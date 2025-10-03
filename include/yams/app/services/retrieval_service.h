@@ -59,6 +59,10 @@ public:
     getByNameSmart(const std::string& name, bool oldest, bool includeContent, bool useSession,
                    const std::string& sessionName, const RetrievalOptions& opts,
                    std::function<Result<std::string>(const std::string&)> resolver = {}) const;
+
+private:
+    // Check if FTS5 index is ready for queries (PBI-040, task 040-1)
+    bool isFTS5Ready(const RetrievalOptions& opts) const;
 };
 
 } // namespace yams::app::services

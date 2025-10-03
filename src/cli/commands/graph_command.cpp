@@ -16,7 +16,6 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/system_executor.hpp>
 
 namespace yams::cli {
 

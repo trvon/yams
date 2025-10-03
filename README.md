@@ -22,7 +22,7 @@
 - SourceHut: https://sr.ht/~trvon/yams/
 - GitHub mirror: https://github.com/trvon/yams
 - Docs: https://yamsmemory.ai
-- Discord: https://discord.gg/n7maE5MuhY
+- Discord: https://discord.gg/rTBmRHdTEc
 
 ## Install
 Supported platforms: Linux x86_64/ARM64, macOS x86_64/ARM64
@@ -48,11 +48,11 @@ meson install -C build/release
 
 Dependencies quick ref:
 
-- Linux: libssl-dev sqlite3 libsqlite3-dev protobuf-compiler libncurses-dev ninja-build cmake
-- macOS (Homebrew): openssl@3 protobuf sqlite3 ncurses ninja cmake
+- Linux: libssl-dev sqlite3 libsqlite3-dev protobuf-compiler ninja-build cmake (TUI enabled by default)
+- macOS (Homebrew): openssl@3 protobuf sqlite3 ninja cmake (TUI enabled by default)
   - Export `OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)` if CMake cannot locate OpenSSL
 
-Common build options (Meson): `-Dbuild-tests=true|false`, `-Denable-tui=true|false`, `-Denable-onnx=enabled|disabled|auto`, `-Dplugin-onnx=true|false`, `-Dyams-version=...`.
+Common build options (Meson): `-Dbuild-tests=true|false`, `-Denable-tui=true|false` (defaults to true), `-Denable-onnx=enabled|disabled|auto`, `-Dplugin-onnx=true|false`, `-Dyams-version=...`.
 Fast iteration: set `FAST_MODE=1` when running `meson setup --reconfigure` to disable ONNX & tests in CI (SourceHut) or locally.
 Media metadata: install `mediainfo` + dev package (e.g. `libmediainfo-dev`) or FFmpeg (`ffprobe`) to enable richer video parsing.
 

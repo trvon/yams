@@ -15,6 +15,7 @@
 #include <mach/task.h>
 #include <mach/task_info.h>
 #endif
+#include <boost/asio/thread_pool.hpp>
 #include <yams/api/content_store.h>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
@@ -42,7 +43,6 @@
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/dispatch.hpp>
-#include <boost/asio/system_executor.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/extraction/extraction_util.h>
 #include <yams/metadata/metadata_repository.h>
@@ -60,6 +60,13 @@
 #include <yams/version.hpp>
 
 namespace yams::daemon {
+
+namespace {
+boost::asio::any_io_executor dispatcher_fallback_executor() {
+    static boost::asio::thread_pool pool(1);
+    return pool.get_executor();
+}
+} // namespace
 
 // Helper functions for system metrics (moved from daemon.cpp)
 double getMemoryUsage() {
@@ -321,7 +328,7 @@ boost::asio::any_io_executor RequestDispatcher::getWorkerExecutor() const {
         }
     } catch (...) {
     }
-    return boost::asio::system_executor();
+    return dispatcher_fallback_executor();
 }
 std::function<void(bool)> RequestDispatcher::getWorkerJobSignal() const {
     try {

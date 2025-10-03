@@ -7,6 +7,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unistd.h>
 #include <unordered_set>
 #include <vector>
@@ -20,7 +21,6 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/system_executor.hpp>
 #include <boost/asio/this_coro.hpp>
 // Timers for streaming guard
 #include <future>
@@ -33,6 +33,39 @@
 #include <yams/app/services/retrieval_service.h>
 
 namespace yams::cli {
+
+namespace {
+
+std::string sanitizeForDisplay(std::string_view input) {
+    std::string sanitized;
+    sanitized.reserve(input.size());
+
+    const auto appendHex = [&](unsigned char c) {
+        constexpr char hex[] = "0123456789ABCDEF";
+        sanitized.push_back('\\');
+        sanitized.push_back('x');
+        sanitized.push_back(hex[c >> 4]);
+        sanitized.push_back(hex[c & 0x0F]);
+    };
+
+    for (unsigned char c : input) {
+        if (c == '\n') {
+            sanitized.append("\\n");
+        } else if (c == '\r') {
+            sanitized.append("\\r");
+        } else if (c == '\t') {
+            sanitized.push_back('\t');
+        } else if (c >= 0x20 && c < 0x7F) {
+            sanitized.push_back(static_cast<char>(c));
+        } else {
+            appendHex(c);
+        }
+    }
+
+    return sanitized;
+}
+
+} // namespace
 
 class GrepCommand : public ICommand {
 private:
@@ -416,14 +449,14 @@ public:
                                 }
                             }
 
-                            std::cout << match.line << std::endl;
+                            std::cout << sanitizeForDisplay(match.line) << std::endl;
 
                             // Show context lines if any
                             for (const auto& ctx : match.contextBefore) {
-                                std::cout << "  " << ctx << std::endl;
+                                std::cout << "  " << sanitizeForDisplay(ctx) << std::endl;
                             }
                             for (const auto& ctx : match.contextAfter) {
-                                std::cout << "  " << ctx << std::endl;
+                                std::cout << "  " << sanitizeForDisplay(ctx) << std::endl;
                             }
                         }
 

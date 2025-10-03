@@ -6,6 +6,8 @@
 #include <vector>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <yams/daemon/client/global_io_context.h>
+
 #ifdef __unix__
 #include <sys/stat.h>
 #endif
@@ -74,7 +76,7 @@ public:
         std::promise<Result<void>> prom;
         auto fut = prom.get_future();
         boost::asio::co_spawn(
-            boost::asio::system_executor{},
+            yams::daemon::GlobalIOContext::global_executor(),
             [this, &prom]() -> boost::asio::awaitable<void> {
                 auto r = co_await this->executeAsync();
                 prom.set_value(std::move(r));
@@ -104,6 +106,10 @@ public:
                     auto st = co_await client.call(sreq);
                     if (st) {
                         auto s = st.value();
+                        auto getCount = [&](const char* key) -> uint64_t {
+                            auto it = s.requestCounts.find(key);
+                            return it != s.requestCounts.end() ? it->second : 0ULL;
+                        };
                         std::string svcSummary;
                         std::string waitingSummary;
                         if (jsonOutput_) {
@@ -131,6 +137,21 @@ public:
                             j["muxActiveHandlers"] = s.muxActiveHandlers;
                             j["muxQueuedBytes"] = s.muxQueuedBytes;
                             j["muxWriterBudgetBytes"] = s.muxWriterBudgetBytes;
+                            j["ipcPoolSize"] = s.ipcPoolSize;
+                            j["ioPoolSize"] = s.ioPoolSize;
+                            {
+                                nlohmann::json worker = nlohmann::json::object();
+                                worker["threads"] = getCount("worker_threads");
+                                worker["active"] = getCount("worker_active");
+                                worker["queued"] = getCount("worker_queued");
+                                j["worker"] = std::move(worker);
+                            }
+                            {
+                                nlohmann::json pools = nlohmann::json::object();
+                                pools["ipc"] = s.ipcPoolSize;
+                                pools["io"] = s.ioPoolSize;
+                                j["pools"] = std::move(pools);
+                            }
                             if (!s.readinessStates.empty()) {
                                 nlohmann::json rj = nlohmann::json::object();
                                 for (const auto& [k, v] : s.readinessStates)
@@ -160,22 +181,18 @@ public:
                             // Include storage stats: render only daemon-provided counts (no local
                             // scans)
                             try {
-                                auto getU64 = [&](const char* key) -> uint64_t {
-                                    auto it = s.requestCounts.find(key);
-                                    return it != s.requestCounts.end() ? it->second : 0ULL;
-                                };
                                 // Prefer authoritative metadata counts; fallback to storage object
                                 // count
-                                uint64_t docs = getU64("documents_total");
+                                uint64_t docs = getCount("documents_total");
                                 if (docs == 0)
-                                    docs = getU64("storage_documents");
-                                uint64_t idxDocs = getU64("documents_indexed");
-                                uint64_t logical = getU64("storage_logical_bytes");
+                                    docs = getCount("storage_documents");
+                                uint64_t idxDocs = getCount("documents_indexed");
+                                uint64_t logical = getCount("storage_logical_bytes");
                                 // Prefer aggregated physical total if available
-                                uint64_t physical = getU64("physical_total_bytes");
+                                uint64_t physical = getCount("physical_total_bytes");
                                 if (physical == 0)
-                                    physical = getU64("storage_physical_bytes");
-                                uint64_t dedupSaved = getU64("cas_dedup_saved_bytes");
+                                    physical = getCount("storage_physical_bytes");
+                                uint64_t dedupSaved = getCount("cas_dedup_saved_bytes");
 
                                 if (docs > 0)
                                     j["totalDocuments"] = docs;
@@ -224,17 +241,13 @@ public:
                             }
                             // Post-ingest gauges (from requestCounts)
                             {
-                                auto getU64 = [&](const char* key) -> uint64_t {
-                                    auto it = s.requestCounts.find(key);
-                                    return it != s.requestCounts.end() ? it->second : 0;
-                                };
                                 nlohmann::json pj;
-                                pj["threads"] = getU64("post_ingest_threads");
-                                pj["queued"] = getU64("post_ingest_queued");
-                                pj["inflight"] = getU64("post_ingest_inflight");
-                                pj["capacity"] = getU64("post_ingest_capacity");
-                                pj["rate_sec_ema"] = getU64("post_ingest_rate_sec_ema");
-                                pj["latency_ms_ema"] = getU64("post_ingest_latency_ms_ema");
+                                pj["threads"] = getCount("post_ingest_threads");
+                                pj["queued"] = getCount("post_ingest_queued");
+                                pj["inflight"] = getCount("post_ingest_inflight");
+                                pj["capacity"] = getCount("post_ingest_capacity");
+                                pj["rate_sec_ema"] = getCount("post_ingest_rate_sec_ema");
+                                pj["latency_ms_ema"] = getCount("post_ingest_latency_ms_ema");
                                 j["post_ingest"] = std::move(pj);
                             }
                             std::cout << j.dump(2) << std::endl;
@@ -257,6 +270,11 @@ public:
                             std::cout << "MEM  : " << std::fixed << std::setprecision(1)
                                       << s.memoryUsageMb << "MB  CPU: " << (int)s.cpuUsagePercent
                                       << "%\n";
+                            std::cout << "POOL : ipc=" << s.ipcPoolSize << ", io=" << s.ioPoolSize
+                                      << "\n";
+                            std::cout << "WORK : thr=" << getCount("worker_threads")
+                                      << ", act=" << getCount("worker_active")
+                                      << ", queued=" << getCount("worker_queued") << "\n";
                             if (!s.ready && !waitingSummary.empty()) {
                                 std::cout << "WAIT : " << waitingSummary << "\n";
                             }
@@ -636,7 +654,7 @@ private:
                 promProbe.set_value(std::move(sr));
                 co_return;
             };
-            boost::asio::co_spawn(boost::asio::system_executor{}, workProbe(),
+            boost::asio::co_spawn(yams::daemon::GlobalIOContext::global_executor(), workProbe(),
                                   boost::asio::detached);
             if (futProbe.wait_for(std::chrono::milliseconds(800)) == std::future_status::ready) {
                 auto sres = futProbe.get();

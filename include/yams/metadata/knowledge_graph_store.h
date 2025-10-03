@@ -109,6 +109,21 @@ struct KGNodeStats {
     std::optional<std::int64_t> lastComputed;  // Unix seconds
 };
 
+struct PathNodeDescriptor {
+    std::string snapshotId;
+    std::string path; // Normalized path within snapshot
+    std::string rootTreeHash;
+    bool isDirectory = false;
+};
+
+struct PathHistoryRecord {
+    std::string snapshotId;
+    std::string path;
+    std::string blobHash;
+    std::optional<std::int64_t> diffId;
+    std::optional<std::string> changeType;
+};
+
 /**
  * Alias resolution result item, optionally carrying a score (e.g., from FTS).
  */
@@ -246,6 +261,19 @@ public:
 
     // Convenience utility to recompute and persist common stats for a node
     virtual Result<KGNodeStats> recomputeNodeStats(std::int64_t nodeId) = 0;
+
+    // -----------------------------------------------------------------------------
+    // Tree diff helpers (PBI-043)
+    // -----------------------------------------------------------------------------
+
+    virtual Result<std::int64_t> ensureBlobNode(std::string_view sha256) = 0;
+    virtual Result<std::int64_t> ensurePathNode(const PathNodeDescriptor& descriptor) = 0;
+    virtual Result<void> linkPathVersion(std::int64_t pathNodeId, std::int64_t blobNodeId,
+                                         std::int64_t diffId) = 0;
+    virtual Result<void> recordRenameEdge(std::int64_t fromPathNodeId, std::int64_t toPathNodeId,
+                                          std::int64_t diffId) = 0;
+    virtual Result<std::vector<PathHistoryRecord>> fetchPathHistory(std::string_view logicalPath,
+                                                                    std::size_t limit = 100) = 0;
 
     // -----------------------------------------------------------------------------
     // Maintenance / Utilities

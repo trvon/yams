@@ -3,8 +3,8 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/system_executor.hpp>
 #include <yams/common/utf8_utils.h>
+#include <yams/daemon/client/global_io_context.h>
 #include <yams/profiling.h>
 #include <yams/vector/embedding_generator.h>
 
@@ -1234,7 +1234,7 @@ static yams::Result<T> await_with_timeout(MakeAwaitable&& make, std::chrono::mil
     auto completed = std::make_shared<std::atomic<bool>>(false);
 
     boost::asio::co_spawn(
-        boost::asio::system_executor{},
+        yams::daemon::GlobalIOContext::global_executor(),
         [state = shared_promise, completed,
          maker = std::forward<MakeAwaitable>(make)]() mutable -> boost::asio::awaitable<void> {
             try {

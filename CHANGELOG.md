@@ -15,29 +15,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
+## [v0.7.2] - 2025-09-30
+
+## [Unreleased] - 2025-10-03
+
+### Added
+- Automatic directory snapshot generation with ISO 8601 timestamp IDs and git metadata detection (commit, branch, remote). Every `yams add <directory>` now creates a timestamped snapshot stored in the `tree_snapshots` table.
+- Snapshot Listing: New `yams list --snapshots` command displays all available snapshots with table and JSON output formats, showing snapshot IDs, directory paths, labels, git commits, and file counts.
+-  Implemented `yams diff <snapshotA> <snapshotB>` command with tree, flat, and JSON output formats for comparing directory snapshots.
+- TreeDiffer automatically detects renamed/moved files via SHA-256 hash equivalence matching, enabled by default.
+
+### Changed
+- **Snapshot Labels**: `yams add` now accepts optional `--label` flag for human-readable snapshot names.
+- **Indexing Service**: Enhanced to persist snapshot metadata (snapshot_id, directory_path, git metadata, file count) to database after directory ingestion.
+- **Metadata Repository**: Added `upsertTreeSnapshot()`, `listTreeSnapshots()`, and tree diff persistence methods for snapshot and change history management.
+- Search: Parallelized keyword search scoring loop to significantly improve performance on multi-core systems.
+- Search: Search thread pools are now configured by the central `TuningManager` to adapt to system load and tuning profiles.
+- Search: Implemented structural scoring to boost relevance of results that are co-located in the same directory.
+- Search: Parallelized keyword search scoring loop to significantly improve performance on multi-core systems.
+- Search: Search thread pools are now configured by the central `TuningManager` to adapt to system load and tuning profiles.
+- Search: Implemented structural scoring to boost relevance of results that are co-located in the same directory.
+- Added FTS5 readiness fast-path check in `getByNameSmart()` to prevent 3-second blocking timeouts when search indexes are updating. 
+- Added `post_ingest_queue_depth` field to status response, enabling clients to check if FTS5 indexes are ready before attempting expensive search operations.
+- TUI browse command now resolves listings and fuzzy search through the shared AppContext service bundle (`TUIServices` + `IDocumentService`/`ISearchService`), with graceful fallback to metadata/content-store paths when the daemon is degraded.
+- CLI Browse: Shift+R reindex dialog now performs a full extraction + index refresh through `TUIServices::reindexDocument`, providing inline success/error feedback instead of the previous placeholder flow.
+
+### Fixed
+- Daemon IPC: SocketServer now shares a live writer-budget reference with every connection and the tuning manager pushes updates through it. Multiplexed streams adjust bandwidth limits immediately when profiles or runtime heuristics change.
+- Search: Corrected an issue where `yams search --include` was not being applied for hybrid searches. The include pattern is now passed to the daemon and correctly filters results.
+- Fixed protobuf UTF-8 validation errors when grepping binary files or non-UTF-8 text. Changed `GrepMatch.line`, `context_before`, and `context_after` fields from `string` to `bytes` type in protobuf definition. This allows grep to handle arbitrary byte sequences including binary content, Latin-1, Windows-1252, and other legacy encodings without validation failures. (PBI-001, task 001-33)
+- Daemon IPC: replaced the `io_context.run_for` polling loop with dedicated `run_one` workers so async accept completions are no longer starved during streaming requests. Added optional diagnostic thread (`YAMS_SOCKET_RUN_DIAG`) for debugging.
+- CLI Browse: refuse to launch the FTXUI browser when the terminal is non-interactive, lacks TERM capabilities, or is smaller than 60x18; emit a clear resize guidance message instead of hanging or crashing.
+- CLI Search: release pooled daemon clients before process teardown to prevent the `std::system_error: mutex lock failed` abort when `yams search` exits after hitting the daemon path.
+
 ## [v0.7.1] - 2025-09-29
 
 ### Changed
 - GrepService: expanded candidate discovery to preselect from `req.paths` using SQL LIKE prefix scans, aligning service behavior with CLI expectations for directory patterns.
-
-- Post‑ingest pipeline: refactored `PostIngestQueue` into true staged processing
-  (Metadata → Knowledge Graph → Embeddings). Metadata extraction persists text and indexes FTS
-  first; completion enqueues independent KG and Embedding tasks so slow extractors no longer
-  block vector availability. Weighted‑fair scheduling across queues maintains fairness.
-
-- Embeddings integrated into the main pipeline: the new Embedding stage generates vectors
-  immediately after extraction using the daemon’s configured model and inserts into the vector
-  DB, marking embedding status in metadata. Initial embedding generation is no longer coupled to
-  the RepairCoordinator’s idle window.
-
-- ServiceManager enqueue path: simplified `enqueuePostIngest` to a direct blocking enqueue
-  (removed busy‑wait retry loop). This improves predictability and throughput under high load.
-
+- RepairCoordinator refocus: on live `DocumentAdded` events, skip queuing when the post‑ingest
+- Post‑ingest pipeline: improvements
+- ServiceManager enqueue path: simplified `enqueuePostIngest` to a direct blocking enqueue. This improves predictability and throughput under high load.
 - CLI Download UX: `yams download` now clearly displays the ingested content hash
-  (labeled "Content Hash") rather than a transfer/download hash. The success tip also shows
-  both retrieval options when a friendly name is present: `yams get --name "<name>"` or
-  `yams get <content-hash>`. JSON output shape is unchanged and still returns `hash`, which
-  now prefers the ingested hash when available.
 
 ### Fixed
 - GrepService streaming: flushes the final partial line when scanning cold CAS streams so single-line files are matched reliably (e.g., `hello.txt`).
@@ -49,14 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   --print-errorlogs`).
 - Repaired the `document_service` metadata pipeline regression so fixture-driven search tests no
   longer observe missing extracted content.
-
 - MCP stdio transport: replaced unused static output mutex with an instance mutex to satisfy
   ODR/build on certain platforms.
-
-### Maintenance
-- RepairCoordinator refocus: on live `DocumentAdded` events, skip queuing when the post‑ingest
-  pipeline is active (embeddings are now scheduled by `PostIngestQueue`). Coordinator continues
-  to scan/repair missed or failed embeddings opportunistically.
 
 ## [v0.7.0] - 2025-09-25
 

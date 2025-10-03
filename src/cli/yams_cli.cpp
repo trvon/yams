@@ -8,6 +8,7 @@
 #include <yams/cli/command_registry.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_migration.h>
+#include <yams/daemon/client/global_io_context.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
@@ -86,7 +87,6 @@ namespace fs = std::filesystem;
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/system_executor.hpp>
 
 namespace yams::cli {
 // NOTE: KG store is now managed as an instance member on YamsCLI (kgStore_)
@@ -400,7 +400,7 @@ int YamsCLI::run(int argc, char* argv[]) {
             std::promise<Result<void>> prom;
             auto fut = prom.get_future();
             boost::asio::co_spawn(
-                boost::asio::system_executor{},
+                yams::daemon::GlobalIOContext::global_executor(),
                 [this, &prom]() -> boost::asio::awaitable<void> {
                     auto r = co_await pendingCommand_->executeAsync();
                     prom.set_value(std::move(r));

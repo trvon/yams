@@ -1,6 +1,6 @@
 option('build-cli', type: 'boolean', value: true, description: 'Build CLI tools')
 option('build-mcp-server', type: 'boolean', value: true, description: 'Build MCP server')
-option('enable-tui', type: 'boolean', value: false, description: 'Enable TUI features in CLI')
+option('enable-tui', type: 'boolean', value: true, description: 'Enable TUI features in CLI')
 option('enable-lzma', type: 'feature', value: 'auto', description: 'Enable LZMA via liblzma (xz)')
 option('enable-onnx', type: 'feature', value: 'auto', description: 'ONNX Runtime integration in vector library (auto-detect)')
 option('sqlite-vec-source-dir', type: 'string', value: '', description: 'Path to sqlite-vec source directory (with sqlite-vec.c)')

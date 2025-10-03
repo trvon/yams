@@ -8,6 +8,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace yams;
@@ -81,6 +82,89 @@ public:
     size_t getDocumentCount() const override { return 0; }
     size_t getTermCount() const override { return 0; }
     size_t getIndexSize() const override { return 0; }
+};
+
+} // namespace
+
+namespace {
+
+class BlockingKeywordSearchEngine final : public KeywordSearchEngine {
+public:
+    explicit BlockingKeywordSearchEngine(std::chrono::milliseconds delay) : delay_(delay) {
+        search::KeywordSearchResult r;
+        r.id = "blocking-keyword";
+        r.content = "Blocking keyword result";
+        r.score = 1.0f;
+        r.metadata["path"] = "blocking-keyword.txt";
+        results_.push_back(std::move(r));
+    }
+
+    std::vector<std::string> analyzeQuery(const std::string& query) const override {
+        std::vector<std::string> tokens;
+        std::istringstream iss(query);
+        std::string token;
+        while (iss >> token) {
+            for (auto& ch : token) {
+                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            }
+            tokens.push_back(token);
+        }
+        return tokens;
+    }
+
+    std::vector<std::string> extractKeywords(const std::string& text) const override {
+        return analyzeQuery(text);
+    }
+
+    Result<std::vector<search::KeywordSearchResult>> search(const std::string&, size_t,
+                                                            const vector::SearchFilter*) override {
+        std::this_thread::sleep_for(delay_);
+        return Result<std::vector<yams::search::KeywordSearchResult>>(results_);
+    }
+
+    Result<std::vector<std::vector<yams::search::KeywordSearchResult>>>
+    batchSearch(const std::vector<std::string>& queries, size_t,
+                const vector::SearchFilter*) override {
+        std::vector<std::vector<yams::search::KeywordSearchResult>> batches(queries.size(),
+                                                                            results_);
+        return Result<std::vector<std::vector<yams::search::KeywordSearchResult>>>(
+            std::move(batches));
+    }
+
+    Result<void> addDocument(const std::string&, const std::string&,
+                             const std::map<std::string, std::string>&) override {
+        return Result<void>();
+    }
+
+    Result<void> removeDocument(const std::string&) override { return Result<void>(); }
+
+    Result<void> updateDocument(const std::string&, const std::string&,
+                                const std::map<std::string, std::string>&) override {
+        return Result<void>();
+    }
+
+    Result<void> addDocuments(const std::vector<std::string>&, const std::vector<std::string>&,
+                              const std::vector<std::map<std::string, std::string>>&) override {
+        return Result<void>();
+    }
+
+    Result<void> buildIndex() override { return Result<void>(); }
+    Result<void> optimizeIndex() override { return Result<void>(); }
+    Result<void> clearIndex() override { return Result<void>(); }
+    Result<void> saveIndex(const std::string&) override {
+        return Result<void>(Error{ErrorCode::InvalidOperation, "Not implemented"});
+    }
+    Result<void> loadIndex(const std::string&) override {
+        return Result<void>(Error{ErrorCode::InvalidOperation, "Not implemented"});
+    }
+
+    size_t getDocumentCount() const override { return results_.size(); }
+    size_t getTermCount() const override { return 0; }
+    size_t getIndexSize() const override { return 0; }
+
+private:
+    std::chrono::milliseconds delay_;
+    std::vector<yams::search::KeywordSearchResult> results_;
 };
 
 } // namespace
@@ -196,6 +280,40 @@ TEST(HybridSearchEngineTest, RerankResultsBoostsExactAndKeywords) {
     EXPECT_NEAR(reranked[0].hybrid_score, 1.32f, 1e-5f);
     EXPECT_EQ(reranked[1].id, "neutral");
     EXPECT_NEAR(reranked[1].hybrid_score, 1.0f, 1e-5f);
+}
+
+TEST(HybridSearchEngineTest, KeywordStageTimeoutRaisesMetrics) {
+    auto vectorManager = std::make_shared<VectorIndexManager>();
+    auto initVec = vectorManager->initialize();
+    ASSERT_TRUE(initVec.has_value()) << initVec.error().message;
+
+    auto keywordEngine =
+        std::make_shared<BlockingKeywordSearchEngine>(std::chrono::milliseconds(30));
+
+    HybridSearchConfig cfg;
+    cfg.vector_weight = 0.0f;
+    cfg.keyword_weight = 1.0f;
+    cfg.parallel_search = true;
+    cfg.final_top_k = 5;
+    cfg.keyword_top_k = 5;
+
+    HybridSearchEngine engine(vectorManager, keywordEngine, cfg);
+    auto initHybrid = engine.initialize();
+    ASSERT_TRUE(initHybrid.has_value()) << initHybrid.error().message;
+
+    SearchStageBudgets budgets;
+    bool keywordTimedOut = false;
+    bool vectorTimedOut = false;
+    budgets.keyword_timeout = std::chrono::milliseconds(5);
+    budgets.keyword_timed_out = &keywordTimedOut;
+    budgets.vector_timeout = std::chrono::milliseconds(0);
+    budgets.vector_timed_out = &vectorTimedOut;
+
+    auto result = engine.search("timeout query", 5, {}, &budgets);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_TRUE(result.value().empty());
+    EXPECT_TRUE(keywordTimedOut);
+    EXPECT_FALSE(vectorTimedOut);
 }
 
 // Test expandQuery pluralization/singularization behavior.

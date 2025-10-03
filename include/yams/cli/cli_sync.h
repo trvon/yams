@@ -6,7 +6,7 @@
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/system_executor.hpp>
+#include <yams/daemon/client/global_io_context.h>
 
 #include <yams/core/types.h>
 
@@ -21,7 +21,7 @@ inline yams::Result<T> run_sync(boost::asio::awaitable<yams::Result<T>> aw,
         std::promise<yams::Result<T>> prom;
         auto fut = prom.get_future();
         boost::asio::co_spawn(
-            boost::asio::system_executor{},
+            yams::daemon::GlobalIOContext::global_executor(),
             [aw = std::move(aw), p = std::move(prom)]() mutable -> boost::asio::awaitable<void> {
                 try {
                     auto r = co_await std::move(aw);

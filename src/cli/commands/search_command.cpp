@@ -31,7 +31,7 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/system_executor.hpp>
+#include <yams/daemon/client/global_io_context.h>
 // Timers and coroutine executor helpers for guard race
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
@@ -615,7 +615,16 @@ public:
             dreq.verbose = verbose_;
             dreq.showLineNumbers = showLineNumbers_;
             // Engine-level filters
-            dreq.pathPattern = pathFilter_;
+            if (!includeGlobsExpanded.empty()) {
+                dreq.pathPattern = includeGlobsExpanded[0];
+                if (includeGlobsExpanded.size() > 1) {
+                    spdlog::warn("Multiple include patterns provided; only the first one ('{}') "
+                                 "will be used for server-side filtering.",
+                                 dreq.pathPattern);
+                }
+            } else {
+                dreq.pathPattern = pathFilter_;
+            }
             if (!filterTags_.empty()) {
                 std::stringstream ss(filterTags_);
                 std::string tag;
@@ -909,7 +918,7 @@ public:
                 std::promise<Result<app::services::SearchResponse>> prom;
                 auto fut = prom.get_future();
                 boost::asio::co_spawn(
-                    boost::asio::system_executor{},
+                    yams::daemon::GlobalIOContext::global_executor(),
                     [&]() -> boost::asio::awaitable<void> {
                         auto r = co_await searchService->search(sreq);
                         prom.set_value(std::move(r));
@@ -1191,7 +1200,8 @@ public:
                 done.set_value(r.error());
                 co_return;
             };
-            boost::asio::co_spawn(boost::asio::system_executor{}, work(), boost::asio::detached);
+            boost::asio::co_spawn(yams::daemon::GlobalIOContext::global_executor(), work(),
+                                  boost::asio::detached);
             if (fut.wait_for(std::chrono::seconds(30)) != std::future_status::ready) {
                 spdlog::warn("search: daemon call timed out; falling back to local execution");
                 auto fb = fallback();
@@ -1305,6 +1315,14 @@ public:
             co_return leaseRes.error();
         }
         auto leaseHandle = std::move(leaseRes.value());
+        struct LeaseScopeExit {
+            std::shared_ptr<yams::cli::DaemonClientPool::Lease>* handle;
+            ~LeaseScopeExit() {
+                if (handle) {
+                    handle->reset();
+                }
+            }
+        } leaseGuard{&leaseHandle};
         auto& client = **leaseHandle;
         client.setStreamingEnabled(clientConfig.enableChunkedResponses);
 
@@ -1438,7 +1456,7 @@ public:
 
             // Launch streaming
             boost::asio::co_spawn(
-                boost::asio::system_executor{},
+                yams::daemon::GlobalIOContext::global_executor(),
                 [&, decided, prom, leaseHandle]() -> boost::asio::awaitable<void> {
                     auto& cliRef = **leaseHandle;
                     auto sr = co_await cliRef.streamingSearch(dreq);
@@ -1450,7 +1468,7 @@ public:
 
             // Launch delayed unary fallback (2 seconds after start)
             boost::asio::co_spawn(
-                boost::asio::system_executor{},
+                yams::daemon::GlobalIOContext::global_executor(),
                 [&, decided, prom, leaseHandle]() -> boost::asio::awaitable<void> {
                     boost::asio::steady_timer t(co_await boost::asio::this_coro::executor);
                     t.expires_after(std::chrono::seconds(2));

@@ -1,4 +1,5 @@
 #include <spdlog/spdlog.h>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -181,6 +182,33 @@ public:
             }
         });
 
+        // Tuning subcommands for centralized tuning configuration
+        auto* tuningCmd = cmd->add_subcommand("tuning", "Manage daemon tuning settings");
+        tuningCmd->require_subcommand();
+
+        auto* tuningProfileCmd = tuningCmd->add_subcommand("profile", "Set tuning profile preset");
+        tuningProfileCmd
+            ->add_option("preset", tuningProfile_, "Preset (efficient|balanced|aggressive)")
+            ->required()
+            ->check(CLI::IsMember({"efficient", "balanced", "aggressive"}));
+        tuningProfileCmd->callback([this]() {
+            auto result = executeTuningProfile();
+            if (!result) {
+                spdlog::error("Set tuning profile failed: {}", result.error().message);
+                std::exit(1);
+            }
+        });
+
+        auto* tuningStatusCmd =
+            tuningCmd->add_subcommand("status", "Show current tuning configuration");
+        tuningStatusCmd->callback([this]() {
+            auto result = executeTuningStatus();
+            if (!result) {
+                spdlog::error("Tuning status failed: {}", result.error().message);
+                std::exit(1);
+            }
+        });
+
         // Storage subcommand
         auto* storageCmd = cmd->add_subcommand("storage", "Configure storage settings");
         storageCmd->add_option("--engine", storageEngine_, "Storage engine (local or s3)");
@@ -213,6 +241,7 @@ private:
     std::string format_;
     std::string embeddingModel_;
     std::string embeddingPreset_;
+    std::string tuningProfile_;
     bool noBackup_ = false;
     bool dryRun_ = false;
 
@@ -598,6 +627,63 @@ private:
                     file << k << " = \"" << v << "\"\n";
                 }
             }
+
+            return Result<void>();
+
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string(e.what())};
+        }
+    }
+
+    Result<void> executeTuningProfile() {
+        try {
+            std::string normalized = tuningProfile_;
+            for (auto& ch : normalized)
+                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+
+            auto result = writeConfigValue("tuning.profile", normalized);
+            if (!result)
+                return result;
+
+            std::cout << "✓ Set tuning.profile = " << normalized << "\n";
+            std::cout << "  Presets: efficient | balanced | aggressive\n";
+            std::cout << "  Changes apply the next time the daemon reloads its tuning config.\n";
+            return Result<void>();
+
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string(e.what())};
+        }
+    }
+
+    Result<void> executeTuningStatus() {
+        try {
+            auto configPath = getConfigPath();
+            auto config = parseSimpleToml(configPath);
+
+            auto getValue = [&config](const std::string& key,
+                                      const std::string& fallback) -> std::string {
+                auto it = config.find(key);
+                if (it != config.end() && !it->second.empty())
+                    return it->second;
+                return fallback;
+            };
+
+            const auto profile = getValue("tuning.profile", "(not set – defaults to balanced)");
+            const auto queueMax = getValue("tuning.post_ingest_queue_max", "(auto)");
+            const auto threadsMin = getValue("tuning.post_ingest_threads", "(auto)");
+            const auto poolCooldown = getValue("tuning.pool_cooldown_ms", "500");
+
+            std::cout << "Tuning Configuration\n";
+            std::cout << "====================\n\n";
+            std::cout << "Profile: " << profile << "\n";
+            std::cout << "Post-ingest worker cap: " << threadsMin << "\n";
+            std::cout << "Post-ingest queue max: " << queueMax << "\n";
+            std::cout << "Pool cooldown (ms): " << poolCooldown << "\n";
+
+            std::cout << "\nCommands:\n";
+            std::cout
+                << "  yams config tuning profile <preset>   # efficient|balanced|aggressive\n";
+            std::cout << "  yams config tuning status            # show current values\n";
 
             return Result<void>();
 

@@ -5,8 +5,8 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/system_executor.hpp>
 #include <yams/core/types.h>
+#include <yams/daemon/client/global_io_context.h>
 
 namespace yams::test_async {
 
@@ -19,7 +19,7 @@ inline yams::Result<T> run_with_timeout(boost::asio::awaitable<yams::Result<T>> 
     std::promise<yams::Result<T>> prom;
     auto fut = prom.get_future();
     boost::asio::co_spawn(
-        boost::asio::system_executor{},
+        yams::daemon::GlobalIOContext::global_executor(),
         [a = std::move(aw), &prom]() mutable -> boost::asio::awaitable<void> {
             auto r = co_await std::move(a);
             prom.set_value(std::move(r));

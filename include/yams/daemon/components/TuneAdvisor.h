@@ -843,6 +843,81 @@ public:
         ioConnPerThreadOverride_.store(v, std::memory_order_relaxed);
     }
 
+    static bool enableParallelIngest() {
+        int ov = enableParallelIngestOverride_.load(std::memory_order_relaxed);
+        if (ov >= 0)
+            return ov > 0;
+        if (const char* s = std::getenv("YAMS_ENABLE_PARALLEL_INGEST")) {
+            std::string v{s};
+            std::transform(v.begin(), v.end(), v.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (v == "0" || v == "false" || v == "off" || v == "no")
+                return false;
+            return true;
+        }
+        return true;
+    }
+    static void setEnableParallelIngest(bool en) {
+        enableParallelIngestOverride_.store(en ? 1 : 0, std::memory_order_relaxed);
+    }
+
+    static uint32_t maxIngestWorkers() {
+        uint32_t ov = maxIngestWorkersOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_INDEXING_WORKERS_MAX")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1)
+                    return v;
+            } catch (...) {
+            }
+        }
+        uint32_t hw = static_cast<uint32_t>(std::thread::hardware_concurrency());
+        if (hw == 0)
+            hw = 1;
+        return hw;
+    }
+    static void setMaxIngestWorkers(uint32_t v) {
+        maxIngestWorkersOverride_.store(v, std::memory_order_relaxed);
+    }
+
+    static uint32_t storagePoolSize() {
+        uint32_t ov = storagePoolSizeOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_STORAGE_POOL_SIZE")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 0;
+    }
+    static void setStoragePoolSize(uint32_t v) {
+        storagePoolSizeOverride_.store(v, std::memory_order_relaxed);
+    }
+
+    static uint32_t ingestBacklogPerWorker() {
+        uint32_t ov = ingestBacklogPerWorkerOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_INGEST_BACKLOG_PER_WORKER")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 32;
+    }
+    static void setIngestBacklogPerWorker(uint32_t v) {
+        ingestBacklogPerWorkerOverride_.store(v == 0 ? 1 : v, std::memory_order_relaxed);
+    }
+
     // Internal Event Bus toggles (config-driven)
     static bool useInternalBusForRepair() {
         return useInternalBusRepair_.load(std::memory_order_relaxed);
@@ -893,6 +968,10 @@ private:
     static inline std::atomic<unsigned> hwCached_{0};
     static inline std::atomic<uint32_t> postIngestQueueMaxOverride_{0};
     static inline std::atomic<uint32_t> ioConnPerThreadOverride_{0};
+    static inline std::atomic<int> enableParallelIngestOverride_{-1};
+    static inline std::atomic<uint32_t> maxIngestWorkersOverride_{0};
+    static inline std::atomic<uint32_t> storagePoolSizeOverride_{0};
+    static inline std::atomic<uint32_t> ingestBacklogPerWorkerOverride_{0};
     // Defaults: prefer internal event bus by default; config/env can override
     static inline std::atomic<bool> useInternalBusRepair_{true};
     static inline std::atomic<bool> useInternalBusPostIngest_{true};

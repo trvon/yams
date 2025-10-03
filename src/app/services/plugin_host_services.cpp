@@ -458,7 +458,7 @@ static void free_search_response(yams_search_response_t* res) {
     free(res);
 }
 
-static boost::asio::any_io_executor g_executor = boost::asio::system_executor{};
+static boost::asio::any_io_executor g_executor = yams::daemon::GlobalIOContext::global_executor();
 
 static int search_service_search(void* handle, const yams_search_request_t* req,
                                  yams_search_callback_t callback, void* user_data) {
@@ -552,3 +552,5 @@ void yams_free_host_context(void* host_ctx) {
     // For now, we just free the context struct itself.
     free(host_ctx);
 }
+
+#include <yams/daemon/client/global_io_context.h>

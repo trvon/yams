@@ -69,6 +69,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             res.requestCounts["worker_queued"] = snap.workerQueued;
             res.requestCounts["post_ingest_threads"] = snap.postIngestThreads;
             res.requestCounts["post_ingest_queued"] = snap.postIngestQueued;
+            // PBI-040, task 040-1: Expose queue depth for FTS5 readiness checks
+            res.postIngestQueueDepth = static_cast<uint32_t>(snap.postIngestQueued);
             res.requestCounts["post_ingest_inflight"] = snap.postIngestInflight;
             res.requestCounts["post_ingest_capacity"] = snap.postIngestCapacity;
             // Export selected tuning config values for clients (best-effort)
@@ -389,6 +391,12 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                     res.requestCounts["worker_threads"] = threads;
                     res.requestCounts["worker_active"] = active;
                     res.requestCounts["worker_queued"] = queued;
+                    // PBI-040, task 040-1: Populate postIngestQueueDepth in non-metrics path
+                    if (serviceManager_) {
+                        if (auto piq = serviceManager_->getPostIngestQueue()) {
+                            res.postIngestQueueDepth = static_cast<uint32_t>(piq->size());
+                        }
+                    }
                 }
             } catch (...) {
             }

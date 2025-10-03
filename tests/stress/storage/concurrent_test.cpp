@@ -1,8 +1,12 @@
+#include <spdlog/spdlog.h>
 #include "test_helpers.h"
 #include <gtest/gtest.h>
 #include <yams/crypto/hasher.h>
+#include <yams/metadata/connection_pool.h>
+#include <yams/metadata/database.h>
 #include <yams/storage/storage_engine.h>
 
+#include <array>
 #include <atomic>
 #include <barrier>
 #include <chrono>
@@ -42,6 +46,41 @@ protected:
         YamsTest::TearDown();
     }
 };
+
+double runPoolWorkload(yams::metadata::ConnectionPool& pool, std::size_t workers,
+                       std::size_t opsPerThread) {
+    std::atomic<std::size_t> errors{0};
+    auto start = std::chrono::steady_clock::now();
+    std::vector<std::thread> threads;
+    threads.reserve(workers);
+    for (std::size_t t = 0; t < workers; ++t) {
+        threads.emplace_back([&, threadIndex = t]() {
+            for (std::size_t op = 0; op < opsPerThread; ++op) {
+                auto res =
+                    pool.withConnection([&](yams::metadata::Database& db) -> yams::Result<void> {
+                        auto stmtRes = db.prepare("INSERT INTO kv(test_key, value) VALUES (?, ?);");
+                        if (!stmtRes)
+                            return stmtRes.error();
+                        auto stmt = std::move(stmtRes.value());
+                        auto bindRes = stmt.bindAll(static_cast<int>(threadIndex),
+                                                    std::string("payload-") + std::to_string(op));
+                        if (!bindRes)
+                            return bindRes.error();
+                        return stmt.execute();
+                    });
+                if (!res)
+                    errors.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+    for (auto& th : threads)
+        th.join();
+    auto end = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration<double>(end - start).count();
+    EXPECT_EQ(errors.load(), 0U);
+    double ops = static_cast<double>(workers * opsPerThread);
+    return (elapsed > 0.0) ? ops / elapsed : ops;
+}
 
 TEST_F(ConcurrentStorageTest, ThousandConcurrentReaders) {
     // Pre-store test objects
@@ -355,7 +394,8 @@ TEST_F(ConcurrentStorageTest, RapidCreateDeleteCycles) {
                 deletes.fetch_add(1);
 
                 // Verify deletion
-                if (storage->exists(hash).value_or(true)) {
+                auto existsRes = storage->exists(hash);
+                if (!existsRes || existsRes.value()) {
                     errors.store(true);
                 }
             }
@@ -442,4 +482,43 @@ TEST_F(ConcurrentStorageTest, LatencyUnderLoad) {
 
     // Verify < 10ms requirement
     EXPECT_LT(p99, 10.0);
+}
+
+TEST_F(ConcurrentStorageTest, ConnectionPoolWorkerSweep) {
+    const auto dbPath = storagePath / "pool_bench.db";
+    yams::metadata::Database bootstrap;
+    ASSERT_TRUE(bootstrap.open(dbPath.string(), yams::metadata::ConnectionMode::Create));
+    ASSERT_TRUE(bootstrap.execute("PRAGMA journal_mode=WAL;").has_value());
+    ASSERT_TRUE(bootstrap.execute("CREATE TABLE IF NOT EXISTS kv (test_key INTEGER, value TEXT);")
+                    .has_value());
+    bootstrap.close();
+
+    yams::metadata::ConnectionPoolConfig cfg;
+    cfg.minConnections = 1;
+    cfg.maxConnections = 8;
+    cfg.busyTimeout = std::chrono::milliseconds(1000);
+    yams::metadata::ConnectionPool pool(dbPath.string(), cfg);
+    ASSERT_TRUE(pool.initialize());
+
+    const std::array<std::size_t, 4> workerSweep{1, 2, 4, 8};
+    const std::size_t opsPerThread = 150;
+    double baseline = 0.0;
+
+    for (std::size_t workers : workerSweep) {
+        auto resetRes = pool.withConnection([](yams::metadata::Database& db) -> yams::Result<void> {
+            return db.execute("DELETE FROM kv;");
+        });
+        ASSERT_TRUE(resetRes);
+
+        double throughput = runPoolWorkload(pool, workers, opsPerThread);
+        spdlog::info("pool sweep workers={} throughput={}", workers, throughput);
+        if (baseline == 0.0)
+            baseline = throughput;
+        else if (baseline > 0.0)
+            EXPECT_GE(throughput, baseline * 0.9)
+                << "connection pool regression for " << workers << " workers";
+    }
+
+    pool.shutdown();
+    std::filesystem::remove(dbPath);
 }

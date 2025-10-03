@@ -150,7 +150,7 @@ void MCPServer::enqueueOutbound(std::string payload) {
     if (outboundStrand_) {
         boost::asio::co_spawn(*outboundStrand_, outboundDrainAsync(), boost::asio::detached);
     } else {
-        boost::asio::co_spawn(yams::daemon::GlobalIOContext::instance().get_io_context(),
+        boost::asio::co_spawn(yams::daemon::GlobalIOContext::global_executor(),
                               outboundDrainAsync(), boost::asio::detached);
     }
 }
@@ -573,6 +573,7 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
     // Initialize a single multiplexed daemon client; rely on DaemonClient defaults for dataDir
     {
         yams::daemon::ClientConfig cfg;
+        cfg.socketPath = yams::daemon::socket_utils::resolve_socket_path_config_first();
         cfg.enableChunkedResponses = true;
         cfg.singleUseConnections = false;
         cfg.requestTimeout = std::chrono::milliseconds(10000);
@@ -627,9 +628,8 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
 
     // Initialize outbound strand for serialized writes on the global IO context
     {
-        auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
-        outboundStrand_ =
-            std::make_unique<boost::asio::strand<boost::asio::any_io_executor>>(io.get_executor());
+        outboundStrand_ = std::make_unique<boost::asio::strand<boost::asio::any_io_executor>>(
+            yams::daemon::GlobalIOContext::global_executor());
     }
 
     // Resolve prompts directory (file-backed templates)
@@ -692,21 +692,7 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
     } catch (...) {
         // Ignore prompt dir resolution errors; built-ins remain available
     }
-    // Ensure the global io_context is running so co_spawn coroutines progress (singleton runner)
-    static std::atomic<bool> ioThreadStarted{false};
-    if (!ioThreadStarted.exchange(true)) {
-        std::thread([] {
-            auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
-            try {
-                spdlog::debug("Starting GlobalIOContext run loop thread");
-                io.run();
-            } catch (const std::exception& e) {
-                spdlog::error("GlobalIOContext thread exception: {}", e.what());
-            } catch (...) {
-                spdlog::error("GlobalIOContext thread encountered unknown exception");
-            }
-        }).detach();
-    }
+
     // Size worker pool: prefer TuneAdvisor setting, else ~25% of cores clamped [2..8]
     try {
         using TA = yams::daemon::TuneAdvisor;
@@ -843,9 +829,8 @@ void MCPServer::start() {
                 }
                 // Emit start progress (spec-compliant when token present)
                 sendProgress("tool", 0.0, std::string("calling ") + toolName, progressToken);
-                auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
                 boost::asio::co_spawn(
-                    io,
+                    yams::daemon::GlobalIOContext::global_executor(),
                     [this, toolName, toolArgs, id_copy,
                      progressToken]() -> boost::asio::awaitable<void> {
                         if (progressToken)
@@ -3439,6 +3424,8 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
     // Convert MCP request to daemon request
     daemon::GetRequest daemon_req;
     daemon_req.hash = req.hash;
+    daemon_req.name = req.name;
+    daemon_req.byName = !req.name.empty();
     daemon_req.outputPath = req.outputPath;
     daemon_req.showGraph = req.graph;
     daemon_req.graphDepth = req.depth;
@@ -3450,53 +3437,27 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
     ropts.requestTimeoutMs = 60000;
     ropts.headerTimeoutMs = 30000;
     ropts.bodyTimeoutMs = 120000;
-    if (!req.name.empty() && daemon_req.hash.empty()) {
-        auto resolver = [this](const std::string& nm) -> Result<std::string> {
-            if (documentService_)
-                return documentService_->resolveNameToHash(nm);
-            return Error{ErrorCode::NotFound, "resolver unavailable"};
-        };
-        auto dres = rsvc.getByNameSmart(req.name, false /*oldest*/, req.includeContent,
-                                        req.useSession, req.sessionName, ropts, resolver);
-        if (!dres)
-            co_return dres.error();
-        MCPRetrieveDocumentResponse mcp_response;
-        const auto& resp = dres.value();
-        mcp_response.hash = resp.hash;
-        mcp_response.path = resp.path;
-        mcp_response.name = resp.name;
-        mcp_response.size = resp.size;
-        mcp_response.mimeType = resp.mimeType;
-        if (resp.hasContent) {
-            mcp_response.content = resp.content;
-        }
-        mcp_response.graphEnabled = resp.graphEnabled;
-        for (const auto& rel : resp.related) {
-            json relatedJson = {{"hash", rel.hash}, {"path", rel.path}, {"distance", rel.distance}};
-            mcp_response.related.push_back(relatedJson);
-        }
-        co_return mcp_response;
-    } else {
-        auto dres = rsvc.get(daemon_req, ropts);
-        if (!dres)
-            co_return dres.error();
-        MCPRetrieveDocumentResponse mcp_response;
-        const auto& resp = dres.value();
-        mcp_response.hash = resp.hash;
-        mcp_response.path = resp.path;
-        mcp_response.name = resp.name;
-        mcp_response.size = resp.size;
-        mcp_response.mimeType = resp.mimeType;
-        if (resp.hasContent) {
-            mcp_response.content = resp.content;
-        }
-        mcp_response.graphEnabled = resp.graphEnabled;
-        for (const auto& rel : resp.related) {
-            json relatedJson = {{"hash", rel.hash}, {"path", rel.path}, {"distance", rel.distance}};
-            mcp_response.related.push_back(relatedJson);
-        }
-        co_return mcp_response;
+
+    auto dres = rsvc.get(daemon_req, ropts);
+    if (!dres)
+        co_return dres.error();
+
+    MCPRetrieveDocumentResponse mcp_response;
+    const auto& resp = dres.value();
+    mcp_response.hash = resp.hash;
+    mcp_response.path = resp.path;
+    mcp_response.name = resp.name;
+    mcp_response.size = resp.size;
+    mcp_response.mimeType = resp.mimeType;
+    if (resp.hasContent) {
+        mcp_response.content = resp.content;
     }
+    mcp_response.graphEnabled = resp.graphEnabled;
+    for (const auto& rel : resp.related) {
+        json relatedJson = {{"hash", rel.hash}, {"path", rel.path}, {"distance", rel.distance}};
+        mcp_response.related.push_back(relatedJson);
+    }
+    co_return mcp_response;
 }
 
 boost::asio::awaitable<Result<MCPListDocumentsResponse>>
@@ -5177,76 +5138,34 @@ MCPServer::handleDeleteByName(const MCPDeleteByNameRequest& req) {
 
 boost::asio::awaitable<yams::Result<yams::mcp::MCPCatDocumentResponse>>
 yams::mcp::MCPServer::handleCatDocument(const yams::mcp::MCPCatDocumentRequest& req) {
-    // Use RetrievalService::getByNameSmart for exact parity with CLI
     yams::app::services::RetrievalService rsvc;
     yams::app::services::RetrievalOptions ropts;
     ropts.requestTimeoutMs = 60000;
     ropts.headerTimeoutMs = 30000;
     ropts.bodyTimeoutMs = 120000;
-    auto resolver = [this](const std::string& nm) -> Result<std::string> {
-        if (documentService_)
-            return documentService_->resolveNameToHash(nm);
-        return Error{ErrorCode::NotFound, "resolver unavailable"};
-    };
-    // Prefer name when provided; otherwise, fallback to hash-based get
-    std::optional<yams::daemon::GetResponse> get_local;
-    if (!req.name.empty()) {
-        auto normalized = yams::app::services::utils::normalizeLookupPath(req.name);
-        std::vector<std::string> candidates;
-        candidates.reserve(4);
-        if (normalized.changed) {
-            candidates.push_back(normalized.normalized);
-        }
-        candidates.push_back(req.name);
-        // Add suffix match candidates, which getByNameSmart might use as patterns
-        candidates.push_back("%" + req.name);
-        if (normalized.changed) {
-            candidates.push_back("%" + normalized.normalized);
-        }
 
-        std::optional<Error> lastNotFound;
-        for (const auto& candidate : candidates) {
-            auto attempt = rsvc.getByNameSmart(candidate, req.oldest, true, false, std::string{},
-                                               ropts, resolver);
-            if (attempt) {
-                get_local = attempt.value();
-                break;
-            }
-            auto err = attempt.error();
-            if (err.code == ErrorCode::NotFound) {
-                lastNotFound = err;
-                continue;
-            }
-            co_return err;
-        }
+    yams::daemon::GetRequest dreq;
+    dreq.hash = req.hash;
+    dreq.name = req.name;
+    dreq.byName = !req.name.empty();
+    dreq.raw = req.rawContent;
+    dreq.extract = req.extractText;
+    dreq.latest = req.latest;
+    dreq.oldest = req.oldest;
+    dreq.metadataOnly = false; // cat always needs content
 
-        if (!get_local.has_value()) {
-            if (lastNotFound)
-                co_return lastNotFound.value();
-            co_return Error{ErrorCode::NotFound, "Document not found: " + req.name};
-        }
-    } else if (!req.hash.empty()) {
-        yams::daemon::GetRequest dreq;
-        dreq.hash = req.hash;
-        dreq.metadataOnly = false;
-        auto get_by_hash = rsvc.get(dreq, ropts);
-        if (!get_by_hash)
-            co_return get_by_hash.error();
-        get_local = std::move(get_by_hash.value());
-    } else {
-        co_return Error{ErrorCode::InvalidArgument, "name or hash required"};
+    auto gres = rsvc.get(dreq, ropts);
+    if (!gres) {
+        co_return gres.error();
     }
 
-    if (!get_local.has_value())
-        co_return Error{ErrorCode::InternalError, "Failed to retrieve document"};
-    const auto& r = *get_local;
+    const auto& r = gres.value();
     MCPCatDocumentResponse out;
     out.size = r.size;
     out.hash = r.hash;
     out.name = r.name;
-    if (!r.content.empty()) {
-        constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024;
-        out.content = r.content.size() <= MAX_BYTES ? r.content : r.content.substr(0, MAX_BYTES);
+    if (r.hasContent) {
+        out.content = r.content;
     }
     co_return out;
 }

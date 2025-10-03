@@ -1,3 +1,4 @@
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/search/chunk_coverage.h>
 #include <yams/search/hybrid_search_engine.h>
 #include <yams/search/kg_scorer.h>
@@ -9,6 +10,7 @@
 #include <cctype>
 #include <cmath>
 #include <condition_variable>
+#include <filesystem>
 #include <future>
 #include <mutex>
 #include <numeric>
@@ -31,6 +33,13 @@ public:
         // Initialize with default BM25 parameters
         k1_ = 1.2f;
         b_ = 0.75f;
+        size_t num_threads = 4;
+        try {
+            // Use 25% of the budgeted background threads for keyword search tasks
+            num_threads = yams::daemon::TuneAdvisor::recommendedThreads(0.25);
+        } catch (...) {
+        }
+        pool_.start(std::clamp<size_t>(num_threads, 2, 8));
     }
 
     Result<std::vector<KeywordSearchResult>> search(const std::string& query, size_t k,
@@ -40,48 +49,74 @@ public:
             return Result<std::vector<KeywordSearchResult>>(std::vector<KeywordSearchResult>{});
         }
 
-        // Calculate BM25 scores for all documents
         std::vector<std::pair<float, std::string>> scores;
+        std::mutex scores_mutex;
 
-        for (const auto& [doc_id, doc_content] : documents_) {
-            // Apply filter if provided
-            if (filter && filter->hasFilters()) {
-                // Exclude by id
-                if (!filter->exclude_ids.empty()) {
-                    if (std::find(filter->exclude_ids.begin(), filter->exclude_ids.end(), doc_id) !=
-                        filter->exclude_ids.end()) {
-                        continue;
-                    }
-                }
-                // Enforce metadata key/value matches (e.g., file_name, extension, mime_type)
-                if (!filter->metadata_filters.empty()) {
-                    auto itMeta = metadata_.find(doc_id);
-                    const std::map<std::string, std::string>* docMeta =
-                        (itMeta != metadata_.end()) ? &itMeta->second : nullptr;
-                    bool metaOk = true;
-                    for (const auto& kv : filter->metadata_filters) {
-                        const auto& key = kv.first;
-                        const auto& val = kv.second;
-                        if (!docMeta) {
-                            metaOk = false;
-                            break;
-                        }
-                        auto it = docMeta->find(key);
-                        if (it == docMeta->end() || it->second != val) {
-                            metaOk = false;
-                            break;
-                        }
-                    }
-                    if (!metaOk) {
-                        continue;
-                    }
-                }
-            }
+        std::vector<std::string> doc_ids;
+        doc_ids.reserve(documents_.size());
+        for (const auto& [id, _] : documents_) {
+            doc_ids.push_back(id);
+        }
 
-            float score = calculateBM25Score(terms, doc_content);
-            if (score > 0) {
-                scores.emplace_back(score, doc_id);
-            }
+        size_t num_threads = std::thread::hardware_concurrency();
+        if (num_threads == 0)
+            num_threads = 1;
+        size_t chunk_size = (doc_ids.size() + num_threads - 1) / num_threads;
+        std::vector<std::future<void>> futures;
+
+        for (size_t i = 0; i < num_threads; ++i) {
+            futures.push_back(pool_.submit(
+                [this, i, chunk_size, &doc_ids, &terms, filter, &scores, &scores_mutex]() {
+                    size_t start = i * chunk_size;
+                    size_t end = std::min(start + chunk_size, doc_ids.size());
+                    std::vector<std::pair<float, std::string>> local_scores;
+
+                    for (size_t j = start; j < end; ++j) {
+                        const auto& doc_id = doc_ids[j];
+                        const auto& doc_content = documents_.at(doc_id);
+
+                        if (filter && filter->hasFilters()) {
+                            if (!filter->exclude_ids.empty() &&
+                                std::find(filter->exclude_ids.begin(), filter->exclude_ids.end(),
+                                          doc_id) != filter->exclude_ids.end()) {
+                                continue;
+                            }
+                            if (!filter->metadata_filters.empty()) {
+                                auto itMeta = metadata_.find(doc_id);
+                                const std::map<std::string, std::string>* docMeta =
+                                    (itMeta != metadata_.end()) ? &itMeta->second : nullptr;
+                                bool metaOk = true;
+                                for (const auto& kv : filter->metadata_filters) {
+                                    if (!docMeta) {
+                                        metaOk = false;
+                                        break;
+                                    }
+                                    auto it = docMeta->find(kv.first);
+                                    if (it == docMeta->end() || it->second != kv.second) {
+                                        metaOk = false;
+                                        break;
+                                    }
+                                }
+                                if (!metaOk)
+                                    continue;
+                            }
+                        }
+
+                        float score = calculateBM25Score(terms, doc_content);
+                        if (score > 0) {
+                            local_scores.emplace_back(score, doc_id);
+                        }
+                    }
+
+                    if (!local_scores.empty()) {
+                        std::lock_guard<std::mutex> lock(scores_mutex);
+                        scores.insert(scores.end(), local_scores.begin(), local_scores.end());
+                    }
+                }));
+        }
+
+        for (auto& fut : futures) {
+            fut.get();
         }
 
         // Sort by score and take top k
@@ -262,6 +297,72 @@ public:
     }
 
 private:
+    // Minimal reusable thread pool to avoid oversubscription with std::async bursts
+    class ThreadPool {
+    public:
+        ThreadPool() = default;
+        ~ThreadPool() { stop(); }
+        void start(size_t threads) {
+            stop();
+            if (threads == 0)
+                return;
+            done_ = false;
+            for (size_t i = 0; i < threads; ++i) {
+                workers_.emplace_back([this]() { run(); });
+            }
+        }
+        void stop() {
+            {
+                std::lock_guard<std::mutex> lk(m_);
+                done_ = true;
+            }
+            cv_.notify_all();
+            for (auto& t : workers_)
+                if (t.joinable())
+                    t.join();
+            workers_.clear();
+            while (!q_.empty())
+                q_.pop();
+        }
+        template <typename F, typename R = std::invoke_result_t<F&>> std::future<R> submit(F&& f) {
+            // Use shared_ptr to hold move-only packaged_task inside copyable std::function
+            auto pt = std::make_shared<std::packaged_task<R()>>(std::forward<F>(f));
+            auto fut = pt->get_future();
+            {
+                std::lock_guard<std::mutex> lk(m_);
+                q_.emplace([pt]() mutable { (*pt)(); });
+            }
+            cv_.notify_one();
+            return fut;
+        }
+
+    private:
+        void run() {
+            for (;;) {
+                std::function<void()> job;
+                {
+                    std::unique_lock<std::mutex> lk(m_);
+                    cv_.wait(lk, [this]() { return done_ || !q_.empty(); });
+                    if (done_ && q_.empty())
+                        return;
+                    job = std::move(q_.front());
+                    q_.pop();
+                }
+                try {
+                    job();
+                } catch (...) {
+                }
+            }
+        }
+        std::vector<std::thread> workers_;
+        std::queue<std::function<void()>> q_;
+        std::mutex m_;
+        std::condition_variable cv_;
+        bool done_{true};
+    };
+
+    ThreadPool pool_;
+
     // BM25 parameters
     float k1_;
     float b_;
@@ -443,13 +544,41 @@ public:
     }
 
     Result<std::vector<HybridSearchResult>> search(const std::string& query, size_t k,
-                                                   const vector::SearchFilter& filter) {
+                                                   const vector::SearchFilter& filter,
+                                                   const SearchStageBudgets* budgets) {
         if (!initialized_) {
             return Result<std::vector<HybridSearchResult>>(
                 Error{ErrorCode::InvalidState, "Engine not initialized"});
         }
 
         auto start_time = std::chrono::high_resolution_clock::now();
+
+        std::optional<std::chrono::milliseconds> vector_override;
+        std::optional<std::chrono::milliseconds> keyword_override;
+        bool* vector_timed_out_flag = nullptr;
+        bool* keyword_timed_out_flag = nullptr;
+        if (budgets) {
+            vector_override = budgets->vector_timeout;
+            keyword_override = budgets->keyword_timeout;
+            vector_timed_out_flag = budgets->vector_timed_out;
+            keyword_timed_out_flag = budgets->keyword_timed_out;
+            if (vector_timed_out_flag)
+                *vector_timed_out_flag = false;
+            if (keyword_timed_out_flag)
+                *keyword_timed_out_flag = false;
+        }
+
+        auto selectBudget = [](const std::optional<std::chrono::milliseconds>& override_value,
+                               std::chrono::milliseconds fallback) {
+            if (override_value.has_value())
+                return override_value.value();
+            return fallback;
+        };
+
+        const std::chrono::milliseconds vector_budget =
+            selectBudget(vector_override, config_.vector_timeout_ms);
+        const std::chrono::milliseconds keyword_budget =
+            selectBudget(keyword_override, config_.keyword_timeout_ms);
 
         // Parse inline qualifiers and normalize query text
         auto parsed = yams::search::parseQueryQualifiers(query);
@@ -609,18 +738,44 @@ public:
         std::vector<KeywordSearchResult> keyword_results;
 
         if (config_.parallel_search) {
-            if (vector_future.valid()) {
-                auto vector_result = vector_future.get();
-                if (vector_result.has_value()) {
-                    vector_results = vector_result.value();
+            auto consumeFuture = [&](auto& fut, const char* stage_name, auto& dest,
+                                     std::chrono::milliseconds budget, bool* timed_out_flag,
+                                     size_t SearchMetrics::* timeout_counter) {
+                if (!fut.valid())
+                    return;
+
+                if (budget.count() > 0) {
+                    const auto status = fut.wait_for(budget);
+                    if (status != std::future_status::ready) {
+                        spdlog::warn(
+                            "HybridSearchEngine: {} search exceeded {} ms budget; continuing with "
+                            "available candidates",
+                            stage_name, budget.count());
+                        if (timed_out_flag)
+                            *timed_out_flag = true;
+                        {
+                            std::lock_guard<std::mutex> lock(metrics_mutex_);
+                            metrics_.*timeout_counter += 1;
+                        }
+                        return;
+                    }
                 }
-            }
-            if (keyword_future.valid()) {
-                auto keyword_result = keyword_future.get();
-                if (keyword_result.has_value()) {
-                    keyword_results = keyword_result.value();
+
+                auto stage_result = fut.get();
+                if (stage_result.has_value()) {
+                    dest = stage_result.value();
+                } else {
+                    spdlog::warn("HybridSearchEngine: {} search failed: {}", stage_name,
+                                 stage_result.error().message);
                 }
-            }
+            };
+
+            consumeFuture(vector_future, "vector", vector_results, vector_budget,
+                          vector_timed_out_flag,
+                          &HybridSearchEngine::SearchMetrics::vector_timeouts);
+            consumeFuture(keyword_future, "keyword", keyword_results, keyword_budget,
+                          keyword_timed_out_flag,
+                          &HybridSearchEngine::SearchMetrics::keyword_timeouts);
         } else {
             // Sequential search honoring gates
             if (vector_enabled) {
@@ -1093,6 +1248,33 @@ public:
             fused_results.push_back(std::move(result));
         }
 
+        // Structural scoring boost
+        if (config.structural_weight > 0.0f && fused_results.size() > 1) {
+            std::unordered_map<std::string, std::vector<size_t>> dir_to_indices;
+            for (size_t i = 0; i < fused_results.size(); ++i) {
+                auto it = fused_results[i].metadata.find("path");
+                if (it != fused_results[i].metadata.end() && !it->second.empty()) {
+                    try {
+                        std::filesystem::path p(it->second);
+                        if (p.has_parent_path()) {
+                            dir_to_indices[p.parent_path().string()].push_back(i);
+                        }
+                    } catch (...) {
+                    }
+                }
+            }
+
+            for (const auto& [dir, indices] : dir_to_indices) {
+                if (indices.size() > 1) { // More than one file from the same directory in results
+                    float boost =
+                        1.0f + (config.structural_weight * std::log1p(indices.size() - 1));
+                    for (size_t index : indices) {
+                        fused_results[index].hybrid_score *= boost;
+                    }
+                }
+            }
+        }
+
         // Sort by hybrid score
         std::sort(fused_results.begin(), fused_results.end());
 
@@ -1232,8 +1414,13 @@ private:
     void initThreadPool() {
         size_t n = config_.num_threads;
         if (n == 0) {
-            size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
-            n = std::clamp<size_t>(hw / 2, 2, 4);
+            try {
+                // Use 50% of the budgeted background threads for hybrid search tasks
+                n = yams::daemon::TuneAdvisor::recommendedThreads(0.5);
+            } catch (...) {
+                size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
+                n = std::clamp<size_t>(hw / 2, 2, 4);
+            }
         }
         pool_.start(n);
     }
@@ -1459,8 +1646,9 @@ void HybridSearchEngine::shutdown() {
 }
 
 Result<std::vector<HybridSearchResult>>
-HybridSearchEngine::search(const std::string& query, size_t k, const vector::SearchFilter& filter) {
-    return pImpl->search(query, k, filter);
+HybridSearchEngine::search(const std::string& query, size_t k, const vector::SearchFilter& filter,
+                           const SearchStageBudgets* budgets) {
+    return pImpl->search(query, k, filter, budgets);
 }
 
 std::vector<HybridSearchResult>

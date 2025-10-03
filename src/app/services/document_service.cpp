@@ -375,6 +375,19 @@ public:
         RetrieveDocumentResponse resp;
         resp.graphEnabled = req.graph;
 
+        // Validate hash format if provided (must be hex string, at least 8 chars for partial)
+        if (!req.hash.empty()) {
+            std::string normalized = normalizeHashInput(req.hash);
+            // Check if it's a valid hex string (allows partial hashes >= 8 chars)
+            if (normalized.size() < 8 ||
+                !std::all_of(normalized.begin(), normalized.end(),
+                             [](char c) { return std::isxdigit(static_cast<unsigned char>(c)); })) {
+                return Error{ErrorCode::InvalidArgument,
+                             "Invalid hash format: expected hex string (min 8 chars), got '" +
+                                 req.hash + "'. Use --name for file paths."};
+            }
+        }
+
         // If name is provided but no hash, resolve name to hash first
         std::string resolvedHash = normalizeHashInput(req.hash);
         if (!req.name.empty() && req.hash.empty()) {

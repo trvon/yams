@@ -4,6 +4,7 @@
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
 
+#include <atomic>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -13,7 +14,6 @@
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
-#include <boost/asio/system_executor.hpp>
 #include <yams/compat/thread_stop_compat.h>
 // New: shared request context
 #include <yams/daemon/ipc/request_context.h>
@@ -94,7 +94,8 @@ public:
         size_t total_queued_bytes_cap =
             256 * 1024 * 1024; // Max bytes queued per connection (256MB)
         size_t writer_budget_bytes_per_turn =
-            256 * 1024; // Fair-writer byte budget per request turn
+            256 * 1024; // Fair-writer byte budget per request turn (fallback)
+        std::shared_ptr<std::atomic<std::size_t>> writer_budget_ref{};
 
         // When closing after a response, attempt a graceful half-close (shutdown send) and briefly
         // drain the peer's read side to reduce the chance of truncation at the client. Has no
@@ -108,7 +109,7 @@ public:
         bool stream_stub_on_init = true;
 
         // Executor for offloading CPU-bound work (worker pool)
-        boost::asio::any_io_executor worker_executor = boost::asio::system_executor();
+        boost::asio::any_io_executor worker_executor{};
         std::function<void(bool)> worker_job_signal{};
 
         Config();

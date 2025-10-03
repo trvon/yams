@@ -198,6 +198,8 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(cons
         conn->handlers.erase(msg.requestId);
         co_return wres.error();
     }
+    spdlog::info("AsioTransportAdapter::send_request wrote frame req_id={} type={}", msg.requestId,
+                 static_cast<int>(getMessageType(req)));
 
     auto [ec, response_result] =
         co_await response_ch->async_receive(boost::asio::as_tuple(use_awaitable));
@@ -253,6 +255,8 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
         conn->handlers.erase(msg.requestId);
         co_return wres.error();
     }
+    spdlog::info("AsioTransportAdapter::send_request_streaming wrote frame req_id={} type={}",
+                 msg.requestId, static_cast<int>(getMessageType(req)));
 
     auto [ec, void_result] = co_await done_ch->async_receive(boost::asio::as_tuple(use_awaitable));
     if (ec) {

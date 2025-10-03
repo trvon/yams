@@ -32,6 +32,7 @@ yams_cli_sources = [
   'commands/doctor_command.cpp',
   'commands/dr_command.cpp',
   'commands/graph_command.cpp',
+  'commands/diff_command.cpp',
 ]
 
 if get_option('enable-tui')
@@ -40,6 +41,8 @@ if get_option('enable-tui')
     'tui/browse_state.cpp',
     'tui/browse_services.cpp',
     'tui/browse_commands.cpp',
+    'tui/highlight_utils.cpp',
+    'tui/tui_services.cpp',
   ]
 endif
 
@@ -132,6 +135,15 @@ cli_deps = [
   dependency('boost'),
   cli11_dep,
 ]
+
+# TUI framework dependencies
+if get_option('enable-tui')
+  # FTXUI: Modern C++17 TUI framework (screen + dom + component modules)
+  ftxui_screen_dep = dependency('ftxui-ftxui-screen', method: 'pkg-config', required: true)
+  ftxui_dom_dep = dependency('ftxui-ftxui-dom', method: 'pkg-config', required: true)
+  ftxui_component_dep = dependency('ftxui-ftxui-component', method: 'pkg-config', required: true)
+  cli_deps += [ftxui_screen_dep, ftxui_dom_dep, ftxui_component_dep]
+endif
 
 if get_option('build-mcp-server')
   cli_deps += dependency('yams_mcp')

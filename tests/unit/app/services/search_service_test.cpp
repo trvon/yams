@@ -2,8 +2,10 @@
 #include <cstddef>
 #include <filesystem>
 #include <optional>
+#include <thread>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
+#include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/use_future.hpp>
 #include <gmock/gmock.h>
@@ -52,6 +54,111 @@ private:
     }
 
     std::size_t getDocumentByHashFailures_{0};
+};
+
+class SlowSnippetMetadataRepository : public MetadataRepository {
+public:
+    SlowSnippetMetadataRepository(ConnectionPool& pool, std::chrono::milliseconds delay)
+        : MetadataRepository(pool), delay_(delay) {}
+
+    Result<std::optional<DocumentContent>> getContent(int64_t documentId) override {
+        std::this_thread::sleep_for(delay_);
+        return MetadataRepository::getContent(documentId);
+    }
+
+    Result<yams::metadata::SearchResults>
+    search(const std::string& query, int limit = 50, int offset = 0,
+           const std::optional<std::vector<int64_t>>& docIds = std::nullopt) override {
+        auto result = MetadataRepository::search(query, limit, offset, docIds);
+        if (result) {
+            for (auto& entry : result.value().results) {
+                entry.snippet.clear();
+            }
+        }
+        return result;
+    }
+
+private:
+    std::chrono::milliseconds delay_;
+};
+
+class BlockingKeywordSearchEngine final : public search::KeywordSearchEngine {
+public:
+    explicit BlockingKeywordSearchEngine(std::chrono::milliseconds delay) : delay_(delay) {
+        yams::search::KeywordSearchResult r;
+        r.id = "blocking-keyword";
+        r.content = "Blocking keyword result";
+        r.score = 1.0f;
+        r.metadata["path"] = "blocking-keyword.txt";
+        results_.push_back(std::move(r));
+    }
+
+    std::vector<std::string> analyzeQuery(const std::string& query) const override {
+        std::vector<std::string> tokens;
+        std::istringstream iss(query);
+        std::string token;
+        while (iss >> token) {
+            for (auto& ch : token) {
+                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            }
+            tokens.push_back(token);
+        }
+        return tokens;
+    }
+
+    std::vector<std::string> extractKeywords(const std::string& text) const override {
+        return analyzeQuery(text);
+    }
+
+    Result<std::vector<yams::search::KeywordSearchResult>>
+    search(const std::string&, size_t, const vector::SearchFilter*) override {
+        std::this_thread::sleep_for(delay_);
+        return Result<std::vector<yams::search::KeywordSearchResult>>(results_);
+    }
+
+    Result<std::vector<std::vector<yams::search::KeywordSearchResult>>>
+    batchSearch(const std::vector<std::string>& queries, size_t,
+                const vector::SearchFilter*) override {
+        std::vector<std::vector<yams::search::KeywordSearchResult>> batches(queries.size(),
+                                                                            results_);
+        return Result<std::vector<std::vector<yams::search::KeywordSearchResult>>>(
+            std::move(batches));
+    }
+
+    Result<void> addDocument(const std::string&, const std::string&,
+                             const std::map<std::string, std::string>&) override {
+        return Result<void>();
+    }
+
+    Result<void> removeDocument(const std::string&) override { return Result<void>(); }
+
+    Result<void> updateDocument(const std::string&, const std::string&,
+                                const std::map<std::string, std::string>&) override {
+        return Result<void>();
+    }
+
+    Result<void> addDocuments(const std::vector<std::string>&, const std::vector<std::string>&,
+                              const std::vector<std::map<std::string, std::string>>&) override {
+        return Result<void>();
+    }
+
+    Result<void> buildIndex() override { return Result<void>(); }
+    Result<void> optimizeIndex() override { return Result<void>(); }
+    Result<void> clearIndex() override { return Result<void>(); }
+    Result<void> saveIndex(const std::string&) override {
+        return Result<void>(Error{ErrorCode::InvalidOperation, "Not implemented"});
+    }
+    Result<void> loadIndex(const std::string&) override {
+        return Result<void>(Error{ErrorCode::InvalidOperation, "Not implemented"});
+    }
+
+    size_t getDocumentCount() const override { return results_.size(); }
+    size_t getTermCount() const override { return 0; }
+    size_t getIndexSize() const override { return 0; }
+
+private:
+    std::chrono::milliseconds delay_;
+    std::vector<yams::search::KeywordSearchResult> results_;
 };
 
 } // namespace
@@ -157,6 +264,7 @@ private:
         appContext_.metadataRepo = metadataRepo_;
         appContext_.searchExecutor = searchExecutor_;
         appContext_.hybridEngine = hybridEngine_;
+        appContext_.workerExecutor = boost::asio::system_executor();
 
         // Create search service using factory
         searchService_ = makeSearchService(appContext_);
@@ -684,4 +792,68 @@ TEST_F(SearchServiceTest, LightIndexRetriesTransientMetadataErrors) {
 
     auto result = searchService_->lightIndexForHash(testHashes_.front(), 512 * 1024);
     ASSERT_TRUE(result) << result.error().message;
+}
+
+TEST_F(SearchServiceTest, KeywordStageTimeoutReportsStats) {
+    auto vectorManager = std::make_shared<vector::VectorIndexManager>();
+    auto initVec = vectorManager->initialize();
+    ASSERT_TRUE(initVec.has_value()) << initVec.error().message;
+
+    auto keywordEngine =
+        std::make_shared<BlockingKeywordSearchEngine>(std::chrono::milliseconds(30));
+
+    search::HybridSearchConfig cfg;
+    cfg.vector_weight = 0.0f;
+    cfg.keyword_weight = 1.0f;
+    cfg.parallel_search = true;
+    cfg.final_top_k = 5;
+    cfg.keyword_top_k = 5;
+
+    auto hybridEngine =
+        std::make_shared<search::HybridSearchEngine>(vectorManager, keywordEngine, cfg);
+    auto initHybrid = hybridEngine->initialize();
+    ASSERT_TRUE(initHybrid.has_value()) << initHybrid.error().message;
+
+    hybridEngine_ = hybridEngine;
+    appContext_.hybridEngine = hybridEngine_;
+    searchService_ = makeSearchService(appContext_);
+
+    auto request = createBasicSearchRequest("programming");
+    request.pathsOnly = true;
+    request.keywordStageTimeoutMs = 5;
+
+    auto result = runAwait(searchService_->search(request));
+    ASSERT_TRUE(result) << result.error().message;
+
+    const auto& stats = result.value().searchStats;
+    auto it = stats.find("keyword_timeout_hit");
+    ASSERT_NE(it, stats.end());
+    EXPECT_EQ(it->second, "true");
+    auto budgetIt = stats.find("keyword_budget_ms");
+    ASSERT_NE(budgetIt, stats.end());
+    EXPECT_EQ(budgetIt->second, "5");
+}
+
+TEST_F(SearchServiceTest, SnippetHydrationTimeoutReportsStats) {
+    auto slowRepo =
+        std::make_shared<SlowSnippetMetadataRepository>(*pool_, std::chrono::milliseconds(200));
+    metadataRepo_ = slowRepo;
+    appContext_.metadataRepo = slowRepo;
+    searchService_ = makeSearchService(appContext_);
+
+    auto request = createBasicSearchRequest("programming");
+    request.snippetHydrationTimeoutMs = 5;
+    request.showHash = true;
+    request.type = "keyword";
+
+    auto result = runAwait(searchService_->search(request));
+    ASSERT_TRUE(result) << result.error().message;
+
+    const auto& stats = result.value().searchStats;
+    auto hitIt = stats.find("snippet_timeout_hit");
+    ASSERT_NE(hitIt, stats.end());
+    EXPECT_EQ(hitIt->second, "true");
+    auto budgetIt = stats.find("snippet_budget_ms");
+    ASSERT_NE(budgetIt, stats.end());
+    EXPECT_EQ(budgetIt->second, "5");
 }

@@ -4,13 +4,59 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string_view>
 #include <type_traits>
+#include <unordered_map>
+#include <vector>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/search/bk_tree.h>
 
 namespace yams::metadata {
+
+// -----------------------------------------------------------------------------
+// Tree diff records (PBI-043)
+// -----------------------------------------------------------------------------
+
+struct TreeSnapshotRecord {
+    std::string snapshotId;
+    std::string rootTreeHash;
+    std::optional<int64_t> ingestDocumentId;
+    std::int64_t createdTime = 0; // unix epoch seconds
+    std::int64_t fileCount = 0;
+    std::int64_t totalBytes = 0;
+    std::unordered_map<std::string, std::string> metadata;
+};
+
+struct TreeDiffDescriptor {
+    std::string baseSnapshotId;
+    std::string targetSnapshotId;
+    std::int64_t computedAt = 0;
+    std::string status = "pending"; // complete|partial|failed
+};
+
+enum class TreeChangeType { Added, Deleted, Modified, Renamed, Moved };
+
+struct TreeChangeRecord {
+    TreeChangeType type{TreeChangeType::Modified};
+    std::string oldPath;
+    std::string newPath;
+    std::string oldHash;
+    std::string newHash;
+    std::optional<int> mode;
+    bool isDirectory = false;
+    std::optional<std::string> contentDeltaHash;
+};
+
+struct TreeDiffQuery {
+    std::string baseSnapshotId;
+    std::string targetSnapshotId;
+    std::optional<std::string> pathPrefix;
+    std::optional<TreeChangeType> typeFilter;
+    std::size_t limit = 1000;
+    std::size_t offset = 0;
+};
 
 /**
  * @brief Repository interface for document metadata operations
@@ -62,12 +108,14 @@ public:
                                               const std::string& content,
                                               const std::string& contentType) = 0;
     virtual Result<void> removeFromIndex(int64_t documentId) = 0;
-    virtual Result<SearchResults> search(const std::string& query, int limit = 50,
-                                         int offset = 0) = 0;
+    virtual Result<SearchResults>
+    search(const std::string& query, int limit = 50, int offset = 0,
+           const std::optional<std::vector<int64_t>>& docIds = std::nullopt) = 0;
 
     // Fuzzy search operations
-    virtual Result<SearchResults> fuzzySearch(const std::string& query, float minSimilarity = 0.7f,
-                                              int limit = 50) = 0;
+    virtual Result<SearchResults>
+    fuzzySearch(const std::string& query, float minSimilarity = 0.7f, int limit = 50,
+                const std::optional<std::vector<int64_t>>& docIds = std::nullopt) = 0;
     virtual Result<void> buildFuzzyIndex() = 0;
     virtual Result<void> updateFuzzyIndex(int64_t documentId) = 0;
 
@@ -110,6 +158,23 @@ public:
     virtual Result<void> updateDocumentEmbeddingStatusByHash(const std::string& hash,
                                                              bool hasEmbedding,
                                                              const std::string& modelId = "") = 0;
+
+    /**
+     * @brief Force a WAL checkpoint.
+     */
+    virtual Result<void> checkpointWal() = 0;
+
+    // Tree diff persistence (PBI-043)
+    virtual Result<void> upsertTreeSnapshot(const TreeSnapshotRecord& record) = 0;
+    virtual Result<std::optional<TreeSnapshotRecord>>
+    getTreeSnapshot(std::string_view snapshotId) = 0;
+    virtual Result<std::vector<TreeSnapshotRecord>> listTreeSnapshots(int limit = 100) = 0;
+    virtual Result<int64_t> beginTreeDiff(const TreeDiffDescriptor& descriptor) = 0;
+    virtual Result<void> appendTreeChanges(int64_t diffId,
+                                           const std::vector<TreeChangeRecord>& changes) = 0;
+    virtual Result<std::vector<TreeChangeRecord>> listTreeChanges(const TreeDiffQuery& query) = 0;
+    virtual Result<void> finalizeTreeDiff(int64_t diffId, std::size_t changeCount,
+                                          std::string_view status) = 0;
 };
 
 /**
@@ -163,11 +228,14 @@ public:
                                       const std::string& content,
                                       const std::string& contentType) override;
     Result<void> removeFromIndex(int64_t documentId) override;
-    Result<SearchResults> search(const std::string& query, int limit = 50, int offset = 0) override;
+    Result<SearchResults>
+    search(const std::string& query, int limit = 50, int offset = 0,
+           const std::optional<std::vector<int64_t>>& docIds = std::nullopt) override;
 
     // Fuzzy search operations
-    Result<SearchResults> fuzzySearch(const std::string& query, float minSimilarity = 0.7f,
-                                      int limit = 50) override;
+    Result<SearchResults>
+    fuzzySearch(const std::string& query, float minSimilarity = 0.7f, int limit = 50,
+                const std::optional<std::vector<int64_t>>& docIds = std::nullopt) override;
     Result<void> buildFuzzyIndex() override;
     Result<void> updateFuzzyIndex(int64_t documentId) override;
 
@@ -207,6 +275,19 @@ public:
                                                const std::string& modelId = "") override;
     Result<void> updateDocumentEmbeddingStatusByHash(const std::string& hash, bool hasEmbedding,
                                                      const std::string& modelId = "") override;
+
+    Result<void> checkpointWal() override;
+
+    // Tree diff persistence
+    Result<void> upsertTreeSnapshot(const TreeSnapshotRecord& record) override;
+    Result<std::optional<TreeSnapshotRecord>> getTreeSnapshot(std::string_view snapshotId) override;
+    Result<std::vector<TreeSnapshotRecord>> listTreeSnapshots(int limit = 100) override;
+    Result<int64_t> beginTreeDiff(const TreeDiffDescriptor& descriptor) override;
+    Result<void> appendTreeChanges(int64_t diffId,
+                                   const std::vector<TreeChangeRecord>& changes) override;
+    Result<std::vector<TreeChangeRecord>> listTreeChanges(const TreeDiffQuery& query) override;
+    Result<void> finalizeTreeDiff(int64_t diffId, std::size_t changeCount,
+                                  std::string_view status) override;
 
 private:
     ConnectionPool& pool_;

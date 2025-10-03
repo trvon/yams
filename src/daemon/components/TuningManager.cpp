@@ -3,6 +3,7 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <chrono>
+#include <thread>
 #include <yams/daemon/components/PoolManager.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
@@ -71,6 +72,42 @@ void TuningManager::tick_once() {
     auto& pm = PoolManager::instance();
 
     const std::uint64_t maxMux = TuneAdvisor::maxMuxBytes();
+    if (sm_) {
+        auto ingestMetrics = sm_->getIngestMetricsSnapshot();
+        if (TuneAdvisor::enableParallelIngest()) {
+            std::size_t backlog = ingestMetrics.queued;
+            std::size_t desired = backlog > 0 ? backlog : 1;
+            const auto activeWorkers = ingestMetrics.active;
+            if (backlog > 0) {
+                const std::size_t perWorker = std::max<std::size_t>(
+                    1, static_cast<std::size_t>(TuneAdvisor::ingestBacklogPerWorker()));
+                desired = (backlog + perWorker - 1) / perWorker;
+            } else if (activeWorkers > 0) {
+                desired = activeWorkers;
+            }
+            std::size_t cap = TuneAdvisor::maxIngestWorkers();
+            if (cap == 0)
+                cap = std::max<std::size_t>(1, std::thread::hardware_concurrency());
+            const std::size_t storageCap = TuneAdvisor::storagePoolSize();
+            if (storageCap > 0)
+                cap = std::min(cap, storageCap);
+            if (cap == 0)
+                cap = 1;
+            if (desired < 1)
+                desired = 1;
+            if (desired > cap)
+                desired = cap;
+            sm_->setIngestWorkerTarget(desired);
+#if defined(TRACY_ENABLE)
+            TracyPlot("ingest.target_workers", static_cast<double>(desired));
+            TracyPlot("ingest.queued", static_cast<double>(backlog));
+            TracyPlot("ingest.active", static_cast<double>(activeWorkers));
+#endif
+        } else {
+            sm_->setIngestWorkerTarget(1);
+        }
+    }
+
     std::uint64_t maxWorkerQ = 0;
     try {
         maxWorkerQ = TuneAdvisor::maxWorkerQueue(static_cast<size_t>(workerThreads));
@@ -196,8 +233,16 @@ void TuningManager::tick_once() {
     std::size_t writerBudget = TuneAdvisor::serverWriterBudgetBytesPerTurn();
     if (writerBudget == 0)
         writerBudget = TuneAdvisor::writerBudgetBytesPerTurn();
-    if (writerBudget > 0)
-        MuxMetricsRegistry::instance().setWriterBudget(writerBudget);
+    if (writerBudget > 0) {
+        if (setWriterBudget_) {
+            try {
+                setWriterBudget_(writerBudget);
+            } catch (...) {
+            }
+        } else {
+            MuxMetricsRegistry::instance().setWriterBudget(writerBudget);
+        }
+    }
 
     // Expose pool sizes and writer budget to FSM metrics for downstream visibility
     try {

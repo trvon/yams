@@ -7,10 +7,10 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/thread_pool.hpp>
 #include <sys/file.h>
 #include <sys/wait.h>
 #include <yams/daemon/client/daemon_client.h>
-#include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/components/LifecycleComponent.h>
 #include <yams/daemon/daemon.h>
 
@@ -21,16 +21,15 @@ using yams::ErrorCode;
 using yams::Result;
 using yams::daemon::ClientConfig;
 using yams::daemon::DaemonClient;
-using yams::daemon::GlobalIOContext;
 
 Result<void> sendShutdownRequest(const ClientConfig& cfg, std::chrono::milliseconds timeout) {
     auto promise = std::make_shared<std::promise<Result<void>>>();
     auto future = promise->get_future();
 
     try {
-        auto& io = GlobalIOContext::instance().get_io_context();
+        boost::asio::thread_pool pool(1);
         boost::asio::co_spawn(
-            io,
+            pool,
             [cfg, promise]() -> boost::asio::awaitable<void> {
                 try {
                     DaemonClient client(cfg);
@@ -51,19 +50,27 @@ Result<void> sendShutdownRequest(const ClientConfig& cfg, std::chrono::milliseco
                 co_return;
             },
             boost::asio::detached);
+
+        auto wait_ready = [&]() -> bool {
+            if (timeout.count() > 0) {
+                return future.wait_for(timeout) == std::future_status::ready;
+            }
+            future.wait();
+            return true;
+        }();
+
+        if (!wait_ready) {
+            pool.stop();
+            pool.join();
+            return Error{ErrorCode::Timeout, "Shutdown request timed out"};
+        }
+
+        pool.join();
+        return future.get();
     } catch (const std::exception& e) {
         return Error{ErrorCode::InternalError,
                      std::string("Failed to dispatch shutdown RPC: ") + e.what()};
     }
-
-    if (timeout.count() > 0) {
-        if (future.wait_for(timeout) != std::future_status::ready) {
-            return Error{ErrorCode::Timeout, "Shutdown request timed out"};
-        }
-    } else {
-        future.wait();
-    }
-    return future.get();
 }
 
 } // namespace

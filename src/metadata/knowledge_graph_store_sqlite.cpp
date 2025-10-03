@@ -1034,6 +1034,40 @@ public:
         return Error{ErrorCode::NotImplemented, "recomputeNodeStats not implemented"};
     }
 
+    // Tree diff helpers (stubs)
+    Result<std::int64_t> ensureBlobNode(std::string_view sha256) override {
+        (void)sha256;
+        return Error{ErrorCode::NotImplemented, "ensureBlobNode not implemented"};
+    }
+
+    Result<std::int64_t> ensurePathNode(const PathNodeDescriptor& descriptor) override {
+        (void)descriptor;
+        return Error{ErrorCode::NotImplemented, "ensurePathNode not implemented"};
+    }
+
+    Result<void> linkPathVersion(std::int64_t pathNodeId, std::int64_t blobNodeId,
+                                 std::int64_t diffId) override {
+        (void)pathNodeId;
+        (void)blobNodeId;
+        (void)diffId;
+        return Error{ErrorCode::NotImplemented, "linkPathVersion not implemented"};
+    }
+
+    Result<void> recordRenameEdge(std::int64_t fromPathNodeId, std::int64_t toPathNodeId,
+                                  std::int64_t diffId) override {
+        (void)fromPathNodeId;
+        (void)toPathNodeId;
+        (void)diffId;
+        return Error{ErrorCode::NotImplemented, "recordRenameEdge not implemented"};
+    }
+
+    Result<std::vector<PathHistoryRecord>> fetchPathHistory(std::string_view logicalPath,
+                                                            std::size_t limit) override {
+        (void)logicalPath;
+        (void)limit;
+        return Error{ErrorCode::NotImplemented, "fetchPathHistory not implemented"};
+    }
+
     // Maintenance
     Result<void> optimize() override {
         auto res = pool_->withConnection(

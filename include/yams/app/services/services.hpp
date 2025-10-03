@@ -190,6 +190,11 @@ struct SearchRequest {
     std::string modifiedBefore;
     std::string indexedAfter;
     std::string indexedBefore;
+
+    // Performance budgets (0 == unlimited)
+    int vectorStageTimeoutMs{0};
+    int keywordStageTimeoutMs{0};
+    int snippetHydrationTimeoutMs{0};
 };
 
 struct SearchMatchContext {
@@ -837,6 +842,7 @@ struct AddDirectoryRequest {
     bool verify{false};
     // Optional: verify indexes (FTS/vector) presence when enabled
     bool verifyIndexes{false};
+    std::string snapshotLabel; // Optional human-friendly label for automatic snapshot
 };
 
 struct IndexedFileResult {
@@ -855,6 +861,9 @@ struct AddDirectoryResponse {
     std::size_t filesSkipped{0};
     std::size_t filesFailed{0};
     std::vector<IndexedFileResult> results;
+    std::string snapshotId;    // Auto-generated timestamp ID (server-side)
+    std::string snapshotLabel; // Optional human-friendly label
+    std::string treeRootHash;  // Merkle tree root hash (PBI-043)
 };
 
 class IIndexingService {

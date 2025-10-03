@@ -674,6 +674,14 @@ inline bool& cli_pool_initialized() {
     return initialized;
 }
 
+#if defined(YAMS_TESTING)
+inline void cli_pool_reset_for_test() {
+    std::lock_guard<std::mutex> lk(cli_pool_mutex());
+    cli_pool_instance().reset();
+    cli_pool_initialized() = false;
+}
+#endif
+
 inline Result<DaemonClientPool::Lease>
 acquire_cli_daemon_client(const yams::daemon::ClientConfig& cfg, size_t min_clients = 1,
                           size_t max_clients = 12) {

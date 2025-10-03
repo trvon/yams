@@ -1,3 +1,4 @@
+#include <spdlog/spdlog.h>
 #include <cstring>
 #include <sstream>
 #include <yams/metadata/database.h>
@@ -270,6 +271,7 @@ Result<void> Database::execute(const std::string& sql) {
     if (rc != SQLITE_OK) {
         std::string error = errMsg ? errMsg : "Unknown error";
         sqlite3_free(errMsg);
+        spdlog::error("SQL exec failed ({}): {}", error, sql);
         return Error{ErrorCode::DatabaseError, "Failed to execute SQL: " + error};
     }
     return {};

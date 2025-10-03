@@ -30,7 +30,7 @@ class YamsConan(ConanFile):
         "build_tests": False,
         "build_benchmarks": False,
         "enable_pdf": True,  # PDF support enabled by default
-        "enable_tui": False,  # TUI disabled by default to reduce dependencies
+        "enable_tui": True,  # TUI enabled by default
         "enable_onnx": True,  # ONNX enabled by default; can be disabled to drop Boost
         "enable_wasmtime": True,  # WASM host enabled by default (bring your own wasmtime-cpp)
     }
@@ -54,8 +54,12 @@ class YamsConan(ConanFile):
         # Boost is used directly (e.g., boost.asio for daemon comms); declare as a direct requirement
         # Using only override=True will not pull Boost into the graph when no transitive dep needs it
         self.requires("boost/1.83.0")
+        
+        # TUI framework dependencies
         if self.options.enable_tui:
-            self.requires("ncurses/6.4")
+            # FTXUI: Modern C++17 TUI library, zero external dependencies
+            self.requires("ftxui/5.0.0")
+        
         if self.options.enable_onnx:
             self.requires("onnxruntime/1.18.1")
         self.requires("xz_utils/5.4.5")

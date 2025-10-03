@@ -12,7 +12,6 @@
 #include <boost/asio/detached.hpp>
 #include <yams/core/repair_fsm.h>
 #include <yams/daemon/client/daemon_client.h>
-#include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
@@ -26,8 +25,16 @@
 // Asio for coroutine-based loop
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
+#include <boost/asio/thread_pool.hpp>
 
 namespace yams::daemon {
+
+namespace {
+boost::asio::any_io_executor repair_fallback_executor() {
+    static boost::asio::thread_pool pool(1);
+    return pool.get_executor();
+}
+} // namespace
 
 RepairCoordinator::RepairCoordinator(ServiceManager* services, StateComponent* state,
                                      std::function<size_t()> activeConnFn, Config cfg)
@@ -44,9 +51,9 @@ void RepairCoordinator::start() {
     // Initialize maintenance tokens based on config
     tokens_.store(cfg_.maintenanceTokens);
     finished_.store(false, std::memory_order_relaxed);
-    auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
+    auto exec = services_ ? services_->getWorkerExecutor() : repair_fallback_executor();
     boost::asio::co_spawn(
-        io,
+        exec,
         [this]() -> boost::asio::awaitable<void> {
             co_await runAsync();
             co_return;

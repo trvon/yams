@@ -117,6 +117,13 @@ public:
                         "Time window for considering files as 'recently changed' (default: 24h)")
             ->default_val("24h");
 
+        // Snapshot operations (Task 043-05b)
+        cmd->add_flag("--snapshots", listSnapshots_, "List all available snapshots");
+        cmd->add_option("--snapshot-id", snapshotId_,
+                        "Filter by snapshot ID or show file at snapshot");
+        cmd->add_option("--compare-to", compareTo_,
+                        "Compare file with another snapshot (requires --snapshot-id)");
+
         cmd->callback([this]() {
             // Handle snippet flag logic
             if (noSnippets_) {
@@ -144,6 +151,30 @@ public:
 
     Result<void> execute() override {
         try {
+            // Task 043-05b: Smart snapshot operations
+            if (listSnapshots_) {
+                return listAllSnapshots();
+            }
+
+            // Detect if pattern looks like a file path
+            bool isFilePath = isFilePathPattern(namePattern_);
+
+            if (isFilePath && !snapshotId_.empty() && !compareTo_.empty()) {
+                return showFileDiff(namePattern_, snapshotId_, compareTo_);
+            }
+
+            if (isFilePath && !snapshotId_.empty()) {
+                return showFileAtSnapshot(namePattern_, snapshotId_);
+            }
+
+            if (isFilePath) {
+                return showFileHistory(namePattern_);
+            }
+
+            if (!snapshotId_.empty()) {
+                return listFilesInSnapshot(snapshotId_);
+            }
+
             // Always try daemon-first approach with full protocol mapping for PBI-001 compliance
             yams::daemon::ListRequest dreq;
 
@@ -306,6 +337,143 @@ public:
 private:
     // Track normalized local file path if user passed a concrete file via --name
     std::optional<std::string> resolvedLocalFilePath_;
+
+    /**
+     * Check if pattern looks like a file path (contains / or . or known prefixes)
+     */
+    bool isFilePathPattern(const std::string& pattern) {
+        if (pattern.empty())
+            return false;
+        return pattern.find('/') != std::string::npos || pattern.find('.') != std::string::npos ||
+               pattern.starts_with("src/") || pattern.starts_with("include/") ||
+               pattern.starts_with("docs/") || pattern.starts_with("tests/");
+    }
+
+    /**
+     * List all available snapshots from tree_snapshots table
+     */
+    Result<void> listAllSnapshots() {
+        auto appContext = cli_->getAppContext();
+        if (!appContext) {
+            return Error{ErrorCode::NotInitialized, "App context not available"};
+        }
+
+        try {
+            auto& metaRepo = appContext->metadataRepo;
+
+            // Use the public listTreeSnapshots method
+            auto result = metaRepo->listTreeSnapshots(limit_ > 0 ? limit_ : 100);
+            if (!result)
+                return result.error();
+
+            const auto& snapshots = result.value();
+
+            // Output snapshots
+            if (format_ == "json" || cli_->getJsonOutput()) {
+                json j = json::array();
+                for (const auto& rec : snapshots) {
+                    json snap;
+                    snap["snapshot_id"] = rec.snapshotId;
+                    snap["directory_path"] = rec.metadata.count("directory_path")
+                                                 ? rec.metadata.at("directory_path")
+                                                 : "";
+                    std::string label = rec.metadata.count("snapshot_label")
+                                            ? rec.metadata.at("snapshot_label")
+                                            : "";
+                    if (!label.empty())
+                        snap["label"] = label;
+                    std::string commit =
+                        rec.metadata.count("git_commit") ? rec.metadata.at("git_commit") : "";
+                    if (!commit.empty())
+                        snap["git_commit"] = commit;
+                    std::string branch =
+                        rec.metadata.count("git_branch") ? rec.metadata.at("git_branch") : "";
+                    if (!branch.empty())
+                        snap["git_branch"] = branch;
+                    snap["files_count"] = rec.fileCount;
+                    snap["created_at"] = rec.createdTime;
+                    j.push_back(snap);
+                }
+                std::cout << j.dump(2) << std::endl;
+            } else {
+                // Table format
+                std::cout << yamsfmt::format("{:<28} {:<40} {:<20} {:<10} {:<8}\n", "SNAPSHOT ID",
+                                             "DIRECTORY", "LABEL", "GIT", "FILES");
+                std::cout << std::string(110, '-') << "\n";
+
+                for (const auto& rec : snapshots) {
+                    std::string path = rec.metadata.count("directory_path")
+                                           ? rec.metadata.at("directory_path")
+                                           : "";
+                    std::string label = rec.metadata.count("snapshot_label")
+                                            ? rec.metadata.at("snapshot_label")
+                                            : "";
+                    std::string commit =
+                        rec.metadata.count("git_commit") ? rec.metadata.at("git_commit") : "";
+
+                    std::string shortCommit = commit.empty() ? "-" : commit.substr(0, 8);
+                    std::string displayLabel = label.empty() ? "-" : label;
+                    std::string shortPath =
+                        path.length() > 38 ? "..." + path.substr(path.length() - 35) : path;
+
+                    std::cout << yamsfmt::format(
+                        "{:<28} {:<40} {:<20} {:<10} {:>8}\n", rec.snapshotId.substr(0, 26),
+                        shortPath, displayLabel.substr(0, 18), shortCommit, rec.fileCount);
+                }
+            }
+
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::InternalError,
+                         std::string("Failed to list snapshots: ") + e.what()};
+        }
+    }
+
+    /**
+     * Show file history across all snapshots
+     */
+    Result<void> showFileHistory(const std::string& filepath) {
+        spdlog::info("Showing file history for: {}", filepath);
+        // TODO: Query which snapshots contain this file
+        // For now, show a helpful message
+        std::cout << "File history feature coming soon!\n";
+        std::cout << "This will show all snapshots containing: " << filepath << "\n";
+        std::cout << "Suggestion: Use 'yams list --snapshots' to see available snapshots\n";
+        return Result<void>();
+    }
+
+    /**
+     * Show file at specific snapshot
+     */
+    Result<void> showFileAtSnapshot(const std::string& filepath, const std::string& snapshotId) {
+        spdlog::info("Showing file {} at snapshot {}", filepath, snapshotId);
+        std::cout << "File-at-snapshot feature coming soon!\n";
+        std::cout << "This will show: " << filepath << " at snapshot " << snapshotId << "\n";
+        return Result<void>();
+    }
+
+    /**
+     * Show inline diff between two snapshots for a file
+     */
+    Result<void> showFileDiff(const std::string& filepath, const std::string& snapshotA,
+                              const std::string& snapshotB) {
+        spdlog::info("Showing diff for {} between {} and {}", filepath, snapshotA, snapshotB);
+        std::cout << "File diff feature coming soon!\n";
+        std::cout << "This will show changes in: " << filepath << "\n";
+        std::cout << "Between: " << snapshotA << " and " << snapshotB << "\n";
+        return Result<void>();
+    }
+
+    /**
+     * List all files in a specific snapshot
+     */
+    Result<void> listFilesInSnapshot(const std::string& snapshotId) {
+        spdlog::info("Listing files in snapshot: {}", snapshotId);
+        std::cout << "List-files-in-snapshot feature coming soon!\n";
+        std::cout << "This will show all files in snapshot: " << snapshotId << "\n";
+        return Result<void>();
+    }
+
     Result<void> executeWithServices() {
         try {
             auto ensured = cli_->ensureStorageInitialized();
@@ -1282,6 +1450,11 @@ private:
     // Tag filtering
     std::string filterTags_;
     // bool matchAllTags_ = false;  // Currently unused - reserved for future tag matching logic
+
+    // Snapshot operations (Task 043-05b)
+    bool listSnapshots_ = false;
+    std::string snapshotId_;
+    std::string compareTo_;
 
     std::string getFileTypeIndicator(const EnhancedDocumentInfo& doc) {
         std::string indicator = "[";

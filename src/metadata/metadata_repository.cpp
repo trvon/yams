@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <iostream>
 #include <sstream>
+#include <string_view>
 #include <yams/common/utf8_utils.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
@@ -201,9 +202,10 @@ Result<void> MetadataRepository::insertContent(const DocumentContent& content) {
             return stmtResult.error();
 
         Statement stmt = std::move(stmtResult).value();
-        auto bindResult =
-            stmt.bindAll(content.documentId, content.contentText, content.contentLength,
-                         content.extractionMethod, content.language);
+        const std::string sanitizedContent = common::sanitizeUtf8(content.contentText);
+        auto bindResult = stmt.bindAll(content.documentId, sanitizedContent,
+                                       static_cast<int64_t>(sanitizedContent.length()),
+                                       content.extractionMethod, content.language);
 
         if (!bindResult)
             return bindResult.error();
@@ -254,9 +256,10 @@ Result<void> MetadataRepository::updateContent(const DocumentContent& content) {
             return stmtResult.error();
 
         Statement stmt = std::move(stmtResult).value();
+        const std::string sanitizedContent = common::sanitizeUtf8(content.contentText);
         auto bindResult =
-            stmt.bindAll(content.contentText, content.contentLength, content.extractionMethod,
-                         content.language, content.documentId);
+            stmt.bindAll(sanitizedContent, static_cast<int64_t>(sanitizedContent.length()),
+                         content.extractionMethod, content.language, content.documentId);
 
         if (!bindResult)
             return bindResult.error();
@@ -789,7 +792,9 @@ std::string sanitizeFTS5Query(const std::string& query) {
     return escaped;
 }
 
-Result<SearchResults> MetadataRepository::search(const std::string& query, int limit, int offset) {
+Result<SearchResults>
+MetadataRepository::search(const std::string& query, int limit, int offset,
+                           const std::optional<std::vector<int64_t>>& docIds) {
     return executeQuery<SearchResults>([&](Database& db) -> Result<SearchResults> {
         SearchResults results;
         results.query = query;
@@ -811,9 +816,9 @@ Result<SearchResults> MetadataRepository::search(const std::string& query, int l
         // Sanitize the query to prevent FTS5 syntax errors
         std::string sanitizedQuery = sanitizeFTS5Query(query);
 
-        // Try FTS search first
-        bool ftsSearchSucceeded = false;
-        auto stmtResult = db.prepare(R"(
+        // Build the query
+        std::ostringstream sql;
+        sql << R"(
             SELECT 
                 fts.rowid,
                 fts.title,
@@ -826,9 +831,23 @@ Result<SearchResults> MetadataRepository::search(const std::string& query, int l
             FROM documents_fts fts
             JOIN documents d ON d.id = fts.rowid
             WHERE documents_fts MATCH ?
-            ORDER BY score
-            LIMIT ? OFFSET ?
-        )");
+        )";
+
+        if (docIds && !docIds->empty()) {
+            sql << " AND d.id IN (";
+            for (size_t i = 0; i < docIds->size(); ++i) {
+                if (i > 0)
+                    sql << ",";
+                sql << "?";
+            }
+            sql << ")";
+        }
+
+        sql << " ORDER BY score LIMIT ? OFFSET ?";
+
+        // Try FTS search first
+        bool ftsSearchSucceeded = false;
+        auto stmtResult = db.prepare(sql.str());
 
         if (stmtResult) {
             Statement stmt = std::move(stmtResult).value();
@@ -1237,6 +1256,389 @@ Result<void> MetadataRepository::updateDocumentEmbeddingStatusByHash(const std::
     });
 }
 
+Result<void> MetadataRepository::checkpointWal() {
+    return executeQuery<void>([](Database& db) -> Result<void> {
+        // Using TRUNCATE is more aggressive and ensures data is written to the main db file.
+        // This is what we want for tests to pass reliably.
+        return db.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+    });
+}
+
+// -----------------------------------------------------------------------------
+// Tree diff persistence stubs (PBI-043)
+// -----------------------------------------------------------------------------
+
+Result<void> MetadataRepository::upsertTreeSnapshot(const TreeSnapshotRecord& record) {
+    return executeQuery<void>([&](Database& db) -> Result<void> {
+        // Extract metadata fields from record.metadata map
+        std::string directoryPath =
+            record.metadata.count("directory_path") ? record.metadata.at("directory_path") : "";
+        std::string snapshotLabel =
+            record.metadata.count("snapshot_label") ? record.metadata.at("snapshot_label") : "";
+        std::string gitCommit =
+            record.metadata.count("git_commit") ? record.metadata.at("git_commit") : "";
+        std::string gitBranch =
+            record.metadata.count("git_branch") ? record.metadata.at("git_branch") : "";
+        std::string gitRemote =
+            record.metadata.count("git_remote") ? record.metadata.at("git_remote") : "";
+
+        auto stmtResult = db.prepare(R"(
+            INSERT INTO tree_snapshots (
+                snapshot_id, created_at, directory_path, tree_root_hash,
+                snapshot_label, git_commit, git_branch, git_remote, files_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(snapshot_id) DO UPDATE SET
+                created_at = excluded.created_at,
+                directory_path = excluded.directory_path,
+                tree_root_hash = excluded.tree_root_hash,
+                snapshot_label = excluded.snapshot_label,
+                git_commit = excluded.git_commit,
+                git_branch = excluded.git_branch,
+                git_remote = excluded.git_remote,
+                files_count = excluded.files_count
+        )");
+
+        if (!stmtResult)
+            return stmtResult.error();
+
+        Statement stmt = std::move(stmtResult).value();
+
+        // Bind parameters
+        stmt.bind(1, record.snapshotId);
+        stmt.bind(2, static_cast<int64_t>(record.createdTime));
+        stmt.bind(3, directoryPath);
+        if (record.rootTreeHash.empty())
+            stmt.bind(4, nullptr);
+        else
+            stmt.bind(4, record.rootTreeHash);
+        if (snapshotLabel.empty())
+            stmt.bind(5, nullptr);
+        else
+            stmt.bind(5, snapshotLabel);
+        if (gitCommit.empty())
+            stmt.bind(6, nullptr);
+        else
+            stmt.bind(6, gitCommit);
+        if (gitBranch.empty())
+            stmt.bind(7, nullptr);
+        else
+            stmt.bind(7, gitBranch);
+        if (gitRemote.empty())
+            stmt.bind(8, nullptr);
+        else
+            stmt.bind(8, gitRemote);
+        stmt.bind(9, static_cast<int64_t>(record.fileCount));
+
+        auto execResult = stmt.execute();
+        if (!execResult)
+            return execResult.error();
+
+        return Result<void>();
+    });
+}
+
+Result<std::optional<TreeSnapshotRecord>>
+MetadataRepository::getTreeSnapshot(std::string_view snapshotId) {
+    (void)snapshotId;
+    return Error{ErrorCode::NotImplemented, "Tree diff snapshot lookup not implemented"};
+}
+
+Result<std::vector<TreeSnapshotRecord>> MetadataRepository::listTreeSnapshots(int limit) {
+    return executeQuery<std::vector<TreeSnapshotRecord>>(
+        [limit](Database& db) -> Result<std::vector<TreeSnapshotRecord>> {
+            const char* sql = R"(
+            SELECT snapshot_id, directory_path, snapshot_label, 
+                   git_commit, git_branch, git_remote, files_count, created_at
+            FROM tree_snapshots
+            ORDER BY created_at DESC
+            LIMIT ?
+        )";
+
+            auto stmtResult = db.prepare(sql);
+            if (!stmtResult)
+                return stmtResult.error();
+
+            auto stmt = std::move(stmtResult).value();
+            stmt.bind(1, limit);
+
+            std::vector<TreeSnapshotRecord> snapshots;
+
+            while (true) {
+                auto stepResult = stmt.step();
+                if (!stepResult)
+                    return stepResult.error();
+                if (!stepResult.value())
+                    break; // No more rows
+
+                TreeSnapshotRecord record;
+                record.snapshotId = stmt.getString(0);
+
+                // Store fields in metadata map to match existing structure
+                record.metadata["directory_path"] = stmt.getString(1);
+                record.metadata["snapshot_label"] = stmt.isNull(2) ? "" : stmt.getString(2);
+                record.metadata["git_commit"] = stmt.isNull(3) ? "" : stmt.getString(3);
+                record.metadata["git_branch"] = stmt.isNull(4) ? "" : stmt.getString(4);
+                record.metadata["git_remote"] = stmt.isNull(5) ? "" : stmt.getString(5);
+
+                record.fileCount = stmt.getInt64(6);
+                record.createdTime = stmt.getInt64(7);
+
+                snapshots.push_back(std::move(record));
+            }
+
+            return snapshots;
+        });
+}
+
+namespace {
+// Helper to convert TreeChangeType to database TEXT representation
+std::string changeTypeToString(TreeChangeType type) {
+    switch (type) {
+        case TreeChangeType::Added:
+            return "added";
+        case TreeChangeType::Deleted:
+            return "deleted";
+        case TreeChangeType::Modified:
+            return "modified";
+        case TreeChangeType::Renamed:
+            return "renamed";
+        case TreeChangeType::Moved:
+            return "moved";
+        default:
+            return "unknown";
+    }
+}
+
+// Helper to convert database TEXT to TreeChangeType
+TreeChangeType stringToChangeType(const std::string& str) {
+    if (str == "added")
+        return TreeChangeType::Added;
+    if (str == "deleted")
+        return TreeChangeType::Deleted;
+    if (str == "modified")
+        return TreeChangeType::Modified;
+    if (str == "renamed")
+        return TreeChangeType::Renamed;
+    if (str == "moved")
+        return TreeChangeType::Moved;
+    return TreeChangeType::Modified; // default fallback
+}
+} // namespace
+
+Result<int64_t> MetadataRepository::beginTreeDiff(const TreeDiffDescriptor& descriptor) {
+    return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
+        auto stmtResult = db.prepare(R"(
+            INSERT INTO tree_diffs (
+                base_snapshot_id, target_snapshot_id, computed_at, status
+            ) VALUES (?, ?, ?, ?)
+        )");
+
+        if (!stmtResult) {
+            return stmtResult.error();
+        }
+
+        Statement stmt = std::move(stmtResult).value();
+        stmt.bind(1, descriptor.baseSnapshotId);
+        stmt.bind(2, descriptor.targetSnapshotId);
+        stmt.bind(3, descriptor.computedAt);
+        stmt.bind(4, descriptor.status);
+
+        auto execResult = stmt.execute();
+        if (!execResult) {
+            return execResult.error();
+        }
+
+        int64_t diffId = db.lastInsertRowId();
+        spdlog::debug("Created tree diff: id={}, base={}, target={}", diffId,
+                      descriptor.baseSnapshotId, descriptor.targetSnapshotId);
+
+        return diffId;
+    });
+}
+
+Result<void> MetadataRepository::appendTreeChanges(int64_t diffId,
+                                                   const std::vector<TreeChangeRecord>& changes) {
+    return executeQuery<void>([&](Database& db) -> Result<void> {
+        // Use a transaction for batch inserts
+        auto txnResult = db.execute("BEGIN TRANSACTION");
+        if (!txnResult) {
+            return txnResult.error();
+        }
+
+        auto stmtResult = db.prepare(R"(
+            INSERT INTO tree_changes (
+                diff_id, change_type, old_path, new_path, 
+                old_hash, new_hash, mode, is_directory
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        )");
+
+        if (!stmtResult) {
+            db.execute("ROLLBACK");
+            return stmtResult.error();
+        }
+
+        Statement stmt = std::move(stmtResult).value();
+
+        for (const auto& change : changes) {
+            stmt.reset();
+            stmt.bind(1, diffId);
+            stmt.bind(2, changeTypeToString(change.type));
+            stmt.bind(3, change.oldPath);
+            stmt.bind(4, change.newPath);
+            stmt.bind(5, change.oldHash);
+            stmt.bind(6, change.newHash);
+
+            if (change.mode.has_value()) {
+                stmt.bind(7, static_cast<int64_t>(*change.mode));
+            } else {
+                stmt.bind(7, nullptr);
+            }
+
+            stmt.bind(8, change.isDirectory ? 1 : 0);
+
+            auto execResult = stmt.execute();
+            if (!execResult) {
+                db.execute("ROLLBACK");
+                return Error{execResult.error()};
+            }
+        }
+
+        auto commitResult = db.execute("COMMIT");
+        if (!commitResult) {
+            db.execute("ROLLBACK");
+            return Error{commitResult.error()};
+        }
+
+        spdlog::debug("Appended {} tree changes to diff_id={}", changes.size(), diffId);
+        return Result<void>();
+    });
+}
+
+Result<std::vector<TreeChangeRecord>>
+MetadataRepository::listTreeChanges(const TreeDiffQuery& query) {
+    return executeQuery<std::vector<TreeChangeRecord>>(
+        [&](Database& db) -> Result<std::vector<TreeChangeRecord>> {
+            std::ostringstream sql;
+            sql << R"(
+            SELECT change_type, old_path, new_path, old_hash, new_hash, 
+                   mode, is_directory
+            FROM tree_changes tc
+            JOIN tree_diffs td ON tc.diff_id = td.diff_id
+            WHERE td.base_snapshot_id = ? 
+              AND td.target_snapshot_id = ?
+        )";
+
+            // Add optional filters
+            if (query.pathPrefix.has_value()) {
+                sql << " AND (old_path LIKE ? OR new_path LIKE ?)";
+            }
+
+            if (query.typeFilter.has_value()) {
+                sql << " AND change_type = ?";
+            }
+
+            sql << " ORDER BY tc.change_id";
+            sql << " LIMIT ? OFFSET ?";
+
+            auto stmtResult = db.prepare(sql.str());
+            if (!stmtResult) {
+                return stmtResult.error();
+            }
+
+            Statement stmt = std::move(stmtResult).value();
+            int paramIdx = 1;
+
+            stmt.bind(paramIdx++, query.baseSnapshotId);
+            stmt.bind(paramIdx++, query.targetSnapshotId);
+
+            if (query.pathPrefix.has_value()) {
+                std::string pattern = *query.pathPrefix + "%";
+                stmt.bind(paramIdx++, pattern);
+                stmt.bind(paramIdx++, pattern);
+            }
+
+            if (query.typeFilter.has_value()) {
+                stmt.bind(paramIdx++, changeTypeToString(*query.typeFilter));
+            }
+
+            stmt.bind(paramIdx++, static_cast<int64_t>(query.limit));
+            stmt.bind(paramIdx++, static_cast<int64_t>(query.offset));
+
+            std::vector<TreeChangeRecord> results;
+
+            while (stmt.step()) {
+                TreeChangeRecord record;
+                record.type = stringToChangeType(stmt.getString(0));
+                record.oldPath = stmt.getString(1);
+                record.newPath = stmt.getString(2);
+                record.oldHash = stmt.getString(3);
+                record.newHash = stmt.getString(4);
+
+                if (!stmt.isNull(5)) {
+                    record.mode = static_cast<int>(stmt.getInt64(5));
+                }
+
+                record.isDirectory = stmt.getInt(6) != 0;
+
+                results.push_back(std::move(record));
+            }
+
+            spdlog::debug("Listed {} tree changes for base={}, target={}", results.size(),
+                          query.baseSnapshotId, query.targetSnapshotId);
+
+            return results;
+        });
+}
+
+Result<void> MetadataRepository::finalizeTreeDiff(int64_t diffId, std::size_t changeCount,
+                                                  std::string_view status) {
+    return executeQuery<void>([&](Database& db) -> Result<void> {
+        auto stmtResult = db.prepare(R"(
+            UPDATE tree_diffs 
+            SET files_added = (
+                    SELECT COUNT(*) FROM tree_changes 
+                    WHERE diff_id = ? AND change_type = 'added' AND is_directory = 0
+                ),
+                files_deleted = (
+                    SELECT COUNT(*) FROM tree_changes 
+                    WHERE diff_id = ? AND change_type = 'deleted' AND is_directory = 0
+                ),
+                files_modified = (
+                    SELECT COUNT(*) FROM tree_changes 
+                    WHERE diff_id = ? AND change_type = 'modified' AND is_directory = 0
+                ),
+                files_renamed = (
+                    SELECT COUNT(*) FROM tree_changes 
+                    WHERE diff_id = ? AND change_type IN ('renamed', 'moved') AND is_directory = 0
+                ),
+                status = ?
+            WHERE diff_id = ?
+        )");
+
+        if (!stmtResult) {
+            return stmtResult.error();
+        }
+
+        Statement stmt = std::move(stmtResult).value();
+        stmt.bind(1, diffId);
+        stmt.bind(2, diffId);
+        stmt.bind(3, diffId);
+        stmt.bind(4, diffId);
+        stmt.bind(5, std::string(status));
+        stmt.bind(6, diffId);
+
+        auto execResult = stmt.execute();
+        if (!execResult) {
+            return Error{execResult.error()};
+        }
+
+        spdlog::debug("Finalized tree diff: id={}, changes={}, status={}", diffId, changeCount,
+                      status);
+
+        return Result<void>();
+    });
+}
+
 // Helper methods for row mapping
 DocumentInfo MetadataRepository::mapDocumentRow(Statement& stmt) {
     DocumentInfo info;
@@ -1491,8 +1893,9 @@ MetadataTransaction::MetadataTransaction(MetadataRepository& repo) : repo_(repo)
 MetadataTransaction::~MetadataTransaction() = default;
 
 // Fuzzy search implementation
-Result<SearchResults> MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity,
-                                                      int limit) {
+Result<SearchResults>
+MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, int limit,
+                                const std::optional<std::vector<int64_t>>& docIds) {
     return executeQuery<SearchResults>([&]([[maybe_unused]] Database& db) -> Result<SearchResults> {
         SearchResults results;
         results.query = query;
@@ -1521,10 +1924,6 @@ Result<SearchResults> MetadataRepository::fuzzySearch(const std::string& query, 
 
         auto fuzzyResults = fuzzySearchIndex_->search(query, static_cast<size_t>(limit), options);
 
-        // Debug output (disabled)
-        // std::cerr << "[DEBUG] Fuzzy search returned " << fuzzyResults.size() << " results" <<
-        // std::endl;
-
         // Convert fuzzy results to SearchResults
         for (const auto& fuzzyResult : fuzzyResults) {
             // Parse document ID from fuzzy result ID
@@ -1533,6 +1932,11 @@ Result<SearchResults> MetadataRepository::fuzzySearch(const std::string& query, 
                 docId = std::stoll(fuzzyResult.id);
             } catch (...) {
                 continue; // Skip invalid IDs
+            }
+
+            // Filter by docIds if provided
+            if (docIds && std::find(docIds->begin(), docIds->end(), docId) == docIds->end()) {
+                continue;
             }
 
             // Fetch document info
@@ -1956,34 +2360,27 @@ MetadataRepository::findDocumentsByTags(const std::vector<std::string>& tags, bo
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
             // Build the SQL query based on matchAll flag using bound parameters
             std::string placeholders;
-            placeholders.reserve(tags.size() * 3);
+            placeholders.reserve(tags.size() * 2);
             for (size_t i = 0; i < tags.size(); ++i) {
                 if (i > 0)
-                    placeholders += ", ";
+                    placeholders += ",";
                 placeholders += '?';
             }
 
             std::ostringstream sql;
             if (matchAll) {
                 // For matchAll, we need documents that have ALL the specified tags
-                sql << "SELECT DISTINCT d.* "
-                    << "FROM documents d "
-                    << "WHERE d.id IN ("
-                    << "SELECT document_id "
-                    << "FROM metadata "
-                    << "WHERE key LIKE 'tag:%' "
-                    << "AND key IN (" << placeholders << ") "
-                    << "GROUP BY document_id "
-                    << "HAVING COUNT(DISTINCT key) = ?) "
-                    << "ORDER BY d.indexed_time DESC";
+                sql << "SELECT d.* FROM documents d WHERE d.id IN ("
+                    << "SELECT document_id FROM metadata WHERE key = 'tag' AND value IN ("
+                    << placeholders << ") "
+                    << "GROUP BY document_id HAVING COUNT(DISTINCT value) = ?)";
             } else {
                 // For matchAny, we need documents that have ANY of the specified tags
                 sql << "SELECT DISTINCT d.* "
-                    << "FROM documents d "
-                    << "JOIN metadata m ON d.id = m.document_id "
-                    << "WHERE m.key IN (" << placeholders << ") "
-                    << "ORDER BY d.indexed_time DESC";
+                    << "FROM documents d JOIN metadata m ON d.id = m.document_id "
+                    << "WHERE m.key = 'tag' AND m.value IN (" << placeholders << ")";
             }
+            sql << " ORDER BY d.indexed_time DESC";
 
             auto stmtResult = db.prepare(sql.str());
             if (!stmtResult)
@@ -1993,18 +2390,17 @@ MetadataRepository::findDocumentsByTags(const std::vector<std::string>& tags, bo
 
             int paramIndex = 1;
             for (const auto& tag : tags) {
-                auto bindResult = stmt.bind(paramIndex++, "tag:" + tag);
+                auto bindResult = stmt.bind(paramIndex++, tag);
                 if (!bindResult)
                     return bindResult.error();
             }
-
             if (matchAll) {
-                auto bindResult = stmt.bind(paramIndex, static_cast<int64_t>(tags.size()));
+                auto bindResult = stmt.bind(paramIndex++, static_cast<int64_t>(tags.size()));
                 if (!bindResult)
                     return bindResult.error();
             }
 
-            std::vector<DocumentInfo> results;
+            std::vector<DocumentInfo> documents;
             while (true) {
                 auto stepResult = stmt.step();
                 if (!stepResult)
@@ -2012,10 +2408,10 @@ MetadataRepository::findDocumentsByTags(const std::vector<std::string>& tags, bo
                 if (!stepResult.value())
                     break;
 
-                results.push_back(mapDocumentRow(stmt));
+                documents.push_back(mapDocumentRow(stmt));
             }
 
-            return results;
+            return documents;
         });
 }
 

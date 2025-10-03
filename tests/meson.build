@@ -105,6 +105,7 @@ test_deps = [
   dependency('yams_daemon_client'),
   dependency('yams_daemon'),
   dependency('yams_mcp'),
+  dependency('yams_cli'),
 ]
 
 if gmock_dep.found()
@@ -139,8 +140,10 @@ subdir('unit')
 
 subdir('integration/smoke')
 
-stress_srcs = []
-# NOTE (PBI 028): Temporarily disabling stress tests compilation for now.
+stress_srcs = files(
+  'stress/main.cpp',
+  'stress/storage/concurrent_test.cpp',
+)
 
 common_srcs = []  # currently no .cpp files under tests/common
 sdk_srcs = []     # currently no .cpp files under tests/sdk
@@ -150,7 +153,7 @@ sdk_srcs = []     # currently no .cpp files under tests/sdk
 plugin_test_srcs = []
 
 all_unit = []  # unit sources now provided by 'yams_unit_objs' from tests/unit/meson.build
-all_stress = []
+all_stress = stress_srcs
 
 # Always rely on tests/unit_main.cpp; do not include tests/test_main.cpp here
 test_main = []

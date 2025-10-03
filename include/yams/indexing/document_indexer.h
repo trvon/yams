@@ -24,6 +24,12 @@ struct IndexingConfig {
     bool detectLanguage = true;                 // Detect document language
     bool updateExisting = true;                 // Update existing indexed documents
     std::chrono::milliseconds timeout{60000};   // Indexing timeout per document
+
+    // PBI-040: Sync FTS5 indexing for small adds to eliminate grep lag
+    // When adding <= sync_threshold documents, perform FTS5 indexing synchronously
+    // instead of queueing to PostIngestQueue. This makes grep results immediately
+    // available without the 5-10s async indexing delay.
+    size_t sync_threshold = 10; // Sync index if <= this many docs
 };
 
 /**

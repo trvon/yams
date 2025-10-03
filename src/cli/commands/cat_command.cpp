@@ -6,9 +6,11 @@
 #include <optional>
 #include <sstream>
 #include <vector>
+#include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/extraction/html_text_extractor.h>
 #include <yams/extraction/text_extractor.h>
 #include <yams/profiling.h>
@@ -28,14 +30,9 @@ public:
 
         auto* cmd = app.add_subcommand("cat", getDescription());
 
-        // Create option group for retrieval methods (only one can be used at a time)
-        auto* group = cmd->add_option_group("retrieval_method");
-        group->add_option("hash", hash_, "Hash of the document to display");
-        group->add_option("--name", name_, "Name of the document to display");
-        auto* positional =
-            group->add_option("target", target_, "Document hash or path (positional argument)");
-        positional->type_name("HASH|PATH");
-        group->require_option(1);
+        cmd->add_option("target", target_, "Document hash or path to display")
+            ->type_name("HASH|PATH")
+            ->required();
         // Disambiguation flags: select newest/oldest when multiple matches exist
         cmd->add_flag(
             "--latest", getLatest_,
@@ -63,15 +60,6 @@ public:
         YAMS_ZONE_SCOPED_N("CatCommand::execute");
 
         try {
-            auto ensured = cli_->ensureStorageInitialized();
-            if (!ensured) {
-                return ensured;
-            }
-            auto store = cli_->getContentStore();
-            if (!store) {
-                return Error{ErrorCode::NotInitialized, "Content store not initialized"};
-            }
-
             if (hash_.empty() && name_.empty() && !target_.empty()) {
                 if (isValidHashPrefix(target_)) {
                     hash_ = target_;
@@ -80,184 +68,47 @@ public:
                 }
             }
 
-            // Resolve the hash to display
-            std::string hashToDisplay;
+            yams::app::services::RetrievalService rsvc;
+            yams::app::services::RetrievalOptions ropts;
+            if (cli_->hasExplicitDataDir()) {
+                ropts.explicitDataDir = cli_->getDataPath();
+            }
+            ropts.requestTimeoutMs = 60000;
+
+            yams::daemon::GetRequest dreq;
+            dreq.raw = raw_;
+            dreq.extract = !raw_;
+            dreq.latest = getLatest_;
+            dreq.oldest = getOldest_;
 
             if (!hash_.empty()) {
-                YAMS_ZONE_SCOPED_N("CatCommand::hashResolution");
-                // Direct hash display - support partial hashes
-                if (isValidHashPrefix(hash_) && hash_.length() < 64) {
-                    auto resolveResult = resolvePartialHash(hash_);
-                    if (!resolveResult) {
-                        return resolveResult.error();
-                    }
-                    hashToDisplay = resolveResult.value();
-                } else {
-                    hashToDisplay = hash_;
-                }
+                dreq.hash = hash_;
             } else if (!name_.empty()) {
-                YAMS_ZONE_SCOPED_N("CatCommand::nameResolution");
-                auto normalized = normalizeLookupPath(name_);
-                std::vector<std::string> lookupCandidates;
-                lookupCandidates.reserve(2);
-                if (normalized.changed)
-                    lookupCandidates.push_back(normalized.normalized);
-                lookupCandidates.push_back(name_);
-
-                std::optional<Error> lastNotFound;
-                for (const auto& candidate : lookupCandidates) {
-                    auto resolveResult = resolveNameToHash(candidate);
-                    if (resolveResult) {
-                        hashToDisplay = resolveResult.value();
-                        break;
-                    }
-
-                    auto err = resolveResult.error();
-                    if (err.code == ErrorCode::NotFound) {
-                        lastNotFound = err;
-                        continue;
-                    }
-                    return err;
-                }
-
-                if (hashToDisplay.empty()) {
-                    bool displayedLocal = false;
-                    for (const auto& candidate : lookupCandidates) {
-                        if (candidate.empty())
-                            continue;
-                        std::error_code fsec;
-                        if (!std::filesystem::exists(candidate, fsec))
-                            continue;
-
-                        std::ifstream file(candidate, std::ios::binary);
-                        if (!file) {
-                            return Error{ErrorCode::FileNotFound,
-                                         "Cannot read local file: " + candidate};
-                        }
-                        std::cout << file.rdbuf();
-                        displayedLocal = true;
-                        break;
-                    }
-
-                    if (displayedLocal)
-                        return Result<void>();
-
-                    if (lastNotFound.has_value())
-                        return lastNotFound.value();
-
-                    return Error{ErrorCode::NotFound, "Document not found: " + name_};
-                }
+                dreq.name = name_;
+                dreq.byName = true;
             } else {
                 return Error{ErrorCode::InvalidArgument, "No document specified"};
             }
 
-            // Check if document exists
-            auto existsResult = store->exists(hashToDisplay);
-            if (!existsResult) {
-                return Error{existsResult.error().code, existsResult.error().message};
-            }
-
-            if (!existsResult.value()) {
-                return Error{ErrorCode::NotFound, "Document not found: " + hashToDisplay};
-            }
-
-            // Retrieve content
-            std::vector<std::byte> contentBytes;
-            {
-                YAMS_ZONE_SCOPED_N("CatCommand::retrieveBytes");
-                auto result = store->retrieveBytes(hashToDisplay);
-                if (!result) {
-                    return Error{result.error().code, result.error().message};
-                }
-                contentBytes = std::move(result.value());
-            }
-
-            // Apply text extraction if not in raw mode
-            if (!raw_) {
-                // Try to determine file extension from name or metadata
-                std::string extension;
-                std::string fileName;
-
-                // Always try to get the actual fileName from metadata using the resolved hash
-                auto metadataRepo = cli_->getMetadataRepository();
-                if (metadataRepo) {
-                    auto docResult = metadataRepo->getDocumentByHash(hashToDisplay);
-                    if (docResult && docResult.value().has_value()) {
-                        fileName = docResult.value()->fileName;
-                    }
-                }
-
-                // Fallback to using the search term if no metadata found
-                if (fileName.empty() && !name_.empty()) {
-                    fileName = name_;
-                }
-
-                // Extract extension from file name
-                if (!fileName.empty()) {
-                    auto lastDot = fileName.find_last_of('.');
-                    if (lastDot != std::string::npos) {
-                        extension = fileName.substr(lastDot);
-                    }
-                }
-
-                // Try text extraction if we have an extension
-                if (!extension.empty()) {
-                    auto& factory = extraction::TextExtractorFactory::instance();
-                    auto extractor = factory.create(extension);
-
-                    if (extractor) {
-                        // Create extraction config
-                        extraction::ExtractionConfig config;
-                        config.maxFileSize = 100 * 1024 * 1024; // 100MB max
-
-                        // Convert to byte span
-                        auto dataSpan =
-                            std::span<const std::byte>(contentBytes.data(), contentBytes.size());
-
-                        // Extract text
-                        auto extractResult = extractor->extractFromBuffer(dataSpan, config);
-                        if (extractResult) {
-                            // Output extracted text
-                            std::cout << extractResult.value().text;
-                            return Result<void>();
-                        }
-                        // If extraction fails, fall back to raw output
-                    } else if (extension == ".html" || extension == ".htm") {
-                        // Try HTML extraction even without factory support
-                        std::string content(reinterpret_cast<const char*>(contentBytes.data()),
-                                            contentBytes.size());
-                        std::string extracted =
-                            extraction::HtmlTextExtractor::extractTextFromHtml(content);
-                        std::cout << extracted;
-                        return Result<void>();
-                    }
-                } else {
-                    // No extension, try content-based detection for HTML
-                    std::string content(reinterpret_cast<const char*>(contentBytes.data()),
-                                        std::min(size_t(1000), contentBytes.size()));
-                    std::transform(content.begin(), content.end(), content.begin(), ::tolower);
-
-                    if (content.find("<!doctype html") != std::string::npos ||
-                        content.find("<html") != std::string::npos ||
-                        content.find("<head") != std::string::npos ||
-                        content.find("<body") != std::string::npos) {
-                        // Detected HTML content
-                        std::string fullContent(reinterpret_cast<const char*>(contentBytes.data()),
-                                                contentBytes.size());
-                        std::string extracted =
-                            extraction::HtmlTextExtractor::extractTextFromHtml(fullContent);
-                        std::cout << extracted;
+            auto gres = rsvc.get(dreq, ropts);
+            if (!gres) {
+                // If daemon fails, try local file system for convenience
+                if (!name_.empty() && std::filesystem::exists(name_)) {
+                    std::ifstream file(name_, std::ios::binary);
+                    if (file) {
+                        std::cout << file.rdbuf();
                         return Result<void>();
                     }
                 }
+                return gres.error();
             }
 
-            // Output raw content
-            std::cout.write(reinterpret_cast<const char*>(contentBytes.data()),
-                            contentBytes.size());
-
-            // Cat command should not output any status messages
-            // This allows clean piping: yams cat --name file.txt | grep something
+            const auto& resp = gres.value();
+            if (resp.hasContent) {
+                std::cout.write(resp.content.data(), resp.content.size());
+            } else {
+                return Error{ErrorCode::NotFound, "Document content not found"};
+            }
 
             return Result<void>();
 

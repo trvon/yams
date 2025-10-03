@@ -100,8 +100,6 @@ ensure_base_packages() {
     pipx \
     git \
     ca-certificates \
-    libncurses-dev \
-    libtinfo-dev \
     pkg-config \
     liburing-dev \
     libarchive-dev \

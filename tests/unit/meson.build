@@ -36,6 +36,13 @@ unit_chunking = files(
   'chunking/streaming_chunker_test.cpp',
 )
 
+unit_cli = []
+if get_option('enable-tui')
+  unit_cli += files(
+    'cli/highlight_utils_test.cpp',
+  )
+endif
+
 unit_compression = files(
   'compression/basic_error_handler_test.cpp',
   'compression/basic_integrity_validator_test.cpp',
@@ -74,6 +81,7 @@ unit_daemon = files(
   'daemon/plugin_host_test.cpp',
   'daemon/plugin_loader_test.cpp',
   'daemon/post_ingest_queue_test.cpp',
+  'daemon/grep_response_proto_test.cpp',
   'daemon/internal_event_bus_concurrency_test.cpp',
   'daemon/post_ingest_queue_bus_stress_test.cpp',
   'daemon/repair_coordinator_test.cpp',
@@ -120,6 +128,7 @@ unit_mcp = files(
   'mcp/mcp_server_exec_test.cpp',
   'mcp/mcp_server_test.cpp',
   'mcp/mcp_tools_schema_and_smoke_test.cpp',
+  'mcp/mcp_tool_registry_wrappers_test.cpp',
   'mcp/stdio_transport_test.cpp',
   'mcp/websocket_transport_test.cpp',
   'mcp/mcp_socket_resolution_test.cpp',
@@ -135,6 +144,8 @@ unit_metadata = files(
   'metadata/kg_store_test.cpp',
   'metadata/metadata_repository_test.cpp',
   'metadata/metadata_schema_test.cpp',
+  'metadata/tree_builder_test.cpp',
+  'metadata/tree_differ_test.cpp',
 )
 
 unit_resolve = files(
@@ -187,6 +198,7 @@ unit_srcs += unit_root
 unit_srcs += unit_api
 unit_srcs += unit_app_services
 unit_srcs += unit_chunking
+unit_srcs += unit_cli
 unit_srcs += unit_compression
 unit_srcs += unit_compression_opt
 unit_srcs += unit_daemon

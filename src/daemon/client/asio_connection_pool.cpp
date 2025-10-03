@@ -16,6 +16,7 @@
 #include <spdlog/spdlog.h>
 
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -43,10 +44,22 @@ namespace {
 
 awaitable<Result<std::unique_ptr<AsioConnection::socket_t>>>
 async_connect_with_timeout(const TransportOptions& opts) {
-    auto& io_ctx = GlobalIOContext::instance().get_io_context();
-    auto socket = std::make_unique<AsioConnection::socket_t>(io_ctx);
+    static bool trace = [] {
+        if (const char* raw = std::getenv("YAMS_STREAM_TRACE")) {
+            std::string v(raw);
+            for (auto& ch : v)
+                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            return (v == "1" || v == "true" || v == "on");
+        }
+        return false;
+    }();
+    auto ex = co_await this_coro::executor;
+    auto socket = std::make_unique<AsioConnection::socket_t>(ex);
     boost::asio::local::stream_protocol::endpoint endpoint(opts.socketPath.string());
     try {
+        if (trace) {
+            spdlog::info("stream-trace: async_connect socket='{}'", opts.socketPath.string());
+        }
         if (!std::filesystem::exists(opts.socketPath)) {
             std::string msg =
                 "Daemon not started (socket not found at '" + opts.socketPath.string() + "').";
@@ -66,13 +79,17 @@ async_connect_with_timeout(const TransportOptions& opts) {
             }
         }
 #endif
-        boost::asio::steady_timer timer(io_ctx);
+        boost::asio::steady_timer timer(ex);
         timer.expires_after(opts.requestTimeout);
         auto connect_result = co_await (socket->async_connect(endpoint, use_awaitable) ||
                                         timer.async_wait(use_awaitable));
         if (connect_result.index() == 1) {
             socket->close();
             co_return Error{ErrorCode::Timeout, "Connection timeout (pool connect)"};
+        }
+        if (trace) {
+            spdlog::info("stream-trace: async_connect succeeded socket='{}'",
+                         opts.socketPath.string());
         }
         co_return std::move(socket);
     } catch (const boost::system::system_error& e) {
@@ -170,13 +187,12 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
     if (!socket_res) {
         co_return nullptr;
     }
-    auto& io_ctx = GlobalIOContext::instance().get_io_context();
     conn->socket = std::move(socket_res.value());
     conn->alive = true;
 
     if (!conn->read_started.exchange(true)) {
         co_spawn(
-            io_ctx,
+            GlobalIOContext::instance().get_io_context(),
             [conn]() -> awaitable<void> {
                 co_await boost::asio::dispatch(conn->strand, use_awaitable);
                 MessageFramer framer;

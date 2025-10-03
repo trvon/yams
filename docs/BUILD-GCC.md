@@ -32,11 +32,11 @@ Install a newer GCC (examples):
 * RHEL/CentOS/Rocky: enable devtoolset (`gcc-toolset-13`)
 ## 2. System Packages
 
-Core dev libs (names by distro): OpenSSL, libcurl, sqlite3, ncurses (for TUI), protobuf compiler + dev headers, zlib.
+Core dev libs (names by distro): OpenSSL, libcurl, sqlite3, protobuf compiler + dev headers, zlib.
 
 Ubuntu example:
 ```bash
-sudo apt-get install -y build-essential cmake pkg-config libssl-dev libcurl4-openssl-dev libsqlite3-dev libncurses-dev protobuf-compiler libprotobuf-dev
+sudo apt-get install -y build-essential cmake pkg-config libssl-dev libcurl4-openssl-dev libsqlite3-dev protobuf-compiler libprotobuf-dev
 ```
 Other distros: use analogous `*-devel` / package names.
 
@@ -196,17 +196,6 @@ CC=gcc CXX=g++ cmake .. \
 ### "std::format not found"
 
 Solution: This is expected with GCC < 13. The build will automatically use the fmt library as a fallback.
-
-### "ncurses library not found"
-
-Solution: Install ncurses development package:
-```bash
-# Ubuntu/Debian
-sudo apt-get install libncurses-dev
-
-# RHEL/CentOS
-sudo yum install ncurses-devel
-```
 
 ### Coroutine compilation errors
 

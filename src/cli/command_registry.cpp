@@ -33,6 +33,7 @@ std::unique_ptr<ICommand> createPluginCommand();
 std::unique_ptr<ICommand> createDrCommand();
 std::unique_ptr<ICommand> createDoctorCommand();
 std::unique_ptr<ICommand> createGraphCommand();
+std::unique_ptr<ICommand> createDiffCommand();
 #ifdef YAMS_BUILD_MCP_SERVER
 std::unique_ptr<ICommand> createServeCommand();
 #endif
@@ -69,6 +70,8 @@ void CommandRegistry::registerAllCommands(YamsCLI* cli) {
     cli->registerCommand(::yams::cli::createDrCommand());
     // New: knowledge graph exploration command
     cli->registerCommand(::yams::cli::createGraphCommand());
+    // New: snapshot diff command (PBI-043)
+    cli->registerCommand(::yams::cli::createDiffCommand());
 #ifdef YAMS_BUILD_MCP_SERVER
     cli->registerCommand(CommandRegistry::createServeCommand());
 #endif

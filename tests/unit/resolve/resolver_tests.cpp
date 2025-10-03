@@ -123,12 +123,16 @@ public:
     Result<void> removeFromIndex(int64_t) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
-    Result<yams::metadata::SearchResults> search(const std::string&, int, int) override {
+    Result<yams::metadata::SearchResults>
+    search(const std::string&, int, int,
+           const std::optional<std::vector<int64_t>>& = std::nullopt) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
 
     // Fuzzy
-    Result<yams::metadata::SearchResults> fuzzySearch(const std::string&, float, int) override {
+    Result<yams::metadata::SearchResults>
+    fuzzySearch(const std::string&, float, int,
+                const std::optional<std::vector<int64_t>>& = std::nullopt) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
     Result<void> buildFuzzyIndex() override { return Error{ErrorCode::NotImplemented, "NI"}; }
@@ -238,6 +242,33 @@ public:
     }
     Result<void> updateDocumentEmbeddingStatusByHash(const std::string&, bool,
                                                      const std::string&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+
+    Result<void> checkpointWal() override { return {}; }
+
+    Result<void> upsertTreeSnapshot(const yams::metadata::TreeSnapshotRecord&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+    Result<std::optional<yams::metadata::TreeSnapshotRecord>>
+    getTreeSnapshot(std::string_view) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+    Result<std::vector<yams::metadata::TreeSnapshotRecord>> listTreeSnapshots(int) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+    Result<int64_t> beginTreeDiff(const yams::metadata::TreeDiffDescriptor&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+    Result<void> appendTreeChanges(int64_t,
+                                   const std::vector<yams::metadata::TreeChangeRecord>&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+    Result<std::vector<yams::metadata::TreeChangeRecord>>
+    listTreeChanges(const yams::metadata::TreeDiffQuery&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+    Result<void> finalizeTreeDiff(int64_t, std::size_t, std::string_view) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
 };

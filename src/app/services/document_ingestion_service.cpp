@@ -8,8 +8,8 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/system_executor.hpp>
 #include <yams/crypto/hasher.h>
+#include <yams/daemon/client/global_io_context.h>
 
 namespace yams::app::services {
 
@@ -63,7 +63,7 @@ DocumentIngestionService::addViaDaemon(const AddOptions& opts) const {
             std::promise<Result<yams::daemon::AddDocumentResponse>> p2;
             auto f2 = p2.get_future();
             boost::asio::co_spawn(
-                boost::asio::system_executor{},
+                yams::daemon::GlobalIOContext::global_executor(),
                 [&client, dreq, pr = std::move(p2)]() mutable -> boost::asio::awaitable<void> {
                     auto r = co_await client.streamingAddDocument(dreq);
                     pr.set_value(std::move(r));

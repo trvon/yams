@@ -511,6 +511,7 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                 serviceReq.includePatterns = req.includePatterns;
                 serviceReq.excludePatterns = req.excludePatterns;
                 serviceReq.recursive = true; // force recursive when directory detected
+                serviceReq.snapshotLabel = req.snapshotLabel;
                 // Prefer deferred extraction for directories. Keep fast returns and let
                 // PostIngestQueue perform FTS5 indexing. Inline extraction for directories can
                 // be very expensive; retain deferred behavior here.
@@ -527,13 +528,39 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                 response.hash = "";
                 response.path = req.path;
                 response.documentsAdded = static_cast<size_t>(serviceResp.filesIndexed);
-                // Enqueue post-ingest work for each successfully indexed file
+                response.snapshotId = serviceResp.snapshotId;
+                response.snapshotLabel = serviceResp.snapshotLabel;
+
+                // PBI-040-4: Sync FTS5 indexing for small adds (<= 10 files by default)
+                // This eliminates the 5-10s async delay for grep on small batches.
+                // For larger batches, fall back to async queueing to avoid blocking the add
+                // operation.
                 try {
                     if (serviceManager_ && serviceManager_->getPostIngestQueue()) {
+                        std::vector<std::string> successHashes;
                         for (const auto& r : serviceResp.results) {
                             if (r.success && !r.hash.empty()) {
-                                // IndexedFileResult does not expose MIME; let the queue resolve it
-                                serviceManager_->enqueuePostIngest(r.hash, std::string());
+                                successHashes.push_back(r.hash);
+                            }
+                        }
+
+                        // Default sync_threshold is 10 (from IndexingConfig)
+                        constexpr size_t kSyncThreshold = 10;
+                        bool useSync = successHashes.size() <= kSyncThreshold;
+
+                        if (useSync) {
+                            // Sync path: index immediately (same thread)
+                            spdlog::debug("Using sync FTS5 indexing for {} documents",
+                                          successHashes.size());
+                            for (const auto& hash : successHashes) {
+                                serviceManager_->getPostIngestQueue()->indexDocumentSync(hash, "");
+                            }
+                        } else {
+                            // Async path: queue for background processing (original behavior)
+                            spdlog::debug("Using async FTS5 indexing for {} documents",
+                                          successHashes.size());
+                            for (const auto& hash : successHashes) {
+                                serviceManager_->enqueuePostIngest(hash, std::string());
                             }
                         }
                     }

@@ -618,10 +618,11 @@ bool PostIngestQueue::resize(std::size_t target) {
         joiners.emplace_back(std::move(w.th));
         threads_.pop_back();
     }
-    // Unlock and join
+    // Unlock and detach threads so the tuning manager is not blocked.
+    // The threads will exit cleanly as their loop condition will fail.
     for (auto& t : joiners) {
         if (t.joinable())
-            t.join();
+            t.detach();
     }
     spdlog::info("PostIngestQueue resized down to {} threads", threads_.size());
     return true;
@@ -641,6 +642,87 @@ void PostIngestQueue::addNextStagesLocked(const std::string& hash, const std::st
         inflight_[hash] = 2u; // edge case: ensure consistency if missing
     }
     cv_.notify_one();
+}
+
+bool PostIngestQueue::indexDocumentSync(const std::string& hash, const std::string& mime) {
+    if (!store_ || !meta_) {
+        spdlog::warn("PostIngest(sync): store or metadata unavailable for {}", hash);
+        return false;
+    }
+
+    try {
+        // Resolve document info from metadata
+        auto infoRes = meta_->getDocumentByHash(hash);
+        if (!infoRes || !infoRes.value().has_value()) {
+            spdlog::warn("PostIngest(sync): document not found in metadata: {}", hash);
+            return false;
+        }
+
+        const auto& info = *infoRes.value();
+        int64_t docId = info.id;
+        std::string fileName = info.fileName.empty() ? "" : info.fileName;
+        std::string resolvedMime = mime.empty() ? info.mimeType : mime;
+        std::string extension = info.fileExtension;
+
+        // Extract text content
+        auto txt = extractDocumentText(store_, hash, resolvedMime, extension, extractors_);
+        if (!txt || txt->empty()) {
+            spdlog::debug("PostIngest(sync): no text extracted for {} (mime={})", hash,
+                          resolvedMime);
+            // Mark as skipped
+            auto d = meta_->getDocument(docId);
+            if (d && d.value().has_value()) {
+                auto updated = d.value().value();
+                updated.contentExtracted = false;
+                updated.extractionStatus = metadata::ExtractionStatus::Skipped;
+                (void)meta_->updateDocument(updated);
+            }
+            return false;
+        }
+
+        // Perform FTS5 indexing synchronously
+        spdlog::info("[PBI-040-4] About to call persist_content_and_index for {}", hash);
+        auto pr = yams::ingest::persist_content_and_index(*meta_, docId, fileName, *txt,
+                                                          resolvedMime, "sync_add");
+        if (!pr) {
+            spdlog::warn("[PBI-040-4] persist/index failed for {}: {}", hash, pr.error().message);
+            return false;
+        }
+
+        spdlog::info("[PBI-040-4] FTS5 indexing completed successfully for {}", hash);
+
+        // PBI-040-4: Force a WAL checkpoint to ensure FTS5 updates are visible to other connections
+        // immediately. This is critical for synchronous indexing tests.
+        if (meta_) {
+            if (auto res = meta_->checkpointWal(); !res) {
+                spdlog::warn("PostIngest(sync): WAL checkpoint failed: {}", res.error().message);
+            }
+        }
+
+        // Queue KG and embedding stages asynchronously (non-blocking)
+        // These are less urgent for grep responsiveness
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            if (inflight_.find(hash) == inflight_.end()) {
+                Task tKg{hash, resolvedMime, "", std::chrono::steady_clock::now(),
+                         Task::Stage::KnowledgeGraph};
+                Task tEmb{hash, resolvedMime, "", std::chrono::steady_clock::now(),
+                          Task::Stage::Embeddings};
+                qKg_.push_back(std::move(tKg));
+                qEmb_.push_back(std::move(tEmb));
+                inflight_[hash] = 2u;
+                cv_.notify_one();
+            }
+        }
+
+        return true;
+    } catch (const std::exception& e) {
+        spdlog::error("PostIngest(sync): exception for {}: {}", hash, e.what());
+        return false;
+    } catch (...) {
+        spdlog::error("PostIngest(sync): unknown exception for {}", hash);
+        return false;
+    }
 }
 
 } // namespace yams::daemon

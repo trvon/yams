@@ -15,7 +15,6 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/system_executor.hpp>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <yams/cli/command.h>
@@ -23,6 +22,7 @@
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_migration.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/client/global_io_context.h>
 #include <yams/downloader/downloader.hpp>
 #include <yams/integrity/repair_utils.h>
 #include <yams/profiling.h>
@@ -418,7 +418,7 @@ public:
                 std::promise<Result<ModelStatusResponse>> prom;
                 auto fut = prom.get_future();
                 boost::asio::co_spawn(
-                    boost::asio::system_executor{},
+                    yams::daemon::GlobalIOContext::global_executor(),
                     [leaseHandle, msr, &prom]() mutable -> boost::asio::awaitable<void> {
                         auto& client = **leaseHandle;
                         auto r = co_await client.call(msr);
@@ -632,7 +632,7 @@ private:
                     std::promise<Result<yams::daemon::ModelStatusResponse>> prom;
                     auto fut = prom.get_future();
                     boost::asio::co_spawn(
-                        boost::asio::system_executor{},
+                        yams::daemon::GlobalIOContext::global_executor(),
                         [leaseHandle, msr, &prom]() mutable -> boost::asio::awaitable<void> {
                             auto& client = **leaseHandle;
                             auto r = co_await client.getModelStatus(msr);

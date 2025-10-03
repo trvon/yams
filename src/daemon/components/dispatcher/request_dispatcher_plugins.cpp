@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <filesystem>
 
+#include <boost/asio/thread_pool.hpp>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
@@ -9,6 +10,13 @@
 #include <yams/daemon/resource/plugin_loader.h>
 
 namespace yams::daemon {
+
+namespace {
+boost::asio::any_io_executor plugin_fallback_executor() {
+    static boost::asio::thread_pool pool(1);
+    return pool.get_executor();
+}
+} // namespace
 
 static PluginRecord toRecord(const PluginDescriptor& sr) {
     PluginRecord pr;
@@ -249,8 +257,9 @@ RequestDispatcher::handlePluginTrustAddRequest(const PluginTrustAddRequest& req)
             try {
                 auto sm = serviceManager_;
                 auto path = std::filesystem::path(req.path);
+                auto exec = sm ? sm->getWorkerExecutor() : plugin_fallback_executor();
                 boost::asio::co_spawn(
-                    boost::asio::system_executor(),
+                    exec,
                     [abi, wasm, sm, path]() -> boost::asio::awaitable<void> {
                         try {
                             if (std::filesystem::is_directory(path)) {

@@ -29,6 +29,10 @@ public:
         setRepair_ = std::move(cb);
     }
 
+    void setWriterBudgetHook(std::function<void(std::size_t)> cb) {
+        setWriterBudget_ = std::move(cb);
+    }
+
 private:
     void tick_once();
     void apply_post_ingest_control(std::size_t queued, std::size_t inflight, std::size_t capacity,
@@ -45,6 +49,8 @@ private:
     std::chrono::steady_clock::time_point repairReadySince_{};
     std::chrono::steady_clock::time_point repairRateWindowStart_{};
     uint64_t repairBatchesAtWindowStart_{0};
+
+    std::function<void(std::size_t)> setWriterBudget_{};
 
     // PI controller state for post-ingest threads
     std::chrono::steady_clock::time_point lastPiAdjust_{};

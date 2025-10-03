@@ -14,9 +14,9 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/io_context.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
-#include <yams/daemon/client/global_io_context.h>
 #include <yams/mcp/http_server.h>
 #include <yams/mcp/mcp_server.h>
 #include <yams/search/search_engine_builder.h>
@@ -214,7 +214,7 @@ private:
         cfg.bindAddress = http_host_;
         cfg.bindPort = http_port_;
 
-        auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
+        boost::asio::io_context io;
         mcp::HttpMcpServer http(io, server, cfg);
 
         http.run();

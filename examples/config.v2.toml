@@ -215,6 +215,8 @@ log_level = "info"
 
 # Centralized tuning knobs (advanced): defaults are safe; uncomment to override
 [tuning]
+# Default tuning preset applied by the daemon. Options: "efficient", "balanced", "aggressive".
+profile = "balanced"
 # backpressure_read_pause_ms = 5
 # worker_poll_ms = 150
 # idle_cpu_pct = 10.0
@@ -636,6 +638,15 @@ auto_migrate = true
 backup_before_migrate = true
 # Migration log file path
 migration_log_path = "migrations.log"
+
+[indexing]
+# PBI-040: Synchronous FTS5 indexing threshold
+# When adding <= sync_threshold documents, perform FTS5 indexing synchronously
+# instead of queueing to PostIngestQueue. This eliminates the 5-10s async delay
+# for grep on small batches, making results immediately available.
+# Set to 0 to always use async indexing (original behavior).
+# Default: 10 files
+sync_threshold = 10
 
 [downloader]
 # Default concurrency for parallel connections

@@ -16,6 +16,8 @@ class YamsCLI;
 
 namespace yams::cli::tui {
 
+class TUIServices;
+
 /**
  * Services and helpers used by the TUI browser.
  * - Fetch document listings (all, fuzzy, basic filter)
@@ -27,7 +29,9 @@ class BrowseServices {
 public:
     using SuspendRunner = std::function<void(const std::function<void()>&)>;
 
-    explicit BrowseServices(yams::cli::YamsCLI* cli) noexcept;
+    explicit BrowseServices(TUIServices* services = nullptr) noexcept;
+
+    void attach(TUIServices* services) noexcept;
 
     // ------------- Documents listing -------------
 
@@ -54,7 +58,7 @@ public:
      * Try to load extracted text content for a document from the metadata repository.
      * Returns std::nullopt if unavailable.
      */
-    std::optional<std::string> loadTextContent(int64_t doc_id);
+    std::optional<std::string> loadTextContent(const DocEntry& doc);
 
     /**
      * Load raw bytes for a document from the content store, capped at cap_bytes.
@@ -118,7 +122,7 @@ public:
                                 const SuspendRunner& suspend);
 
 private:
-    yams::cli::YamsCLI* _cli; // non-owning
+    TUIServices* backend_{nullptr}; // non-owning
 };
 
 } // namespace yams::cli::tui

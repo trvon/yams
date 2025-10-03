@@ -49,9 +49,12 @@ void IngestService::workerLoop(yams::compat::stop_token token) {
         if (channel->try_pop(task)) {
             const auto& req = task.request;
             try {
-                spdlog::debug("[IngestService] Popped StoreDocumentTask from InternalEventBus "
-                              "(path='{}', name='{}', recursive={}, noEmbeddings={})",
-                              req.path, req.name, req.recursive ? 1 : 0, req.noEmbeddings ? 1 : 0);
+                spdlog::info(
+                    "[IngestService] task path='{}' name='{}' recursive={} has_content={} "
+                    "noEmbeddings={} include_count={} exclude_count={} tag_count={} metadata={}",
+                    req.path, req.name, req.recursive ? 1 : 0, req.content.empty() ? 0 : 1,
+                    req.noEmbeddings ? 1 : 0, req.includePatterns.size(),
+                    req.excludePatterns.size(), req.tags.size(), req.metadata.size());
             } catch (...) {
             }
             bool isDir = (!req.path.empty() && std::filesystem::is_directory(req.path));
@@ -82,6 +85,33 @@ void IngestService::workerLoop(yams::compat::stop_token token) {
                                   result.error().message);
                 } else {
                     spdlog::info("Successfully stored directory from ingest queue: {}", req.path);
+
+                    const auto& serviceResp = result.value();
+                    if (sm_ && sm_->getPostIngestQueue()) {
+                        std::vector<std::string> successHashes;
+                        for (const auto& r : serviceResp.results) {
+                            if (r.success && !r.hash.empty()) {
+                                successHashes.push_back(r.hash);
+                            }
+                        }
+
+                        constexpr size_t kSyncThreshold = 10;
+                        bool useSync = successHashes.size() <= kSyncThreshold;
+
+                        if (useSync) {
+                            spdlog::debug("Using sync FTS5 indexing for {} documents from {}",
+                                          successHashes.size(), req.path);
+                            for (const auto& hash : successHashes) {
+                                sm_->getPostIngestQueue()->indexDocumentSync(hash, "");
+                            }
+                        } else {
+                            spdlog::debug("Using async FTS5 indexing for {} documents from {}",
+                                          successHashes.size(), req.path);
+                            for (const auto& hash : successHashes) {
+                                sm_->enqueuePostIngest(hash, std::string());
+                            }
+                        }
+                    }
                 }
             } else {
                 app::services::StoreDocumentRequest serviceReq;
@@ -111,8 +141,14 @@ void IngestService::workerLoop(yams::compat::stop_token token) {
                                  "(bytesStored={}, bytesDeduped={})",
                                  serviceResp.hash, serviceResp.bytesStored,
                                  serviceResp.bytesDeduped);
-                    if (sm_) {
+
+                    if (sm_ && serviceResp.bytesStored > 0) {
+                        spdlog::debug("Enqueuing post-ingest task for new document {}",
+                                      serviceResp.hash);
                         sm_->enqueuePostIngest(serviceResp.hash, req.mimeType);
+                    } else if (sm_) {
+                        spdlog::debug("Skipping post-ingest for existing document {}",
+                                      serviceResp.hash);
                     }
                 }
             }

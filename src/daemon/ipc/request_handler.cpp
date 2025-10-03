@@ -36,6 +36,20 @@
 namespace yams::daemon {
 
 namespace {
+bool stream_trace_enabled_local() {
+    static int enabled = [] {
+        if (const char* raw = std::getenv("YAMS_STREAM_TRACE")) {
+            std::string v(raw);
+            for (auto& ch : v)
+                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            if (v == "1" || v == "true" || v == "on")
+                return 1;
+        }
+        return 0;
+    }();
+    return enabled != 0;
+}
+
 // Adapter class to convert RequestDispatcher to RequestProcessor interface
 // Must be defined outside of constructor to avoid lifetime issues
 class DispatcherAdapter : public RequestProcessor {
@@ -97,7 +111,8 @@ RequestHandler::RequestHandler(RequestDispatcher* dispatcher, Config config)
     config_.max_inflight_per_connection = TuneAdvisor::serverMaxInflightPerConn();
     config_.per_request_queue_cap = TuneAdvisor::serverQueueFramesCap();
     config_.total_queued_bytes_cap = TuneAdvisor::serverQueueBytesCap();
-    config_.writer_budget_bytes_per_turn = TuneAdvisor::serverWriterBudgetBytesPerTurn();
+    if (!config_.writer_budget_ref && config_.writer_budget_bytes_per_turn == 0)
+        config_.writer_budget_bytes_per_turn = TuneAdvisor::serverWriterBudgetBytesPerTurn();
     // Create a processor adapter that wraps the dispatcher
     if (dispatcher_) {
         auto adapter = std::make_shared<DispatcherAdapter>(dispatcher_);
@@ -194,6 +209,7 @@ boost::asio::awaitable<void>
 RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket socket,
                                   yams::compat::stop_token token) {
     using boost::asio::use_awaitable;
+    const bool stream_trace = stream_trace_enabled_local();
     try {
 #if defined(TRACY_ENABLE)
         // Treat each connection as a fiber for better cross-await stack attribution
@@ -202,8 +218,14 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
             ~FiberGuard() { YAMS_FIBER_LEAVE(); }
         } _fg;
 #endif
-        spdlog::debug("RequestHandler::handle_connection coroutine started");
-        spdlog::debug("New connection established");
+        if (stream_trace) {
+            spdlog::info("stream-trace: RequestHandler::handle_connection enter socket_open={} "
+                         "stop_requested={}",
+                         socket.is_open(), token.stop_requested());
+        } else {
+            spdlog::info("RequestHandler::handle_connection coroutine started");
+            spdlog::info("RequestHandler::handle_connection: new connection established");
+        }
         // Wrap socket in shared_ptr so per-request coroutines can safely reference it
         using socket_t = boost::asio::local::stream_protocol::socket;
         auto sock = std::make_shared<socket_t>(std::move(socket));
@@ -244,7 +266,8 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
             }
             // Read as much as is available (up to 4096), do not block for exact size
             std::array<uint8_t, 4096> buf{};
-            spdlog::debug("About to co_await socket.async_read");
+            if (!stream_trace)
+                spdlog::debug("About to co_await socket.async_read");
             // FSM guard: ensure reads are allowed before attempting to read from the socket
             bool can_read = true;
             std::string guard_err;
@@ -456,9 +479,9 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
 
                 // Handle the request with correlation id
                 // Route through streaming-aware path so FSM transitions are captured
-                spdlog::debug("RequestHandler::handle_connection: Routing request_id={} with "
-                              "expectsStreamingResponse={}",
-                              message.requestId, message.expectsStreamingResponse);
+                spdlog::info("RequestHandler::handle_connection: Routing request_id={} with "
+                             "expectsStreamingResponse={}",
+                             message.requestId, message.expectsStreamingResponse);
                 if (config_.enable_multiplexing) {
                     auto cur = inflight_.load(std::memory_order_relaxed);
                     if (cur >= config_.max_inflight_per_connection) {
@@ -481,6 +504,9 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
                             [this, sock, req = *request_ptr, req_id = message.requestId,
                              expects = message.expectsStreamingResponse]()
                                 -> boost::asio::awaitable<void> {
+                                spdlog::info(
+                                    "handle_streaming_request spawn req_id={} type={} expects={}",
+                                    req_id, static_cast<int>(getMessageType(req)), expects);
                                 auto r = co_await handle_streaming_request(*sock, req, req_id,
                                                                            nullptr, expects);
                                 if (!r) {
@@ -571,6 +597,7 @@ boost::asio::awaitable<Result<Message>>
 RequestHandler::read_message(boost::asio::local::stream_protocol::socket& socket,
                              FrameReader& reader) {
     using boost::asio::use_awaitable;
+    const bool stream_trace = stream_trace_enabled_local();
     // Read until we have a complete frame
     size_t read_loops = 0;
     while (!reader.has_frame()) {
@@ -616,9 +643,28 @@ RequestHandler::read_message(boost::asio::local::stream_protocol::socket& socket
         co_return frame_result.error();
     }
 
-    auto parsed = framer_.parse_frame(frame_result.value());
+    auto frame_data = frame_result.value();
+    auto parsed = framer_.parse_frame(frame_data);
     if (parsed) {
+        if (stream_trace) {
+            const auto& msg = parsed.value();
+            spdlog::info("stream-trace: RequestHandler::read_message got frame req_id={} "
+                         "streaming={} size={}",
+                         msg.requestId, msg.expectsStreamingResponse, frame_data.size());
+        }
         FsmMetricsRegistry::instance().incrementHeaderReads(1);
+        const auto& msg = parsed.value();
+        if (std::holds_alternative<Request>(msg.payload)) {
+            const auto& req = std::get<Request>(msg.payload);
+            spdlog::info(
+                "read_message: request req_id={} type={} expects_streaming={} payload_size={}",
+                msg.requestId, static_cast<int>(getMessageType(req)), msg.expectsStreamingResponse,
+                frame_data.size());
+        } else if (std::holds_alternative<Response>(msg.payload)) {
+            const auto& resp = std::get<Response>(msg.payload);
+            spdlog::info("read_message: response req_id={} type={} payload_size={}", msg.requestId,
+                         static_cast<int>(getMessageType(resp)), frame_data.size());
+        }
     }
     co_return parsed;
 }
@@ -874,6 +920,9 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
                                          ConnectionFsm* fsm, bool client_expects_streaming) {
     using boost::asio::use_awaitable;
     auto start_time = std::chrono::steady_clock::now();
+
+    spdlog::info("handle_streaming_request begin req_id={} type={} client_expects={}", request_id,
+                 static_cast<int>(getMessageType(request)), client_expects_streaming);
 
     try {
         // Check socket is open before processing
@@ -1552,11 +1601,17 @@ RequestHandler::writer_drain(boost::asio::local::stream_protocol::socket& socket
         // Drain up to budget bytes for this request turn
         // Dynamic budget: derive base from global mux metrics if set; otherwise config
         size_t base_budget = config_.writer_budget_bytes_per_turn;
+        if (config_.writer_budget_ref)
+            base_budget = config_.writer_budget_ref->load(std::memory_order_relaxed);
         {
             auto snap = MuxMetricsRegistry::instance().snapshot();
             if (snap.writerBudgetBytes > 0)
                 base_budget = static_cast<size_t>(snap.writerBudgetBytes);
         }
+        if (base_budget == 0)
+            base_budget = TuneAdvisor::writerBudgetBytesPerTurn();
+        if (base_budget == 0)
+            base_budget = 256 * 1024; // defensively cap to a sane minimum
         size_t budget = base_budget;
         const size_t active = rr_active_.size();
         const size_t queued_bytes = total_queued_bytes_;

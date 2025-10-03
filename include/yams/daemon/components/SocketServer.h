@@ -46,6 +46,8 @@ public:
     Result<void> stop();
     bool isRunning() const { return running_.load(); }
 
+    void setWriterBudget(std::size_t bytes);
+
     // Optional: allow safe rebinding of the dispatcher after startup.
     void setDispatcher(RequestDispatcher* dispatcher) {
         std::lock_guard<std::mutex> lk(dispatcherMutex_);
@@ -78,11 +80,15 @@ private:
         std::shared_ptr<std::atomic<bool>> exit;
     };
     std::vector<IoWorker> workers_;
+    std::vector<
+        std::shared_ptr<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>>
+        workerGuards_;
     std::mutex workersMutex_;
     // Keep io_context_ alive while running to avoid race where threads exit
     std::optional<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>
         work_guard_;
     yams::compat::jthread ioReconThread_;
+    std::thread diagThread_;
 
     // Socket tracking
     std::filesystem::path actualSocketPath_;
@@ -90,6 +96,8 @@ private:
     // Connection metrics
     std::atomic<size_t> activeConnections_{0};
     std::atomic<uint64_t> totalConnections_{0};
+
+    std::shared_ptr<std::atomic<std::size_t>> writerBudget_;
 
     // Lifecycle state
     std::atomic<bool> running_{false};

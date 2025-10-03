@@ -117,6 +117,24 @@ namespace search = yams::search;
 
 ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state)
     : config_(config), state_(state) {
+    tuningConfig_ = config_.tuning;
+
+    ingestWorkerTarget_.store(1, std::memory_order_relaxed);
+
+    // If post_ingest_threads_max is still the default, calculate a better one.
+    if (tuningConfig_.postIngestThreadsMax == 8) {
+        try {
+            // Use 75% of budgeted background threads for post-ingest max.
+            auto rec = yams::daemon::TuneAdvisor::recommendedThreads(0.75);
+            if (rec > tuningConfig_.postIngestThreadsMax) {
+                tuningConfig_.postIngestThreadsMax = rec;
+                spdlog::info("Auto-adjusting post-ingest max threads to {}", rec);
+            }
+        } catch (...) {
+            // Ignore errors and proceed with default.
+        }
+    }
+
     try {
         spdlog::debug("ServiceManager constructor start");
         // In test builds, prefer mock embedding provider unless explicitly disabled.
@@ -1040,6 +1058,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             }
         }
         connectionPool_ = std::make_shared<metadata::ConnectionPool>(dbPath.string(), dbPoolCfg);
+        TuneAdvisor::setStoragePoolSize(static_cast<uint32_t>(dbPoolCfg.maxConnections));
+        TuneAdvisor::setEnableParallelIngest(true);
         auto poolInit = init::record_duration(
             "db_pool", [&]() { return connectionPool_->initialize(); }, state_.initDurationsMs);
         if (!poolInit) {

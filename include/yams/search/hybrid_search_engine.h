@@ -86,6 +86,9 @@ struct HybridSearchConfig {
     // Guard embedding generation so vector path never stalls queries. When the
     // timeout elapses, fall back to keyword-only for that query.
     std::chrono::milliseconds embed_timeout_ms{350};
+    // Time budgets for candidate gathering (0 == unlimited)
+    std::chrono::milliseconds vector_timeout_ms{0};
+    std::chrono::milliseconds keyword_timeout_ms{0};
 
     // Validate configuration
     bool isValid() const {
@@ -105,6 +108,13 @@ struct HybridSearchConfig {
             structural_weight = structural_weight / sum;
         }
     }
+};
+
+struct SearchStageBudgets {
+    std::optional<std::chrono::milliseconds> vector_timeout;
+    std::optional<std::chrono::milliseconds> keyword_timeout;
+    bool* vector_timed_out{nullptr};
+    bool* keyword_timed_out{nullptr};
 };
 
 /**
@@ -283,7 +293,8 @@ public:
 
     // Main search interface
     Result<std::vector<HybridSearchResult>> search(const std::string& query, size_t k = 10,
-                                                   const vector::SearchFilter& filter = {});
+                                                   const vector::SearchFilter& filter = {},
+                                                   const SearchStageBudgets* budgets = nullptr);
 
     // Advanced search with pre-computed vector
     Result<std::vector<HybridSearchResult>>
@@ -339,6 +350,10 @@ public:
         // Volume metrics
         size_t total_searches = 0;
         size_t total_results_returned = 0;
+
+        // Timeout metrics
+        size_t vector_timeouts = 0;
+        size_t keyword_timeouts = 0;
 
         // Method distribution
         size_t vector_only_results = 0;

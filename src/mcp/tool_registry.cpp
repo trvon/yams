@@ -108,13 +108,7 @@ MCPSearchRequest MCPSearchRequest::fromJson(const json& j) {
     req.colorMode = j.value("color", std::string{"never"});
     req.pathPattern = j.value("path_pattern", j.value("path", std::string{}));
 
-    if (j.contains("tags") && j["tags"].is_array()) {
-        for (const auto& tag : j["tags"]) {
-            if (tag.is_string()) {
-                req.tags.push_back(tag.get<std::string>());
-            }
-        }
-    }
+    detail::readStringArray(j, "tags", req.tags);
     req.matchAllTags = j.value("match_all_tags", false);
     req.includeDiff = j.value("include_diff", false);
     req.useSession = j.value("use_session", true);
@@ -150,13 +144,7 @@ MCPSearchResponse MCPSearchResponse::fromJson(const json& j) {
     resp.type = j.value("type", std::string{});
     resp.executionTimeMs = j.value("execution_time_ms", uint64_t{0});
 
-    if (j.contains("paths") && j["paths"].is_array()) {
-        for (const auto& path : j["paths"]) {
-            if (path.is_string()) {
-                resp.paths.push_back(path.get<std::string>());
-            }
-        }
-    }
+    detail::readStringArray(j, "paths", resp.paths);
 
     if (j.contains("results") && j["results"].is_array()) {
         for (const auto& result : j["results"]) {
@@ -257,25 +245,8 @@ MCPGrepRequest MCPGrepRequest::fromJson(const json& j) {
     req.name = j.value("name", std::string{});
     req.subpath = j.value("subpath", true);
 
-    if (j.contains("paths") && j["paths"].is_array()) {
-        for (const auto& path : j["paths"]) {
-            if (path.is_string()) {
-                req.paths.push_back(path.get<std::string>());
-            }
-        }
-    }
-
-    // include_patterns may be a string or array
-    if (j.contains("include_patterns")) {
-        if (j["include_patterns"].is_string()) {
-            req.includePatterns.push_back(j["include_patterns"].get<std::string>());
-        } else if (j["include_patterns"].is_array()) {
-            for (const auto& p : j["include_patterns"]) {
-                if (p.is_string())
-                    req.includePatterns.push_back(p.get<std::string>());
-            }
-        }
-    }
+    detail::readStringArray(j, "paths", req.paths);
+    detail::readStringArray(j, "include_patterns", req.includePatterns);
 
     req.ignoreCase = j.value("ignore_case", false);
     req.word = j.value("word", false);
@@ -342,13 +313,7 @@ MCPDownloadRequest MCPDownloadRequest::fromJson(const json& j) {
     MCPDownloadRequest req;
     req.url = j.value("url", std::string{});
 
-    if (j.contains("headers") && j["headers"].is_array()) {
-        for (const auto& h : j["headers"]) {
-            if (h.is_string()) {
-                req.headers.push_back(h.get<std::string>());
-            }
-        }
-    }
+    detail::readStringArray(j, "headers", req.headers);
 
     req.checksum = j.value("checksum", std::string{});
     req.concurrency = j.value("concurrency", 4);
@@ -365,13 +330,7 @@ MCPDownloadRequest MCPDownloadRequest::fromJson(const json& j) {
     // Default to true so that the returned hash is ingest-ready for retrieval
     req.postIndex = j.value("post_index", true);
 
-    if (j.contains("tags") && j["tags"].is_array()) {
-        for (const auto& t : j["tags"]) {
-            if (t.is_string()) {
-                req.tags.push_back(t.get<std::string>());
-            }
-        }
-    }
+    detail::readStringArray(j, "tags", req.tags);
 
     if (j.contains("metadata") && j["metadata"].is_object()) {
         for (auto it = j["metadata"].begin(); it != j["metadata"].end(); ++it) {
@@ -488,28 +447,12 @@ MCPStoreDocumentRequest MCPStoreDocumentRequest::fromJson(const json& j) {
     req.snapshotId = j.value("snapshot_id", std::string{});
     req.snapshotLabel = j.value("snapshot_label", std::string{});
     req.recursive = j.value("recursive", false);
-    if (j.contains("include") && j["include"].is_array()) {
-        for (const auto& it : j["include"]) {
-            if (it.is_string())
-                req.includePatterns.push_back(it.get<std::string>());
-        }
-    }
-    if (j.contains("exclude") && j["exclude"].is_array()) {
-        for (const auto& it : j["exclude"]) {
-            if (it.is_string())
-                req.excludePatterns.push_back(it.get<std::string>());
-        }
-    }
+    detail::readStringArray(j, "include", req.includePatterns);
+    detail::readStringArray(j, "exclude", req.excludePatterns);
     req.disableAutoMime = j.value("disable_auto_mime", false);
     req.noEmbeddings = j.value("no_embeddings", false);
 
-    if (j.contains("tags") && j["tags"].is_array()) {
-        for (const auto& tag : j["tags"]) {
-            if (tag.is_string()) {
-                req.tags.push_back(tag.get<std::string>());
-            }
-        }
-    }
+    detail::readStringArray(j, "tags", req.tags);
 
     if (j.contains("metadata")) {
         req.metadata = j["metadata"];
@@ -608,13 +551,7 @@ MCPListDocumentsRequest MCPListDocumentsRequest::fromJson(const json& j) {
     req.pattern = j.value("pattern", std::string{});
     req.name = j.value("name", std::string{});
 
-    if (j.contains("tags") && j["tags"].is_array()) {
-        for (const auto& tag : j["tags"]) {
-            if (tag.is_string()) {
-                req.tags.push_back(tag.get<std::string>());
-            }
-        }
-    }
+    detail::readStringArray(j, "tags", req.tags);
 
     req.type = j.value("type", std::string{});
     req.mime = j.value("mime", std::string{});
@@ -636,13 +573,7 @@ MCPListDocumentsRequest MCPListDocumentsRequest::fromJson(const json& j) {
 MCPSessionPinRequest MCPSessionPinRequest::fromJson(const json& j) {
     MCPSessionPinRequest req;
     req.path = j.value("path", std::string{});
-    if (j.contains("tags") && j["tags"].is_array()) {
-        for (const auto& tag : j["tags"]) {
-            if (tag.is_string()) {
-                req.tags.push_back(tag.get<std::string>());
-            }
-        }
-    }
+    detail::readStringArray(j, "tags", req.tags);
     if (j.contains("metadata") && j["metadata"].is_object()) {
         req.metadata = j["metadata"];
     } else {
@@ -762,37 +693,16 @@ MCPAddDirectoryRequest MCPAddDirectoryRequest::fromJson(const json& j) {
     req.directoryPath = j.value("directory_path", std::string{});
     req.collection = j.value("collection", std::string{});
 
-    if (j.contains("include_patterns") && j["include_patterns"].is_array()) {
-        for (const auto& pattern : j["include_patterns"]) {
-            if (pattern.is_string()) {
-                req.includePatterns.push_back(pattern.get<std::string>());
-            }
-        }
-    }
-
-    if (j.contains("exclude_patterns") && j["exclude_patterns"].is_array()) {
-        for (const auto& pattern : j["exclude_patterns"]) {
-            if (pattern.is_string()) {
-                req.excludePatterns.push_back(pattern.get<std::string>());
-            }
-        }
-    }
-
+    detail::readStringArray(j, "include_patterns", req.includePatterns);
+    detail::readStringArray(j, "exclude_patterns", req.excludePatterns);
+    detail::readStringArray(j, "tags", req.tags);
     if (j.contains("metadata")) {
         req.metadata = j["metadata"];
     }
-
     req.recursive = j.value("recursive", true);
     req.followSymlinks = j.value("follow_symlinks", false);
     req.snapshotId = j.value("snapshot_id", std::string{});
     req.snapshotLabel = j.value("snapshot_label", std::string{});
-    if (j.contains("tags") && j["tags"].is_array()) {
-        for (const auto& tag : j["tags"]) {
-            if (tag.is_string()) {
-                req.tags.push_back(tag.get<std::string>());
-            }
-        }
-    }
     return req;
 }
 
@@ -881,13 +791,7 @@ MCPDeleteByNameRequest MCPDeleteByNameRequest::fromJson(const json& j) {
     req.pattern = j.value("pattern", std::string{});
     req.dryRun = j.value("dry_run", false);
 
-    if (j.contains("names") && j["names"].is_array()) {
-        for (const auto& n : j["names"]) {
-            if (n.is_string()) {
-                req.names.push_back(n.get<std::string>());
-            }
-        }
-    }
+    detail::readStringArray(j, "names", req.names);
 
     return req;
 }
@@ -902,13 +806,7 @@ MCPDeleteByNameResponse MCPDeleteByNameResponse::fromJson(const json& j) {
     resp.count = j.value("count", size_t{0});
     resp.dryRun = j.value("dry_run", false);
 
-    if (j.contains("deleted") && j["deleted"].is_array()) {
-        for (const auto& d : j["deleted"]) {
-            if (d.is_string()) {
-                resp.deleted.push_back(d.get<std::string>());
-            }
-        }
-    }
+    detail::readStringArray(j, "deleted", resp.deleted);
 
     return resp;
 }
@@ -966,29 +864,9 @@ MCPUpdateMetadataRequest MCPUpdateMetadataRequest::fromJson(const json& j) {
         req.metadata = j["metadata"];
     }
 
-    if (j.contains("tags") && j["tags"].is_array()) {
-        for (const auto& tag : j["tags"]) {
-            if (tag.is_string()) {
-                req.tags.push_back(tag.get<std::string>());
-            }
-        }
-    }
-
-    if (j.contains("remove_tags") && j["remove_tags"].is_array()) {
-        for (const auto& tag : j["remove_tags"]) {
-            if (tag.is_string()) {
-                req.removeTags.push_back(tag.get<std::string>());
-            }
-        }
-    }
-
-    if (j.contains("names") && j["names"].is_array()) {
-        for (const auto& n : j["names"]) {
-            if (n.is_string()) {
-                req.names.push_back(n.get<std::string>());
-            }
-        }
-    }
+    detail::readStringArray(j, "tags", req.tags);
+    detail::readStringArray(j, "remove_tags", req.removeTags);
+    detail::readStringArray(j, "names", req.names);
 
     req.dryRun = j.value("dry_run", false);
     req.useSession = j.value("use_session", true);
@@ -1014,12 +892,7 @@ MCPUpdateMetadataResponse MCPUpdateMetadataResponse::fromJson(const json& j) {
     resp.message = j.value("message", std::string{});
     resp.matched = j.value("matched", std::size_t{0});
     resp.updated = j.value("updated", std::size_t{0});
-    if (j.contains("updated_hashes") && j["updated_hashes"].is_array()) {
-        for (const auto& h : j["updated_hashes"]) {
-            if (h.is_string())
-                resp.updatedHashes.push_back(h.get<std::string>());
-        }
-    }
+    detail::readStringArray(j, "updated_hashes", resp.updatedHashes);
     return resp;
 }
 
@@ -1040,21 +913,8 @@ MCPRestoreCollectionRequest MCPRestoreCollectionRequest::fromJson(const json& j)
     req.createDirs = j.value("create_dirs", true);
     req.dryRun = j.value("dry_run", false);
 
-    if (j.contains("include_patterns") && j["include_patterns"].is_array()) {
-        for (const auto& p : j["include_patterns"]) {
-            if (p.is_string()) {
-                req.includePatterns.push_back(p.get<std::string>());
-            }
-        }
-    }
-
-    if (j.contains("exclude_patterns") && j["exclude_patterns"].is_array()) {
-        for (const auto& p : j["exclude_patterns"]) {
-            if (p.is_string()) {
-                req.excludePatterns.push_back(p.get<std::string>());
-            }
-        }
-    }
+    detail::readStringArray(j, "include_patterns", req.includePatterns);
+    detail::readStringArray(j, "exclude_patterns", req.excludePatterns);
 
     return req;
 }
@@ -1076,13 +936,7 @@ MCPRestoreCollectionResponse MCPRestoreCollectionResponse::fromJson(const json& 
     resp.filesRestored = j.value("files_restored", size_t{0});
     resp.dryRun = j.value("dry_run", false);
 
-    if (j.contains("restored_paths") && j["restored_paths"].is_array()) {
-        for (const auto& p : j["restored_paths"]) {
-            if (p.is_string()) {
-                resp.restoredPaths.push_back(p.get<std::string>());
-            }
-        }
-    }
+    detail::readStringArray(j, "restored_paths", resp.restoredPaths);
 
     return resp;
 }
@@ -1103,21 +957,8 @@ MCPRestoreSnapshotRequest MCPRestoreSnapshotRequest::fromJson(const json& j) {
     req.createDirs = j.value("create_dirs", true);
     req.dryRun = j.value("dry_run", false);
 
-    if (j.contains("include_patterns") && j["include_patterns"].is_array()) {
-        for (const auto& p : j["include_patterns"]) {
-            if (p.is_string()) {
-                req.includePatterns.push_back(p.get<std::string>());
-            }
-        }
-    }
-
-    if (j.contains("exclude_patterns") && j["exclude_patterns"].is_array()) {
-        for (const auto& p : j["exclude_patterns"]) {
-            if (p.is_string()) {
-                req.excludePatterns.push_back(p.get<std::string>());
-            }
-        }
-    }
+    detail::readStringArray(j, "include_patterns", req.includePatterns);
+    detail::readStringArray(j, "exclude_patterns", req.excludePatterns);
 
     return req;
 }
@@ -1140,13 +981,7 @@ MCPRestoreSnapshotResponse MCPRestoreSnapshotResponse::fromJson(const json& j) {
     resp.filesRestored = j.value("files_restored", size_t{0});
     resp.dryRun = j.value("dry_run", false);
 
-    if (j.contains("restored_paths") && j["restored_paths"].is_array()) {
-        for (const auto& p : j["restored_paths"]) {
-            if (p.is_string()) {
-                resp.restoredPaths.push_back(p.get<std::string>());
-            }
-        }
-    }
+    detail::readStringArray(j, "restored_paths", resp.restoredPaths);
 
     return resp;
 }

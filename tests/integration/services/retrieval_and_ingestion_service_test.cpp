@@ -19,8 +19,8 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
-#include <boost/asio/system_executor.hpp>
 #include <boost/system/error_code.hpp>
+#include <yams/daemon/client/global_io_context.h>
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
@@ -122,7 +122,7 @@ waitForPostIngestQuiescent(const std::filesystem::path& socket,
         std::promise<yams::Result<yams::daemon::StatusResponse>> prom;
         auto fut = prom.get_future();
         boost::asio::co_spawn(
-            boost::asio::system_executor{},
+            yams::daemon::GlobalIOContext::global_executor(),
             [client, p = std::move(prom)]() mutable -> boost::asio::awaitable<void> {
                 auto r = co_await client->status();
                 p.set_value(std::move(r));

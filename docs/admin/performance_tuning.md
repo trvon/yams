@@ -50,6 +50,22 @@ Best practice: rely on the built‑in auto‑tuning first. If you need stricter 
 - Vector search: pick parameters for your recall/latency target; precompute embeddings offline when possible.
 - OS limits: raise `nofile` (≥ 16384); monitor CPU, disk latency (p99), and cache hit rates.
 
+## Configuration Quick Reference
+
+TuneAdvisor covers the dynamic knobs, but static configuration still matters. The table below links the most common performance levers to concrete `config.toml` keys so you can codify experiments instead of relying on ad-hoc overrides.
+
+| Area | Config key(s) | Primary effect | When to tweak |
+| --- | --- | --- | --- |
+| Worker pools | `[performance].num_worker_threads`, `[performance].io_thread_pool_size` | Caps CPU-bound and IO-bound parallelism | Increase for ingest bursts when CPU headroom exists; decrease on constrained hosts to stay within quota |
+| Request backlog | `[performance].max_concurrent_operations` | Limits simultaneous daemon tasks | Lower to protect latency-sensitive workloads; raise when long-running ingest jobs block short queries |
+| Chunking window | `[chunking].min_chunk_size`, `[chunking].max_chunk_size`, `[chunking].average_chunk_size` | Controls dedupe granularity vs index fan-out | Smaller window for text diffs, larger for large binaries to reduce index pressure |
+| Compression | `[compression].algorithm`, `[compression].zstd_level`, `[compression].async_compression` | Balances CPU cost and storage savings | Drop levels to keep ingest real-time; raise during off-peak archival passes |
+| Embeddings | `[embeddings].auto_on_add`, `[embeddings].batch_size`, `[embeddings].generation_delay_ms` | Tunes immediate vs deferred embedding cost | Disable auto-on-add for cold ingest pipelines; trim batch size if GPU/CPU memory is tight |
+| Vector index | `[vector_database].index_type`, `[vector_database].num_partitions`, `[vector_database].num_sub_quantizers` | Trades recall for query latency and build cost | Start with defaults; increase partitions/sub-quantizers for massive corpora after baseline data collection |
+| WAL & durability | `[wal].sync_interval`, `[wal].sync_timeout_ms`, `[wal].enable_group_commit` | Determines fsync cadence | Relax during bulk ingest (higher interval) and tighten once steady-state resumes |
+
+Workflow tip: snapshot the current config (`yams config dump`) before each experiment and commit deltas alongside benchmark notes. This keeps TuneAdvisor highlights, CLI overrides, and long-term configuration changes aligned.
+
 ---
 
 ## Workload Profiles

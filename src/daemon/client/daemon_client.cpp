@@ -1133,7 +1133,10 @@ DaemonClient::generateEmbedding(const GenerateEmbeddingRequest& req) {
         std::optional<EmbeddingResponse> value;
     };
     auto h = std::make_shared<Handler>();
+    spdlog::info("DaemonClient::generateEmbedding sending request model='{}'", req.modelName);
     auto r = co_await sendRequestStreaming(req, h);
+    spdlog::info("DaemonClient::generateEmbedding sendRequestStreaming done ok={} error?{}",
+                 r.has_value(), r ? 0 : 1);
     if (!r)
         co_return r.error();
     if (h->error)

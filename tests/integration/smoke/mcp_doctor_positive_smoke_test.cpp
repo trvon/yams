@@ -4,6 +4,8 @@
 #include <string>
 #include <thread>
 
+#include <yams/cli/cli_sync.h>
+#include <yams/cli/daemon_helpers.h>
 #include <yams/daemon/daemon.h>
 #include <yams/mcp/mcp_server.h>
 
@@ -26,6 +28,41 @@ public:
     bool isConnected() const override { return true; }
     void close() override {}
 };
+
+using yams::Error;
+using yams::Result;
+
+Result<void> wait_for_daemon_ready(const std::filesystem::path& socketPath) {
+    using namespace std::chrono_literals;
+    yams::daemon::ClientConfig statusCfg;
+    statusCfg.socketPath = socketPath;
+    statusCfg.requestTimeout = 5s;
+    yams::daemon::DaemonClient statusClient(statusCfg);
+    auto connectRes = yams::cli::run_sync(statusClient.connect(), 2s);
+    if (!connectRes)
+        return connectRes.error();
+
+    std::string statusErr;
+    for (int attempt = 0; attempt < 120; ++attempt) {
+        auto statusRes = yams::cli::run_sync(statusClient.status(), 1s);
+        if (statusRes) {
+            const auto& s = statusRes.value();
+            bool metadataReady = s.readinessStates.contains("metadata_repo") &&
+                                 s.readinessStates.at("metadata_repo");
+            bool searchReady = s.readinessStates.contains("search_engine") &&
+                               s.readinessStates.at("search_engine");
+            if (s.ready || (metadataReady && searchReady)) {
+                return Result<void>();
+            }
+            statusErr = s.overallStatus;
+        } else {
+            statusErr = statusRes.error().message;
+        }
+        std::this_thread::sleep_for(250ms);
+    }
+    return Error{yams::ErrorCode::Timeout,
+                 std::string("daemon never reached ready state: ") + statusErr};
+}
 } // namespace
 
 // Linux-only: relies on AF_UNIX socket semantics and short XDG_RUNTIME_DIR
@@ -52,6 +89,8 @@ TEST(MCPDoctorPositiveSmoke, DoctorReportsReadyWithLiveDaemon) {
 
     const fs::path socketPath = runtimeRoot / "yams-daemon.sock";
     ::setenv("YAMS_SOCKET_PATH", socketPath.string().c_str(), 1);
+    ::setenv("YAMS_DAEMON_SOCKET", socketPath.string().c_str(), 1);
+    yams::cli::cli_pool_reset_for_test();
 
     // Start the daemon
     yams::daemon::DaemonConfig cfg;
@@ -63,9 +102,12 @@ TEST(MCPDoctorPositiveSmoke, DoctorReportsReadyWithLiveDaemon) {
     auto started = daemon.start();
     ASSERT_TRUE(started) << started.error().message;
 
+    ASSERT_TRUE(wait_for_daemon_ready(socketPath)) << "daemon readiness wait failed";
+
     // Build an MCP server with a dummy transport and call the doctor tool
     auto t = std::make_unique<NullTransport>();
     MCPServer svr(std::move(t));
+    svr.setDaemonClientSocketPathForTest(socketPath);
     auto res = svr.callToolPublic("doctor", json::object());
 
     // Stop daemon before assertions to avoid lingering processes
@@ -141,6 +183,8 @@ TEST(MCPSmoke, DocOpsRoundTrip) {
     const fs::path socketPath =
         fs::path("/tmp") / ("yams-mcp-docops-" + std::to_string(::getpid()) + ".sock");
     ::setenv("YAMS_SOCKET_PATH", socketPath.string().c_str(), 1);
+    ::setenv("YAMS_DAEMON_SOCKET", socketPath.string().c_str(), 1);
+    yams::cli::cli_pool_reset_for_test();
 
     // Start daemon
     yams::daemon::DaemonConfig cfg;
@@ -152,9 +196,12 @@ TEST(MCPSmoke, DocOpsRoundTrip) {
     auto started = daemon.start();
     ASSERT_TRUE(started) << started.error().message;
 
+    ASSERT_TRUE(wait_for_daemon_ready(socketPath)) << "daemon readiness wait failed";
+
     // Build an MCP server with a dummy transport (direct callToolPublic)
     auto t = std::make_unique<NullTransport>();
     MCPServer svr(std::move(t));
+    svr.setDaemonClientSocketPathForTest(socketPath);
 
     // 1) add content
     auto addRes =

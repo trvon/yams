@@ -113,6 +113,43 @@ public:
                 }
             }
 
+            // Validate hash format if provided (prevent paths being used as hashes)
+            if (!hash_.empty()) {
+                std::string normalized = hash_;
+                // Strip sha256: prefix if present
+                if (normalized.size() > 7) {
+                    std::string lower = normalized;
+                    for (size_t i = 0; i < lower.size(); ++i) {
+                        lower[i] =
+                            static_cast<char>(std::tolower(static_cast<unsigned char>(lower[i])));
+                    }
+                    if (lower.substr(0, 7) == "sha256:") {
+                        normalized = normalized.substr(7);
+                    }
+                }
+
+                // Check if it's a valid hex string (min 8 chars for partial hash)
+                bool isHex = normalized.size() >= 8;
+                if (isHex) {
+                    for (char c : normalized) {
+                        if (!std::isxdigit(static_cast<unsigned char>(c))) {
+                            isHex = false;
+                            break;
+                        }
+                    }
+                }
+
+                if (!isHex) {
+                    return Error{
+                        ErrorCode::InvalidArgument,
+                        "Invalid hash format: '" + hash_ +
+                            "'\n"
+                            "Expected: 64-character hex string (or 8+ chars for partial match)\n"
+                            "Hint: Use --name for file paths, e.g., yams get --name " +
+                            hash_};
+                }
+            }
+
             // Create enhanced daemon request with ALL CLI options mapped
             yams::daemon::GetRequest dreq;
 
@@ -243,159 +280,29 @@ public:
                                                  /*includeContent*/ !metadataOnly_,
                                                  /*useSession*/ false, std::string{}, ropts);
                 if (smart) {
-                    auto rr = render(smart.value());
-                    if (!rr)
-                        return rr.error();
-                    return Result<void>();
+                    return render(smart.value());
                 }
+                // If smart fails, fall back to the generic get request with the name
                 spdlog::debug(
-                    "get --name: smart resolution failed ({}); continuing with daemon path",
+                    "get --name: smart resolution failed ({}); continuing with generic get",
                     smart.error().message);
             }
 
-            // Primary path: RetrievalService via daemon
-            {
-                yams::app::services::RetrievalService rsvc;
-                yams::app::services::RetrievalOptions ropts;
-                if (cli_->hasExplicitDataDir()) {
-                    ropts.explicitDataDir = cli_->getDataPath();
-                }
-                ropts.requestTimeoutMs = 60000; // allow reasonable time for extraction
-                ropts.headerTimeoutMs = 30000;
-                ropts.bodyTimeoutMs = 120000;
-                auto gres = rsvc.get(dreq, ropts);
-                if (gres) {
-                    auto rr = render(gres.value());
-                    if (!rr)
-                        return rr.error();
-                    return Result<void>();
-                }
-                spdlog::warn("get: daemon path failed ({}); falling back to local services",
-                             gres.error().message);
+            yams::app::services::RetrievalService rsvc;
+            yams::app::services::RetrievalOptions ropts;
+            if (cli_->hasExplicitDataDir()) {
+                ropts.explicitDataDir = cli_->getDataPath();
+            }
+            ropts.requestTimeoutMs = 60000; // allow reasonable time for extraction
+            ropts.headerTimeoutMs = 30000;
+            ropts.bodyTimeoutMs = 120000;
+
+            auto gres = rsvc.get(dreq, ropts);
+            if (!gres) {
+                return gres.error();
             }
 
-            // Define service fallback using DocumentService
-            auto fallback = [&]() -> Result<void> {
-                spdlog::debug("GetCommand: Using service fallback");
-
-                // Get application context and DocumentService
-                auto appContext = cli_->getAppContext();
-                auto documentService = app::services::makeDocumentService(*appContext);
-
-                // Map CLI options to service RetrieveDocumentRequest
-                app::services::RetrieveDocumentRequest serviceReq;
-
-                // Target selection
-                serviceReq.hash = hash_;
-                serviceReq.name = name_;
-
-                // File type filters
-                serviceReq.fileType = fileType_;
-                serviceReq.mimeType = mimeType_;
-                serviceReq.extension = extension_;
-
-                // Selection options
-                serviceReq.latest = getLatest_;
-                serviceReq.oldest = getOldest_;
-
-                // Output options
-                serviceReq.outputPath = outputPath_;
-                serviceReq.metadataOnly = metadataOnly_;
-                serviceReq.maxBytes = maxBytes_;
-                serviceReq.chunkSize = chunkSize_;
-
-                // Content options
-                serviceReq.includeContent = !metadataOnly_;
-                serviceReq.raw = raw_;
-                serviceReq.extract = extract_;
-
-                // Knowledge graph options
-                serviceReq.graph = showGraph_;
-                serviceReq.depth = graphDepth_;
-
-                // Call DocumentService
-                auto result = documentService->retrieve(serviceReq);
-                if (!result) {
-                    return result.error();
-                }
-
-                const auto& serviceResp = result.value();
-
-                // Convert service response to daemon response and render
-                yams::daemon::GetResponse daemonResp;
-
-                if (serviceResp.document.has_value()) {
-                    const auto& doc = serviceResp.document.value();
-                    daemonResp.hash = doc.hash;
-                    daemonResp.path = doc.path;
-                    daemonResp.name = doc.name;
-                    daemonResp.fileName = doc.fileName;
-                    daemonResp.size = doc.size;
-                    daemonResp.mimeType = doc.mimeType;
-                    daemonResp.fileType = doc.fileType;
-                    daemonResp.created = doc.created;
-                    daemonResp.modified = doc.modified;
-                    daemonResp.indexed = doc.indexed;
-
-                    if (doc.content.has_value()) {
-                        daemonResp.content = doc.content.value();
-                        daemonResp.hasContent = true;
-                    }
-
-                    // Convert metadata
-                    for (const auto& [key, value] : doc.metadata) {
-                        daemonResp.metadata[key] = value;
-                    }
-
-                } else if (!serviceResp.documents.empty()) {
-                    const auto& doc = serviceResp.documents[0];
-                    daemonResp.hash = doc.hash;
-                    daemonResp.path = doc.path;
-                    daemonResp.name = doc.name;
-                    daemonResp.fileName = doc.fileName;
-                    daemonResp.size = doc.size;
-                    daemonResp.mimeType = doc.mimeType;
-                    daemonResp.fileType = doc.fileType;
-                    daemonResp.created = doc.created;
-                    daemonResp.modified = doc.modified;
-                    daemonResp.indexed = doc.indexed;
-
-                    if (doc.content.has_value()) {
-                        daemonResp.content = doc.content.value();
-                        daemonResp.hasContent = true;
-                    }
-
-                    for (const auto& [key, value] : doc.metadata) {
-                        daemonResp.metadata[key] = value;
-                    }
-                } else {
-                    return Error{ErrorCode::NotFound, "No documents found matching criteria"};
-                }
-
-                // Knowledge graph results
-                daemonResp.graphEnabled = serviceResp.graphEnabled;
-                if (serviceResp.graphEnabled) {
-                    for (const auto& rel : serviceResp.related) {
-                        yams::daemon::RelatedDocumentEntry entry;
-                        entry.hash = rel.hash;
-                        entry.path = rel.path;
-                        entry.name = rel.name;
-                        entry.relationship = rel.relationship.value_or("unknown");
-                        entry.distance = rel.distance;
-                        entry.relevanceScore = rel.relevanceScore;
-                        daemonResp.related.push_back(entry);
-                    }
-                }
-
-                daemonResp.totalBytes = serviceResp.totalBytes;
-                daemonResp.outputWritten = serviceResp.outputPath.has_value();
-
-                // Render using the same logic as daemon path
-                return render(daemonResp);
-            };
-
-            // Fallback to local services when daemon path failed
-            return fallback();
+            return render(gres.value());
 
         } catch (const std::exception& e) {
             return Error{ErrorCode::InternalError, std::string("GetCommand failed: ") + e.what()};

@@ -1,5 +1,8 @@
 #include <spdlog/spdlog.h>
 #include <boost/asio/post.hpp>
+#include <boost/asio/redirect_error.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/app/services/enhanced_search_executor.h>
 #include <yams/app/services/services.hpp>
@@ -17,6 +20,7 @@
 #include <cstdint>
 #include <mutex>
 #include <optional>
+#include <regex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -64,26 +68,44 @@ static std::string escapeRegex(const std::string& text) {
     return escaped;
 }
 
-// Simple glob matcher supporting '*' and '?'
-static bool wildcardMatch(const std::string& text, const std::string& pattern) {
-    const size_t n = text.size();
-    const size_t m = pattern.size();
-    std::vector<std::vector<bool>> dp(n + 1, std::vector<bool>(m + 1, false));
-    dp[0][0] = true;
-    for (size_t j = 1; j <= m; ++j) {
-        if (pattern[j - 1] == '*')
-            dp[0][j] = dp[0][j - 1];
-    }
-    for (size_t i = 1; i <= n; ++i) {
-        for (size_t j = 1; j <= m; ++j) {
-            if (pattern[j - 1] == '*') {
-                dp[i][j] = dp[i][j - 1] || dp[i - 1][j];
-            } else if (pattern[j - 1] == '?' || pattern[j - 1] == text[i - 1]) {
-                dp[i][j] = dp[i - 1][j - 1];
+// Converts a glob pattern to a regex string.
+static std::string globToRegex(const std::string& glob) {
+    std::string regex_str;
+    regex_str.reserve(glob.size() * 2);
+    for (size_t i = 0; i < glob.size(); ++i) {
+        char c = glob[i];
+        if (c == '*') {
+            if (i + 1 < glob.size() && glob[i + 1] == '*') {
+                // '**' matches any sequence of characters, including path separators
+                regex_str += ".*";
+                i++; // consume second '*'
+            } else {
+                // '*' matches any sequence of characters except path separators
+                regex_str += "[^/]*";
             }
+        } else if (c == '?') {
+            regex_str += ".";
+        } else if (c == '.' || c == '+' || c == '(' || c == ')' || c == '{' || c == '}' ||
+                   c == '[' || c == ']' || c == '^' || c == '|' || c == '\\') {
+            regex_str += '\\';
+            regex_str += c;
+        } else {
+            regex_str += c;
         }
     }
-    return dp[n][m];
+    return regex_str;
+}
+
+// Robust glob matcher using regex, supporting '**'.
+static bool wildcardMatch(const std::string& text, const std::string& pattern) {
+    try {
+        std::regex re(globToRegex(pattern));
+        return std::regex_match(text, re);
+    } catch (const std::regex_error& e) {
+        spdlog::warn("Invalid glob pattern '{}' converted to regex: {}", pattern, e.what());
+        // Fallback to simple string contains for invalid patterns
+        return text.find(pattern) != std::string::npos;
+    }
 }
 
 // Heuristic: treat as path/filename when the query contains a separator
@@ -439,7 +461,20 @@ public:
                     result = Result<SearchResponse>(std::move(resp));
                 }
             } else if (ctx_.hybridEngine) {
-                result = hybridSearch(normalizedReq, parsed.scope, &metadataTelemetry);
+                result = hybridSearch(normalizedReq, parsed.scope, &metadataTelemetry,
+                                      normalizedReq.pathPattern);
+                if (result && !req.pathPattern.empty()) {
+                    auto resp = std::move(result).value();
+                    std::vector<SearchItem> filtered;
+                    for (const auto& item : resp.results) {
+                        if (wildcardMatch(item.path, req.pathPattern)) {
+                            filtered.push_back(item);
+                        }
+                    }
+                    resp.results = std::move(filtered);
+                    resp.total = resp.results.size();
+                    result = Result<SearchResponse>(std::move(resp));
+                }
             } else {
                 spdlog::warn("Hybrid engine unavailable, using metadata fallback");
                 result = metadataSearch(normalizedReq, &metadataTelemetry);
@@ -492,6 +527,10 @@ public:
 
         if (result) {
             auto resp = std::move(result).value();
+            if (req.pathsOnly && resp.paths.empty()) {
+                spdlog::info("[SearchService] invoking paths fallback for empty pathsOnly result");
+                ensurePathsFallbackSync(normalizedReq, resp, &metadataTelemetry);
+            }
             auto totalElapsed = duration_cast<milliseconds>(steady_clock::now() - t0).count();
             resp.executionTimeMs = static_cast<int64_t>(totalElapsed);
             resp.searchStats["latency_ms"] = std::to_string(totalElapsed);
@@ -704,10 +743,15 @@ private:
         if (todo.empty())
             co_return;
 
+        auto outstanding = std::make_shared<std::atomic<size_t>>(todo.size());
+        auto timer =
+            std::make_shared<boost::asio::steady_timer>(co_await boost::asio::this_coro::executor);
+
         for (size_t i = 0; i < todo.size(); ++i) {
-            co_await boost::asio::co_spawn(
+            boost::asio::co_spawn(
                 ctx_.workerExecutor,
-                [&, idx = todo[i]]() -> boost::asio::awaitable<void> {
+                [&, idx = todo[i], outstanding, timer,
+                 telemetry]() -> boost::asio::awaitable<void> {
                     auto& out = resp.results[idx];
                     int64_t docId = -1;
                     if (!out.hash.empty()) {
@@ -734,49 +778,80 @@ private:
                             }
                         }
                     }
+
+                    if (--(*outstanding) == 0) {
+                        timer->cancel();
+                    }
                     co_return;
                 },
-                boost::asio::use_awaitable);
+                boost::asio::detached);
+        }
+
+        std::chrono::milliseconds snippetBudget{req.snippetHydrationTimeoutMs};
+        if (snippetBudget.count() > 0) {
+            timer->expires_after(snippetBudget);
+        } else {
+            timer->expires_at(std::chrono::steady_clock::time_point::max());
+        }
+
+        boost::system::error_code waitEc;
+        co_await timer->async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, waitEc));
+        if (waitEc && waitEc != boost::asio::error::operation_aborted) {
+            throw boost::system::system_error(waitEc);
+        }
+        if (!waitEc && snippetBudget.count() > 0) {
+            resp.searchStats["snippet_timeout_hit"] = "true";
+            resp.searchStats["snippet_budget_ms"] = std::to_string(snippetBudget.count());
         }
     }
 
-    boost::asio::awaitable<void> ensurePathsFallbackAsync(const SearchRequest& req,
-                                                          SearchResponse& resp,
-                                                          MetadataTelemetry* telemetry = nullptr) {
-        if (!ctx_.metadataRepo || !ctx_.workerExecutor)
-            co_return;
+    void ensurePathsFallbackSync(const SearchRequest& req, SearchResponse& resp,
+                                 MetadataTelemetry* telemetry = nullptr) {
+        if (!ctx_.metadataRepo)
+            return;
         auto allDocsResult =
             retryMetadataOp([&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); }, 4,
                             std::chrono::milliseconds(25), telemetry);
-        if (!allDocsResult)
-            co_return;
+        if (!allDocsResult) {
+            spdlog::warn(
+                "[SearchService] ensurePathsFallback failed to enumerate paths: code={} message={}",
+                static_cast<int>(allDocsResult.error().code), allDocsResult.error().message);
+            return;
+        }
         const auto& docs = allDocsResult.value();
+        spdlog::info("[SearchService] ensurePathsFallback scanning {} docs for query '{}'",
+                     docs.size(), req.query);
 
         std::vector<std::string> foundPaths;
-        std::mutex outMutex;
+        std::vector<std::string> fallbackPaths;
+        const std::size_t limit = req.limit == 0 ? std::numeric_limits<std::size_t>::max()
+                                                 : static_cast<std::size_t>(req.limit);
+        fallbackPaths.reserve(std::min<std::size_t>(docs.size(), limit));
 
         for (const auto& doc : docs) {
-            co_await boost::asio::co_spawn(
-                ctx_.workerExecutor,
-                [&, doc]() -> boost::asio::awaitable<void> {
-                    if (!req.query.empty() && doc.filePath.find(req.query) == std::string::npos &&
-                        doc.fileName.find(req.query) == std::string::npos) {
-                        co_return;
-                    }
-                    std::string p = !doc.filePath.empty() ? doc.filePath : doc.fileName;
-                    std::lock_guard<std::mutex> lk(outMutex);
-                    if (req.limit == 0 || foundPaths.size() < req.limit) {
-                        foundPaths.push_back(std::move(p));
-                    }
-                    co_return;
-                },
-                boost::asio::use_awaitable);
-            if (req.limit != 0 && foundPaths.size() >= req.limit) {
-                break;
+            const bool matches = req.query.empty() ||
+                                 doc.filePath.find(req.query) != std::string::npos ||
+                                 doc.fileName.find(req.query) != std::string::npos;
+            std::string path = !doc.filePath.empty() ? doc.filePath : doc.fileName;
+            if (fallbackPaths.size() < limit) {
+                fallbackPaths.push_back(path);
             }
+            if (matches && foundPaths.size() < limit) {
+                foundPaths.push_back(std::move(path));
+            }
+            if (foundPaths.size() >= limit)
+                break;
         }
 
-        resp.paths = std::move(foundPaths);
+        if (!foundPaths.empty()) {
+            spdlog::info("[SearchService] ensurePathsFallback matched {} paths", foundPaths.size());
+            resp.paths = std::move(foundPaths);
+        } else {
+            spdlog::info(
+                "[SearchService] ensurePathsFallback using fallback paths count={} limit={}",
+                fallbackPaths.size(), req.limit);
+            resp.paths = std::move(fallbackPaths);
+        }
     }
 
     Result<SearchResponse> pathSearch(const SearchRequest& req,
@@ -892,7 +967,7 @@ private:
         resp.usedHybrid = false;
 
         std::size_t count = 0;
-        for (int attempt = 0; attempt < 10 && count == 0; ++attempt) {
+        for (int attempt = 0; attempt < 2 && count == 0; ++attempt) {
             auto docsResult = fetchAll();
             if (!docsResult) {
                 return Error{ErrorCode::InternalError,
@@ -970,7 +1045,8 @@ private:
 
     Result<SearchResponse> hybridSearch(const SearchRequest& req,
                                         const yams::search::ExtractScope& scope,
-                                        MetadataTelemetry* telemetry = nullptr) {
+                                        MetadataTelemetry* telemetry,
+                                        const std::string& pathPattern) {
         // Expect ctx_.hybridEngine->search(query, limit) returning Result<vector<...>>
         // Shape inferred from existing MCP code: each result has:
         //  - id
@@ -980,6 +1056,9 @@ private:
         yams::vector::SearchFilter filter;
         if (!scope.name.empty()) {
             filter.metadata_filters["name"] = scope.name;
+        }
+        if (!pathPattern.empty()) {
+            filter.metadata_filters["path"] = pathPattern;
         }
         if (!scope.ext.empty()) {
             std::string ext = scope.ext;
@@ -992,7 +1071,32 @@ private:
         if (!scope.mime.empty()) {
             filter.metadata_filters["mime_type"] = scope.mime;
         }
-        auto hres = ctx_.hybridEngine->search(req.query, req.limit, filter);
+        yams::search::SearchStageBudgets stageBudgets{};
+        bool vectorTimedOut = false;
+        bool keywordTimedOut = false;
+        stageBudgets.vector_timed_out = &vectorTimedOut;
+        stageBudgets.keyword_timed_out = &keywordTimedOut;
+
+        bool budgetsActive = false;
+        const auto engineConfig = ctx_.hybridEngine->getConfig();
+        auto applyBudget = [&](int requestMs, std::chrono::milliseconds configValue,
+                               std::optional<std::chrono::milliseconds>& target) {
+            if (requestMs > 0) {
+                target = std::chrono::milliseconds(requestMs);
+                budgetsActive = true;
+            } else if (configValue.count() > 0) {
+                target = configValue;
+                budgetsActive = true;
+            }
+        };
+
+        applyBudget(req.vectorStageTimeoutMs, engineConfig.vector_timeout_ms,
+                    stageBudgets.vector_timeout);
+        applyBudget(req.keywordStageTimeoutMs, engineConfig.keyword_timeout_ms,
+                    stageBudgets.keyword_timeout);
+
+        auto hres = ctx_.hybridEngine->search(req.query, req.limit, filter,
+                                              budgetsActive ? &stageBudgets : nullptr);
         if (!hres) {
             return Error{ErrorCode::InternalError, "Hybrid search failed: " + hres.error().message};
         }
@@ -1002,6 +1106,23 @@ private:
         SearchResponse resp;
         resp.type = "hybrid";
         resp.usedHybrid = true;
+
+        if (budgetsActive) {
+            if (stageBudgets.vector_timeout.has_value()) {
+                resp.searchStats["vector_budget_ms"] =
+                    std::to_string(stageBudgets.vector_timeout->count());
+            }
+            if (stageBudgets.keyword_timeout.has_value()) {
+                resp.searchStats["keyword_budget_ms"] =
+                    std::to_string(stageBudgets.keyword_timeout->count());
+            }
+        }
+        if (vectorTimedOut) {
+            resp.searchStats["vector_timeout_hit"] = "true";
+        }
+        if (keywordTimedOut) {
+            resp.searchStats["keyword_timeout_hit"] = "true";
+        }
 
         if (req.pathsOnly) {
             for (const auto& r : vec) {
@@ -1068,12 +1189,47 @@ private:
             processedQuery = escapeRegex(req.query);
         }
 
+        // Get docIds for tags if provided
+        std::optional<std::vector<int64_t>> docIds;
+        if (!req.tags.empty()) {
+            auto docsResult = retryMetadataOp(
+                [&]() {
+                    return ctx_.metadataRepo->findDocumentsByTags(req.tags, req.matchAllTags);
+                },
+                4, std::chrono::milliseconds(25), telemetry);
+            if (docsResult) {
+                std::vector<int64_t> ids;
+                const auto& docsVec = docsResult.value();
+                ids.reserve(docsVec.size());
+                for (const auto& doc : docsVec) {
+                    ids.push_back(doc.id);
+                }
+                docIds = std::move(ids);
+            }
+        }
+
+        auto convertResults = [&](const metadata::SearchResults& metaResults) {
+            std::vector<SearchItem> serviceResults;
+            serviceResults.reserve(metaResults.results.size());
+            for (const auto& item : metaResults.results) {
+                SearchItem it;
+                it.id = item.document.id;
+                it.hash = req.showHash ? item.document.sha256Hash : "";
+                it.title = item.document.fileName;
+                it.path = item.document.filePath;
+                it.score = item.score;
+                it.snippet = item.snippet;
+                serviceResults.push_back(std::move(it));
+            }
+            return serviceResults;
+        };
+
         // Fuzzy or full-text via metadata repository
         if (req.fuzzy) {
             auto r = retryMetadataOp(
                 [&]() {
                     return ctx_.metadataRepo->fuzzySearch(processedQuery, req.similarity,
-                                                          static_cast<int>(req.limit));
+                                                          static_cast<int>(req.limit), docIds);
                 },
                 4, std::chrono::milliseconds(25), telemetry);
             if (!r) {
@@ -1091,129 +1247,20 @@ private:
             if (req.pathsOnly) {
                 for (const auto& item : res.results) {
                     const auto& d = item.document;
-                    bool pathOk = true;
-                    bool metaFiltersOk = true;
-                    if (!req.pathPattern.empty()) {
-                        if (hasWildcard(req.pathPattern)) {
-                            std::string pattern = req.pathPattern;
-                            if (pattern.front() != '*' && pattern.front() != '/' &&
-                                pattern.find(":/") == std::string::npos) {
-                                pattern = "*" + pattern;
-                            }
-                            pathOk = wildcardMatch(d.filePath, pattern);
-                        } else {
-                            pathOk = d.filePath.find(req.pathPattern) != std::string::npos;
-                        }
-                    }
-                    if (!req.extension.empty()) {
-                        if (d.fileExtension != req.extension &&
-                            d.fileExtension != ("." + req.extension)) {
-                            metaFiltersOk = false;
-                        }
-                    }
-                    if (!req.mimeType.empty() && d.mimeType != req.mimeType) {
-                        metaFiltersOk = false;
-                    }
-                    if (pathOk && metaFiltersOk &&
-                        metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags, req.matchAllTags,
-                                        telemetry)) {
-                        resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
-                    }
-                }
-                // Fallback: if no paths matched but query is non-empty, try filename/path contains
-                if (resp.paths.empty() && !processedQuery.empty()) {
-                    auto allDocs = retryMetadataOp(
-                        [&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); }, 4,
-                        std::chrono::milliseconds(25), telemetry);
-                    if (allDocs) {
-                        for (const auto& d : allDocs.value()) {
-                            if (d.filePath.find(processedQuery) != std::string::npos ||
-                                d.fileName.find(processedQuery) != std::string::npos) {
-                                resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
-                                if (resp.paths.size() >= req.limit)
-                                    break;
-                            }
-                        }
-                    }
-                }
-                // Final fallback: if still empty, return up to 'limit' recent documents' paths
-                if (resp.paths.empty()) {
-                    auto allDocs = retryMetadataOp(
-                        [&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); }, 4,
-                        std::chrono::milliseconds(25), telemetry);
-                    if (allDocs) {
-                        for (const auto& d : allDocs.value()) {
-                            resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
-                            if (resp.paths.size() >= req.limit)
-                                break;
-                        }
-                    }
+                    resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
                 }
                 resp.total = resp.paths.size();
                 return resp;
             }
 
-            {
-                const auto& items = res.results;
-                const size_t n = items.size();
-                const size_t workers = recommendedWorkers(n);
-                std::atomic<size_t> next{0};
-                std::vector<std::optional<SearchItem>> slots(n);
-                auto worker = [&]() {
-                    while (true) {
-                        const size_t i = next.fetch_add(1);
-                        if (i >= n)
-                            break;
-                        const auto& item = items[i];
-                        const auto& d = item.document;
-                        bool pathOk = true;
-                        if (!req.pathPattern.empty()) {
-                            if (hasWildcard(req.pathPattern))
-                                pathOk = wildcardMatch(d.filePath, req.pathPattern);
-                            else
-                                pathOk = d.filePath.find(req.pathPattern) != std::string::npos;
-                        }
-                        bool metaFiltersOk = true;
-                        if (!req.extension.empty()) {
-                            if (d.fileExtension != req.extension &&
-                                d.fileExtension != ("." + req.extension))
-                                metaFiltersOk = false;
-                        }
-                        if (!req.mimeType.empty() && d.mimeType != req.mimeType)
-                            metaFiltersOk = false;
-                        if (!pathOk || !metaFiltersOk ||
-                            !metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags,
-                                             req.matchAllTags, telemetry))
-                            continue;
-
-                        SearchItem it;
-                        it.id = item.document.id;
-                        it.hash = req.showHash ? item.document.sha256Hash : "";
-                        it.title = item.document.fileName;
-                        it.path = item.document.filePath;
-                        it.score = item.score;
-                        it.snippet = item.snippet;
-                        slots[i] = std::move(it);
-                    }
-                };
-                std::vector<std::thread> ths;
-                ths.reserve(workers);
-                for (size_t t = 0; t < workers; ++t)
-                    ths.emplace_back(worker);
-                for (auto& th : ths)
-                    th.join();
-                resp.results.reserve(n);
-                for (size_t i = 0; i < n; ++i)
-                    if (slots[i].has_value())
-                        resp.results.push_back(std::move(*slots[i]));
-            }
+            resp.results = convertResults(res);
             normalizeScores(resp.results, resp.type);
             return resp;
         } else {
             auto r = retryMetadataOp(
                 [&]() {
-                    return ctx_.metadataRepo->search(processedQuery, static_cast<int>(req.limit),
-                                                     0);
+                    return ctx_.metadataRepo->search(processedQuery, static_cast<int>(req.limit), 0,
+                                                     docIds);
                 },
                 4, std::chrono::milliseconds(25), telemetry);
             if (!r) {
@@ -1236,113 +1283,13 @@ private:
             if (req.pathsOnly) {
                 for (const auto& item : res.results) {
                     const auto& d = item.document;
-                    bool pathOk = true;
-                    if (!req.pathPattern.empty()) {
-                        if (hasWildcard(req.pathPattern))
-                            pathOk = wildcardMatch(d.filePath, req.pathPattern);
-                        else
-                            pathOk = d.filePath.find(req.pathPattern) != std::string::npos;
-                    }
-                    bool metaFiltersOk = true;
-                    if (!req.extension.empty()) {
-                        if (d.fileExtension != req.extension &&
-                            d.fileExtension != ("." + req.extension))
-                            metaFiltersOk = false;
-                    }
-                    if (!req.mimeType.empty() && d.mimeType != req.mimeType)
-                        metaFiltersOk = false;
-                    if (pathOk && metaFiltersOk &&
-                        metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags, req.matchAllTags,
-                                        telemetry)) {
-                        resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
-                    }
-                }
-                if (resp.paths.empty() && !processedQuery.empty()) {
-                    auto allDocs = retryMetadataOp(
-                        [&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); }, 4,
-                        std::chrono::milliseconds(25), telemetry);
-                    if (allDocs) {
-                        for (const auto& d : allDocs.value()) {
-                            if (d.filePath.find(processedQuery) != std::string::npos ||
-                                d.fileName.find(processedQuery) != std::string::npos) {
-                                resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
-                                if (resp.paths.size() >= req.limit)
-                                    break;
-                            }
-                        }
-                    }
-                }
-                if (resp.paths.empty()) {
-                    auto allDocs = retryMetadataOp(
-                        [&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); }, 4,
-                        std::chrono::milliseconds(25), telemetry);
-                    if (allDocs) {
-                        for (const auto& d : allDocs.value()) {
-                            resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
-                            if (resp.paths.size() >= req.limit)
-                                break;
-                        }
-                    }
+                    resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
                 }
                 resp.total = resp.paths.size();
                 return resp;
             }
 
-            // Parallel shaping for full-text results (lock-free slots)
-            {
-                const auto& items = res.results;
-                const size_t n = items.size();
-                const size_t workers = recommendedWorkers(n);
-                std::atomic<size_t> next{0};
-                std::vector<std::optional<SearchItem>> slots(n);
-                auto worker = [&]() {
-                    while (true) {
-                        const size_t i = next.fetch_add(1);
-                        if (i >= n)
-                            break;
-                        const auto& item = items[i];
-                        const auto& d = item.document;
-                        bool pathOk = true;
-                        if (!req.pathPattern.empty()) {
-                            if (hasWildcard(req.pathPattern))
-                                pathOk = wildcardMatch(d.filePath, req.pathPattern);
-                            else
-                                pathOk = d.filePath.find(req.pathPattern) != std::string::npos;
-                        }
-                        bool metaFiltersOk = true;
-                        if (!req.extension.empty()) {
-                            if (d.fileExtension != req.extension &&
-                                d.fileExtension != ("." + req.extension))
-                                metaFiltersOk = false;
-                        }
-                        if (!req.mimeType.empty() && d.mimeType != req.mimeType)
-                            metaFiltersOk = false;
-                        if (!pathOk || !metaFiltersOk ||
-                            !metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags,
-                                             req.matchAllTags, telemetry))
-                            continue;
-
-                        SearchItem it;
-                        it.id = item.document.id;
-                        it.hash = req.showHash ? item.document.sha256Hash : "";
-                        it.title = item.document.fileName;
-                        it.path = item.document.filePath;
-                        it.score = item.score;
-                        it.snippet = item.snippet;
-                        slots[i] = std::move(it);
-                    }
-                };
-                std::vector<std::thread> ths;
-                ths.reserve(workers);
-                for (size_t t = 0; t < workers; ++t)
-                    ths.emplace_back(worker);
-                for (auto& th : ths)
-                    th.join();
-                resp.results.reserve(n);
-                for (size_t i = 0; i < n; ++i)
-                    if (slots[i].has_value())
-                        resp.results.push_back(std::move(*slots[i]));
-            }
+            resp.results = convertResults(res);
             normalizeScores(resp.results, resp.type);
             return resp;
         }

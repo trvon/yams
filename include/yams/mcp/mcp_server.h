@@ -138,6 +138,12 @@ public:
     setEnsureDaemonClientHook(std::function<Result<void>(const yams::daemon::ClientConfig&)> fn) {
         testEnsureDaemonClientHook_ = std::move(fn);
     }
+    void setDaemonClientSocketPathForTest(const std::filesystem::path& p) {
+        daemon_client_config_.socketPath = p;
+        daemon_client_ = nullptr;
+        daemon_client_lease_.reset();
+        yams::cli::cli_pool_reset_for_test();
+    }
 #endif
 
     // Public wrappers for HTTP mode (bridge to internal handlers)

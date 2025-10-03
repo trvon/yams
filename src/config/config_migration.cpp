@@ -387,6 +387,12 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
               {"max_memory_gb", "0"},
               {"log_level", "info"}}},
 
+            {"tuning",
+             {{"profile", "balanced"},
+              {"post_ingest_threads", "0"},
+              {"post_ingest_queue_max", "1000"},
+              {"pool_cooldown_ms", "500"}}},
+
             {"search.hybrid",
              {{"enable", "true"},
               {"enable_kg", "true"},

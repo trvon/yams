@@ -221,10 +221,14 @@ public:
         return Result<void>();
     }
     Result<void> removeFromIndex(int64_t) override { return ErrorCode::NotImplemented; }
-    Result<metadata::SearchResults> search(const std::string&, int, int) override {
+    Result<metadata::SearchResults>
+    search(const std::string&, int, int,
+           const std::optional<std::vector<int64_t>>& = std::nullopt) override {
         return ErrorCode::NotImplemented;
     }
-    Result<metadata::SearchResults> fuzzySearch(const std::string&, float, int) override {
+    Result<metadata::SearchResults>
+    fuzzySearch(const std::string&, float, int,
+                const std::optional<std::vector<int64_t>>& = std::nullopt) override {
         return ErrorCode::NotImplemented;
     }
     Result<void> buildFuzzyIndex() override { return ErrorCode::NotImplemented; }

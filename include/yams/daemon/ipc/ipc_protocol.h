@@ -72,6 +72,10 @@ struct SearchRequest {
     std::string indexedAfter;
     std::string indexedBefore;
 
+    int vectorStageTimeoutMs{0};
+    int keywordStageTimeoutMs{0};
+    int snippetHydrationTimeoutMs{0};
+
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
@@ -81,7 +85,9 @@ struct SearchRequest {
             << static_cast<int32_t>(beforeContext) << static_cast<int32_t>(context) << hashQuery
             << pathPattern << tags << matchAllTags << extension << mimeType << fileType << textOnly
             << binaryOnly << createdAfter << createdBefore << modifiedAfter << modifiedBefore
-            << indexedAfter << indexedBefore;
+            << indexedAfter << indexedBefore << static_cast<int32_t>(vectorStageTimeoutMs)
+            << static_cast<int32_t>(keywordStageTimeoutMs)
+            << static_cast<int32_t>(snippetHydrationTimeoutMs);
     }
 
     template <typename Deserializer>
@@ -240,6 +246,22 @@ struct SearchRequest {
             req.indexedBefore = std::move(ib.value());
         } else {
             return ib.error();
+        }
+
+        if (auto vst = deser.template read<int32_t>(); vst) {
+            req.vectorStageTimeoutMs = vst.value();
+        } else {
+            return vst.error();
+        }
+        if (auto kst = deser.template read<int32_t>(); kst) {
+            req.keywordStageTimeoutMs = kst.value();
+        } else {
+            return kst.error();
+        }
+        if (auto sht = deser.template read<int32_t>(); sht) {
+            req.snippetHydrationTimeoutMs = sht.value();
+        } else {
+            return sht.error();
         }
 
         return req;
@@ -2674,6 +2696,9 @@ struct StatusResponse {
     };
     std::vector<PluginSkipInfo> skippedPlugins;
 
+    // PBI-040, task 040-1: PostIngestQueue depth for FTS5 readiness checks
+    uint32_t postIngestQueueDepth{0};
+
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
@@ -3643,11 +3668,14 @@ struct AddDocumentResponse {
     std::string message;
     size_t documentsAdded = 0;
     size_t size = 0;
+    std::string snapshotId;    // Auto-generated timestamp ID for directory operations
+    std::string snapshotLabel; // Optional human-friendly label
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
-        ser << hash << path << documentsAdded << message << static_cast<uint64_t>(size);
+        ser << hash << path << documentsAdded << message << static_cast<uint64_t>(size)
+            << snapshotId << snapshotLabel;
     }
 
     template <typename Deserializer>
@@ -3674,6 +3702,14 @@ struct AddDocumentResponse {
         if (!s)
             return s.error();
         res.size = static_cast<size_t>(s.value());
+        auto sid = deser.readString();
+        if (!sid)
+            return sid.error();
+        res.snapshotId = std::move(sid.value());
+        auto slbl = deser.readString();
+        if (!slbl)
+            return slbl.error();
+        res.snapshotLabel = std::move(slbl.value());
         return res;
     }
 };

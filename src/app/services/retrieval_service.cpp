@@ -6,9 +6,9 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/system_executor.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
+#include <yams/daemon/client/global_io_context.h>
 
 namespace yams::app::services {
 
@@ -33,36 +33,54 @@ static yams::daemon::ClientConfig makeClientConfig(const RetrievalOptions& opts)
 Result<yams::daemon::GetResponse> RetrievalService::get(const yams::daemon::GetRequest& req,
                                                         const RetrievalOptions& opts) const {
     yams::daemon::DaemonClient client(makeClientConfig(opts));
-    std::promise<Result<yams::daemon::GetResponse>> p2;
-    auto f2 = p2.get_future();
+    std::promise<Result<yams::daemon::GetResponse>> p;
+    auto f = p.get_future();
     boost::asio::co_spawn(
-        boost::asio::system_executor{},
-        [&client, req, p = std::move(p2)]() mutable -> boost::asio::awaitable<void> {
+        yams::daemon::GlobalIOContext::global_executor(),
+        [&client, req, p = std::move(p)]() mutable -> boost::asio::awaitable<void> {
             auto r = co_await client.get(req);
             p.set_value(std::move(r));
             co_return;
         },
         boost::asio::detached);
-    if (f2.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) == std::future_status::ready)
-        return f2.get();
+
+    try {
+        if (f.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) ==
+            std::future_status::ready) {
+            return f.get();
+        }
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::InternalError,
+                     std::string("get failed with exception: ") + e.what()};
+    }
+
     return Error{ErrorCode::Timeout, "get timed out"};
 }
 
 Result<yams::daemon::GrepResponse> RetrievalService::grep(const yams::daemon::GrepRequest& req,
                                                           const RetrievalOptions& opts) const {
     yams::daemon::DaemonClient client(makeClientConfig(opts));
-    std::promise<Result<yams::daemon::GrepResponse>> p2;
-    auto f2 = p2.get_future();
+    std::promise<Result<yams::daemon::GrepResponse>> p;
+    auto future = p.get_future();
     boost::asio::co_spawn(
-        boost::asio::system_executor{},
-        [&client, req, p = std::move(p2)]() mutable -> boost::asio::awaitable<void> {
+        yams::daemon::GlobalIOContext::global_executor(),
+        [&client, req, p = std::move(p)]() mutable -> boost::asio::awaitable<void> {
             auto r = co_await client.streamingGrep(req);
             p.set_value(std::move(r));
             co_return;
         },
         boost::asio::detached);
-    if (f2.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) == std::future_status::ready)
-        return f2.get();
+
+    try {
+        if (future.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) ==
+            std::future_status::ready) {
+            return future.get();
+        }
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::InternalError,
+                     std::string("grep failed with exception: ") + e.what()};
+    }
+
     return Error{ErrorCode::Timeout, "grep timed out"};
 }
 
@@ -72,7 +90,7 @@ Result<yams::daemon::ListResponse> RetrievalService::list(const yams::daemon::Li
     std::promise<Result<yams::daemon::ListResponse>> p2;
     auto f2 = p2.get_future();
     boost::asio::co_spawn(
-        boost::asio::system_executor{},
+        yams::daemon::GlobalIOContext::global_executor(),
         [&client, req, p = std::move(p2)]() mutable -> boost::asio::awaitable<void> {
             auto r = co_await client.streamingList(req);
             p.set_value(std::move(r));
@@ -90,7 +108,7 @@ Result<void> RetrievalService::getToStdout(const yams::daemon::GetInitRequest& r
     std::promise<Result<void>> p2;
     auto f2 = p2.get_future();
     boost::asio::co_spawn(
-        boost::asio::system_executor{},
+        yams::daemon::GlobalIOContext::global_executor(),
         [&client, req, p = std::move(p2)]() mutable -> boost::asio::awaitable<void> {
             auto r = co_await client.getToStdout(req);
             p.set_value(std::move(r));
@@ -109,7 +127,7 @@ Result<void> RetrievalService::getToFile(const yams::daemon::GetInitRequest& req
     std::promise<Result<void>> p2;
     auto f2 = p2.get_future();
     boost::asio::co_spawn(
-        boost::asio::system_executor{},
+        yams::daemon::GlobalIOContext::global_executor(),
         [&client, req, outputPath, p = std::move(p2)]() mutable -> boost::asio::awaitable<void> {
             auto r = co_await client.getToFile(req, outputPath);
             p.set_value(std::move(r));
@@ -130,7 +148,7 @@ RetrievalService::getChunkedBuffer(const yams::daemon::GetInitRequest& req, std:
         std::promise<Result<ChunkedGetResult>> p2;
         auto f2 = p2.get_future();
         boost::asio::co_spawn(
-            boost::asio::system_executor{},
+            yams::daemon::GlobalIOContext::global_executor(),
             [&client, req, capBytes, p = std::move(p2)]() mutable -> boost::asio::awaitable<void> {
                 auto init = co_await client.getInit(req);
                 if (!init) {
@@ -381,6 +399,12 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
     }
 
     // 5) Hybrid search fallback for best match
+    // PBI-040, task 040-1: Fast-path check if FTS5 is ready before attempting search
+    if (!isFTS5Ready(opts)) {
+        return Error{ErrorCode::NotFound,
+                     "document not found (search index updating, try again in a few seconds)"};
+    }
+
     try {
         yams::daemon::DaemonClient client(makeClientConfig(opts));
         yams::daemon::SearchRequest sreq;
@@ -393,7 +417,7 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
         std::promise<Result<yams::daemon::SearchResponse>> p;
         auto f = p.get_future();
         boost::asio::co_spawn(
-            boost::asio::system_executor{},
+            yams::daemon::GlobalIOContext::global_executor(),
             [&client, sreq, pr = std::move(p)]() mutable -> boost::asio::awaitable<void> {
                 auto r = co_await client.streamingSearch(sreq);
                 pr.set_value(std::move(r));
@@ -431,6 +455,41 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
     }
 
     return Error{ErrorCode::NotFound, "document not found by name"};
+}
+
+// PBI-040, task 040-1: Check if FTS5 index is ready for queries
+bool RetrievalService::isFTS5Ready(const RetrievalOptions& opts) const {
+    try {
+        yams::daemon::DaemonClient client(makeClientConfig(opts));
+        std::promise<Result<yams::daemon::StatusResponse>> p;
+        auto f = p.get_future();
+        boost::asio::co_spawn(
+            yams::daemon::GlobalIOContext::global_executor(),
+            [&client, pr = std::move(p)]() mutable -> boost::asio::awaitable<void> {
+                auto r = co_await client.status();
+                pr.set_value(std::move(r));
+                co_return;
+            },
+            boost::asio::detached);
+
+        // Fast timeout for readiness check (500ms)
+        if (f.wait_for(std::chrono::milliseconds(500)) != std::future_status::ready) {
+            return false; // Daemon not responsive -> not ready
+        }
+
+        auto status = f.get();
+        if (!status) {
+            return false; // Status query failed -> not ready
+        }
+
+        // Consider FTS5 ready if queue depth is low (< 100 tasks)
+        // Threshold balances responsiveness vs. false negatives
+        constexpr uint32_t kReadyThreshold = 100;
+        return status.value().postIngestQueueDepth < kReadyThreshold;
+
+    } catch (...) {
+        return false; // Any error -> assume not ready
+    }
 }
 
 } // namespace yams::app::services

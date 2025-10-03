@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <gtest/gtest.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
 
@@ -65,7 +66,7 @@ TEST(DaemonVectorScoring, RebuildEnablesVectorsWithoutBlocking) {
         ASSERT_TRUE(eg);
         // Schedule rebuild
         boost::asio::co_spawn(
-            boost::asio::system_executor(),
+            yams::daemon::GlobalIOContext::global_executor(),
             [sm]() -> boost::asio::awaitable<void> {
                 co_await sm->co_enableEmbeddingsAndRebuild();
                 co_return;

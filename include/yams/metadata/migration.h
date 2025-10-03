@@ -175,6 +175,12 @@ private:
 
     // Version 10: Rebuild FTS5 with improved tokenization for code identifiers
     static Migration upgradeFTS5Tokenization();
+
+    // Version 11: Add tree snapshots schema for directory versioning
+    static Migration createTreeSnapshotsSchema();
+
+    // Version 12: Add tree diffs and changes schema for diff persistence
+    static Migration createTreeDiffsSchema();
 };
 
 /**

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <thread>
+#include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
 
@@ -11,6 +12,10 @@ public:
     static GlobalIOContext& instance();
 
     boost::asio::io_context& get_io_context();
+
+    static boost::asio::any_io_executor global_executor() {
+        return instance().get_io_context().get_executor();
+    }
 
 private:
     GlobalIOContext();

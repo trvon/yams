@@ -25,8 +25,27 @@ struct DocEntry {
     std::string name;
     size_t size = 0;
     std::string type;
+    std::string path;
     std::chrono::system_clock::time_point createdAt{};
     int64_t id = 0;
+};
+
+struct ModalState {
+    enum class Type { None, AddDocument, TagEdit, Reindex };
+
+    Type type = Type::None;
+    std::string title;
+    std::string input;
+    std::string hint;
+    std::string error;
+
+    void reset() {
+        type = Type::None;
+        title.clear();
+        input.clear();
+        hint.clear();
+        error.clear();
+    }
 };
 
 // Centralized UI state for the browser TUI
@@ -84,7 +103,7 @@ struct BrowseState {
 
     void setStatus(std::string message, Status::Level level = Status::Info,
                    std::chrono::seconds duration = std::chrono::seconds(0)) {
-        status = {level, std::move(message)};
+        status = {level, std::move(message), {}};
         if (duration.count() > 0) {
             status.expires = std::chrono::steady_clock::now() + duration;
         }
@@ -106,6 +125,15 @@ struct BrowseState {
     std::vector<std::string> viewerLines;
     int viewerScrollOffset = 0;
     bool viewerWrap = false; // when true, soft-wrap long lines in viewer
+
+    // Search/filter
+    bool useFuzzySearch = false;
+    std::string filterExt;
+    std::string filterMime;
+    std::string filterTag;
+
+    // Modal dialog state (add/update/reindex)
+    ModalState modal;
 };
 
 } // namespace yams::cli::tui

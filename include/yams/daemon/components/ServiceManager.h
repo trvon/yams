@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -92,6 +93,36 @@ public:
     PostIngestQueue* getPostIngestQueue() const { return postIngest_.get(); }
     // Resize PostIngestQueue worker threads; returns false if unchanged/missing.
     bool resizePostIngestThreads(std::size_t target);
+    struct IngestMetricsSnapshot {
+        std::size_t queued;
+        std::size_t active;
+        std::size_t target;
+    };
+
+    void publishIngestMetrics(std::size_t queued, std::size_t active) {
+        ingestQueued_.store(queued, std::memory_order_relaxed);
+        ingestActive_.store(active, std::memory_order_relaxed);
+    }
+    void publishIngestQueued(std::size_t queued) {
+        ingestQueued_.store(queued, std::memory_order_relaxed);
+    }
+    void publishIngestActive(std::size_t active) {
+        ingestActive_.store(active, std::memory_order_relaxed);
+    }
+    void setIngestWorkerTarget(std::size_t target) {
+        if (target < 1)
+            target = 1;
+        ingestWorkerTarget_.store(target, std::memory_order_relaxed);
+    }
+    std::size_t ingestWorkerTarget() const {
+        auto v = ingestWorkerTarget_.load(std::memory_order_relaxed);
+        return v == 0 ? 1 : v;
+    }
+    IngestMetricsSnapshot getIngestMetricsSnapshot() const {
+        return {ingestQueued_.load(std::memory_order_relaxed),
+                ingestActive_.load(std::memory_order_relaxed),
+                ingestWorkerTarget_.load(std::memory_order_relaxed)};
+    }
     void enqueuePostIngest(const std::string& hash, const std::string& mime) {
         bool routedViaBus = false;
         if (yams::daemon::TuneAdvisor::useInternalBusForPostIngest()) {
@@ -346,6 +377,10 @@ private:
     std::atomic<std::size_t> poolPosted_{0};
     std::atomic<std::size_t> poolCompleted_{0};
     std::size_t poolThreads_{0};
+
+    std::atomic<std::size_t> ingestQueued_{0};
+    std::atomic<std::size_t> ingestActive_{0};
+    std::atomic<std::size_t> ingestWorkerTarget_{1};
 
     std::unique_ptr<IngestService> ingestService_;
     std::shared_ptr<yams::search::HybridSearchEngine> searchEngine_;

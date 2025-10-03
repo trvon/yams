@@ -25,6 +25,34 @@ void set_current_thread_name(const std::string& name) {
     pthread_setname_np(name.c_str());
 #endif
 }
+
+bool stream_trace_enabled() {
+    static int enabled = [] {
+        if (const char* raw = std::getenv("YAMS_STREAM_TRACE")) {
+            std::string v(raw);
+            for (auto& ch : v)
+                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            if (v == "1" || v == "true" || v == "on")
+                return 1;
+        }
+        return 0;
+    }();
+    return enabled != 0;
+}
+
+bool socket_run_diag_enabled() {
+    static int enabled = [] {
+        if (const char* raw = std::getenv("YAMS_SOCKET_RUN_DIAG")) {
+            std::string v(raw);
+            for (auto& ch : v)
+                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            if (v == "1" || v == "true" || v == "on")
+                return 1;
+        }
+        return 0;
+    }();
+    return enabled != 0;
+}
 } // namespace
 
 #include <spdlog/spdlog.h>
@@ -39,6 +67,7 @@ void set_current_thread_name(const std::string& name) {
 #include <boost/asio/write.hpp>
 
 #include <atomic>
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 
@@ -126,7 +155,22 @@ Result<void> SocketServer::start() {
 
         actualSocketPath_ = sockPath;
 
-        co_spawn(io_context_, accept_loop(), detached);
+        // Seed writer budget prior to first connection
+        std::size_t initialBudget = TuneAdvisor::serverWriterBudgetBytesPerTurn();
+        if (initialBudget == 0)
+            initialBudget = TuneAdvisor::writerBudgetBytesPerTurn();
+        if (initialBudget == 0)
+            initialBudget = 256 * 1024;
+        setWriterBudget(initialBudget);
+
+        co_spawn(
+            io_context_,
+            [this]() -> awaitable<void> {
+                co_await accept_loop();
+                co_return;
+            },
+            detached);
+        spdlog::info("SocketServer: accept_loop scheduled");
 
         try {
             auto rec = TuneAdvisor::recommendedThreads(0.5 /*backgroundFactor*/);
@@ -137,16 +181,37 @@ Result<void> SocketServer::start() {
         } catch (...) {
         }
 
+        workerGuards_.reserve(config_.workerThreads);
         for (size_t i = 0; i < config_.workerThreads; ++i) {
             auto flag = std::make_shared<std::atomic<bool>>(false);
             IoWorker w{};
             w.exit = flag;
-            w.th = std::thread([this, i, flag] {
+            workerGuards_.push_back(
+                std::make_shared<
+                    boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>(
+                    io_context_.get_executor()));
+            w.th = std::thread([this, i, flag, guard = workerGuards_.back()] {
                 set_current_thread_name("yams-ipc-worker-" + std::to_string(i));
+                const bool trace = stream_trace_enabled();
+                if (trace) {
+                    spdlog::info("stream-trace: worker {} entering io_context.run loop", i);
+                }
                 try {
                     while (!stopping_.load(std::memory_order_relaxed) &&
                            !flag->load(std::memory_order_relaxed)) {
-                        io_context_.run_for(std::chrono::milliseconds(100));
+                        auto processed = io_context_.run_one();
+                        if (processed == 0) {
+                            using namespace std::chrono_literals;
+                            std::this_thread::sleep_for(1ms);
+                            if (trace) {
+                                static thread_local uint32_t idle_ticks = 0;
+                                if (++idle_ticks % 500 == 0) {
+                                    spdlog::info("stream-trace: worker {} idle", i);
+                                }
+                            }
+                        } else if (trace) {
+                            spdlog::info("stream-trace: worker {} handled {} events", i, processed);
+                        }
                     }
                 } catch (const std::exception& e) {
                     spdlog::error("Worker thread exception: {}", e.what());
@@ -156,6 +221,21 @@ Result<void> SocketServer::start() {
                 std::lock_guard<std::mutex> lk(workersMutex_);
                 workers_.emplace_back(std::move(w));
             }
+        }
+
+        if (socket_run_diag_enabled()) {
+            diagThread_ = std::thread([this] {
+                set_current_thread_name("yams-ipc-diag");
+                try {
+                    spdlog::info("SocketServer diag thread: io_context.run starting");
+                    auto handlers = io_context_.run();
+                    spdlog::info(
+                        "SocketServer diag thread: io_context.run exited handlers={} stopped={}",
+                        handlers, io_context_.stopped());
+                } catch (const std::exception& e) {
+                    spdlog::error("SocketServer diag thread exception: {}", e.what());
+                }
+            });
         }
 
         start_io_reconciler();
@@ -287,6 +367,17 @@ Result<void> SocketServer::stop() {
             workers_.clear();
         }
         work_guard_.reset();
+        workerGuards_.clear();
+
+        if (diagThread_.joinable()) {
+            try {
+                diagThread_.join();
+            } catch (const std::exception& e) {
+                spdlog::warn("Diag thread join exception: {}", e.what());
+            } catch (...) {
+                spdlog::warn("Diag thread join unknown exception");
+            }
+        }
 
         if (state_) {
             state_->readiness.ipcServerReady.store(false);
@@ -301,7 +392,9 @@ Result<void> SocketServer::stop() {
             actualSocketPath_.clear();
         }
 
-        spdlog::info("Socket server stopped");
+        spdlog::info("Socket server stopped (total_conn={} active_conn={})",
+                     totalConnections_.load(std::memory_order_relaxed),
+                     activeConnections_.load(std::memory_order_relaxed));
     } catch (const std::exception& e) {
         spdlog::error("SocketServer::stop unhandled exception: {}", e.what());
     } catch (...) {
@@ -309,6 +402,18 @@ Result<void> SocketServer::stop() {
     }
     stopping_.store(false, std::memory_order_relaxed);
     return {};
+}
+
+void SocketServer::setWriterBudget(std::size_t bytes) {
+    if (bytes == 0)
+        bytes = TuneAdvisor::writerBudgetBytesPerTurn();
+    if (bytes == 0)
+        bytes = 256 * 1024;
+    if (!writerBudget_)
+        writerBudget_ = std::make_shared<std::atomic<std::size_t>>(bytes);
+    else
+        writerBudget_->store(bytes, std::memory_order_relaxed);
+    MuxMetricsRegistry::instance().setWriterBudget(bytes);
 }
 
 void SocketServer::start_io_reconciler() {
@@ -342,6 +447,7 @@ void SocketServer::start_io_reconciler() {
                             const std::size_t idx = current + i;
                             w.th = std::thread([this, idx, flag] {
                                 set_current_thread_name("yams-ipc-worker-" + std::to_string(idx));
+                                const bool trace = stream_trace_enabled();
                                 try {
                                     while (!stopping_.load(std::memory_order_relaxed) &&
                                            !flag->load(std::memory_order_relaxed)) {
@@ -354,7 +460,29 @@ void SocketServer::start_io_reconciler() {
                                                 poll_ms = TuneAdvisor::workerPollMs();
                                         } catch (...) {
                                         }
-                                        io_context_.run_for(std::chrono::milliseconds(poll_ms));
+                                        auto handled =
+                                            io_context_.run_for(std::chrono::milliseconds(poll_ms));
+                                        if (trace && handled > 0) {
+                                            spdlog::info("stream-trace: worker {} processed {} "
+                                                         "handlers (io_stopped={})",
+                                                         idx, handled, io_context_.stopped());
+                                        }
+                                        if (trace && handled == 0) {
+                                            static thread_local uint32_t idle_ticks = 0;
+                                            if (++idle_ticks % 50 == 0) {
+                                                spdlog::info(
+                                                    "stream-trace: worker {} idle (io_stopped={})",
+                                                    idx, io_context_.stopped());
+                                            }
+                                        }
+                                        if (io_context_.stopped()) {
+                                            io_context_.restart();
+                                            if (trace) {
+                                                spdlog::info(
+                                                    "stream-trace: worker {} restarting io_context",
+                                                    idx);
+                                            }
+                                        }
                                     }
                                 } catch (const std::exception& e) {
                                     spdlog::error("Worker thread exception: {}", e.what());
@@ -400,7 +528,28 @@ void SocketServer::stop_io_reconciler() {
 }
 
 awaitable<void> SocketServer::accept_loop() {
+    static const bool trace = stream_trace_enabled();
+    static bool trace_env_logged = false;
+    static bool logged_entry = false;
     spdlog::debug("Accept loop started");
+    if (!logged_entry) {
+        logged_entry = true;
+        spdlog::info("SocketServer: accept_loop coroutine entered");
+    }
+    if (!trace && !trace_env_logged) {
+        trace_env_logged = true;
+        if (const char* raw = std::getenv("YAMS_STREAM_TRACE")) {
+            spdlog::info("stream-trace: accept_loop env present but disabled ('{}')", raw);
+        } else {
+            spdlog::info("stream-trace: accept_loop env not set");
+        }
+    }
+    if (trace) {
+        spdlog::info("stream-trace: accept_loop starting (max_conn={} worker_threads={} socket={})",
+                     config_.maxConnections, config_.workerThreads,
+                     actualSocketPath_.empty() ? config_.socketPath.string()
+                                               : actualSocketPath_.string());
+    }
 
     while (running_ && !stopping_) {
 #if defined(TRACY_ENABLE)
@@ -469,6 +618,11 @@ awaitable<void> SocketServer::accept_loop() {
             } catch (...) {
             }
             if (activeConnections_.load() >= config_.maxConnections) {
+                if (trace) {
+                    spdlog::info("stream-trace: accept throttled (active={} max={})",
+                                 activeConnections_.load(std::memory_order_relaxed),
+                                 config_.maxConnections);
+                }
                 if (state_) {
                     state_->stats.acceptCapacityDelays.fetch_add(1, std::memory_order_relaxed);
                 }
@@ -478,12 +632,24 @@ awaitable<void> SocketServer::accept_loop() {
                 continue;
             }
 
+            if (trace) {
+                spdlog::info("stream-trace: waiting for accept (active={} total={})",
+                             activeConnections_.load(std::memory_order_relaxed),
+                             totalConnections_.load(std::memory_order_relaxed));
+            }
             auto socket = co_await acceptor_->async_accept(use_awaitable);
+
+            if (trace) {
+                spdlog::info("stream-trace: accept completed (active={} total={})",
+                             activeConnections_.load(std::memory_order_relaxed),
+                             totalConnections_.load(std::memory_order_relaxed));
+            }
 
             auto current = activeConnections_.fetch_add(1) + 1;
             totalConnections_.fetch_add(1);
 
-            spdlog::debug("New connection accepted, active: {}", current);
+            spdlog::info("SocketServer: accepted connection, active={} total={}", current,
+                         totalConnections_.load());
 
             if (state_) {
                 state_->stats.activeConnections.store(current);
@@ -579,19 +745,44 @@ awaitable<void> SocketServer::handle_connection(local::socket socket) {
 #if defined(TRACY_ENABLE)
     ZoneScopedN("SocketServer::handle_connection");
 #endif
+    static const bool trace = stream_trace_enabled();
     struct CleanupGuard {
         SocketServer* server;
+        bool trace;
         ~CleanupGuard() {
             auto current = server->activeConnections_.fetch_sub(1) - 1;
             if (server->state_) {
                 server->state_->stats.activeConnections.store(current);
             }
-            spdlog::debug("Connection closed, active: {}", current);
+            if (trace) {
+                spdlog::info("stream-trace: handle_connection cleanup active={} total={}", current,
+                             server->totalConnections_.load());
+            } else {
+                spdlog::debug("Connection closed, active: {}", current);
+            }
         }
-    } guard{this};
+    } guard{this, trace};
+
+    if (trace) {
+        spdlog::info("stream-trace: handle_connection begin active={} total={} socket_valid={}",
+                     activeConnections_.load(std::memory_order_relaxed),
+                     totalConnections_.load(std::memory_order_relaxed), socket.is_open());
+    }
 
     try {
+        if (!writerBudget_) {
+            std::size_t initialBudget = TuneAdvisor::serverWriterBudgetBytesPerTurn();
+            if (initialBudget == 0)
+                initialBudget = TuneAdvisor::writerBudgetBytesPerTurn();
+            if (initialBudget == 0)
+                initialBudget = 256 * 1024;
+            writerBudget_ = std::make_shared<std::atomic<std::size_t>>(initialBudget);
+        }
+
         RequestHandler::Config handlerConfig;
+        handlerConfig.worker_executor = io_context_.get_executor();
+        handlerConfig.writer_budget_ref = writerBudget_;
+        handlerConfig.writer_budget_bytes_per_turn = writerBudget_->load(std::memory_order_relaxed);
         handlerConfig.enable_streaming = true;
         handlerConfig.enable_multiplexing = true;
         if (dispatcher_) {
@@ -615,7 +806,18 @@ awaitable<void> SocketServer::handle_connection(local::socket socket) {
         handlerConfig.read_timeout = timeoutSeconds;
         handlerConfig.write_timeout = timeoutSeconds;
         handlerConfig.max_inflight_per_connection = TuneAdvisor::serverMaxInflightPerConn();
-        handlerConfig.writer_budget_bytes_per_turn = TuneAdvisor::serverWriterBudgetBytesPerTurn();
+        if (handlerConfig.writer_budget_bytes_per_turn == 0) {
+            handlerConfig.writer_budget_bytes_per_turn =
+                TuneAdvisor::serverWriterBudgetBytesPerTurn();
+            if (handlerConfig.writer_budget_bytes_per_turn == 0)
+                handlerConfig.writer_budget_bytes_per_turn =
+                    TuneAdvisor::writerBudgetBytesPerTurn();
+            if (handlerConfig.writer_budget_bytes_per_turn == 0)
+                handlerConfig.writer_budget_bytes_per_turn = 256 * 1024;
+            if (writerBudget_)
+                writerBudget_->store(handlerConfig.writer_budget_bytes_per_turn,
+                                     std::memory_order_relaxed);
+        }
         MuxMetricsRegistry::instance().setWriterBudget(handlerConfig.writer_budget_bytes_per_turn);
         RequestDispatcher* disp = nullptr;
         {
@@ -635,7 +837,7 @@ awaitable<void> SocketServer::handle_connection(local::socket socket) {
 
         co_await handler.handle_connection(std::move(socket), token);
     } catch (const std::exception& e) {
-        spdlog::debug("Connection handler error: {}", e.what());
+        spdlog::error("SocketServer::handle_connection error: {}", e.what());
     }
 }
 

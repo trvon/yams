@@ -1,8 +1,17 @@
 #include <spdlog/spdlog.h>
+#include <algorithm>
+#include <chrono>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
+#include <thread>
 #include <yams/app/services/services.hpp>
 #include <yams/common/pattern_utils.h>
 #include <yams/crypto/hasher.h>
+#include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/metadata/tree_builder.h>
 
 namespace yams::app::services {
 
@@ -126,46 +135,122 @@ public:
             spdlog::info("[IndexingService] addDirectory: collected {} candidate files under '{}'",
                          entries.size(), req.directoryPath);
 
-            // Parallel processing with bounded workers
-            std::atomic<size_t> idx{0};
-            // Note: Underlying store and extraction paths may not be fully thread-safe across
-            // platforms/tests. Process serially to ensure correctness and avoid races.
-            size_t workers = 1;
-            std::mutex respMutex;
-            auto workerFn = [&]() {
-                while (true) {
-                    size_t i = idx.fetch_add(1);
-                    if (i >= entries.size())
-                        break;
-                    AddDirectoryResponse localResp; // partial counts
-                    const auto& ent = entries[i];
-                    // Pre-log include/exclude decision for visibility
-                    bool willInclude = shouldIncludeFile(req.directoryPath, ent.path().string(),
-                                                         req.includePatterns, req.excludePatterns);
-                    spdlog::info("[IndexingService] candidate: '{}' -> {}", ent.path().string(),
-                                 willInclude ? "include" : "skip");
-                    processDirectoryEntry(ent, req, localResp);
-                    // Merge local results into shared response
-                    std::lock_guard<std::mutex> lk(respMutex);
-                    response.filesProcessed += localResp.filesProcessed;
-                    response.filesIndexed += localResp.filesIndexed;
-                    response.filesSkipped += localResp.filesSkipped;
-                    response.filesFailed += localResp.filesFailed;
-                    for (auto& r : localResp.results)
-                        response.results.push_back(std::move(r));
-                }
-            };
-            std::vector<std::thread> threads;
-            threads.reserve(workers);
-            for (size_t t = 0; t < workers; ++t)
-                threads.emplace_back(workerFn);
-            for (auto& th : threads)
-                th.join();
+            const std::size_t backlog = entries.size();
+            if (backlog == 0) {
+                publishIngestMetrics(0, 0);
+            } else {
+                std::atomic<size_t> idx{0};
+                std::atomic<size_t> remaining{backlog};
+                size_t workers = resolveWorkerCount(backlog);
+                if (workers == 0)
+                    workers = 1;
+                publishIngestMetrics(backlog, workers);
+                std::mutex respMutex;
+                auto workerFn = [&]() {
+                    while (true) {
+                        size_t i = idx.fetch_add(1, std::memory_order_relaxed);
+                        if (i >= backlog)
+                            break;
+                        AddDirectoryResponse localResp; // partial counts
+                        const auto& ent = entries[i];
+                        bool willInclude =
+                            shouldIncludeFile(req.directoryPath, ent.path().string(),
+                                              req.includePatterns, req.excludePatterns);
+                        spdlog::info("[IndexingService] candidate: '{}' -> {}", ent.path().string(),
+                                     willInclude ? "include" : "skip");
+                        processDirectoryEntry(ent, req, localResp);
+                        auto leftBefore = remaining.fetch_sub(1, std::memory_order_relaxed);
+                        if (leftBefore > 0)
+                            publishIngestQueued(leftBefore - 1);
+                        std::lock_guard<std::mutex> lk(respMutex);
+                        response.filesProcessed += localResp.filesProcessed;
+                        response.filesIndexed += localResp.filesIndexed;
+                        response.filesSkipped += localResp.filesSkipped;
+                        response.filesFailed += localResp.filesFailed;
+                        for (auto& r : localResp.results)
+                            response.results.push_back(std::move(r));
+                    }
+                };
+                std::vector<std::thread> threads;
+                threads.reserve(workers);
+                for (size_t t = 0; t < workers; ++t)
+                    threads.emplace_back(workerFn);
+                for (auto& th : threads)
+                    th.join();
+                publishIngestMetrics(0, 0);
+            }
 
             spdlog::info("[IndexingService] addDirectory: done. processed={} indexed={} skipped={} "
                          "failed={}",
                          response.filesProcessed, response.filesIndexed, response.filesSkipped,
                          response.filesFailed);
+
+            // Generate automatic snapshot for directory operations
+            response.snapshotId = generateSnapshotId();
+            response.snapshotLabel = req.snapshotLabel;
+
+            // Detect git metadata
+            auto gitMeta = detectGitMetadata(dirPath);
+
+            // TODO: Build Merkle tree for the directory (PBI-043)
+            // TreeBuilder integration requires IStorageEngine interface
+            // For now, tree_root_hash will be NULL until we add adapter layer
+            std::string treeRootHash;
+
+            // Store snapshot metadata in tree_snapshots table
+            if (ctx_.metadataRepo && !response.snapshotId.empty()) {
+                try {
+                    metadata::TreeSnapshotRecord snapshot;
+                    snapshot.snapshotId = response.snapshotId;
+                    snapshot.rootTreeHash = treeRootHash;
+                    snapshot.createdTime = std::chrono::duration_cast<std::chrono::seconds>(
+                                               std::chrono::system_clock::now().time_since_epoch())
+                                               .count();
+                    snapshot.fileCount = response.filesIndexed;
+                    snapshot.totalBytes = 0; // TODO: accumulate from file sizes
+
+                    // Store metadata fields
+                    snapshot.metadata["directory_path"] = req.directoryPath;
+                    if (!req.snapshotLabel.empty()) {
+                        snapshot.metadata["snapshot_label"] = req.snapshotLabel;
+                    }
+                    if (!gitMeta.commitHash.empty()) {
+                        snapshot.metadata["git_commit"] = gitMeta.commitHash;
+                    }
+                    if (!gitMeta.branch.empty()) {
+                        snapshot.metadata["git_branch"] = gitMeta.branch;
+                    }
+                    if (!gitMeta.remoteUrl.empty()) {
+                        snapshot.metadata["git_remote"] = gitMeta.remoteUrl;
+                    }
+                    if (!req.collection.empty()) {
+                        snapshot.metadata["collection"] = req.collection;
+                    }
+
+                    auto storeResult = ctx_.metadataRepo->upsertTreeSnapshot(snapshot);
+                    if (!storeResult) {
+                        spdlog::warn("[IndexingService] Failed to store snapshot metadata: {}",
+                                     storeResult.error().message);
+                    } else {
+                        spdlog::info("[IndexingService] Stored snapshot metadata: id={}",
+                                     response.snapshotId);
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::warn("[IndexingService] Exception storing snapshot: {}", e.what());
+                }
+            }
+
+            // Log summary
+            if (!gitMeta.commitHash.empty()) {
+                spdlog::info(
+                    "[IndexingService] Snapshot {} created for {} files (git: {}, tree: {})",
+                    response.snapshotId, response.filesIndexed, gitMeta.commitHash.substr(0, 8),
+                    treeRootHash.empty() ? "none" : treeRootHash.substr(0, 8));
+            } else {
+                spdlog::info("[IndexingService] Snapshot {} created for {} files (tree: {})",
+                             response.snapshotId, response.filesIndexed,
+                             treeRootHash.empty() ? "none" : treeRootHash.substr(0, 8));
+            }
 
             return response;
         } catch (const std::exception& e) {
@@ -176,6 +261,109 @@ public:
 
 private:
     AppContext ctx_;
+
+    /**
+     * Generate ISO 8601 timestamp-based snapshot ID with microsecond precision.
+     * Format: 2025-10-01T14:30:00.123456Z
+     */
+    std::string generateSnapshotId() const {
+        auto now = std::chrono::system_clock::now();
+        auto time_t_now = std::chrono::system_clock::to_time_t(now);
+        auto micros =
+            std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count() %
+            1000000;
+
+        std::tm tm_utc;
+#ifdef _WIN32
+        gmtime_s(&tm_utc, &time_t_now);
+#else
+        gmtime_r(&time_t_now, &tm_utc);
+#endif
+
+        std::ostringstream oss;
+        oss << std::put_time(&tm_utc, "%Y-%m-%dT%H:%M:%S") << '.' << std::setfill('0')
+            << std::setw(6) << micros << 'Z';
+        return oss.str();
+    }
+
+    /**
+     * Detect git repository metadata (commit hash, branch, remote URL).
+     * Returns empty values if not in a git repository.
+     */
+    struct GitMetadata {
+        std::string commitHash;
+        std::string branch;
+        std::string remoteUrl;
+    };
+
+    GitMetadata detectGitMetadata(const std::filesystem::path& path) const {
+        GitMetadata meta;
+
+        // Find git directory by walking up from path
+        std::filesystem::path gitDir;
+        auto current = std::filesystem::absolute(path);
+        while (current.has_parent_path()) {
+            auto candidate = current / ".git";
+            if (std::filesystem::exists(candidate)) {
+                gitDir = candidate;
+                break;
+            }
+            current = current.parent_path();
+        }
+
+        if (gitDir.empty()) {
+            return meta; // Not in a git repository
+        }
+
+        // Read HEAD to get branch
+        try {
+            auto headPath = gitDir / "HEAD";
+            if (std::filesystem::exists(headPath)) {
+                std::ifstream headFile(headPath);
+                std::string line;
+                if (std::getline(headFile, line)) {
+                    if (line.starts_with("ref: refs/heads/")) {
+                        meta.branch = line.substr(16); // Skip "ref: refs/heads/"
+                    } else if (line.size() == 40) {
+                        meta.commitHash = line; // Detached HEAD
+                    }
+                }
+            }
+
+            // Read commit hash from branch ref
+            if (!meta.branch.empty() && meta.commitHash.empty()) {
+                auto refPath = gitDir / "refs" / "heads" / meta.branch;
+                if (std::filesystem::exists(refPath)) {
+                    std::ifstream refFile(refPath);
+                    std::getline(refFile, meta.commitHash);
+                }
+            }
+
+            // Read remote URL from config
+            auto configPath = gitDir / "config";
+            if (std::filesystem::exists(configPath)) {
+                std::ifstream configFile(configPath);
+                std::string line;
+                bool inRemoteSection = false;
+                while (std::getline(configFile, line)) {
+                    // Simple parser: look for [remote "origin"] then url =
+                    if (line.find("[remote \"origin\"]") != std::string::npos) {
+                        inRemoteSection = true;
+                    } else if (inRemoteSection && line.find("url = ") != std::string::npos) {
+                        auto pos = line.find("url = ");
+                        meta.remoteUrl = line.substr(pos + 6);
+                        break;
+                    } else if (line.starts_with("[") && inRemoteSection) {
+                        break; // Left remote section
+                    }
+                }
+            }
+        } catch (const std::exception& e) {
+            spdlog::debug("Failed to read git metadata: {}", e.what());
+        }
+
+        return meta;
+    }
 
     void processDirectoryEntry(const std::filesystem::directory_entry& entry,
                                const AddDirectoryRequest& req, AddDirectoryResponse& response) {
@@ -300,11 +488,50 @@ private:
             return true;
 
         // Include if any include pattern matches filename or rel path
-        if (yams::common::matches_any_path(nfile, includePatterns))
+        if (yams::common::matches_any(nfile, includePatterns)) {
             return true;
-        if (yams::common::matches_any_path(relPath, includePatterns))
+        }
+        if (yams::common::matches_any_path(relPath, includePatterns)) {
             return true;
+        }
         return false;
+    }
+
+    std::size_t resolveWorkerCount(std::size_t backlog) const {
+        if (backlog == 0)
+            return 1;
+        if (ctx_.service_manager) {
+            auto target = ctx_.service_manager->ingestWorkerTarget();
+            return target == 0 ? 1 : target;
+        }
+        if (!yams::daemon::TuneAdvisor::enableParallelIngest())
+            return 1;
+        std::size_t cap = yams::daemon::TuneAdvisor::maxIngestWorkers();
+        if (cap == 0)
+            cap = std::max<std::size_t>(1, std::thread::hardware_concurrency());
+        std::size_t storageCap = yams::daemon::TuneAdvisor::storagePoolSize();
+        if (storageCap > 0)
+            cap = std::min(cap, storageCap);
+        if (cap == 0)
+            cap = 1;
+        const std::size_t perWorker = std::max<std::size_t>(
+            1, static_cast<std::size_t>(yams::daemon::TuneAdvisor::ingestBacklogPerWorker()));
+        std::size_t desired = (backlog + perWorker - 1) / perWorker;
+        if (desired == 0)
+            desired = 1;
+        if (desired > cap)
+            desired = cap;
+        return desired;
+    }
+
+    void publishIngestMetrics(std::size_t queued, std::size_t active) const {
+        if (ctx_.service_manager)
+            ctx_.service_manager->publishIngestMetrics(queued, active);
+    }
+
+    void publishIngestQueued(std::size_t queued) const {
+        if (ctx_.service_manager)
+            ctx_.service_manager->publishIngestQueued(queued);
     }
 };
 

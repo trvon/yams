@@ -1,6 +1,7 @@
 // Templated, trait-driven serializer to minimize if/else and ease extension
 #include <yams/daemon/ipc/proto_serializer.h>
 
+#include <yams/common/utf8_utils.h>
 #include <yams/core/types.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/proto/ipc_envelope.pb.h>
@@ -31,8 +32,8 @@ static void to_kv_pairs(const std::map<std::string, std::string>& in,
     out->Clear();
     for (const auto& [k, v] : in) {
         auto* kv = out->Add();
-        kv->set_key(k);
-        kv->set_value(v);
+        kv->set_key(yams::common::sanitizeUtf8(k));
+        kv->set_value(yams::common::sanitizeUtf8(v));
     }
 }
 
@@ -178,6 +179,9 @@ template <> struct ProtoBinding<SearchRequest> {
         o->set_modified_before(r.modifiedBefore);
         o->set_indexed_after(r.indexedAfter);
         o->set_indexed_before(r.indexedBefore);
+        o->set_vector_stage_timeout_ms(r.vectorStageTimeoutMs);
+        o->set_keyword_stage_timeout_ms(r.keywordStageTimeoutMs);
+        o->set_snippet_hydration_timeout_ms(r.snippetHydrationTimeoutMs);
     }
     static SearchRequest get(const Envelope& env) {
         const auto& i = env.search_request();
@@ -212,6 +216,9 @@ template <> struct ProtoBinding<SearchRequest> {
         r.modifiedBefore = i.modified_before();
         r.indexedAfter = i.indexed_after();
         r.indexedBefore = i.indexed_before();
+        r.vectorStageTimeoutMs = i.vector_stage_timeout_ms();
+        r.keywordStageTimeoutMs = i.keyword_stage_timeout_ms();
+        r.snippetHydrationTimeoutMs = i.snippet_hydration_timeout_ms();
         return r;
     }
 };
@@ -921,10 +928,10 @@ template <> struct ProtoBinding<SearchResponse> {
         o->set_elapsed_ms(static_cast<int64_t>(r.elapsed.count()));
         for (const auto& s : r.results) {
             auto* pr = o->add_results();
-            pr->set_id(s.id);
-            pr->set_path(s.path);
-            pr->set_title(s.title);
-            pr->set_snippet(s.snippet);
+            pr->set_id(yams::common::sanitizeUtf8(s.id));
+            pr->set_path(yams::common::sanitizeUtf8(s.path));
+            pr->set_title(yams::common::sanitizeUtf8(s.title));
+            pr->set_snippet(yams::common::sanitizeUtf8(s.snippet));
             pr->set_score(s.score);
             to_kv_pairs(s.metadata, pr->mutable_metadata());
         }
@@ -1174,6 +1181,8 @@ template <> struct ProtoBinding<StatusResponse> {
             sp->set_path(s.path);
             sp->set_reason(s.reason);
         }
+        // PBI-040, task 040-1: PostIngestQueue depth
+        o->set_post_ingest_queue_depth(r.postIngestQueueDepth);
     }
     static StatusResponse get(const Envelope& env) {
         StatusResponse r{};
@@ -1292,6 +1301,8 @@ template <> struct ProtoBinding<StatusResponse> {
             s.reason = sp.reason();
             r.skippedPlugins.push_back(std::move(s));
         }
+        // PBI-040, task 040-1: PostIngestQueue depth
+        r.postIngestQueueDepth = i.post_ingest_queue_depth();
         // If older daemon (proto v1) set only state, derive minimal booleans
         if (r.version.empty() && r.uptimeSeconds == 0 && r.memoryUsageMb == 0 &&
             r.cpuUsagePercent == 0) {
@@ -1485,6 +1496,8 @@ template <> struct ProtoBinding<AddDocumentResponse> {
         o->set_path(r.path);
         o->set_documents_added(static_cast<uint64_t>(r.documentsAdded));
         o->set_size(static_cast<uint64_t>(r.size));
+        o->set_snapshot_id(r.snapshotId);
+        o->set_snapshot_label(r.snapshotLabel);
     }
     static AddDocumentResponse get(const Envelope& env) {
         const auto& i = env.add_document_response();
@@ -1492,8 +1505,10 @@ template <> struct ProtoBinding<AddDocumentResponse> {
         r.hash = i.hash();
         r.message = i.message();
         r.path = i.path();
-        r.documentsAdded = static_cast<size_t>(i.documents_added());
-        r.size = static_cast<size_t>(i.size());
+        r.documentsAdded = i.documents_added();
+        r.size = i.size();
+        r.snapshotId = i.snapshot_id();
+        r.snapshotLabel = i.snapshot_label();
         return r;
     }
 };
@@ -1506,12 +1521,13 @@ template <> struct ProtoBinding<GrepResponse> {
             auto* m = o->add_matches();
             m->set_file(match.file);
             m->set_line_number(match.lineNumber);
-            m->set_line(match.line);
+            // Use bytes setter to support binary/non-UTF-8 content
+            m->set_line(match.line.data(), match.line.size());
             for (const auto& before : match.contextBefore) {
-                m->add_context_before(before);
+                m->add_context_before(before.data(), before.size());
             }
             for (const auto& after : match.contextAfter) {
-                m->add_context_after(after);
+                m->add_context_after(after.data(), after.size());
             }
             m->set_match_type(match.matchType);
             m->set_confidence(match.confidence);
@@ -1525,12 +1541,13 @@ template <> struct ProtoBinding<GrepResponse> {
             GrepMatch match{};
             match.file = m.file();
             match.lineNumber = m.line_number();
-            match.line = m.line();
+            // Construct string from bytes (handles both UTF-8 and binary)
+            match.line = std::string(m.line());
             for (const auto& before : m.context_before()) {
-                match.contextBefore.push_back(before);
+                match.contextBefore.push_back(std::string(before));
             }
             for (const auto& after : m.context_after()) {
-                match.contextAfter.push_back(after);
+                match.contextAfter.push_back(std::string(after));
             }
             match.matchType = m.match_type();
             match.confidence = m.confidence();

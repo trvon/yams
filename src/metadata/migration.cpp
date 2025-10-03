@@ -283,7 +283,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             createMetadataIndexes(),      createRelationshipTables(),
             createSearchTables(),         createCollectionIndexes(),
             createKnowledgeGraphSchema(), createBinarySignatureSchema(),
-            createVectorSearchSchema(),   upgradeFTS5Tokenization()};
+            createVectorSearchSchema(),   upgradeFTS5Tokenization(),
+            createTreeSnapshotsSchema(),  createTreeDiffsSchema()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -1091,6 +1092,154 @@ Migration YamsMetadataMigrations::createVectorSearchSchema() {
         DROP TABLE IF EXISTS vector_models;
         
         -- Note: The doc_embeddings virtual table would be dropped by the backend
+    )";
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::createTreeSnapshotsSchema() {
+    Migration m;
+    m.version = 11;
+    m.name = "Create tree snapshots schema";
+    m.created = std::chrono::system_clock::now();
+
+    m.upFunc = [](Database& db) -> Result<void> {
+        // Create tree_snapshots table for storing directory snapshot metadata
+        auto result = db.execute(R"(
+            CREATE TABLE IF NOT EXISTS tree_snapshots (
+                snapshot_id TEXT PRIMARY KEY,           -- ISO 8601 timestamp ID
+                created_at INTEGER NOT NULL,            -- Unix timestamp
+                directory_path TEXT NOT NULL,           -- Source directory path
+                tree_root_hash TEXT,                    -- Merkle tree root hash (future use)
+                snapshot_label TEXT,                    -- Optional human-readable label
+                git_commit TEXT,                        -- Auto-detected git commit hash
+                git_branch TEXT,                        -- Auto-detected git branch name
+                git_remote TEXT,                        -- Auto-detected git remote URL
+                files_count INTEGER DEFAULT 0,          -- Number of files in snapshot
+                CHECK(files_count >= 0)
+            );
+        )");
+        if (!result)
+            return result;
+
+        // Create indexes for common query patterns
+        result = db.execute(R"(
+            CREATE INDEX IF NOT EXISTS idx_snapshot_created 
+                ON tree_snapshots(created_at);
+            CREATE INDEX IF NOT EXISTS idx_snapshot_label 
+                ON tree_snapshots(snapshot_label) WHERE snapshot_label IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS idx_snapshot_git_commit 
+                ON tree_snapshots(git_commit) WHERE git_commit IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS idx_snapshot_directory 
+                ON tree_snapshots(directory_path);
+        )");
+        if (!result)
+            return result;
+
+        spdlog::info("Tree snapshots schema migration completed");
+        return Result<void>();
+    };
+
+    m.downSQL = R"(
+        -- Drop indexes
+        DROP INDEX IF EXISTS idx_snapshot_directory;
+        DROP INDEX IF EXISTS idx_snapshot_git_commit;
+        DROP INDEX IF EXISTS idx_snapshot_label;
+        DROP INDEX IF EXISTS idx_snapshot_created;
+        
+        -- Drop table
+        DROP TABLE IF EXISTS tree_snapshots;
+    )";
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::createTreeDiffsSchema() {
+    Migration m;
+    m.version = 12;
+    m.name = "Create tree diffs and changes schema";
+    m.created = std::chrono::system_clock::now();
+
+    m.upFunc = [](Database& db) -> Result<void> {
+        // Create tree_diffs table for storing diff metadata
+        auto result = db.execute(R"(
+            CREATE TABLE IF NOT EXISTS tree_diffs (
+                diff_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                base_snapshot_id TEXT NOT NULL,
+                target_snapshot_id TEXT NOT NULL,
+                computed_at INTEGER NOT NULL,                  -- Unix timestamp
+                files_added INTEGER DEFAULT 0,
+                files_deleted INTEGER DEFAULT 0,
+                files_modified INTEGER DEFAULT 0,
+                files_renamed INTEGER DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'complete',       -- complete|partial|failed
+                delta_blob_hash TEXT,                          -- Optional: compressed diff in CAS
+                FOREIGN KEY (base_snapshot_id) REFERENCES tree_snapshots(snapshot_id),
+                FOREIGN KEY (target_snapshot_id) REFERENCES tree_snapshots(snapshot_id),
+                UNIQUE(base_snapshot_id, target_snapshot_id)
+            );
+        )");
+        if (!result)
+            return result;
+
+        // Create tree_changes table for individual file changes
+        result = db.execute(R"(
+            CREATE TABLE IF NOT EXISTS tree_changes (
+                change_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                diff_id INTEGER NOT NULL,
+                change_type TEXT NOT NULL,                     -- added|deleted|modified|renamed|moved
+                old_path TEXT,                                 -- Path in base snapshot (NULL for added)
+                new_path TEXT,                                 -- Path in target snapshot (NULL for deleted)
+                old_hash TEXT,                                 -- Content hash in base (NULL for added)
+                new_hash TEXT,                                 -- Content hash in target (NULL for deleted)
+                old_mode INTEGER,                              -- File mode in base
+                new_mode INTEGER,                              -- File mode in target
+                is_directory INTEGER NOT NULL DEFAULT 0,
+                file_size INTEGER DEFAULT 0,
+                content_delta_hash TEXT,                       -- Optional: file-level delta in CAS
+                FOREIGN KEY (diff_id) REFERENCES tree_diffs(diff_id) ON DELETE CASCADE
+            );
+        )");
+        if (!result)
+            return result;
+
+        // Create indexes for efficient queries
+        result = db.execute(R"(
+            CREATE INDEX IF NOT EXISTS idx_tree_diffs_base 
+                ON tree_diffs(base_snapshot_id);
+            CREATE INDEX IF NOT EXISTS idx_tree_diffs_target 
+                ON tree_diffs(target_snapshot_id);
+            CREATE INDEX IF NOT EXISTS idx_tree_diffs_computed 
+                ON tree_diffs(computed_at);
+            CREATE INDEX IF NOT EXISTS idx_tree_changes_diff 
+                ON tree_changes(diff_id);
+            CREATE INDEX IF NOT EXISTS idx_tree_changes_old_path 
+                ON tree_changes(old_path) WHERE old_path IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS idx_tree_changes_new_path 
+                ON tree_changes(new_path) WHERE new_path IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS idx_tree_changes_type 
+                ON tree_changes(change_type);
+        )");
+        if (!result)
+            return result;
+
+        spdlog::info("Tree diffs and changes schema migration completed");
+        return Result<void>();
+    };
+
+    m.downSQL = R"(
+        -- Drop indexes
+        DROP INDEX IF EXISTS idx_tree_changes_type;
+        DROP INDEX IF EXISTS idx_tree_changes_new_path;
+        DROP INDEX IF EXISTS idx_tree_changes_old_path;
+        DROP INDEX IF EXISTS idx_tree_changes_diff;
+        DROP INDEX IF EXISTS idx_tree_diffs_computed;
+        DROP INDEX IF EXISTS idx_tree_diffs_target;
+        DROP INDEX IF EXISTS idx_tree_diffs_base;
+        
+        -- Drop tables (cascade will remove tree_changes)
+        DROP TABLE IF EXISTS tree_changes;
+        DROP TABLE IF EXISTS tree_diffs;
     )";
 
     return m;

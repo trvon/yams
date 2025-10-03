@@ -218,6 +218,16 @@ Result<void> YamsDaemon::start() {
     state_.readiness.ipcServerReady = true;
     spdlog::info("Socket server started on {}", config_.socketPath.string());
 
+    if (tuningManager_) {
+        tuningManager_->setWriterBudgetHook([this](std::size_t bytes) {
+            try {
+                if (socketServer_)
+                    socketServer_->setWriterBudget(bytes);
+            } catch (...) {
+            }
+        });
+    }
+
 #ifdef YAMS_TESTING
     // Fast-start mode for tests: skip heavy service initialization and allow
     // streaming stubs/status responses to operate over the live socket server.

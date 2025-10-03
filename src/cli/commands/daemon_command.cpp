@@ -3,7 +3,6 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/io_context.hpp>
-#include <boost/asio/system_executor.hpp>
 #include <boost/asio/use_future.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>

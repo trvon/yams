@@ -99,6 +99,12 @@ public:
         getVectorDatabase_ = std::move(dbGetter);
     }
 
+    // PBI-040-4: Synchronous FTS5 indexing for small adds
+    // Process FTS5 indexing immediately (same thread) instead of queueing.
+    // This eliminates the 5-10s async delay for grep on small document batches.
+    // Returns true on success, false on failure.
+    bool indexDocumentSync(const std::string& hash, const std::string& mime = "");
+
 private:
     void workerLoop();
 

@@ -44,6 +44,9 @@ message SearchRequest {
   string modified_before = 28;
   string indexed_after = 29;
   string indexed_before = 30;
+  int32 vector_stage_timeout_ms = 31;
+  int32 keyword_stage_timeout_ms = 32;
+  int32 snippet_hydration_timeout_ms = 33;
 }
 
 message GetRequest {
@@ -373,6 +376,8 @@ message StatusResponse {
   repeated ProviderInfo providers = 14;
   message SkippedPlugin { string path = 1; string reason = 2; }
   repeated SkippedPlugin skipped = 15;
+  // PostIngestQueue depth for FTS5 readiness checks (PBI-040)
+  uint32 post_ingest_queue_depth = 16;
 }
 
 message EmbeddingResponse {
@@ -420,14 +425,16 @@ message AddDocumentResponse {
   string path = 3;             // absolute or provided path for the request
   uint64 documents_added = 4;  // number of documents added (directories may add multiple)
   uint64 size = 5;             // size of added content if applicable (single-file adds)
+  string snapshot_id = 6;      // auto-generated ISO 8601 timestamp for directory operations
+  string snapshot_label = 7;   // optional human-friendly label
 }
 // First-class grep match with full context
 message GrepMatch {
   string file = 1;
   int64 line_number = 2;
-  string line = 3;
-  repeated string context_before = 4;
-  repeated string context_after = 5;
+  bytes line = 3;  // Changed from string to bytes to support binary/non-UTF-8 content
+  repeated bytes context_before = 4;  // Changed from string to bytes
+  repeated bytes context_after = 5;   // Changed from string to bytes
   string match_type = 6;
   double confidence = 7;
 }

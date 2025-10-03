@@ -72,7 +72,7 @@ ONNX model provider (host‑backed): when built and trusted, the ONNX plugin adv
 | `YAMS_BUILD_TESTS` | OFF | Unit and integration tests |
 | `YAMS_BUILD_BENCHMARKS` | OFF | Performance benchmarks |
 | `YAMS_ENABLE_PDF` | ON | PDF text extraction support (may download PDFium via FetchContent) |
-| `YAMS_ENABLE_TUI` | OFF | Enables TUI browser (adds ncurses via Conan; ImTUI via FetchContent) |
+| `YAMS_ENABLE_TUI` | ON | Enables the FTXUI-based TUI browser (pass `-Denable-tui=false` to skip) |
 | `YAMS_ENABLE_ONNX` | ON | Enables ONNX Runtime features (pulls onnxruntime; may pull Boost transitively) |
 | `CMAKE_BUILD_TYPE` | Release | Debug/Release/RelWithDebInfo |
 

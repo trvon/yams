@@ -25,19 +25,24 @@ inline yams::Result<std::shared_ptr<IModelProvider>> ensure_provider_available(S
     try {
         if (!sm)
             return yams::Error{yams::ErrorCode::InvalidState, "ServiceManager unavailable"};
+        spdlog::info("ensure_provider_available: checking provider");
         auto provider = sm->getModelProvider();
         if (provider && provider->isAvailable())
             return provider;
+        spdlog::info("ensure_provider_available: provider not ready, autoloading");
         (void)sm->autoloadPluginsNow();
         auto adopted = sm->adoptModelProviderFromHosts();
         if (adopted && adopted.value()) {
             provider = sm->getModelProvider();
         }
         if (!provider || !provider->isAvailable()) {
+            spdlog::info("ensure_provider_available: provider unavailable after autoload");
             return yams::Error{yams::ErrorCode::InvalidState, "Model provider unavailable"};
         }
+        spdlog::info("ensure_provider_available: provider ready now");
         return provider;
     } catch (const std::exception& e) {
+        spdlog::info("ensure_provider_available: exception {}", e.what());
         return yams::Error{yams::ErrorCode::InternalError, e.what()};
     }
 }

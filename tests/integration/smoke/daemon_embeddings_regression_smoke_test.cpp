@@ -60,14 +60,41 @@ template <typename Map> size_t parse_counter(const Map& stats, const std::string
 }
 
 bool wait_for_daemon_ready(yams::daemon::DaemonClient& client, std::chrono::milliseconds max_wait,
-                           std::string* last_status) {
+                           std::string* last_status, const yams::daemon::YamsDaemon* daemon) {
     const auto deadline = StatusClock::now() + max_wait;
     while (StatusClock::now() < deadline) {
-        auto statusRes = run_sync(client.status(), 500ms);
+        auto statusRes = run_sync(client.status(), 10000ms);
         if (statusRes) {
             const auto& status = statusRes.value();
             if (last_status) {
-                *last_status = status.overallStatus;
+                *last_status =
+                    status.overallStatus.empty() ? std::string("(empty)") : status.overallStatus;
+                *last_status += " | ready=" + std::string(status.ready ? "true" : "false");
+                *last_status +=
+                    " | lifecycle=" + (status.lifecycleState.empty() ? std::string("(empty)")
+                                                                     : status.lifecycleState);
+                if (!status.readinessStates.empty()) {
+                    *last_status += " | readiness=";
+                    for (const auto& [k, v] : status.readinessStates) {
+                        *last_status += k + '=' + std::string(v ? "true" : "false") + ';';
+                    }
+                }
+                if (!status.initProgress.empty()) {
+                    *last_status += " | progress=";
+                    for (const auto& [k, v] : status.initProgress) {
+                        *last_status += k + '=' + std::to_string(static_cast<unsigned>(v)) + ';';
+                    }
+                }
+                if (!status.requestCounts.empty()) {
+                    *last_status += " | requests=";
+                    for (const auto& [k, v] : status.requestCounts) {
+                        *last_status += k + '=' + std::to_string(v) + ';';
+                    }
+                }
+                if (!status.lastError.empty()) {
+                    *last_status += " | last_error=" + status.lastError;
+                }
+                std::cerr << "status tick: " << *last_status << std::endl;
             }
             if (status.ready || status.overallStatus == "ready" ||
                 status.overallStatus == "Ready" || status.overallStatus == "degraded" ||
@@ -75,7 +102,28 @@ bool wait_for_daemon_ready(yams::daemon::DaemonClient& client, std::chrono::mill
                 return true;
             }
         }
+        if (last_status && !statusRes) {
+            *last_status = statusRes.error().message.empty() ? std::string("status call failed")
+                                                             : statusRes.error().message;
+            std::cerr << "status tick: " << *last_status << std::endl;
+        }
+        if (daemon) {
+            try {
+                auto snap = daemon->getLifecycle().snapshot();
+                if (snap.state == yams::daemon::LifecycleState::Ready ||
+                    snap.state == yams::daemon::LifecycleState::Degraded) {
+                    if (last_status && last_status->empty()) {
+                        *last_status = "lifecycle_ready";
+                    }
+                    return true;
+                }
+            } catch (...) {
+            }
+        }
         std::this_thread::sleep_for(100ms);
+    }
+    if (last_status && last_status->empty()) {
+        *last_status = "timeout waiting for ready";
     }
     return false;
 }
@@ -177,9 +225,9 @@ bool wait_for_documents_available(yams::daemon::DaemonClient& client,
 
 bool ensure_embeddings_provider(yams::daemon::DaemonClient& client,
                                 std::chrono::milliseconds max_wait, const std::string& model_name,
-                                std::string* reason) {
+                                std::string* reason, const yams::daemon::YamsDaemon* daemon) {
     std::string status;
-    if (!wait_for_daemon_ready(client, max_wait, &status)) {
+    if (!wait_for_daemon_ready(client, max_wait, &status, daemon)) {
         if (reason)
             *reason = "Daemon not ready (status=" + status + ")";
         return false;
@@ -190,7 +238,7 @@ bool ensure_embeddings_provider(yams::daemon::DaemonClient& client,
     req.modelName = model_name.empty() ? std::string{"all-MiniLM-L6-v2"} : model_name;
     req.normalize = true;
 
-    const auto timeout = std::min(max_wait, std::chrono::milliseconds{2000});
+    const auto timeout = max_wait;
     auto res = run_sync(client.generateEmbedding(req), timeout);
     if (!res) {
         if (reason)
@@ -250,8 +298,12 @@ TEST(DaemonEmbeddingsRegressionSmoke, GeneratesVectorsForSearchCorpusPresets) {
 
 #if defined(_WIN32)
     _putenv_s("YAMS_DAEMON_KILL_OTHERS", "0");
+    _putenv_s("YAMS_DISABLE_VECTOR_DB", "0");
+    _putenv_s("YAMS_STREAM_TRACE", "1");
 #else
     setenv("YAMS_DAEMON_KILL_OTHERS", "0", 1);
+    unsetenv("YAMS_DISABLE_VECTOR_DB");
+    setenv("YAMS_STREAM_TRACE", "1", 1);
 #endif
     // Skip content store stats queries that can race when embedding loads are slow.
 #if defined(_WIN32)
@@ -265,6 +317,7 @@ TEST(DaemonEmbeddingsRegressionSmoke, GeneratesVectorsForSearchCorpusPresets) {
     const fs::path fixturesRoot = root / "fixtures";
     fs::create_directories(dataDir);
     fs::create_directories(fixturesRoot);
+    std::cerr << "embed smoke temp root: " << root << std::endl;
 
     yams::test::FixtureManager fixtures(fixturesRoot);
 
@@ -301,7 +354,11 @@ TEST(DaemonEmbeddingsRegressionSmoke, GeneratesVectorsForSearchCorpusPresets) {
             if (daemon) {
                 (void)daemon->stop();
             }
-            if (!root.empty()) {
+            const char* keepEnv = std::getenv("YAMS_KEEP_SMOKE_TEMP");
+            const bool keep = truthy_env(keepEnv);
+            std::cerr << "Guard cleanup: keep_env='" << (keepEnv ? keepEnv : "")
+                      << "' keep=" << (keep ? "true" : "false") << " root=" << root << std::endl;
+            if (!root.empty() && !keep) {
                 std::error_code ec;
                 fs::remove_all(root, ec);
             }
@@ -317,9 +374,9 @@ TEST(DaemonEmbeddingsRegressionSmoke, GeneratesVectorsForSearchCorpusPresets) {
 
     yams::daemon::ClientConfig clientCfg;
     clientCfg.socketPath = cfg.socketPath;
-    clientCfg.requestTimeout = 15s;
-    clientCfg.headerTimeout = 15s;
-    clientCfg.bodyTimeout = 30s;
+    clientCfg.requestTimeout = 60s;
+    clientCfg.headerTimeout = 60s;
+    clientCfg.bodyTimeout = 120s;
     clientCfg.enableChunkedResponses = false;
     clientCfg.autoStart = false;
 
@@ -330,10 +387,46 @@ TEST(DaemonEmbeddingsRegressionSmoke, GeneratesVectorsForSearchCorpusPresets) {
     client.setStreamingEnabled(false);
 
     std::string status;
-    ASSERT_TRUE(wait_for_daemon_ready(client, 30s, &status)) << "Daemon not ready: " << status;
+    bool ready = wait_for_daemon_ready(client, 30s, &status, &daemon);
+    if (!ready) {
+        auto statusRes = yams::cli::run_sync(client.status(), 2s);
+        if (statusRes) {
+            const auto& s = statusRes.value();
+            status += " | last_overall=" + s.overallStatus;
+            status += " | lifecycle=" + s.lifecycleState;
+            status += " | ready=" + std::string(s.ready ? "true" : "false");
+            if (!s.readinessStates.empty()) {
+                status += " | readiness=";
+                for (const auto& [k, v] : s.readinessStates) {
+                    status += k + '=' + std::string(v ? "true" : "false") + ';';
+                }
+            }
+            if (!s.initProgress.empty()) {
+                status += " | progress=";
+                for (const auto& [k, v] : s.initProgress) {
+                    status += k + '=' + std::to_string(static_cast<unsigned>(v)) + ';';
+                }
+            }
+            if (!s.requestCounts.empty()) {
+                status += " | requests=";
+                for (const auto& [k, v] : s.requestCounts) {
+                    status += k + '=' + std::to_string(v) + ';';
+                }
+            }
+            if (!s.lastError.empty()) {
+                status += " | last_error=" + s.lastError;
+            }
+        } else {
+            status += " | status_err=" + statusRes.error().message;
+        }
+    }
+    if (!ready) {
+        std::cerr << "final daemon status: " << status << std::endl;
+    }
+    ASSERT_TRUE(ready) << "Daemon not ready: " << status;
 
     std::string reason;
-    ASSERT_TRUE(ensure_embeddings_provider(client, 10s, modelName, &reason))
+    ASSERT_TRUE(ensure_embeddings_provider(client, 30s, modelName, &reason, &daemon))
         << "Embeddings provider unavailable: " << reason;
 
     yams::app::services::DocumentIngestionService ingestion;

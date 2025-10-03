@@ -1,5 +1,6 @@
 #include <yams/app/services/grep_mode_tls.h>
 #include <yams/app/services/services.hpp>
+#include <yams/common/utf8_utils.h>
 // Hot/Cold mode helpers (env-driven)
 #include "../../cli/hot_cold_utils.h"
 #include <yams/metadata/metadata_repository.h>
@@ -181,50 +182,6 @@ auto retryMetadataOp(Fn&& fn, std::size_t maxAttempts = 4,
     return attempt;
 }
 
-static Result<bool> metadataHasTags(metadata::MetadataRepository* repo, int64_t docId,
-                                    const std::vector<std::string>& tags, bool matchAll,
-                                    MetadataTelemetry* telemetry = nullptr) {
-    if (!repo || tags.empty())
-        return true;
-    auto md = retryMetadataOp([&]() { return repo->getAllMetadata(docId); }, 4,
-                              std::chrono::milliseconds(25), telemetry);
-    if (!md) {
-        spdlog::debug("GrepService: metadata lookup failed for doc {}: {}", docId,
-                      md.error().message);
-        spdlog::warn("GrepService: propagating metadata error code {} for doc {}",
-                     static_cast<int>(md.error().code), docId);
-        return Error{md.error().code, "Metadata lookup failed for doc " + std::to_string(docId) +
-                                          ": " + md.error().message};
-    }
-    auto& all = md.value();
-
-    auto hasTag = [&](const std::string& t) {
-        // Match if key equals tag OR string value equals tag
-        auto it = all.find(t);
-        if (it != all.end())
-            return true;
-        for (const auto& [k, v] : all) {
-            (void)k;
-            if (v.asString() == t)
-                return true;
-        }
-        return false;
-    };
-
-    if (matchAll) {
-        for (const auto& t : tags) {
-            if (!hasTag(t))
-                return false;
-        }
-        return true;
-    }
-    for (const auto& t : tags) {
-        if (hasTag(t))
-            return true;
-    }
-    return false;
-}
-
 static bool pathFilterMatch(const std::string& filePath, const std::vector<std::string>& filters) {
     if (filters.empty())
         return true;
@@ -271,6 +228,8 @@ public:
     explicit GrepServiceImpl(const AppContext& ctx) : ctx_(ctx) {}
 
     Result<GrepResponse> grep(const GrepRequest& req) override {
+        auto grep_start_time = std::chrono::steady_clock::now();
+        spdlog::debug("[GrepTrace] GrepServiceImpl::grep started.");
         if (!ctx_.metadataRepo) {
             return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
         }
@@ -324,196 +283,100 @@ public:
         MetadataTelemetry metadataTelemetry;
         auto start_time = std::chrono::steady_clock::now();
 
-        // Build candidate document set: KG(tags) -> metadata -> fallback
+        // --- Candidate Document Discovery ---
+        // This logic is modeled after SearchService's multi-stage candidate retrieval.
+        // It prioritizes smart, fast methods (hybrid search, FTS) to find a relevant
+        // set of documents to grep, avoiding a full scan of all content when possible.
         std::vector<metadata::DocumentInfo> docs;
-        if (!req.tags.empty()) {
-            auto tRes = retryMetadataOp(
-                [&]() {
-                    return ctx_.metadataRepo->findDocumentsByTags(req.tags, req.matchAllTags);
-                },
-                4, std::chrono::milliseconds(25), &metadataTelemetry);
-            if (!tRes) {
-                return Error{ErrorCode::InternalError,
-                             "Failed to query documents by tags: " + tRes.error().message};
+        std::unordered_set<int64_t> seenDocIds;
+
+        auto addDocs = [&](std::vector<metadata::DocumentInfo>&& newDocs) {
+            for (auto& d : newDocs) {
+                if (seenDocIds.insert(d.id).second) {
+                    docs.push_back(std::move(d));
+                }
             }
-            docs = std::move(tRes.value());
-        }
-        if (docs.empty()) {
-            bool canUseFTS = req.literalText || req.word;
-            if (canUseFTS) {
-                auto sRes = retryMetadataOp(
+        };
+
+        // If explicit, restrictive filters (tags, paths) are provided, we start with them.
+        // Otherwise, we use smart search to find an initial set of candidates.
+        bool has_restrictive_filters =
+            !req.tags.empty() || !req.paths.empty() || !req.includePatterns.empty();
+
+        if (has_restrictive_filters) {
+            if (!req.tags.empty()) {
+                auto tRes = retryMetadataOp(
                     [&]() {
-                        return ctx_.metadataRepo->search(req.pattern, /*limit*/ 2000, /*offset*/ 0);
+                        return ctx_.metadataRepo->findDocumentsByTags(req.tags, req.matchAllTags);
                     },
                     4, std::chrono::milliseconds(25), &metadataTelemetry);
-                if (sRes && sRes.value().isSuccess() && !sRes.value().results.empty()) {
-                    std::unordered_set<int64_t> allow;
-                    allow.reserve(sRes.value().results.size());
-                    for (const auto& r : sRes.value().results)
-                        allow.insert(r.document.id);
-                    auto allRes = retryMetadataOp(
-                        [&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); }, 4,
-                        std::chrono::milliseconds(25), &metadataTelemetry);
-                    if (!allRes) {
-                        return Error{ErrorCode::InternalError,
-                                     "Failed to enumerate documents: " + allRes.error().message};
+                if (tRes)
+                    addDocs(std::move(tRes.value()));
+            }
+            if (!req.paths.empty() || !req.includePatterns.empty()) {
+                std::vector<std::string> patterns = req.paths;
+                patterns.insert(patterns.end(), req.includePatterns.begin(),
+                                req.includePatterns.end());
+                for (const auto& p : patterns) {
+                    if (p.empty())
+                        continue;
+                    // Use a LIKE query for path prefixes, which is reasonably fast with an index.
+                    auto r = retryMetadataOp([&]() {
+                        return ctx_.metadataRepo->findDocumentsByPath(normalizePathForSqlLike(p) +
+                                                                      "%");
+                    });
+                    if (r)
+                        addDocs(std::move(r.value()));
+                }
+            }
+        } else {
+            // No restrictive filters, so use smart search to find candidates.
+            // 1. Hybrid Search (Semantic + Keyword)
+            if (ctx_.hybridEngine) {
+                auto hres = ctx_.hybridEngine->search(req.pattern, 1000);
+                if (hres && !hres.value().empty()) {
+                    std::vector<metadata::DocumentInfo> semanticDocs;
+                    // This is inefficient, but necessary as hybrid search doesn't return doc IDs.
+                    std::unordered_set<std::string> allowPaths;
+                    for (const auto& r : hres.value()) {
+                        if (auto it = r.metadata.find("path"); it != r.metadata.end())
+                            allowPaths.insert(it->second);
                     }
-                    for (auto& d : allRes.value()) {
-                        if (allow.find(d.id) != allow.end())
-                            docs.push_back(std::move(d));
+                    if (!allowPaths.empty()) {
+                        auto allDocsRes = retryMetadataOp(
+                            [&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); });
+                        if (allDocsRes) {
+                            for (auto& d : allDocsRes.value()) {
+                                if (allowPaths.count(d.filePath))
+                                    semanticDocs.push_back(std::move(d));
+                            }
+                            addDocs(std::move(semanticDocs));
+                        }
                     }
                 }
             }
-            if (docs.empty()) {
-                bool usePreselect = true;
-                if (const char* env = std::getenv("YAMS_GREP_PRESELECT")) {
-                    std::string v(env);
-                    std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                    usePreselect = !(v == "0" || v == "false" || v == "off");
-                }
-                const bool hasExplicitPaths = !req.paths.empty();
-                if (usePreselect && !hasExplicitPaths) {
-                    try {
-                        std::shared_ptr<yams::search::HybridSearchEngine> eng = ctx_.hybridEngine;
-                        if (!eng) {
-                            auto vecMgr = std::make_shared<yams::vector::VectorIndexManager>();
-                            yams::search::SearchEngineBuilder builder;
-                            builder.withVectorIndex(vecMgr).withMetadataRepo(ctx_.metadataRepo);
-                            auto opts =
-                                yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
-                            opts.hybrid.final_top_k = 1000;
-                            opts.hybrid.vector_weight = 0.30f;
-                            opts.hybrid.keyword_weight = 0.70f;
-                            auto engRes = builder.buildEmbedded(opts);
-                            if (engRes)
-                                eng = engRes.value();
-                        }
-                        if (eng) {
-                            auto hres = eng->search(req.pattern, /*topk*/ 1000);
-                            if (hres && !hres.value().empty()) {
-                                std::unordered_set<std::string> allowPaths;
-                                allowPaths.reserve(hres.value().size());
-                                for (const auto& r : hres.value()) {
-                                    auto it = r.metadata.find("path");
-                                    if (it != r.metadata.end() && !it->second.empty()) {
-                                        allowPaths.insert(it->second);
-                                    }
-                                }
-                                auto allRes = retryMetadataOp(
-                                    [&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); },
-                                    4, std::chrono::milliseconds(25), &metadataTelemetry);
-                                if (!allRes) {
-                                    return Error{ErrorCode::InternalError,
-                                                 "Failed to enumerate documents: " +
-                                                     allRes.error().message};
-                                }
-                                for (auto& d : allRes.value()) {
-                                    if (allowPaths.find(d.filePath) != allowPaths.end())
-                                        docs.push_back(std::move(d));
-                                }
-                            }
-                        }
-                    } catch (...) {
-                    }
+            // 2. FTS Search (Keyword)
+            if (req.literalText || req.word) {
+                auto sRes = retryMetadataOp(
+                    [&]() { return ctx_.metadataRepo->search(req.pattern, 2000, 0); });
+                if (sRes && sRes.value().isSuccess()) {
+                    std::vector<metadata::DocumentInfo> ftsDocs;
+                    for (const auto& r : sRes.value().results)
+                        ftsDocs.push_back(r.document);
+                    addDocs(std::move(ftsDocs));
                 }
             }
         }
+
+        // Fallback: If no candidates were found by any method, scan all documents.
         if (docs.empty()) {
-            auto fetchAll = [&]() -> Result<std::vector<metadata::DocumentInfo>> {
-                return retryMetadataOp(
-                    [&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); }, 4,
-                    std::chrono::milliseconds(25), &metadataTelemetry);
-            };
-            if (auto allRes = fetchAll(); allRes) {
+            auto allRes =
+                retryMetadataOp([&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); });
+            if (allRes) {
                 docs = std::move(allRes.value());
             } else {
                 return Error{ErrorCode::InternalError,
                              "Failed to enumerate documents: " + allRes.error().message};
-            }
-            // If caller provided paths/include globs and we still have no docs, allow a brief
-            // bounded wait for metadata to become visible (post-ingest extraction completes).
-            if (docs.empty() && (!req.paths.empty() || !req.includePatterns.empty())) {
-                for (int i = 0; i < 10 && docs.empty(); ++i) { // up to ~500ms
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                    if (auto allRes2 = fetchAll(); allRes2)
-                        docs = std::move(allRes2.value());
-                }
-                // If still empty, try targeted metadata scans using includePatterns directory
-                // prefixes like "/dir/**" -> prefix "/dir/".
-                if (docs.empty() && !req.includePatterns.empty()) {
-                    std::unordered_set<int64_t> seenIds;
-                    for (const auto& p : req.includePatterns) {
-                        auto dd = p.find("**");
-                        if (dd == std::string::npos)
-                            continue;
-                        std::string prefix = p.substr(0, dd);
-                        if (prefix.empty())
-                            continue;
-                        // Normalize macOS /var -> /private/var and lowercase for repo matching
-                        auto normPrefix = normalizePathForCompare(prefix);
-                        if (!normPrefix.empty() && normPrefix.back() != '/')
-                            normPrefix.push_back('/');
-                        // Convert to SQL LIKE friendly form (end with %)
-                        std::string like = normPrefix + "%";
-                        auto dirRes = retryMetadataOp(
-                            [&]() { return ctx_.metadataRepo->findDocumentsByPath(like); }, 4,
-                            std::chrono::milliseconds(25), &metadataTelemetry);
-                        if (dirRes && !dirRes.value().empty()) {
-                            for (auto& d : dirRes.value()) {
-                                if (seenIds.insert(d.id).second) {
-                                    docs.push_back(std::move(d));
-                                }
-                            }
-                        }
-                    }
-                }
-                // Also preselect candidates using explicit req.paths entries. For directory
-                // paths, perform a LIKE prefix scan ("/dir/" -> "/dir/%"); for file paths,
-                // perform an exact LIKE (no wildcard). If a path contains wildcards or ends
-                // with "**", derive a directory prefix up to the last '/' and perform a
-                // LIKE prefix scan.
-                if (docs.empty() && !req.paths.empty()) {
-                    std::unordered_set<int64_t> seenIds;
-                    for (const auto& p : req.paths) {
-                        if (p.empty())
-                            continue;
-                        auto queryLike = [&](const std::string& like) {
-                            auto r = retryMetadataOp(
-                                [&]() { return ctx_.metadataRepo->findDocumentsByPath(like); }, 4,
-                                std::chrono::milliseconds(25), &metadataTelemetry);
-                            if (r && !r.value().empty()) {
-                                for (auto& d : r.value()) {
-                                    if (seenIds.insert(d.id).second)
-                                        docs.push_back(std::move(d));
-                                }
-                            }
-                        };
-                        // Handle wildcards by reducing to a directory prefix
-                        bool wild = (p.find('*') != std::string::npos) ||
-                                    (p.find('?') != std::string::npos);
-                        auto dd = p.find("**");
-                        if (wild || dd != std::string::npos) {
-                            std::string prefix = (dd != std::string::npos) ? p.substr(0, dd) : p;
-                            auto lastSlash = prefix.find_last_of('/');
-                            if (lastSlash != std::string::npos)
-                                prefix = prefix.substr(0, lastSlash + 1);
-                            auto normPrefix = normalizePathForSqlLike(prefix);
-                            if (!normPrefix.empty() && normPrefix.back() != '/')
-                                normPrefix.push_back('/');
-                            queryLike(normPrefix + "%");
-                        } else {
-                            // Try exact file, then treat as directory prefix
-                            auto norm = normalizePathForSqlLike(p);
-                            if (!norm.empty()) {
-                                queryLike(norm);
-                                if (norm.back() != '/')
-                                    queryLike(norm + "/%");
-                                else
-                                    queryLike(norm + "%");
-                            }
-                        }
-                    }
-                }
             }
         }
 
@@ -563,6 +426,53 @@ public:
         }
 
         spdlog::debug("[GrepService] candidates pre-filter count={}", docs.size());
+
+        // If tags were provided, ensure the candidate set is filtered by them.
+        // This is because the candidate set could have been populated by FTS or other
+        // means that do not account for tags.
+        if (!req.tags.empty()) {
+            auto tagDocsRes = retryMetadataOp(
+                [&]() {
+                    return ctx_.metadataRepo->findDocumentsByTags(req.tags, req.matchAllTags);
+                },
+                4, std::chrono::milliseconds(25), &metadataTelemetry);
+
+            if (!tagDocsRes) {
+                spdlog::debug("[GrepService] tag lookup failed: code={} message={}",
+                              static_cast<int>(tagDocsRes.error().code),
+                              tagDocsRes.error().message);
+                return Result<GrepResponse>(tagDocsRes.error());
+            }
+
+            const auto& docsVec = tagDocsRes.value();
+            if (!docsVec.empty()) {
+                std::unordered_set<int64_t> allowedIds;
+                allowedIds.reserve(docsVec.size());
+                for (const auto& doc : docsVec) {
+                    allowedIds.insert(doc.id);
+                }
+
+                std::vector<metadata::DocumentInfo> finalDocs;
+                finalDocs.reserve(docs.size());
+                for (const auto& doc : docs) {
+                    if (allowedIds.count(doc.id)) {
+                        finalDocs.push_back(doc);
+                    }
+                }
+                docs = std::move(finalDocs);
+                spdlog::debug("[GrepService] candidates after tag filter count={} (metadata ops={} "
+                              "retries={} transient_failures={})",
+                              docs.size(), metadataTelemetry.operations.load(),
+                              metadataTelemetry.retries.load(),
+                              metadataTelemetry.transientFailures.load());
+            } else {
+                spdlog::debug(
+                    "[GrepService] tag repository returned no direct candidates; deferring tag "
+                    "validation to per-document metadata (ops={} retries={} transient_failures={})",
+                    metadataTelemetry.operations.load(), metadataTelemetry.retries.load(),
+                    metadataTelemetry.transientFailures.load());
+            }
+        }
 
         // Apply early path/include filtering
         if (!req.paths.empty() || !req.includePatterns.empty()) {
@@ -674,6 +584,9 @@ public:
         size_t workers = std::min<size_t>({rec, hw, static_cast<size_t>(4)});
         workers = std::min(workers, docs.size() > 0 ? docs.size() : size_t{1});
 
+        spdlog::debug("[GrepService] starting worker scan: docs={} tags={} paths={} includes={}",
+                      docs.size(), req.tags.size(), req.paths.size(), req.includePatterns.size());
+        auto before_workers_time = std::chrono::steady_clock::now();
         std::atomic<size_t> next{0};
         std::mutex outMutex;
         std::vector<GrepFileResult> outResults;
@@ -744,37 +657,60 @@ public:
                     if (!ok)
                         continue;
                 }
-                auto tagCheck = metadataHasTags(ctx_.metadataRepo.get(), doc.id, req.tags,
-                                                req.matchAllTags, &metadataTelemetry);
-                if (!tagCheck) {
-                    {
-                        std::lock_guard<std::mutex> errLock(errorMutex);
-                        workerErrors.push_back(tagCheck.error());
-                    }
-                    stop.store(true, std::memory_order_relaxed);
-                    continue;
-                }
-                if (!tagCheck.value())
-                    continue;
 
                 // Respect per-document force_cold (metadata key or tag)
                 bool forceCold = false;
+                std::optional<std::unordered_map<std::string, metadata::MetadataValue>>
+                    metadataSnapshot;
                 if (ctx_.metadataRepo) {
                     auto md =
                         retryMetadataOp([&]() { return ctx_.metadataRepo->getAllMetadata(doc.id); },
                                         4, std::chrono::milliseconds(25), &metadataTelemetry);
-                    if (md) {
-                        auto& all = md.value();
-                        auto it = all.find("force_cold");
-                        if (it != all.end()) {
-                            auto v = it->second.asString();
-                            std::string lv = v;
-                            std::transform(lv.begin(), lv.end(), lv.begin(), ::tolower);
-                            forceCold = (lv == "1" || lv == "true" || lv == "yes");
+                    if (!md) {
+                        spdlog::warn(
+                            "[GrepService] metadata fetch failed for doc {}: code={} message={}",
+                            doc.id, static_cast<int>(md.error().code), md.error().message);
+                        {
+                            std::lock_guard<std::mutex> lk(errorMutex);
+                            workerErrors.push_back(md.error());
                         }
-                        if (!forceCold && all.find("tag:force_cold") != all.end()) {
-                            forceCold = true;
+                        stop.store(true, std::memory_order_relaxed);
+                        return;
+                    }
+                    metadataSnapshot = md.value();
+
+                    if (!req.tags.empty()) {
+                        size_t matchedTags = 0;
+                        for (const auto& tag : req.tags) {
+                            const std::string key = std::string("tag:") + tag;
+                            const bool present =
+                                metadataSnapshot->find(key) != metadataSnapshot->end();
+                            if (present) {
+                                ++matchedTags;
+                                if (!req.matchAllTags)
+                                    break;
+                            } else if (req.matchAllTags) {
+                                matchedTags = 0;
+                                break;
+                            }
                         }
+                        const bool tagsSatisfied =
+                            req.matchAllTags ? (matchedTags == req.tags.size()) : (matchedTags > 0);
+                        if (!tagsSatisfied) {
+                            continue;
+                        }
+                    }
+
+                    auto it = metadataSnapshot->find("force_cold");
+                    if (it != metadataSnapshot->end()) {
+                        auto v = it->second.asString();
+                        std::string lv = v;
+                        std::transform(lv.begin(), lv.end(), lv.begin(), ::tolower);
+                        forceCold = (lv == "1" || lv == "true" || lv == "yes");
+                    }
+                    if (!forceCold &&
+                        metadataSnapshot->find("tag:force_cold") != metadataSnapshot->end()) {
+                        forceCold = true;
                     }
                 }
 
@@ -841,7 +777,7 @@ public:
                     gm.confidence = 1.0;
                     if (req.lineNumbers)
                         gm.lineNumber = ln_counter;
-                    gm.line = line;
+                    gm.line = yams::common::sanitizeUtf8(line);
                     if (!req.invert && !req.literalText) {
                         std::smatch sm;
                         if (std::regex_search(line, sm, re)) {
@@ -1009,6 +945,12 @@ public:
         for (auto& th : ths)
             th.join();
 
+        auto workers_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - before_workers_time)
+                                    .count();
+        spdlog::debug("[GrepTrace] Regex matching across {} files took {}ms.",
+                      response.filesSearched, workers_duration);
+
         {
             std::lock_guard<std::mutex> lk(errorMutex);
             if (!workerErrors.empty())
@@ -1034,9 +976,11 @@ public:
         // Perform semantic search unless disabled; allow even in count/files-only/paths-only modes
         if (!req.regexOnly && req.semanticLimit > 0) {
             try {
+                auto semantic_start_time = std::chrono::steady_clock::now();
                 std::shared_ptr<yams::search::HybridSearchEngine> eng = ctx_.hybridEngine;
                 size_t topk = static_cast<size_t>(std::max(1, req.semanticLimit)) * 3;
                 if (!eng) {
+                    auto build_start_time = std::chrono::steady_clock::now();
                     auto vecMgr = std::make_shared<yams::vector::VectorIndexManager>();
                     yams::search::SearchEngineBuilder builder;
                     builder.withVectorIndex(vecMgr).withMetadataRepo(ctx_.metadataRepo);
@@ -1046,6 +990,12 @@ public:
                     if (engRes) {
                         eng = engRes.value();
                     }
+                    auto build_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                              std::chrono::steady_clock::now() - build_start_time)
+                                              .count();
+                    spdlog::debug("[GrepTrace] Built temporary HybridSearchEngine for semantic "
+                                  "search in {}ms.",
+                                  build_duration);
                 }
                 if (eng) {
                     auto hres = eng->search(req.pattern, topk);
@@ -1116,7 +1066,7 @@ public:
                             gm.confidence = conf;
                             gm.lineNumber = 0;
                             if (!r.content.empty())
-                                gm.line = r.content;
+                                gm.line = yams::common::sanitizeUtf8(r.content);
                             fr.matches.push_back(std::move(gm));
                             fr.matchCount = 1;
                             fr.wasSemanticSearch = true;
@@ -1129,6 +1079,10 @@ public:
                         }
                     }
                 }
+                auto semantic_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                             std::chrono::steady_clock::now() - semantic_start_time)
+                                             .count();
+                spdlog::debug("[GrepTrace] Semantic search took {}ms.", semantic_duration);
             } catch (...) {
             }
         }
@@ -1149,6 +1103,11 @@ public:
             response.searchStats["timeout_triggered"] =
                 stop.load(std::memory_order_relaxed) ? "1" : "0";
         }
+
+        auto total_grep_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now() - grep_start_time)
+                                       .count();
+        spdlog::debug("[GrepTrace] GrepServiceImpl::grep finished in {}ms.", total_grep_duration);
 
         return Result<GrepResponse>(std::move(response));
     }

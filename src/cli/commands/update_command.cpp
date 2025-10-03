@@ -10,9 +10,9 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/system_executor.hpp>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/response_of.hpp>
 // Smart name resolution
@@ -161,7 +161,7 @@ Result<void> UpdateCommand::execute() {
                     std::promise<Result<yams::daemon::UpdateDocumentResponse>> prom;
                     auto fut = prom.get_future();
                     boost::asio::co_spawn(
-                        boost::asio::system_executor{},
+                        yams::daemon::GlobalIOContext::global_executor(),
                         [leaseHandle, dreq, &prom]() mutable -> boost::asio::awaitable<void> {
                             auto& client = **leaseHandle;
                             auto r = co_await client.call(dreq);

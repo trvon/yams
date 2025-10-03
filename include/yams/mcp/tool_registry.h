@@ -3,11 +3,14 @@
 #include <nlohmann/json.hpp>
 #include <concepts>
 #include <functional>
+#include <iterator>
 #include <optional>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <type_traits>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 #include <boost/asio/awaitable.hpp>
 #include <yams/core/types.h>
@@ -16,19 +19,70 @@ namespace yams::mcp {
 
 using json = nlohmann::json;
 
-[[maybe_unused]] static nlohmann::json wrapToolResult(const nlohmann::json& structured,
-                                                      bool isError = false) {
-    nlohmann::json result;
-    // Format according to MCP spec - content array with text items
-    if (isError) {
-        // For errors, return the error object directly without wrapping in content
-        return structured;
+namespace detail {
+
+inline json makeTextContent(std::string text) {
+    return json::array({json{{"type", "text"}, {"text", std::move(text)}}});
+}
+
+[[nodiscard]] inline json makeErrorResponse(std::string message) {
+    return json{{"content", makeTextContent(std::move(message))}, {"isError", true}};
+}
+
+[[nodiscard]] inline json makeErrorResponse(std::string_view message) {
+    return makeErrorResponse(std::string(message));
+}
+
+template <typename T>
+[[nodiscard]] auto jsonValueOr(const json& j, std::string_view key, T&& defaultValue)
+    -> std::decay_t<T> {
+    if (const auto it = j.find(key); it != j.end() && !it->is_null()) {
+        return it->get<std::decay_t<T>>();
     }
+    return std::forward<T>(defaultValue);
+}
 
-    // For successful results, wrap in content array as per MCP spec
-    result["content"] =
-        nlohmann::json::array({nlohmann::json{{"type", "text"}, {"text", structured.dump()}}});
+template <typename Container>
+concept StringPushBackContainer = requires(Container& c, std::string value) {
+    { c.push_back(std::move(value)) } -> std::same_as<void>;
+};
 
+template <StringPushBackContainer Container>
+void readStringArray(const json& j, std::string_view key, Container& out) {
+    if (const auto it = j.find(key); it != j.end() && !it->is_null()) {
+        if (it->is_array()) {
+            if constexpr (requires(Container& cont, std::size_t size) { cont.reserve(size); }) {
+                out.reserve(out.size() + it->size());
+            }
+            for (const auto& element : *it) {
+                if (element.is_string()) {
+                    out.push_back(element.template get<std::string>());
+                }
+            }
+        } else if (it->is_string()) {
+            out.push_back(it->template get<std::string>());
+        }
+    }
+}
+
+template <typename Handler, typename Request, typename Response>
+concept SyncToolHandler =
+    std::invocable<Handler&, const Request&> &&
+    std::same_as<std::invoke_result_t<Handler&, const Request&>, Result<Response>>;
+
+template <typename Handler, typename Request, typename Response>
+concept AsyncToolHandler = std::invocable<Handler&, const Request&> &&
+                           std::same_as<std::invoke_result_t<Handler&, const Request&>,
+                                        boost::asio::awaitable<Result<Response>>>;
+
+} // namespace detail
+
+// MCP 1.x requires textual responses wrapped in a content array. Retain this format until the
+// protocol relaxes the constraint; callers rely on the text payload today.
+[[maybe_unused]] inline nlohmann::json wrapToolResult(const nlohmann::json& structured,
+                                                      bool /*isError*/ = false) {
+    nlohmann::json result;
+    result["content"] = detail::makeTextContent(structured.dump());
     return result;
 }
 
@@ -337,8 +391,7 @@ struct MCPStatusRequest {
     bool detailed = false;
     static MCPStatusRequest fromJson(const json& j) {
         MCPStatusRequest r;
-        if (j.contains("detailed"))
-            r.detailed = j.at("detailed").get<bool>();
+        r.detailed = detail::jsonValueOr(j, "detailed", r.detailed);
         return r;
     }
     json toJson() const {
@@ -367,23 +420,20 @@ struct MCPStatusResponse {
 
     static MCPStatusResponse fromJson(const json& j) {
         MCPStatusResponse r;
-        r.running = j.value("running", false);
-        r.ready = j.value("ready", false);
-        r.overallStatus = j.value("overallStatus", "");
-        r.lifecycleState = j.value("lifecycleState", "");
-        r.lastError = j.value("lastError", "");
-        r.version = j.value("version", "");
-        r.uptimeSeconds = j.value("uptimeSeconds", 0ull);
-        r.requestsProcessed = j.value("requestsProcessed", 0ull);
-        r.activeConnections = j.value("activeConnections", 0ull);
-        r.memoryUsageMb = j.value("memoryUsageMb", 0.0);
-        r.cpuUsagePercent = j.value("cpuUsagePercent", 0.0);
-        if (j.contains("counters"))
-            r.counters = j.at("counters");
-        if (j.contains("readinessStates"))
-            r.readinessStates = j.at("readinessStates");
-        if (j.contains("initProgress"))
-            r.initProgress = j.at("initProgress");
+        r.running = detail::jsonValueOr(j, "running", r.running);
+        r.ready = detail::jsonValueOr(j, "ready", r.ready);
+        r.overallStatus = detail::jsonValueOr(j, "overallStatus", r.overallStatus);
+        r.lifecycleState = detail::jsonValueOr(j, "lifecycleState", r.lifecycleState);
+        r.lastError = detail::jsonValueOr(j, "lastError", r.lastError);
+        r.version = detail::jsonValueOr(j, "version", r.version);
+        r.uptimeSeconds = detail::jsonValueOr(j, "uptimeSeconds", r.uptimeSeconds);
+        r.requestsProcessed = detail::jsonValueOr(j, "requestsProcessed", r.requestsProcessed);
+        r.activeConnections = detail::jsonValueOr(j, "activeConnections", r.activeConnections);
+        r.memoryUsageMb = detail::jsonValueOr(j, "memoryUsageMb", r.memoryUsageMb);
+        r.cpuUsagePercent = detail::jsonValueOr(j, "cpuUsagePercent", r.cpuUsagePercent);
+        r.counters = detail::jsonValueOr(j, "counters", r.counters);
+        r.readinessStates = detail::jsonValueOr(j, "readinessStates", r.readinessStates);
+        r.initProgress = detail::jsonValueOr(j, "initProgress", r.initProgress);
         return r;
     }
     json toJson() const {
@@ -412,8 +462,7 @@ struct MCPDoctorRequest {
     bool verbose = true;
     static MCPDoctorRequest fromJson(const json& j) {
         MCPDoctorRequest r;
-        if (j.contains("verbose"))
-            r.verbose = j.at("verbose").get<bool>();
+        r.verbose = detail::jsonValueOr(j, "verbose", r.verbose);
         return r;
     }
     json toJson() const {
@@ -430,11 +479,9 @@ struct MCPDoctorResponse {
     json details;
     static MCPDoctorResponse fromJson(const json& j) {
         MCPDoctorResponse r;
-        r.summary = j.value("summary", "");
-        if (j.contains("issues"))
-            r.issues = j.at("issues").get<std::vector<std::string>>();
-        if (j.contains("details"))
-            r.details = j.at("details");
+        r.summary = detail::jsonValueOr(j, "summary", r.summary);
+        r.issues = detail::jsonValueOr(j, "issues", r.issues);
+        r.details = detail::jsonValueOr(j, "details", r.details);
         return r;
     }
     json toJson() const {
@@ -482,14 +529,15 @@ struct MCPAddDirectoryResponse {
 
 // Tool descriptor for registry
 struct ToolDescriptor {
-    std::string_view name;
+    std::string name;
     std::function<json(const json&)> handler;
     json schema;
-    std::string_view description;
+    std::string description;
 
-    ToolDescriptor(std::string_view n, std::function<json(const json&)> h, json s = {},
-                   std::string_view d = {})
-        : name(n), handler(std::move(h)), schema(std::move(s)), description(d) {}
+    ToolDescriptor(std::string n, std::function<json(const json&)> h, json s = {},
+                   std::string d = {})
+        : name(std::move(n)), handler(std::move(h)), schema(std::move(s)),
+          description(std::move(d)) {}
 };
 
 // Get by name DTOs
@@ -718,17 +766,15 @@ struct MCPSessionStartRequest {
 
     static MCPSessionStartRequest fromJson(const json& j) {
         MCPSessionStartRequest r;
-        if (j.contains("name"))
-            r.name = j.value("name", "");
-        if (j.contains("description"))
-            r.description = j.value("description", "");
-        r.warm = j.value("warm", true);
-        r.limit = j.value("limit", 200);
-        r.snippetLen = j.value("snippet_len", 160);
-        r.cores = j.value("cores", -1);
-        r.memoryGb = j.value("memory_gb", -1);
-        r.timeMs = j.value<long>("time_ms", -1);
-        r.aggressive = j.value("aggressive", false);
+        r.name = detail::jsonValueOr(j, "name", r.name);
+        r.description = detail::jsonValueOr(j, "description", r.description);
+        r.warm = detail::jsonValueOr(j, "warm", r.warm);
+        r.limit = detail::jsonValueOr(j, "limit", r.limit);
+        r.snippetLen = detail::jsonValueOr(j, "snippet_len", r.snippetLen);
+        r.cores = detail::jsonValueOr(j, "cores", r.cores);
+        r.memoryGb = detail::jsonValueOr(j, "memory_gb", r.memoryGb);
+        r.timeMs = detail::jsonValueOr(j, "time_ms", r.timeMs);
+        r.aggressive = detail::jsonValueOr(j, "aggressive", r.aggressive);
         return r;
     }
     json toJson() const {
@@ -745,8 +791,8 @@ struct MCPSessionStartResponse {
     uint64_t warmedCount = 0;
     static MCPSessionStartResponse fromJson(const json& j) {
         MCPSessionStartResponse r;
-        r.name = j.value("name", "");
-        r.warmedCount = j.value<uint64_t>("warmed_count", 0);
+        r.name = detail::jsonValueOr(j, "name", r.name);
+        r.warmedCount = detail::jsonValueOr(j, "warmed_count", r.warmedCount);
         return r;
     }
     json toJson() const { return json{{"name", name}, {"warmed_count", warmedCount}}; }
@@ -758,9 +804,8 @@ struct MCPSessionStopRequest {
     bool clear = true; // clear materialized cache
     static MCPSessionStopRequest fromJson(const json& j) {
         MCPSessionStopRequest r;
-        if (j.contains("name"))
-            r.name = j.value("name", "");
-        r.clear = j.value("clear", true);
+        r.name = detail::jsonValueOr(j, "name", r.name);
+        r.clear = detail::jsonValueOr(j, "clear", r.clear);
         return r;
     }
     json toJson() const { return json{{"name", name}, {"clear", clear}}; }
@@ -772,8 +817,8 @@ struct MCPSessionStopResponse {
     bool cleared = false;
     static MCPSessionStopResponse fromJson(const json& j) {
         MCPSessionStopResponse r;
-        r.name = j.value("name", "");
-        r.cleared = j.value("cleared", false);
+        r.name = detail::jsonValueOr(j, "name", r.name);
+        r.cleared = detail::jsonValueOr(j, "cleared", r.cleared);
         return r;
     }
     json toJson() const { return json{{"name", name}, {"cleared", cleared}}; }
@@ -824,7 +869,9 @@ class ToolWrapper {
 public:
     using HandlerFn = std::function<Result<ResponseType>(const RequestType&)>;
 
-    explicit ToolWrapper(HandlerFn handler) : handler_(std::move(handler)) {}
+    template <typename Handler>
+    requires detail::SyncToolHandler<std::decay_t<Handler>, RequestType, ResponseType>
+    explicit ToolWrapper(Handler&& handler) : handler_(HandlerFn(std::forward<Handler>(handler))) {}
 
     json operator()(const json& args) {
         try {
@@ -832,31 +879,15 @@ public:
             auto result = handler_(req);
 
             if (!result) {
-                // Return error wrapped in content array as per MCP spec
-                json errorContent = {
-                    {"content", json::array({json{{"type", "text"},
-                                                  {"text", "Error: " + result.error().message}}})},
-                    {"isError", true}};
-                return errorContent;
+                return detail::makeErrorResponse(std::string("Error: ") + result.error().message);
             }
 
-            auto responseJson = result.value().toJson();
-            return wrapToolResult(responseJson, false);
+            return wrapToolResult(result.value().toJson());
 
         } catch (const json::exception& e) {
-            // Return error wrapped in content array as per MCP spec
-            json errorContent = {
-                {"content", json::array({json{{"type", "text"},
-                                              {"text", "JSON error: " + std::string(e.what())}}})},
-                {"isError", true}};
-            return errorContent;
+            return detail::makeErrorResponse(std::string("JSON error: ") + e.what());
         } catch (const std::exception& e) {
-            // Return error wrapped in content array as per MCP spec
-            json errorContent = {
-                {"content", json::array({json{{"type", "text"},
-                                              {"text", "Error: " + std::string(e.what())}}})},
-                {"isError", true}};
-            return errorContent;
+            return detail::makeErrorResponse(std::string("Error: ") + e.what());
         }
     }
 
@@ -871,7 +902,10 @@ public:
     using AsyncHandlerFn =
         std::function<boost::asio::awaitable<Result<ResponseType>>(const RequestType&)>;
 
-    explicit AsyncToolWrapper(AsyncHandlerFn handler) : handler_(std::move(handler)) {}
+    template <typename Handler>
+    requires detail::AsyncToolHandler<std::decay_t<Handler>, RequestType, ResponseType>
+    explicit AsyncToolWrapper(Handler&& handler)
+        : handler_(AsyncHandlerFn(std::forward<Handler>(handler))) {}
 
     boost::asio::awaitable<json> operator()(const json& args) {
         try {
@@ -879,31 +913,16 @@ public:
             auto result = co_await handler_(req);
 
             if (!result) {
-                // Return error wrapped in content array as per MCP spec
-                json errorContent = {
-                    {"content", json::array({json{{"type", "text"},
-                                                  {"text", "Error: " + result.error().message}}})},
-                    {"isError", true}};
-                co_return errorContent;
+                co_return detail::makeErrorResponse(std::string("Error: ") +
+                                                    result.error().message);
             }
 
-            auto responseJson = result.value().toJson();
-            co_return wrapToolResult(responseJson, false);
+            co_return wrapToolResult(result.value().toJson());
 
         } catch (const json::exception& e) {
-            // Return error wrapped in content array as per MCP spec
-            json errorContent = {
-                {"content", json::array({json{{"type", "text"},
-                                              {"text", "JSON error: " + std::string(e.what())}}})},
-                {"isError", true}};
-            co_return errorContent;
+            co_return detail::makeErrorResponse(std::string("JSON error: ") + e.what());
         } catch (const std::exception& e) {
-            // Return error wrapped in content array as per MCP spec
-            json errorContent = {
-                {"content", json::array({json{{"type", "text"},
-                                              {"text", "Error: " + std::string(e.what())}}})},
-                {"isError", true}};
-            co_return errorContent;
+            co_return detail::makeErrorResponse(std::string("Error: ") + e.what());
         }
     }
 
@@ -919,24 +938,22 @@ public:
 
     ToolRegistry() {
         handlers_.reserve(32); // Pre-allocate for performance
+        descriptors_.reserve(32);
     }
 
-    template <ToolRequest RequestType, ToolResponse ResponseType>
-    requires ToolSerializable<RequestType> && ToolSerializable<ResponseType>
-    void registerTool(
-        std::string_view name,
-        std::function<boost::asio::awaitable<Result<ResponseType>>(const RequestType&)> handler,
-        json schema = {}, std::string_view description = {}) {
-        auto wrapper = AsyncToolWrapper<RequestType, ResponseType>(std::move(handler));
-        auto handlerFn = [wrapper = std::move(wrapper)](
-                             const json& args) mutable -> boost::asio::awaitable<json> {
+    template <ToolRequest RequestType, ToolResponse ResponseType, typename Handler>
+    requires ToolSerializable<RequestType> && ToolSerializable<ResponseType> &&
+             detail::AsyncToolHandler<std::decay_t<Handler>, RequestType, ResponseType>
+    void registerTool(std::string_view name, Handler&& handler, json schema = {},
+                      std::string description = {}) {
+        auto wrapper = AsyncToolWrapper<RequestType, ResponseType>(std::forward<Handler>(handler));
+        auto handlerFn = [wrapper](const json& args) mutable -> boost::asio::awaitable<json> {
             return wrapper(args);
         };
 
-        // Use iterator from emplace to avoid double lookup
         auto [it, inserted] = handlers_.emplace(std::string(name), std::move(handlerFn));
         if (inserted) {
-            descriptors_.emplace_back(it->first, it->second, std::move(schema), description);
+            descriptors_.push_back({it->first, std::move(schema), std::move(description)});
         }
     }
 
@@ -944,39 +961,28 @@ public:
         if (auto it = handlers_.find(std::string(name)); it != handlers_.end()) {
             co_return co_await it->second(arguments);
         }
-        // Return error wrapped in content array as per MCP spec
-        json errorContent = {
-            {"content",
-             json::array({json{{"type", "text"}, {"text", "Unknown tool: " + std::string(name)}}})},
-            {"isError", true}};
-        co_return errorContent;
+        co_return detail::makeErrorResponse(std::string("Unknown tool: ") + std::string(name));
     }
 
     json listTools() const {
         json tools = json::array();
-        for (const auto& desc : descriptors_) {
+        std::ranges::transform(descriptors_, std::back_inserter(tools), [](const auto& desc) {
             json tool;
             tool["name"] = desc.name;
-            tool["description"] = desc.description.empty() ? "" : std::string(desc.description);
+            tool["description"] = desc.description;
             if (!desc.schema.empty()) {
                 tool["inputSchema"] = desc.schema;
             }
-            tools.push_back(std::move(tool));
-        }
+            return tool;
+        });
         return json{{"tools", std::move(tools)}};
     }
 
 private:
     struct AsyncToolDescriptor {
-        std::string_view name;
-        const std::function<boost::asio::awaitable<json>(const json&)>& handler;
+        std::string name;
         json schema;
-        std::string_view description;
-
-        AsyncToolDescriptor(std::string_view n,
-                            const std::function<boost::asio::awaitable<json>(const json&)>& h,
-                            json s, std::string_view d)
-            : name(n), handler(h), schema(std::move(s)), description(d) {}
+        std::string description;
     };
 
     AsyncHandlerMap handlers_;
