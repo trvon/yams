@@ -199,7 +199,7 @@ private:
                         const std::string& snapshotId) {
         // Query metadata repository for snapshot by opening the database directly
         try {
-            auto dbPath = cli_->getDataPath() / "metadata.db";
+            auto dbPath = cli_->getDataPath() / "yams.db";
             sqlite3* db = nullptr;
 
             if (sqlite3_open(dbPath.string().c_str(), &db) != SQLITE_OK || !db) {
@@ -211,7 +211,7 @@ private:
 
             sqlite3_stmt* stmt = nullptr;
 
-            const char* sql = "SELECT snapshot_id, label, collection, tree_root_hash, created_at "
+            const char* sql = "SELECT snapshot_id, snapshot_label, tree_root_hash, created_at "
                               "FROM tree_snapshots WHERE snapshot_id = ?";
 
             if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
@@ -228,11 +228,12 @@ private:
                 if (sqlite3_column_type(stmt, 1) != SQLITE_NULL) {
                     meta.label = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
                 }
+                // No collection column in tree_snapshots schema
                 if (sqlite3_column_type(stmt, 2) != SQLITE_NULL) {
-                    meta.collection = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+                    meta.tree_root_hash =
+                        reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
                 }
-                meta.tree_root_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
-                meta.created_at = sqlite3_column_int64(stmt, 4);
+                meta.created_at = sqlite3_column_int64(stmt, 3);
 
                 sqlite3_finalize(stmt);
                 sqlite3_close(db);

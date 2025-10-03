@@ -158,6 +158,24 @@ all_stress = stress_srcs
 # Always rely on tests/unit_main.cpp; do not include tests/test_main.cpp here
 test_main = []
 
+heavy_tests = [
+  'ResourcePoolTest.MaxSizeEnforcement',
+  'StreamingProcessorTest.*',
+  'ZstandardCompressorTest.DecompressionPerformance',
+  'DatabaseTest.Migrations',
+  'ResultRankerTest.RankingResults',
+  'CompressedStorageStatsTest.*',
+  'IntegrityVerifierTest.*',
+  'DaemonTest.*',
+  'StreamingChunkerTest.*',
+  'ChunkValidatorParallel.*',
+  'DownloadManagerExport.*',
+  'StorageBackendTest.*',
+  'RepairCoordinatorTest.*',
+]
+
+unit_exclude = '*-' + ':'.join(heavy_tests)
+
 unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
   include_directories: incs,
   dependencies: [gtest_dep, test_deps],
@@ -165,25 +183,9 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
   link_whole: yams_unit_objs,
   install: false,
 )
-  unit_exclude = (
-    '*-' +
-    'ResourcePoolTest.MaxSizeEnforcement:' +
-    'StreamingProcessorTest.*:' +
-    'ZstandardCompressorTest.DecompressionPerformance:' +
-    'DatabaseTest.Migrations:' +
-    'ResultRankerTest.RankingResults:' +
-    'CompressedStorageStatsTest.*:' +
-    'ReferenceCounterTest.Statistics:' +
-    'IntegrityVerifierTest.*:' +
-    'DaemonTest.*:' +
-    'StreamingChunkerTest.*:' +
-    'ChunkValidatorParallel.*:' +
-    'DownloadManagerExport.*:' +
-    'StorageBackendTest.*:' +
-    'RepairCoordinatorTest.*'
-  )
   unit_shards = get_option('unit-shards')
   unit_timeout = get_option('unit-timeout')
+  bench_timeout = get_option('bench-timeout')
 
   if unit_shards > 1
     # Derive per-shard timeout (ceil division) with a small floor of 120s
@@ -215,113 +217,114 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
   endif
 
   test('unit_isolated_integrity_verifier', unit_exe,
-    suite: ['unit', 'isolated'],
+    suite: ['bench', 'isolated'],
     args: ['--gtest_filter=IntegrityVerifierTest.*'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'GTEST_BRIEF': '1',
     },
-    timeout: unit_timeout,
+    timeout: bench_timeout,
   )
 
+  # Daemon lifecycle smoke coverage remains opt-in because it performs full daemon start/stop sequences.
   test('unit_isolated_daemon', unit_exe,
-    suite: ['unit', 'isolated'],
+    suite: ['daemon-long'],
     args: ['--gtest_filter=DaemonTest.*'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'GTEST_BRIEF': '1',
     },
-    timeout: unit_timeout,
+    timeout: bench_timeout,
   )
 
   test('unit_isolated_streaming_chunker', unit_exe,
-    suite: ['unit', 'isolated'],
+    suite: ['bench', 'isolated'],
     args: ['--gtest_filter=StreamingChunkerTest.*'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'GTEST_BRIEF': '1',
     },
-    timeout: unit_timeout,
+    timeout: bench_timeout,
   )
 
   test('unit_isolated_chunk_validator', unit_exe,
-    suite: ['unit', 'isolated'],
+    suite: ['bench', 'isolated'],
     args: ['--gtest_filter=ChunkValidatorParallel.*'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'GTEST_BRIEF': '1',
     },
-    timeout: unit_timeout,
+    timeout: bench_timeout,
   )
 
   test('unit_isolated_download_manager', unit_exe,
-    suite: ['unit', 'isolated'],
+    suite: ['bench', 'isolated'],
     args: ['--gtest_filter=DownloadManagerExport.*'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'GTEST_BRIEF': '1',
     },
-    timeout: unit_timeout,
+    timeout: bench_timeout,
   )
 
   test('unit_isolated_storage_backend', unit_exe,
-    suite: ['unit', 'isolated'],
+    suite: ['bench', 'isolated'],
     args: ['--gtest_filter=StorageBackendTest.*'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'GTEST_BRIEF': '1',
     },
-    timeout: unit_timeout,
+    timeout: bench_timeout,
   )
 
   test('unit_isolated_repair_coordinator', unit_exe,
-    suite: ['unit', 'isolated'],
+    suite: ['bench', 'isolated'],
     args: ['--gtest_filter=RepairCoordinatorTest.*'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'GTEST_BRIEF': '1',
     },
-    timeout: unit_timeout,
+    timeout: bench_timeout,
   )
 
   test('unit_isolated_service_manager', unit_exe,
-    suite: ['unit', 'isolated'],
+    suite: ['bench', 'isolated'],
     args: ['--gtest_filter=ServiceManagerTest.*'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'GTEST_BRIEF': '1',
     },
-    timeout: unit_timeout,
+    timeout: bench_timeout,
   )
 
   test('unit_shard_vectordb_metrics', unit_exe,
-    suite: ['unit'],
+    suite: ['bench'],
     args: ['--gtest_filter=DaemonMetrics.VectorDbReadyHealsFromHandle'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'GTEST_BRIEF': '1',
     },
-    timeout: 120,
+    timeout: bench_timeout,
   )
 
   test('unit_shard_post_ingest_queue', unit_exe,
-    suite: ['unit'],
+    suite: ['bench'],
     args: ['--gtest_filter=PostIngestQueueStandardTest.*'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'GTEST_BRIEF': '1',
     },
-    timeout: 120,
+    timeout: bench_timeout,
   )
 
   test('unit_reliability_grep_search_startup', unit_exe,
-    suite: ['unit', 'reliability'],
+    suite: ['bench', 'reliability'],
     args: ['--gtest_filter=GrepServiceTest.RetriesTransientMetadataErrors:GrepServiceTest.PropagatesMetadataErrorsWhenTagsUnavailable:SearchServiceTest.LightIndexRetriesTransientMetadataErrors'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'GTEST_BRIEF': '1',
     },
-    timeout: 120,
+    timeout: bench_timeout,
   )
 
   # Define a fast "smoke" subset using gtest filter for developer iteration

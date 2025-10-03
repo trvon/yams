@@ -23,6 +23,18 @@ using namespace yams::api;
 
 class IndexingServiceTest : public ::testing::Test {
 protected:
+    static void SetUpTestSuite() {
+        auto& detector = FileTypeDetector::instance();
+        auto detectorInit = detector.initializeWithMagicNumbers();
+        ASSERT_TRUE(detectorInit) << "Failed to initialize FileTypeDetector: "
+                                  << detectorInit.error().message;
+
+        auto& registry = ContentHandlerRegistry::instance();
+        registry.clear();
+    }
+
+    static void TearDownTestSuite() { ContentHandlerRegistry::instance().clear(); }
+
     void SetUp() override {
         setupTestEnvironment();
         setupDatabase();
@@ -56,16 +68,6 @@ private:
 
         std::filesystem::create_directories(infraDir_, ec);
         ASSERT_FALSE(ec) << "Failed to create infrastructure directory: " << ec.message();
-
-        // Initialize file type detector
-        auto& detector = FileTypeDetector::instance();
-        auto result = detector.initializeWithMagicNumbers();
-        ASSERT_TRUE(result) << "Failed to initialize FileTypeDetector: " << result.error().message;
-
-        // Initialize content handler registry
-        auto& registry = ContentHandlerRegistry::instance();
-        registry.clear();
-        registry.initializeDefaultHandlers();
     }
 
     void setupDatabase() {
@@ -146,8 +148,6 @@ private:
     }
 
     void cleanupTestEnvironment() {
-        ContentHandlerRegistry::instance().clear();
-
         if (!testDir_.empty() && std::filesystem::exists(testDir_)) {
             std::error_code ec;
             std::filesystem::remove_all(testDir_, ec);
