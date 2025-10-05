@@ -17,6 +17,20 @@ endif
 
 onnx_opt = get_option('enable-onnx')
 
+# Enforce sqlite3 FTS5 presence at configure time (configurable)
+require_fts5 = get_option('require-fts5')
+sqlite_dep = dependency('sqlite3', required: true)
+cpp = meson.get_compiler('cpp')
+fts5_prog = cpp.run(files('meson/fts5_check.cpp'), dependencies: sqlite_dep, name: 'sqlite3 FTS5 check')
+if fts5_prog.returncode() != 0
+  msg = 'SQLite3 built without FTS5 support. Enable FTS5 in your package manager or Conan (e.g., -o sqlite3:fts5=True).'
+  if require_fts5
+    error(msg)
+  else
+    warning(msg)
+  endif
+endif
+
 # Boost is a core requirement (e.g., Boost.Asio for daemon communication).
 # Conan's PkgConfigDeps often doesn't emit boost.pc, so prefer CMake config.
 boost_dep = dependency('boost', modules: ['system', 'thread'], method: 'cmake', required: true)

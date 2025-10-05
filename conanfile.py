@@ -42,7 +42,21 @@ class YamsConan(ConanFile):
         self.requires("spdlog/1.13.0")
         self.requires("cli11/2.4.1")
         self.requires("nlohmann_json/3.11.3")
-        self.requires("sqlite3/3.44.2")
+        # sqlite3 with FTS5 enabled by default (no user flags needed)
+        # Also enable JSON1 and keep load_extension available for FTS5.
+        # Conan v2 requires passing options at requires()-time; mutating in
+        # configure() is unreliable for downstream packages.
+        self.requires(
+            "sqlite3/3.44.2",
+            options={
+                # ConanCenter sqlite3 options (3.44.x)
+                "enable_fts5": True,
+                "enable_json1": True,
+                "enable_rtree": True,
+                # Keep extension loading so FTS virtual tables can operate
+                "omit_load_extension": False,
+            },
+        )
         self.requires("zlib/1.3.1")
         self.requires("zstd/1.5.5")
         self.requires("libarchive/3.7.6")
