@@ -39,4 +39,32 @@ inline std::vector<std::string> defaultSearchQueries() {
             "hello_world()", "{\"server\":", "30,New",  "**bold**"};
 }
 
+inline SearchCorpusSpec mobileSearchCorpusSpec() {
+    SearchCorpusSpec spec;
+    spec.rootDirectory = "mobile";
+    spec.bytesPerDocument = 256;
+    spec.commonTags = {"mobile", "fixture"};
+    spec.topics = {{.name = "sync",
+                    .documentsPerTopic = 2,
+                    .extension = ".txt",
+                    .keywords = {"offline sync", "delta"},
+                    .tags = {"sync", "scenario:offline"}},
+                   {.name = "case",
+                    .documentsPerTopic = 2,
+                    .extension = ".md",
+                    .keywords = {"CaseSensitive", "casesensitive"},
+                    .tags = {"case", "scenario:case"}},
+                   {.name = "paths",
+                    .documentsPerTopic = 2,
+                    .extension = ".json",
+                    .keywords = {"/Users/demo/Documents", "C:/Users/Demo/Documents"},
+                    .tags = {"paths", "scenario:path"}},
+                   {.name = "semantic",
+                    .documentsPerTopic = 1,
+                    .extension = ".txt",
+                    .keywords = {"neural embedding warm up"},
+                    .tags = {"semantic", "scenario:warmup"}}};
+    return spec;
+}
+
 } // namespace yams::test

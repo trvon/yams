@@ -17,6 +17,7 @@
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/query_helpers.h>
 
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
@@ -117,7 +118,7 @@ TEST_F(GrepServiceExpectationsIT, RegexOnlyPathsOnlyWithInclude) {
     {
         bool visible = false;
         for (int i = 0; i < 40 && !visible; ++i) {
-            auto allDocs = ctx.metadataRepo->findDocumentsByPath("%");
+            auto allDocs = metadata::queryDocumentsByPattern(*ctx.metadataRepo, "%");
             if (allDocs) {
                 for (const auto& d : allDocs.value()) {
                     if (d.filePath.find("hello.txt") != std::string::npos) {
@@ -185,7 +186,7 @@ TEST_F(GrepServiceExpectationsIT, CountModeStructure) {
     {
         bool visible = false;
         for (int i = 0; i < 40 && !visible; ++i) {
-            auto allDocs = ctx.metadataRepo->findDocumentsByPath("%");
+            auto allDocs = metadata::queryDocumentsByPattern(*ctx.metadataRepo, "%");
             if (allDocs) {
                 for (const auto& d : allDocs.value()) {
                     if (d.filePath.find("a.md") != std::string::npos) {

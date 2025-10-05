@@ -5,6 +5,7 @@
 #include <yams/metadata/database.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
+#include <yams/metadata/query_helpers.h>
 
 #include <filesystem>
 #include <fstream>
@@ -21,7 +22,7 @@ public:
     explicit FlakyMetadataRepository(ConnectionPool& pool) : MetadataRepository(pool) {}
 
     void setGetAllMetadataFailures(std::size_t count) { getAllMetadataFailures_ = count; }
-    void setFindDocumentsByPathFailures(std::size_t count) { findByPathFailures_ = count; }
+    void setQueryDocumentsFailures(std::size_t count) { queryFailures_ = count; }
 
     Result<std::unordered_map<std::string, MetadataValue>>
     getAllMetadata(int64_t documentId) override {
@@ -31,11 +32,16 @@ public:
         return MetadataRepository::getAllMetadata(documentId);
     }
 
-    Result<std::vector<DocumentInfo>> findDocumentsByPath(const std::string& pathPattern) override {
-        if (consume(findByPathFailures_)) {
+    Result<std::vector<DocumentInfo>>
+    queryDocuments(const metadata::DocumentQueryOptions& options) override {
+        if (consume(queryFailures_)) {
             return Error{ErrorCode::DatabaseError, "database is locked"};
         }
-        return MetadataRepository::findDocumentsByPath(pathPattern);
+        return MetadataRepository::queryDocuments(options);
+    }
+
+    Result<std::optional<DocumentInfo>> findDocumentByExactPath(const std::string& path) override {
+        return MetadataRepository::findDocumentByExactPath(path);
     }
 
 private:
@@ -47,7 +53,7 @@ private:
     }
 
     std::size_t getAllMetadataFailures_{0};
-    std::size_t findByPathFailures_{0};
+    std::size_t queryFailures_{0};
 };
 
 } // namespace
@@ -246,7 +252,7 @@ TEST_F(GrepServiceTest, PathsOnlyModeAllowsSemanticSuggestions) {
 
 TEST_F(GrepServiceTest, RetriesTransientMetadataErrors) {
     auto flakyRepo = std::make_shared<FlakyMetadataRepository>(*pool_);
-    auto docsRes = flakyRepo->findDocumentsByPath("%");
+    auto docsRes = metadata::queryDocumentsByPattern(*flakyRepo, "%");
     ASSERT_TRUE(docsRes);
     ASSERT_FALSE(docsRes.value().empty());
     const auto docId = docsRes.value().front().id;
@@ -269,7 +275,7 @@ TEST_F(GrepServiceTest, RetriesTransientMetadataErrors) {
 
 TEST_F(GrepServiceTest, PropagatesMetadataErrorsWhenTagsUnavailable) {
     auto flakyRepo = std::make_shared<FlakyMetadataRepository>(*pool_);
-    auto docsRes = flakyRepo->findDocumentsByPath("%");
+    auto docsRes = metadata::queryDocumentsByPattern(*flakyRepo, "%");
     ASSERT_TRUE(docsRes);
     ASSERT_FALSE(docsRes.value().empty());
     const auto docId = docsRes.value().front().id;

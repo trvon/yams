@@ -44,6 +44,18 @@ retrieval_bench = executable('yams_retrieval_service_benchmarks',
   install: false,
 )
 
+metadata_query_bench_deps = [dependency('yams_metadata'), dependency('yams_search')] + tracy_deps
+if benchmark_dep.found()
+  metadata_query_bench_deps += [benchmark_dep]
+endif
+
+metadata_query_bench = executable('metadata_path_query_bench', files('metadata_path_query_bench.cpp'),
+  include_directories: incs,
+  dependencies: metadata_query_bench_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  install: false,
+)
+
 ingestion_bench = executable('ingestion_throughput_bench', files('ingestion_throughput_bench.cpp'),
   include_directories: incs,
   dependencies: [
@@ -59,3 +71,17 @@ ingestion_bench = executable('ingestion_throughput_bench', files('ingestion_thro
 )
 
 alias_target('bench_ingest', ingestion_bench)
+
+# PBI-043 Tree-diff benchmarks
+tree_diff_bench = executable('tree_diff_benchmarks', files('tree_diff_benchmarks.cpp'),
+  include_directories: incs,
+  dependencies: [
+    dependency('yams_benchmarks'),
+    dependency('yams_metadata'),
+    dependency('yams_storage_engine'),
+  ] + tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  install: false,
+)
+
+alias_target('bench_tree_diff', tree_diff_bench)

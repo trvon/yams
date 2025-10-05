@@ -131,6 +131,7 @@ jobs:
             -pr:h=${{ matrix.conan_host_profile }} \
             -s build_type=${{ inputs.build_type }} \
             -s:h arch=${{ matrix.conan_arch }} \
+            -o sqlite3:fts5=True \
             -o "yams/*:enable_onnx=${ONNX}" \
             --build=missing
 

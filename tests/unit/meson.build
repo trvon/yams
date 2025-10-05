@@ -98,6 +98,7 @@ unit_daemon = files(
   'daemon/proto_roundtrip_test.cpp',
   'daemon/streaming_processor_test.cpp',
   'daemon/wasm_plugin_harness_test.cpp',
+  'daemon/daemon_warm_bench_test.cpp',
   # excluded: multiplex_client_test.cpp, request_dispatcher_plugin_test.cpp, onnx_*
 )
 
@@ -144,6 +145,7 @@ unit_metadata = files(
   'metadata/kg_store_test.cpp',
   'metadata/metadata_repository_test.cpp',
   'metadata/metadata_schema_test.cpp',
+  'metadata/query_helpers_test.cpp',
   'metadata/tree_builder_test.cpp',
   'metadata/tree_differ_test.cpp',
 )

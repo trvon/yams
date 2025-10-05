@@ -159,3 +159,12 @@ TEST_F(SearchHashEdgeCasesTest, HashPrefixAmbiguityNoCrash) {
     EXPECT_EQ(r.value().type, "hash");
     EXPECT_GE(r.value().total, 0u);
 }
+
+TEST_F(SearchHashEdgeCasesTest, MetadataRepositoryDirectHashPrefixLookup) {
+    ASSERT_FALSE(hashes_.empty());
+    auto prefix = hashes_.front().substr(0, 10);
+    auto lookup = repo_->findDocumentsByHashPrefix(prefix, 5);
+    ASSERT_TRUE(lookup) << lookup.error().message;
+    ASSERT_FALSE(lookup.value().empty());
+    EXPECT_EQ(lookup.value().front().sha256Hash, hashes_.front());
+}

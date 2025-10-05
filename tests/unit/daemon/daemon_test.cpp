@@ -489,7 +489,9 @@ TEST_F(DaemonTest, StartFailsWithInvalidDataDir) {
     EXPECT_FALSE(result) << "Daemon should not start with invalid dataDir";
 }
 
-TEST_F(DaemonTest, WarmLatencyBenchmark) {
+// Disabled: causes hangs/flakes in some environments. Move to bench suite with
+// explicit runtime guard and shorter warmups. See PBI 026 follow-up.
+TEST_F(DaemonTest, DISABLED_WarmLatencyBenchmark) {
     daemon_ = std::make_unique<YamsDaemon>(config_);
     auto result = daemon_->start();
     if (!result) {

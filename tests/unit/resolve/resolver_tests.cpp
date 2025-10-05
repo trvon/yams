@@ -141,10 +141,21 @@ public:
     }
 
     // Bulk ops (some are used)
-    Result<std::vector<DocumentInfo>> findDocumentsByPath(const std::string& pathPattern) override {
-        // Provide a simple stubbed behavior:
-        // When pathPattern contains "%/x.txt" or equals "/abs/x.txt", return a matching
-        // DocumentInfo
+    Result<std::vector<DocumentInfo>>
+    queryDocuments(const metadata::DocumentQueryOptions& options) override {
+        auto toPattern = [&]() -> std::string {
+            if (options.likePattern)
+                return *options.likePattern;
+            if (options.exactPath)
+                return *options.exactPath;
+            if (options.pathPrefix)
+                return *options.pathPrefix + "%";
+            if (options.containsFragment)
+                return "%" + *options.containsFragment;
+            return "%";
+        };
+
+        const std::string pathPattern = toPattern();
         std::vector<DocumentInfo> out;
 
         auto pushDoc = [&](std::string path, std::string name, std::string hash) {
@@ -155,10 +166,6 @@ public:
             out.push_back(std::move(d));
         };
 
-        // Simulate a small "database":
-        // - /root/a.txt (hash A)
-        // - /root/sub/b.txt (hash B)
-        // - /root/sub/.hidden.txt (hash H)
         if (pathPattern == "%/a.txt" || pathPattern == "/root/a.txt" || pathPattern == "%") {
             pushDoc("/root/a.txt", "a.txt",
                     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
@@ -168,18 +175,26 @@ public:
             pushDoc("/root/sub/b.txt", "b.txt",
                     "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
         }
-        if (pathPattern == "/root/sub/%" || pathPattern == "%") {
+        if (pathPattern == "%/.hidden.txt" || pathPattern == "/root/sub/.hidden.txt" ||
+            pathPattern == "/root/sub/%" || pathPattern == "%") {
             pushDoc("/root/sub/.hidden.txt", ".hidden.txt",
                     "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH");
         }
 
-        // Support SQL LIKE for pattern "*_*.txt" -> "%/_%.txt" etc. We keep it super simple:
-        // If pattern ends with "%", return dir listing for "/root/sub/%"
-        if (pathPattern == "/root/sub/%") {
-            // already pushed above
-        }
-
         return out;
+    }
+
+    Result<std::optional<DocumentInfo>> findDocumentByExactPath(const std::string& path) override {
+        auto docs = queryDocuments(metadata::DocumentQueryOptions{.exactPath = path});
+        if (!docs)
+            return docs.error();
+        if (docs.value().empty())
+            return std::optional<DocumentInfo>(std::nullopt);
+        return std::optional<DocumentInfo>(docs.value()[0]);
+    }
+    Result<std::vector<DocumentInfo>> findDocumentsByHashPrefix(const std::string&,
+                                                                std::size_t) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
     }
     Result<std::vector<DocumentInfo>> findDocumentsByExtension(const std::string&) override {
         return Error{ErrorCode::NotImplemented, "NI"};

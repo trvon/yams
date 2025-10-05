@@ -5,6 +5,7 @@
 #include <yams/metadata/database.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
+#include <yams/metadata/query_helpers.h>
 
 using namespace yams;
 using namespace yams::metadata;
@@ -468,7 +469,7 @@ TEST_F(MetadataSchemaTest, BulkOperations) {
     }
 
     // Find by path pattern
-    auto pathResult = repo_->findDocumentsByPath("%bulk%");
+    auto pathResult = metadata::queryDocumentsByPattern(*repo_, "%bulk%");
     ASSERT_TRUE(pathResult.has_value());
     EXPECT_EQ(pathResult.value().size(), 5);
 

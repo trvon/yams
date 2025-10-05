@@ -65,8 +65,17 @@ class InMemoryMetadata : public metadata::MetadataRepository {
 public:
     InMemoryMetadata() : metadata::MetadataRepository(*getPool()) {}
     void add(const metadata::DocumentInfo& d) { docs_.push_back(d); }
-    Result<std::vector<metadata::DocumentInfo>> findDocumentsByPath(const std::string&) override {
+    Result<std::vector<metadata::DocumentInfo>>
+    queryDocuments(const metadata::DocumentQueryOptions&) override {
         return docs_;
+    }
+    Result<std::optional<metadata::DocumentInfo>>
+    findDocumentByExactPath(const std::string& path) override {
+        for (auto& d : docs_) {
+            if (d.filePath == path)
+                return std::optional<metadata::DocumentInfo>(d);
+        }
+        return std::optional<metadata::DocumentInfo>(std::nullopt);
     }
     Result<std::vector<std::string>> getDocumentTags(int64_t) override {
         return std::vector<std::string>{};

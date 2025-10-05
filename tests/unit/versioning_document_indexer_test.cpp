@@ -5,6 +5,7 @@
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/query_helpers.h>
 
 using namespace yams;
 using namespace yams::indexing;
@@ -69,7 +70,7 @@ TEST_F(VersioningIndexerTest, PathSeries_NewThenUpdate_CreatesVersionEdgeAndFlag
     ASSERT_NE(id1, id2);
 
     // Exactly one latest=true at this path and it's id2
-    auto samePathDocs = repo->findDocumentsByPath(filePath.string());
+    auto samePathDocs = metadata::queryDocumentsByPattern(*repo, filePath.string());
     ASSERT_TRUE(samePathDocs);
     size_t latestCount = 0;
     for (const auto& d : samePathDocs.value()) {

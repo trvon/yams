@@ -105,11 +105,14 @@ test_deps = [
   dependency('yams_daemon_client'),
   dependency('yams_daemon'),
   dependency('yams_mcp'),
-  dependency('yams_cli'),
 ]
 
 if gmock_dep.found()
   test_deps += gmock_dep
+endif
+
+if get_option('build-cli')
+  test_deps += dependency('yams_cli')
 endif
 
 incs = [
@@ -139,6 +142,7 @@ subdir('unit')
 
 
 subdir('integration/smoke')
+subdir('mobile')
 
 stress_srcs = files(
   'stress/main.cpp',
@@ -317,6 +321,21 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
     timeout: bench_timeout,
   )
 
+  # Fast warm-latency bench (replaces unit WarmLatencyBenchmark)
+  test('unit_bench_daemon_warm_latency', unit_exe,
+    suite: ['bench'],
+    args: ['--gtest_filter=DaemonBench.WarmLatencyFast'],
+    env: {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'GTEST_BRIEF': '1',
+      # Require an explicit opt-in to actually run the daemon warm bench
+      # in CI or local: YAMS_ENABLE_DAEMON_BENCH=1 must be set in addition
+      # to this fast flag; otherwise the test self-skips.
+      'YAMS_BENCH_FAST': '1',
+    },
+    timeout: bench_timeout,
+  )
+
   test('unit_reliability_grep_search_startup', unit_exe,
     suite: ['bench', 'reliability'],
     args: ['--gtest_filter=GrepServiceTest.RetriesTransientMetadataErrors:GrepServiceTest.PropagatesMetadataErrorsWhenTagsUnavailable:SearchServiceTest.LightIndexRetriesTransientMetadataErrors'],
@@ -346,6 +365,26 @@ subdir('integration/services')
 
 # Benchmarks (standalone executables, not part of "meson test")
 subdir('benchmarks')
+
+# Standalone, minimal daemon warm-latency bench (does not depend on unit object lib)
+daemon_warm_bench = executable('yams_bench_daemon_warm',
+  files('benchmarks/daemon_warm_latency_main.cpp'),
+  include_directories: incs,
+  dependencies: [test_deps],
+  install: false,
+)
+
+test('bench_daemon_warm_latency', daemon_warm_bench,
+  suite: ['bench'],
+  env: {
+    'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+    # Bench is opt-in; enable by setting YAMS_ENABLE_DAEMON_BENCH=1 when invoking meson test
+  },
+  timeout: bench_timeout,
+)
+
+# Acceptance tests (E2E validation)
+subdir('acceptance')
 
 # Stress tests can be heavy; register but mark as long-running via suite name
 if all_stress.length() > 0

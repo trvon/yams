@@ -15,6 +15,8 @@ jobs:
     timeout-minutes: 90
     env:
       BUILD_DIR: build/yams-release
+      # Opt-in switch to run the daemon warm-latency bench (off by default)
+      RUN_DAEMON_WARM_BENCH: 'false'
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -56,7 +58,7 @@ jobs:
           set -euo pipefail
           rm -rf "$BUILD_DIR"
           conan profile detect --force
-          conan install . -of "$BUILD_DIR" -pr:b=default -pr:h=./conan/profiles/host-linux-clang -s build_type=Release --build=missing
+          conan install . -of "$BUILD_DIR" -pr:b=default -pr:h=./conan/profiles/host-linux-clang -s build_type=Release -o sqlite3:fts5=True --build=missing
           # Use Conan-generated Meson toolchain when present
           TOOLCHAIN_DIR="$BUILD_DIR/build-release/conan"
           NATIVE_FILE=$(find "$TOOLCHAIN_DIR" "$BUILD_DIR" -name 'conan_meson_native.ini' -print -quit 2>/dev/null || true)
@@ -80,6 +82,16 @@ jobs:
         run: |
           set -euo pipefail
           meson test -C "$BUILD_DIR" --suite bench -t 5 --no-rebuild
+
+      - name: Run Daemon Warm-Latency Bench (opt-in)
+        if: env.RUN_DAEMON_WARM_BENCH == 'true'
+        shell: bash
+        env:
+          YAMS_ENABLE_DAEMON_BENCH: '1'
+        run: |
+          set -euo pipefail
+          echo "Running bench_daemon_warm_latency (opt-in)..."
+          meson test -C "$BUILD_DIR" bench_daemon_warm_latency --suite bench --no-rebuild -t 3
 
       - name: Run Bus Micro-benchmark
         id: bench

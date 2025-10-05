@@ -1,13 +1,16 @@
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <thread>
+#include <vector>
 #include <gtest/gtest.h>
 #include <yams/common/utf8_utils.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
+#include <yams/metadata/path_utils.h>
 #include <yams/search/bk_tree.h>
 
 using namespace yams;
@@ -50,6 +53,34 @@ protected:
     std::unique_ptr<ConnectionPool> pool_;
     std::unique_ptr<MetadataRepository> repository_;
 };
+
+namespace {
+
+DocumentInfo makeDocumentWithPath(const std::string& path, const std::string& hash,
+                                  const std::string& mime = "text/plain") {
+    DocumentInfo info;
+    info.filePath = path;
+    info.fileName = std::filesystem::path(path).filename().string();
+    info.fileExtension = std::filesystem::path(path).extension().string();
+    info.fileSize = 1234;
+    info.sha256Hash = hash;
+    info.mimeType = mime;
+    info.createdTime = std::chrono::system_clock::now();
+    info.modifiedTime = info.createdTime;
+    info.indexedTime = info.createdTime;
+    auto derived = computePathDerivedValues(path);
+    info.filePath = derived.normalizedPath;
+    info.pathPrefix = derived.pathPrefix;
+    info.reversePath = derived.reversePath;
+    info.pathHash = derived.pathHash;
+    info.parentHash = derived.parentHash;
+    info.pathDepth = derived.pathDepth;
+    info.contentExtracted = true;
+    info.extractionStatus = ExtractionStatus::Success;
+    return info;
+}
+
+} // namespace
 
 TEST_F(MetadataRepositoryTest, InsertAndGetDocument) {
     DocumentInfo docInfo;
@@ -138,6 +169,60 @@ TEST_F(MetadataRepositoryTest, UpdateDocument) {
     auto updatedDoc = getResult.value().value();
     EXPECT_EQ(updatedDoc.fileName, "updated.txt");
     EXPECT_EQ(updatedDoc.fileSize, 4096);
+}
+
+TEST_F(MetadataRepositoryTest, QueryDocumentsHandlesExactPrefixAndSuffix) {
+    auto docA = makeDocumentWithPath(
+        "/notes/todo.md", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+    auto docB = makeDocumentWithPath(
+        "/notes/log.txt", "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
+    auto docC = makeDocumentWithPath(
+        "/reports/summary.pdf", "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+        "application/pdf");
+
+    ASSERT_TRUE(repository_->insertDocument(docA).has_value());
+    ASSERT_TRUE(repository_->insertDocument(docB).has_value());
+    ASSERT_TRUE(repository_->insertDocument(docC).has_value());
+
+    // Exact path via hash lookup (path hash)
+    DocumentQueryOptions exactOpts;
+    exactOpts.exactPath = "/notes/todo.md";
+    auto exactRes = repository_->queryDocuments(exactOpts);
+    ASSERT_TRUE(exactRes.has_value());
+    ASSERT_EQ(exactRes->size(), 1u);
+    EXPECT_EQ(exactRes->front().filePath, "/notes/todo.md");
+
+    // Directory prefix with subdirectories
+    DocumentQueryOptions prefixOpts;
+    prefixOpts.pathPrefix = "/notes";
+    prefixOpts.prefixIsDirectory = true;
+    prefixOpts.includeSubdirectories = true;
+    auto prefixRes = repository_->queryDocuments(prefixOpts);
+    ASSERT_TRUE(prefixRes.has_value());
+    std::vector<std::string> notePaths;
+    for (const auto& d : *prefixRes)
+        notePaths.push_back(d.filePath);
+    std::sort(notePaths.begin(), notePaths.end());
+    ASSERT_EQ(notePaths.size(), 2u);
+    EXPECT_EQ(notePaths[0], "/notes/log.txt");
+    EXPECT_EQ(notePaths[1], "/notes/todo.md");
+
+    // Suffix/contains fragment via FTS + reverse_path
+    DocumentQueryOptions containsOpts;
+    containsOpts.containsFragment = "todo.md";
+    containsOpts.containsUsesFts = true;
+    auto containsRes = repository_->queryDocuments(containsOpts);
+    ASSERT_TRUE(containsRes.has_value());
+    ASSERT_EQ(containsRes->size(), 1u);
+    EXPECT_EQ(containsRes->front().filePath, "/notes/todo.md");
+
+    // Extension filter restricted to `.txt`
+    DocumentQueryOptions extOpts;
+    extOpts.extension = ".txt";
+    auto extRes = repository_->queryDocuments(extOpts);
+    ASSERT_TRUE(extRes.has_value());
+    ASSERT_EQ(extRes->size(), 1u);
+    EXPECT_EQ(extRes->front().filePath, "/notes/log.txt");
 }
 
 TEST_F(MetadataRepositoryTest, DeleteDocument) {

@@ -84,9 +84,24 @@ class YamsConan(ConanFile):
             self.requires("tracy/0.12.2")
 
     def configure(self):
-        self.options["sqlite3"].enable_fts5 = True
-        self.options["sqlite3"].enable_fts4 = True
-        self.options["sqlite3"].enable_fts3_parenthesis = True
+        # Enable FTS extensions on sqlite3 across both legacy and modern option naming.
+        try:
+            if hasattr(self.options["sqlite3"], "fts5"):
+                self.options["sqlite3"].fts5 = True
+            if hasattr(self.options["sqlite3"], "enable_fts5"):
+                self.options["sqlite3"].enable_fts5 = True
+            if hasattr(self.options["sqlite3"], "fts4"):
+                self.options["sqlite3"].fts4 = True
+            if hasattr(self.options["sqlite3"], "enable_fts4"):
+                self.options["sqlite3"].enable_fts4 = True
+            if hasattr(self.options["sqlite3"], "fts3_parenthesis"):
+                self.options["sqlite3"].fts3_parenthesis = True
+            if hasattr(self.options["sqlite3"], "enable_fts3_parenthesis"):
+                self.options["sqlite3"].enable_fts3_parenthesis = True
+            if hasattr(self.options["sqlite3"], "json1"):
+                self.options["sqlite3"].json1 = True
+        except Exception:
+            pass
         self.options["libcurl"].with_ssl = "openssl"
         self.options["libcurl"].with_zlib = True
         self.options["libcurl"].shared = False

@@ -75,8 +75,10 @@ public:
                 (const std::string& query, float minSimilarity, int limit), (override));
     MOCK_METHOD(Result<void>, buildFuzzyIndex, (), (override));
     MOCK_METHOD(Result<void>, updateFuzzyIndex, (int64_t documentId), (override));
-    MOCK_METHOD((Result<std::vector<DocumentInfo>>), findDocumentsByPath,
-                (const std::string& pathPattern), (override));
+    MOCK_METHOD((Result<std::optional<DocumentInfo>>), findDocumentByExactPath,
+                (const std::string& path), (override));
+    MOCK_METHOD((Result<std::vector<DocumentInfo>>), queryDocuments,
+                (const DocumentQueryOptions& options), (override));
     MOCK_METHOD((Result<std::vector<DocumentInfo>>), findDocumentsByExtension,
                 (const std::string& extension), (override));
     MOCK_METHOD((Result<std::vector<DocumentInfo>>), findDocumentsModifiedSince,

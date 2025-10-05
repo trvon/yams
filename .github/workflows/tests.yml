@@ -247,6 +247,7 @@ jobs:
             -pr:h="${{ matrix.conan_host_profile }}" \
             -s build_type=Debug \
             -s:h arch=${{ matrix.conan_arch }} \
+            -o sqlite3:fts5=True \
             -o "yams/*:build_tests=True" \
             -o "yams/*:enable_onnx=False" \
             --build=missing
@@ -293,6 +294,17 @@ jobs:
           fi
           meson setup ${{ env.BUILD_DIR }} "${MESON_TOOL_ARG[@]}" -Dwerror=false -Dwarning_level=2 ${{ matrix.extra_meson_flags }}
           meson compile -C ${{ env.BUILD_DIR }}
+
+      - name: Check mobile ABI surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          LIB_PATH=$(find "${{ env.BUILD_DIR }}" -type f \( -name 'libyams_mobile*.so' -o -name 'libyams_mobile*.dylib' -o -name 'yams_mobile.dll' \) | head -n1)
+          if [ -z "$LIB_PATH" ]; then
+            echo "libyams_mobile shared library not found under ${{ env.BUILD_DIR }}" >&2
+            exit 1
+          fi
+          scripts/ci/check_mobile_abi.sh "$LIB_PATH"
 
       
 

@@ -233,8 +233,13 @@ public:
     }
     Result<void> buildFuzzyIndex() override { return ErrorCode::NotImplemented; }
     Result<void> updateFuzzyIndex(int64_t) override { return Result<void>(); }
-    Result<std::vector<metadata::DocumentInfo>> findDocumentsByPath(const std::string&) override {
+    Result<std::vector<metadata::DocumentInfo>>
+    queryDocuments(const metadata::DocumentQueryOptions&) override {
         return std::vector<metadata::DocumentInfo>{};
+    }
+    Result<std::optional<metadata::DocumentInfo>>
+    findDocumentByExactPath(const std::string&) override {
+        return std::optional<metadata::DocumentInfo>(std::nullopt);
     }
     Result<std::vector<metadata::DocumentInfo>>
     findDocumentsByExtension(const std::string&) override {
