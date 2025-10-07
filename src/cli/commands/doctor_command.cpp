@@ -5,12 +5,14 @@
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/recommendation_util.h>
+#include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/resource/plugin_loader.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/query_helpers.h>
 #include <yams/repair/embedding_repair_util.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
@@ -777,7 +779,7 @@ private:
                     std::cout << "  Store/Metadata unavailable\n";
                     return;
                 }
-                auto docs = appCtx->metadataRepo->findDocumentsByPath("%");
+                auto docs = metadata::queryDocumentsByPattern(*appCtx->metadataRepo, "%");
                 if (!docs) {
                     std::cout << "  Query failed: " << docs.error().message << "\n";
                     return;
@@ -824,15 +826,34 @@ private:
     void checkDaemon() {
         using namespace yams::daemon;
         try {
+            // First, perform a lightweight check to see if the daemon is responsive.
+            // This avoids triggering auto-start logic in a diagnostic command.
+            std::string effectiveSocket =
+                daemon::DaemonClient::resolveSocketPathConfigFirst().string();
+            if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
+                std::cout << "\n" << yams::cli::ui::section_header("Daemon Health") << "\n\n";
+                std::cout << yams::cli::ui::colorize("✗ UNAVAILABLE", yams::cli::ui::Ansi::RED)
+                          << " - Daemon not running on socket: " << effectiveSocket << "\n";
+                std::cout << "\n"
+                          << yams::cli::ui::colorize(
+                                 "Hint: Start the daemon with 'yams daemon start'",
+                                 yams::cli::ui::Ansi::DIM)
+                          << "\n";
+                return;
+            }
+
             yams::daemon::ClientConfig cfg;
             if (cli_)
                 if (cli_->hasExplicitDataDir()) {
                     cfg.dataDir = cli_->getDataPath();
                 }
-            cfg.requestTimeout = std::chrono::milliseconds(3000);
+            // Use longer timeout when daemon might be initializing
+            cfg.requestTimeout = std::chrono::milliseconds(10000);
             auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
             if (!leaseRes) {
-                std::cout << "Daemon: UNAVAILABLE - " << leaseRes.error().message << "\n";
+                std::cout << "\n" << yams::cli::ui::section_header("Daemon Health") << "\n\n";
+                std::cout << yams::cli::ui::colorize("✗ UNAVAILABLE", yams::cli::ui::Ansi::RED)
+                          << " - " << leaseRes.error().message << "\n";
                 return;
             }
             auto leaseHandle = std::move(leaseRes.value());
@@ -904,20 +925,43 @@ private:
                 }
             } catch (...) {
             }
-            std::cout << "Daemon: ";
+            std::cout << "\n" << yams::cli::ui::section_header("Daemon Health") << "\n\n";
+            // Use longer timeout for status call - daemon may be initializing
             auto s = yams::cli::run_result<yams::daemon::StatusResponse>(client.status(),
-                                                                         std::chrono::seconds(3));
+                                                                         std::chrono::seconds(10));
             if (!s) {
-                std::cout << "UNAVAILABLE - " << s.error().message << "\n";
+                std::cout << yams::cli::ui::colorize("✗ Failed to get status",
+                                                     yams::cli::ui::Ansi::RED)
+                          << " - " << s.error().message << "\n";
+                std::cout << "\n"
+                          << yams::cli::ui::colorize("Hint: Daemon may be starting up. Try 'yams "
+                                                     "daemon doctor' for detailed diagnostics.",
+                                                     yams::cli::ui::Ansi::DIM)
+                          << "\n";
                 return;
             }
             const auto& st = s.value();
-            std::cout << (st.ready ? "READY" : "NOT READY") << ", state="
-                      << (st.lifecycleState.empty() ? st.overallStatus : st.lifecycleState)
-                      << ", connections=" << st.activeConnections
-                      << ", version=" << (st.version.empty() ? "unknown" : st.version) << "\n";
 
-            // Show vector scoring availability line (brief)
+            std::vector<yams::cli::ui::Row> daemonRows;
+            std::string statusDisplay;
+            if (st.ready) {
+                statusDisplay = yams::cli::ui::colorize("✓ READY", yams::cli::ui::Ansi::GREEN);
+            } else {
+                statusDisplay = yams::cli::ui::colorize("◷ NOT READY", yams::cli::ui::Ansi::YELLOW);
+            }
+            daemonRows.push_back({"Status", statusDisplay, ""});
+
+            std::string state = st.lifecycleState.empty() ? st.overallStatus : st.lifecycleState;
+            daemonRows.push_back({"State", state, ""});
+            daemonRows.push_back({"Version", st.version.empty() ? "unknown" : st.version, ""});
+            daemonRows.push_back({"Connections", std::to_string(st.activeConnections), ""});
+            yams::cli::ui::render_rows(std::cout, daemonRows);
+
+            // Vector scoring and resources
+            std::cout << "\n";
+            std::vector<yams::cli::ui::Row> resourceRows;
+
+            // Show vector scoring availability
             try {
                 bool vecAvail = false, vecEnabled = false;
                 if (auto it = st.readinessStates.find("vector_embeddings_available");
@@ -926,17 +970,21 @@ private:
                 if (auto it = st.readinessStates.find("vector_scoring_enabled");
                     it != st.readinessStates.end())
                     vecEnabled = it->second;
-                if (!vecEnabled) {
-                    std::cout << "  Vector scoring: disabled — "
-                              << (vecAvail ? "config weight=0" : "embeddings unavailable") << "\n";
+
+                std::string vecStatus;
+                if (vecEnabled) {
+                    vecStatus = yams::cli::ui::colorize("✓ enabled", yams::cli::ui::Ansi::GREEN);
                 } else {
-                    std::cout << "  Vector scoring: enabled\n";
+                    vecStatus = yams::cli::ui::colorize("✗ disabled", yams::cli::ui::Ansi::YELLOW);
+                    vecStatus +=
+                        " (" +
+                        std::string(vecAvail ? "config weight=0" : "embeddings unavailable") + ")";
                 }
+                resourceRows.push_back({"Vector Scoring", vecStatus, ""});
             } catch (...) {
             }
 
-            // Show resources (memory/cpu) and worker/mux details. Print conditionally:
-            // if metrics are not yet available, show a concise pending line instead.
+            // Show resources
             try {
                 const auto& phase =
                     (st.lifecycleState.empty() ? st.overallStatus : st.lifecycleState);
@@ -948,33 +996,41 @@ private:
                 bool haveWorkers = (wt != st.requestCounts.end()) ||
                                    (wa != st.requestCounts.end()) || (wq != st.requestCounts.end());
                 bool haveResources = (ram > 0.0 || cpu > 0.0);
+
                 if (haveResources) {
-                    std::cout << "  Resources:    RAM=" << std::fixed << std::setprecision(1) << ram
-                              << " MB, CPU=" << std::setprecision(0) << cpu << "%\n";
-                } else {
-                    if (!phase.empty()) {
-                        if (st.retryAfterMs > 0) {
-                            std::cout << "  Resources:    pending (daemon " << phase
-                                      << ", retry after " << st.retryAfterMs << " ms)\n";
-                        } else {
-                            std::cout << "  Resources:    pending (daemon " << phase << ")\n";
-                        }
+                    std::ostringstream ramStr;
+                    ramStr << std::fixed << std::setprecision(1) << ram << " MB";
+                    resourceRows.push_back({"Memory", ramStr.str(), ""});
+                    resourceRows.push_back({"CPU", std::to_string((int)cpu) + "%", ""});
+                } else if (!phase.empty()) {
+                    std::string pending = "pending (" + phase + ")";
+                    if (st.retryAfterMs > 0) {
+                        pending += " - retry after " + std::to_string(st.retryAfterMs) + "ms";
                     }
+                    resourceRows.push_back({"Resources", pending, ""});
                 }
+
                 if (haveWorkers) {
                     size_t threads = wt != st.requestCounts.end() ? wt->second : 0;
                     size_t active = wa != st.requestCounts.end() ? wa->second : 0;
                     size_t queued = wq != st.requestCounts.end() ? wq->second : 0;
-                    std::cout << "  Workers:      threads=" << threads << " active=" << active
-                              << " queued=" << queued << "\n";
+                    std::ostringstream workerStr;
+                    workerStr << threads << " threads, " << active << " active, " << queued
+                              << " queued";
+                    resourceRows.push_back({"Worker Pool", workerStr.str(), ""});
                 } else if (!st.ready) {
-                    std::cout << "  Workers:      pending\n";
+                    resourceRows.push_back({"Worker Pool", "pending", ""});
                 }
-                if (st.muxQueuedBytes > 0)
-                    std::cout << "  Mux queued: " << st.muxQueuedBytes << " bytes\n";
-                if (st.retryAfterMs > 0)
-                    std::cout << "  Retry hint: " << st.retryAfterMs << " ms\n";
+
+                if (st.muxQueuedBytes > 0) {
+                    resourceRows.push_back(
+                        {"Mux Queued", std::to_string(st.muxQueuedBytes) + " bytes", ""});
+                }
             } catch (...) {
+            }
+
+            if (!resourceRows.empty()) {
+                yams::cli::ui::render_rows(std::cout, resourceRows);
             }
         } catch (const std::exception& e) {
             std::cout << "Daemon: ERROR - " << e.what() << "\n";
@@ -1227,6 +1283,8 @@ private:
 
     // doctor (no args): quick combined
     void runAll() {
+        // SQLite + FTS status and migration health
+        // FTS checks removed to avoid blocking/hangs; use 'yams daemon status -d' for readiness.
         // Minimal structured recommendations example (will expand in future audits)
         yams::cli::RecommendationBuilder recs;
         // Keep doctor fast and non-invasive by default:
@@ -1239,27 +1297,41 @@ private:
         // Show embedding runtime from daemon status (best-effort)
         try {
             using namespace yams::daemon;
-            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(ClientConfig{});
+            ClientConfig cfg;
+            cfg.requestTimeout = std::chrono::milliseconds(10000);
+            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
             if (!leaseRes)
                 throw std::runtime_error(leaseRes.error().message);
             auto leaseHandle = std::move(leaseRes.value());
             auto& client = **leaseHandle;
-            auto st = yams::cli::run_result(client.status(), std::chrono::seconds(3));
+            auto st = yams::cli::run_result(client.status(), std::chrono::seconds(10));
             if (st) {
                 const auto& s = st.value();
-                std::cout << "\nEmbedding Runtime\n-----------------\n";
-                std::cout << "Available: " << (s.embeddingAvailable ? "yes" : "no") << "\n";
+                std::cout << "\n" << yams::cli::ui::section_header("Embedding Runtime") << "\n\n";
+
+                std::vector<yams::cli::ui::Row> embRows;
+                std::string availStatus =
+                    s.embeddingAvailable
+                        ? yams::cli::ui::colorize("✓ yes", yams::cli::ui::Ansi::GREEN)
+                        : yams::cli::ui::colorize("✗ no", yams::cli::ui::Ansi::YELLOW);
+                embRows.push_back({"Available", availStatus, ""});
+
                 if (!s.embeddingBackend.empty())
-                    std::cout << "Backend : " << s.embeddingBackend << "\n";
+                    embRows.push_back({"Backend", s.embeddingBackend, ""});
                 if (!s.embeddingModel.empty())
-                    std::cout << "Model   : " << s.embeddingModel << "\n";
+                    embRows.push_back({"Model", s.embeddingModel, ""});
                 if (!s.embeddingModelPath.empty())
-                    std::cout << "Path    : " << s.embeddingModelPath << "\n";
+                    embRows.push_back({"Path", s.embeddingModelPath, ""});
                 if (s.embeddingDim > 0)
-                    std::cout << "Dim     : " << s.embeddingDim << "\n";
-                if (s.embeddingThreadsIntra > 0 || s.embeddingThreadsInter > 0)
-                    std::cout << "Threads : " << s.embeddingThreadsIntra << "/"
-                              << s.embeddingThreadsInter << "\n";
+                    embRows.push_back({"Dimension", std::to_string(s.embeddingDim), ""});
+                if (s.embeddingThreadsIntra > 0 || s.embeddingThreadsInter > 0) {
+                    std::ostringstream thrStr;
+                    thrStr << s.embeddingThreadsIntra << " intra / " << s.embeddingThreadsInter
+                           << " inter";
+                    embRows.push_back({"Threads", thrStr.str(), ""});
+                }
+
+                yams::cli::ui::render_rows(std::cout, embRows);
             }
         } catch (...) {
         }
@@ -1284,23 +1356,26 @@ private:
                 long long embeddings = countTable("SELECT COUNT(1) FROM kg_node_embeddings");
                 long long entities = countTable("SELECT COUNT(1) FROM doc_entities");
 
-                std::cout << "\nKnowledge Graph\n----------------\n";
+                std::cout << "\n" << yams::cli::ui::section_header("Knowledge Graph") << "\n\n";
                 if (entities <= 0 && nodes <= 0) {
                     std::string msg = "Knowledge graph empty — run 'yams doctor repair --graph' to "
                                       "build from tags/metadata";
-                    std::cout << msg << "\n";
+                    std::cout << yams::cli::ui::colorize("⚠ " + msg, yams::cli::ui::Ansi::YELLOW)
+                              << "\n";
                     recs.warning("DOCTOR_KG_EMPTY", msg);
                 } else {
+                    std::vector<yams::cli::ui::Row> kgRows;
                     if (nodes >= 0)
-                        std::cout << "Nodes:        " << nodes << "\n";
+                        kgRows.push_back({"Nodes", std::to_string(nodes), ""});
                     if (edges >= 0)
-                        std::cout << "Edges:        " << edges << "\n";
+                        kgRows.push_back({"Edges", std::to_string(edges), ""});
                     if (aliases >= 0)
-                        std::cout << "Aliases:      " << aliases << "\n";
+                        kgRows.push_back({"Aliases", std::to_string(aliases), ""});
                     if (embeddings >= 0)
-                        std::cout << "Embeddings:   " << embeddings << "\n";
+                        kgRows.push_back({"Embeddings", std::to_string(embeddings), ""});
                     if (entities >= 0)
-                        std::cout << "Doc entities: " << entities << "\n";
+                        kgRows.push_back({"Doc Entities", std::to_string(entities), ""});
+                    yams::cli::ui::render_rows(std::cout, kgRows);
                 }
             }
         } catch (...) {
@@ -1314,7 +1389,8 @@ private:
             if (cli_ && cli_->hasExplicitDataDir()) {
                 cfg.dataDir = cli_->getDataPath();
             }
-            cfg.requestTimeout = std::chrono::milliseconds(3000);
+            // Use longer timeout for daemon calls during initialization
+            cfg.requestTimeout = std::chrono::milliseconds(10000);
             cfg.enableChunkedResponses = false;
             auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
             if (!leaseRes)
@@ -1323,7 +1399,7 @@ private:
             auto& client = **leaseHandle;
 
             auto sres = yams::cli::run_result<StatusResponse>(client.status(),
-                                                              std::chrono::milliseconds(3000));
+                                                              std::chrono::milliseconds(10000));
             GetStatsResponse stats{};
             bool haveStats = false;
             {
@@ -1331,7 +1407,7 @@ private:
                 req.detailed = true; // request plugin JSON snapshot too
                 req.showFileTypes = false;
                 auto gres = yams::cli::run_result<GetStatsResponse>(
-                    client.call(req), std::chrono::milliseconds(3000));
+                    client.call(req), std::chrono::milliseconds(10000));
                 if (gres) {
                     stats = gres.value();
                     haveStats = true;
@@ -1384,24 +1460,51 @@ private:
                 // best-effort; continue
             }
 
-            std::cout << "\nLoaded Plugins\n";
-            std::cout << "---------------\n";
+            std::cout << "\n" << yams::cli::ui::section_header("Loaded Plugins") << "\n\n";
 
             // Prefer typed providers list from StatusResponse
             if (sres && !sres.value().providers.empty()) {
                 const auto& st = sres.value();
                 for (const auto& p : st.providers) {
-                    std::cout << "- " << p.name;
+                    std::string status;
+                    if (p.degraded) {
+                        status = yams::cli::ui::colorize("✗", yams::cli::ui::Ansi::RED);
+                    } else if (!p.ready) {
+                        status = yams::cli::ui::colorize("◷", yams::cli::ui::Ansi::YELLOW);
+                    } else {
+                        status = yams::cli::ui::colorize("✓", yams::cli::ui::Ansi::GREEN);
+                    }
+
+                    std::cout << "  " << status << " "
+                              << yams::cli::ui::colorize(p.name, yams::cli::ui::Ansi::CYAN);
+
+                    std::vector<std::string> tags;
                     if (p.isProvider)
-                        std::cout << " [provider]";
+                        tags.push_back("provider");
                     if (!p.ready)
-                        std::cout << " [not-ready]";
+                        tags.push_back("not-ready");
                     if (p.degraded)
-                        std::cout << " [degraded]";
+                        tags.push_back("degraded");
+
+                    if (!tags.empty()) {
+                        std::cout << " ["
+                                  << yams::cli::ui::colorize(tags[0], yams::cli::ui::Ansi::DIM);
+                        for (size_t i = 1; i < tags.size(); ++i) {
+                            std::cout << ", "
+                                      << yams::cli::ui::colorize(tags[i], yams::cli::ui::Ansi::DIM);
+                        }
+                        std::cout << "]";
+                    }
+
                     if (p.modelsLoaded > 0)
-                        std::cout << " models=" << p.modelsLoaded;
+                        std::cout << " "
+                                  << yams::cli::ui::colorize("(" + std::to_string(p.modelsLoaded) +
+                                                                 " models)",
+                                                             yams::cli::ui::Ansi::DIM);
                     if (!p.error.empty())
-                        std::cout << " error=\"" << p.error << "\"";
+                        std::cout << "\n      "
+                                  << yams::cli::ui::colorize("Error: " + p.error,
+                                                             yams::cli::ui::Ansi::RED);
                     std::cout << "\n";
                 }
             } else if (haveStats) {
@@ -1975,7 +2078,7 @@ Result<void> DoctorCommand::repairGraph() {
             return Error{ErrorCode::NotInitialized, "Knowledge graph store unavailable"};
 
         std::cout << "Building knowledge graph from tags/metadata...\n";
-        auto docsR = repo->findDocumentsByPath("%");
+        auto docsR = metadata::queryDocumentsByPattern(*repo, "%");
         if (!docsR)
             return Error{ErrorCode::InternalError,
                          std::string("List docs failed: ") + docsR.error().message};

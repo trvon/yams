@@ -54,25 +54,63 @@ public:
                 // best-effort: continue
             }
 
-            // Initialize backend with database path
-            auto result = backend_->initialize(config_.database_path);
+            // Allow test/CI override to force in-memory vector DB
+            std::string db_path = config_.database_path;
+            bool force_in_memory = config_.use_in_memory;
+            if (const char* env_mem = std::getenv("YAMS_VDB_IN_MEMORY")) {
+                std::string v(env_mem);
+                std::transform(v.begin(), v.end(), v.begin(),
+                               [](unsigned char c) { return (char)std::tolower(c); });
+                force_in_memory =
+                    force_in_memory || (v == "1" || v == "true" || v == "yes" || v == "on");
+            }
+            if (force_in_memory) {
+                db_path = ":memory:";
+            }
+
+            // Initialize backend with chosen database path
+            auto result = backend_->initialize(db_path);
             if (!result) {
                 setError("Failed to initialize backend: " + result.error().message);
                 return false;
             }
 
-            // Create tables only when explicitly allowed
+            // Respect test/CI bypass: when sqlite-vec init is skipped, do not attempt to create
+            // virtual tables (avoids 'no such module: vec0').
+            bool vec_bypass = false;
+            try {
+                if (const char* env = std::getenv("YAMS_DISABLE_VECTORS")) {
+                    std::string v(env);
+                    std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                    vec_bypass = (v == "1" || v == "true" || v == "yes" || v == "on");
+                }
+                if (!vec_bypass) {
+                    if (const char* env = std::getenv("YAMS_SQLITE_VEC_SKIP_INIT")) {
+                        std::string v(env);
+                        std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                        vec_bypass = (v == "1" || v == "true" || v == "yes" || v == "on");
+                    }
+                }
+            } catch (...) {
+            }
+
+            // Create tables only when explicitly allowed (and not bypassed)
             if (!backend_->tablesExist()) {
-                if (!config_.create_if_missing) {
-                    setError("Vector database tables missing and create_if_missing=false");
-                    return false;
+                if (vec_bypass) {
+                    spdlog::warn("Vector tables missing but sqlite-vec init bypassed; continuing "
+                                 "without vector support");
+                } else {
+                    if (!config_.create_if_missing) {
+                        setError("Vector database tables missing and create_if_missing=false");
+                        return false;
+                    }
+                    auto createResult = backend_->createTables(config_.embedding_dim);
+                    if (!createResult) {
+                        setError("Failed to create tables: " + createResult.error().message);
+                        return false;
+                    }
+                    spdlog::info("Created vector tables with dimension {}", config_.embedding_dim);
                 }
-                auto createResult = backend_->createTables(config_.embedding_dim);
-                if (!createResult) {
-                    setError("Failed to create tables: " + createResult.error().message);
-                    return false;
-                }
-                spdlog::info("Created vector tables with dimension {}", config_.embedding_dim);
             } else {
                 // Tables exist; verify stored dimension vs configured and optionally self-heal.
                 try {

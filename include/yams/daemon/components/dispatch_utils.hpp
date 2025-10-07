@@ -1,23 +1,52 @@
 #pragma once
 
 #include <algorithm>
-#include <future>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <type_traits>
+#include <utility>
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/core/types.h>
 #include <yams/daemon/components/init_utils.hpp>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/WorkerPool.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
 
 namespace yams::daemon::dispatch {
+
+template <typename Fn>
+inline boost::asio::awaitable<std::remove_cvref_t<std::invoke_result_t<Fn&>>>
+offload_to_worker(ServiceManager* sm, Fn&& fn) {
+    using RawResult = std::invoke_result_t<Fn&>;
+    using ResultType = std::remove_cvref_t<RawResult>;
+    static_assert(!std::is_void_v<ResultType>, "offload_to_worker requires non-void result type");
+    auto pool = sm ? sm->getWorkerPool() : nullptr;
+    if (pool) {
+        auto exec = pool->executor();
+        auto shared = co_await boost::asio::co_spawn(
+            exec,
+            [fn = std::forward<Fn>(
+                 fn)]() mutable -> boost::asio::awaitable<std::shared_ptr<ResultType>> {
+                try {
+                    auto value = fn();
+                    co_return std::make_shared<ResultType>(std::move(value));
+                } catch (...) {
+                    std::rethrow_exception(std::current_exception());
+                }
+            },
+            boost::asio::use_awaitable);
+        co_return std::move(*shared);
+    }
+    co_return fn();
+}
 
 // Provider availability (adopt from hosts if absent). Synchronous helper used by
 // request handlers to avoid duplicating adoption logic.
@@ -47,31 +76,30 @@ inline yams::Result<std::shared_ptr<IModelProvider>> ensure_provider_available(S
     }
 }
 
-// Load model with optional options JSON and timeout. Uses std::async to remain synchronous
-// from handler perspective.
-inline yams::Result<void> ensure_model_loaded(IModelProvider* provider, const std::string& model,
-                                              int timeout_ms, const std::string& optionsJson = {}) {
+// Load model with optional options JSON and timeout by offloading to ServiceManager worker pool.
+inline boost::asio::awaitable<yams::Result<void>>
+ensure_model_loaded(ServiceManager* sm, std::shared_ptr<IModelProvider> provider,
+                    const std::string& model, int timeout_ms, const std::string& optionsJson = {}) {
     if (!provider)
-        return yams::Error{yams::ErrorCode::InvalidState, "Provider null"};
+        co_return yams::Error{yams::ErrorCode::InvalidState, "Provider null"};
     if (model.empty())
-        return yams::Error{yams::ErrorCode::InvalidData, "Model name required"};
+        co_return yams::Error{yams::ErrorCode::InvalidData, "Model name required"};
     if (provider->isModelLoaded(model))
-        return yams::Result<void>();
-    try {
-        std::future<yams::Result<void>> fut;
-        if (!optionsJson.empty()) {
-            fut = std::async(std::launch::async,
-                             [&]() { return provider->loadModelWithOptions(model, optionsJson); });
-        } else {
-            fut = std::async(std::launch::async, [&]() { return provider->loadModel(model); });
+        co_return yams::Result<void>();
+    auto run_load = [provider, model, optionsJson]() -> yams::Result<void> {
+        try {
+            if (!optionsJson.empty())
+                return provider->loadModelWithOptions(model, optionsJson);
+            return provider->loadModel(model);
+        } catch (const std::exception& e) {
+            return yams::Error{yams::ErrorCode::InternalError, e.what()};
         }
-        if (fut.wait_for(std::chrono::milliseconds(timeout_ms)) == std::future_status::timeout) {
-            return yams::Error{yams::ErrorCode::Timeout, "Model load timed out"};
-        }
-        return fut.get();
-    } catch (const std::exception& e) {
-        return yams::Error{yams::ErrorCode::InternalError, e.what()};
-    }
+    };
+    co_return co_await yams::daemon::init::await_with_timeout<void>(
+        [sm, run_load]() mutable -> boost::asio::awaitable<yams::Result<void>> {
+            co_return co_await offload_to_worker(sm, run_load);
+        },
+        timeout_ms);
 }
 
 // Embedding generation (single)
@@ -176,10 +204,17 @@ inline std::pair<std::string, size_t> build_plugins_json(ServiceManager* sm) {
                         if (auto mp = sm->getModelProvider()) {
                             rec["models_loaded"] = mp->getLoadedModels().size();
                         }
-                        if (sm->isModelProviderDegraded()) {
-                            rec["degraded"] = true;
-                            if (!sm->lastModelError().empty())
-                                rec["error"] = sm->lastModelError();
+                        try {
+                            auto es = sm->getEmbeddingProviderFsmSnapshot();
+                            const bool providerDegraded =
+                                (es.state == EmbeddingProviderState::Degraded ||
+                                 es.state == EmbeddingProviderState::Failed);
+                            if (providerDegraded) {
+                                rec["degraded"] = true;
+                                if (!sm->lastModelError().empty())
+                                    rec["error"] = sm->lastModelError();
+                            }
+                        } catch (...) {
                         }
                     }
                 } catch (...) {
@@ -209,7 +244,13 @@ build_typed_providers(ServiceManager* sm, const yams::daemon::StateComponent* st
         return providers;
     try {
         const bool providerReady = state ? state->readiness.modelProviderReady.load() : false;
-        const bool providerDegraded = sm->isModelProviderDegraded();
+        bool providerDegraded = false;
+        try {
+            auto es = sm->getEmbeddingProviderFsmSnapshot();
+            providerDegraded = (es.state == EmbeddingProviderState::Degraded ||
+                                es.state == EmbeddingProviderState::Failed);
+        } catch (...) {
+        }
         const std::string lastErr = sm->lastModelError();
         uint32_t modelsLoaded = 0;
         try {

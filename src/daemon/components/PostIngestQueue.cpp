@@ -118,6 +118,10 @@ void PostIngestQueue::enqueue(Task t) {
 }
 
 bool PostIngestQueue::tryEnqueue(const Task& t) {
+    return tryEnqueue(Task{t});
+}
+
+bool PostIngestQueue::tryEnqueue(Task&& t) {
     std::unique_lock<std::mutex> lk(mtx_);
     if (stop_.load())
         return false;
@@ -126,20 +130,19 @@ bool PostIngestQueue::tryEnqueue(const Task& t) {
     if (inflight_.find(t.hash) != inflight_.end()) {
         return false; // duplicate suppressed
     }
-    Task copy = t;
-    copy.enqueuedAt = std::chrono::steady_clock::now();
-    if (copy.session.empty())
-        copy.session = "default";
-    inflight_.emplace(copy.hash, 1u);
-    switch (copy.stage) {
+    t.enqueuedAt = std::chrono::steady_clock::now();
+    if (t.session.empty())
+        t.session = "default";
+    inflight_.emplace(t.hash, 1u);
+    switch (t.stage) {
         case Task::Stage::KnowledgeGraph:
-            qKg_.push_back(std::move(copy));
+            qKg_.push_back(std::move(t));
             break;
         case Task::Stage::Embeddings:
-            qEmb_.push_back(std::move(copy));
+            qEmb_.push_back(std::move(t));
             break;
         default:
-            qMeta_.push_back(std::move(copy));
+            qMeta_.push_back(std::move(t));
             break;
     }
     lk.unlock();
@@ -645,6 +648,7 @@ void PostIngestQueue::addNextStagesLocked(const std::string& hash, const std::st
 }
 
 bool PostIngestQueue::indexDocumentSync(const std::string& hash, const std::string& mime) {
+    spdlog::info("PostIngest(sync): index start {}", hash);
     if (!store_ || !meta_) {
         spdlog::warn("PostIngest(sync): store or metadata unavailable for {}", hash);
         return false;
@@ -693,11 +697,11 @@ bool PostIngestQueue::indexDocumentSync(const std::string& hash, const std::stri
 
         // PBI-040-4: Force a WAL checkpoint to ensure FTS5 updates are visible to other connections
         // immediately. This is critical for synchronous indexing tests.
-        if (meta_) {
-            if (auto res = meta_->checkpointWal(); !res) {
-                spdlog::warn("PostIngest(sync): WAL checkpoint failed: {}", res.error().message);
-            }
-        }
+        // if (meta_) {
+        //     if (auto res = meta_->checkpointWal(); !res) {
+        //         spdlog::warn("PostIngest(sync): WAL checkpoint failed: {}", res.error().message);
+        //     }
+        // }
 
         // Queue KG and embedding stages asynchronously (non-blocking)
         // These are less urgent for grep responsiveness
@@ -715,12 +719,15 @@ bool PostIngestQueue::indexDocumentSync(const std::string& hash, const std::stri
             }
         }
 
+        spdlog::info("PostIngest(sync): index done {}", hash);
         return true;
     } catch (const std::exception& e) {
         spdlog::error("PostIngest(sync): exception for {}: {}", hash, e.what());
+        spdlog::info("PostIngest(sync): index done {} (failure)", hash);
         return false;
     } catch (...) {
         spdlog::error("PostIngest(sync): unknown exception for {}", hash);
+        spdlog::info("PostIngest(sync): index done {} (failure)", hash);
         return false;
     }
 }

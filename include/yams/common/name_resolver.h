@@ -2,6 +2,7 @@
 
 #include <yams/core/types.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/query_helpers.h>
 
 #include <algorithm>
 #include <cctype>
@@ -29,7 +30,7 @@ inline Result<std::string> resolve_hash_prefix(yams::metadata::MetadataRepositor
         return Error{ErrorCode::InvalidArgument, "Invalid hash prefix (need 8-64 hex chars)"};
     }
     // Fallback approach: scan paths (consistent with existing CLI patterns)
-    auto docs = repo.findDocumentsByPath("%");
+    auto docs = metadata::queryDocumentsByPattern(repo, "%");
     if (!docs) {
         return Error{docs.error().code, docs.error().message};
     }
@@ -55,7 +56,7 @@ inline Result<std::string> resolve_name(yams::metadata::MetadataRepository& repo
                                         const std::string& name, bool latest = false,
                                         bool oldest = false) {
     // Try exact path first
-    auto exact = repo.findDocumentsByPath(name);
+    auto exact = metadata::queryDocumentsByPattern(repo, name);
     if (exact && !exact.value().empty()) {
         if (exact.value().size() == 1)
             return exact.value()[0].sha256Hash;
@@ -69,7 +70,7 @@ inline Result<std::string> resolve_name(yams::metadata::MetadataRepository& repo
         }
     }
     // Try match by filename at any path
-    auto docs2 = repo.findDocumentsByPath("%/" + name);
+    auto docs2 = metadata::queryDocumentsByPattern(repo, "%/" + name);
     if (docs2 && !docs2.value().empty()) {
         auto docs = docs2.value();
         // Filter stricter equality on filename or path

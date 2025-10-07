@@ -4,6 +4,7 @@
 #include <yams/app/services/services.hpp>
 #include <yams/cli/tui/tui_services.hpp>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/query_helpers.h>
 
 #include <spdlog/spdlog.h>
 
@@ -119,7 +120,7 @@ std::vector<DocEntry> BrowseServices::loadAllDocuments(BrowseState& state) {
 
             if (count > 0) {
                 constexpr int INITIAL_LOAD_LIMIT = 1000;
-                auto docsRes = metadataRepo->findDocumentsByPath("%");
+                auto docsRes = metadata::queryDocumentsByPattern(*metadataRepo, "%");
                 if (docsRes.has_value()) {
                     int loaded = 0;
                     for (const auto& di : docsRes.value()) {

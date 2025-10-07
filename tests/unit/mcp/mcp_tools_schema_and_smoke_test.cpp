@@ -493,7 +493,7 @@ protected:
         info.fileSize = static_cast<int64_t>(content.size());
         info.sha256Hash = hash;
         info.mimeType = mime;
-        auto now = std::chrono::system_clock::now();
+        auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
         info.createdTime = now;
         info.modifiedTime = now;
         info.indexedTime = now;
@@ -534,7 +534,7 @@ protected:
         info.fileSize = static_cast<int64_t>(data.size());
         info.sha256Hash = hash;
         info.mimeType = mime;
-        auto now = std::chrono::system_clock::now();
+        auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
         info.createdTime = now;
         info.modifiedTime = now;
         info.indexedTime = now;

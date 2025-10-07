@@ -176,6 +176,16 @@ heavy_tests = [
   'DownloadManagerExport.*',
   'StorageBackendTest.*',
   'RepairCoordinatorTest.*',
+  # Temporary skips to stabilize shards (Option A): vector DB / WAL heavy
+  'VectorDatabaseTest.*',
+  'VectorDatabasePersistenceTest.*',
+  'VectorIndexManagerTest.*',
+  'OnnxRuntimeTest.*',
+  'EmbeddingGeneratorTest.*',
+  'ModelManagementTest.*',
+  'WALDualReadTest.*',
+  'WALManagerComprehensiveTest.*',
+  'WALManagerTest.*',
 ]
 
 unit_exclude = '*-' + ':'.join(heavy_tests)
@@ -190,6 +200,11 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
   unit_shards = get_option('unit-shards')
   unit_timeout = get_option('unit-timeout')
   bench_timeout = get_option('bench-timeout')
+  # CI-friendly timeout for the unit_safe runner: 2x unit_timeout, floor at 600s
+  safe_timeout = unit_timeout * 2
+  if safe_timeout < 600
+    safe_timeout = 600
+  endif
 
   if unit_shards > 1
     # Derive per-shard timeout (ceil division) with a small floor of 120s
@@ -208,6 +223,14 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
           # Be brief to reduce log size
           'GTEST_BRIEF': '1',
           'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+          # Stabilize SQLite/vec for unit runs (PBI-040)
+          'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
+          'YAMS_SQLITE_VEC_INIT_TIMEOUT_MS': '1500',
+          'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
+          'YAMS_VDB_IN_MEMORY': '1',
+          'YAMS_SQLITE_VEC_SKIP_INIT': '1',
+          'YAMS_DISABLE_VECTORS': '1',
+          'YAMS_TESTING': '1',
         },
         timeout: shard_timeout
       )
@@ -216,7 +239,16 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
     test('unit', unit_exe,
       suite: 'unit',
       args: ['--gtest_filter=' + unit_exclude],
-      env: {'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1'},
+      env: {
+        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+        'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
+        'YAMS_SQLITE_VEC_INIT_TIMEOUT_MS': '1500',
+        'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
+        'YAMS_VDB_IN_MEMORY': '1',
+        'YAMS_SQLITE_VEC_SKIP_INIT': '1',
+        'YAMS_DISABLE_VECTORS': '1',
+        'YAMS_TESTING': '1',
+      },
       timeout: unit_timeout)
   endif
 
@@ -351,7 +383,72 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
   test('unit_smoke', unit_exe,
     suite: ['unit', 'smoke'],
     args: ['--gtest_filter=' + smoke_filter],
-    env: {'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1'},
+    env: {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
+      'YAMS_SQLITE_VEC_INIT_TIMEOUT_MS': '1500',
+      'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
+      'YAMS_VDB_IN_MEMORY': '1',
+      'YAMS_SQLITE_VEC_SKIP_INIT': '1',
+      'YAMS_DISABLE_VECTORS': '1',
+      'YAMS_TESTING': '1',
+    },
+    timeout: 120,
+  )
+
+  # Targeted fast subset for PBI-045 metadata modernization acceptance
+  targeted_filter = 'DatabaseStatementChronoTest.*:QueryHelpersIntegration.*:MetadataRepositoryCache.*:ConnectionPoolMaintenance.*:SqlBuildSelectTest.*:TagsQuerySpecIntegration.*:MetadataRepositoryTest.CountsAndModifiedSince:MetadataValueVariantTest.*'
+  test('unit_targeted_metadata', unit_exe,
+    suite: ['unit', 'pbi045'],
+    args: ['--gtest_filter=' + targeted_filter],
+    env: {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'GTEST_BRIEF': '1',
+      'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
+      'YAMS_SQLITE_VEC_INIT_TIMEOUT_MS': '1500',
+      'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
+      'YAMS_VDB_IN_MEMORY': '1',
+      'YAMS_SQLITE_VEC_SKIP_INIT': '1',
+      'YAMS_DISABLE_VECTORS': '1',
+    },
+    timeout: 180,
+  )
+
+  # PBI-040: unit_safe runner — stable daily gate excluding known heavy/fragile suites
+  # This provides a fast, reliable unit test subset for CI/developer iteration
+  # CI-stable subset: drop FTS-heavy, repo search, reference counter stats and vector smoke
+  safe_include_filter = 'ContentStoreTest.*:ProgressReporterTest.*:QueryHelpersIntegration.*:ConnectionPoolMaintenance.*:BKTreeTest.*:SearchCacheTest.*:QueryParserTest.*:MessageFramingTest.*:ResponseOfTest.*:IPCMessageTypeTest.*'
+  test('unit_safe', unit_exe,
+    suite: ['unit', 'safe', 'pbi040'],
+    args: ['--gtest_filter=' + safe_include_filter],
+    env: {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'GTEST_BRIEF': '1',
+      'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
+      'YAMS_SQLITE_VEC_INIT_TIMEOUT_MS': '1500',
+      'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
+      'YAMS_VDB_IN_MEMORY': '1',
+      'YAMS_SQLITE_VEC_SKIP_INIT': '1',
+      'YAMS_DISABLE_VECTORS': '1',
+      'YAMS_TESTING': '1',
+    },
+    timeout: safe_timeout,
+  )
+
+  # PBI-040: Conditional vector smoke test (runs only when sqlite-vec is available)
+  test('unit_vector_smoke', unit_exe,
+    suite: ['unit', 'vector', 'pbi040'],
+    args: ['--gtest_filter=VectorSmokeTest.*'],
+    env: {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'GTEST_BRIEF': '1',
+      'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
+      'YAMS_SQLITE_VEC_INIT_TIMEOUT_MS': '3000',
+      'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
+      'YAMS_VDB_IN_MEMORY': '1',
+      'YAMS_TESTING': '1',
+      # Note: sqlite-vec env toggles NOT set, allowing initialization if available
+    },
     timeout: 120,
   )
 

@@ -4,6 +4,7 @@
 #include <sstream>
 #include <yams/cli/commands/update_command.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/metadata/query_helpers.h>
 // Daemon client API for daemon-first update
 #include <future>
 #include <thread>
@@ -442,7 +443,7 @@ Result<metadata::DocumentInfo> UpdateCommand::resolveNameToDocument(const std::s
     }
 
     // First try as a path suffix (for real files)
-    auto documentsResult = metadataRepo->findDocumentsByPath("%/" + name);
+    auto documentsResult = metadata::queryDocumentsByPattern(*metadataRepo, "%/" + name);
     if (documentsResult && !documentsResult.value().empty()) {
         const auto& results = documentsResult.value();
         if (results.size() > 1) {
@@ -460,7 +461,7 @@ Result<metadata::DocumentInfo> UpdateCommand::resolveNameToDocument(const std::s
     }
 
     // Try exact path match
-    documentsResult = metadataRepo->findDocumentsByPath(name);
+    documentsResult = metadata::queryDocumentsByPattern(*metadataRepo, name);
     if (documentsResult && !documentsResult.value().empty()) {
         return documentsResult.value()[0];
     }
@@ -547,7 +548,7 @@ Result<std::string> UpdateCommand::resolveNameToHashSmart(const std::string& nam
 
     // Fallback: try common list patterns via RetrievalService (daemon)
     auto tryList = [&](const std::string& pat) -> std::optional<yams::daemon::ListResponse> {
-        yams::daemon::ListRequest lreq;
+        yams::app::services::ListOptions lreq;
         lreq.namePattern = pat;
         lreq.limit = 500;
         lreq.pathsOnly = false;

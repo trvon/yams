@@ -60,7 +60,8 @@ protected:
         doc.fileSize = 1024;
         doc.sha256Hash = "hash_" + name;
         doc.mimeType = "text/plain";
-        doc.createdTime = std::chrono::system_clock::now();
+        doc.createdTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
         doc.modifiedTime = doc.createdTime;
         doc.indexedTime = doc.createdTime;
         doc.contentExtracted = false;
@@ -254,7 +255,7 @@ TEST_F(MetadataSchemaTest, RelationshipOperations) {
     rel1.parentId = parentId;
     rel1.childId = child1Id;
     rel1.relationshipType = RelationshipType::Contains;
-    rel1.createdTime = std::chrono::system_clock::now();
+    rel1.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
 
     auto rel1Result = repo_->insertRelationship(rel1);
     ASSERT_TRUE(rel1Result.has_value());
@@ -264,7 +265,7 @@ TEST_F(MetadataSchemaTest, RelationshipOperations) {
     rel2.parentId = parentId;
     rel2.childId = child2Id;
     rel2.relationshipType = RelationshipType::Contains;
-    rel2.createdTime = std::chrono::system_clock::now();
+    rel2.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
 
     auto rel2Result = repo_->insertRelationship(rel2);
     ASSERT_TRUE(rel2Result.has_value());
@@ -286,7 +287,8 @@ TEST_F(MetadataSchemaTest, RelationshipOperations) {
     orphanRel.childId = child1Id;
     orphanRel.relationshipType = RelationshipType::Custom;
     orphanRel.customType = "orphaned";
-    orphanRel.createdTime = std::chrono::system_clock::now();
+    orphanRel.createdTime =
+        std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
 
     auto orphanResult = repo_->insertRelationship(orphanRel);
     ASSERT_TRUE(orphanResult.has_value());
@@ -383,7 +385,7 @@ TEST_F(MetadataSchemaTest, SearchHistory) {
     // Create search history entries
     SearchHistoryEntry entry1;
     entry1.query = "test query";
-    entry1.queryTime = std::chrono::system_clock::now();
+    entry1.queryTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
     entry1.resultsCount = 5;
     entry1.executionTimeMs = 25;
     entry1.userContext = "user123";
@@ -395,7 +397,8 @@ TEST_F(MetadataSchemaTest, SearchHistory) {
     for (int i = 0; i < 10; i++) {
         SearchHistoryEntry entry;
         entry.query = "query " + std::to_string(i);
-        entry.queryTime = std::chrono::system_clock::now();
+        entry.queryTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
         entry.resultsCount = i * 2;
         entry.executionTimeMs = 10 + i;
 
@@ -420,7 +423,7 @@ TEST_F(MetadataSchemaTest, SavedQueries) {
     query1.name = "My Search";
     query1.query = "C++ programming";
     query1.description = "Search for C++ content";
-    query1.createdTime = std::chrono::system_clock::now();
+    query1.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
     query1.lastUsed = query1.createdTime;
     query1.useCount = 0;
 
@@ -438,7 +441,7 @@ TEST_F(MetadataSchemaTest, SavedQueries) {
 
     // Update saved query
     retrieved.useCount = 5;
-    retrieved.lastUsed = std::chrono::system_clock::now();
+    retrieved.lastUsed = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
     auto updateResult = repo_->updateSavedQuery(retrieved);
     ASSERT_TRUE(updateResult.has_value());
 
@@ -462,7 +465,8 @@ TEST_F(MetadataSchemaTest, BulkOperations) {
     std::vector<int64_t> docIds;
     for (int i = 0; i < 5; i++) {
         auto doc = createTestDocument("bulk_" + std::to_string(i) + ".txt");
-        doc.modifiedTime = std::chrono::system_clock::now() - std::chrono::hours(i);
+        doc.modifiedTime = std::chrono::floor<std::chrono::seconds>(
+            std::chrono::system_clock::now() - std::chrono::hours(i));
         auto result = repo_->insertDocument(doc);
         ASSERT_TRUE(result.has_value());
         docIds.push_back(result.value());
@@ -556,7 +560,7 @@ TEST_F(MetadataSchemaTest, CascadingDeletes) {
     rel.childId = docId; // Self-reference for test
     rel.relationshipType = RelationshipType::Custom;
     rel.customType = "self";
-    rel.createdTime = std::chrono::system_clock::now();
+    rel.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
     repo_->insertRelationship(rel);
 
     // Delete document - should cascade to all related data
@@ -584,10 +588,14 @@ TEST_F(MetadataSchemaTest, QueryBuilder) {
         createTestDocument("doc3.txt"), createTestDocument("doc4.doc")};
 
     // Set different attributes
-    docs[0].modifiedTime = std::chrono::system_clock::now() - std::chrono::hours(1);
-    docs[1].modifiedTime = std::chrono::system_clock::now() - std::chrono::hours(2);
-    docs[2].modifiedTime = std::chrono::system_clock::now() - std::chrono::hours(3);
-    docs[3].modifiedTime = std::chrono::system_clock::now() - std::chrono::hours(4);
+    docs[0].modifiedTime = std::chrono::floor<std::chrono::seconds>(
+        std::chrono::system_clock::now() - std::chrono::hours(1));
+    docs[1].modifiedTime = std::chrono::floor<std::chrono::seconds>(
+        std::chrono::system_clock::now() - std::chrono::hours(2));
+    docs[2].modifiedTime = std::chrono::floor<std::chrono::seconds>(
+        std::chrono::system_clock::now() - std::chrono::hours(3));
+    docs[3].modifiedTime = std::chrono::floor<std::chrono::seconds>(
+        std::chrono::system_clock::now() - std::chrono::hours(4));
 
     for (auto& doc : docs) {
         auto result = repo_->insertDocument(doc);

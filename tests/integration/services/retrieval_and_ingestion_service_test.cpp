@@ -181,7 +181,7 @@ TEST_F(ServicesRetrievalIngestionIT, AddViaDaemonAndListGetGrep) {
     // Pin to test daemon socket and storage
     ropts.socketPath = socketPath_;
     ropts.explicitDataDir = storageDir_;
-    yams::daemon::ListRequest lreq;
+    yams::app::services::ListOptions lreq;
     lreq.limit = 100;
     bool found = false;
     for (int attempt = 0; attempt < 60 && !found; ++attempt) { // up to ~3s
@@ -200,15 +200,14 @@ TEST_F(ServicesRetrievalIngestionIT, AddViaDaemonAndListGetGrep) {
     EXPECT_TRUE(found);
 
     // 4) Get by hash via RetrievalService
-    yams::daemon::GetRequest greq;
+    yams::app::services::GetOptions greq;
     greq.hash = addRes.value().hash;
     greq.metadataOnly = false;
     auto gres = rsvc.get(greq, ropts);
     ASSERT_TRUE(gres) << (gres ? "" : gres.error().message);
     EXPECT_EQ(gres.value().name, "hello.txt");
 
-    // 5) Grep for a term
-    yams::daemon::GrepRequest gpreq;
+    yams::app::services::GrepOptions gpreq;
     gpreq.pattern = "hello";
     gpreq.pathsOnly = true;
     // Grep may require deferred extraction/indexing to complete; allow a brief wait
@@ -231,7 +230,7 @@ TEST_F(ServicesRetrievalIngestionIT, AddViaDaemonAndListGetGrep) {
     EXPECT_EQ(gname.value().name, "hello.txt");
 
     // 7) Chunked buffer get with cap (allow generous timeout to avoid flakiness)
-    yams::daemon::GetInitRequest ginit;
+    yams::app::services::GetInitOptions ginit;
     ginit.hash = addRes.value().hash;
     ropts.requestTimeoutMs = 30000; // default
     auto chunked = rsvc.getChunkedBuffer(ginit, /*capBytes*/ 8, ropts);
@@ -351,9 +350,7 @@ TEST_F(ServicesRetrievalIngestionIT, AddDirectoryWithPatternsAndTags) {
     RetrievalService rsvc;
     RetrievalOptions ropts;
     ropts.socketPath = socketPath_;
-    ropts.explicitDataDir = storageDir_;
-
-    yams::daemon::ListRequest lreq;
+    yams::app::services::ListOptions lreq;
     lreq.limit = 50;
     // Filter to our directory by pattern
     lreq.namePattern = (fixtures_->root() / "ingest" / "**").string();
@@ -395,7 +392,7 @@ TEST_F(ServicesRetrievalIngestionIT, AddDirectoryWithPatternsAndTags) {
     EXPECT_FALSE(sawBin);
 
     // Grep should find content only in included files
-    yams::daemon::GrepRequest gpreq;
+    yams::app::services::GrepOptions gpreq;
     gpreq.pattern = "hello";
     gpreq.pathsOnly = true;
     // Use fixtures root, matching the path passed to ingestion so grep scopes correctly
@@ -492,7 +489,7 @@ TEST_F(ServicesRetrievalIngestionIT, IndexingAddDirectoryVerifyAndDefer) {
     RetrievalOptions ro;
     ro.socketPath = socketPath_;
     ro.explicitDataDir = storageDir_;
-    yams::daemon::ListRequest lq;
+    yams::app::services::ListOptions lq;
     lq.limit = 10;
     lq.namePattern = (fixtures_->root() / "idx" / "**").string();
     auto lr = rsvc.list(lq, ro);
@@ -527,7 +524,7 @@ TEST_F(ServicesRetrievalIngestionIT, RetrievalGetToFileWritesContent) {
     ro.socketPath = socketPath_;
     ro.explicitDataDir = storageDir_;
 
-    yams::daemon::GetInitRequest gi;
+    yams::app::services::GetInitOptions gi;
     gi.hash = addRes.value().hash;
     auto outPath = testRoot_ / "out_one.txt";
     // Prefer chunked buffer (works on minimal builds); fall back to getToFile
@@ -583,7 +580,7 @@ TEST_F(ServicesRetrievalIngestionIT, BinaryChunkedGetBytesRoundTrip) {
     ropts.socketPath = socketPath_;
     ropts.explicitDataDir = storageDir_;
 
-    yams::daemon::GetInitRequest gi{};
+    yams::app::services::GetInitOptions gi{};
     gi.name = p.filename().string();
     gi.maxBytes = 0;
     gi.chunkSize = 4;
@@ -629,7 +626,7 @@ TEST_F(ServicesRetrievalIngestionIT, RetrievalListRespectsLimitAndPattern) {
     ro.socketPath = socketPath_;
     ro.explicitDataDir = storageDir_;
 
-    yams::daemon::ListRequest lreq;
+    yams::app::services::ListOptions lreq;
     lreq.limit = 1; // enforce limit
     lreq.namePattern = (fixtures_->root() / "list" / "**" / "*.md").string();
 
@@ -672,9 +669,7 @@ TEST_F(ServicesRetrievalIngestionIT, RetrievalListEchoesTotalCountAndStructure) 
     ro.socketPath = socketPath_;
     ro.explicitDataDir = storageDir_;
 
-    yams::daemon::ListRequest lq;
-    lq.limit = 2;
-    lq.namePattern = (fixtures_->root() / "list2" / "**").string();
+    yams::app::services::ListOptions lq;
     lq.showTags = true;
     lq.showMetadata = true;
 
@@ -765,7 +760,7 @@ TEST_F(ServicesRetrievalIngestionIT, StressTail) {
     ro.socketPath = socketPath_;
     ro.explicitDataDir = storageDir_;
 
-    yams::daemon::ListRequest lq;
+    yams::app::services::ListOptions lq;
     lq.limit = 5;
     lq.namePattern = (fixtures_->root() / "stress" / "**").string();
 

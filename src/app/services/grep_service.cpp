@@ -4,6 +4,7 @@
 // Hot/Cold mode helpers (env-driven)
 #include "../../cli/hot_cold_utils.h"
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/query_helpers.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/vector/vector_index_manager.h>
 
@@ -314,20 +315,174 @@ public:
                     addDocs(std::move(tRes.value()));
             }
             if (!req.paths.empty() || !req.includePatterns.empty()) {
-                std::vector<std::string> patterns = req.paths;
-                patterns.insert(patterns.end(), req.includePatterns.begin(),
-                                req.includePatterns.end());
-                for (const auto& p : patterns) {
-                    if (p.empty())
-                        continue;
-                    // Use a LIKE query for path prefixes, which is reasonably fast with an index.
-                    auto r = retryMetadataOp([&]() {
-                        return ctx_.metadataRepo->findDocumentsByPath(normalizePathForSqlLike(p) +
-                                                                      "%");
-                    });
+                // Normalize include/path patterns to v13-indexed queries where possible:
+                //  - "**/*.ext" or "*.ext"            => extension filter
+                //  - "dir/**/*.ext"                    => pathPrefix=dir + extension filter
+                //  - "**/*.{a,b,c}" (brace form)      => multiple extension filters
+                //  - other patterns                     => fallback to LIKE
+
+                auto trim = [](std::string s) {
+                    auto issp = [](unsigned char c) { return std::isspace(c) != 0; };
+                    while (!s.empty() && issp(static_cast<unsigned char>(s.front())))
+                        s.erase(s.begin());
+                    while (!s.empty() && issp(static_cast<unsigned char>(s.back())))
+                        s.pop_back();
+                    return s;
+                };
+                auto strip_leading_slash = [](std::string s) {
+                    while (!s.empty() &&
+                           (s.front() == '/' || (s.size() > 1 && s[0] == '.' && s[1] == '/'))) {
+                        if (s.front() == '/')
+                            s.erase(s.begin());
+                        else
+                            s.erase(s.begin(), s.begin() + 2);
+                    }
+                    return s;
+                };
+
+                auto collect_by_ext_and_prefix = [&](const std::string& maybePrefix,
+                                                     const std::string& ext) {
+                    if (ext.empty())
+                        return;
+                    if (maybePrefix.empty()) {
+                        auto r = retryMetadataOp(
+                            [&]() { return ctx_.metadataRepo->findDocumentsByExtension(ext); }, 4,
+                            std::chrono::milliseconds(25), &metadataTelemetry);
+                        if (r)
+                            addDocs(std::move(r.value()));
+                        return;
+                    }
+                    metadata::DocumentQueryOptions q;
+                    q.pathPrefix = strip_leading_slash(maybePrefix);
+                    q.prefixIsDirectory = true;
+                    q.includeSubdirectories = true;
+                    q.extension = ext;
+                    q.orderByNameAsc = true;
+                    auto r = retryMetadataOp([&]() { return ctx_.metadataRepo->queryDocuments(q); },
+                                             4, std::chrono::milliseconds(25), &metadataTelemetry);
                     if (r)
                         addDocs(std::move(r.value()));
+                };
+
+                // Expand a single pattern that may include brace extension list like "*.{h,hpp}"
+                auto expand_brace_exts = [](const std::string& pattern) {
+                    struct Out {
+                        std::string head;
+                        std::vector<std::string> exts;
+                    };
+                    Out out;
+                    auto lb = pattern.find('{');
+                    auto rb =
+                        (lb == std::string::npos) ? std::string::npos : pattern.find('}', lb + 1);
+                    if (lb == std::string::npos || rb == std::string::npos || rb <= lb + 1) {
+                        return out; // no braces
+                    }
+                    out.head = pattern.substr(0, lb);
+                    std::string inner = pattern.substr(lb + 1, rb - lb - 1);
+                    std::vector<std::string> list;
+                    std::stringstream ss(inner);
+                    std::string item;
+                    while (std::getline(ss, item, ',')) {
+                        // trim spaces
+                        item.erase(0, item.find_first_not_of(" \t"));
+                        if (!item.empty())
+                            item.erase(item.find_last_not_of(" \t") + 1);
+                        if (!item.empty())
+                            list.push_back(item);
+                    }
+                    out.exts = std::move(list);
+                    return out;
+                };
+
+                std::vector<std::string> patterns;
+                patterns.reserve(req.paths.size() + req.includePatterns.size());
+                patterns.insert(patterns.end(), req.paths.begin(), req.paths.end());
+                patterns.insert(patterns.end(), req.includePatterns.begin(),
+                                req.includePatterns.end());
+
+                std::size_t likeFallbacks = 0;
+                std::size_t indexedFastPaths = 0;
+                for (const auto& raw : patterns) {
+                    std::string p = trim(raw);
+                    if (p.empty())
+                        continue;
+
+                    // Handle brace expansion variants first
+                    auto brace = expand_brace_exts(p);
+                    if (!brace.head.empty() && !brace.exts.empty()) {
+                        // Cases: "**/*. {a,b}" or "dir/**/*.{a,b}" or "*.{a,b}"
+                        if (brace.head == "**/*.") {
+                            for (const auto& e : brace.exts)
+                                collect_by_ext_and_prefix("", e);
+                            indexedFastPaths += brace.exts.size();
+                            continue;
+                        }
+                        // "*.{exts}"
+                        if (brace.head == "*.") {
+                            for (const auto& e : brace.exts)
+                                collect_by_ext_and_prefix("", e);
+                            indexedFastPaths += brace.exts.size();
+                            continue;
+                        }
+                        // "dir/**/*.{exts}"
+                        auto marker = brace.head.find("/**/");
+                        if (marker != std::string::npos && brace.head.size() >= marker + 4 &&
+                            brace.head.rfind("*.", std::string::npos) == std::string::npos) {
+                            std::string prefix = brace.head.substr(0, marker);
+                            for (const auto& e : brace.exts)
+                                collect_by_ext_and_prefix(prefix, e);
+                            indexedFastPaths += brace.exts.size();
+                            continue;
+                        }
+                        // Fallthrough to LIKE if unrecognized form
+                    }
+
+                    // Case 1: "**/*.ext" or "*.ext"
+                    if ((p.rfind("**/*.", 0) == 0 && p.size() > 5) ||
+                        (p.rfind("*.", 0) == 0 && p.size() > 2)) {
+                        const char* start = (p[0] == '*' && p.size() > 1 && p[1] == '.')
+                                                ? p.c_str() + 2
+                                                : (p.size() > 4 ? p.c_str() + 5 : p.c_str());
+                        std::string ext(start);
+                        collect_by_ext_and_prefix("", ext);
+                        ++indexedFastPaths;
+                        continue;
+                    }
+
+                    // Case 2: "dir/**/*.ext" -> prefix + ext
+                    std::size_t starDot = p.rfind("*.");
+                    std::size_t marker = p.find("/**/");
+                    if (marker != std::string::npos && starDot != std::string::npos &&
+                        starDot > marker) {
+                        std::string ext = p.substr(starDot + 2);
+                        std::string prefix = p.substr(0, marker);
+                        collect_by_ext_and_prefix(prefix, ext);
+                        ++indexedFastPaths;
+                        continue;
+                    }
+
+                    // Fallback: LIKE pattern
+                    std::string likePattern = normalizePathForSqlLike(p);
+                    std::replace(likePattern.begin(), likePattern.end(), '*', '%');
+                    auto r = retryMetadataOp(
+                        [&]() {
+                            return metadata::queryDocumentsByPattern(*ctx_.metadataRepo,
+                                                                     likePattern);
+                        },
+                        4, std::chrono::milliseconds(25), &metadataTelemetry);
+                    if (r)
+                        addDocs(std::move(r.value()));
+                    ++likeFallbacks;
                 }
+                spdlog::info(
+                    "[GrepService] includePatterns= {}{}; indexedFastPaths={} likeFallbacks={} "
+                    "candidates(before dedupe)={}",
+                    (req.includePatterns.empty() ? std::string("<none>")
+                                                 : req.includePatterns.front()),
+                    (req.includePatterns.size() > 1
+                         ? std::string(", …(") + std::to_string(req.includePatterns.size()) + ")"
+                         : std::string()),
+                    indexedFastPaths, likeFallbacks, docs.size());
             }
         } else {
             // No restrictive filters, so use smart search to find candidates.
@@ -343,8 +498,9 @@ public:
                             allowPaths.insert(it->second);
                     }
                     if (!allowPaths.empty()) {
-                        auto allDocsRes = retryMetadataOp(
-                            [&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); });
+                        auto allDocsRes = retryMetadataOp([&]() {
+                            return metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%");
+                        });
                         if (allDocsRes) {
                             for (auto& d : allDocsRes.value()) {
                                 if (allowPaths.count(d.filePath))
@@ -368,16 +524,9 @@ public:
             }
         }
 
-        // Fallback: If no candidates were found by any method, scan all documents.
+        // If no candidates were found by any method, return empty-handed.
         if (docs.empty()) {
-            auto allRes =
-                retryMetadataOp([&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); });
-            if (allRes) {
-                docs = std::move(allRes.value());
-            } else {
-                return Error{ErrorCode::InternalError,
-                             "Failed to enumerate documents: " + allRes.error().message};
-            }
+            spdlog::debug("[GrepService] No candidate documents found after initial discovery.");
         }
 
         // Ensure candidate set includes any explicit req.paths selections by performing
@@ -413,9 +562,9 @@ public:
                 }
                 if (like.empty())
                     continue;
-                auto addRes =
-                    retryMetadataOp([&]() { return ctx_.metadataRepo->findDocumentsByPath(like); },
-                                    4, std::chrono::milliseconds(25), &metadataTelemetry);
+                auto addRes = retryMetadataOp(
+                    [&]() { return metadata::queryDocumentsByPattern(*ctx_.metadataRepo, like); },
+                    4, std::chrono::milliseconds(25), &metadataTelemetry);
                 if (addRes && !addRes.value().empty()) {
                     for (auto& d : addRes.value()) {
                         if (have.insert(d.id).second)

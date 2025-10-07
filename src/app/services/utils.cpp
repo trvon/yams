@@ -3,7 +3,10 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <mutex>
 #include <string>
+
+#include <yams/detection/file_type_detector.h>
 
 namespace yams::app::services::utils {
 
@@ -167,6 +170,54 @@ NormalizedLookupPath normalizeLookupPath(const std::string& path) {
     }
 
     return out;
+}
+
+std::string classifyFileType(const std::string& mimeType, const std::string& extension) {
+    auto toLower = [](std::string in) {
+        std::transform(in.begin(), in.end(), in.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return in;
+    };
+
+    std::string normalizedExt = extension;
+    if (!normalizedExt.empty() && normalizedExt.front() != '.')
+        normalizedExt.insert(normalizedExt.begin(), '.');
+    normalizedExt = toLower(normalizedExt);
+
+    std::string mime = toLower(mimeType);
+    if (mime.empty()) {
+        mime = yams::detection::FileTypeDetector::getMimeTypeFromExtension(normalizedExt);
+    }
+
+    std::string category;
+    try {
+        // Ensure detector has patterns available (safe to call repeatedly)
+        (void)yams::detection::FileTypeDetector::initializeWithMagicNumbers();
+        auto& detector = yams::detection::FileTypeDetector::instance();
+        category = detector.getFileTypeCategory(mime);
+        if (category.empty()) {
+            if (detector.isTextMimeType(mime))
+                category = "text";
+            else if (detector.isBinaryMimeType(mime))
+                category = "binary";
+        }
+    } catch (...) {
+    }
+
+    if (!category.empty())
+        return category;
+
+    if (!mime.empty()) {
+        auto slash = mime.find('/');
+        if (slash != std::string::npos && slash > 0)
+            return mime.substr(0, slash);
+        return mime;
+    }
+
+    if (!normalizedExt.empty())
+        return normalizedExt.substr(1);
+
+    return "unknown";
 }
 
 } // namespace yams::app::services::utils

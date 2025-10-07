@@ -9,6 +9,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <thread>
 #include <vector>
 
@@ -100,6 +101,8 @@ public:
         size_t logFileCount = 0;
         std::chrono::steady_clock::time_point lastSync;
         std::chrono::steady_clock::time_point lastRotation;
+        std::chrono::nanoseconds maxExclusiveLockWait{0};
+        std::chrono::nanoseconds maxSharedLockWait{0};
     };
     [[nodiscard]] Stats getStats() const;
 

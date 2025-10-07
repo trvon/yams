@@ -4,13 +4,17 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
 #include <cstring>
 #include <deque>
 #include <fstream>
 #include <map>
 #include <optional>
 #include <ranges>
+#include <shared_mutex>
 #include <sstream>
+#include <string_view>
 #include <vector>
 
 #include <yams/compression/compressor_interface.h>
@@ -202,13 +206,42 @@ struct WALManager::Impl {
     std::unique_ptr<WALFile> currentLog;
     std::filesystem::path currentLogPath;
 
-    mutable std::mutex mutex;
+    mutable std::shared_mutex stateMutex;
     std::deque<WALEntry> pendingEntries;
+    std::atomic<uint64_t> maxExclusiveLockWaitNs{0};
+    std::atomic<uint64_t> maxSharedLockWaitNs{0};
+
+    static constexpr std::chrono::nanoseconds kExclusiveWarnThreshold{
+        std::chrono::milliseconds(10)};
+
+    static bool updateMaxAtomic(std::atomic<uint64_t>& target, uint64_t candidate) {
+        auto current = target.load(std::memory_order_relaxed);
+        while (candidate > current) {
+            if (target.compare_exchange_weak(current, candidate, std::memory_order_relaxed)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void recordExclusiveLockWait(std::chrono::nanoseconds waitedNs, std::string_view context) {
+        if (updateMaxAtomic(maxExclusiveLockWaitNs, static_cast<uint64_t>(waitedNs.count())) &&
+            waitedNs >= kExclusiveWarnThreshold) {
+            const auto waitedMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(waitedNs).count();
+            spdlog::warn("WAL {} exclusive lock wait {} ms (pending={}, active={})", context,
+                         waitedMs, pendingEntries.size(), activeTransactions.load());
+        }
+    }
+
+    void recordSharedLockWait(std::chrono::nanoseconds waitedNs) {
+        updateMaxAtomic(maxSharedLockWaitNs, static_cast<uint64_t>(waitedNs.count()));
+    }
 
     // Background sync thread
     std::thread syncThread;
     std::atomic<bool> running{false};
-    std::condition_variable syncCv;
+    std::condition_variable_any syncCv;
 
     // Statistics
     std::atomic<uint64_t> totalEntries{0};
@@ -256,7 +289,9 @@ struct WALManager::Impl {
 
     void backgroundSync() {
         while (running) {
-            std::unique_lock lock(mutex);
+            auto lockStart = std::chrono::steady_clock::now();
+            std::unique_lock lock(stateMutex);
+            recordExclusiveLockWait(std::chrono::steady_clock::now() - lockStart, "backgroundSync");
 
             // Wait for entries or timeout
             syncCv.wait_for(lock, config.syncTimeout,
@@ -510,6 +545,9 @@ Result<void> WALManager::shutdown() {
     }
 
     // Final sync
+    auto lockStart = std::chrono::steady_clock::now();
+    std::unique_lock lock(pImpl->stateMutex);
+    pImpl->recordExclusiveLockWait(std::chrono::steady_clock::now() - lockStart, "shutdown");
     if (pImpl->currentLog && pImpl->currentLog->isOpen()) {
         auto syncResult = pImpl->currentLog->sync();
         if (!syncResult) {
@@ -536,7 +574,9 @@ std::unique_ptr<Transaction> WALManager::beginTransaction() {
 }
 
 Result<uint64_t> WALManager::writeEntry(const WALEntry& entry) {
-    std::lock_guard lock(pImpl->mutex);
+    auto lockStart = std::chrono::steady_clock::now();
+    std::unique_lock lock(pImpl->stateMutex);
+    pImpl->recordExclusiveLockWait(std::chrono::steady_clock::now() - lockStart, "writeEntry");
     return pImpl->writeEntryInternal(entry);
 }
 
@@ -744,7 +784,9 @@ Result<WALManager::RecoveryStats> WALManager::recover(ApplyFunction applyEntry) 
 }
 
 Result<void> WALManager::checkpoint() {
-    std::lock_guard lock(pImpl->mutex);
+    auto lockStart = std::chrono::steady_clock::now();
+    std::unique_lock lock(pImpl->stateMutex);
+    pImpl->recordExclusiveLockWait(std::chrono::steady_clock::now() - lockStart, "checkpoint");
 
     // Create checkpoint entry
     auto checkpointData = WALEntry::CheckpointData::encode(
@@ -763,7 +805,9 @@ Result<void> WALManager::checkpoint() {
 }
 
 Result<void> WALManager::rotateLogs() {
-    std::lock_guard lock(pImpl->mutex);
+    auto lockStart = std::chrono::steady_clock::now();
+    std::unique_lock lock(pImpl->stateMutex);
+    pImpl->recordExclusiveLockWait(std::chrono::steady_clock::now() - lockStart, "rotateLogs");
     return pImpl->rotateLogs();
 }
 
@@ -771,8 +815,16 @@ Result<void> WALManager::pruneLogs(std::chrono::hours retention) {
     auto cutoffTime = std::chrono::system_clock::now() - retention;
     size_t prunedCount = 0;
 
+    std::filesystem::path activeLogPath;
+    {
+        auto lockStart = std::chrono::steady_clock::now();
+        std::shared_lock lock(pImpl->stateMutex);
+        pImpl->recordSharedLockWait(std::chrono::steady_clock::now() - lockStart);
+        activeLogPath = pImpl->currentLogPath;
+    }
+
     for (const auto& entry : std::filesystem::directory_iterator(pImpl->config.walDirectory)) {
-        if (isWalLogFile(entry.path()) && entry.path() != pImpl->currentLogPath) {
+        if (isWalLogFile(entry.path()) && entry.path() != activeLogPath) {
             auto lastWrite = std::filesystem::last_write_time(entry);
             auto lastWriteTime = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
                 lastWrite - std::filesystem::file_time_type::clock::now() +
@@ -796,7 +848,9 @@ Result<void> WALManager::pruneLogs(std::chrono::hours retention) {
 }
 
 Result<void> WALManager::sync() {
-    std::lock_guard lock(pImpl->mutex);
+    auto lockStart = std::chrono::steady_clock::now();
+    std::unique_lock lock(pImpl->stateMutex);
+    pImpl->recordExclusiveLockWait(std::chrono::steady_clock::now() - lockStart, "sync");
 
     if (pImpl->currentLog && pImpl->currentLog->isOpen()) {
         return pImpl->currentLog->sync();
@@ -810,12 +864,16 @@ uint64_t WALManager::getCurrentSequence() const {
 }
 
 size_t WALManager::getPendingEntries() const {
-    std::lock_guard lock(pImpl->mutex);
+    auto lockStart = std::chrono::steady_clock::now();
+    std::shared_lock lock(pImpl->stateMutex);
+    pImpl->recordSharedLockWait(std::chrono::steady_clock::now() - lockStart);
     return pImpl->pendingEntries.size();
 }
 
 std::filesystem::path WALManager::getCurrentLogPath() const {
-    std::lock_guard lock(pImpl->mutex);
+    auto lockStart = std::chrono::steady_clock::now();
+    std::shared_lock lock(pImpl->stateMutex);
+    pImpl->recordSharedLockWait(std::chrono::steady_clock::now() - lockStart);
     return pImpl->currentLogPath;
 }
 
@@ -825,7 +883,9 @@ WALManager::Stats WALManager::getStats() const {
     stats.totalBytes = pImpl->totalBytes.load();
     stats.activeTransactions = pImpl->activeTransactions.load();
     {
-        std::lock_guard lock(pImpl->mutex);
+        auto lockStart = std::chrono::steady_clock::now();
+        std::shared_lock lock(pImpl->stateMutex);
+        pImpl->recordSharedLockWait(std::chrono::steady_clock::now() - lockStart);
         stats.pendingEntriesCount = pImpl->pendingEntries.size();
     }
 
@@ -842,6 +902,10 @@ WALManager::Stats WALManager::getStats() const {
 
     stats.lastSync = pImpl->lastSync;
     stats.lastRotation = pImpl->lastRotation;
+    stats.maxExclusiveLockWait =
+        std::chrono::nanoseconds(pImpl->maxExclusiveLockWaitNs.load(std::memory_order_relaxed));
+    stats.maxSharedLockWait =
+        std::chrono::nanoseconds(pImpl->maxSharedLockWaitNs.load(std::memory_order_relaxed));
 
     return stats;
 }

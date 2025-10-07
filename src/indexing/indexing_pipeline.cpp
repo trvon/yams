@@ -6,6 +6,7 @@
 #include <yams/crypto/hasher.h>
 #include <yams/indexing/document_indexer.h>
 #include <yams/indexing/indexing_pipeline.h>
+#include <yams/metadata/path_utils.h>
 #include <yams/profiling.h>
 
 namespace yams::indexing {
@@ -311,10 +312,20 @@ bool IndexingPipeline::processContent(IndexingTask& task) {
         auto scTime = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
             fsTime - std::filesystem::file_time_type::clock::now() +
             std::chrono::system_clock::now());
-        docInfo.modifiedTime = scTime;
-        docInfo.indexedTime = std::chrono::system_clock::now();
+        using std::chrono::floor;
+        using namespace std::chrono;
+        docInfo.modifiedTime = floor<seconds>(scTime);
+        docInfo.indexedTime = floor<seconds>(std::chrono::system_clock::now());
         docInfo.contentExtracted = true;
         docInfo.extractionStatus = metadata::ExtractionStatus::Success;
+
+        auto derived = metadata::computePathDerivedValues(docInfo.filePath);
+        docInfo.filePath = derived.normalizedPath;
+        docInfo.pathPrefix = derived.pathPrefix;
+        docInfo.reversePath = derived.reversePath;
+        docInfo.pathHash = derived.pathHash;
+        docInfo.parentHash = derived.parentHash;
+        docInfo.pathDepth = derived.pathDepth;
 
         // Set MIME type from extraction metadata if available
         auto& metadata = task.extractionResult->metadata;
@@ -356,6 +367,13 @@ bool IndexingPipeline::indexContent(IndexingTask& task) {
             auto& existing = existingDoc.value().value();
             isNewDocument = false;
             documentId = existing.id;
+
+            auto derivedExisting = metadata::computePathDerivedValues(existing.filePath);
+            existing.pathPrefix = derivedExisting.pathPrefix;
+            existing.reversePath = derivedExisting.reversePath;
+            existing.pathHash = derivedExisting.pathHash;
+            existing.parentHash = derivedExisting.parentHash;
+            existing.pathDepth = derivedExisting.pathDepth;
 
             spdlog::debug("Found existing document with hash {} at path {}",
                           task.documentInfo->sha256Hash, existing.filePath);

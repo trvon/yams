@@ -72,6 +72,9 @@ Result<void> ConnectionPool::initialize() {
     }
 
     spdlog::debug("Connection pool initialized with {} connections", config_.minConnections);
+#if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
+    startMaintenanceThread();
+#endif
     return {};
 }
 
@@ -99,6 +102,11 @@ void ConnectionPool::shutdown() {
     activeConnections_ = 0;
 
     spdlog::debug("Connection pool shut down");
+#if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
+    if (maintenanceThread_.joinable()) {
+        maintenanceThread_.request_stop();
+    }
+#endif
 }
 
 Result<std::unique_ptr<PooledConnection>>
@@ -109,7 +117,49 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout) {
         return Error{ErrorCode::InvalidState, "Pool is shut down"};
     }
 
-    waitingRequests_++;
+    class WaitingRequestGuard {
+    public:
+        explicit WaitingRequestGuard(ConnectionPool& pool) : pool_(pool) {}
+        ~WaitingRequestGuard() { finish(); }
+
+        void activate() {
+            if (active_)
+                return;
+            active_ = true;
+            startedAt_ = std::chrono::steady_clock::now();
+            const auto current = pool_.waitingRequests_.fetch_add(1, std::memory_order_relaxed) + 1;
+            auto previous = pool_.maxWaitingRequests_.load(std::memory_order_relaxed);
+            while (current > previous &&
+                   !pool_.maxWaitingRequests_.compare_exchange_weak(
+                       previous, current, std::memory_order_relaxed, std::memory_order_relaxed)) {
+                // CAS loop updates 'previous' with the latest observed value.
+            }
+        }
+
+        void markTimeout() { timeout_ = true; }
+
+        void finish() {
+            if (!active_)
+                return;
+            const auto ended = std::chrono::steady_clock::now();
+            pool_.waitingRequests_.fetch_sub(1, std::memory_order_relaxed);
+            const auto micros =
+                std::chrono::duration_cast<std::chrono::microseconds>(ended - startedAt_).count();
+            pool_.totalWaitMicros_.fetch_add(static_cast<std::uint64_t>(micros),
+                                             std::memory_order_relaxed);
+            if (timeout_) {
+                pool_.timeoutCount_.fetch_add(1, std::memory_order_relaxed);
+            }
+            active_ = false;
+            timeout_ = false;
+        }
+
+    private:
+        ConnectionPool& pool_;
+        bool active_{false};
+        bool timeout_{false};
+        std::chrono::steady_clock::time_point startedAt_{};
+    } waitingGuard(*this);
 
     // Wait for available connection
     auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -128,31 +178,32 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout) {
 
                 totalConnections_++;
                 activeConnections_++;
-                waitingRequests_--;
                 totalAcquired_++;
 
                 return pooledConn;
             } else {
-                waitingRequests_--;
                 failedAcquisitions_++;
                 return connResult.error();
             }
         }
 
         // Wait for connection to become available
+        waitingGuard.activate();
         if (timeout.count() >= 30000) { // >= 30 seconds, treat as indefinite wait
             cv_.wait(lock, [this] { return !available_.empty() || shutdown_; });
+            waitingGuard.finish();
         } else {
             if (!cv_.wait_until(lock, deadline,
                                 [this] { return !available_.empty() || shutdown_; })) {
-                waitingRequests_--;
+                waitingGuard.markTimeout();
+                waitingGuard.finish();
                 failedAcquisitions_++;
                 return Error{ErrorCode::Timeout, "Timeout acquiring connection"};
             }
+            waitingGuard.finish();
         }
 
         if (shutdown_) {
-            waitingRequests_--;
             failedAcquisitions_++;
             return Error{ErrorCode::InvalidState, "Pool is shut down"};
         }
@@ -170,7 +221,6 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout) {
         lock.lock();
 
         if (!connResult) {
-            waitingRequests_--;
             failedAcquisitions_++;
             totalConnections_--;
             return connResult.error();
@@ -182,8 +232,9 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout) {
 
     conn->touch();
     activeConnections_++;
-    waitingRequests_--;
     totalAcquired_++;
+
+    waitingGuard.finish();
 
     return conn;
 }
@@ -191,8 +242,16 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout) {
 ConnectionPool::Stats ConnectionPool::getStats() const {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    return {totalConnections_, available_.size(), activeConnections_, waitingRequests_,
-            totalAcquired_,    totalReleased_,    failedAcquisitions_};
+    return {totalConnections_,
+            available_.size(),
+            activeConnections_,
+            waitingRequests_,
+            maxWaitingRequests_.load(std::memory_order_relaxed),
+            totalWaitMicros_.load(std::memory_order_relaxed),
+            timeoutCount_.load(std::memory_order_relaxed),
+            totalAcquired_,
+            totalReleased_,
+            failedAcquisitions_};
 }
 
 Result<void> ConnectionPool::healthCheck() {
@@ -382,5 +441,20 @@ bool ConnectionPool::isConnectionValid(const Database& db) const {
         return false;
     }
 }
+
+#if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
+void ConnectionPool::startMaintenanceThread() {
+    using namespace std::chrono_literals;
+    maintenanceThread_ = std::jthread([this](std::stop_token st) {
+        while (!st.stop_requested()) {
+            (void)this->healthCheck();
+            this->pruneIdleConnections();
+            for (int i = 0; i < 60 && !st.stop_requested(); ++i) {
+                std::this_thread::sleep_for(1s);
+            }
+        }
+    });
+}
+#endif
 
 } // namespace yams::metadata

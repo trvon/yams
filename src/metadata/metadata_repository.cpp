@@ -1,17 +1,176 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <iostream>
+#include <span>
 #include <sstream>
 #include <string_view>
 #include <yams/common/utf8_utils.h>
 #include <yams/metadata/document_metadata.h>
+#include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
+#include <yams/metadata/path_utils.h>
+#include <yams/metadata/query_helpers.h>
 
 namespace yams::metadata {
+
+namespace {
+constexpr const char* kDocumentColumnListNew =
+    "id, file_path, file_name, file_extension, file_size, sha256_hash, mime_type, "
+    "created_time, modified_time, indexed_time, content_extracted, extraction_status, "
+    "extraction_error, path_prefix, reverse_path, path_hash, parent_hash, path_depth";
+
+constexpr const char* kDocumentColumnListCompat =
+    "id, file_path, file_name, file_extension, file_size, sha256_hash, mime_type, "
+    "created_time, modified_time, indexed_time, content_extracted, extraction_status, "
+    "extraction_error, NULL as path_prefix, '' as reverse_path, '' as path_hash, '' as "
+    "parent_hash, 0 as path_depth";
+} // namespace
+
+std::optional<DocumentInfo>
+MetadataRepository::lookupPathCache(const std::string& normalizedPath) const {
+    flushPathCacheBuffer();
+    auto snap = std::atomic_load_explicit(&pathCacheSnapshot_, std::memory_order_acquire);
+    if (!snap)
+        return std::nullopt;
+    if (auto it = snap->data.find(normalizedPath); it != snap->data.end()) {
+        // Record a hit approximately (lock-free ring), then return copy of doc
+        recordPathHit(normalizedPath);
+        return it->second.doc;
+    }
+    return std::nullopt;
+}
+
+void MetadataRepository::storePathCache(const DocumentInfo& info) const {
+    {
+        std::lock_guard<std::mutex> lock(pathCacheWriteBuffer_.mutex);
+        pathCacheWriteBuffer_.pending.push_back(info);
+    }
+    auto pending = pathCacheWriteBuffer_.size.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (pending >= kPathCacheFlushThreshold) {
+        flushPathCacheBuffer();
+    }
+}
+
+void MetadataRepository::recordPathHit(const std::string& normalizedPath) const {
+    if (!hitRing_)
+        return; // not initialized until first store
+    uint64_t h = std::hash<std::string>{}(normalizedPath);
+    auto idx = hitSeq_.fetch_add(1, std::memory_order_relaxed) & hitRingMask_;
+    hitRing_[idx].store(h, std::memory_order_relaxed);
+}
+
+void MetadataRepository::flushPathCacheBuffer() const {
+    std::vector<DocumentInfo> batch;
+    {
+        std::lock_guard<std::mutex> lock(pathCacheWriteBuffer_.mutex);
+        if (pathCacheWriteBuffer_.pending.empty())
+            return;
+        batch = std::move(pathCacheWriteBuffer_.pending);
+        pathCacheWriteBuffer_.pending.clear();
+        pathCacheWriteBuffer_.size.store(0, std::memory_order_relaxed);
+    }
+
+    if (!hitRing_) {
+        const std::size_t ringSize = 4096; // power of two
+        hitRing_.reset(new std::atomic<uint64_t>[ringSize]);
+        hitRingSize_ = ringSize;
+        for (std::size_t i = 0; i < ringSize; ++i) {
+            hitRing_[i].store(0, std::memory_order_relaxed);
+        }
+        hitRingMask_ = ringSize - 1;
+    }
+
+    auto old = std::atomic_load_explicit(&pathCacheSnapshot_, std::memory_order_acquire);
+    auto updated = std::make_shared<PathCacheSnapshot>(*old);
+
+    const auto endSeq = hitSeq_.load(std::memory_order_relaxed);
+    const std::size_t toFold = static_cast<std::size_t>(std::min<uint64_t>(hitRingSize_, endSeq));
+    for (std::size_t i = 0; i < toFold; ++i) {
+        const uint64_t h =
+            hitRing_[(endSeq - 1 - i) & hitRingMask_].load(std::memory_order_relaxed);
+        if (h == 0)
+            continue;
+        for (auto& kv : updated->data) {
+            const uint64_t kh = std::hash<std::string>{}(kv.first);
+            if (kh == h) {
+                kv.second.lastHitSeq = endSeq - i;
+            }
+        }
+    }
+
+    uint64_t lastSeq = updated->buildSeq;
+    for (const auto& info : batch) {
+        const auto gseq = globalSeq_.fetch_add(1, std::memory_order_relaxed);
+        lastSeq = gseq;
+        auto& entry = updated->data[info.filePath];
+        entry.doc = info;
+        if (entry.insertedSeq == 0)
+            entry.insertedSeq = gseq;
+    }
+
+    if (updated->data.size() > pathCacheCapacity_) {
+        std::vector<std::pair<std::string, PathCacheSnapshot::Entry*>> entries;
+        entries.reserve(updated->data.size());
+        for (auto& kv : updated->data) {
+            entries.emplace_back(kv.first, &kv.second);
+        }
+        std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
+            if (a.second->lastHitSeq != b.second->lastHitSeq)
+                return a.second->lastHitSeq < b.second->lastHitSeq;
+            return a.second->insertedSeq < b.second->insertedSeq;
+        });
+        const auto need = updated->data.size() - pathCacheCapacity_;
+        for (std::size_t i = 0; i < need && i < entries.size(); ++i) {
+            updated->data.erase(entries[i].first);
+        }
+    }
+
+    updated->timestamp = std::chrono::steady_clock::now();
+    if (!batch.empty())
+        updated->buildSeq = lastSeq;
+    std::atomic_store_explicit(&pathCacheSnapshot_, std::move(updated), std::memory_order_release);
+}
+
+void MetadataRepository::invalidateQueryCache() const {
+    std::lock_guard<std::mutex> lock(queryCacheMutex_);
+    std::atomic_store_explicit(&queryCacheSnapshot_, std::make_shared<QueryCacheMap>(),
+                               std::memory_order_release);
+}
+
+void MetadataRepository::updateQueryCache(const std::string& key,
+                                          const SearchResults& results) const {
+    std::lock_guard<std::mutex> lock(queryCacheMutex_);
+    auto snapshot = std::atomic_load_explicit(&queryCacheSnapshot_, std::memory_order_acquire);
+    if (!snapshot) {
+        snapshot = std::make_shared<QueryCacheMap>();
+    }
+    auto updated = std::make_shared<QueryCacheMap>(*snapshot);
+    QueryCacheEntry entry;
+    entry.results = results;
+    entry.timestamp = std::chrono::steady_clock::now();
+    entry.hits = 0;
+
+    (*updated)[key] = std::move(entry);
+    if (updated->size() > kQueryCacheCapacity) {
+        auto victim = std::min_element(updated->begin(), updated->end(),
+                                       [](const auto& lhs, const auto& rhs) {
+                                           auto lhsHits = lhs.second.hits;
+                                           auto rhsHits = rhs.second.hits;
+                                           if (lhsHits != rhsHits)
+                                               return lhsHits < rhsHits;
+                                           return lhs.second.timestamp < rhs.second.timestamp;
+                                       });
+        if (victim != updated->end()) {
+            updated->erase(victim);
+        }
+    }
+    std::atomic_store_explicit(&queryCacheSnapshot_, std::move(updated), std::memory_order_release);
+}
 
 MetadataRepository::MetadataRepository(ConnectionPool& pool) : pool_(pool) {
     // Ensure database schema is initialized
@@ -27,11 +186,33 @@ MetadataRepository::MetadataRepository(ConnectionPool& pool) : pool_(pool) {
         // Register all YAMS metadata migrations
         manager.registerMigrations(YamsMetadataMigrations::getAllMigrations());
 
+        auto currentVersionRes = manager.getCurrentVersion();
+        if (!currentVersionRes) {
+            spdlog::error("Failed to get current DB version: {}",
+                          currentVersionRes.error().message);
+            return currentVersionRes.error();
+        }
+        int currentVersion = currentVersionRes.value();
+        int latestVersion = manager.getLatestVersion();
+        spdlog::info("Database schema version: {}, latest available: {}", currentVersion,
+                     latestVersion);
+
+        if (currentVersion < latestVersion) {
+            spdlog::info("Pending migrations found. Attempting to upgrade...");
+        }
+
         // Apply migrations
         auto migrateResult = manager.migrate();
         if (!migrateResult) {
             spdlog::error("Failed to run database migrations: {}", migrateResult.error().message);
             return Error{migrateResult.error()};
+        }
+
+        auto newVersionRes = manager.getCurrentVersion();
+        if (newVersionRes && newVersionRes.value() > currentVersion) {
+            spdlog::info("Database successfully migrated to version {}", newVersionRes.value());
+        } else if (newVersionRes) {
+            spdlog::info("Database schema is up to date at version {}", newVersionRes.value());
         }
 
         spdlog::info("Database schema initialized successfully");
@@ -44,6 +225,8 @@ MetadataRepository::MetadataRepository(ConnectionPool& pool) : pool_(pool) {
     }
 }
 
+// Legacy makeSelect removed; use sql::QuerySpec in callers.
+
 // Document operations
 Result<int64_t> MetadataRepository::insertDocument(const DocumentInfo& info) {
     return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
@@ -51,8 +234,9 @@ Result<int64_t> MetadataRepository::insertDocument(const DocumentInfo& info) {
             INSERT INTO documents (
                 file_path, file_name, file_extension, file_size, sha256_hash,
                 mime_type, created_time, modified_time, indexed_time,
-                content_extracted, extraction_status, extraction_error
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                content_extracted, extraction_status, extraction_error,
+                path_prefix, reverse_path, path_hash, parent_hash, path_depth
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         )");
 
         if (!stmtResult)
@@ -61,9 +245,10 @@ Result<int64_t> MetadataRepository::insertDocument(const DocumentInfo& info) {
         Statement stmt = std::move(stmtResult).value();
         auto bindResult = stmt.bindAll(
             info.filePath, info.fileName, info.fileExtension, info.fileSize, info.sha256Hash,
-            info.mimeType, info.createdTimeUnix(), info.modifiedTimeUnix(), info.indexedTimeUnix(),
+            info.mimeType, info.createdTime, info.modifiedTime, info.indexedTime,
             info.contentExtracted ? 1 : 0, ExtractionStatusUtils::toString(info.extractionStatus),
-            info.extractionError);
+            info.extractionError, info.pathPrefix, info.reversePath, info.pathHash, info.parentHash,
+            info.pathDepth);
 
         if (!bindResult)
             return bindResult.error();
@@ -79,13 +264,15 @@ Result<int64_t> MetadataRepository::insertDocument(const DocumentInfo& info) {
 Result<std::optional<DocumentInfo>> MetadataRepository::getDocument(int64_t id) {
     return executeQuery<std::optional<DocumentInfo>>(
         [&](Database& db) -> Result<std::optional<DocumentInfo>> {
-            auto stmtResult = db.prepare(R"(
-            SELECT id, file_path, file_name, file_extension, file_size,
-                   sha256_hash, mime_type, created_time, modified_time,
-                   indexed_time, content_extracted, extraction_status,
-                   extraction_error
-            FROM documents WHERE id = ?
-        )");
+            using yams::metadata::sql::QuerySpec;
+            const char* cols =
+                hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
+            QuerySpec spec{
+                .table = "documents",
+                .columns = {cols},
+                .conditions = {"id = ?"},
+            };
+            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
 
             if (!stmtResult)
                 return stmtResult.error();
@@ -110,13 +297,15 @@ Result<std::optional<DocumentInfo>> MetadataRepository::getDocument(int64_t id) 
 Result<std::optional<DocumentInfo>> MetadataRepository::getDocumentByHash(const std::string& hash) {
     return executeQuery<std::optional<DocumentInfo>>(
         [&](Database& db) -> Result<std::optional<DocumentInfo>> {
-            auto stmtResult = db.prepare(R"(
-            SELECT id, file_path, file_name, file_extension, file_size,
-                   sha256_hash, mime_type, created_time, modified_time,
-                   indexed_time, content_extracted, extraction_status,
-                   extraction_error
-            FROM documents WHERE sha256_hash = ?
-        )");
+            using yams::metadata::sql::QuerySpec;
+            const char* cols =
+                hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
+            QuerySpec spec{
+                .table = "documents",
+                .columns = {cols},
+                .conditions = {"sha256_hash = ?"},
+            };
+            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
 
             if (!stmtResult)
                 return stmtResult.error();
@@ -146,7 +335,8 @@ Result<void> MetadataRepository::updateDocument(const DocumentInfo& info) {
                 file_size = ?, sha256_hash = ?, mime_type = ?,
                 created_time = ?, modified_time = ?, indexed_time = ?,
                 content_extracted = ?, extraction_status = ?,
-                extraction_error = ?
+                extraction_error = ?, path_prefix = ?, reverse_path = ?,
+                path_hash = ?, parent_hash = ?, path_depth = ?
             WHERE id = ?
         )");
 
@@ -156,9 +346,10 @@ Result<void> MetadataRepository::updateDocument(const DocumentInfo& info) {
         Statement stmt = std::move(stmtResult).value();
         auto bindResult = stmt.bindAll(
             info.filePath, info.fileName, info.fileExtension, info.fileSize, info.sha256Hash,
-            info.mimeType, info.createdTimeUnix(), info.modifiedTimeUnix(), info.indexedTimeUnix(),
+            info.mimeType, info.createdTime, info.modifiedTime, info.indexedTime,
             info.contentExtracted ? 1 : 0, ExtractionStatusUtils::toString(info.extractionStatus),
-            info.extractionError, info.id);
+            info.extractionError, info.pathPrefix, info.reversePath, info.pathHash, info.parentHash,
+            info.pathDepth, info.id);
 
         if (!bindResult)
             return bindResult.error();
@@ -311,10 +502,12 @@ Result<std::optional<MetadataValue>> MetadataRepository::getMetadata(int64_t doc
                                                                      const std::string& key) {
     return executeQuery<std::optional<MetadataValue>>(
         [&](Database& db) -> Result<std::optional<MetadataValue>> {
-            auto stmtResult = db.prepare(R"(
-            SELECT value, value_type FROM metadata
-            WHERE document_id = ? AND key = ?
-        )");
+            using yams::metadata::sql::QuerySpec;
+            QuerySpec spec;
+            spec.table = "metadata";
+            spec.columns = {"value", "value_type"};
+            spec.conditions = {"document_id = ?", "key = ?"};
+            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
 
             if (!stmtResult)
                 return stmtResult.error();
@@ -344,10 +537,12 @@ Result<std::unordered_map<std::string, MetadataValue>>
 MetadataRepository::getAllMetadata(int64_t documentId) {
     return executeQuery<std::unordered_map<std::string, MetadataValue>>(
         [&](Database& db) -> Result<std::unordered_map<std::string, MetadataValue>> {
-            auto stmtResult = db.prepare(R"(
-            SELECT key, value, value_type FROM metadata
-            WHERE document_id = ?
-        )");
+            using yams::metadata::sql::QuerySpec;
+            QuerySpec spec;
+            spec.table = "metadata";
+            spec.columns = {"key", "value", "value_type"};
+            spec.conditions = {"document_id = ?"};
+            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
 
             if (!stmtResult)
                 return stmtResult.error();
@@ -371,6 +566,60 @@ MetadataRepository::getAllMetadata(int64_t documentId) {
                 value.type = MetadataValueTypeUtils::fromString(stmt.getString(2));
 
                 result[stmt.getString(0)] = value;
+            }
+
+            return result;
+        });
+}
+
+Result<std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>>>
+MetadataRepository::getMetadataForDocuments(std::span<const int64_t> documentIds) {
+    if (documentIds.empty())
+        return std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>>{};
+
+    return executeQuery<
+        std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>>>(
+        [&](Database& db)
+            -> Result<std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>>> {
+            using yams::metadata::sql::QuerySpec;
+            std::string inList;
+            inList.reserve(documentIds.size() * 2);
+            inList += '(';
+            for (size_t i = 0; i < documentIds.size(); ++i) {
+                if (i > 0)
+                    inList += ',';
+                inList += '?';
+            }
+            inList += ')';
+            QuerySpec spec;
+            spec.table = "metadata";
+            spec.columns = {"document_id", "key", "value", "value_type"};
+            spec.conditions = {"document_id IN " + inList};
+            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
+            if (!stmtResult)
+                return stmtResult.error();
+
+            Statement stmt = std::move(stmtResult).value();
+            int index = 1;
+            for (auto id : documentIds) {
+                if (auto bindRes = stmt.bind(index++, id); !bindRes)
+                    return bindRes.error();
+            }
+
+            std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>> result;
+
+            while (true) {
+                auto stepResult = stmt.step();
+                if (!stepResult)
+                    return stepResult.error();
+                if (!stepResult.value())
+                    break;
+
+                int64_t docId = stmt.getInt64(0);
+                MetadataValue value;
+                value.value = stmt.getString(2);
+                value.type = MetadataValueTypeUtils::fromString(stmt.getString(3));
+                result[docId][stmt.getString(1)] = value;
             }
 
             return result;
@@ -411,9 +660,9 @@ Result<int64_t> MetadataRepository::insertRelationship(const DocumentRelationshi
 
         Result<void> bindResult;
         if (relationship.parentId > 0) {
-            bindResult = stmt.bindAll(relationship.parentId, relationship.childId,
-                                      relationship.getRelationshipTypeString(),
-                                      relationship.createdTimeUnix());
+            bindResult =
+                stmt.bindAll(relationship.parentId, relationship.childId,
+                             relationship.getRelationshipTypeString(), relationship.createdTime);
         } else {
             bindResult = stmt.bind(1, nullptr);
             if (bindResult.has_value()) {
@@ -423,7 +672,7 @@ Result<int64_t> MetadataRepository::insertRelationship(const DocumentRelationshi
                 bindResult = stmt.bind(3, relationship.getRelationshipTypeString());
             }
             if (bindResult.has_value()) {
-                bindResult = stmt.bind(4, relationship.createdTimeUnix());
+                bindResult = stmt.bind(4, relationship.createdTime);
             }
         }
 
@@ -502,7 +751,7 @@ Result<int64_t> MetadataRepository::insertSearchHistory(const SearchHistoryEntry
             return stmtResult.error();
 
         Statement stmt = std::move(stmtResult).value();
-        auto bindResult = stmt.bindAll(entry.query, entry.queryTimeUnix(), entry.resultsCount,
+        auto bindResult = stmt.bindAll(entry.query, entry.queryTime, entry.resultsCount,
                                        entry.executionTimeMs, entry.userContext);
 
         if (!bindResult)
@@ -563,9 +812,8 @@ Result<int64_t> MetadataRepository::insertSavedQuery(const SavedQuery& query) {
             return stmtResult.error();
 
         Statement stmt = std::move(stmtResult).value();
-        auto bindResult =
-            stmt.bindAll(query.name, query.query, query.description, query.createdTimeUnix(),
-                         query.lastUsedUnix(), query.useCount);
+        auto bindResult = stmt.bindAll(query.name, query.query, query.description,
+                                       query.createdTime, query.lastUsed, query.useCount);
 
         if (!bindResult)
             return bindResult.error();
@@ -648,9 +896,8 @@ Result<void> MetadataRepository::updateSavedQuery(const SavedQuery& query) {
             return stmtResult.error();
 
         Statement stmt = std::move(stmtResult).value();
-        auto bindResult =
-            stmt.bindAll(query.name, query.query, query.description, query.createdTimeUnix(),
-                         query.lastUsedUnix(), query.useCount, query.id);
+        auto bindResult = stmt.bindAll(query.name, query.query, query.description,
+                                       query.createdTime, query.lastUsed, query.useCount, query.id);
 
         if (!bindResult)
             return bindResult.error();
@@ -678,7 +925,7 @@ Result<void> MetadataRepository::deleteSavedQuery(int64_t id) {
 Result<void> MetadataRepository::indexDocumentContent(int64_t documentId, const std::string& title,
                                                       const std::string& content,
                                                       const std::string& contentType) {
-    return executeQuery<void>([&](Database& db) -> Result<void> {
+    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
         // First check if FTS5 is available
         auto fts5Result = db.hasFTS5();
         if (!fts5Result)
@@ -714,10 +961,14 @@ Result<void> MetadataRepository::indexDocumentContent(int64_t documentId, const 
 
         return stmt.execute();
     });
+
+    if (result)
+        invalidateQueryCache();
+    return result;
 }
 
 Result<void> MetadataRepository::removeFromIndex(int64_t documentId) {
-    return executeQuery<void>([&](Database& db) -> Result<void> {
+    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
         // First check if FTS5 is available
         auto fts5Result = db.hasFTS5();
         if (!fts5Result)
@@ -738,6 +989,10 @@ Result<void> MetadataRepository::removeFromIndex(int64_t documentId) {
 
         return stmt.execute();
     });
+
+    if (result)
+        invalidateQueryCache();
+    return result;
 }
 
 // Helper function to sanitize FTS5 query strings
@@ -799,6 +1054,30 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
         SearchResults results;
         results.query = query;
 
+        const bool cacheable = !docIds.has_value() || docIds->empty();
+        std::string cacheKey;
+        if (cacheable) {
+            cacheKey.reserve(query.size() + 32);
+            cacheKey.append(query);
+            cacheKey.push_back(':');
+            cacheKey.append(std::to_string(limit));
+            cacheKey.push_back(':');
+            cacheKey.append(std::to_string(offset));
+
+            auto snapshot =
+                std::atomic_load_explicit(&queryCacheSnapshot_, std::memory_order_acquire);
+            if (snapshot) {
+                auto it = snapshot->find(cacheKey);
+                if (it != snapshot->end()) {
+                    auto age = std::chrono::steady_clock::now() - it->second.timestamp;
+                    if (age <= kQueryCacheTtl) {
+                        ++it->second.hits;
+                        return it->second.results;
+                    }
+                }
+            }
+        }
+
         auto start = std::chrono::high_resolution_clock::now();
 
         // First check if FTS5 is available
@@ -816,43 +1095,64 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
         // Sanitize the query to prevent FTS5 syntax errors
         std::string sanitizedQuery = sanitizeFTS5Query(query);
 
-        // Build the query
-        std::ostringstream sql;
-        sql << R"(
-            SELECT 
-                fts.rowid,
-                fts.title,
-                snippet(documents_fts, 0, '<b>', '</b>', '...', 32) as snippet,
-                bm25(documents_fts) as score,
-                d.file_path, d.file_name, d.file_extension, d.file_size,
-                d.sha256_hash, d.mime_type, d.created_time, d.modified_time,
-                d.indexed_time, d.content_extracted, d.extraction_status,
-                d.extraction_error
-            FROM documents_fts fts
-            JOIN documents d ON d.id = fts.rowid
-            WHERE documents_fts MATCH ?
-        )";
-
+        using yams::metadata::sql::QuerySpec;
+        QuerySpec spec;
+        spec.from =
+            std::optional<std::string>{"documents_fts fts JOIN documents d ON d.id = fts.rowid"};
+        spec.table = "documents_fts";
+        spec.columns = {"fts.rowid",
+                        "fts.title",
+                        "snippet(documents_fts, 0, '<b>', '</b>', '...', 32) as snippet",
+                        "bm25(documents_fts) as score",
+                        "d.file_path",
+                        "d.file_name",
+                        "d.file_extension",
+                        "d.file_size",
+                        "d.sha256_hash",
+                        "d.mime_type",
+                        "d.created_time",
+                        "d.modified_time",
+                        "d.indexed_time",
+                        "d.content_extracted",
+                        "d.extraction_status",
+                        "d.extraction_error"};
+        spec.conditions.emplace_back("documents_fts MATCH ?");
+        // Optional ID filter (dynamic IN placeholder list)
+        std::string idIn;
         if (docIds && !docIds->empty()) {
-            sql << " AND d.id IN (";
+            idIn = "d.id IN (";
             for (size_t i = 0; i < docIds->size(); ++i) {
                 if (i > 0)
-                    sql << ",";
-                sql << "?";
+                    idIn += ',';
+                idIn += '?';
             }
-            sql << ")";
+            idIn += ')';
+            spec.conditions.push_back(idIn);
         }
-
-        sql << " ORDER BY score LIMIT ? OFFSET ?";
+        spec.orderBy = std::optional<std::string>{"score"};
+        spec.limit = limit;
+        spec.offset = offset;
+        auto sql = yams::metadata::sql::buildSelect(spec);
 
         // Try FTS search first
         bool ftsSearchSucceeded = false;
-        auto stmtResult = db.prepare(sql.str());
+        auto stmtResult = db.prepare(sql);
 
         if (stmtResult) {
             Statement stmt = std::move(stmtResult).value();
-            auto bindResult = stmt.bindAll(sanitizedQuery, limit, offset);
-            if (bindResult) {
+            // Bind: MATCH term, optional id list, limit, offset
+            int bindIndex = 1;
+            auto b1 = stmt.bind(bindIndex++, sanitizedQuery);
+            if (!b1)
+                return b1.error();
+            if (docIds && !docIds->empty()) {
+                for (auto id : *docIds) {
+                    auto b = stmt.bind(bindIndex++, static_cast<int64_t>(id));
+                    if (!b)
+                        return b.error();
+                }
+            }
+            {
                 // Try to execute the FTS5 search
                 while (true) {
                     auto stepResult = stmt.step();
@@ -879,9 +1179,9 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
                     result.document.fileSize = stmt.getInt64(7);
                     result.document.sha256Hash = stmt.getString(8);
                     result.document.mimeType = stmt.getString(9);
-                    result.document.setCreatedTime(stmt.getInt64(10));
-                    result.document.setModifiedTime(stmt.getInt64(11));
-                    result.document.setIndexedTime(stmt.getInt64(12));
+                    result.document.createdTime = stmt.getTime(10);
+                    result.document.modifiedTime = stmt.getTime(11);
+                    result.document.indexedTime = stmt.getTime(12);
                     result.document.contentExtracted = stmt.getInt(13) != 0;
                     result.document.extractionStatus =
                         ExtractionStatusUtils::fromString(stmt.getString(14));
@@ -912,8 +1212,6 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
                         }
                     }
                 }
-            } else {
-                spdlog::debug("FTS5 search bind failed: {}", bindResult.error().message);
             }
         } else {
             spdlog::debug("FTS5 search prepare failed: {}", stmtResult.error().message);
@@ -940,34 +1238,317 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
         results.executionTimeMs =
             std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 
+        if (cacheable) {
+            updateQueryCache(cacheKey, results);
+        }
+
         return results;
     });
 }
 
 // Bulk operations
+Result<std::optional<DocumentInfo>>
+MetadataRepository::findDocumentByExactPath(const std::string& path) {
+    auto derived = computePathDerivedValues(path);
+    if (auto cached = lookupPathCache(derived.normalizedPath))
+        return cached;
+
+    return executeQuery<std::optional<DocumentInfo>>(
+        [&](Database& db) -> Result<std::optional<DocumentInfo>> {
+            using yams::metadata::sql::QuerySpec;
+            const char* cols =
+                hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
+            QuerySpec spec{
+                .table = "documents",
+                .columns = {cols},
+                .conditions = {"path_hash = ?"},
+                .orderBy = std::nullopt,
+                .groupBy = std::nullopt,
+                .having = std::nullopt,
+                .limit = 1,
+                .offset = std::nullopt,
+            };
+            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
+            if (!stmtResult)
+                return stmtResult.error();
+
+            Statement stmt = std::move(stmtResult).value();
+            if (auto bind = stmt.bind(1, derived.pathHash); !bind)
+                return bind.error();
+
+            auto stepResult = stmt.step();
+            if (!stepResult)
+                return stepResult.error();
+            if (!stepResult.value())
+                return std::optional<DocumentInfo>{};
+
+            auto doc = mapDocumentRow(stmt);
+            storePathCache(doc);
+            return std::optional<DocumentInfo>{std::move(doc)};
+        });
+}
+
 Result<std::vector<DocumentInfo>>
-MetadataRepository::findDocumentsByPath(const std::string& pathPattern) {
+MetadataRepository::queryDocuments(const DocumentQueryOptions& options) {
     return executeQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
-            auto stmtResult = db.prepare(R"(
-            SELECT id, file_path, file_name, file_extension, file_size,
-                   sha256_hash, mime_type, created_time, modified_time,
-                   indexed_time, content_extracted, extraction_status,
-                   extraction_error
-            FROM documents WHERE file_path LIKE ?
-            ORDER BY file_path
-        )");
+            const bool joinFtsForContains = options.containsFragment && options.containsUsesFts &&
+                                            !options.containsFragment->empty();
+
+            std::string sql = "SELECT ";
+            sql += hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
+            sql += " FROM documents";
+            if (joinFtsForContains)
+                sql += " JOIN documents_path_fts ON documents.id = documents_path_fts.rowid";
+
+            std::vector<std::string> conditions;
+            struct BindParam {
+                enum class Type { Text, Int } type;
+                std::string text;
+                int64_t integer{0};
+            };
+            std::vector<BindParam> params;
+
+            auto addText = [&](std::string value) {
+                params.push_back(BindParam{BindParam::Type::Text, std::move(value), 0});
+            };
+            auto addInt = [&](int64_t value) {
+                params.push_back(BindParam{BindParam::Type::Int, {}, value});
+            };
+
+            if (options.exactPath) {
+                auto derived = computePathDerivedValues(*options.exactPath);
+                conditions.emplace_back("path_hash = ?");
+                addText(derived.pathHash);
+            }
+
+            if (options.pathPrefix && !options.pathPrefix->empty()) {
+                const std::string& originalPrefix = *options.pathPrefix;
+                bool treatAsDirectory = options.prefixIsDirectory;
+                if (!treatAsDirectory) {
+                    char tail = originalPrefix.back();
+                    treatAsDirectory = (tail == '/' || tail == '\\');
+                }
+
+                auto derived = computePathDerivedValues(originalPrefix);
+                std::string normalized = derived.normalizedPath;
+
+                if (treatAsDirectory) {
+                    // Ensure we operate on directory component without trailing slash
+                    if (!normalized.empty() && normalized.back() == '/')
+                        normalized.pop_back();
+
+                    if (!normalized.empty()) {
+                        if (hasPathIndexing_) {
+                            std::string clause = "(path_prefix = ?";
+                            addText(normalized);
+                            if (options.includeSubdirectories) {
+                                clause += " OR path_prefix LIKE ?";
+                                std::string likeValue = normalized;
+                                likeValue.append("/%");
+                                addText(likeValue);
+                            }
+                            clause += ')';
+                            conditions.emplace_back(std::move(clause));
+                        } else {
+                            std::string likeValue = normalized;
+                            likeValue.append("/%");
+                            conditions.emplace_back("file_path LIKE ?");
+                            addText(likeValue);
+                        }
+                    } else {
+                        if (!options.includeSubdirectories) {
+                            if (hasPathIndexing_) {
+                                conditions.emplace_back("path_prefix = ''");
+                            } else {
+                                // Root-only without subdirectories doesn't have a strict
+                                // equivalent; approximate with file_path NOT LIKE '%/%'
+                                // which filters to top-level entries.
+                                conditions.emplace_back("file_path NOT LIKE '%/%'");
+                            }
+                        }
+                        // When querying from repository root with includeSubdirectories,
+                        // the prefix condition would match everything; omit predicate.
+                    }
+                } else {
+                    std::string lower = normalized;
+                    std::string upper = normalized;
+                    upper.push_back(static_cast<char>(0xFF));
+                    conditions.emplace_back("(file_path >= ? AND file_path < ?)");
+                    addText(lower);
+                    addText(upper);
+                }
+            }
+
+            if (options.containsFragment && !options.containsFragment->empty()) {
+                std::string fragment = *options.containsFragment;
+                std::replace(fragment.begin(), fragment.end(), '\\', '/');
+
+                if (joinFtsForContains) {
+                    std::string ftsToken = fragment;
+                    auto slashPos = ftsToken.find_last_of('/');
+                    if (slashPos != std::string::npos)
+                        ftsToken = ftsToken.substr(slashPos + 1);
+                    std::replace(ftsToken.begin(), ftsToken.end(), '"', ' ');
+                    if (!ftsToken.empty() && ftsToken.back() != '*')
+                        ftsToken.push_back('*');
+                    conditions.emplace_back("documents_path_fts MATCH ?");
+                    addText(ftsToken);
+                }
+
+                if (hasPathIndexing_) {
+                    std::string reversed(fragment.rbegin(), fragment.rend());
+                    conditions.emplace_back("reverse_path LIKE ?");
+                    addText(reversed + "%");
+                } else {
+                    conditions.emplace_back("file_path LIKE ?");
+                    addText("%" + fragment + "%");
+                }
+            }
+
+            if (options.likePattern && !options.likePattern->empty()) {
+                conditions.emplace_back("file_path LIKE ?");
+                addText(*options.likePattern);
+            }
+
+            if (options.extension && !options.extension->empty()) {
+                conditions.emplace_back("file_extension = ?");
+                addText(*options.extension);
+            }
+
+            if (options.mimeType && !options.mimeType->empty()) {
+                conditions.emplace_back("mime_type = ?");
+                addText(*options.mimeType);
+            }
+
+            if (options.textOnly) {
+                conditions.emplace_back("mime_type LIKE 'text/%'");
+            } else if (options.binaryOnly) {
+                conditions.emplace_back("mime_type NOT LIKE 'text/%'");
+            }
+
+            if (options.modifiedAfter) {
+                conditions.emplace_back("modified_time >= ?");
+                addInt(*options.modifiedAfter);
+            }
+
+            if (options.modifiedBefore) {
+                conditions.emplace_back("modified_time <= ?");
+                addInt(*options.modifiedBefore);
+            }
+
+            if (options.indexedAfter) {
+                conditions.emplace_back("indexed_time >= ?");
+                addInt(*options.indexedAfter);
+            }
+
+            if (options.indexedBefore) {
+                conditions.emplace_back("indexed_time <= ?");
+                addInt(*options.indexedBefore);
+            }
+
+            for (const auto& tag : options.tags) {
+                conditions.emplace_back(
+                    "EXISTS (SELECT 1 FROM metadata m WHERE m.document_id = documents.id "
+                    "AND m.key = ? AND m.value = ?)");
+                addText(std::string("tag:") + tag);
+                addText(tag);
+            }
+
+            if (!conditions.empty()) {
+                sql += " WHERE ";
+                for (size_t i = 0; i < conditions.size(); ++i) {
+                    if (i > 0)
+                        sql += " AND ";
+                    sql += conditions[i];
+                }
+            }
+
+            if (options.orderByNameAsc) {
+                sql += " ORDER BY file_name ASC";
+            } else if (options.orderByIndexedDesc) {
+                sql += " ORDER BY indexed_time DESC";
+            }
+
+            if (options.limit > 0) {
+                sql += " LIMIT ?";
+                addInt(options.limit);
+            }
+            if (options.offset > 0) {
+                sql += " OFFSET ?";
+                addInt(options.offset);
+            }
+
+            auto stmtResult = db.prepare(sql);
+            if (!stmtResult)
+                return stmtResult.error();
+
+            Statement stmt = std::move(stmtResult).value();
+            int index = 1;
+            for (const auto& param : params) {
+                Result<void> bindResult;
+                if (param.type == BindParam::Type::Text) {
+                    bindResult = stmt.bind(index, param.text);
+                } else {
+                    bindResult = stmt.bind(index, param.integer);
+                }
+                if (!bindResult)
+                    return bindResult.error();
+                ++index;
+            }
+
+            std::vector<DocumentInfo> docs;
+            while (true) {
+                auto stepResult = stmt.step();
+                if (!stepResult)
+                    return stepResult.error();
+                if (!stepResult.value())
+                    break;
+
+                auto doc = mapDocumentRow(stmt);
+                storePathCache(doc);
+                docs.push_back(std::move(doc));
+            }
+
+            return docs;
+        });
+}
+
+Result<std::vector<DocumentInfo>>
+MetadataRepository::findDocumentsByHashPrefix(const std::string& hashPrefix, std::size_t limit) {
+    return executeQuery<std::vector<DocumentInfo>>(
+        [&](Database& db) -> Result<std::vector<DocumentInfo>> {
+            if (hashPrefix.empty()) {
+                return std::vector<DocumentInfo>{};
+            }
+
+            std::string lowered = hashPrefix;
+            std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+            // Build query via helper
+            const char* cols =
+                hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
+            sql::QuerySpec spec{
+                .table = "documents",
+                .columns = {cols},
+                .conditions = {"lower(sha256_hash) LIKE ?"},
+                .orderBy = std::optional<std::string>("indexed_time DESC"),
+                .limit = static_cast<int>(limit),
+                .offset = std::nullopt,
+            };
+            auto stmtResult = db.prepare(sql::buildSelect(spec));
 
             if (!stmtResult)
                 return stmtResult.error();
 
             Statement stmt = std::move(stmtResult).value();
-            auto bindResult = stmt.bind(1, pathPattern);
-            if (!bindResult)
-                return bindResult.error();
+            auto bindPrefix = stmt.bind(1, lowered + "%");
+            if (!bindPrefix)
+                return bindPrefix.error();
+            // Limit is embedded in SQL
 
             std::vector<DocumentInfo> result;
-
             while (true) {
                 auto stepResult = stmt.step();
                 if (!stepResult)
@@ -986,15 +1567,18 @@ Result<std::vector<DocumentInfo>>
 MetadataRepository::findDocumentsByExtension(const std::string& extension) {
     return executeQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
-            auto stmtResult = db.prepare(R"(
-            SELECT id, file_path, file_name, file_extension, file_size,
-                   sha256_hash, mime_type, created_time, modified_time,
-                   indexed_time, content_extracted, extraction_status,
-                   extraction_error
-            FROM documents WHERE file_extension = ?
-            ORDER BY file_name
-        )");
+            const char* cols =
+                hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
+            sql::QuerySpec spec{
+                .table = "documents",
+                .columns = {cols},
+                .conditions = {"file_extension = ?"},
+                .orderBy = std::optional<std::string>("file_name"),
+                .limit = std::nullopt,
+                .offset = std::nullopt,
+            };
 
+            auto stmtResult = db.prepare(sql::buildSelect(spec));
             if (!stmtResult)
                 return stmtResult.error();
 
@@ -1004,17 +1588,14 @@ MetadataRepository::findDocumentsByExtension(const std::string& extension) {
                 return bindResult.error();
 
             std::vector<DocumentInfo> result;
-
             while (true) {
                 auto stepResult = stmt.step();
                 if (!stepResult)
                     return stepResult.error();
                 if (!stepResult.value())
                     break;
-
                 result.push_back(mapDocumentRow(stmt));
             }
-
             return result;
         });
 }
@@ -1023,17 +1604,20 @@ Result<std::vector<DocumentInfo>>
 MetadataRepository::findDocumentsModifiedSince(std::chrono::system_clock::time_point since) {
     return executeQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
+            using yams::metadata::sql::QuerySpec;
             auto sinceUnix =
                 std::chrono::duration_cast<std::chrono::seconds>(since.time_since_epoch()).count();
 
-            auto stmtResult = db.prepare(R"(
-            SELECT id, file_path, file_name, file_extension, file_size,
-                   sha256_hash, mime_type, created_time, modified_time,
-                   indexed_time, content_extracted, extraction_status,
-                   extraction_error
-            FROM documents WHERE modified_time >= ?
-            ORDER BY modified_time DESC
-        )");
+            const char* cols =
+                hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
+            QuerySpec spec{
+                .table = "documents",
+                .columns = {cols},
+                .conditions = {"modified_time >= ?"},
+                .orderBy = std::optional<std::string>("modified_time DESC"),
+            };
+
+            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
 
             if (!stmtResult)
                 return stmtResult.error();
@@ -1062,7 +1646,12 @@ MetadataRepository::findDocumentsModifiedSince(std::chrono::system_clock::time_p
 // Statistics
 Result<int64_t> MetadataRepository::getDocumentCount() {
     return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
-        auto stmtResult = db.prepare("SELECT COUNT(*) FROM documents");
+        using yams::metadata::sql::QuerySpec;
+        QuerySpec spec{
+            .table = "documents",
+            .columns = {"COUNT(*)"},
+        };
+        auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
         if (!stmtResult)
             return stmtResult.error();
 
@@ -1095,7 +1684,13 @@ Result<int64_t> MetadataRepository::getIndexedDocumentCount() {
 
 Result<int64_t> MetadataRepository::getContentExtractedDocumentCount() {
     return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
-        auto stmtResult = db.prepare("SELECT COUNT(*) FROM documents WHERE content_extracted = 1");
+        using yams::metadata::sql::QuerySpec;
+        QuerySpec spec{
+            .table = "documents",
+            .columns = {"COUNT(*)"},
+            .conditions = {"content_extracted = 1"},
+        };
+        auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
         if (!stmtResult)
             return stmtResult.error();
         Statement stmt = std::move(stmtResult).value();
@@ -1108,9 +1703,13 @@ Result<int64_t> MetadataRepository::getContentExtractedDocumentCount() {
 
 Result<int64_t> MetadataRepository::getDocumentCountByExtractionStatus(ExtractionStatus status) {
     return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
-        auto stmtResult = db.prepare(R"(
-            SELECT COUNT(*) FROM documents WHERE extraction_status = ?
-        )");
+        using yams::metadata::sql::QuerySpec;
+        QuerySpec spec{
+            .table = "documents",
+            .columns = {"COUNT(*)"},
+            .conditions = {"extraction_status = ?"},
+        };
+        auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
         if (!stmtResult)
             return stmtResult.error();
 
@@ -1131,12 +1730,14 @@ Result<std::unordered_map<std::string, int64_t>>
 MetadataRepository::getDocumentCountsByExtension() {
     return executeQuery<std::unordered_map<std::string, int64_t>>(
         [&](Database& db) -> Result<std::unordered_map<std::string, int64_t>> {
-            auto stmtResult = db.prepare(R"(
-            SELECT file_extension, COUNT(*) as count
-            FROM documents
-            GROUP BY file_extension
-            ORDER BY count DESC
-        )");
+            using yams::metadata::sql::QuerySpec;
+            QuerySpec spec{
+                .table = "documents",
+                .columns = {"file_extension", "COUNT(*) as count"},
+                .groupBy = std::optional<std::string>("file_extension"),
+                .orderBy = std::optional<std::string>("count DESC"),
+            };
+            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
 
             if (!stmtResult)
                 return stmtResult.error();
@@ -1156,6 +1757,16 @@ MetadataRepository::getDocumentCountsByExtension() {
 
             return result;
         });
+}
+
+Result<void> MetadataRepository::ensureFuzzyIndexInitialized() {
+    {
+        std::shared_lock<std::shared_mutex> readLock(fuzzyIndexMutex_);
+        if (fuzzySearchIndex_) {
+            return Result<void>();
+        }
+    }
+    return buildFuzzyIndex();
 }
 
 Result<void> MetadataRepository::updateDocumentEmbeddingStatus(int64_t documentId,
@@ -1458,7 +2069,7 @@ Result<int64_t> MetadataRepository::beginTreeDiff(const TreeDiffDescriptor& desc
 
 Result<void> MetadataRepository::appendTreeChanges(int64_t diffId,
                                                    const std::vector<TreeChangeRecord>& changes) {
-    return executeQuery<void>([&](Database& db) -> Result<void> {
+    auto sqlResult = executeQuery<void>([&](Database& db) -> Result<void> {
         // Use a transaction for batch inserts
         auto txnResult = db.execute("BEGIN TRANSACTION");
         if (!txnResult) {
@@ -1512,35 +2123,155 @@ Result<void> MetadataRepository::appendTreeChanges(int64_t diffId,
         spdlog::debug("Appended {} tree changes to diff_id={}", changes.size(), diffId);
         return Result<void>();
     });
+
+    if (!sqlResult) {
+        return sqlResult;
+    }
+
+    if (!kgStore_) {
+        return Result<void>();
+    }
+
+    auto diffResult = executeQuery<std::optional<TreeDiffDescriptor>>(
+        [&](Database& db) -> Result<std::optional<TreeDiffDescriptor>> {
+            auto stmtResult =
+                db.prepare("SELECT base_snapshot_id, target_snapshot_id, computed_at, status "
+                           "FROM tree_diffs WHERE id = ?");
+            if (!stmtResult) {
+                return stmtResult.error();
+            }
+            Statement stmt = std::move(stmtResult).value();
+            stmt.bind(1, diffId);
+            auto stepResult = stmt.step();
+            if (!stepResult) {
+                return stepResult.error();
+            }
+            if (!stepResult.value()) {
+                return std::optional<TreeDiffDescriptor>{};
+            }
+            TreeDiffDescriptor desc;
+            desc.baseSnapshotId = stmt.getString(0);
+            desc.targetSnapshotId = stmt.getString(1);
+            desc.computedAt = stmt.getInt64(2);
+            desc.status = stmt.getString(3);
+            return std::optional<TreeDiffDescriptor>{desc};
+        });
+
+    if (!diffResult || !diffResult.value()) {
+        spdlog::warn("Failed to fetch diff descriptor for KG population: diffId={}", diffId);
+        return Result<void>();
+    }
+
+    auto diff = diffResult.value().value();
+
+    for (const auto& change : changes) {
+        if (!change.oldHash.empty()) {
+            auto oldBlobRes = kgStore_->ensureBlobNode(change.oldHash);
+            if (!oldBlobRes) {
+                spdlog::warn("Failed to create KG blob node for hash={}: {}", change.oldHash,
+                             oldBlobRes.error().message);
+            }
+        }
+        if (!change.newHash.empty()) {
+            auto newBlobRes = kgStore_->ensureBlobNode(change.newHash);
+            if (!newBlobRes) {
+                spdlog::warn("Failed to create KG blob node for hash={}: {}", change.newHash,
+                             newBlobRes.error().message);
+            }
+        }
+
+        std::optional<std::int64_t> oldPathNodeId;
+        std::optional<std::int64_t> newPathNodeId;
+
+        if (!change.oldPath.empty()) {
+            metadata::PathNodeDescriptor oldDesc{.snapshotId = diff.baseSnapshotId,
+                                                 .path = change.oldPath,
+                                                 .rootTreeHash = "",
+                                                 .isDirectory = change.isDirectory};
+            auto oldPathRes = kgStore_->ensurePathNode(oldDesc);
+            if (oldPathRes) {
+                oldPathNodeId = oldPathRes.value();
+            } else {
+                spdlog::warn("Failed to create KG path node for path={}: {}", change.oldPath,
+                             oldPathRes.error().message);
+            }
+        }
+
+        if (!change.newPath.empty()) {
+            metadata::PathNodeDescriptor newDesc{.snapshotId = diff.targetSnapshotId,
+                                                 .path = change.newPath,
+                                                 .rootTreeHash = "",
+                                                 .isDirectory = change.isDirectory};
+            auto newPathRes = kgStore_->ensurePathNode(newDesc);
+            if (newPathRes) {
+                newPathNodeId = newPathRes.value();
+            } else {
+                spdlog::warn("Failed to create KG path node for path={}: {}", change.newPath,
+                             newPathRes.error().message);
+            }
+        }
+
+        if (oldPathNodeId && !change.oldHash.empty()) {
+            auto oldBlobNodeRes = kgStore_->ensureBlobNode(change.oldHash);
+            if (oldBlobNodeRes) {
+                auto linkRes =
+                    kgStore_->linkPathVersion(*oldPathNodeId, oldBlobNodeRes.value(), diffId);
+                if (!linkRes) {
+                    spdlog::warn("Failed to link path to blob in KG: path={}, hash={}",
+                                 change.oldPath, change.oldHash);
+                }
+            }
+        }
+
+        if (newPathNodeId && !change.newHash.empty()) {
+            auto newBlobNodeRes = kgStore_->ensureBlobNode(change.newHash);
+            if (newBlobNodeRes) {
+                auto linkRes =
+                    kgStore_->linkPathVersion(*newPathNodeId, newBlobNodeRes.value(), diffId);
+                if (!linkRes) {
+                    spdlog::warn("Failed to link path to blob in KG: path={}, hash={}",
+                                 change.newPath, change.newHash);
+                }
+            }
+        }
+
+        if ((change.type == TreeChangeType::Renamed || change.type == TreeChangeType::Moved) &&
+            oldPathNodeId && newPathNodeId) {
+            auto renameRes = kgStore_->recordRenameEdge(*oldPathNodeId, *newPathNodeId, diffId);
+            if (!renameRes) {
+                spdlog::warn("Failed to record rename edge in KG: {} -> {}", change.oldPath,
+                             change.newPath);
+            }
+        }
+    }
+
+    spdlog::debug("Populated KG with {} tree changes for diff_id={}", changes.size(), diffId);
+    return Result<void>();
 }
 
 Result<std::vector<TreeChangeRecord>>
 MetadataRepository::listTreeChanges(const TreeDiffQuery& query) {
     return executeQuery<std::vector<TreeChangeRecord>>(
         [&](Database& db) -> Result<std::vector<TreeChangeRecord>> {
-            std::ostringstream sql;
-            sql << R"(
-            SELECT change_type, old_path, new_path, old_hash, new_hash, 
-                   mode, is_directory
-            FROM tree_changes tc
-            JOIN tree_diffs td ON tc.diff_id = td.diff_id
-            WHERE td.base_snapshot_id = ? 
-              AND td.target_snapshot_id = ?
-        )";
-
-            // Add optional filters
+            using yams::metadata::sql::QuerySpec;
+            QuerySpec spec;
+            spec.from = std::optional<std::string>{
+                "tree_changes tc JOIN tree_diffs td ON tc.diff_id = td.diff_id"};
+            spec.table = "tree_changes"; // not used when from is set
+            spec.columns = {"change_type", "old_path", "new_path",    "old_hash",
+                            "new_hash",    "mode",     "is_directory"};
+            spec.conditions = {"td.base_snapshot_id = ?", "td.target_snapshot_id = ?"};
             if (query.pathPrefix.has_value()) {
-                sql << " AND (old_path LIKE ? OR new_path LIKE ?)";
+                spec.conditions.emplace_back("(old_path LIKE ? OR new_path LIKE ?)");
             }
-
             if (query.typeFilter.has_value()) {
-                sql << " AND change_type = ?";
+                spec.conditions.emplace_back("change_type = ?");
             }
+            spec.orderBy = std::optional<std::string>{"tc.change_id"};
+            spec.limit = static_cast<int>(query.limit);
+            spec.offset = static_cast<int>(query.offset);
 
-            sql << " ORDER BY tc.change_id";
-            sql << " LIMIT ? OFFSET ?";
-
-            auto stmtResult = db.prepare(sql.str());
+            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
             if (!stmtResult) {
                 return stmtResult.error();
             }
@@ -1649,12 +2380,17 @@ DocumentInfo MetadataRepository::mapDocumentRow(Statement& stmt) {
     info.fileSize = stmt.getInt64(4);
     info.sha256Hash = stmt.getString(5);
     info.mimeType = stmt.getString(6);
-    info.setCreatedTime(stmt.getInt64(7));
-    info.setModifiedTime(stmt.getInt64(8));
-    info.setIndexedTime(stmt.getInt64(9));
+    info.createdTime = stmt.getTime(7);
+    info.modifiedTime = stmt.getTime(8);
+    info.indexedTime = stmt.getTime(9);
     info.contentExtracted = stmt.getInt(10) != 0;
     info.extractionStatus = ExtractionStatusUtils::fromString(stmt.getString(11));
     info.extractionError = stmt.getString(12);
+    info.pathPrefix = stmt.getString(13);
+    info.reversePath = stmt.getString(14);
+    info.pathHash = stmt.getString(15);
+    info.parentHash = stmt.getString(16);
+    info.pathDepth = stmt.getInt(17);
     return info;
 }
 
@@ -1676,7 +2412,7 @@ DocumentRelationship MetadataRepository::mapRelationshipRow(Statement& stmt) {
     }
     rel.childId = stmt.getInt64(2);
     rel.setRelationshipTypeFromString(stmt.getString(3));
-    rel.setCreatedTime(stmt.getInt64(4));
+    rel.createdTime = stmt.getTime(4);
     return rel;
 }
 
@@ -1684,7 +2420,7 @@ SearchHistoryEntry MetadataRepository::mapSearchHistoryRow(Statement& stmt) {
     SearchHistoryEntry entry;
     entry.id = stmt.getInt64(0);
     entry.query = stmt.getString(1);
-    entry.setQueryTime(stmt.getInt64(2));
+    entry.queryTime = stmt.getTime(2);
     entry.resultsCount = stmt.getInt64(3);
     entry.executionTimeMs = stmt.getInt64(4);
     entry.userContext = stmt.getString(5);
@@ -1697,9 +2433,9 @@ SavedQuery MetadataRepository::mapSavedQueryRow(Statement& stmt) {
     query.name = stmt.getString(1);
     query.query = stmt.getString(2);
     query.description = stmt.getString(3);
-    query.setCreatedTime(stmt.getInt64(4));
+    query.createdTime = stmt.getTime(4);
     if (!stmt.isNull(5)) {
-        query.setLastUsed(stmt.getInt64(5));
+        query.lastUsed = stmt.getTime(5);
     }
     query.useCount = stmt.getInt64(6);
     return query;
@@ -1851,13 +2587,14 @@ MetadataQueryBuilder& MetadataQueryBuilder::offset(int count) {
 }
 
 std::string MetadataQueryBuilder::buildQuery() const {
-    std::string query = R"(
-        SELECT id, file_path, file_name, file_extension, file_size,
-               sha256_hash, mime_type, created_time, modified_time,
-               indexed_time, content_extracted, extraction_status,
-               extraction_error
-        FROM documents
-    )";
+    std::string query = "SELECT ";
+    // MetadataQueryBuilder is used primarily by tools that execute via
+    // MetadataRepository::queryDocuments. To keep compatibility with pre-v13
+    // schemas, prefer the newer column set and let the repository path adjust
+    // when preparing statements. Here, use the superset to keep ordinal mapping
+    // consistent; older schemas will be projected via aliases.
+    query += kDocumentColumnListNew;
+    query += " FROM documents";
 
     if (!conditions_.empty()) {
         query += " WHERE ";
@@ -1900,46 +2637,44 @@ MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, i
         SearchResults results;
         results.query = query;
 
-        auto start = std::chrono::high_resolution_clock::now();
-
-        // Ensure fuzzy index is built
-        {
-            std::lock_guard<std::mutex> lock(fuzzyIndexMutex_);
-            if (!fuzzySearchIndex_) {
-                auto buildResult = buildFuzzyIndex();
-                if (!buildResult) {
-                    results.errorMessage =
-                        "Failed to build fuzzy index: " + buildResult.error().message;
-                    return results;
-                }
-            }
+        auto ensureResult = ensureFuzzyIndexInitialized();
+        if (!ensureResult) {
+            results.errorMessage = "Failed to build fuzzy index: " + ensureResult.error().message;
+            return results;
         }
 
-        // Perform fuzzy search
-        search::HybridFuzzySearch::SearchOptions options;
-        options.minSimilarity = minSimilarity;
-        options.maxEditDistance = 3;
-        options.useTrigramPrefilter = true;
-        options.useBKTree = true;
+        std::vector<search::HybridFuzzySearch::SearchResult> fuzzyResults;
+        {
+            std::shared_lock<std::shared_mutex> readLock(fuzzyIndexMutex_);
+            auto* indexPtr = fuzzySearchIndex_.get();
+            if (!indexPtr) {
+                results.errorMessage = "Fuzzy index unavailable";
+                return results;
+            }
 
-        auto fuzzyResults = fuzzySearchIndex_->search(query, static_cast<size_t>(limit), options);
+            search::HybridFuzzySearch::SearchOptions options;
+            options.minSimilarity = minSimilarity;
+            options.maxEditDistance = 3;
+            options.useTrigramPrefilter = true;
+            options.useBKTree = true;
 
-        // Convert fuzzy results to SearchResults
+            fuzzyResults = indexPtr->search(query, static_cast<size_t>(limit), options);
+        }
+
+        auto start = std::chrono::high_resolution_clock::now();
+
         for (const auto& fuzzyResult : fuzzyResults) {
-            // Parse document ID from fuzzy result ID
             int64_t docId = 0;
             try {
                 docId = std::stoll(fuzzyResult.id);
             } catch (...) {
-                continue; // Skip invalid IDs
+                continue;
             }
 
-            // Filter by docIds if provided
             if (docIds && std::find(docIds->begin(), docIds->end(), docId) == docIds->end()) {
                 continue;
             }
 
-            // Fetch document info
             auto docResult = getDocument(docId);
             if (!docResult || !docResult.value().has_value()) {
                 continue;
@@ -1967,7 +2702,7 @@ MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, i
 
 Result<void> MetadataRepository::buildFuzzyIndex() {
     return executeQuery<void>([&](Database& db) -> Result<void> {
-        // NOTE: Mutex is already locked by the caller - don't lock again!
+        std::unique_lock<std::shared_mutex> lock(fuzzyIndexMutex_);
 
         // Create new fuzzy search index
         fuzzySearchIndex_ = std::make_unique<search::HybridFuzzySearch>();
@@ -2112,7 +2847,7 @@ Result<void> MetadataRepository::buildFuzzyIndex() {
 
 Result<void> MetadataRepository::updateFuzzyIndex(int64_t documentId) {
     return executeQuery<void>([&]([[maybe_unused]] Database& db) -> Result<void> {
-        std::lock_guard<std::mutex> lock(fuzzyIndexMutex_);
+        std::unique_lock<std::shared_mutex> lock(fuzzyIndexMutex_);
 
         if (!fuzzySearchIndex_) {
             // Index not built yet, will be built on first search
@@ -2263,12 +2998,14 @@ MetadataRepository::findDocumentsBySnapshotLabel(const std::string& snapshotLabe
 Result<std::vector<std::string>> MetadataRepository::getCollections() {
     return executeQuery<std::vector<std::string>>(
         [&](Database& db) -> Result<std::vector<std::string>> {
-            auto stmtResult = db.prepare(R"(
-            SELECT DISTINCT value
-            FROM metadata
-            WHERE key = 'collection'
-            ORDER BY value
-        )");
+            using yams::metadata::sql::QuerySpec;
+            QuerySpec spec;
+            spec.table = "metadata";
+            spec.columns = {"DISTINCT value"};
+            spec.conditions = {"key = 'collection'"};
+            spec.orderBy = std::optional<std::string>{"value"};
+
+            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
 
             if (!stmtResult)
                 return stmtResult.error();
@@ -2293,12 +3030,14 @@ Result<std::vector<std::string>> MetadataRepository::getCollections() {
 Result<std::vector<std::string>> MetadataRepository::getSnapshots() {
     return executeQuery<std::vector<std::string>>(
         [&](Database& db) -> Result<std::vector<std::string>> {
-            auto stmtResult = db.prepare(R"(
-            SELECT DISTINCT value
-            FROM metadata
-            WHERE key = 'snapshot_id'
-            ORDER BY value
-        )");
+            using yams::metadata::sql::QuerySpec;
+            QuerySpec spec;
+            spec.table = "metadata";
+            spec.columns = {"DISTINCT value"};
+            spec.conditions = {"key = 'snapshot_id'"};
+            spec.orderBy = std::optional<std::string>{"value"};
+
+            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
 
             if (!stmtResult)
                 return stmtResult.error();
@@ -2323,12 +3062,14 @@ Result<std::vector<std::string>> MetadataRepository::getSnapshots() {
 Result<std::vector<std::string>> MetadataRepository::getSnapshotLabels() {
     return executeQuery<std::vector<std::string>>(
         [&](Database& db) -> Result<std::vector<std::string>> {
-            auto stmtResult = db.prepare(R"(
-            SELECT DISTINCT value
-            FROM metadata
-            WHERE key = 'snapshot_label'
-            ORDER BY value
-        )");
+            using yams::metadata::sql::QuerySpec;
+            QuerySpec spec;
+            spec.table = "metadata";
+            spec.columns = {"DISTINCT value"};
+            spec.conditions = {"key = 'snapshot_label'"};
+            spec.orderBy = std::optional<std::string>{"value"};
+
+            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
 
             if (!stmtResult)
                 return stmtResult.error();
@@ -2358,46 +3099,61 @@ MetadataRepository::findDocumentsByTags(const std::vector<std::string>& tags, bo
 
     return executeQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
-            // Build the SQL query based on matchAll flag using bound parameters
-            std::string placeholders;
-            placeholders.reserve(tags.size() * 2);
-            for (size_t i = 0; i < tags.size(); ++i) {
-                if (i > 0)
-                    placeholders += ",";
-                placeholders += '?';
-            }
+            using yams::metadata::sql::QuerySpec;
+            // Build keys as "tag:<name>"
+            std::vector<std::string> tagKeys;
+            tagKeys.reserve(tags.size());
+            for (const auto& t : tags)
+                tagKeys.push_back(std::string("tag:") + t);
 
-            std::ostringstream sql;
+            // Build IN list
+            std::string inKeys;
+            inKeys.reserve(tagKeys.size() * 4);
+            inKeys += '(';
+            for (size_t i = 0; i < tagKeys.size(); ++i) {
+                if (i)
+                    inKeys += ',';
+                inKeys += '?';
+            }
+            inKeys += ')';
+
+            QuerySpec spec;
             if (matchAll) {
-                // For matchAll, we need documents that have ALL the specified tags
-                sql << "SELECT d.* FROM documents d WHERE d.id IN ("
-                    << "SELECT document_id FROM metadata WHERE key = 'tag' AND value IN ("
-                    << placeholders << ") "
-                    << "GROUP BY document_id HAVING COUNT(DISTINCT value) = ?)";
+                // d.id IN (SELECT document_id FROM metadata WHERE key IN ('tag:a','tag:b') GROUP BY
+                // document_id HAVING COUNT(DISTINCT key)=N)
+                spec.table = "documents";
+                spec.columns = {"*"};
+                std::string sub = "SELECT document_id FROM metadata WHERE key IN " + inKeys +
+                                  " GROUP BY document_id HAVING COUNT(DISTINCT key) = ?";
+                spec.conditions.emplace_back("id IN (" + sub + ")");
+                spec.orderBy = std::optional<std::string>{"indexed_time DESC"};
             } else {
-                // For matchAny, we need documents that have ANY of the specified tags
-                sql << "SELECT DISTINCT d.* "
-                    << "FROM documents d JOIN metadata m ON d.id = m.document_id "
-                    << "WHERE m.key = 'tag' AND m.value IN (" << placeholders << ")";
+                // JOIN metadata and filter by key IN ('tag:...')
+                spec.from = std::optional<std::string>{
+                    "documents d JOIN metadata m ON d.id = m.document_id"};
+                spec.table = "documents";
+                spec.columns = {"DISTINCT d.*"};
+                spec.conditions.emplace_back("m.key IN " + inKeys);
+                spec.orderBy = std::optional<std::string>{"d.indexed_time DESC"};
             }
-            sql << " ORDER BY d.indexed_time DESC";
 
-            auto stmtResult = db.prepare(sql.str());
+            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
             if (!stmtResult)
                 return stmtResult.error();
 
             Statement stmt = std::move(stmtResult).value();
-
             int paramIndex = 1;
-            for (const auto& tag : tags) {
-                auto bindResult = stmt.bind(paramIndex++, tag);
-                if (!bindResult)
-                    return bindResult.error();
+            // Bind keys
+            for (const auto& k : tagKeys) {
+                auto b = stmt.bind(paramIndex++, k);
+                if (!b)
+                    return b.error();
             }
+            // Bind N for matchAll HAVING
             if (matchAll) {
-                auto bindResult = stmt.bind(paramIndex++, static_cast<int64_t>(tags.size()));
-                if (!bindResult)
-                    return bindResult.error();
+                auto b = stmt.bind(paramIndex++, static_cast<int64_t>(tagKeys.size()));
+                if (!b)
+                    return b.error();
             }
 
             std::vector<DocumentInfo> documents;
@@ -2456,12 +3212,14 @@ Result<std::vector<std::string>> MetadataRepository::getDocumentTags(int64_t doc
 Result<std::vector<std::string>> MetadataRepository::getAllTags() {
     return executeQuery<std::vector<std::string>>(
         [&](Database& db) -> Result<std::vector<std::string>> {
-            auto stmtResult = db.prepare(R"(
-                SELECT DISTINCT key
-                FROM metadata
-                WHERE key LIKE 'tag:%'
-                ORDER BY key
-            )");
+            using yams::metadata::sql::QuerySpec;
+            QuerySpec spec;
+            spec.table = "metadata";
+            spec.columns = {"DISTINCT key"};
+            spec.conditions = {"key LIKE 'tag:%'"};
+            spec.orderBy = std::optional<std::string>{"key"};
+
+            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
 
             if (!stmtResult)
                 return stmtResult.error();

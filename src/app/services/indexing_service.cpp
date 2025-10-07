@@ -234,6 +234,68 @@ public:
                     } else {
                         spdlog::info("[IndexingService] Stored snapshot metadata: id={}",
                                      response.snapshotId);
+                        // PBI-043: Populate KG with path/blob nodes and relationships
+                        if (ctx_.kgStore && !response.results.empty()) {
+                            try {
+                                std::size_t kgNodesCreated = 0;
+                                std::size_t kgEdgesCreated = 0;
+
+                                for (const auto& result : response.results) {
+                                    if (result.hash.empty() || result.path.empty()) {
+                                        continue; // Skip incomplete results
+                                    }
+
+                                    // Create blob node for content hash
+                                    auto blobNodeResult = ctx_.kgStore->ensureBlobNode(result.hash);
+                                    if (!blobNodeResult) {
+                                        spdlog::debug(
+                                            "[IndexingService] KG ensureBlobNode failed for {}: {}",
+                                            result.hash.substr(0, 8),
+                                            blobNodeResult.error().message);
+                                        continue;
+                                    }
+                                    kgNodesCreated++;
+
+                                    // Create path node for this file in this snapshot
+                                    metadata::PathNodeDescriptor pathDesc;
+                                    pathDesc.snapshotId = response.snapshotId;
+                                    pathDesc.path = result.path;
+                                    pathDesc.rootTreeHash = treeRootHash;
+                                    pathDesc.isDirectory = false;
+
+                                    auto pathNodeResult = ctx_.kgStore->ensurePathNode(pathDesc);
+                                    if (!pathNodeResult) {
+                                        spdlog::debug(
+                                            "[IndexingService] KG ensurePathNode failed for {}: {}",
+                                            result.path, pathNodeResult.error().message);
+                                        continue;
+                                    }
+                                    kgNodesCreated++;
+
+                                    // Link path version to blob (has_version edge)
+                                    // Note: diffId not available yet (would need TreeDiffer
+                                    // integration)
+                                    auto linkResult = ctx_.kgStore->linkPathVersion(
+                                        pathNodeResult.value(), blobNodeResult.value(), 0);
+                                    if (!linkResult) {
+                                        spdlog::debug(
+                                            "[IndexingService] KG linkPathVersion failed: {}",
+                                            linkResult.error().message);
+                                        continue;
+                                    }
+                                    kgEdgesCreated++;
+                                }
+
+                                if (kgNodesCreated > 0 || kgEdgesCreated > 0) {
+                                    spdlog::info(
+                                        "[IndexingService] KG populated: {} nodes, {} edges",
+                                        kgNodesCreated, kgEdgesCreated);
+                                }
+                            } catch (const std::exception& e) {
+                                spdlog::warn("[IndexingService] Exception populating KG: {}",
+                                             e.what());
+                            }
+                        }
                     }
                 } catch (const std::exception& e) {
                     spdlog::warn("[IndexingService] Exception storing snapshot: {}", e.what());
@@ -308,7 +370,10 @@ private:
                 gitDir = candidate;
                 break;
             }
-            current = current.parent_path();
+            auto parent = current.parent_path();
+            if (parent == current)
+                break;
+            current = parent;
         }
 
         if (gitDir.empty()) {

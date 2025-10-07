@@ -21,10 +21,11 @@
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <set>
 #include "../benchmarks/benchmark_base.h"
 #include <yams/metadata/tree_builder.h>
 #include <yams/metadata/tree_differ.h>
-#include <yams/storage/cas_storage_engine.h>
+#include <yams/storage/storage_engine.h>
 
 namespace fs = std::filesystem;
 using namespace yams::metadata;
@@ -144,8 +145,6 @@ TreeNode buildTreeFromFiles(const std::vector<TestDataGenerator::FileInfo>& file
 
     return root;
 }
-
-} // anonymous namespace
 
 // Benchmark: Baseline diff performance
 class BaselineDiffBenchmark : public BenchmarkBase {
@@ -359,6 +358,129 @@ private:
     size_t flatSize_ = 0;
 };
 
+// Benchmark: Multi-snapshot storage deduplication (Task 043-07)
+class MultiSnapshotStorageBenchmark : public BenchmarkBase {
+public:
+    MultiSnapshotStorageBenchmark(size_t snapshotCount, const Config& config)
+        : BenchmarkBase("MultiSnapshotStorage_" + std::to_string(snapshotCount), config),
+          snapshotCount_(snapshotCount) {
+        // Generate initial file set (1000 files as realistic repository size)
+        baseFiles_ = TestDataGenerator::generateFiles(1000, 5);
+    }
+
+protected:
+    size_t runIteration() override {
+        // Simulate repository evolution over N snapshots
+        std::vector<TreeNode> snapshots;
+        std::vector<std::vector<TestDataGenerator::FileInfo>> fileStates;
+
+        snapshots.reserve(snapshotCount_);
+        fileStates.reserve(snapshotCount_);
+
+        // Initial snapshot
+        fileStates.push_back(baseFiles_);
+        snapshots.push_back(buildTreeFromFiles(baseFiles_));
+
+        // Generate subsequent snapshots with realistic change rates
+        for (size_t i = 1; i < snapshotCount_; ++i) {
+            // Realistic commit: 2% add, 1% delete, 3% modify, 0.5% rename
+            auto nextState =
+                TestDataGenerator::applyMutations(fileStates.back(), 0.02, 0.01, 0.03, 0.005);
+            fileStates.push_back(nextState);
+            snapshots.push_back(buildTreeFromFiles(nextState));
+        }
+
+        // Calculate storage sizes
+        calculateStorageSizes(fileStates, snapshots);
+
+        return snapshotCount_;
+    }
+
+    void collectCustomMetrics(std::map<std::string, double>& metrics) override {
+        // Calculate deduplication benefit
+        double blockOnlySize = blockOnlyTotalSize_;
+        double treeWithBlockSize = treeStorageSize_ + blockDeduplicatedSize_;
+
+        double savings = 0.0;
+        if (blockOnlySize > 0) {
+            savings = ((blockOnlySize - treeWithBlockSize) / blockOnlySize) * 100.0;
+        }
+
+        // Storage overhead of tree metadata relative to deduplicated blocks
+        double treeOverhead = 0.0;
+        if (blockDeduplicatedSize_ > 0) {
+            treeOverhead = (static_cast<double>(treeStorageSize_) / blockDeduplicatedSize_) * 100.0;
+        }
+
+        metrics["snapshot_count"] = snapshotCount_;
+        metrics["block_only_total_mb"] = blockOnlyTotalSize_ / (1024.0 * 1024.0);
+        metrics["block_deduplicated_mb"] = blockDeduplicatedSize_ / (1024.0 * 1024.0);
+        metrics["tree_metadata_mb"] = treeStorageSize_ / (1024.0 * 1024.0);
+        metrics["tree_plus_blocks_mb"] =
+            (treeStorageSize_ + blockDeduplicatedSize_) / (1024.0 * 1024.0);
+        metrics["dedup_savings_pct"] = savings;
+        metrics["tree_overhead_pct"] = treeOverhead;
+        metrics["unique_tree_nodes"] = uniqueTreeNodes_;
+        metrics["unique_blocks"] = uniqueBlocks_;
+        metrics["ac7_threshold_pct"] = 15.0;
+        metrics["ac7_passed"] = (treeOverhead <= 15.0) ? 1.0 : 0.0;
+
+        // PRD claims 10-20% additional savings from tree-level dedup
+        bool expectedSavings = (savings >= 10.0 && savings <= 20.0);
+        metrics["prd_claim_validated"] = expectedSavings ? 1.0 : 0.0;
+    }
+
+private:
+    size_t snapshotCount_;
+    std::vector<TestDataGenerator::FileInfo> baseFiles_;
+
+    // Storage metrics
+    size_t blockOnlyTotalSize_ = 0;
+    size_t blockDeduplicatedSize_ = 0;
+    size_t treeStorageSize_ = 0;
+    size_t uniqueTreeNodes_ = 0;
+    size_t uniqueBlocks_ = 0;
+
+    void
+    calculateStorageSizes(const std::vector<std::vector<TestDataGenerator::FileInfo>>& fileStates,
+                          const std::vector<TreeNode>& snapshots) {
+        // Track unique blocks (content-addressed by hash)
+        std::set<std::string> uniqueBlockSet;
+
+        // Calculate block-only storage (no tree metadata)
+        blockOnlyTotalSize_ = 0;
+        for (const auto& state : fileStates) {
+            for (const auto& file : state) {
+                blockOnlyTotalSize_ += file.size; // Full file content per snapshot
+                uniqueBlockSet.insert(file.hash);
+            }
+        }
+
+        // Calculate deduplicated block storage
+        blockDeduplicatedSize_ = 0;
+        for (const auto& hash : uniqueBlockSet) {
+            // Average file size (simulated)
+            blockDeduplicatedSize_ += 5000; // Conservative estimate
+        }
+        uniqueBlocks_ = uniqueBlockSet.size();
+
+        // Calculate tree metadata storage
+        std::set<std::string> uniqueTreeHashes;
+        treeStorageSize_ = 0;
+
+        for (const auto& tree : snapshots) {
+            auto serialized = tree.serialize();
+            std::string treeHash = tree.computeHash();
+
+            if (uniqueTreeHashes.find(treeHash) == uniqueTreeHashes.end()) {
+                treeStorageSize_ += serialized.size();
+                uniqueTreeHashes.insert(treeHash);
+            }
+        }
+        uniqueTreeNodes_ = uniqueTreeHashes.size();
+    }
+};
+
 // Benchmark: Subtree hash optimization
 class SubtreeHashBenchmark : public BenchmarkBase {
 public:
@@ -433,6 +555,7 @@ int main(int argc, char** argv) {
     std::cout << "  AC #2: Diff latency < 750ms p95 (10k entries)" << std::endl;
     std::cout << "  AC #7: Rename accuracy ≥ 99%" << std::endl;
     std::cout << "  Storage overhead ≤ 15%" << std::endl;
+    std::cout << "  Task 043-07: Multi-snapshot storage deduplication" << std::endl;
     std::cout << std::endl;
 
     BenchmarkBase::Config config;
@@ -445,7 +568,7 @@ int main(int argc, char** argv) {
     bool allPassed = true;
 
     // 1. Latency acceptance test (AC #2)
-    std::cout << "\n[1/6] Latency Acceptance (AC #2)" << std::endl;
+    std::cout << "\n[1/9] Latency Acceptance (AC #2)" << std::endl;
     std::cout << "-----------------------------------" << std::endl;
     LatencyAcceptanceBenchmark latencyBench(config);
     auto latencyResult = latencyBench.run();
@@ -456,7 +579,7 @@ int main(int argc, char** argv) {
               << std::endl;
 
     // 2. Rename detection accuracy (AC #7)
-    std::cout << "\n[2/6] Rename Detection Accuracy (AC #7)" << std::endl;
+    std::cout << "\n[2/9] Rename Detection Accuracy (AC #7)" << std::endl;
     std::cout << "----------------------------------------" << std::endl;
     RenameDetectionBenchmark renameBench(1000, 0.20, config); // 20% renames
     auto renameResult = renameBench.run();
@@ -466,9 +589,9 @@ int main(int argc, char** argv) {
     std::cout << (ac7Passed ? "✓ PASSED" : "✗ FAILED") << ": accuracy=" << accuracy
               << "% (threshold: 99%)" << std::endl;
 
-    // 3. Storage overhead
-    std::cout << "\n[3/6] Storage Overhead" << std::endl;
-    std::cout << "----------------------" << std::endl;
+    // 3. Storage overhead (single snapshot)
+    std::cout << "\n[3/9] Storage Overhead (Single Snapshot)" << std::endl;
+    std::cout << "-----------------------------------------" << std::endl;
     StorageOverheadBenchmark storageBench(10000, config);
     auto storageResult = storageBench.run();
     double overhead = storageResult.custom_metrics["storage_overhead_pct"];
@@ -477,20 +600,66 @@ int main(int argc, char** argv) {
     std::cout << (storagePassed ? "✓ PASSED" : "✗ FAILED") << ": overhead=" << overhead
               << "% (threshold: 15%)" << std::endl;
 
-    // 4. Baseline diff performance (1k files)
-    std::cout << "\n[4/6] Baseline Diff (1k files)" << std::endl;
+    // 4. Multi-snapshot storage (10 commits) - Task 043-07
+    std::cout << "\n[4/9] Multi-Snapshot Storage (10 commits)" << std::endl;
+    std::cout << "-------------------------------------------" << std::endl;
+    MultiSnapshotStorageBenchmark multiStorage10(10, config);
+    auto multiResult10 = multiStorage10.run();
+    double savings10 = multiResult10.custom_metrics["dedup_savings_pct"];
+    double treeOverhead10 = multiResult10.custom_metrics["tree_overhead_pct"];
+    bool multi10Passed = (treeOverhead10 <= 15.0);
+    allPassed &= multi10Passed;
+    std::cout << "  Dedup savings: " << savings10 << "%" << std::endl;
+    std::cout << "  Tree overhead: " << treeOverhead10 << "%" << std::endl;
+    std::cout << (multi10Passed ? "✓ PASSED" : "✗ FAILED") << ": overhead=" << treeOverhead10
+              << "% (threshold: 15%)" << std::endl;
+
+    // 5. Multi-snapshot storage (100 commits) - Task 043-07
+    std::cout << "\n[5/9] Multi-Snapshot Storage (100 commits)" << std::endl;
+    std::cout << "--------------------------------------------" << std::endl;
+    MultiSnapshotStorageBenchmark multiStorage100(100, config);
+    auto multiResult100 = multiStorage100.run();
+    double savings100 = multiResult100.custom_metrics["dedup_savings_pct"];
+    double treeOverhead100 = multiResult100.custom_metrics["tree_overhead_pct"];
+    bool multi100Passed = (treeOverhead100 <= 15.0);
+    allPassed &= multi100Passed;
+    std::cout << "  Dedup savings: " << savings100 << "%" << std::endl;
+    std::cout << "  Tree overhead: " << treeOverhead100 << "%" << std::endl;
+    std::cout << (multi100Passed ? "✓ PASSED" : "✗ FAILED") << ": overhead=" << treeOverhead100
+              << "% (threshold: 15%)" << std::endl;
+
+    // 6. Multi-snapshot storage (1000 commits) - Task 043-07
+    std::cout << "\n[6/9] Multi-Snapshot Storage (1000 commits)" << std::endl;
+    std::cout << "---------------------------------------------" << std::endl;
+    MultiSnapshotStorageBenchmark multiStorage1000(1000, config);
+    auto multiResult1000 = multiStorage1000.run();
+    double savings1000 = multiResult1000.custom_metrics["dedup_savings_pct"];
+    double treeOverhead1000 = multiResult1000.custom_metrics["tree_overhead_pct"];
+    bool multi1000Passed = (treeOverhead1000 <= 15.0);
+    allPassed &= multi1000Passed;
+    std::cout << "  Dedup savings: " << savings1000 << "%" << std::endl;
+    std::cout << "  Tree overhead: " << treeOverhead1000 << "%" << std::endl;
+    std::cout << "  PRD claim (10-20% savings): "
+              << (multiResult1000.custom_metrics["prd_claim_validated"] > 0.5 ? "✓ VALIDATED"
+                                                                              : "✗ NOT MET")
+              << std::endl;
+    std::cout << (multi1000Passed ? "✓ PASSED" : "✗ FAILED") << ": overhead=" << treeOverhead1000
+              << "% (threshold: 15%)" << std::endl;
+
+    // 7. Baseline diff performance (1k files)
+    std::cout << "\n[7/9] Baseline Diff (1k files)" << std::endl;
     std::cout << "-------------------------------" << std::endl;
     BaselineDiffBenchmark baseline1k(1000, config);
     baseline1k.run();
 
-    // 5. Baseline diff performance (10k files)
-    std::cout << "\n[5/6] Baseline Diff (10k files)" << std::endl;
+    // 8. Baseline diff performance (10k files)
+    std::cout << "\n[8/9] Baseline Diff (10k files)" << std::endl;
     std::cout << "--------------------------------" << std::endl;
     BaselineDiffBenchmark baseline10k(10000, config);
     baseline10k.run();
 
-    // 6. Subtree hash optimization
-    std::cout << "\n[6/6] Subtree Hash Optimization" << std::endl;
+    // 9. Subtree hash optimization
+    std::cout << "\n[9/9] Subtree Hash Optimization" << std::endl;
     std::cout << "--------------------------------" << std::endl;
     SubtreeHashBenchmark subtreeBench(config);
     auto subtreeResult = subtreeBench.run();

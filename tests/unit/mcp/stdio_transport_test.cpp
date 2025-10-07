@@ -10,20 +10,21 @@
 using namespace yams::mcp;
 using test_json = nlohmann::json;
 
-// MCP stdio over JSON-RPC uses Content-Length framing (LSP-compatible)
+// MCP stdio spec: newline-delimited JSON (NDJSON)
 static std::string frameMessage(const test_json& j) {
+    return j.dump() + "\n";
+}
+
+// Legacy LSP-style framing (for backwards compatibility testing)
+static std::string frameLSP(const test_json& j) {
     std::string payload = j.dump();
     std::ostringstream oss;
-    oss << "Content-Length: " << payload.size() << "\r\n"
-        << "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n\r\n"
-        << payload;
+    oss << "Content-Length: " << payload.size() << "\r\n\r\n" << payload;
     return oss.str();
 }
 
 static std::string frameRaw(const std::string& raw) {
-    std::ostringstream oss;
-    oss << "Content-Length: " << raw.size() << "\r\n\r\n" << raw;
-    return oss.str();
+    return raw + "\n";
 }
 
 class StdioTransportTest : public ::testing::Test {
@@ -79,16 +80,20 @@ TEST_F(StdioTransportTest, SendMessage) {
     std::string output = getOutput();
     EXPECT_FALSE(output.empty());
 
-    // Should contain the JSON message and framing headers (no trailing CRLF after payload)
-    EXPECT_NE(output.find("Content-Length:"), std::string::npos);
-    EXPECT_NE(output.find("\r\n\r\n"), std::string::npos);
+    // MCP stdio spec: output should be NDJSON (JSON + newline)
+    EXPECT_EQ(output.back(), '\n');
+    EXPECT_EQ(output.find("Content-Length:"), std::string::npos); // No LSP headers
+    EXPECT_EQ(output.find("Content-Type:"), std::string::npos);   // No LSP headers
+
+    // Should contain the JSON fields
     EXPECT_NE(output.find("\"jsonrpc\""), std::string::npos);
     EXPECT_NE(output.find("\"method\""), std::string::npos);
     EXPECT_NE(output.find("\"test\""), std::string::npos);
     EXPECT_NE(output.find("\"id\""), std::string::npos);
-    // The last characters of output should be the closing brace or bracket of the JSON payload
-    // and not an extra CRLF. Weak check: ensure it does not end with CRLF.
-    ASSERT_FALSE(output.size() >= 2 && output.substr(output.size() - 2) == "\r\n");
+
+    // Should be parseable as JSON (without the newline)
+    auto parsed = test_json::parse(output.substr(0, output.size() - 1));
+    EXPECT_EQ(parsed["method"], "test");
 }
 
 TEST_F(StdioTransportTest, ReceiveValidJson) {
@@ -164,13 +169,16 @@ TEST_F(StdioTransportTest, SendMultipleMessages) {
 
     std::string output = getOutput();
 
-    // Both messages should be in output and each with framing
+    // Both messages should be in output, each with newline (NDJSON)
     EXPECT_NE(output.find("test1"), std::string::npos);
     EXPECT_NE(output.find("test2"), std::string::npos);
-    size_t firstHdr = output.find("Content-Length:");
-    size_t secondHdr = output.find("Content-Length:", firstHdr + 1);
-    EXPECT_NE(firstHdr, std::string::npos);
-    EXPECT_NE(secondHdr, std::string::npos);
+
+    // Count newlines - should be 2 (one per message)
+    size_t newlineCount = std::count(output.begin(), output.end(), '\n');
+    EXPECT_EQ(newlineCount, 2);
+
+    // Should NOT have LSP headers
+    EXPECT_EQ(output.find("Content-Length:"), std::string::npos);
 }
 
 TEST_F(StdioTransportTest, CloseTransport) {
@@ -314,4 +322,54 @@ TEST_F(StdioTransportTest, LargeMessage) {
         EXPECT_EQ(received["method"], "test");
         EXPECT_EQ(received["params"]["large_data"].get<std::string>().length(), 10000);
     }
+}
+
+TEST_F(StdioTransportTest, BackwardsCompatibilityLSPInput) {
+    // Test that we can read LSP-style input (backwards compatibility)
+    // but always output NDJSON (spec-compliant)
+    json testMessage = {{"jsonrpc", "2.0"}, {"id", 1}, {"method", "test"}};
+
+    // Send LSP-framed input
+    setInput(frameLSP(testMessage));
+    auto result = transport->receive();
+
+    EXPECT_TRUE(result);
+    if (result) {
+        EXPECT_EQ(result.value()["method"], "test");
+    }
+
+    // But output should still be NDJSON
+    clearOutput();
+    transport->send(testMessage);
+    std::string output = getOutput();
+
+    // Should be NDJSON, not LSP
+    EXPECT_EQ(output.back(), '\n');
+    EXPECT_EQ(output.find("Content-Length:"), std::string::npos);
+}
+
+TEST_F(StdioTransportTest, NDJSONInputAndOutput) {
+    // Test standard NDJSON input/output (MCP spec compliant)
+    json testMessage = {{"jsonrpc", "2.0"}, {"id", 1}, {"method", "test"}};
+
+    // Send NDJSON input
+    setInput(frameMessage(testMessage));
+    auto result = transport->receive();
+
+    EXPECT_TRUE(result);
+    if (result) {
+        EXPECT_EQ(result.value()["method"], "test");
+    }
+
+    // Output should be NDJSON
+    clearOutput();
+    transport->send(testMessage);
+    std::string output = getOutput();
+
+    EXPECT_EQ(output.back(), '\n');
+    EXPECT_EQ(output.find("Content-Length:"), std::string::npos);
+
+    // Should be parseable
+    auto parsed = json::parse(output.substr(0, output.size() - 1));
+    EXPECT_EQ(parsed["method"], "test");
 }

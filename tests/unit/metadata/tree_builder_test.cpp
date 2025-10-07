@@ -397,6 +397,56 @@ TEST_F(TreeBuilderTest, BuildFromDirectoryExcludePatterns) {
     EXPECT_FALSE(hasGitDir);
 }
 
+TEST_F(TreeBuilderTest, BuildFromDirectoryGlobExclusions) {
+    // Layout:
+    //  build/tmp/a.o        (excluded by build/*)
+    //  src/foo.tmp          (excluded by **/*.tmp)
+    //  src/foo.txt          (kept)
+    //  dist/keep.txt        (kept)
+    fs::create_directories(tempDir_ / "build" / "tmp");
+    fs::create_directories(tempDir_ / "src");
+    fs::create_directories(tempDir_ / "dist");
+    createFile(tempDir_ / "build" / "tmp" / "a.o", "obj");
+    createFile(tempDir_ / "src" / "foo.tmp", "tmp");
+    createFile(tempDir_ / "src" / "foo.txt", "ok");
+    createFile(tempDir_ / "dist" / "keep.txt", "ok");
+
+    std::vector<std::string> excludePatterns = {"build/*", "**/*.tmp"};
+
+    auto result = builder_->buildFromDirectory(tempDir_.string(), excludePatterns);
+    ASSERT_TRUE(result.has_value());
+
+    const auto rootTreeHash = result.value();
+    auto rootTree = builder_->getTree(rootTreeHash);
+    ASSERT_TRUE(rootTree.has_value());
+
+    // Collect names in root tree for quick checks
+    std::vector<std::string> names;
+    for (const auto& e : rootTree.value().entries())
+        names.push_back(e.name);
+
+    // Excluded directory 'build' should not appear
+    EXPECT_TRUE(std::find(names.begin(), names.end(), "build") == names.end());
+
+    // 'src' directory exists and should not contain foo.tmp
+    const TreeEntry* srcEntry = nullptr;
+    for (const auto& e : rootTree.value().entries())
+        if (e.name == "src")
+            srcEntry = &e;
+    ASSERT_NE(srcEntry, nullptr);
+    auto srcTree = builder_->getTree(srcEntry->hash);
+    ASSERT_TRUE(srcTree.has_value());
+    bool hasTmp = false, hasTxt = false;
+    for (const auto& e : srcTree.value().entries()) {
+        if (e.name == "foo.tmp")
+            hasTmp = true;
+        if (e.name == "foo.txt")
+            hasTxt = true;
+    }
+    EXPECT_FALSE(hasTmp);
+    EXPECT_TRUE(hasTxt);
+}
+
 TEST_F(TreeBuilderTest, BuildFromDirectoryDeduplication) {
     // Create identical files (should deduplicate in CAS)
     createFile(tempDir_ / "file1.txt", "same content");

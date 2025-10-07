@@ -36,8 +36,9 @@ protected:
         meta.info.mimeType = "text/plain";
         meta.info.fileSize = 1024;
         meta.info.sha256Hash = "hash123";
-        meta.info.modifiedTime = std::chrono::system_clock::now();
-        meta.info.createdTime = std::chrono::system_clock::now();
+        auto now_s = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+        meta.info.modifiedTime = now_s;
+        meta.info.createdTime = now_s;
         return meta;
     }
 

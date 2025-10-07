@@ -16,6 +16,7 @@
 #include <yams/cli/yams_cli.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/query_helpers.h>
 
 #include <yams/app/services/services.hpp>
 #include <yams/daemon/client/asio_transport.h>
@@ -281,7 +282,7 @@ private:
         std::cout << "Cleaning orphaned metadata entries...\n";
 
         // Get all documents from metadata
-        auto documentsResult = metadataRepo->findDocumentsByPath("%");
+        auto documentsResult = metadata::queryDocumentsByPattern(*metadataRepo, "%");
         if (!documentsResult) {
             return Error{ErrorCode::DatabaseError,
                          "Failed to query documents: " + documentsResult.error().message};
@@ -374,7 +375,7 @@ private:
         std::cout << "Repairing downloaded documents (tags/metadata/filenames)...\n";
 
         // Fetch all docs
-        auto docsResult = metadataRepo->findDocumentsByPath("%");
+        auto docsResult = metadata::queryDocumentsByPattern(*metadataRepo, "%");
         if (!docsResult) {
             return Error{ErrorCode::DatabaseError,
                          "Failed to query documents: " + docsResult.error().message};
@@ -479,7 +480,7 @@ private:
         detection::FileTypeDetector::instance().initialize(config);
 
         // Get all documents from metadata
-        auto documentsResult = metadataRepo->findDocumentsByPath("%");
+        auto documentsResult = metadata::queryDocumentsByPattern(*metadataRepo, "%");
         if (!documentsResult) {
             return Error{ErrorCode::DatabaseError,
                          "Failed to query documents: " + documentsResult.error().message};
@@ -1080,7 +1081,7 @@ private:
             // Stream embeddings via daemon and show progress (preferred path)
             try {
                 // Query all documents from metadata
-                auto allDocs = metadataRepo->findDocumentsByPath("%");
+                auto allDocs = metadata::queryDocumentsByPattern(*metadataRepo, "%");
                 if (!allDocs) {
                     std::cout << "  ✗ Failed to query documents: " << allDocs.error().message
                               << "\n";
@@ -1232,7 +1233,7 @@ Result<void> RepairCommand::rebuildFts5Index(const app::services::AppContext& ct
     if (!ctx.store || !ctx.metadataRepo) {
         return Error{ErrorCode::NotInitialized, "Store/Metadata not initialized"};
     }
-    auto docs = ctx.metadataRepo->findDocumentsByPath("%");
+    auto docs = metadata::queryDocumentsByPattern(*ctx.metadataRepo, "%");
     if (!docs) {
         return Error{ErrorCode::DatabaseError,
                      "Failed to enumerate documents: " + docs.error().message};

@@ -18,6 +18,7 @@ struct Migration {
     std::string upSQL;                             ///< SQL to apply migration
     std::string downSQL;                           ///< SQL to rollback migration (optional)
     std::chrono::system_clock::time_point created; ///< Creation timestamp
+    bool wrapInTransaction{true};                  ///< Whether manager should wrap in a transaction
 
     /**
      * @brief Custom migration function (for complex migrations)
@@ -181,6 +182,12 @@ private:
 
     // Version 12: Add tree diffs and changes schema for diff persistence
     static Migration createTreeDiffsSchema();
+
+    // Version 13: Path indexing columns and FTS optimizations
+    static Migration addPathIndexingSchema();
+
+    // Version 14: Chunked path indexing backfill (resumable)
+    static Migration chunkedPathIndexingBackfill();
 };
 
 /**
@@ -214,6 +221,7 @@ public:
     // Custom functions
     MigrationBuilder& upFunction(std::function<Result<void>(Database&)> func);
     MigrationBuilder& downFunction(std::function<Result<void>(Database&)> func);
+    MigrationBuilder& wrapInTransaction(bool enabled);
 
     // Build the migration
     [[nodiscard]] Migration build() const;

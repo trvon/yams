@@ -87,8 +87,8 @@ RequestDispatcher::handleGenerateEmbeddingRequest(const GenerateEmbeddingRequest
                 } catch (...) {
                 }
             }
-            auto lr = yams::daemon::dispatch::ensure_model_loaded(provider.get(), req.modelName,
-                                                                  timeout_ms);
+            auto lr = co_await yams::daemon::dispatch::ensure_model_loaded(
+                serviceManager_, provider, req.modelName, timeout_ms);
             if (!lr) {
                 co_return makeError(lr.error().code, lr.error().message);
             }
@@ -146,8 +146,8 @@ RequestDispatcher::handleBatchEmbeddingRequest(const BatchEmbeddingRequest& req)
                 } catch (...) {
                 }
             }
-            Result<void> r = yams::daemon::dispatch::ensure_model_loaded(provider.get(),
-                                                                         req.modelName, timeout_ms);
+            Result<void> r = co_await yams::daemon::dispatch::ensure_model_loaded(
+                serviceManager_, provider, req.modelName, timeout_ms);
             if (!r) {
                 co_return makeError(r.error().code, r.error().message);
             }
@@ -192,9 +192,14 @@ RequestDispatcher::handleEmbedDocumentsRequest(const EmbedDocumentsRequest& req)
     if (!serviceManager_) {
         co_return ErrorResponse{ErrorCode::NotInitialized, "ServiceManager not available"};
     }
-    if (serviceManager_->isModelProviderDegraded()) {
-        co_return ErrorResponse{ErrorCode::InvalidState,
-                                "Embedding generation disabled: provider degraded"};
+    try {
+        auto es = serviceManager_->getEmbeddingProviderFsmSnapshot();
+        if (es.state == EmbeddingProviderState::Degraded ||
+            es.state == EmbeddingProviderState::Failed) {
+            co_return ErrorResponse{ErrorCode::InvalidState,
+                                    "Embedding generation disabled: provider degraded"};
+        }
+    } catch (...) {
     }
     auto executor = getWorkerExecutor();
     auto signal = getWorkerJobSignal();

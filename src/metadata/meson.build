@@ -10,7 +10,9 @@ yams_metadata = static_library('yams_metadata',
     'connection_pool.cpp',
     'migration.cpp',
     'metadata_repository.cpp',
+    'query_helpers.cpp',
     'knowledge_graph_store_sqlite.cpp',
+    'path_utils.cpp',
     'tree_builder.cpp',
     'tree_differ.cpp',
   ],
@@ -31,4 +33,3 @@ yams_metadata_dep = declare_dependency(
   include_directories: include_directories('../../include'),
 )
 meson.override_dependency('yams_metadata', yams_metadata_dep)
-

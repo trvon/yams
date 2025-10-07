@@ -1554,12 +1554,12 @@ template <> struct ProtoBinding<GrepResponse> {
             match.file = m.file();
             match.lineNumber = m.line_number();
             // Construct string from bytes (handles both UTF-8 and binary)
-            match.line = std::string(m.line());
+            match.line = yams::common::sanitizeUtf8(m.line());
             for (const auto& before : m.context_before()) {
-                match.contextBefore.push_back(std::string(before));
+                match.contextBefore.push_back(yams::common::sanitizeUtf8(before));
             }
             for (const auto& after : m.context_after()) {
-                match.contextAfter.push_back(std::string(after));
+                match.contextAfter.push_back(yams::common::sanitizeUtf8(after));
             }
             match.matchType = m.match_type();
             match.confidence = m.confidence();
@@ -1876,6 +1876,69 @@ template <> struct ProtoBinding<RemovePathSelectorRequest> {
     }
 };
 
+// Tree diff bindings (PBI-043)
+template <> struct ProtoBinding<ListTreeDiffRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kListTreeDiffRequest;
+    static void set(Envelope& env, const ListTreeDiffRequest& r) {
+        auto* o = env.mutable_list_tree_diff_request();
+        o->set_base_snapshot_id(r.baseSnapshotId);
+        o->set_target_snapshot_id(r.targetSnapshotId);
+        o->set_path_prefix(r.pathPrefix);
+        o->set_type_filter(r.typeFilter);
+        o->set_limit(r.limit);
+        o->set_offset(r.offset);
+    }
+    static ListTreeDiffRequest get(const Envelope& env) {
+        const auto& i = env.list_tree_diff_request();
+        ListTreeDiffRequest r{};
+        r.baseSnapshotId = i.base_snapshot_id();
+        r.targetSnapshotId = i.target_snapshot_id();
+        r.pathPrefix = i.path_prefix();
+        r.typeFilter = i.type_filter();
+        r.limit = i.limit();
+        r.offset = i.offset();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<ListTreeDiffResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kListTreeDiffResponse;
+    static void set(Envelope& env, const ListTreeDiffResponse& r) {
+        auto* o = env.mutable_list_tree_diff_response();
+        for (const auto& change : r.changes) {
+            auto* entry = o->add_changes();
+            entry->set_change_type(change.changeType);
+            entry->set_path(change.path);
+            entry->set_old_path(change.oldPath);
+            entry->set_hash(change.hash);
+            entry->set_old_hash(change.oldHash);
+            entry->set_size(change.size);
+            entry->set_old_size(change.oldSize);
+            entry->set_content_delta_hash(change.contentDeltaHash);
+        }
+        o->set_total_count(r.totalCount);
+    }
+    static ListTreeDiffResponse get(const Envelope& env) {
+        const auto& i = env.list_tree_diff_response();
+        ListTreeDiffResponse r{};
+        r.changes.reserve(static_cast<size_t>(i.changes_size()));
+        for (const auto& entry : i.changes()) {
+            TreeChangeEntry ce;
+            ce.changeType = entry.change_type();
+            ce.path = entry.path();
+            ce.oldPath = entry.old_path();
+            ce.hash = entry.hash();
+            ce.oldHash = entry.old_hash();
+            ce.size = entry.size();
+            ce.oldSize = entry.old_size();
+            ce.contentDeltaHash = entry.content_delta_hash();
+            r.changes.push_back(std::move(ce));
+        }
+        r.totalCount = i.total_count();
+        return r;
+    }
+};
+
 // Helper to encode Request/Response variants using bindings
 template <typename Variant>
 static Result<void> encode_variant_into(Envelope& env, const Variant& v) {
@@ -1895,7 +1958,9 @@ static Result<void> encode_variant_into(Envelope& env, const Variant& v) {
     return Result<void>();
 }
 
-Result<std::vector<uint8_t>> ProtoSerializer::encode_payload(const Message& msg) {
+namespace {
+
+Result<Envelope> build_envelope(const Message& msg) {
     Envelope env;
     env.set_version(PROTOCOL_VERSION);
     env.set_request_id(msg.requestId);
@@ -1927,14 +1992,39 @@ Result<std::vector<uint8_t>> ProtoSerializer::encode_payload(const Message& msg)
             return r.error();
     }
 
-    std::string out;
-    if (!env.SerializeToString(&out)) {
-        return Error{ErrorCode::SerializationError, "Failed to serialize protobuf Envelope"};
-    }
-    if (out.size() > MAX_MESSAGE_SIZE) {
+    return env;
+}
+
+} // namespace
+
+Result<void> ProtoSerializer::encode_payload_into(const Message& msg,
+                                                  std::vector<uint8_t>& buffer) {
+    auto env_result = build_envelope(msg);
+    if (!env_result)
+        return env_result.error();
+
+    Envelope env = std::move(env_result.value());
+    const auto size = env.ByteSizeLong();
+    if (size > MAX_MESSAGE_SIZE) {
         return Error{ErrorCode::InvalidData, "Serialized payload exceeds MAX_MESSAGE_SIZE"};
     }
-    return std::vector<uint8_t>(out.begin(), out.end());
+
+    const auto base = buffer.size();
+    buffer.resize(base + static_cast<std::size_t>(size));
+    if (!env.SerializeToArray(buffer.data() + base, static_cast<int>(size))) {
+        buffer.resize(base);
+        return Error{ErrorCode::SerializationError, "Failed to serialize protobuf Envelope"};
+    }
+
+    return Result<void>();
+}
+
+Result<std::vector<uint8_t>> ProtoSerializer::encode_payload(const Message& msg) {
+    std::vector<uint8_t> out;
+    auto res = encode_payload_into(msg, out);
+    if (!res)
+        return res.error();
+    return out;
 }
 
 Result<Message> ProtoSerializer::decode_payload(const std::vector<uint8_t>& bytes) {

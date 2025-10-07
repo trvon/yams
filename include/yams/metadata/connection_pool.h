@@ -3,7 +3,13 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <functional>
+#include <thread>
+#if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
+#include <semaphore>
+#include <stop_token>
+#endif
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -132,6 +138,9 @@ public:
         size_t availableConnections;
         size_t activeConnections;
         size_t waitingRequests;
+        size_t maxObservedWaiting;
+        std::uint64_t totalWaitMicros;
+        size_t timeoutCount;
         size_t totalAcquired;
         size_t totalReleased;
         size_t failedAcquisitions;
@@ -159,10 +168,17 @@ private:
     std::atomic<size_t> totalConnections_{0};
     std::atomic<size_t> activeConnections_{0};
     std::atomic<size_t> waitingRequests_{0};
+    std::atomic<size_t> maxWaitingRequests_{0};
+    std::atomic<std::uint64_t> totalWaitMicros_{0};
+    std::atomic<size_t> timeoutCount_{0};
     std::atomic<size_t> totalAcquired_{0};
     std::atomic<size_t> totalReleased_{0};
     std::atomic<size_t> failedAcquisitions_{0};
     std::atomic<bool> shutdown_{false};
+
+#if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
+    std::jthread maintenanceThread_;
+#endif
 
     /**
      * @brief Create a new connection
@@ -183,6 +199,10 @@ private:
      * @brief Check if a connection is still valid
      */
     bool isConnectionValid(const Database& db) const;
+
+#if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
+    void startMaintenanceThread();
+#endif
 };
 
 /**

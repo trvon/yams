@@ -69,7 +69,7 @@ TEST(SimpleKGScorerTest, ScoresEntityAndStructuralOverlap) {
     d1.fileSize = 1;
     d1.sha256Hash = "hash1";
     d1.mimeType = "text/plain";
-    d1.createdTime = std::chrono::system_clock::now();
+    d1.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
     d1.modifiedTime = d1.createdTime;
     d1.indexedTime = d1.createdTime;
     auto did1 = repo->insertDocument(d1);

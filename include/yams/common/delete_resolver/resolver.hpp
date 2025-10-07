@@ -13,6 +13,7 @@
 #include <yams/common/pattern_utils.h>
 #include <yams/core/types.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/query_helpers.h>
 
 namespace yams::common::resolve {
 
@@ -126,10 +127,10 @@ struct MetadataBackend {
 
         // Prefer suffix-path lookup first (align with existing CLI behavior)
         auto like = std::string("%/") + std::string{name};
-        auto docs = repo->findDocumentsByPath(like);
+        auto docs = metadata::queryDocumentsByPattern(*repo, like);
         if (!docs) {
             // Try exact fallback (path may be stored as-is)
-            docs = repo->findDocumentsByPath(std::string{name});
+            docs = metadata::queryDocumentsByPattern(*repo, std::string{name});
             if (!docs) {
                 return Error{docs.error().code, "Failed to query documents for name"};
             }
@@ -165,7 +166,7 @@ struct MetadataBackend {
         if (!like.empty() && like.front() != '/') {
             like = "%/" + like;
         }
-        auto docs = repo->findDocumentsByPath(like);
+        auto docs = metadata::queryDocumentsByPattern(*repo, like);
         if (!docs) {
             return Error{docs.error().code, "Failed to query documents for pattern"};
         }
@@ -204,7 +205,7 @@ struct MetadataBackend {
         }
         auto like = dir + "%";
 
-        auto docs = repo->findDocumentsByPath(like);
+        auto docs = metadata::queryDocumentsByPattern(*repo, like);
         if (!docs) {
             return Error{docs.error().code, "Failed to query directory: " + std::string{directory}};
         }

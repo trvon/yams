@@ -2,7 +2,9 @@
 #include <cstdint>
 #include <iomanip>
 #include <sstream>
+#include <unordered_set>
 #include <yams/metadata/migration.h>
+#include <yams/metadata/path_utils.h>
 
 namespace yams::metadata {
 
@@ -215,27 +217,54 @@ void MigrationManager::setProgressCallback(ProgressCallback callback) {
 }
 
 Result<void> MigrationManager::applyMigration(const Migration& migration) {
-    return db_.transaction([&]() -> Result<void> {
+    auto run = [&]() -> Result<void> {
+        if (!migration.upSQL.empty()) {
+            auto result = db_.execute(migration.upSQL);
+            if (!result) {
+                return result;
+            }
+        }
         if (migration.upFunc) {
             return migration.upFunc(db_);
-        } else if (!migration.upSQL.empty()) {
-            return db_.execute(migration.upSQL);
-        } else {
+        }
+        if (migration.upSQL.empty() && !migration.upFunc) {
             return Error{ErrorCode::InvalidData, "Migration has no up function or SQL"};
         }
-    });
+        return {};
+    };
+
+    if (migration.wrapInTransaction) {
+        return db_.transaction(run);
+    }
+
+    return run();
 }
 
 Result<void> MigrationManager::rollbackMigration(const Migration& migration) {
-    return db_.transaction([&]() -> Result<void> {
+    auto run = [&]() -> Result<void> {
         if (migration.downFunc) {
-            return migration.downFunc(db_);
-        } else if (!migration.downSQL.empty()) {
-            return db_.execute(migration.downSQL);
-        } else {
+            auto result = migration.downFunc(db_);
+            if (!result) {
+                return result;
+            }
+        }
+        if (!migration.downSQL.empty()) {
+            auto result = db_.execute(migration.downSQL);
+            if (!result) {
+                return result;
+            }
+        }
+        if (migration.downSQL.empty() && !migration.downFunc) {
             return Error{ErrorCode::InvalidData, "Migration has no down function or SQL"};
         }
-    });
+        return {};
+    };
+
+    if (migration.wrapInTransaction) {
+        return db_.transaction(run);
+    }
+
+    return run();
 }
 
 Result<void> MigrationManager::recordMigration(int version, const std::string& name,
@@ -284,7 +313,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             createSearchTables(),         createCollectionIndexes(),
             createKnowledgeGraphSchema(), createBinarySignatureSchema(),
             createVectorSearchSchema(),   upgradeFTS5Tokenization(),
-            createTreeSnapshotsSchema(),  createTreeDiffsSchema()};
+            createTreeSnapshotsSchema(),  createTreeDiffsSchema(),
+            addPathIndexingSchema(),      chunkedPathIndexingBackfill()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -693,11 +723,16 @@ MigrationBuilder& MigrationBuilder::downFunction(std::function<Result<void>(Data
     return *this;
 }
 
+MigrationBuilder& MigrationBuilder::wrapInTransaction(bool enabled) {
+    migration_.wrapInTransaction = enabled;
+    return *this;
+}
+
 Migration MigrationBuilder::build() const {
     Migration m = migration_;
 
     // Combine SQL statements
-    if (!upStatements_.empty() && !m.upFunc) {
+    if (!upStatements_.empty()) {
         std::stringstream sql;
         for (const auto& stmt : upStatements_) {
             sql << stmt << ";\n";
@@ -705,7 +740,7 @@ Migration MigrationBuilder::build() const {
         m.upSQL = sql.str();
     }
 
-    if (!downStatements_.empty() && !m.downFunc) {
+    if (!downStatements_.empty()) {
         std::stringstream sql;
         for (const auto& stmt : downStatements_) {
             sql << stmt << ";\n";
@@ -1243,6 +1278,331 @@ Migration YamsMetadataMigrations::createTreeDiffsSchema() {
     )";
 
     return m;
+}
+
+Migration YamsMetadataMigrations::addPathIndexingSchema() {
+    MigrationBuilder builder(13, "Add path indexing schema");
+
+    // Columns and indexes will be created idempotently inside upFunction.
+
+    // FTS vtable handling is performed in upFunction with hasFTS5() guard.
+
+    // Triggers moved into upFunction after successful FTS creation.
+
+    builder.down(R"(DROP TRIGGER IF EXISTS documents_au;)");
+    builder.down(R"(DROP TRIGGER IF EXISTS documents_ad;)");
+    builder.down(R"(DROP TRIGGER IF EXISTS documents_ai;)");
+    builder.down(R"(DROP TABLE IF EXISTS documents_path_fts;)");
+    builder.down(R"(DROP INDEX IF EXISTS idx_documents_parent_hash;)");
+    builder.down(R"(DROP INDEX IF EXISTS idx_documents_path_hash;)");
+    builder.down(R"(DROP INDEX IF EXISTS idx_documents_reverse_path;)");
+    builder.down(R"(DROP INDEX IF EXISTS idx_documents_path_prefix;)");
+
+    builder.upFunction([](Database& db) -> Result<void> {
+        // Ensure required columns exist; add missing ones idempotently.
+        std::unordered_set<std::string> cols;
+        if (auto ti = db.prepare("PRAGMA table_info(documents)"); ti) {
+            auto stmt = std::move(ti).value();
+            while (true) {
+                auto s = stmt.step();
+                if (!s)
+                    break;
+                if (!s.value())
+                    break;
+                cols.insert(stmt.getString(1));
+            }
+        }
+        auto add_col = [&](const std::string& name, const std::string& ddl) -> Result<void> {
+            if (!cols.count(name)) {
+                return db.execute("ALTER TABLE documents ADD COLUMN " + ddl);
+            }
+            return Result<void>();
+        };
+        if (auto r = add_col("path_prefix", "path_prefix TEXT"); !r)
+            return r;
+        if (auto r = add_col("reverse_path", "reverse_path TEXT"); !r)
+            return r;
+        if (auto r = add_col("path_hash", "path_hash TEXT"); !r)
+            return r;
+        if (auto r = add_col("parent_hash", "parent_hash TEXT"); !r)
+            return r;
+        if (auto r = add_col("path_depth", "path_depth INTEGER DEFAULT 0"); !r)
+            return r;
+
+        // Ensure indexes exist (no-op if already present)
+        if (auto r = db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_documents_path_prefix ON documents (path_prefix)");
+            !r)
+            return r;
+        if (auto r = db.execute("CREATE INDEX IF NOT EXISTS idx_documents_reverse_path ON "
+                                "documents (reverse_path)");
+            !r)
+            return r;
+        if (auto r = db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_documents_path_hash ON documents (path_hash)");
+            !r)
+            return r;
+        if (auto r = db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_documents_parent_hash ON documents (parent_hash)");
+            !r)
+            return r;
+
+        auto selectResult = db.prepare("SELECT id, file_path FROM documents");
+        if (!selectResult)
+            return selectResult.error();
+
+        auto updateResult =
+            db.prepare("UPDATE documents SET file_path = ?, path_prefix = ?, reverse_path = ?, "
+                       "path_hash = ?, parent_hash = ?, path_depth = ? WHERE id = ?");
+        if (!updateResult)
+            return updateResult.error();
+
+        Statement selectStmt = std::move(selectResult).value();
+        Statement updateStmt = std::move(updateResult).value();
+
+        while (true) {
+            auto step = selectStmt.step();
+            if (!step)
+                return step.error();
+            if (!step.value())
+                break;
+
+            int64_t id = selectStmt.getInt64(0);
+            std::string originalPath = selectStmt.getString(1);
+            auto derived = computePathDerivedValues(originalPath);
+
+            updateStmt.reset();
+            updateStmt.bind(1, derived.normalizedPath);
+            updateStmt.bind(2, derived.pathPrefix);
+            updateStmt.bind(3, derived.reversePath);
+            updateStmt.bind(4, derived.pathHash);
+            updateStmt.bind(5, derived.parentHash);
+            updateStmt.bind(6, derived.pathDepth);
+            updateStmt.bind(7, id);
+
+            auto exec = updateStmt.execute();
+            if (!exec)
+                return exec.error();
+        }
+
+        // Create/rebuild the path FTS vtable defensively (only if FTS5 is available).
+        // If any step fails, swallow it and continue so that column/index migration still
+        // completes; path FTS usage will be opportunistic.
+        auto fts5 = db.hasFTS5();
+        if (!fts5 || !fts5.value()) {
+            spdlog::info("v13: FTS5 not available; skipping path FTS vtable creation.");
+            return Result<void>();
+        }
+        auto create = db.execute(R"(
+            CREATE VIRTUAL TABLE IF NOT EXISTS documents_path_fts
+            USING fts5(file_path, tokenize='unicode61', content='documents', content_rowid='id');
+        )");
+        if (!create) {
+            spdlog::warn("v13: FTS creation failed ({}). Continuing without path FTS.",
+                         create.error().message);
+            return Result<void>();
+        }
+
+        auto rebuild =
+            db.execute("INSERT INTO documents_path_fts(documents_path_fts) VALUES('rebuild')");
+        if (!rebuild) {
+            spdlog::warn("v13: FTS rebuild failed ({}). Attempting full backfill.",
+                         rebuild.error().message);
+            (void)db.execute("DROP TABLE IF EXISTS documents_path_fts");
+            auto recreate = db.execute(R"(
+                CREATE VIRTUAL TABLE IF NOT EXISTS documents_path_fts
+                USING fts5(file_path, tokenize='unicode61', content='documents', content_rowid='id');
+            )");
+            if (recreate) {
+                auto fill = db.execute(R"(
+                    INSERT INTO documents_path_fts(rowid, file_path)
+                    SELECT id, file_path FROM documents ORDER BY id
+                )");
+                if (!fill) {
+                    spdlog::warn("v13: FTS backfill failed ({}). Continuing without path FTS.",
+                                 fill.error().message);
+                }
+            } else {
+                spdlog::warn("v13: FTS recreate failed ({}). Continuing without path FTS.",
+                             recreate.error().message);
+            }
+        }
+
+        // Best-effort trigger creation (no-fail). If FTS is unavailable, these may fail.
+        (void)db.execute(R"(
+            CREATE TRIGGER IF NOT EXISTS documents_ai
+            AFTER INSERT ON documents BEGIN
+                INSERT INTO documents_path_fts(rowid, file_path)
+                VALUES (new.id, new.file_path);
+            END;
+        )");
+        (void)db.execute(R"(
+            CREATE TRIGGER IF NOT EXISTS documents_ad
+            AFTER DELETE ON documents BEGIN
+                INSERT INTO documents_path_fts(documents_path_fts, rowid, file_path)
+                VALUES('delete', old.id, old.file_path);
+            END;
+        )");
+        (void)db.execute(R"(
+            CREATE TRIGGER IF NOT EXISTS documents_au
+            AFTER UPDATE ON documents BEGIN
+                INSERT INTO documents_path_fts(documents_path_fts, rowid, file_path)
+                VALUES('delete', old.id, old.file_path);
+                INSERT INTO documents_path_fts(rowid, file_path)
+                VALUES(new.id, new.file_path);
+            END;
+        )");
+
+        return Result<void>();
+    });
+
+    return builder.build();
+}
+
+Migration YamsMetadataMigrations::chunkedPathIndexingBackfill() {
+    // Post-v13 hardening: re-backfill path columns in chunks to avoid long single transactions.
+    MigrationBuilder builder(14, "Chunked path indexing backfill");
+    // Keep outer migration transaction; chunk logic checks inTransaction().
+
+    builder.upFunction([](Database& db) -> Result<void> {
+        // Create a tiny progress KV table; idempotent.
+        if (auto r = db.execute(R"(
+                CREATE TABLE IF NOT EXISTS yams_migration_progress (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            )");
+            !r) {
+            return r;
+        }
+
+        // Determine starting cursor (last processed id, default 0)
+        int64_t lastId = 0;
+        if (auto sel = db.prepare(
+                "SELECT value FROM yams_migration_progress WHERE key='v14_path_backfill_last_id'");
+            sel) {
+            auto s = std::move(sel).value();
+            if (auto step = s.step(); step && step.value() && !s.isNull(0)) {
+                try {
+                    lastId = std::stoll(s.getString(0));
+                } catch (...) {
+                    lastId = 0;
+                }
+            }
+        }
+
+        // Chunk size (default 1000); allow override via env.
+        int chunk = 1000;
+        if (const char* env = std::getenv("YAMS_PATH_BACKFILL_CHUNK"); env && *env) {
+            try {
+                chunk = std::max(1, std::stoi(env));
+            } catch (...) {
+            }
+        }
+
+        // Prepare SELECT and UPDATE statements reused within chunks.
+        auto selStmtRes = db.prepare("SELECT id, file_path, path_hash, path_prefix, reverse_path "
+                                     "FROM documents "
+                                     "WHERE id > ? AND (path_hash IS NULL OR path_hash='' OR "
+                                     "                 path_prefix IS NULL OR path_prefix='' OR "
+                                     "                 reverse_path IS NULL OR reverse_path='') "
+                                     "ORDER BY id LIMIT ?");
+        if (!selStmtRes)
+            return selStmtRes.error();
+        auto updStmtRes =
+            db.prepare("UPDATE documents SET file_path = ?, path_prefix = ?, reverse_path = ?, "
+                       "path_hash = ?, parent_hash = ?, path_depth = ? WHERE id = ?");
+        if (!updStmtRes)
+            return updStmtRes.error();
+
+        Statement selectStmt = std::move(selStmtRes).value();
+        Statement updateStmt = std::move(updStmtRes).value();
+
+        int processedTotal = 0;
+        while (true) {
+            // Bind cursor and chunk
+            if (auto r = selectStmt.reset(); !r)
+                return r.error();
+            if (auto b1 = selectStmt.bind(1, lastId); !b1)
+                return b1.error();
+            if (auto b2 = selectStmt.bind(2, chunk); !b2)
+                return b2.error();
+
+            const bool outerTxn = db.inTransaction();
+            if (!outerTxn) {
+                if (auto r = db.beginTransaction(); !r)
+                    return r;
+            }
+
+            int processedThisChunk = 0;
+            int64_t maxIdThisChunk = lastId;
+            while (true) {
+                auto step = selectStmt.step();
+                if (!step) {
+                    if (!outerTxn)
+                        db.rollback();
+                    return step.error();
+                }
+                if (!step.value())
+                    break;
+
+                int64_t id = selectStmt.getInt64(0);
+                std::string originalPath = selectStmt.getString(1);
+                auto derived = computePathDerivedValues(originalPath);
+
+                if (auto r = updateStmt.reset(); !r) {
+                    if (!outerTxn)
+                        db.rollback();
+                    return r.error();
+                }
+                if (auto r = updateStmt.bindAll(derived.normalizedPath, derived.pathPrefix,
+                                                derived.reversePath, derived.pathHash,
+                                                derived.parentHash, derived.pathDepth, id);
+                    !r) {
+                    if (!outerTxn)
+                        db.rollback();
+                    return r.error();
+                }
+                if (auto r = updateStmt.execute(); !r) {
+                    if (!outerTxn)
+                        db.rollback();
+                    return r.error();
+                }
+
+                maxIdThisChunk = id;
+                ++processedThisChunk;
+            }
+
+            if (!outerTxn) {
+                if (auto r = db.commit(); !r)
+                    return r; // commit even if 0 processed
+            }
+
+            if (processedThisChunk == 0)
+                break; // no more rows to process
+
+            processedTotal += processedThisChunk;
+            lastId = maxIdThisChunk;
+
+            // Persist progress (REPLACE ensures idempotency)
+            if (auto prog = db.prepare("REPLACE INTO yams_migration_progress(key, value) "
+                                       "VALUES('v14_path_backfill_last_id', ?)");
+                prog) {
+                auto st = std::move(prog).value();
+                (void)st.bind(1, std::to_string(lastId));
+                (void)st.execute();
+            }
+
+            spdlog::info("v14: path backfill processed {} rows (last_id={})", processedThisChunk,
+                         lastId);
+        }
+
+        spdlog::info("v14: chunked path backfill complete (total processed={})", processedTotal);
+        return Result<void>();
+    });
+
+    // No-op down migration (data transform)
+    return builder.build();
 }
 
 } // namespace yams::metadata

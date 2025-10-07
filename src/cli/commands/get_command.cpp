@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
@@ -17,6 +18,7 @@
 #include <yams/detection/file_type_detector.h>
 #include <yams/extraction/text_extractor.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/query_helpers.h>
 #include <yams/profiling.h>
 
 #ifdef _WIN32
@@ -34,7 +36,8 @@ public:
     std::string getName() const override { return "get"; }
 
     std::string getDescription() const override {
-        return "Retrieve a document from the content store";
+        return "Retrieve a document from the content store (usage: yams get <path|hash> or yams "
+               "get --name <path>)";
     }
 
     void registerCommand(CLI::App& app, YamsCLI* cli) override {
@@ -44,11 +47,10 @@ public:
 
         // Create option group for retrieval methods (only one can be used at a time)
         auto* group = cmd->add_option_group("retrieval_method");
-        group->add_option("hash", hash_, "Hash of the document to retrieve");
-        group->add_option("--name", name_, "Name of the document to retrieve");
-        auto* positional =
-            group->add_option("target", target_, "Document hash or path (positional argument)");
+        auto* positional = group->add_option("target", target_, "Document hash or path");
         positional->type_name("HASH|PATH");
+        group->add_option("--name", name_, "Name of the document to retrieve (explicit flag form)");
+        group->add_option("--hash", hash_, "Hash of the document to retrieve (explicit flag form)");
 
         // File type filters
         group->add_option("--type", fileType_,
@@ -128,33 +130,59 @@ public:
                     }
                 }
 
-                // Check if it's a valid hex string (min 8 chars for partial hash)
-                bool isHex = normalized.size() >= 8;
-                if (isHex) {
-                    for (char c : normalized) {
-                        if (!std::isxdigit(static_cast<unsigned char>(c))) {
-                            isHex = false;
-                            break;
-                        }
+                // Normalize to lowercase and validate
+                for (char& c : normalized) {
+                    if (!std::isxdigit(static_cast<unsigned char>(c))) {
+                        return Error{ErrorCode::InvalidArgument,
+                                     "Invalid hash format: '" + hash_ +
+                                         "'\n"
+                                         "Expected: 64-character hex string (or 6+ chars for "
+                                         "partial match)\n"
+                                         "Hint: Use --name for file paths, e.g., yams get --name " +
+                                         hash_};
                     }
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
                 }
 
-                if (!isHex) {
-                    return Error{
-                        ErrorCode::InvalidArgument,
-                        "Invalid hash format: '" + hash_ +
-                            "'\n"
-                            "Expected: 64-character hex string (or 8+ chars for partial match)\n"
-                            "Hint: Use --name for file paths, e.g., yams get --name " +
-                            hash_};
+                if (normalized.size() < 6 || normalized.size() > 64) {
+                    return Error{ErrorCode::InvalidArgument,
+                                 "Invalid hash length: expected between 6 and 64 hex characters."};
+                }
+
+                hash_ = normalized;
+            }
+
+            yams::app::services::RetrievalService rsvc;
+            yams::app::services::RetrievalOptions ropts;
+            if (cli_->hasExplicitDataDir()) {
+                ropts.explicitDataDir = cli_->getDataPath();
+            }
+            ropts.requestTimeoutMs = 60000;
+            ropts.headerTimeoutMs = 30000;
+            ropts.bodyTimeoutMs = 120000;
+
+            std::optional<std::string> resolvedHash;
+            if (!hash_.empty()) {
+                resolvedHash = hash_;
+                if (resolvedHash->size() != 64) {
+                    auto resolved =
+                        rsvc.resolveHashPrefix(*resolvedHash, getOldest_, getLatest_, ropts);
+                    if (!resolved) {
+                        return resolved.error();
+                    }
+                    resolvedHash = resolved.value();
                 }
             }
 
             // Create enhanced daemon request with ALL CLI options mapped
-            yams::daemon::GetRequest dreq;
+            yams::app::services::GetOptions dreq;
 
             // Target selection
-            dreq.hash = hash_;
+            if (resolvedHash) {
+                dreq.hash = *resolvedHash;
+            } else {
+                dreq.hash = hash_;
+            }
             dreq.name = name_;
             dreq.byName = !name_.empty();
 
@@ -266,16 +294,7 @@ public:
             };
 
             // If name-based retrieval was requested, prefer smart name resolution first
-            if (!name_.empty() && hash_.empty()) {
-                yams::app::services::RetrievalService rsvc;
-                yams::app::services::RetrievalOptions ropts;
-                if (cli_->hasExplicitDataDir()) {
-                    ropts.explicitDataDir = cli_->getDataPath();
-                }
-                ropts.requestTimeoutMs = 60000;
-                ropts.headerTimeoutMs = 30000;
-                ropts.bodyTimeoutMs = 120000;
-
+            if (!name_.empty() && !resolvedHash) {
                 auto smart = rsvc.getByNameSmart(name_, /*oldest*/ getOldest_,
                                                  /*includeContent*/ !metadataOnly_,
                                                  /*useSession*/ false, std::string{}, ropts);
@@ -287,15 +306,6 @@ public:
                     "get --name: smart resolution failed ({}); continuing with generic get",
                     smart.error().message);
             }
-
-            yams::app::services::RetrievalService rsvc;
-            yams::app::services::RetrievalOptions ropts;
-            if (cli_->hasExplicitDataDir()) {
-                ropts.explicitDataDir = cli_->getDataPath();
-            }
-            ropts.requestTimeoutMs = 60000; // allow reasonable time for extraction
-            ropts.headerTimeoutMs = 30000;
-            ropts.bodyTimeoutMs = 120000;
 
             auto gres = rsvc.get(dreq, ropts);
             if (!gres) {
@@ -333,7 +343,8 @@ private:
 
         // Find documents in same directory
         std::filesystem::path dirPath = std::filesystem::path(doc.filePath).parent_path();
-        auto relatedResult = metadataRepo->findDocumentsByPath(dirPath.string() + "/%");
+        auto relatedResult =
+            metadata::queryDocumentsByPattern(*metadataRepo, dirPath.string() + "/%");
 
         if (relatedResult && !relatedResult.value().empty()) {
             int count = 0;
@@ -348,7 +359,7 @@ private:
 
         // Find documents with similar extension
         std::cerr << "\nSimilar documents by extension:\n";
-        auto extResult = metadataRepo->findDocumentsByPath("%." + doc.fileExtension);
+        auto extResult = metadata::queryDocumentsByPattern(*metadataRepo, "%." + doc.fileExtension);
         if (extResult && !extResult.value().empty()) {
             int count = 0;
             for (const auto& similar : extResult.value()) {
@@ -378,7 +389,7 @@ private:
         }
 
         // Get all documents
-        auto documentsResult = metadataRepo->findDocumentsByPath("%");
+        auto documentsResult = metadata::queryDocumentsByPattern(*metadataRepo, "%");
         if (!documentsResult) {
             return Error{ErrorCode::DatabaseError,
                          "Failed to query documents: " + documentsResult.error().message};
@@ -636,7 +647,7 @@ private:
             name.find('*') != std::string::npos || name.find('?') != std::string::npos;
 
         // First try as a path suffix (for real files)
-        auto documentsResult = metadataRepo->findDocumentsByPath("%/" + name);
+        auto documentsResult = metadata::queryDocumentsByPattern(*metadataRepo, "%/" + name);
         if (documentsResult && !documentsResult.value().empty()) {
             const auto& results = documentsResult.value();
             if (results.size() > 1) {
@@ -671,7 +682,7 @@ private:
         }
 
         // Try exact path match
-        documentsResult = metadataRepo->findDocumentsByPath(name);
+        documentsResult = metadata::queryDocumentsByPattern(*metadataRepo, name);
         if (documentsResult && !documentsResult.value().empty()) {
             if (documentsResult.value().size() > 1 && (hasWildcards || getLatest_ || getOldest_)) {
                 auto sorted = documentsResult.value();
@@ -763,7 +774,7 @@ private:
         std::transform(lowerPrefix.begin(), lowerPrefix.end(), lowerPrefix.begin(), ::tolower);
 
         // Get all documents and find matches
-        auto documentsResult = metadataRepo->findDocumentsByPath("%");
+        auto documentsResult = metadata::queryDocumentsByPattern(*metadataRepo, "%");
         if (!documentsResult) {
             return Error{ErrorCode::DatabaseError,
                          "Failed to query documents: " + documentsResult.error().message};
@@ -815,7 +826,7 @@ private:
         }
 
         // Get all documents
-        auto documentsResult = metadataRepo->findDocumentsByPath("%");
+        auto documentsResult = metadata::queryDocumentsByPattern(*metadataRepo, "%");
         if (!documentsResult) {
             return Error{ErrorCode::DatabaseError,
                          "Failed to query documents: " + documentsResult.error().message};
@@ -947,7 +958,7 @@ private:
         }
 
         // Get all documents
-        auto documentsResult = metadataRepo->findDocumentsByPath("%");
+        auto documentsResult = metadata::queryDocumentsByPattern(*metadataRepo, "%");
         if (!documentsResult) {
             return Error{ErrorCode::DatabaseError,
                          "Failed to query documents: " + documentsResult.error().message};

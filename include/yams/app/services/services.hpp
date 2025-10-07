@@ -31,6 +31,11 @@ namespace yams::daemon {
 class ServiceManager;
 }
 
+// Forward declare KnowledgeGraphStore for AppContext
+namespace yams::metadata {
+class KnowledgeGraphStore;
+}
+
 namespace yams::app::services::utils {
 
 /// Parse natural language time expressions into Unix epoch seconds
@@ -82,6 +87,7 @@ struct AppContext {
     std::shared_ptr<search::SearchExecutor> searchExecutor;
     std::shared_ptr<metadata::MetadataRepository> metadataRepo;
     std::shared_ptr<search::HybridSearchEngine> hybridEngine;
+    std::shared_ptr<metadata::KnowledgeGraphStore> kgStore; // PBI-043: tree diff KG integration
     // Optional: externally-provided content extractors (plugins)
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors;
 

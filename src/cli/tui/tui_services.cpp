@@ -179,7 +179,8 @@ yams::Result<void> TUIServices::reindexDocument(const std::string& hash) {
         contentStore_, hash, info.mimeType, extension, extractors);
 
     metadata::DocumentInfo updated = info;
-    updated.indexedTime = std::chrono::system_clock::now();
+    updated.indexedTime =
+        std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
 
     if (extractedOpt && !extractedOpt->empty()) {
         metadata::DocumentContent contentRow;

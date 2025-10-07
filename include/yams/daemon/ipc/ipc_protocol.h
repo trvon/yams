@@ -2153,6 +2153,7 @@ struct ListSessionsRequest;
 struct UseSessionRequest;
 struct AddPathSelectorRequest;
 struct RemovePathSelectorRequest;
+struct ListTreeDiffRequest;
 
 // Variant type for all requests
 using Request =
@@ -2164,7 +2165,7 @@ using Request =
                  EmbedDocumentsRequest, PluginScanRequest, PluginLoadRequest, PluginUnloadRequest,
                  PluginTrustListRequest, PluginTrustAddRequest, PluginTrustRemoveRequest,
                  CancelRequest, CatRequest, ListSessionsRequest, UseSessionRequest,
-                 AddPathSelectorRequest, RemovePathSelectorRequest>;
+                 AddPathSelectorRequest, RemovePathSelectorRequest, ListTreeDiffRequest>;
 
 // ============================================================================
 // Response Types
@@ -2557,6 +2558,59 @@ struct StatusResponse {
     // Centralized tuning pool sizes (from FSM metrics via TuningManager)
     uint32_t ipcPoolSize{0};
     uint32_t ioPoolSize{0};
+    struct SearchMetrics {
+        std::uint32_t active{0};
+        std::uint32_t queued{0};
+        std::uint64_t executed{0};
+        double cacheHitRate{0.0};
+        std::uint64_t avgLatencyUs{0};
+        std::uint32_t concurrencyLimit{0};
+
+        template <typename Serializer>
+        requires IsSerializer<Serializer>
+        void serialize(Serializer& ser) const {
+            ser << active << queued << executed << cacheHitRate << avgLatencyUs << concurrencyLimit;
+        }
+
+        template <typename Deserializer>
+        requires IsDeserializer<Deserializer>
+        static Result<SearchMetrics> deserialize(Deserializer& deser) {
+            SearchMetrics metrics;
+
+            auto activeRes = deser.readUint32();
+            if (!activeRes)
+                return activeRes.error();
+            metrics.active = activeRes.value();
+
+            auto queuedRes = deser.readUint32();
+            if (!queuedRes)
+                return queuedRes.error();
+            metrics.queued = queuedRes.value();
+
+            auto executedRes = deser.readUint64();
+            if (!executedRes)
+                return executedRes.error();
+            metrics.executed = executedRes.value();
+
+            auto cacheHitRes = deser.readDouble();
+            if (!cacheHitRes)
+                return cacheHitRes.error();
+            metrics.cacheHitRate = cacheHitRes.value();
+
+            auto latencyRes = deser.readUint64();
+            if (!latencyRes)
+                return latencyRes.error();
+            metrics.avgLatencyUs = latencyRes.value();
+
+            auto limitRes = deser.readUint32();
+            if (!limitRes)
+                return limitRes.error();
+            metrics.concurrencyLimit = limitRes.value();
+
+            return metrics;
+        }
+    };
+    SearchMetrics searchMetrics{};
     std::map<std::string, size_t> requestCounts;
 
     // Readiness state tracking (new fields)
@@ -4341,6 +4395,167 @@ struct RemovePathSelectorRequest {
     }
 };
 
+// ============================================================================
+// Tree Diff Request/Response (PBI-043)
+// ============================================================================
+
+struct ListTreeDiffRequest {
+    std::string baseSnapshotId;
+    std::string targetSnapshotId;
+    std::string pathPrefix;
+    std::string typeFilter;
+    uint64_t limit = 1000;
+    uint64_t offset = 0;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << baseSnapshotId << targetSnapshotId << pathPrefix << typeFilter << limit << offset;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<ListTreeDiffRequest> deserialize(Deserializer& deser) {
+        ListTreeDiffRequest req;
+        auto base = deser.readString();
+        if (!base)
+            return base.error();
+        req.baseSnapshotId = std::move(base.value());
+
+        auto target = deser.readString();
+        if (!target)
+            return target.error();
+        req.targetSnapshotId = std::move(target.value());
+
+        auto prefix = deser.readString();
+        if (!prefix)
+            return prefix.error();
+        req.pathPrefix = std::move(prefix.value());
+
+        auto filter = deser.readString();
+        if (!filter)
+            return filter.error();
+        req.typeFilter = std::move(filter.value());
+
+        auto lim = deser.template read<uint64_t>();
+        if (!lim)
+            return lim.error();
+        req.limit = lim.value();
+
+        auto off = deser.template read<uint64_t>();
+        if (!off)
+            return off.error();
+        req.offset = off.value();
+
+        return req;
+    }
+};
+
+struct TreeChangeEntry {
+    std::string changeType;
+    std::string path;
+    std::string oldPath;
+    std::string hash;
+    std::string oldHash;
+    uint64_t size = 0;
+    uint64_t oldSize = 0;
+    std::string contentDeltaHash;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << changeType << path << oldPath << hash << oldHash << size << oldSize
+            << contentDeltaHash;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<TreeChangeEntry> deserialize(Deserializer& deser) {
+        TreeChangeEntry entry;
+        auto ct = deser.readString();
+        if (!ct)
+            return ct.error();
+        entry.changeType = std::move(ct.value());
+
+        auto p = deser.readString();
+        if (!p)
+            return p.error();
+        entry.path = std::move(p.value());
+
+        auto op = deser.readString();
+        if (!op)
+            return op.error();
+        entry.oldPath = std::move(op.value());
+
+        auto h = deser.readString();
+        if (!h)
+            return h.error();
+        entry.hash = std::move(h.value());
+
+        auto oh = deser.readString();
+        if (!oh)
+            return oh.error();
+        entry.oldHash = std::move(oh.value());
+
+        auto sz = deser.template read<uint64_t>();
+        if (!sz)
+            return sz.error();
+        entry.size = sz.value();
+
+        auto osz = deser.template read<uint64_t>();
+        if (!osz)
+            return osz.error();
+        entry.oldSize = osz.value();
+
+        auto cdh = deser.readString();
+        if (!cdh)
+            return cdh.error();
+        entry.contentDeltaHash = std::move(cdh.value());
+
+        return entry;
+    }
+};
+
+struct ListTreeDiffResponse {
+    std::vector<TreeChangeEntry> changes;
+    uint64_t totalCount = 0;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << static_cast<uint32_t>(changes.size());
+        for (const auto& entry : changes) {
+            entry.serialize(ser);
+        }
+        ser << totalCount;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<ListTreeDiffResponse> deserialize(Deserializer& deser) {
+        ListTreeDiffResponse resp;
+        auto countRes = deser.template read<uint32_t>();
+        if (!countRes)
+            return countRes.error();
+        auto count = countRes.value();
+
+        resp.changes.reserve(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            auto entry = TreeChangeEntry::deserialize(deser);
+            if (!entry)
+                return entry.error();
+            resp.changes.push_back(std::move(entry.value()));
+        }
+
+        auto total = deser.template read<uint64_t>();
+        if (!total)
+            return total.error();
+        resp.totalCount = total.value();
+
+        return resp;
+    }
+};
+
 // Variant type for all responses
 using Response =
     std::variant<SearchResponse, AddResponse, GetResponse, GetInitResponse, GetChunkResponse,
@@ -4349,7 +4564,7 @@ using Response =
                  AddDocumentResponse, GrepResponse, UpdateDocumentResponse, GetStatsResponse,
                  DownloadResponse, DeleteResponse, PrepareSessionResponse, EmbedDocumentsResponse,
                  PluginScanResponse, PluginLoadResponse, PluginTrustListResponse, CatResponse,
-                 ListSessionsResponse,
+                 ListSessionsResponse, ListTreeDiffResponse,
                  // Streaming events (progress/heartbeats)
                  EmbeddingEvent, ModelLoadEvent>;
 
@@ -4415,6 +4630,8 @@ enum class MessageType : uint8_t {
     UseSessionRequest = 27,
     AddPathSelectorRequest = 28,
     RemovePathSelectorRequest = 29,
+    // Tree diff requests (PBI-043)
+    ListTreeDiffRequest = 30,
 
     // Responses
     SearchResponse = 128,
@@ -4440,6 +4657,8 @@ enum class MessageType : uint8_t {
     PrepareSessionResponse = 148,
     CatResponse = 152,
     ListSessionsResponse = 153,
+    // Tree diff responses (PBI-043)
+    ListTreeDiffResponse = 154,
     // Events
     EmbeddingEvent = 149,
     ModelLoadEvent = 150,

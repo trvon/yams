@@ -134,6 +134,13 @@ jobs:
           echo "Running yams_search_benchmarks..."
           ( cd "$BUILD_DIR" && ./tests/benchmarks/yams_search_benchmarks ) || exit 1
 
+      - name: Run Tree Diff Benchmarks (PBI-043)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Running tree_diff_benchmarks..."
+          ( cd "$BUILD_DIR" && ./tests/benchmarks/tree_diff_benchmarks ) || exit 1
+
       - name: Regression Check (API)
         shell: bash
         run: |
@@ -154,6 +161,17 @@ jobs:
             tests/benchmarks/baseline/search_benchmarks.baseline.json \
             --threshold 0.5 \
             --output "$BUILD_DIR/bench_results/search_benchmarks_regression.json" \
+            --fail-on-regression
+
+      - name: Regression Check (Tree Diff - PBI-043)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/scripts/check_regression.py \
+            "$BUILD_DIR/bench_results/tree_diff_benchmark_results.json" \
+            tests/benchmarks/baseline/tree_diff_benchmarks.baseline.json \
+            --threshold 0.5 \
+            --output "$BUILD_DIR/bench_results/tree_diff_benchmarks_regression.json" \
             --fail-on-regression
 
       - name: Summarize Benchmarks in Job Summary
@@ -190,4 +208,6 @@ jobs:
             ${{ env.BUILD_DIR }}/bench_results/search_benchmark_report.md
             ${{ env.BUILD_DIR }}/bench_results/api_benchmarks_regression.json
             ${{ env.BUILD_DIR }}/bench_results/search_benchmarks_regression.json
+            ${{ env.BUILD_DIR }}/bench_results/tree_diff_benchmark_results.json
+            ${{ env.BUILD_DIR }}/bench_results/tree_diff_benchmarks_regression.json
           retention-days: 7

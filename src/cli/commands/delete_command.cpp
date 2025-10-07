@@ -15,6 +15,7 @@
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/metadata/query_helpers.h>
 
 namespace yams::cli {
 
@@ -474,10 +475,10 @@ private:
         }
 
         // Search for documents with matching fileName
-        auto documentsResult = metadataRepo->findDocumentsByPath("%/" + name);
+        auto documentsResult = metadata::queryDocumentsByPattern(*metadataRepo, "%/" + name);
         if (!documentsResult) {
             // Try exact match
-            documentsResult = metadataRepo->findDocumentsByPath(name);
+            documentsResult = metadata::queryDocumentsByPattern(*metadataRepo, name);
             if (!documentsResult) {
                 return Error{ErrorCode::NotFound,
                              "Failed to query documents: " + documentsResult.error().message};
@@ -577,7 +578,7 @@ private:
             sqlPattern = "%" + sqlPattern + "%";
         }
 
-        auto documentsResult = metadataRepo->findDocumentsByPath(sqlPattern);
+        auto documentsResult = metadata::queryDocumentsByPattern(*metadataRepo, sqlPattern);
         if (!documentsResult) {
             return Error{ErrorCode::NotFound,
                          "Failed to query documents: " + documentsResult.error().message};
@@ -641,7 +642,7 @@ private:
         }
         pattern += "%";
 
-        auto documentsResult = metadataRepo->findDocumentsByPath(pattern);
+        auto documentsResult = metadata::queryDocumentsByPattern(*metadataRepo, pattern);
         if (!documentsResult) {
             return Error{ErrorCode::DatabaseError,
                          "Failed to query directory: " + documentsResult.error().message};

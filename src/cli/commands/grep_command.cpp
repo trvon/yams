@@ -15,6 +15,7 @@
 #include <yams/cli/session_store.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/query_helpers.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/vector/vector_index_manager.h>
 // Daemon client API for daemon-first grep
@@ -152,7 +153,7 @@ public:
         cmd->add_flag("-L,--files-without-match", filesWithoutMatch_,
                       "Show only filenames without matches");
         cmd->add_flag("--paths-only", pathsOnly_, "Show only file paths (no content)");
-        cmd->add_flag("--literal-text", literalText_,
+        cmd->add_flag("-F,--fixed-strings,--literal-text", literalText_,
                       "Treat pattern as literal text, not regex (escapes special characters)");
 
         // Hybrid search options
@@ -260,7 +261,7 @@ public:
         try {
             // Attempt daemon-first grep with complete protocol mapping
             {
-                yams::daemon::GrepRequest dreq;
+                yams::app::services::GrepOptions dreq;
                 dreq.pattern = pattern_;
                 dreq.paths = paths_; // Use new paths field for multiple paths
                 if (dreq.paths.empty() && !sessionPatterns_.empty()) {
@@ -585,29 +586,46 @@ private:
         try {
             regex = std::regex(regexPattern, flags);
         } catch (const std::regex_error& e) {
+            std::string suggestion;
+            if (!literalText_ && (pattern_.find('(') != std::string::npos ||
+                                  pattern_.find('[') != std::string::npos ||
+                                  pattern_.find('{') != std::string::npos)) {
+                suggestion = "\nHint: If searching for literal text (not regex), use:\n"
+                             "  yams grep --literal-text \"" +
+                             pattern_ + "\"";
+                if (!includePatterns_.empty()) {
+                    suggestion += " --include=\"" + includePatterns_ + "\"";
+                }
+            }
             return Error{ErrorCode::InvalidArgument,
-                         "Invalid regex pattern: " + std::string(e.what())};
+                         "Invalid regex: " + std::string(e.what()) + suggestion};
         }
 
         // Get documents to search
         std::vector<metadata::DocumentInfo> documents;
+        std::unordered_set<int64_t> seenDocIds;
 
-        if (paths_.empty()) {
-            // Apply tag filter if specified
-            if (!filterTags_.empty()) {
-                // Parse comma-separated tags
-                std::vector<std::string> tags;
-                std::stringstream ss(filterTags_);
-                std::string tag;
-                while (std::getline(ss, tag, ',')) {
-                    // Trim whitespace
-                    tag.erase(0, tag.find_first_not_of(" \t"));
-                    tag.erase(tag.find_last_not_of(" \t") + 1);
-                    if (!tag.empty()) {
-                        tags.push_back(tag);
-                    }
+        auto addDocs = [&](const std::vector<metadata::DocumentInfo>& newDocs) {
+            for (const auto& d : newDocs) {
+                if (seenDocIds.insert(d.id).second) {
+                    documents.push_back(d);
                 }
+            }
+        };
 
+        std::vector<std::string> queryPatterns;
+        if (!paths_.empty()) {
+            queryPatterns.insert(queryPatterns.end(), paths_.begin(), paths_.end());
+        }
+        if (!includePatterns_.empty()) {
+            auto expanded = splitPatterns({includePatterns_});
+            queryPatterns.insert(queryPatterns.end(), expanded.begin(), expanded.end());
+        }
+
+        if (queryPatterns.empty()) {
+            // No path/include filters, so check for tags or get all
+            if (!filterTags_.empty()) {
+                std::vector<std::string> tags = parseCommaSeparated(filterTags_);
                 if (!tags.empty()) {
                     auto docsResult = metadataRepo->findDocumentsByTags(tags, matchAllTags_);
                     if (!docsResult) {
@@ -616,18 +634,10 @@ private:
                                          docsResult.error().message};
                     }
                     documents = docsResult.value();
-                } else {
-                    // No valid tags, search all files
-                    auto docsResult = metadataRepo->findDocumentsByPath("%");
-                    if (!docsResult) {
-                        return Error{ErrorCode::DatabaseError,
-                                     "Failed to query documents: " + docsResult.error().message};
-                    }
-                    documents = docsResult.value();
                 }
             } else {
                 // Search all indexed files
-                auto docsResult = metadataRepo->findDocumentsByPath("%");
+                auto docsResult = metadata::queryDocumentsByPattern(*metadataRepo, "%");
                 if (!docsResult) {
                     return Error{ErrorCode::DatabaseError,
                                  "Failed to query documents: " + docsResult.error().message};
@@ -635,78 +645,88 @@ private:
                 documents = docsResult.value();
             }
         } else {
-            // Search specific paths
-            for (const auto& path : paths_) {
-                std::filesystem::path fsPath(path);
+            // Use path/include patterns for candidate discovery.
+            // Normalize common glob forms to indexed queries (v13 path_prefix + extension):
+            //   - "**/*.ext"           -> extension filter only
+            //   - "dir/**/*.ext"       -> pathPrefix=dir + extension filter
+            //   - "*.ext"             -> extension filter only
+            // Patterns that do not match these forms fall back to LIKE.
 
-                // Check if path is a directory
-                if (std::filesystem::exists(fsPath) && std::filesystem::is_directory(fsPath)) {
-                    // For directories, search all files within
-                    std::string pattern = path;
-                    if (pattern.back() != '/') {
-                        pattern += '/';
-                    }
-                    pattern += '%';
+            auto trim = [](std::string s) {
+                auto issp = [](unsigned char c) { return std::isspace(c) != 0; };
+                while (!s.empty() && issp(static_cast<unsigned char>(s.front())))
+                    s.erase(s.begin());
+                while (!s.empty() && issp(static_cast<unsigned char>(s.back())))
+                    s.pop_back();
+                return s;
+            };
+            auto strip_leading_slash = [](std::string s) {
+                while (!s.empty() &&
+                       (s.front() == '/' || (s.size() > 1 && s[0] == '.' && s[1] == '/'))) {
+                    if (s.front() == '/')
+                        s.erase(s.begin());
+                    else
+                        s.erase(s.begin(), s.begin() + 2);
+                }
+                return s;
+            };
 
-                    auto docsResult = metadataRepo->findDocumentsByPath(pattern);
-                    if (docsResult) {
-                        for (const auto& doc : docsResult.value()) {
-                            documents.push_back(doc);
-                        }
-                    }
-                } else {
-                    // For files or patterns, try exact match first
-                    auto docsResult = metadataRepo->findDocumentsByPath(path);
-                    if (docsResult) {
-                        for (const auto& doc : docsResult.value()) {
-                            documents.push_back(doc);
-                        }
-                    }
+            auto collect_by_ext_and_prefix = [&](const std::string& maybePrefix,
+                                                 const std::string& ext) {
+                if (maybePrefix.empty()) {
+                    auto r = metadataRepo->findDocumentsByExtension(ext);
+                    if (r)
+                        addDocs(r.value());
+                    return;
+                }
+                metadata::DocumentQueryOptions q;
+                q.pathPrefix = strip_leading_slash(maybePrefix);
+                q.extension = ext;
+                q.orderByNameAsc = true;
+                auto r = metadataRepo->queryDocuments(q);
+                if (r)
+                    addDocs(r.value());
+            };
 
-                    // Also try as a suffix pattern if no exact match
-                    if (!docsResult || docsResult.value().empty()) {
-                        auto suffixResult = metadataRepo->findDocumentsByPath("%/" + path);
-                        if (suffixResult && !suffixResult.value().empty()) {
-                            for (const auto& doc : suffixResult.value()) {
-                                documents.push_back(doc);
-                            }
-                        }
+            for (const auto& raw : queryPatterns) {
+                std::string p = trim(raw);
+                if (p.empty())
+                    continue;
+
+                // Case 1: "**/*.ext" (anywhere) or "*.ext"
+                if ((p.rfind("**/*.", 0) == 0 && p.size() > 5) ||
+                    (p.rfind("*.", 0) == 0 && p.size() > 2)) {
+                    const char* start = (p[0] == '*' && p.size() > 1 && p[1] == '.')
+                                            ? p.c_str() + 2
+                                            : (p.size() > 4 ? p.c_str() + 5 : p.c_str());
+                    std::string ext(start);
+                    if (!ext.empty()) {
+                        collect_by_ext_and_prefix("", ext);
+                        continue;
                     }
                 }
+
+                // Case 2: "dir/**/*.ext" -> prefix + ext
+                // Find marker "/**/" and ensure pattern ends with "*.ext"
+                std::size_t starDot = p.rfind("*.");
+                std::size_t marker = p.find("/**/");
+                if (marker != std::string::npos && starDot != std::string::npos &&
+                    starDot > marker) {
+                    std::string ext = p.substr(starDot + 2);
+                    if (!ext.empty()) {
+                        std::string prefix = p.substr(0, marker);
+                        collect_by_ext_and_prefix(prefix, ext);
+                        continue;
+                    }
+                }
+
+                // Fallback: LIKE pattern from glob
+                std::string likePattern = p;
+                std::replace(likePattern.begin(), likePattern.end(), '*', '%');
+                auto docsResult = metadata::queryDocumentsByPattern(*metadataRepo, likePattern);
+                if (docsResult)
+                    addDocs(docsResult.value());
             }
-        }
-
-        // Apply include pattern filtering if specified
-        if (!includePatterns_.empty()) {
-            std::vector<metadata::DocumentInfo> filteredDocs;
-            auto expandedPatterns = splitPatterns({includePatterns_});
-
-            for (const auto& doc : documents) {
-                bool shouldInclude = false;
-
-                for (const auto& pattern : expandedPatterns) {
-                    // Check if pattern contains path components
-                    if (pattern.find('/') != std::string::npos) {
-                        if (matchesPattern(doc.filePath, pattern)) {
-                            shouldInclude = true;
-                            break;
-                        }
-                    } else {
-                        std::string fileName =
-                            std::filesystem::path(doc.filePath).filename().string();
-                        if (matchesPattern(fileName, pattern)) {
-                            shouldInclude = true;
-                            break;
-                        }
-                    }
-                }
-
-                if (shouldInclude) {
-                    filteredDocs.push_back(doc);
-                }
-            }
-
-            documents = filteredDocs;
         }
 
         // Optional FTS prefilter: when literal/word-style queries, use the SQLite FTS index

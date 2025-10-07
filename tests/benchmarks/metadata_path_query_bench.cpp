@@ -31,9 +31,10 @@ DocumentInfo makeDocWithPath(const std::string& path, const std::string& hash) {
     info.fileSize = 1764;
     info.sha256Hash = hash;
     info.mimeType = info.fileExtension == ".pdf" ? "application/pdf" : "text/plain";
-    info.createdTime = std::chrono::system_clock::now();
-    info.modifiedTime = info.createdTime;
-    info.indexedTime = info.createdTime;
+    auto now_s = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    info.createdTime = now_s;
+    info.modifiedTime = now_s;
+    info.indexedTime = now_s;
     info.contentExtracted = true;
     info.extractionStatus = ExtractionStatus::Success;
     auto derived = computePathDerivedValues(path);

@@ -336,7 +336,7 @@ TEST(PostIngestQueueStandardTest, ProcessesTaskAndPersistsContent) {
     doc.fileExtension = ".txt";
     doc.sha256Hash = "hash-123";
     doc.mimeType = "text/plain";
-    doc.indexedTime = std::chrono::system_clock::now();
+    doc.indexedTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
     metadataRepo->setDocument(doc);
 
     const std::string payload = "Hello from post-ingest";
@@ -349,7 +349,7 @@ TEST(PostIngestQueueStandardTest, ProcessesTaskAndPersistsContent) {
 
     PostIngestQueue::Task task{
         doc.sha256Hash, doc.mimeType, "", {}, PostIngestQueue::Task::Stage::Metadata};
-    ASSERT_TRUE(queue->tryEnqueue(task));
+    ASSERT_TRUE(queue->tryEnqueue(std::move(task)));
 
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (queue->processed() < 1 && std::chrono::steady_clock::now() < deadline) {

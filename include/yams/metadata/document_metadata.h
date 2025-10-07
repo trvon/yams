@@ -40,80 +40,129 @@ enum class MetadataValueType { String, Integer, Real, Blob, Boolean };
  * @brief Generic metadata value with type information
  */
 struct MetadataValue {
+    // Backward-compat storage (DB serialization uses this and 'type')
     std::string value;
     MetadataValueType type;
+
+    // Optional typed cache for faster/safer access (no schema change)
+    using Variant = std::variant<std::string, int64_t, double, bool, std::vector<uint8_t>>;
+    mutable std::optional<Variant> typedCache;
 
     MetadataValue() : type(MetadataValueType::String) {}
 
     // Constructors for different types
     explicit MetadataValue(const std::string& str) : value(str), type(MetadataValueType::String) {}
-
     explicit MetadataValue(const char* str) : value(str), type(MetadataValueType::String) {}
-
     explicit MetadataValue(int64_t num)
-        : value(std::to_string(num)), type(MetadataValueType::Integer) {}
+        : value(std::to_string(num)), type(MetadataValueType::Integer) {
+        typedCache = Variant{num};
+    }
+    explicit MetadataValue(double num) : value(std::to_string(num)), type(MetadataValueType::Real) {
+        typedCache = Variant{num};
+    }
+    explicit MetadataValue(bool b) : value(b ? "1" : "0"), type(MetadataValueType::Boolean) {
+        typedCache = Variant{b};
+    }
+    static MetadataValue fromBlob(const std::vector<uint8_t>& blob) {
+        MetadataValue mv;
+        mv.type = MetadataValueType::Blob;
+        mv.value.assign(blob.begin(), blob.end()); // lossy textual view for legacy paths
+        mv.typedCache = Variant{std::vector<uint8_t>(blob)};
+        return mv;
+    }
 
-    explicit MetadataValue(double num)
-        : value(std::to_string(num)), type(MetadataValueType::Real) {}
-
-    explicit MetadataValue(bool b) : value(b ? "1" : "0"), type(MetadataValueType::Boolean) {}
-
-    // Type-safe getters
+    // Keep legacy accessors for compatibility
     [[nodiscard]] std::string asString() const { return value; }
     [[nodiscard]] int64_t asInteger() const { return std::stoll(value); }
     [[nodiscard]] double asReal() const { return std::stod(value); }
     [[nodiscard]] bool asBoolean() const { return value == "1"; }
+
+    // New typed API
+    [[nodiscard]] Variant asVariant() const {
+        if (typedCache)
+            return *typedCache;
+        switch (type) {
+            case MetadataValueType::String:
+                typedCache = Variant{value};
+                break;
+            case MetadataValueType::Integer:
+                typedCache = Variant{std::stoll(value)};
+                break;
+            case MetadataValueType::Real:
+                typedCache = Variant{std::stod(value)};
+                break;
+            case MetadataValueType::Boolean:
+                typedCache = Variant{value == "1"};
+                break;
+            case MetadataValueType::Blob: {
+                std::vector<uint8_t> bytes(value.begin(), value.end());
+                typedCache = Variant{std::move(bytes)};
+                break;
+            }
+        }
+        return *typedCache;
+    }
+
+    void setVariant(const Variant& v) {
+        typedCache = v;
+        if (std::holds_alternative<std::string>(v)) {
+            type = MetadataValueType::String;
+            value = std::get<std::string>(v);
+        } else if (std::holds_alternative<int64_t>(v)) {
+            type = MetadataValueType::Integer;
+            value = std::to_string(std::get<int64_t>(v));
+        } else if (std::holds_alternative<double>(v)) {
+            type = MetadataValueType::Real;
+            value = std::to_string(std::get<double>(v));
+        } else if (std::holds_alternative<bool>(v)) {
+            type = MetadataValueType::Boolean;
+            value = std::get<bool>(v) ? "1" : "0";
+        } else if (std::holds_alternative<std::vector<uint8_t>>(v)) {
+            type = MetadataValueType::Blob;
+            const auto& bytes = std::get<std::vector<uint8_t>>(v);
+            value.assign(bytes.begin(), bytes.end());
+        }
+    }
 };
 
 /**
  * @brief Core document information
  */
 struct DocumentInfo {
-    int64_t id = 0;                                                ///< Database ID
-    std::string filePath;                                          ///< Absolute file path
-    std::string fileName;                                          ///< File name only
-    std::string fileExtension;                                     ///< File extension
-    int64_t fileSize = 0;                                          ///< File size in bytes
-    std::string sha256Hash;                                        ///< SHA-256 hash
-    std::string mimeType;                                          ///< MIME type
-    std::chrono::system_clock::time_point createdTime;             ///< File creation time
-    std::chrono::system_clock::time_point modifiedTime;            ///< File modification time
-    std::chrono::system_clock::time_point indexedTime;             ///< When indexed
-    bool contentExtracted = false;                                 ///< Text extraction completed
+    int64_t id = 0;                        ///< Database ID
+    std::string filePath;                  ///< Absolute file path
+    std::string fileName;                  ///< File name only
+    std::string fileExtension;             ///< File extension
+    int64_t fileSize = 0;                  ///< File size in bytes
+    std::string sha256Hash;                ///< SHA-256 hash
+    std::string mimeType;                  ///< MIME type
+    std::string pathPrefix;                ///< Directory prefix of path
+    std::string reversePath;               ///< Reversed path string (for suffix search)
+    std::string pathHash;                  ///< Hash of normalized path
+    std::string parentHash;                ///< Hash of parent path
+    int pathDepth = 0;                     ///< Number of path segments
+    std::chrono::sys_seconds createdTime;  ///< File creation time (seconds precision)
+    std::chrono::sys_seconds modifiedTime; ///< File modification time (seconds precision)
+    std::chrono::sys_seconds indexedTime;  ///< When indexed (seconds precision)
+    bool contentExtracted = false;         ///< Text extraction completed
     ExtractionStatus extractionStatus = ExtractionStatus::Pending; ///< Extraction status
     std::string extractionError;                                   ///< Error message if failed
 
-    /**
-     * @brief Convert to Unix timestamp for database storage
-     */
-    [[nodiscard]] int64_t createdTimeUnix() const {
-        return std::chrono::duration_cast<std::chrono::seconds>(createdTime.time_since_epoch())
-            .count();
-    }
-
-    [[nodiscard]] int64_t modifiedTimeUnix() const {
-        return std::chrono::duration_cast<std::chrono::seconds>(modifiedTime.time_since_epoch())
-            .count();
-    }
-
-    [[nodiscard]] int64_t indexedTimeUnix() const {
-        return std::chrono::duration_cast<std::chrono::seconds>(indexedTime.time_since_epoch())
-            .count();
-    }
+    // Legacy Unix timestamp accessors removed; bind/get sys_seconds directly via Statement.
 
     /**
      * @brief Set time from Unix timestamp
      */
     void setCreatedTime(int64_t unixTime) {
-        createdTime = std::chrono::system_clock::from_time_t(unixTime);
+        createdTime = std::chrono::sys_seconds{std::chrono::seconds{unixTime}};
     }
 
     void setModifiedTime(int64_t unixTime) {
-        modifiedTime = std::chrono::system_clock::from_time_t(unixTime);
+        modifiedTime = std::chrono::sys_seconds{std::chrono::seconds{unixTime}};
     }
 
     void setIndexedTime(int64_t unixTime) {
-        indexedTime = std::chrono::system_clock::from_time_t(unixTime);
+        indexedTime = std::chrono::sys_seconds{std::chrono::seconds{unixTime}};
     }
 };
 
@@ -137,15 +186,12 @@ struct DocumentRelationship {
     int64_t childId = 0;                                          ///< Child document ID
     RelationshipType relationshipType = RelationshipType::Custom; ///< Relationship type
     std::string customType;                                       ///< Custom relationship name
-    std::chrono::system_clock::time_point createdTime;            ///< When relationship created
+    std::chrono::sys_seconds createdTime; ///< When relationship created (seconds)
 
-    [[nodiscard]] int64_t createdTimeUnix() const {
-        return std::chrono::duration_cast<std::chrono::seconds>(createdTime.time_since_epoch())
-            .count();
-    }
+    // Legacy Unix accessor removed
 
     void setCreatedTime(int64_t unixTime) {
-        createdTime = std::chrono::system_clock::from_time_t(unixTime);
+        createdTime = std::chrono::sys_seconds{std::chrono::seconds{unixTime}};
     }
 
     /**
@@ -194,20 +240,17 @@ struct DocumentRelationship {
  * @brief Search query history entry
  */
 struct SearchHistoryEntry {
-    int64_t id = 0;                                  ///< Database ID
-    std::string query;                               ///< Search query string
-    std::chrono::system_clock::time_point queryTime; ///< When query was executed
-    int64_t resultsCount = 0;                        ///< Number of results returned
-    int64_t executionTimeMs = 0;                     ///< Query execution time in milliseconds
-    std::string userContext;                         ///< Optional user/session identifier
+    int64_t id = 0;                     ///< Database ID
+    std::string query;                  ///< Search query string
+    std::chrono::sys_seconds queryTime; ///< When query was executed (seconds precision)
+    int64_t resultsCount = 0;           ///< Number of results returned
+    int64_t executionTimeMs = 0;        ///< Query execution time in milliseconds
+    std::string userContext;            ///< Optional user/session identifier
 
-    [[nodiscard]] int64_t queryTimeUnix() const {
-        return std::chrono::duration_cast<std::chrono::seconds>(queryTime.time_since_epoch())
-            .count();
-    }
+    // Legacy Unix accessor removed
 
     void setQueryTime(int64_t unixTime) {
-        queryTime = std::chrono::system_clock::from_time_t(unixTime);
+        queryTime = std::chrono::sys_seconds{std::chrono::seconds{unixTime}};
     }
 };
 
@@ -215,30 +258,22 @@ struct SearchHistoryEntry {
  * @brief Saved search query
  */
 struct SavedQuery {
-    int64_t id = 0;                                    ///< Database ID
-    std::string name;                                  ///< User-friendly name
-    std::string query;                                 ///< Search query string
-    std::string description;                           ///< Optional description
-    std::chrono::system_clock::time_point createdTime; ///< When saved
-    std::chrono::system_clock::time_point lastUsed;    ///< Last time used
-    int64_t useCount = 0;                              ///< Number of times used
+    int64_t id = 0;                       ///< Database ID
+    std::string name;                     ///< User-friendly name
+    std::string query;                    ///< Search query string
+    std::string description;              ///< Optional description
+    std::chrono::sys_seconds createdTime; ///< When saved (seconds precision)
+    std::chrono::sys_seconds lastUsed;    ///< Last time used (seconds precision)
+    int64_t useCount = 0;                 ///< Number of times used
 
-    [[nodiscard]] int64_t createdTimeUnix() const {
-        return std::chrono::duration_cast<std::chrono::seconds>(createdTime.time_since_epoch())
-            .count();
-    }
-
-    [[nodiscard]] int64_t lastUsedUnix() const {
-        return std::chrono::duration_cast<std::chrono::seconds>(lastUsed.time_since_epoch())
-            .count();
-    }
+    // Legacy Unix accessors removed
 
     void setCreatedTime(int64_t unixTime) {
-        createdTime = std::chrono::system_clock::from_time_t(unixTime);
+        createdTime = std::chrono::sys_seconds{std::chrono::seconds{unixTime}};
     }
 
     void setLastUsed(int64_t unixTime) {
-        lastUsed = std::chrono::system_clock::from_time_t(unixTime);
+        lastUsed = std::chrono::sys_seconds{std::chrono::seconds{unixTime}};
     }
 };
 

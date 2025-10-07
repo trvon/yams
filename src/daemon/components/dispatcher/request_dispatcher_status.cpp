@@ -8,7 +8,10 @@
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/dispatch_utils.hpp>
+#include <yams/daemon/components/EmbeddingProviderFsm.h>
+#include <yams/daemon/components/PluginHostFsm.h>
 #include <yams/daemon/components/RequestDispatcher.h>
+#include <yams/daemon/components/ServiceManagerFsm.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
 #include <yams/daemon/ipc/stream_metrics_registry.h>
@@ -69,6 +72,20 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             res.requestCounts["worker_queued"] = snap.workerQueued;
             res.requestCounts["post_ingest_threads"] = snap.postIngestThreads;
             res.requestCounts["post_ingest_queued"] = snap.postIngestQueued;
+            res.searchMetrics.active = snap.searchActive;
+            res.searchMetrics.queued = snap.searchQueued;
+            res.searchMetrics.executed = snap.searchExecuted;
+            res.searchMetrics.cacheHitRate = snap.searchCacheHitRate;
+            res.searchMetrics.avgLatencyUs = snap.searchAvgLatencyUs;
+            res.searchMetrics.concurrencyLimit = snap.searchConcurrencyLimit;
+            res.requestCounts["search_active"] = snap.searchActive;
+            res.requestCounts["search_queued"] = snap.searchQueued;
+            res.requestCounts["search_executed"] = static_cast<size_t>(snap.searchExecuted);
+            res.requestCounts["search_cache_hit_rate_pct"] =
+                static_cast<size_t>(snap.searchCacheHitRate * 100.0);
+            res.requestCounts["search_avg_latency_us"] =
+                static_cast<size_t>(snap.searchAvgLatencyUs);
+            res.requestCounts["search_concurrency_limit"] = snap.searchConcurrencyLimit;
             // PBI-040, task 040-1: Expose queue depth for FTS5 readiness checks
             res.postIngestQueueDepth = static_cast<uint32_t>(snap.postIngestQueued);
             res.requestCounts["post_ingest_inflight"] = snap.postIngestInflight;
@@ -76,6 +93,32 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             // Export selected tuning config values for clients (best-effort)
             try {
                 if (serviceManager_) {
+                    // Surface FSM states as numeric codes in requestCounts, and booleans in
+                    // readinessStates
+                    try {
+                        auto ss = serviceManager_->getServiceManagerFsmSnapshot();
+                        res.requestCounts["service_fsm_state"] = static_cast<size_t>(ss.state);
+                    } catch (...) {
+                    }
+                    try {
+                        auto es = serviceManager_->getEmbeddingProviderFsmSnapshot();
+                        res.requestCounts["embedding_state"] = static_cast<size_t>(es.state);
+                        res.readinessStates["embedding_ready"] =
+                            (es.state == EmbeddingProviderState::ModelReady);
+                        // Provide an explicit degraded flag for clients/tools that
+                        // distinguish readiness from degraded modes.
+                        res.readinessStates["embedding_degraded"] =
+                            (es.state == EmbeddingProviderState::Degraded);
+                    } catch (...) {
+                    }
+                    try {
+                        auto ps = serviceManager_->getPluginHostFsmSnapshot();
+                        res.requestCounts["plugin_host_state"] = static_cast<size_t>(ps.state);
+                        res.readinessStates["plugins_ready"] = (ps.state == PluginHostState::Ready);
+                        res.readinessStates["plugins_degraded"] =
+                            (ps.state == PluginHostState::Failed);
+                    } catch (...) {
+                    }
                     const auto& tc = serviceManager_->getConfig().tuning;
                     res.requestCounts["tuning_post_ingest_capacity"] = tc.postIngestCapacity;
                     res.requestCounts["tuning_post_ingest_threads_min"] = tc.postIngestThreadsMin;

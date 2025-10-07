@@ -7,12 +7,16 @@
 #include <stop_token>
 #include "IComponent.h"
 #include <boost/asio/any_io_executor.hpp>
+#include <boost/asio/thread_pool.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/core/types.h>
+#include <yams/daemon/components/EmbeddingProviderFsm.h>
 #include <yams/daemon/components/InternalEventBus.h>
+#include <yams/daemon/components/PluginHostFsm.h>
 #include <yams/daemon/components/PoolManager.h>
 #include <yams/daemon/components/PostIngestQueue.h>
+#include <yams/daemon/components/ServiceManagerFsm.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningConfig.h>
@@ -93,6 +97,16 @@ public:
     PostIngestQueue* getPostIngestQueue() const { return postIngest_.get(); }
     // Resize PostIngestQueue worker threads; returns false if unchanged/missing.
     bool resizePostIngestThreads(std::size_t target);
+    struct SearchLoadMetrics {
+        std::uint32_t active{0};
+        std::uint32_t queued{0};
+        std::uint64_t executed{0};
+        double cacheHitRate{0.0};
+        std::uint64_t avgLatencyUs{0};
+        std::uint32_t concurrencyLimit{0};
+    };
+    SearchLoadMetrics getSearchLoadMetrics() const;
+    bool applySearchConcurrencyTarget(std::size_t target);
     struct IngestMetricsSnapshot {
         std::size_t queued;
         std::size_t active;
@@ -241,6 +255,11 @@ public:
     // Get AppContext for app services
     app::services::AppContext getAppContext() const;
 
+    // FSM snapshots (read-only) for status/diagnostics
+    ServiceManagerSnapshot getServiceManagerFsmSnapshot() const { return serviceFsm_.snapshot(); }
+    ProviderSnapshot getEmbeddingProviderFsmSnapshot() const { return embeddingFsm_.snapshot(); }
+    PluginHostSnapshot getPluginHostFsmSnapshot() const { return pluginHostFsm_.snapshot(); }
+
     // PBI-008-11: FSM hook scaffolds for session preparation lifecycle (no-op for now)
     void onPrepareSessionRequested() {};
     void onPrepareSessionCompleted() {};
@@ -277,16 +296,19 @@ public:
     // Helper method to align vector component dimensions after embedding generator is initialized
     void alignVectorComponentDimensions();
 
-    // Model provider degraded state accessors
+    // Model provider degraded state accessors (FSM-first)
     bool isModelProviderDegraded() const {
-        return modelProviderDegraded_.load(std::memory_order_relaxed);
+        try {
+            auto snap = embeddingFsm_.snapshot();
+            return snap.state == EmbeddingProviderState::Degraded ||
+                   snap.state == EmbeddingProviderState::Failed;
+        } catch (...) {
+            return false;
+        }
     }
     const std::string& lastModelError() const { return lastModelError_; }
     const std::string& adoptedProviderPluginName() const { return adoptedProviderPluginName_; }
-    void clearModelProviderError() {
-        modelProviderDegraded_.store(false, std::memory_order_relaxed);
-        lastModelError_.clear();
-    }
+    void clearModelProviderError() { lastModelError_.clear(); }
 
     // Combined embedding initialization and search engine rebuild coroutine.
     // This method provides idempotent, race-safe initialization of embedding capabilities
@@ -300,19 +322,6 @@ public:
     // itself.
     Result<void> ensureEmbeddingGeneratorFor(const std::string& modelName);
 
-    // Check if embedding initialization has started
-    bool isEmbeddingInitStarted() const {
-        return embedInitStarted_.load(std::memory_order_acquire);
-    }
-
-    // Check if embedding initialization has completed
-    bool isEmbeddingInitCompleted() const {
-        return embedInitCompleted_.load(std::memory_order_acquire);
-    }
-
-    // Check if search engine rebuild is in progress
-    bool isRebuildInProgress() const { return rebuildInProgress_.load(std::memory_order_acquire); }
-
     // Coroutine-based initialization wrapper (awaitable). Uses the same phase logic as
     // initialization but integrates with Boost.Asio coroutine flow.
     boost::asio::awaitable<Result<void>> initializeAsyncAwaitable(yams::compat::stop_token token);
@@ -325,8 +334,35 @@ public:
         adoptedProviderPluginName_ = name;
     }
     void __test_setModelProviderDegraded(bool degraded, const std::string& error = {}) {
-        modelProviderDegraded_.store(degraded, std::memory_order_relaxed);
         lastModelError_ = error;
+        try {
+            if (degraded) {
+                embeddingFsm_.dispatch(
+                    ProviderDegradedEvent{error.empty() ? std::string{"test"} : error});
+            } else {
+                // Treat as recovered to a ready-ish state without asserting a model; use
+                // ModelLoadedEvent with dimension 0 to clear degraded state in FSM.
+                embeddingFsm_.dispatch(ModelLoadedEvent{embeddingModelName_, 0});
+            }
+        } catch (...) {
+        }
+    }
+#ifdef YAMS_TESTING
+    AbiPluginHost* __test_getAbiHost() const { return abiHost_.get(); }
+    AbiPluginLoader* __test_getAbiPluginLoader() const { return abiPluginLoader_.get(); }
+#endif
+    // Test helpers for plugin host FSM transitions (status recovery tests)
+    void __test_pluginLoadFailed(const std::string& error) {
+        try {
+            pluginHostFsm_.dispatch(PluginLoadFailedEvent{error});
+        } catch (...) {
+        }
+    }
+    void __test_pluginScanComplete(std::size_t count) {
+        try {
+            pluginHostFsm_.dispatch(AllPluginsLoadedEvent{count});
+        } catch (...) {
+        }
     }
     // Force a vector DB initialization attempt and return whether work was performed
     // (skipped=false indicates already attempted or lock-busy/disabled).
@@ -356,12 +392,14 @@ private:
     std::shared_ptr<metadata::Database> database_;
     std::shared_ptr<metadata::ConnectionPool> connectionPool_;
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
+    std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_; // PBI-043: tree diff KG integration
     std::shared_ptr<search::SearchExecutor> searchExecutor_;
     std::shared_ptr<vector::VectorIndexManager> vectorIndexManager_;
     std::shared_ptr<vector::EmbeddingGenerator> embeddingGenerator_;
     std::shared_ptr<vector::VectorDatabase> vectorDatabase_;
     std::shared_ptr<search::SearchEngineBuilder> searchBuilder_;
     std::shared_ptr<IModelProvider> modelProvider_;
+    std::unique_ptr<boost::asio::thread_pool> initPool_;
     std::unique_ptr<PluginLoader> pluginLoader_;
     std::unique_ptr<AbiPluginLoader> abiPluginLoader_;
     std::unique_ptr<AbiPluginHost> abiHost_;
@@ -396,14 +434,10 @@ private:
     bool embeddingsAutoOnAdd_{false};
     // Centralized tuning config (persistable via config file; avoids envs).
     TuningConfig tuningConfig_{};
-    // Prevent duplicate plugin autoload scheduling
-    std::atomic<bool> pluginsAutoloadScheduled_{false};
 
-    // Atomic guards for idempotent operations
-    std::atomic<bool> embedInitStarted_{false};
-    std::atomic<bool> embedInitCompleted_{false};
-    std::atomic<bool> rebuildInProgress_{false};
-    std::atomic<bool> preferredPreloadStarted_{false};
+    // Atomic guards retained:
+    //  - vectorDbInitAttempted_ (cross-process guard)
+    //  - shutdownInvoked_ (safety backstop)
 
     // Guard to ensure vector database initialization executes at most once per daemon lifetime
     std::atomic<bool> vectorDbInitAttempted_{false};
@@ -413,7 +447,8 @@ private:
     // because it was already attempted elsewhere. On failure, returns Error.
     Result<bool> initializeVectorDatabaseOnce(const std::filesystem::path& dataDir);
 
-    // Degraded provider tracking
+    // Degraded provider tracking (FSM-first). Atomic retained only for ABI/back-compat during
+    // transition, but not written by new code paths.
     std::atomic<bool> modelProviderDegraded_{false};
     std::string lastModelError_;
     std::string adoptedProviderPluginName_;
@@ -428,6 +463,11 @@ private:
 
     // Idempotence: guard against double shutdown (stop() plus destructor)
     std::atomic<bool> shutdownInvoked_{false};
+
+    // FSMs introduced by PBI-046 (initially advisory; will replace atomic flags incrementally)
+    ServiceManagerFsm serviceFsm_{};
+    EmbeddingProviderFsm embeddingFsm_{};
+    PluginHostFsm pluginHostFsm_{};
 };
 
 } // namespace yams::daemon

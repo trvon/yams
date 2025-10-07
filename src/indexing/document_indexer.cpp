@@ -12,6 +12,8 @@
 #include <yams/extraction/text_extractor.h>
 #include <yams/indexing/document_indexer.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/path_utils.h>
+#include <yams/metadata/query_helpers.h>
 
 namespace yams::indexing {
 
@@ -144,13 +146,24 @@ public:
             docInfo.fileName = path.filename().string();
             docInfo.fileExtension = path.extension().string();
             docInfo.fileSize = static_cast<int64_t>(fileSize);
+            {
+                auto derived = metadata::computePathDerivedValues(docInfo.filePath);
+                docInfo.filePath = derived.normalizedPath;
+                docInfo.pathPrefix = derived.pathPrefix;
+                docInfo.reversePath = derived.reversePath;
+                docInfo.pathHash = derived.pathHash;
+                docInfo.parentHash = derived.parentHash;
+                docInfo.pathDepth = derived.pathDepth;
+            }
             // Convert filesystem time to system_clock time
             auto fsTime = std::filesystem::last_write_time(path);
             auto scTime = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
                 fsTime - std::filesystem::file_time_type::clock::now() +
                 std::chrono::system_clock::now());
-            docInfo.modifiedTime = scTime;
-            docInfo.indexedTime = std::chrono::system_clock::now();
+            using std::chrono::floor;
+            using namespace std::chrono;
+            docInfo.modifiedTime = floor<seconds>(scTime);
+            docInfo.indexedTime = floor<seconds>(std::chrono::system_clock::now());
             docInfo.contentExtracted = !extractedText.empty();
             docInfo.extractionStatus = metadata::ExtractionStatus::Success;
 
@@ -257,7 +270,8 @@ public:
                         const auto seriesKey = path.string();
                         // Find all docs with the exact same path (LIKE without wildcards acts as
                         // exact)
-                        auto prevListRes = metadataRepo_->findDocumentsByPath(seriesKey);
+                        auto prevListRes =
+                            metadata::queryDocumentsByPattern(*metadataRepo_, seriesKey);
                         if (prevListRes) {
                             const auto& prevList = prevListRes.value();
                             std::optional<metadata::DocumentInfo> prevLatest;
@@ -298,7 +312,8 @@ public:
                                 rel.parentId = prevLatest->id;
                                 rel.childId = documentId;
                                 rel.relationshipType = metadata::RelationshipType::VersionOf;
-                                rel.createdTime = std::chrono::system_clock::now();
+                                rel.createdTime = std::chrono::floor<std::chrono::seconds>(
+                                    std::chrono::system_clock::now());
                                 (void)metadataRepo_->insertRelationship(rel);
 
                                 // Compute incremented version
@@ -329,7 +344,7 @@ public:
                                 seriesKey, documentId, newVersion,
                                 prevLatest.has_value() ? prevLatest->id : 0);
                         } else {
-                            spdlog::warn("Versioning: findDocumentsByPath failed for '{}': {}",
+                            spdlog::warn("Versioning: queryDocumentsByPattern failed for '{}': {}",
                                          path.string(), prevListRes.error().message);
                         }
                     } catch (const std::exception& ex) {

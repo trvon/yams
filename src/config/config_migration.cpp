@@ -299,7 +299,7 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
 
             {"wal",
              {{"enable", "true"},
-              {"wal_directory", "./wal"},
+              {"wal_directory", "wal"},
               {"max_log_size", "104857600"},
               {"sync_interval", "1000"},
               {"sync_timeout_ms", "100"},
@@ -421,7 +421,7 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
               {"parallel_search", "true"}}},
 
             {"knowledge_graph",
-             {{"db_path", "~/.yams/data/yams.db"},
+             {{"db_path", "yams.db"},
               {"enable_alias_fts", "true"},
               {"enable_wal", "true"},
               {"prefer_exact_alias_first", "true"},
@@ -564,7 +564,7 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
               {"decay_interval_hours", "24"},
               {"max_boost_factor", "2.0"},
               {"enable_persistence", "true"},
-              {"data_file", "~/.yams/data/hotzones.db"},
+              {"data_file", "hotzones.db"},
               {"decay_processing_interval_minutes", "60"},
               {"enable_shared_hotzones", "false"}}},
 
@@ -821,10 +821,9 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::mergeC
         merged["storage"]["base_path"] = merged["core"]["data_dir"];
     }
 
-    // Special handling for knowledge_graph.db_path
-    if (merged["knowledge_graph"]["db_path"].empty() &&
-        merged["core"].find("data_dir") != merged["core"].end()) {
-        merged["knowledge_graph"]["db_path"] = merged["core"]["data_dir"] + "/yams.db";
+    // Special handling for knowledge_graph.db_path - use relative path
+    if (merged["knowledge_graph"]["db_path"].empty()) {
+        merged["knowledge_graph"]["db_path"] = "yams.db";
     }
 
     return merged;

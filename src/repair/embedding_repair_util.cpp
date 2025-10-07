@@ -1,6 +1,7 @@
 #include <yams/extraction/extraction_util.h>
 #include <yams/extraction/text_extractor.h>
 #include <yams/ingest/ingest_helpers.h>
+#include <yams/metadata/query_helpers.h>
 #include <yams/repair/embedding_repair_util.h>
 #include <yams/vector/document_chunker.h>
 #include <yams/vector/vector_database.h>
@@ -124,7 +125,7 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
 
     if (documentHashes.empty()) {
         // Process all documents
-        auto allDocs = metadataRepo->findDocumentsByPath("%");
+        auto allDocs = metadata::queryDocumentsByPattern(*metadataRepo, "%");
         if (!allDocs) {
             return Error{allDocs.error()};
         }
@@ -298,7 +299,7 @@ getDocumentsMissingEmbeddings(std::shared_ptr<metadata::IMetadataRepository> met
     std::vector<std::string> missingEmbeddings;
 
     // Get all documents
-    auto allDocs = metadataRepo->findDocumentsByPath("%");
+    auto allDocs = metadata::queryDocumentsByPattern(*metadataRepo, "%");
     if (!allDocs) {
         return Error{allDocs.error()};
     }

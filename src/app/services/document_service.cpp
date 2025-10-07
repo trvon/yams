@@ -10,7 +10,10 @@
 #include <yams/extraction/format_handlers/text_basic_handler.hpp>
 #include <yams/extraction/text_extractor.h>
 
+#include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/path_utils.h>
+#include <yams/metadata/query_helpers.h>
 
 #include <algorithm>
 #include <cctype>
@@ -19,6 +22,7 @@
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -75,6 +79,16 @@ inline std::string globToSqlLike(const std::string& glob) {
 
 inline int64_t toEpochSeconds(const std::chrono::system_clock::time_point& tp) {
     return std::chrono::duration_cast<std::chrono::seconds>(tp.time_since_epoch()).count();
+}
+
+inline void populatePathDerivedFields(metadata::DocumentInfo& info) {
+    auto derived = metadata::computePathDerivedValues(info.filePath);
+    info.filePath = derived.normalizedPath;
+    info.pathPrefix = derived.pathPrefix;
+    info.reversePath = derived.reversePath;
+    info.pathHash = derived.pathHash;
+    info.parentHash = derived.parentHash;
+    info.pathDepth = derived.pathDepth;
 }
 
 inline void addTagPairsToMap(const std::vector<std::string>& tags,
@@ -275,13 +289,18 @@ public:
             }
             if (info.mimeType.empty())
                 info.mimeType = "application/octet-stream";
+            using std::chrono::floor;
+            using namespace std::chrono;
             auto now = std::chrono::system_clock::now();
-            info.createdTime = now;
-            info.modifiedTime = now;
-            info.indexedTime = now;
+            auto now_s = floor<seconds>(now);
+            info.createdTime = now_s;
+            info.modifiedTime = now_s;
+            info.indexedTime = now_s;
             info.contentExtracted = isTextMime(info.mimeType);
             info.extractionStatus = info.contentExtracted ? metadata::ExtractionStatus::Success
                                                           : metadata::ExtractionStatus::Pending;
+
+            populatePathDerivedFields(info);
 
             auto ins = ctx_.metadataRepo->insertDocument(info);
             if (ins) {
@@ -407,7 +426,7 @@ public:
                 return Error{ErrorCode::NotInitialized,
                              "Metadata repository not available for partial hash resolution"};
             }
-            auto docsRes = ctx_.metadataRepo->findDocumentsByPath("%");
+            auto docsRes = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%");
             if (!docsRes) {
                 return Error{ErrorCode::InternalError,
                              "Failed to enumerate documents for partial hash resolution: " +
@@ -437,7 +456,7 @@ public:
         // Find document in metadata repository to populate metadata/path/name/size
         std::optional<metadata::DocumentInfo> foundDoc;
         if (ctx_.metadataRepo) {
-            auto docsRes = ctx_.metadataRepo->findDocumentsByPath("%");
+            auto docsRes = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%");
             if (docsRes) {
                 for (const auto& d : docsRes.value()) {
                     if (d.sha256Hash == resolvedHash) {
@@ -518,25 +537,109 @@ public:
         }
         resp.document = doc;
 
-        // Build simple related graph (same directory = distance 1)
+        // Build knowledge graph relationships (Task 043-12b)
         if (req.graph && ctx_.metadataRepo && foundDoc) {
-            std::filesystem::path baseDir = std::filesystem::path(foundDoc->filePath).parent_path();
-            auto docsRes = ctx_.metadataRepo->findDocumentsByPath("%");
-            if (docsRes) {
-                for (const auto& other : docsRes.value()) {
-                    if (other.sha256Hash == foundDoc->sha256Hash)
-                        continue;
-                    if (std::filesystem::path(other.filePath).parent_path() == baseDir) {
-                        RelatedDocument rd;
-                        rd.hash = other.sha256Hash;
-                        rd.path = other.filePath;
-                        rd.distance = 1;
-                        resp.related.push_back(std::move(rd));
+            // Track relationships by distance for depth limiting
+            std::unordered_map<std::string, std::pair<int, std::string>> seenHashes;
+            seenHashes[foundDoc->sha256Hash] = {0, "self"};
+
+            int maxDepth = std::clamp(req.depth, 1, 5);
+
+            // Level 1: Same-content relationships via KG (blob nodes)
+            if (ctx_.kgStore && maxDepth >= 1) {
+                auto blobNodeRes = ctx_.kgStore->ensureBlobNode(foundDoc->sha256Hash);
+                if (blobNodeRes) {
+                    auto edgesRes = ctx_.kgStore->getEdgesFrom(blobNodeRes.value(), "has_version");
+                    if (edgesRes) {
+                        for (const auto& edge : edgesRes.value()) {
+                            // Get path node and resolve to document
+                            auto pathNodeRes = ctx_.kgStore->getNodeById(edge.dstNodeId);
+                            if (pathNodeRes && pathNodeRes.value()) {
+                                const auto& pathNode = pathNodeRes.value().value();
+                                // Extract path from node key (format: "path:<snapshot>:<path>")
+                                if (pathNode.nodeKey.starts_with("path:")) {
+                                    // Parse node key: "path:<snapshot>:<path>"
+                                    size_t firstColon = pathNode.nodeKey.find(':', 5);
+                                    size_t secondColon = pathNode.nodeKey.find(':', firstColon + 1);
+                                    if (secondColon != std::string::npos) {
+                                        std::string path = pathNode.nodeKey.substr(secondColon + 1);
+                                        // Find document with this path
+                                        auto docRes = metadata::queryDocumentsByPattern(
+                                            *ctx_.metadataRepo, path);
+                                        if (docRes && !docRes.value().empty()) {
+                                            const auto& doc = docRes.value()[0];
+                                            if (seenHashes.find(doc.sha256Hash) ==
+                                                seenHashes.end()) {
+                                                RelatedDocument rd;
+                                                rd.hash = doc.sha256Hash;
+                                                rd.path = doc.filePath;
+                                                rd.name = doc.fileName;
+                                                rd.relationship = "same_content";
+                                                rd.distance = 1;
+                                                resp.related.push_back(std::move(rd));
+                                                seenHashes[doc.sha256Hash] = {1, "same_content"};
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
-            // depth>1 could be implemented later; we cap at distance 1
-            (void)req.depth;
+
+            // Level 2: Rename chains via KG path history
+            if (ctx_.kgStore && maxDepth >= 1) {
+                auto historyRes = ctx_.kgStore->fetchPathHistory(foundDoc->filePath, 100);
+                if (historyRes) {
+                    for (const auto& record : historyRes.value()) {
+                        if (record.path != foundDoc->filePath &&
+                            seenHashes.find(record.blobHash) == seenHashes.end()) {
+                            // Resolve to document
+                            auto docRes = ctx_.metadataRepo->getDocumentByHash(record.blobHash);
+                            if (docRes && docRes.value()) {
+                                const auto& doc = docRes.value().value();
+                                RelatedDocument rd;
+                                rd.hash = doc.sha256Hash;
+                                rd.path = doc.filePath;
+                                rd.name = doc.fileName;
+                                rd.relationship = record.changeType.value_or("renamed");
+                                rd.distance = 1;
+                                resp.related.push_back(std::move(rd));
+                                seenHashes[doc.sha256Hash] = {1, "rename_chain"};
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Level 3: Fallback to directory-based relationships if no KG results
+            if (resp.related.empty()) {
+                std::filesystem::path baseDir =
+                    std::filesystem::path(foundDoc->filePath).parent_path();
+                auto docsRes = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%");
+                if (docsRes) {
+                    int count = 0;
+                    for (const auto& other : docsRes.value()) {
+                        if (other.sha256Hash == foundDoc->sha256Hash)
+                            continue;
+                        if (std::filesystem::path(other.filePath).parent_path() == baseDir) {
+                            if (seenHashes.find(other.sha256Hash) == seenHashes.end() &&
+                                count < 20) {
+                                RelatedDocument rd;
+                                rd.hash = other.sha256Hash;
+                                rd.path = other.filePath;
+                                rd.name = other.fileName;
+                                rd.relationship = "same_directory";
+                                rd.distance = 1;
+                                resp.related.push_back(std::move(rd));
+                                seenHashes[other.sha256Hash] = {1, "same_directory"};
+                                count++;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         return resp;
@@ -578,7 +681,7 @@ public:
             std::string mime;
             std::string ext;
             if (ctx_.metadataRepo) {
-                auto docsRes = ctx_.metadataRepo->findDocumentsByPath("%");
+                auto docsRes = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%");
                 if (docsRes) {
                     for (const auto& d : docsRes.value()) {
                         if (d.sha256Hash == hash) {
@@ -658,7 +761,7 @@ public:
         bool forceCold = false;
         std::optional<yams::metadata::DocumentInfo> targetDoc;
         if (ctx_.metadataRepo) {
-            auto docsRes = ctx_.metadataRepo->findDocumentsByPath("%");
+            auto docsRes = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%");
             if (docsRes) {
                 for (const auto& d : docsRes.value()) {
                     if (d.sha256Hash == hash) {
@@ -737,75 +840,159 @@ public:
             return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
         }
 
-        std::string sqlPattern = req.pattern.empty() ? "%" : globToSqlLike(req.pattern);
-        auto docsRes = ctx_.metadataRepo->findDocumentsByPath(sqlPattern);
-        if (!docsRes) {
-            return Error{ErrorCode::InternalError,
-                         "Failed to query documents: " + docsRes.error().message};
-        }
+        std::vector<metadata::DocumentInfo> docs;
+        bool usedQuery = false;
+        std::size_t totalFoundApprox = 0;
 
-        std::vector<metadata::DocumentInfo> docs = docsRes.value();
+        metadata::DocumentQueryOptions queryOpts;
+        queryOpts.limit = req.limit > 0 ? req.limit : 0;
+        queryOpts.offset = std::max(0, req.offset);
+        queryOpts.pathsOnly = req.pathsOnly;
 
-        // Filter by extension (accept ".md" or "md")
-        if (!req.extension.empty()) {
-            std::string wanted = normalizeExtension(req.extension);
-            docs.erase(std::remove_if(docs.begin(), docs.end(),
-                                      [&](const metadata::DocumentInfo& d) {
-                                          std::string ext = d.fileExtension;
-                                          return normalizeExtension(ext) != wanted;
-                                      }),
-                       docs.end());
-        }
+        auto normalizeSingleExtension = [&](const std::string& ext) -> std::optional<std::string> {
+            if (ext.empty())
+                return std::nullopt;
+            if (ext.find(',') != std::string::npos)
+                return std::nullopt; // delegate to fallback for multi-extension pattern
+            return normalizeExtension(ext);
+        };
 
-        // Filter by type (text/binary) or explicit flags
+        if (auto normExt = normalizeSingleExtension(req.extension))
+            queryOpts.extension = *normExt;
+
+        if (!req.mime.empty())
+            queryOpts.mimeType = req.mime;
+
         if (req.text || req.type == "text") {
-            docs.erase(std::remove_if(
-                           docs.begin(), docs.end(),
-                           [](const metadata::DocumentInfo& d) { return !isTextMime(d.mimeType); }),
-                       docs.end());
+            queryOpts.textOnly = true;
         } else if (req.binary || req.type == "binary") {
-            docs.erase(std::remove_if(
-                           docs.begin(), docs.end(),
-                           [](const metadata::DocumentInfo& d) { return isTextMime(d.mimeType); }),
-                       docs.end());
+            queryOpts.binaryOnly = true;
         }
 
-        // Filter by tags (presence-based)
-        if (!req.tags.empty()) {
-            std::vector<metadata::DocumentInfo> filtered;
-            for (const auto& d : docs) {
-                auto md = ctx_.metadataRepo->getAllMetadata(d.id);
-                if (!md)
-                    continue;
-                auto tags = extractTags(md.value());
-                bool has = false;
-                for (const auto& t : req.tags) {
-                    if (std::find(tags.begin(), tags.end(), t) != tags.end()) {
-                        has = true;
-                        break;
-                    }
-                }
-                if (has)
-                    filtered.push_back(d);
-            }
-            docs.swap(filtered);
-        }
+        if (!req.tags.empty())
+            queryOpts.tags = req.tags;
 
-        // Recent: keep N most recently indexed (desc)
-        if (req.recent && *req.recent > 0) {
-            std::sort(docs.begin(), docs.end(),
-                      [](const auto& a, const auto& b) { return a.indexedTime > b.indexedTime; });
-            if (static_cast<int>(docs.size()) > *req.recent) {
-                docs.resize(static_cast<size_t>(*req.recent));
-            }
-        }
-
-        // Sorting (minimal): name, asc|desc; default to req.sortBy if present
         if (req.sortBy == "name") {
-            std::sort(docs.begin(), docs.end(),
-                      [](const auto& a, const auto& b) { return a.fileName < b.fileName; });
-            if (req.sortOrder == "desc") {
-                std::reverse(docs.begin(), docs.end());
+            queryOpts.orderByNameAsc = (req.sortOrder != "desc");
+        } else {
+            queryOpts.orderByIndexedDesc = (req.sortOrder != "asc");
+        }
+
+        bool useFallback = false;
+        if (!req.pattern.empty()) {
+            const auto& pattern = req.pattern;
+            auto wildcardPos = pattern.find_first_of("*?");
+            bool hasWildcard = wildcardPos != std::string::npos;
+
+            if (!hasWildcard) {
+                queryOpts.exactPath = pattern;
+            } else if (pattern.back() == '*' &&
+                       pattern.find_first_of("*?", wildcardPos + 1) == pattern.size() - 1) {
+                std::string prefix = pattern.substr(0, pattern.size() - 1);
+                while (!prefix.empty() && (prefix.back() == '*' || prefix.back() == '?'))
+                    prefix.pop_back();
+                queryOpts.pathPrefix = prefix;
+                if (!prefix.empty()) {
+                    char tail = prefix.back();
+                    if (tail == '/' || tail == '\\')
+                        queryOpts.prefixIsDirectory = true;
+                }
+            } else if (pattern.front() == '*' &&
+                       pattern.find_first_of("*?", wildcardPos + 1) == std::string::npos) {
+                queryOpts.containsFragment = pattern.substr(1);
+                queryOpts.containsUsesFts = true;
+            } else {
+                useFallback = true;
+            }
+        }
+
+        if (!useFallback) {
+            auto docsRes = ctx_.metadataRepo->queryDocuments(queryOpts);
+            if (!docsRes) {
+                return Error{ErrorCode::InternalError,
+                             "Failed to query documents: " + docsRes.error().message};
+            }
+            docs = std::move(docsRes.value());
+            usedQuery = true;
+            totalFoundApprox = static_cast<std::size_t>(queryOpts.offset) + docs.size();
+        }
+
+        if (!usedQuery) {
+            std::string sqlPattern = req.pattern.empty() ? "%" : globToSqlLike(req.pattern);
+            auto docsRes = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, sqlPattern);
+            if (!docsRes) {
+                return Error{ErrorCode::InternalError,
+                             "Failed to query documents: " + docsRes.error().message};
+            }
+
+            docs = std::move(docsRes.value());
+
+            // Filter by extension (accept ".md" or "md")
+            if (!req.extension.empty()) {
+                std::string wanted = normalizeExtension(req.extension);
+                docs.erase(std::remove_if(docs.begin(), docs.end(),
+                                          [&](const metadata::DocumentInfo& d) {
+                                              std::string ext = d.fileExtension;
+                                              return normalizeExtension(ext) != wanted;
+                                          }),
+                           docs.end());
+            }
+        }
+
+        if (!usedQuery) {
+            // Filter by type (text/binary) or explicit flags
+            if (req.text || req.type == "text") {
+                docs.erase(std::remove_if(docs.begin(), docs.end(),
+                                          [](const metadata::DocumentInfo& d) {
+                                              return !isTextMime(d.mimeType);
+                                          }),
+                           docs.end());
+            } else if (req.binary || req.type == "binary") {
+                docs.erase(std::remove_if(docs.begin(), docs.end(),
+                                          [](const metadata::DocumentInfo& d) {
+                                              return isTextMime(d.mimeType);
+                                          }),
+                           docs.end());
+            }
+
+            // Filter by tags (presence-based)
+            if (!req.tags.empty()) {
+                std::vector<metadata::DocumentInfo> filtered;
+                for (const auto& d : docs) {
+                    auto md = ctx_.metadataRepo->getAllMetadata(d.id);
+                    if (!md)
+                        continue;
+                    auto tags = extractTags(md.value());
+                    bool has = false;
+                    for (const auto& t : req.tags) {
+                        if (std::find(tags.begin(), tags.end(), t) != tags.end()) {
+                            has = true;
+                            break;
+                        }
+                    }
+                    if (has)
+                        filtered.push_back(d);
+                }
+                docs.swap(filtered);
+            }
+
+            // Recent: keep N most recently indexed (desc)
+            if (req.recent && *req.recent > 0) {
+                std::sort(docs.begin(), docs.end(), [](const auto& a, const auto& b) {
+                    return a.indexedTime > b.indexedTime;
+                });
+                if (static_cast<int>(docs.size()) > *req.recent) {
+                    docs.resize(static_cast<size_t>(*req.recent));
+                }
+            }
+
+            // Sorting (minimal): name, asc|desc; default to req.sortBy if present
+            if (req.sortBy == "name") {
+                std::sort(docs.begin(), docs.end(),
+                          [](const auto& a, const auto& b) { return a.fileName < b.fileName; });
+                if (req.sortOrder == "desc") {
+                    std::reverse(docs.begin(), docs.end());
+                }
             }
         }
 
@@ -813,14 +1000,30 @@ public:
         int start = std::max(0, req.offset);
         int lim = std::max(0, req.limit);
         std::vector<metadata::DocumentInfo> page;
-        if (start < static_cast<int>(docs.size())) {
+        if (usedQuery) {
+            page = std::move(docs);
+        } else if (start < static_cast<int>(docs.size())) {
             auto itStart = docs.begin() + start;
             auto itEnd = (lim > 0) ? std::min(docs.end(), itStart + lim) : docs.end();
             page.assign(itStart, itEnd);
         }
 
+        std::unordered_map<int64_t, std::unordered_map<std::string, metadata::MetadataValue>>
+            metadataCache;
+        if (!page.empty() &&
+            (req.showMetadata || req.showTags || (!req.tags.empty() && !usedQuery))) {
+            std::vector<int64_t> docIds;
+            docIds.reserve(page.size());
+            for (const auto& doc : page)
+                docIds.push_back(doc.id);
+            auto metaRes =
+                ctx_.metadataRepo->getMetadataForDocuments(std::span<const int64_t>(docIds));
+            if (metaRes)
+                metadataCache = std::move(metaRes.value());
+        }
+
         ListDocumentsResponse out;
-        out.totalFound = docs.size();
+        out.totalFound = usedQuery ? totalFoundApprox : docs.size();
         out.count = page.size();
         out.sortBy = req.sortBy;
         out.sortOrder = req.sortOrder;
@@ -883,8 +1086,11 @@ public:
                 e.created = toEpochSeconds(d.createdTime);
                 e.modified = toEpochSeconds(d.modifiedTime);
                 e.indexed = toEpochSeconds(d.indexedTime);
-                std::optional<std::unordered_map<std::string, metadata::MetadataValue>>
-                    cachedMetadata;
+                const auto* cachedMetadata =
+                    [&]() -> const std::unordered_map<std::string, metadata::MetadataValue>* {
+                    auto it = metadataCache.find(d.id);
+                    return it == metadataCache.end() ? nullptr : &it->second;
+                }();
                 if (req.showSnippets && req.snippetLength > 0) {
                     auto contentResult = ctx_.metadataRepo->getContent(d.id);
                     if (contentResult) {
@@ -929,11 +1135,6 @@ public:
                     }
                 }
                 if (req.showTags || req.showMetadata) {
-                    if (!cachedMetadata) {
-                        auto metadataResult = ctx_.metadataRepo->getAllMetadata(d.id);
-                        if (metadataResult)
-                            cachedMetadata = metadataResult.value();
-                    }
                     if (cachedMetadata) {
                         if (req.showTags) {
                             e.tags = extractTags(*cachedMetadata);
@@ -978,8 +1179,11 @@ public:
                 e.created = toEpochSeconds(d.createdTime);
                 e.modified = toEpochSeconds(d.modifiedTime);
                 e.indexed = toEpochSeconds(d.indexedTime);
-                std::optional<std::unordered_map<std::string, metadata::MetadataValue>>
-                    cachedMetadata;
+                const auto* cachedMetadata =
+                    [&]() -> const std::unordered_map<std::string, metadata::MetadataValue>* {
+                    auto it = metadataCache.find(d.id);
+                    return it == metadataCache.end() ? nullptr : &it->second;
+                }();
                 if (req.showSnippets && req.snippetLength > 0) {
                     auto contentResult = ctx_.metadataRepo->getContent(d.id);
                     if (contentResult) {
@@ -1024,11 +1228,6 @@ public:
                     }
                 }
                 if (req.showTags || req.showMetadata) {
-                    if (!cachedMetadata) {
-                        auto metadataResult = ctx_.metadataRepo->getAllMetadata(d.id);
-                        if (metadataResult)
-                            cachedMetadata = metadataResult.value();
-                    }
                     if (cachedMetadata) {
                         if (req.showTags) {
                             e.tags = extractTags(*cachedMetadata);
@@ -1066,7 +1265,7 @@ public:
         }
 
         // Find target document by hash
-        auto docsRes = ctx_.metadataRepo->findDocumentsByPath("%");
+        auto docsRes = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%");
         if (!docsRes) {
             return Error{ErrorCode::InternalError,
                          "Failed to enumerate documents: " + docsRes.error().message};
@@ -1226,9 +1425,9 @@ public:
             return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
         }
         // Match filename anywhere at end of path; fallback to direct LIKE
-        auto byName = ctx_.metadataRepo->findDocumentsByPath("%/" + name);
+        auto byName = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%/" + name);
         if (!byName) {
-            auto direct = ctx_.metadataRepo->findDocumentsByPath(name);
+            auto direct = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, name);
             if (!direct) {
                 return Error{ErrorCode::NotFound, "Document not found: " + name};
             }
@@ -1273,7 +1472,7 @@ public:
 
         // If a hash is provided (full or prefix), resolve it first
         if (!req.hash.empty()) {
-            auto all = ctx_.metadataRepo->findDocumentsByPath("%");
+            auto all = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%");
             if (!all) {
                 return Error{ErrorCode::InternalError,
                              "Failed to enumerate documents: " + all.error().message};
@@ -1293,16 +1492,16 @@ public:
 
         if (!req.pattern.empty()) {
             auto pat = globToSqlLike(req.pattern);
-            auto res = ctx_.metadataRepo->findDocumentsByPath(pat);
+            auto res = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, pat);
             if (res && !res.value().empty()) {
                 addDocVec(res.value());
             }
         }
         for (const auto& n : req.names) {
-            auto res = ctx_.metadataRepo->findDocumentsByPath("%/" + n);
+            auto res = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%/" + n);
             if (!res || res.value().empty()) {
                 // Try direct path match
-                auto res2 = ctx_.metadataRepo->findDocumentsByPath(n);
+                auto res2 = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, n);
                 if (res2 && !res2.value().empty())
                     addDocVec(res2.value());
                 continue;
@@ -1310,9 +1509,9 @@ public:
             addDocVec(res.value());
         }
         if (!req.name.empty()) {
-            auto res = ctx_.metadataRepo->findDocumentsByPath("%/" + req.name);
+            auto res = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%/" + req.name);
             if (!res || res.value().empty()) {
-                auto res2 = ctx_.metadataRepo->findDocumentsByPath(req.name);
+                auto res2 = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, req.name);
                 if (res2 && !res2.value().empty())
                     addDocVec(res2.value());
             } else {

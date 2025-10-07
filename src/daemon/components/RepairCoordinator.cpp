@@ -1,6 +1,7 @@
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/daemon/components/RepairCoordinator.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/metadata/query_helpers.h>
 
 #include <spdlog/spdlog.h>
 #include <condition_variable>
@@ -145,7 +146,7 @@ boost::asio::awaitable<void> RepairCoordinator::runAsync() {
                 if (meta) {
                     auto vectorDb = services_ ? services_->getVectorDatabase() : nullptr;
                     if (vectorDb) {
-                        auto allDocs = meta->findDocumentsByPath("%");
+                        auto allDocs = metadata::queryDocumentsByPattern(*meta, "%");
                         if (allDocs && !allDocs.value().empty()) {
                             size_t enq = 0;
                             {
@@ -460,7 +461,7 @@ boost::asio::awaitable<void> RepairCoordinator::runAsync() {
                     // Scan all docs to find those without embeddings
                     auto vectorDb = services_ ? services_->getVectorDatabase() : nullptr;
                     if (vectorDb) {
-                        auto allDocs = meta->findDocumentsByPath("%");
+                        auto allDocs = metadata::queryDocumentsByPattern(*meta, "%");
                         if (allDocs && !allDocs.value().empty()) {
                             size_t enq = 0;
                             {

@@ -23,6 +23,7 @@
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/integrity/repair_utils.h>
+#include <yams/metadata/query_helpers.h>
 #include <yams/vector/dim_resolver.h>
 #include <yams/vector/dynamic_batcher.h>
 #include <yams/vector/embedding_generator.h>
@@ -274,7 +275,7 @@ void EmbeddingService::triggerRepairIfNeeded() {
         }
 
         // Just check if we have any documents without embeddings (sample check)
-        auto docsResult = metadataRepo_->findDocumentsByPath("%");
+        auto docsResult = metadata::queryDocumentsByPattern(*metadataRepo_, "%");
         if (!docsResult || docsResult.value().empty()) {
             spdlog::debug("No documents to process");
             return;
@@ -413,7 +414,7 @@ void EmbeddingService::runRepair(yams::compat::stop_token stopToken) {
             return;
         }
 
-        auto docsResult = metadataRepo_->findDocumentsByPath("%");
+        auto docsResult = metadata::queryDocumentsByPattern(*metadataRepo_, "%");
         if (!docsResult) {
             spdlog::error("Repair thread: Failed to get documents");
             return;

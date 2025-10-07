@@ -25,6 +25,14 @@ TEST(StatusResponseProto, RoundTripLifecycleAndError) {
     s.lifecycleState = "starting"; // will be mirrored to overallStatus on decode
     s.lastError = "boom";          // encoded via reserved request_counts key
     s.requestCounts["worker_threads"] = 4;
+    // New FSM-exported fields
+    s.requestCounts["service_fsm_state"] = 3; // arbitrary enum code
+    s.requestCounts["embedding_state"] = 2;   // arbitrary enum code
+    s.requestCounts["plugin_host_state"] = 1; // arbitrary enum code
+    s.readinessStates["embedding_ready"] = false;
+    s.readinessStates["plugins_ready"] = true;
+    // New degraded flags should serialize too
+    s.readinessStates["plugins_degraded"] = true;
 
     Message m{};
     m.payload = Response{std::in_place_type<StatusResponse>, s};
@@ -51,4 +59,15 @@ TEST(StatusResponseProto, RoundTripLifecycleAndError) {
     auto it = r.requestCounts.find("worker_threads");
     ASSERT_NE(it, r.requestCounts.end());
     EXPECT_EQ(it->second, 4u);
+
+    // FSM fields should also survive serialization
+    EXPECT_NE(r.requestCounts.find("service_fsm_state"), r.requestCounts.end());
+    EXPECT_NE(r.requestCounts.find("embedding_state"), r.requestCounts.end());
+    EXPECT_NE(r.requestCounts.find("plugin_host_state"), r.requestCounts.end());
+    auto it_embed_ready = r.readinessStates.find("embedding_ready");
+    auto it_plugins_ready = r.readinessStates.find("plugins_ready");
+    auto it_plugins_degraded = r.readinessStates.find("plugins_degraded");
+    ASSERT_NE(it_embed_ready, r.readinessStates.end());
+    ASSERT_NE(it_plugins_ready, r.readinessStates.end());
+    ASSERT_NE(it_plugins_degraded, r.readinessStates.end());
 }

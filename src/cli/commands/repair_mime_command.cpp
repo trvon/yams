@@ -4,6 +4,7 @@
 #include <yams/detection/file_type_detector.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/query_helpers.h>
 
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -80,7 +81,7 @@ public:
                 // Use a LIKE filter that matches anywhere; DB expects '%' wildcards
                 like = "%" + pathFilter_ + "%";
             }
-            auto res = metadataRepo->findDocumentsByPath(like);
+            auto res = metadata::queryDocumentsByPattern(*metadataRepo, like);
             if (!res)
                 return res.error();
             docs = std::move(res.value());

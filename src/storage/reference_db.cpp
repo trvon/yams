@@ -153,6 +153,18 @@ public:
 
         // Set busy timeout for concurrent transactions (15 seconds)
         sqlite3_busy_timeout(db_, 15000);
+
+        // WAL light mode: if YAMS_TESTING is set, use memory journal mode
+        // to avoid WAL contention during parallel test runs
+        if (const char* test_env = std::getenv("YAMS_TESTING")) {
+            std::string v(test_env);
+            std::transform(v.begin(), v.end(), v.begin(),
+                           [](unsigned char c) { return (char)std::tolower(c); });
+            if (v == "1" || v == "true" || v == "yes" || v == "on") {
+                execute("PRAGMA journal_mode = MEMORY");
+                spdlog::debug("Reference DB: using MEMORY journal mode (YAMS_TESTING=1)");
+            }
+        }
     }
 
     ~Database() {

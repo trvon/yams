@@ -177,21 +177,24 @@ protected:
         testDoc1_.fileName = "test1.txt";
         testDoc1_.filePath = testDir_ / "test1.txt";
         testDoc1_.fileSize = 1024;
-        testDoc1_.indexedTime = std::chrono::system_clock::now();
+        testDoc1_.indexedTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
 
         testDoc2_.id = 2;
         testDoc2_.sha256Hash = "789xyz012";
         testDoc2_.fileName = "test2.md";
         testDoc2_.filePath = testDir_ / "test2.md";
         testDoc2_.fileSize = 2048;
-        testDoc2_.indexedTime = std::chrono::system_clock::now();
+        testDoc2_.indexedTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
 
         stdinDoc_.id = 3;
         stdinDoc_.sha256Hash = "stdin123";
         stdinDoc_.fileName = "-"; // stdin indicator
         stdinDoc_.filePath = "";
         stdinDoc_.fileSize = 512;
-        stdinDoc_.indexedTime = std::chrono::system_clock::now();
+        stdinDoc_.indexedTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
     }
 
     std::shared_ptr<MockMetadataRepository> mockMetadataRepo_;

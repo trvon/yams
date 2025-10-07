@@ -1,3 +1,4 @@
+#include <yams/metadata/path_utils.h>
 #include <yams/metadata/tree_builder.h>
 
 #include <spdlog/spdlog.h>
@@ -311,13 +312,92 @@ Result<std::string> TreeBuilder::storeTree(const TreeNode& node) {
     return treeHash;
 }
 
+namespace {
+inline bool hasGlobMeta(const std::string& s) {
+    return s.find('*') != std::string::npos || s.find('?') != std::string::npos ||
+           s.find('[') != std::string::npos;
+}
+
+#if !defined(_WIN32)
+#include <fnmatch.h>
+inline bool fnmatchWrap(const std::string& pat, const std::string& p) {
+    // If the pattern uses "**" allow matching across '/'; otherwise respect path boundaries
+    int flags = FNM_PERIOD;
+    std::string pattern = pat;
+    bool hasDoubleStar = pattern.find("**") != std::string::npos;
+    if (!hasDoubleStar) {
+        flags |= FNM_PATHNAME;
+    } else {
+        // collapse '**' to '*' for libc fnmatch semantics where '*' may cross '/'
+        std::string collapsed;
+        collapsed.reserve(pattern.size());
+        for (size_t i = 0; i < pattern.size(); ++i) {
+            if (pattern[i] == '*' && i + 1 < pattern.size() && pattern[i + 1] == '*') {
+                collapsed.push_back('*');
+                ++i;
+            } else {
+                collapsed.push_back(pattern[i]);
+            }
+        }
+        pattern.swap(collapsed);
+    }
+    return fnmatch(pattern.c_str(), p.c_str(), flags) == 0;
+}
+#else
+// Minimal wildcard matcher for Windows: '*' matches any, '?' matches single char; no '[]'
+inline bool simpleGlob(const char* pat, const char* str) {
+    if (!pat || !str)
+        return false;
+    while (*pat) {
+        if (*pat == '*') {
+            while (*pat == '*')
+                ++pat;
+            if (!*pat)
+                return true;
+            for (const char* s = str; *s; ++s) {
+                if (simpleGlob(pat, s))
+                    return true;
+            }
+            return false;
+        } else if (*pat == '?') {
+            if (!*str)
+                return false;
+            ++pat;
+            ++str;
+        } else {
+            if (*pat != *str)
+                return false;
+            ++pat;
+            ++str;
+        }
+    }
+    return *str == '\0';
+}
+#endif
+} // namespace
+
 bool TreeBuilder::shouldExclude(std::string_view path,
                                 const std::vector<std::string>& patterns) const {
+    // Normalize path to forward slashes and canonical form used elsewhere
+    auto derived = computePathDerivedValues(std::string(path));
+    const std::string& norm = derived.normalizedPath;
+
     for (const auto& pattern : patterns) {
-        // Simple substring match for now (TODO: implement proper glob matching)
-        if (path.find(pattern) != std::string_view::npos) {
-            return true;
+        if (pattern.empty())
+            continue;
+        // Backward-compatibility: if no glob meta, treat as substring containment
+        if (!hasGlobMeta(pattern)) {
+            if (norm.find(pattern) != std::string::npos)
+                return true;
+            continue;
         }
+#if !defined(_WIN32)
+        if (fnmatchWrap(pattern, norm))
+            return true;
+#else
+        if (simpleGlob(pattern.c_str(), norm.c_str()))
+            return true;
+#endif
     }
     return false;
 }

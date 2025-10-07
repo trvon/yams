@@ -1,4 +1,5 @@
 #include <spdlog/spdlog.h>
+#include <chrono>
 #include <cstring>
 #include <sstream>
 #include <yams/metadata/database.h>
@@ -103,6 +104,12 @@ Result<void> Statement::bind(int index, std::span<const std::byte> blob) {
     return {};
 }
 
+// C++20 chrono support
+Result<void> Statement::bind(int index, std::chrono::sys_seconds tp) {
+    // Store as unix epoch seconds (int64)
+    return bind(index, tp.time_since_epoch().count());
+}
+
 Result<void> Statement::execute() {
     int rc = sqlite3_step(stmt_);
     if (rc != SQLITE_DONE) {
@@ -156,6 +163,12 @@ std::vector<std::byte> Statement::getBlob(int column) const {
 
 bool Statement::isNull(int column) const {
     return sqlite3_column_type(stmt_, column) == SQLITE_NULL;
+}
+
+// C++20 chrono support
+std::chrono::sys_seconds Statement::getTime(int column) const {
+    // Interpret column as unix epoch seconds
+    return std::chrono::sys_seconds{std::chrono::seconds{getInt64(column)}};
 }
 
 int Statement::columnCount() const {
@@ -338,16 +351,10 @@ Result<bool> Database::tableExists(const std::string& table) {
 }
 
 Result<bool> Database::hasFTS5() {
-    auto stmtResult = prepare("SELECT sqlite_compileoption_used('ENABLE_FTS5')");
-    if (!stmtResult)
-        return stmtResult.error();
-
-    Statement stmt = std::move(stmtResult).value();
-    auto stepResult = stmt.step();
-    if (!stepResult)
-        return stepResult.error();
-
-    return stepResult.value() && stmt.getInt(0) == 1;
+    // Prefer direct C API to avoid relying on the optional SQL function
+    // sqlite_compileoption_used() which may be omitted in some builds.
+    int enabled = sqlite3_compileoption_used("ENABLE_FTS5");
+    return enabled == 1;
 }
 
 Result<void> Database::setBusyTimeout(std::chrono::milliseconds timeout) {

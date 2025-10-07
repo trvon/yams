@@ -154,9 +154,21 @@ public:
                             }
                             if (!s.readinessStates.empty()) {
                                 nlohmann::json rj = nlohmann::json::object();
-                                for (const auto& [k, v] : s.readinessStates)
+                                bool pluginsDegraded = false;
+                                bool embeddingDegraded = false;
+                                for (const auto& [k, v] : s.readinessStates) {
                                     rj[k] = v;
+                                    if (k == std::string("plugins_degraded"))
+                                        pluginsDegraded = v;
+                                    if (k == std::string("embedding_degraded"))
+                                        embeddingDegraded = v;
+                                }
                                 j["readiness"] = std::move(rj);
+                                // Convenience summary for clients
+                                nlohmann::json dj = nlohmann::json::object();
+                                dj["plugins"] = pluginsDegraded;
+                                dj["embedding"] = embeddingDegraded;
+                                j["degraded"] = std::move(dj);
                             }
                             if (!s.initProgress.empty()) {
                                 nlohmann::json pj = nlohmann::json::object();
@@ -239,6 +251,16 @@ public:
                                 er["inter_threads"] = s.embeddingThreadsInter;
                                 j["embedding"] = std::move(er);
                             }
+                            {
+                                nlohmann::json sr = nlohmann::json::object();
+                                sr["active"] = s.searchMetrics.active;
+                                sr["queued"] = s.searchMetrics.queued;
+                                sr["executed"] = s.searchMetrics.executed;
+                                sr["cache_hit_rate"] = s.searchMetrics.cacheHitRate;
+                                sr["avg_latency_us"] = s.searchMetrics.avgLatencyUs;
+                                sr["concurrency_limit"] = s.searchMetrics.concurrencyLimit;
+                                j["search"] = std::move(sr);
+                            }
                             // Post-ingest gauges (from requestCounts)
                             {
                                 nlohmann::json pj;
@@ -272,9 +294,33 @@ public:
                                       << "%\n";
                             std::cout << "POOL : ipc=" << s.ipcPoolSize << ", io=" << s.ioPoolSize
                                       << "\n";
+                            std::cout << "SEARCH: act=" << s.searchMetrics.active
+                                      << ", queued=" << s.searchMetrics.queued
+                                      << ", hit=" << std::fixed << std::setprecision(1)
+                                      << (s.searchMetrics.cacheHitRate * 100.0)
+                                      << "% , lat=" << s.searchMetrics.avgLatencyUs << "us"
+                                      << ", limit=" << s.searchMetrics.concurrencyLimit << "\n";
+                            std::cout.unsetf(std::ios::floatfield);
                             std::cout << "WORK : thr=" << getCount("worker_threads")
                                       << ", act=" << getCount("worker_active")
                                       << ", queued=" << getCount("worker_queued") << "\n";
+                            // Surface degraded flags prominently when present
+                            try {
+                                auto it_pd = s.readinessStates.find("plugins_degraded");
+                                auto it_ed = s.readinessStates.find("embedding_degraded");
+                                if ((it_pd != s.readinessStates.end() && it_pd->second) ||
+                                    (it_ed != s.readinessStates.end() && it_ed->second)) {
+                                    std::cout << "DEGD : "
+                                              << (it_pd != s.readinessStates.end() && it_pd->second
+                                                      ? "plugins "
+                                                      : "")
+                                              << (it_ed != s.readinessStates.end() && it_ed->second
+                                                      ? "embeddings"
+                                                      : "")
+                                              << "\n";
+                                }
+                            } catch (...) {
+                            }
                             if (!s.ready && !waitingSummary.empty()) {
                                 std::cout << "WAIT : " << waitingSummary << "\n";
                             }
@@ -409,6 +455,16 @@ public:
                                               << ", inflight=" << pii << ", cap=" << pic
                                               << ", rate=" << pir << "/s, lat=" << pil << "ms\n";
                                 }
+
+                                std::cout << "SEARCH: active=" << s.searchMetrics.active
+                                          << ", queued=" << s.searchMetrics.queued
+                                          << ", executed=" << s.searchMetrics.executed
+                                          << ", cache_hit=" << std::fixed << std::setprecision(1)
+                                          << (s.searchMetrics.cacheHitRate * 100.0)
+                                          << "%, lat=" << s.searchMetrics.avgLatencyUs
+                                          << "us, limit=" << s.searchMetrics.concurrencyLimit
+                                          << "\n";
+                                std::cout.unsetf(std::ios::floatfield);
 
                                 uint64_t casPhys = getU64("cas_physical_bytes");
                                 uint64_t total = getU64("physical_total_bytes");

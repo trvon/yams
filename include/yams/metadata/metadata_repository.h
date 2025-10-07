@@ -1,9 +1,14 @@
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <functional>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <shared_mutex>
+#include <span>
 #include <string_view>
 #include <type_traits>
 #include <unordered_map>
@@ -11,9 +16,13 @@
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/document_metadata.h>
+#include <yams/metadata/metadata_concepts.h>
 #include <yams/search/bk_tree.h>
 
 namespace yams::metadata {
+
+// Forward declarations
+class KnowledgeGraphStore;
 
 // -----------------------------------------------------------------------------
 // Tree diff records (PBI-043)
@@ -56,6 +65,30 @@ struct TreeDiffQuery {
     std::optional<TreeChangeType> typeFilter;
     std::size_t limit = 1000;
     std::size_t offset = 0;
+};
+
+struct DocumentQueryOptions {
+    std::optional<std::string> exactPath;
+    std::optional<std::string> pathPrefix;
+    std::optional<std::string> containsFragment;
+    std::optional<std::string> extension;
+    std::optional<std::string> mimeType;
+    bool textOnly{false};
+    bool binaryOnly{false};
+    std::vector<std::string> tags;
+    std::optional<int64_t> modifiedAfter;
+    std::optional<int64_t> modifiedBefore;
+    std::optional<int64_t> indexedAfter;
+    std::optional<int64_t> indexedBefore;
+    int limit{0};
+    int offset{0};
+    bool orderByNameAsc{false};
+    bool orderByIndexedDesc{false};
+    bool pathsOnly{false};
+    bool prefixIsDirectory{false};
+    bool includeSubdirectories{true};
+    bool containsUsesFts{false};
+    std::optional<std::string> likePattern;
 };
 
 /**
@@ -120,12 +153,18 @@ public:
     virtual Result<void> updateFuzzyIndex(int64_t documentId) = 0;
 
     // Bulk operations
+    virtual Result<std::optional<DocumentInfo>>
+    findDocumentByExactPath(const std::string& path) = 0;
     virtual Result<std::vector<DocumentInfo>>
-    findDocumentsByPath(const std::string& pathPattern) = 0;
+    queryDocuments(const DocumentQueryOptions& options) = 0;
+    virtual Result<std::vector<DocumentInfo>>
+    findDocumentsByHashPrefix(const std::string& hashPrefix, std::size_t limit = 100) = 0;
     virtual Result<std::vector<DocumentInfo>>
     findDocumentsByExtension(const std::string& extension) = 0;
     virtual Result<std::vector<DocumentInfo>>
     findDocumentsModifiedSince(std::chrono::system_clock::time_point since) = 0;
+    virtual Result<std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>>>
+    getMetadataForDocuments(std::span<const int64_t> documentIds) = 0;
 
     // Collection and snapshot operations
     virtual Result<std::vector<DocumentInfo>>
@@ -240,7 +279,8 @@ public:
     Result<void> updateFuzzyIndex(int64_t documentId) override;
 
     // Bulk operations
-    Result<std::vector<DocumentInfo>> findDocumentsByPath(const std::string& pathPattern) override;
+    Result<std::vector<DocumentInfo>> findDocumentsByHashPrefix(const std::string& hashPrefix,
+                                                                std::size_t limit = 100) override;
     Result<std::vector<DocumentInfo>>
     findDocumentsByExtension(const std::string& extension) override;
     Result<std::vector<DocumentInfo>>
@@ -253,9 +293,15 @@ public:
     findDocumentsBySnapshot(const std::string& snapshotId) override;
     Result<std::vector<DocumentInfo>>
     findDocumentsBySnapshotLabel(const std::string& snapshotLabel) override;
+
+    Result<std::optional<DocumentInfo>> findDocumentByExactPath(const std::string& path) override;
+    Result<std::vector<DocumentInfo>> queryDocuments(const DocumentQueryOptions& options) override;
     Result<std::vector<std::string>> getCollections() override;
     Result<std::vector<std::string>> getSnapshots() override;
     Result<std::vector<std::string>> getSnapshotLabels() override;
+
+    Result<std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>>>
+    getMetadataForDocuments(std::span<const int64_t> documentIds) override;
 
     // Tag operations
     Result<std::vector<DocumentInfo>> findDocumentsByTags(const std::vector<std::string>& tags,
@@ -289,12 +335,67 @@ public:
     Result<void> finalizeTreeDiff(int64_t diffId, std::size_t changeCount,
                                   std::string_view status) override;
 
+public:
+    void setKnowledgeGraphStore(std::shared_ptr<KnowledgeGraphStore> kgStore) {
+        kgStore_ = std::move(kgStore);
+    }
+
 private:
     ConnectionPool& pool_;
+    bool hasPathIndexing_{false};
+    std::shared_ptr<KnowledgeGraphStore> kgStore_; // PBI-043: tree diff KG integration
+
+    // Legacy makeSelect removed; callers now use sql::QuerySpec to build SELECTs
 
     // Fuzzy search indices
     mutable std::unique_ptr<search::HybridFuzzySearch> fuzzySearchIndex_;
-    mutable std::mutex fuzzyIndexMutex_;
+    mutable std::shared_mutex fuzzyIndexMutex_;
+
+    struct PathCacheEntry {
+        std::string path;
+        DocumentInfo document;
+    };
+
+    // Lock-free read-mostly path cache snapshot with approximate LRU metadata
+    struct PathCacheSnapshot {
+        struct Entry {
+            DocumentInfo doc;
+            uint64_t lastHitSeq{0};
+            uint64_t insertedSeq{0};
+        };
+        std::unordered_map<std::string, Entry> data;
+        std::chrono::steady_clock::time_point timestamp{std::chrono::steady_clock::now()};
+        uint64_t buildSeq{0};
+    };
+    // Use atomic_load/atomic_store free functions for shared_ptr
+    mutable std::shared_ptr<PathCacheSnapshot> pathCacheSnapshot_{
+        std::make_shared<PathCacheSnapshot>()};
+    std::size_t pathCacheCapacity_ = 1024;
+    struct PathCacheWriteBuffer {
+        std::vector<DocumentInfo> pending;
+        std::mutex mutex;
+        std::atomic<std::size_t> size{0};
+    };
+    static constexpr std::size_t kPathCacheFlushThreshold = 32;
+    mutable PathCacheWriteBuffer pathCacheWriteBuffer_{};
+
+    struct QueryCacheEntry {
+        SearchResults results;
+        std::chrono::steady_clock::time_point timestamp{};
+        uint64_t hits{0};
+    };
+    using QueryCacheMap = std::unordered_map<std::string, QueryCacheEntry>;
+    static constexpr std::chrono::seconds kQueryCacheTtl{300};
+    static constexpr std::size_t kQueryCacheCapacity = 512;
+    mutable std::shared_ptr<QueryCacheMap> queryCacheSnapshot_{std::make_shared<QueryCacheMap>()};
+    mutable std::mutex queryCacheMutex_;
+
+    // Approximate LRU hit recording (lock-free ring of path hashes)
+    mutable std::unique_ptr<std::atomic<uint64_t>[]> hitRing_;
+    mutable std::size_t hitRingSize_{0};
+    mutable std::atomic<uint64_t> hitSeq_{0};
+    mutable std::size_t hitRingMask_{0};
+    mutable std::atomic<uint64_t> globalSeq_{0};
 
     // Helper methods for row mapping
     DocumentInfo mapDocumentRow(Statement& stmt);
@@ -302,6 +403,15 @@ private:
     DocumentRelationship mapRelationshipRow(Statement& stmt);
     SearchHistoryEntry mapSearchHistoryRow(Statement& stmt);
     SavedQuery mapSavedQueryRow(Statement& stmt);
+
+    Result<void> ensureFuzzyIndexInitialized();
+
+    std::optional<DocumentInfo> lookupPathCache(const std::string& normalizedPath) const;
+    void storePathCache(const DocumentInfo& info) const;
+    void flushPathCacheBuffer() const;
+    void recordPathHit(const std::string& normalizedPath) const;
+    void updateQueryCache(const std::string& key, const SearchResults& results) const;
+    void invalidateQueryCache() const;
 
     // Helper method to handle nested Result from withConnection
     template <typename T> Result<T> executeQuery(std::function<Result<T>(Database&)> func) {
@@ -386,3 +496,6 @@ private:
 };
 
 } // namespace yams::metadata
+
+// Concept compliance check for compile-time guarantees
+static_assert(yams::metadata::FullMetadataStore<yams::metadata::MetadataRepository>);

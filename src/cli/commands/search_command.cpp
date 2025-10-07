@@ -17,6 +17,7 @@
 #include <yams/cli/result_renderer.h>
 #include <yams/cli/session_store.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/common/utf8_utils.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/profiling.h>
 #include <yams/search/search_engine_builder.h>
@@ -239,7 +240,7 @@ private:
         if (cli_->hasExplicitDataDir())
             ropts.explicitDataDir = cli_->getDataPath();
 
-        yams::daemon::GetRequest greq;
+        yams::app::services::GetOptions greq;
         greq.hash = resolvedHash;
         greq.metadataOnly = false;
         auto gr = rsvc.get(greq, ropts);
@@ -603,9 +604,14 @@ public:
 
             // Create search request
             yams::daemon::SearchRequest dreq;
-            dreq.query = query_;
+            // Sanitize query to ensure valid UTF-8 (required by Protocol Buffer)
+            dreq.query = yams::common::sanitizeUtf8(query_);
+            if (dreq.query != query_) {
+                spdlog::debug(
+                    "Search query contained invalid UTF-8; sanitized for IPC transmission");
+            }
             dreq.limit = static_cast<size_t>(limit_);
-            dreq.fuzzy = true; // favor resilient defaults; CLI still refines client-side
+            dreq.fuzzy = fuzzySearch_; // honor explicit CLI flag; fallback logic will retry
             dreq.literalText = literalText_;
             dreq.similarity = (minSimilarity_ > 0.0f) ? static_cast<double>(minSimilarity_) : 0.7;
             dreq.pathsOnly = pathsOnly_;
@@ -1328,7 +1334,11 @@ public:
 
         // Request + render
         yams::daemon::SearchRequest dreq;
-        dreq.query = query_;
+        // Sanitize query to ensure valid UTF-8 (required by Protocol Buffer)
+        dreq.query = yams::common::sanitizeUtf8(query_);
+        if (dreq.query != query_) {
+            spdlog::debug("Search query contained invalid UTF-8; sanitized for IPC transmission");
+        }
         dreq.limit = static_cast<size_t>(limit_);
         dreq.fuzzy = true;
         dreq.literalText = literalText_;

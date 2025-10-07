@@ -65,7 +65,7 @@ DocumentInfo makeDocumentWithPath(const std::string& path, const std::string& ha
     info.fileSize = 1234;
     info.sha256Hash = hash;
     info.mimeType = mime;
-    info.createdTime = std::chrono::system_clock::now();
+    info.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
     info.modifiedTime = info.createdTime;
     info.indexedTime = info.createdTime;
     auto derived = computePathDerivedValues(path);
@@ -88,7 +88,8 @@ TEST_F(MetadataRepositoryTest, InsertAndGetDocument) {
     docInfo.fileName = "test.txt";
     docInfo.fileSize = 1024;
     docInfo.mimeType = "text/plain";
-    docInfo.createdTime = std::chrono::system_clock::now();
+    docInfo.createdTime =
+        std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
     docInfo.modifiedTime = docInfo.createdTime;
 
     auto result = repository_->insertDocument(docInfo);
@@ -122,7 +123,8 @@ TEST_F(MetadataRepositoryTest, GetDocumentByHash) {
     docInfo.fileName = "hash_test.txt";
     docInfo.fileSize = 2048;
     docInfo.mimeType = "text/plain";
-    docInfo.createdTime = std::chrono::system_clock::now();
+    docInfo.createdTime =
+        std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
     docInfo.modifiedTime = docInfo.createdTime;
 
     auto createResult = repository_->insertDocument(docInfo);
@@ -145,7 +147,8 @@ TEST_F(MetadataRepositoryTest, UpdateDocument) {
     docInfo.fileName = "original.txt";
     docInfo.fileSize = 2048;
     docInfo.mimeType = "text/plain";
-    docInfo.createdTime = std::chrono::system_clock::now();
+    docInfo.createdTime =
+        std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
     docInfo.modifiedTime = docInfo.createdTime;
 
     auto createResult = repository_->insertDocument(docInfo);
@@ -156,7 +159,8 @@ TEST_F(MetadataRepositoryTest, UpdateDocument) {
     docInfo.id = docId;
     docInfo.fileName = "updated.txt";
     docInfo.fileSize = 4096;
-    docInfo.modifiedTime = std::chrono::system_clock::now();
+    docInfo.modifiedTime =
+        std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
 
     auto updateResult = repository_->updateDocument(docInfo);
     ASSERT_TRUE(updateResult.has_value());
@@ -189,8 +193,8 @@ TEST_F(MetadataRepositoryTest, QueryDocumentsHandlesExactPrefixAndSuffix) {
     exactOpts.exactPath = "/notes/todo.md";
     auto exactRes = repository_->queryDocuments(exactOpts);
     ASSERT_TRUE(exactRes.has_value());
-    ASSERT_EQ(exactRes->size(), 1u);
-    EXPECT_EQ(exactRes->front().filePath, "/notes/todo.md");
+    ASSERT_EQ(exactRes.value().size(), 1u);
+    EXPECT_EQ(exactRes.value().front().filePath, "/notes/todo.md");
 
     // Directory prefix with subdirectories
     DocumentQueryOptions prefixOpts;
@@ -200,7 +204,7 @@ TEST_F(MetadataRepositoryTest, QueryDocumentsHandlesExactPrefixAndSuffix) {
     auto prefixRes = repository_->queryDocuments(prefixOpts);
     ASSERT_TRUE(prefixRes.has_value());
     std::vector<std::string> notePaths;
-    for (const auto& d : *prefixRes)
+    for (const auto& d : prefixRes.value())
         notePaths.push_back(d.filePath);
     std::sort(notePaths.begin(), notePaths.end());
     ASSERT_EQ(notePaths.size(), 2u);
@@ -213,16 +217,16 @@ TEST_F(MetadataRepositoryTest, QueryDocumentsHandlesExactPrefixAndSuffix) {
     containsOpts.containsUsesFts = true;
     auto containsRes = repository_->queryDocuments(containsOpts);
     ASSERT_TRUE(containsRes.has_value());
-    ASSERT_EQ(containsRes->size(), 1u);
-    EXPECT_EQ(containsRes->front().filePath, "/notes/todo.md");
+    ASSERT_EQ(containsRes.value().size(), 1u);
+    EXPECT_EQ(containsRes.value().front().filePath, "/notes/todo.md");
 
     // Extension filter restricted to `.txt`
     DocumentQueryOptions extOpts;
     extOpts.extension = ".txt";
     auto extRes = repository_->queryDocuments(extOpts);
     ASSERT_TRUE(extRes.has_value());
-    ASSERT_EQ(extRes->size(), 1u);
-    EXPECT_EQ(extRes->front().filePath, "/notes/log.txt");
+    ASSERT_EQ(extRes.value().size(), 1u);
+    EXPECT_EQ(extRes.value().front().filePath, "/notes/log.txt");
 }
 
 TEST_F(MetadataRepositoryTest, DeleteDocument) {
@@ -232,7 +236,8 @@ TEST_F(MetadataRepositoryTest, DeleteDocument) {
     docInfo.fileName = "delete_me.txt";
     docInfo.fileSize = 512;
     docInfo.mimeType = "text/plain";
-    docInfo.createdTime = std::chrono::system_clock::now();
+    docInfo.createdTime =
+        std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
     docInfo.modifiedTime = docInfo.createdTime;
 
     auto createResult = repository_->insertDocument(docInfo);
@@ -256,7 +261,8 @@ TEST_F(MetadataRepositoryTest, SetAndGetMetadata) {
     docInfo.fileName = "meta.txt";
     docInfo.fileSize = 1024;
     docInfo.mimeType = "text/plain";
-    docInfo.createdTime = std::chrono::system_clock::now();
+    docInfo.createdTime =
+        std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
     docInfo.modifiedTime = docInfo.createdTime;
 
     auto createResult = repository_->insertDocument(docInfo);
@@ -285,7 +291,8 @@ TEST_F(MetadataRepositoryTest, GetAllMetadata) {
     docInfo.fileName = "meta_all.txt";
     docInfo.fileSize = 1024;
     docInfo.mimeType = "text/plain";
-    docInfo.createdTime = std::chrono::system_clock::now();
+    docInfo.createdTime =
+        std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
     docInfo.modifiedTime = docInfo.createdTime;
 
     auto createResult = repository_->insertDocument(docInfo);
@@ -321,7 +328,8 @@ TEST_F(MetadataRepositoryTest, RemoveMetadata) {
     docInfo.fileName = "remove.txt";
     docInfo.fileSize = 1024;
     docInfo.mimeType = "text/plain";
-    docInfo.createdTime = std::chrono::system_clock::now();
+    docInfo.createdTime =
+        std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
     docInfo.modifiedTime = docInfo.createdTime;
 
     auto createResult = repository_->insertDocument(docInfo);
@@ -354,7 +362,8 @@ TEST_F(MetadataRepositoryTest, SearchFunctionality) {
     docInfo.fileName = "search.txt";
     docInfo.fileSize = 1024;
     docInfo.mimeType = "text/plain";
-    docInfo.createdTime = std::chrono::system_clock::now();
+    docInfo.createdTime =
+        std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
     docInfo.modifiedTime = docInfo.createdTime;
 
     auto createResult = repository_->insertDocument(docInfo);
@@ -380,7 +389,8 @@ TEST_F(MetadataRepositoryTest, SearchSanitizesSnippetUtf8) {
     docInfo.fileName = "bad_utf8.txt";
     docInfo.fileSize = 32;
     docInfo.mimeType = "text/plain";
-    docInfo.createdTime = std::chrono::system_clock::now();
+    docInfo.createdTime =
+        std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
     docInfo.modifiedTime = docInfo.createdTime;
 
     auto createResult = repository_->insertDocument(docInfo);
@@ -419,7 +429,8 @@ TEST_F(MetadataRepositoryTest, IndexDocumentContentSanitizesUtf8) {
     docInfo.fileName = "fts_bad_utf8.txt";
     docInfo.fileSize = 64;
     docInfo.mimeType = "text/plain";
-    docInfo.createdTime = std::chrono::system_clock::now();
+    docInfo.createdTime =
+        std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
     docInfo.modifiedTime = docInfo.createdTime;
 
     auto createResult = repository_->insertDocument(docInfo);
@@ -456,4 +467,63 @@ TEST_F(MetadataRepositoryTest, IndexDocumentContentSanitizesUtf8) {
     const auto sanitized = common::sanitizeUtf8(badContent);
     EXPECT_EQ(storedContent, sanitized);
     EXPECT_EQ(storedContent.find(static_cast<char>(0xFF)), std::string::npos);
+}
+
+TEST_F(MetadataRepositoryTest, CountsAndModifiedSince) {
+    using clock = std::chrono::system_clock;
+    auto now = std::chrono::floor<std::chrono::seconds>(clock::now());
+
+    // Three docs with different extraction statuses and modified times
+    auto d1 = makeDocumentWithPath("/tmp/a.txt", "H-A");
+    d1.extractionStatus = ExtractionStatus::Success;
+    d1.contentExtracted = true;
+    d1.modifiedTime = now - std::chrono::hours(2);
+
+    auto d2 = makeDocumentWithPath("/tmp/b.txt", "H-B");
+    d2.extractionStatus = ExtractionStatus::Pending;
+    d2.contentExtracted = false;
+    d2.modifiedTime = now - std::chrono::seconds(10);
+
+    auto d3 = makeDocumentWithPath("/tmp/c.txt", "H-C");
+    d3.extractionStatus = ExtractionStatus::Failed;
+    d3.contentExtracted = true;
+    d3.modifiedTime = now - std::chrono::hours(3);
+
+    ASSERT_TRUE(repository_->insertDocument(d1).has_value());
+    ASSERT_TRUE(repository_->insertDocument(d2).has_value());
+    ASSERT_TRUE(repository_->insertDocument(d3).has_value());
+
+    // Basic counts
+    auto total = repository_->getDocumentCount();
+    ASSERT_TRUE(total.has_value());
+    EXPECT_GE(total.value(), 3); // >= because other tests may have inserted
+
+    auto extracted = repository_->getContentExtractedDocumentCount();
+    ASSERT_TRUE(extracted.has_value());
+    // At least the two we inserted with contentExtracted=true
+    EXPECT_GE(extracted.value(), 2);
+
+    auto c_pending = repository_->getDocumentCountByExtractionStatus(ExtractionStatus::Pending);
+    auto c_success = repository_->getDocumentCountByExtractionStatus(ExtractionStatus::Success);
+    auto c_failed = repository_->getDocumentCountByExtractionStatus(ExtractionStatus::Failed);
+    ASSERT_TRUE(c_pending.has_value());
+    ASSERT_TRUE(c_success.has_value());
+    ASSERT_TRUE(c_failed.has_value());
+    EXPECT_GE(c_pending.value(), 1);
+    EXPECT_GE(c_success.value(), 1);
+    EXPECT_GE(c_failed.value(), 1);
+
+    // Modified-since should include only d2 among our three when since=now-60s
+    auto since = clock::now() - std::chrono::seconds(60);
+    auto modifiedRes = repository_->findDocumentsModifiedSince(since);
+    ASSERT_TRUE(modifiedRes.has_value());
+    // Confirm at least one document (d2) qualifies
+    bool foundRecent = false;
+    for (const auto& doc : modifiedRes.value()) {
+        if (doc.sha256Hash == d2.sha256Hash) {
+            foundRecent = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(foundRecent);
 }

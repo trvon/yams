@@ -130,7 +130,8 @@ protected:
             doc.filePath = (tempDir_ / doc.fileName).string();
             doc.sha256Hash = "hash_" + std::to_string(i);
             doc.fileSize = 1024 * (i % 100 + 1);
-            doc.createdTime = std::chrono::system_clock::now();
+            doc.createdTime =
+                std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
             auto result = metadataRepo_->insertDocument(doc);
             if (result) {
                 documentIds_.push_back(result.value());

@@ -9,6 +9,17 @@ extern "C" {
 #include <stdint.h>
 #endif
 
+#define YAMS_MOBILE_API_VERSION_MAJOR 1U
+#define YAMS_MOBILE_API_VERSION_MINOR 0U
+#define YAMS_MOBILE_API_VERSION_PATCH 0U
+
+#define YAMS_MOBILE_MAKE_VERSION(major, minor, patch)                                              \
+    ((((uint32_t)(major)) << 16U) | (((uint32_t)(minor)) << 8U) | ((uint32_t)(patch)))
+
+#define YAMS_MOBILE_API_VERSION                                                                    \
+    YAMS_MOBILE_MAKE_VERSION(YAMS_MOBILE_API_VERSION_MAJOR, YAMS_MOBILE_API_VERSION_MINOR,         \
+                             YAMS_MOBILE_API_VERSION_PATCH)
+
 #ifndef YAMS_MOBILE_API
 #if defined(_WIN32) && !defined(YAMS_STATIC)
 #ifdef yams_mobile_EXPORTS
@@ -50,6 +61,9 @@ typedef enum yams_mobile_status {
 typedef struct yams_mobile_context_t yams_mobile_context_t;
 
 typedef struct yams_mobile_context_config {
+    uint32_t struct_size; /**< Size of this struct for forward compatibility (set to sizeof). */
+    uint32_t version;     /**< Packed API version from `YAMS_MOBILE_API_VERSION`. */
+    uint32_t reserved;    /**< Reserved for future use; set to 0. */
     const char* working_directory; /**< Root path for metadata/storage; UTF-8, nullable */
     const char* cache_directory;   /**< Optional cache directory override */
     const char* telemetry_sink;    /**< Optional sink identifier ("console", "stderr", "noop", or
@@ -62,6 +76,9 @@ typedef struct yams_mobile_context_config {
  * Basic request envelope shared by grep and search flows.
  */
 typedef struct yams_mobile_request_header {
+    uint32_t struct_size;       /**< Size of this struct (set to sizeof). */
+    uint32_t version;           /**< Packed API version from `YAMS_MOBILE_API_VERSION`. */
+    uint32_t flags;             /**< Reserved flags for request-specific toggles; set to 0. */
     const char* correlation_id; /**< Optional identifier for tracing */
     uint32_t timeout_ms;        /**< 0 => default */
 } yams_mobile_request_header;
@@ -253,4 +270,47 @@ YAMS_MOBILE_API const char* yams_mobile_last_error_message(void);
 
 #ifdef __cplusplus
 } // extern "C"
+#endif
+
+#ifdef __cplusplus
+static inline yams_mobile_context_config yams_mobile_context_config_default() {
+    yams_mobile_context_config config{};
+    config.struct_size = sizeof(yams_mobile_context_config);
+    config.version = YAMS_MOBILE_API_VERSION;
+    config.reserved = 0U;
+    return config;
+}
+
+static inline yams_mobile_request_header yams_mobile_request_header_default() {
+    yams_mobile_request_header header{};
+    header.struct_size = sizeof(yams_mobile_request_header);
+    header.version = YAMS_MOBILE_API_VERSION;
+    header.flags = 0U;
+    header.correlation_id = nullptr;
+    header.timeout_ms = 0U;
+    return header;
+}
+#else
+static inline yams_mobile_context_config yams_mobile_context_config_default(void) {
+    yams_mobile_context_config config;
+    config.struct_size = sizeof(yams_mobile_context_config);
+    config.version = YAMS_MOBILE_API_VERSION;
+    config.reserved = 0U;
+    config.working_directory = NULL;
+    config.cache_directory = NULL;
+    config.telemetry_sink = NULL;
+    config.max_worker_threads = 0U;
+    config.flags = 0U;
+    return config;
+}
+
+static inline yams_mobile_request_header yams_mobile_request_header_default(void) {
+    yams_mobile_request_header header;
+    header.struct_size = sizeof(yams_mobile_request_header);
+    header.version = YAMS_MOBILE_API_VERSION;
+    header.flags = 0U;
+    header.correlation_id = NULL;
+    header.timeout_ms = 0U;
+    return header;
+}
 #endif

@@ -79,6 +79,7 @@ tree_diff_bench = executable('tree_diff_benchmarks', files('tree_diff_benchmarks
     dependency('yams_benchmarks'),
     dependency('yams_metadata'),
     dependency('yams_storage_engine'),
+    dependency('nlohmann_json'),
   ] + tracy_deps,
   cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
   install: false,

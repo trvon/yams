@@ -118,7 +118,7 @@ TEST_F(GrepServiceExpectationsIT, RegexOnlyPathsOnlyWithInclude) {
     {
         bool visible = false;
         for (int i = 0; i < 40 && !visible; ++i) {
-            auto allDocs = metadata::queryDocumentsByPattern(*ctx.metadataRepo, "%");
+            auto allDocs = yams::metadata::queryDocumentsByPattern(*ctx.metadataRepo, "%");
             if (allDocs) {
                 for (const auto& d : allDocs.value()) {
                     if (d.filePath.find("hello.txt") != std::string::npos) {
@@ -186,7 +186,7 @@ TEST_F(GrepServiceExpectationsIT, CountModeStructure) {
     {
         bool visible = false;
         for (int i = 0; i < 40 && !visible; ++i) {
-            auto allDocs = metadata::queryDocumentsByPattern(*ctx.metadataRepo, "%");
+            auto allDocs = yams::metadata::queryDocumentsByPattern(*ctx.metadataRepo, "%");
             if (allDocs) {
                 for (const auto& d : allDocs.value()) {
                     if (d.filePath.find("a.md") != std::string::npos) {
@@ -497,7 +497,7 @@ TEST_F(GrepServiceExpectationsIT, BinaryFileNoUtf8ErrorPathsOnly) {
     ropts.socketPath = socketPath_;
     ropts.explicitDataDir = storageDir_;
 
-    yams::daemon::GrepRequest gpreq;
+    yams::app::services::GrepOptions gpreq;
     gpreq.pattern = "A";    // present in payload
     gpreq.pathsOnly = true; // avoid embedding raw bytes in protobuf text fields
     gpreq.literalText = true;
@@ -541,7 +541,7 @@ TEST_F(GrepServiceExpectationsIT, BinaryFileNoUtf8ErrorCountOnly) {
     ropts.socketPath = socketPath_;
     ropts.explicitDataDir = storageDir_;
 
-    yams::daemon::GrepRequest gpreq;
+    yams::app::services::GrepOptions gpreq;
     gpreq.pattern = "Z";
     gpreq.countOnly = true;
     gpreq.regexOnly = true;
@@ -574,7 +574,7 @@ TEST_F(GrepServiceExpectationsIT, BinaryFileNoUtf8ErrorFilesOnly) {
     ropts.socketPath = socketPath_;
     ropts.explicitDataDir = storageDir_;
 
-    yams::daemon::GrepRequest gpreq;
+    yams::app::services::GrepOptions gpreq;
     gpreq.pattern = "A"; // 0x41
     gpreq.filesOnly = true;
     gpreq.regexOnly = true;

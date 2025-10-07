@@ -202,28 +202,28 @@ StreamingRequestProcessor::process_streaming_impl(Request request) {
         if (std::holds_alternative<SearchRequest>(req_copy)) {
             spdlog::debug("StreamingRequestProcessor: defer Search for deterministic paging");
             mode_ = Mode::Search;
-            pending_request_ = req_copy;
+            pending_request_.emplace(std::make_unique<Request>(std::move(request)));
             std::fprintf(stdout, "[DEBUG] SRP defer Search -> streaming\n");
             co_return std::nullopt;
         }
         if (std::holds_alternative<ListRequest>(req_copy)) {
             spdlog::debug("StreamingRequestProcessor: defer List for deterministic paging");
             mode_ = Mode::List;
-            pending_request_ = req_copy;
+            pending_request_.emplace(std::make_unique<Request>(std::move(request)));
             std::fprintf(stdout, "[DEBUG] SRP defer List -> streaming\n");
             co_return std::nullopt;
         }
         if (std::holds_alternative<GrepRequest>(req_copy)) {
             spdlog::debug("StreamingRequestProcessor: defer Grep for deterministic paging");
             mode_ = Mode::Grep;
-            pending_request_ = req_copy;
+            pending_request_.emplace(std::make_unique<Request>(std::move(request)));
             std::fprintf(stdout, "[DEBUG] SRP defer Grep -> streaming\n");
             co_return std::nullopt;
         }
         if (std::holds_alternative<AddDocumentRequest>(req_copy)) {
             spdlog::debug("StreamingRequestProcessor: defer AddDocument for header-first");
             // Mode None: single final chunk after heartbeat
-            pending_request_ = req_copy;
+            pending_request_.emplace(std::make_unique<Request>(std::move(request)));
             std::fprintf(stdout, "[DEBUG] SRP defer AddDocument -> streaming\n");
             co_return std::nullopt;
         }
@@ -231,7 +231,7 @@ StreamingRequestProcessor::process_streaming_impl(Request request) {
         if (std::holds_alternative<GenerateEmbeddingRequest>(req_copy) ||
             std::holds_alternative<LoadModelRequest>(req_copy)) {
             spdlog::debug("StreamingRequestProcessor: defer single-step embedding/model load");
-            pending_request_ = req_copy;
+            pending_request_.emplace(std::make_unique<Request>(std::move(request)));
             std::fprintf(stdout, "[DEBUG] SRP defer SingleStep -> streaming\n");
             co_return std::nullopt;
         }
@@ -240,7 +240,9 @@ StreamingRequestProcessor::process_streaming_impl(Request request) {
         co_return co_await delegate_->process(req_copy);
     } catch (...) {
         // On unexpected failure; choose streaming path so caller can still progress.
-        pending_request_ = req_copy;
+        if (!pending_request_.has_value()) {
+            pending_request_.emplace(std::make_unique<Request>(std::move(request)));
+        }
         co_return std::nullopt;
     }
 }
@@ -298,7 +300,7 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
             heartbeat_sent_ = true;
             MessageType mt =
                 pending_request_.has_value()
-                    ? getMessageType(*pending_request_)
+                    ? getMessageType(**pending_request_)
                     : (mode_ == Mode::BatchEmbed
                            ? MessageType::BatchEmbeddingRequest
                            : (mode_ == Mode::EmbedDocs ? MessageType::EmbedDocumentsRequest
@@ -338,7 +340,7 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                     ModelLoadEvent mev{};
                     mev.phase = "started";
                     mev.message = "load started";
-                    mev.modelName = std::get<LoadModelRequest>(*pending_request_).modelName;
+                    mev.modelName = std::get<LoadModelRequest>(**pending_request_).modelName;
                     co_return ResponseChunk{.data = Response{std::move(mev)},
                                             .is_last_chunk = false};
                 }
@@ -353,7 +355,7 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
         // 2) After the heartbeat has been sent, act based on mode_ or message type.
         if (pending_request_.has_value() || pending_final_.has_value()) {
             auto mt = pending_request_.has_value()
-                          ? getMessageType(*pending_request_)
+                          ? getMessageType(**pending_request_)
                           : (mode_ == Mode::BatchEmbed
                                  ? MessageType::BatchEmbeddingRequest
                                  : (mode_ == Mode::EmbedDocs ? MessageType::EmbedDocumentsRequest
@@ -397,7 +399,7 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                 }
                 // For GenerateEmbedding/LoadModel, call delegate once and finish.
                 {
-                    auto final = co_await delegate_->process(*pending_request_);
+                    auto final = co_await delegate_->process(**pending_request_);
                     pending_request_.reset();
                     co_return ResponseChunk{.data = std::move(final), .is_last_chunk = true};
                 }
@@ -405,14 +407,22 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
 
             // AddDocumentRequest: single final response after heartbeat.
             if (mt == MessageType::AddDocumentRequest) {
-                auto final = co_await delegate_->process(*pending_request_);
+                try {
+                    spdlog::info("[SRP] AddDocument delegate processing start");
+                } catch (...) {
+                }
+                auto final = co_await delegate_->process(**pending_request_);
+                try {
+                    spdlog::info("[SRP] AddDocument delegate processing done");
+                } catch (...) {
+                }
                 pending_request_.reset();
                 co_return ResponseChunk{.data = std::move(final), .is_last_chunk = true};
             }
 
             // Search/List/Grep initial compute (first post-heartbeat chunk)
             if (mode_ == Mode::Search && !search_.has_value()) {
-                auto r = co_await delegate_->process(*pending_request_);
+                auto r = co_await delegate_->process(**pending_request_);
                 if (auto* s = std::get_if<SearchResponse>(&r)) {
                     search_ = SearchState{};
                     search_->results = std::move(s->results);
@@ -424,7 +434,7 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                     co_return ResponseChunk{.data = std::move(r), .is_last_chunk = true};
                 }
             } else if (mode_ == Mode::List && !list_.has_value()) {
-                auto r = co_await delegate_->process(*pending_request_);
+                auto r = co_await delegate_->process(**pending_request_);
                 if (auto* l = std::get_if<ListResponse>(&r)) {
                     list_ = ListState{};
                     list_->items = std::move(l->items);
@@ -435,7 +445,7 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                     co_return ResponseChunk{.data = std::move(r), .is_last_chunk = true};
                 }
             } else if (mode_ == Mode::Grep && !grep_.has_value()) {
-                auto r = co_await delegate_->process(*pending_request_);
+                auto r = co_await delegate_->process(**pending_request_);
                 if (auto* g = std::get_if<GrepResponse>(&r)) {
                     grep_ = GrepState{};
                     grep_->matches = std::move(g->matches);

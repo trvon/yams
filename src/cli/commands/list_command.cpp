@@ -176,7 +176,7 @@ public:
             }
 
             // Always try daemon-first approach with full protocol mapping for PBI-001 compliance
-            yams::daemon::ListRequest dreq;
+            yams::app::services::ListOptions dreq;
 
             // Map all CLI options to daemon protocol fields
             // Basic pagination and sorting
@@ -255,10 +255,13 @@ public:
                     doc.info.fileSize = e.size;
                     doc.info.mimeType = e.mimeType;
 
-                    // Convert timestamps
-                    doc.info.createdTime = std::chrono::system_clock::from_time_t(e.created);
-                    doc.info.modifiedTime = std::chrono::system_clock::from_time_t(e.modified);
-                    doc.info.indexedTime = std::chrono::system_clock::from_time_t(e.indexed);
+                    // Convert timestamps (seconds precision)
+                    doc.info.createdTime =
+                        std::chrono::sys_seconds{std::chrono::seconds{e.created}};
+                    doc.info.modifiedTime =
+                        std::chrono::sys_seconds{std::chrono::seconds{e.modified}};
+                    doc.info.indexedTime =
+                        std::chrono::sys_seconds{std::chrono::seconds{e.indexed}};
 
                     // Content and metadata
                     doc.contentSnippet = e.snippet;
@@ -566,10 +569,13 @@ private:
                 doc.info.fileSize = docEntry.size;
                 doc.info.mimeType = docEntry.mimeType;
 
-                // Convert timestamps
-                doc.info.createdTime = std::chrono::system_clock::from_time_t(docEntry.created);
-                doc.info.modifiedTime = std::chrono::system_clock::from_time_t(docEntry.modified);
-                doc.info.indexedTime = std::chrono::system_clock::from_time_t(docEntry.indexed);
+                // Convert timestamps (seconds precision)
+                doc.info.createdTime =
+                    std::chrono::sys_seconds{std::chrono::seconds{docEntry.created}};
+                doc.info.modifiedTime =
+                    std::chrono::sys_seconds{std::chrono::seconds{docEntry.modified}};
+                doc.info.indexedTime =
+                    std::chrono::sys_seconds{std::chrono::seconds{docEntry.indexed}};
 
                 // Handle metadata and tags
                 if (!docEntry.metadata.empty()) {
@@ -888,7 +894,7 @@ private:
             yams::app::services::RetrievalOptions ropts;
             if (cli_->hasExplicitDataDir())
                 ropts.explicitDataDir = cli_->getDataPath();
-            yams::daemon::GetRequest greq;
+            yams::app::services::GetOptions greq;
             greq.hash = chosen->hash;
             greq.metadataOnly = false;
             auto gr = rsvc.get(greq, ropts);

@@ -1043,29 +1043,41 @@ private:
                     : (s.ready ? std::string("Ready")
                                : (s.overallStatus.empty() ? std::string("Initializing")
                                                           : s.overallStatus));
-            std::cout << "YAMS Daemon\n";
-            std::cout << "- State:        " << state;
-            if (!s.version.empty())
-                std::cout << "   Version: " << s.version;
-            std::cout << "\n";
-            std::cout << "- Uptime:       " << s.uptimeSeconds
-                      << "s   Connections: " << s.activeConnections
-                      << "   CPU: " << (int)s.cpuUsagePercent << "%   Mem: " << (int)s.memoryUsageMb
-                      << " MB\n";
-            auto ok = [&](const char* k) {
-                auto it = s.readinessStates.find(k);
-                return it != s.readinessStates.end() && it->second;
+
+            std::cout << yams::cli::ui::section_header("YAMS Daemon Status") << "\n\n";
+
+            // Core status with color-coded state
+            std::vector<yams::cli::ui::Row> coreRows;
+            std::string stateDisplay = state;
+            if (s.ready) {
+                stateDisplay = yams::cli::ui::colorize("✓ " + state, yams::cli::ui::Ansi::GREEN);
+            } else if (s.running) {
+                stateDisplay = yams::cli::ui::colorize("◷ " + state, yams::cli::ui::Ansi::YELLOW);
+            } else {
+                stateDisplay = yams::cli::ui::colorize("✗ " + state, yams::cli::ui::Ansi::RED);
+            }
+            coreRows.push_back({"State", stateDisplay, ""});
+            coreRows.push_back({"Version", s.version.empty() ? "unknown" : s.version, ""});
+
+            auto formatUptime = [](uint64_t sec) -> std::string {
+                if (sec < 60)
+                    return std::to_string(sec) + "s";
+                if (sec < 3600)
+                    return std::to_string(sec / 60) + "m " + std::to_string(sec % 60) + "s";
+                uint64_t h = sec / 3600;
+                uint64_t m = (sec % 3600) / 60;
+                return std::to_string(h) + "h " + std::to_string(m) + "m";
             };
-            std::cout << "- Services:     content_store=" << (ok("content_store") ? "ok" : "…")
-                      << "  metadata_repo=" << (ok("metadata_repo") ? "ok" : "…")
-                      << "  search_engine=" << (ok("search_engine") ? "ok" : "…")
-                      << "  model_provider=" << (ok("model_provider") ? "ok" : "…") << "\n";
-            // Vector DB snapshot
-            std::cout << "- Vectors:      ready=" << (s.vectorDbReady ? "yes" : "no");
-            if (s.vectorDbDim > 0)
-                std::cout << "  dim=" << s.vectorDbDim;
-            std::cout << "\n";
-            // Worker snapshot
+            coreRows.push_back({"Uptime", formatUptime(s.uptimeSeconds), ""});
+            coreRows.push_back({"Connections", std::to_string(s.activeConnections), ""});
+            yams::cli::ui::render_rows(std::cout, coreRows);
+
+            // Performance metrics
+            std::cout << "\n" << yams::cli::ui::section_header("Performance") << "\n\n";
+            std::vector<yams::cli::ui::Row> perfRows;
+            perfRows.push_back({"CPU Usage", std::to_string((int)s.cpuUsagePercent) + "%", ""});
+            perfRows.push_back({"Memory Usage", std::to_string((int)s.memoryUsageMb) + " MB", ""});
+
             std::size_t threads = 0, active = 0, queued = 0;
             if (auto it = s.requestCounts.find("worker_threads"); it != s.requestCounts.end())
                 threads = it->second;
@@ -1074,8 +1086,55 @@ private:
             if (auto it = s.requestCounts.find("worker_queued"); it != s.requestCounts.end())
                 queued = it->second;
             std::size_t util = threads ? static_cast<std::size_t>((100.0 * active) / threads) : 0;
-            std::cout << "- Workers:      threads=" << threads << "  active=" << active
-                      << "  queued=" << queued << "  util=" << util << "%\n";
+
+            std::ostringstream workerInfo;
+            workerInfo << threads << " total, " << active << " active, " << queued << " queued";
+            std::string utilDisplay = std::to_string(util) + "%";
+            if (util > 80) {
+                utilDisplay = yams::cli::ui::colorize(utilDisplay, yams::cli::ui::Ansi::YELLOW);
+            } else if (util > 95) {
+                utilDisplay = yams::cli::ui::colorize(utilDisplay, yams::cli::ui::Ansi::RED);
+            }
+            perfRows.push_back({"Worker Threads", workerInfo.str(), ""});
+            perfRows.push_back({"Worker Util", utilDisplay, ""});
+            yams::cli::ui::render_rows(std::cout, perfRows);
+
+            // Services status
+            std::cout << "\n" << yams::cli::ui::section_header("Services") << "\n\n";
+            auto ok = [&](const char* k) {
+                auto it = s.readinessStates.find(k);
+                return it != s.readinessStates.end() && it->second;
+            };
+            std::vector<yams::cli::ui::Row> svcRows;
+            auto svcStatus = [](bool ready) -> std::string {
+                if (ready)
+                    return yams::cli::ui::colorize("✓ ready", yams::cli::ui::Ansi::GREEN);
+                return yams::cli::ui::colorize("◷ starting", yams::cli::ui::Ansi::YELLOW);
+            };
+            svcRows.push_back({"Content Store", svcStatus(ok("content_store")), ""});
+            svcRows.push_back({"Metadata Repo", svcStatus(ok("metadata_repo")), ""});
+            svcRows.push_back({"Search Engine", svcStatus(ok("search_engine")), ""});
+            svcRows.push_back({"Model Provider", svcStatus(ok("model_provider")), ""});
+            yams::cli::ui::render_rows(std::cout, svcRows);
+
+            // Vector DB info
+            std::cout << "\n" << yams::cli::ui::section_header("Vector Database") << "\n\n";
+            std::vector<yams::cli::ui::Row> vecRows;
+            std::string vecStatus =
+                s.vectorDbReady
+                    ? yams::cli::ui::colorize("✓ ready", yams::cli::ui::Ansi::GREEN)
+                    : yams::cli::ui::colorize("◷ not ready", yams::cli::ui::Ansi::YELLOW);
+            vecRows.push_back({"Status", vecStatus, ""});
+            if (s.vectorDbDim > 0) {
+                vecRows.push_back({"Dimension", std::to_string(s.vectorDbDim), ""});
+            }
+            yams::cli::ui::render_rows(std::cout, vecRows);
+
+            std::cout << "\n"
+                      << yams::cli::ui::colorize(
+                             "→ Use 'yams daemon status -d' for detailed information",
+                             yams::cli::ui::Ansi::DIM)
+                      << "\n";
             return;
         }
 

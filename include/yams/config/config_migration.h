@@ -199,7 +199,7 @@ struct ConfigV2 {
     // WAL settings
     struct WAL {
         bool enable = true;
-        std::string wal_directory = "./wal";
+        std::string wal_directory = "wal";
         size_t max_log_size = 104857600;
         size_t sync_interval = 1000;
         int sync_timeout_ms = 100;

@@ -117,7 +117,7 @@ TEST_F(UiCliExpectationsIT, GrepPathsOnlyHonorsIncludeAndTags) {
     ropts.socketPath = socketPath_;
     ropts.explicitDataDir = storageDir_;
 
-    yams::daemon::GrepRequest gpreq;
+    yams::app::services::GrepOptions gpreq;
     gpreq.pattern = "hello";
     gpreq.pathsOnly = true;
     gpreq.includePatterns = {(root_ / "ingest" / "**").string()};
@@ -161,9 +161,7 @@ TEST_F(UiCliExpectationsIT, GetByHashMetadataOnlyHasNoContent) {
     yams::app::services::RetrievalService rsvc;
     yams::app::services::RetrievalOptions ropts;
     ropts.socketPath = socketPath_;
-    ropts.explicitDataDir = storageDir_;
-
-    yams::daemon::GetRequest greq;
+    yams::app::services::GetOptions greq;
     greq.hash = addRes.value().hash;
     greq.metadataOnly = true;
     auto gres = rsvc.get(greq, ropts);
@@ -195,9 +193,9 @@ TEST_F(UiCliExpectationsIT, ListLimitAndNamePattern) {
     ropts.socketPath = socketPath_;
     ropts.explicitDataDir = storageDir_;
 
-    yams::daemon::ListRequest lreq;
-    lreq.limit = 2; // enforce limit
-    lreq.namePattern = (root_ / "ingest" / "**" / "*.md").string();
+    yams::app::services::ListOptions lreq;
+    lreq.limit =
+        2; // enforce limit    lreq.namePattern = (root_ / "ingest" / "**" / "*.md").string();
     // Act/Assert with brief retries for visibility
     bool ok = false;
     for (int i = 0; i < 60 && !ok; ++i) {
@@ -251,8 +249,7 @@ TEST_F(UiCliExpectationsIT, RetrieveByNameSuccessShape) {
     {
         bool okHash = false;
         for (int i = 0; i < 40 && !okHash; ++i) {
-            yams::daemon::GetRequest ghash;
-            ghash.hash = addedHash;
+            yams::app::services::GetOptions ghash;
             ghash.metadataOnly = false;
             auto gres = rsvc.get(ghash, ropts);
             if (gres) {
@@ -266,7 +263,7 @@ TEST_F(UiCliExpectationsIT, RetrieveByNameSuccessShape) {
     }
 
     // Now request by the canonical name returned above
-    yams::daemon::GetRequest greq;
+    yams::app::services::GetOptions greq;
     greq.name = v.name;
     greq.byName = true;
     greq.metadataOnly = false;
@@ -309,7 +306,7 @@ TEST_F(UiCliExpectationsIT, UpdateMetadataThenDeleteByName) {
     {
         bool okHash = false;
         for (int i = 0; i < 40 && !okHash; ++i) {
-            yams::daemon::GetRequest ghash;
+            yams::app::services::GetOptions ghash;
             ghash.hash = addRes.value().hash;
             ghash.metadataOnly = true; // only need name here
             auto gres = rsvc.get(ghash, ropts);
@@ -351,7 +348,7 @@ TEST_F(UiCliExpectationsIT, UpdateMetadataThenDeleteByName) {
     // Optional: attempt to observe the tag via list; don't assert to avoid flakiness on minimal
     // builds.
     {
-        yams::daemon::ListRequest lreq;
+        yams::app::services::ListOptions lreq;
         lreq.limit = 10;
         lreq.filterTags = "tmpdel";
         for (int i = 0; i < 20; ++i) {
@@ -376,7 +373,7 @@ TEST_F(UiCliExpectationsIT, UpdateMetadataThenDeleteByName) {
 
     // Confirm absence
     {
-        yams::daemon::ListRequest lreq;
+        yams::app::services::ListOptions lreq;
         lreq.limit = 10;
         lreq.namePattern = canonicalName;
         bool gone = false;
@@ -897,7 +894,7 @@ TEST_F(UiCliExpectationsIT, UnreachableHintsIncludeSocketOrEnv) {
         fs::path("/tmp") / ("yams-ui-cli-missing-" + std::to_string(::getpid()) + ".sock");
     ropts.explicitDataDir = storageDir_;
 
-    yams::daemon::ListRequest lreq;
+    yams::app::services::ListOptions lreq;
     lreq.limit = 1;
     auto lres = rsvc.list(lreq, ropts);
     ASSERT_FALSE(lres);

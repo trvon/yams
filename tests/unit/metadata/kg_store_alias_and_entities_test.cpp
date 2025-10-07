@@ -119,7 +119,7 @@ TEST_F(KGStoreAliasAndEntitiesTest, NeighborsAndDocEntitiesRoundTrip) {
     d.fileSize = 123;
     d.sha256Hash = "hash-alpha";
     d.mimeType = "text/plain";
-    d.createdTime = std::chrono::system_clock::now();
+    d.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
     d.modifiedTime = d.createdTime;
     d.indexedTime = d.createdTime;
     auto did = repo_->insertDocument(d);

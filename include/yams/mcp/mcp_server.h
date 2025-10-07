@@ -55,19 +55,22 @@ public:
 
 /**
  * Standard I/O transport (default for MCP) with atomic state management.
- * Output uses strict LSP/MCP framing (Content-Length and Content-Type headers) with no
- * trailing newline after the JSON payload. Input reads are non-locking.
+ * Implements MCP stdio specification: outputs newline-delimited JSON (NDJSON).
+ * Per MCP spec: "Messages are delimited by newlines and MUST NOT contain embedded newlines."
+ *
+ * For backwards compatibility, can read LSP-style Content-Length framing on input,
+ * but always outputs spec-compliant NDJSON.
  */
 class StdioTransport : public ITransport {
 public:
     StdioTransport();
     ~StdioTransport(); // Ensures writer thread is joined/flushed for clean shutdown
     void send(const json& message) override;
-    // NDJSON (JSON-per-line) send helper for clients that don't use headers
+    // NDJSON send - same as send() for stdio (spec-compliant)
     void sendNdjson(const json& message);
-    // Enqueue a message for the writer thread (non-blocking for request handlers); always framed
+    // Enqueue a message for the writer thread (non-blocking for request handlers)
     void sendAsync(json message);
-    // Framed (LSP/MCP) send helper (sole output path)
+    // Framed send helper for pre-serialized JSON payloads (legacy compatibility)
     void sendFramedSerialized(const std::string& payload);
     MessageResult receive() override;
     bool isConnected() const override { return state_.load() == TransportState::Connected; }
@@ -77,10 +80,6 @@ public:
     // Set external shutdown flag for non-blocking checks
     void setShutdownFlag(std::atomic<bool>* shutdown) { externalShutdown_ = shutdown; }
 
-    // Peer framing preference auto-detected from inbound (true => ndjson, false => headers).
-    // Default to NDJSON for broader client compatibility; switch to framed when we detect headers.
-    bool peerPrefersNdjson() const noexcept { return preferNdjson_.load(); }
-
 private:
     // Unified non-blocking sender for all transports. Uses async send when available
     // and falls back to a best-effort synchronous send otherwise.
@@ -88,12 +87,9 @@ private:
     std::atomic<TransportState> state_{TransportState::Connected};
     std::atomic<bool>* externalShutdown_{nullptr};
     std::atomic<size_t> errorCount_{0};
-    std::atomic<bool> preferNdjson_{true};
 
     // Receive poll timeout (ms). Default 500ms; configurable via env YAMS_MCP_RECV_TIMEOUT_MS.
     int recvTimeoutMs_{500};
-    // Outbound content type header for framed messages (configurable via YAMS_MCP_CONTENT_TYPE)
-    std::string contentTypeHeader_;
 
     // Mutex for thread-safe output operations (sending only) - instance member for proper RAII
     mutable std::mutex outMutex_;

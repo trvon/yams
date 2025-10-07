@@ -1034,38 +1034,247 @@ public:
         return Error{ErrorCode::NotImplemented, "recomputeNodeStats not implemented"};
     }
 
-    // Tree diff helpers (stubs)
+    // Tree diff helpers (KG integration for PBI-043)
     Result<std::int64_t> ensureBlobNode(std::string_view sha256) override {
-        (void)sha256;
-        return Error{ErrorCode::NotImplemented, "ensureBlobNode not implemented"};
+        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+            // Check if blob node exists
+            auto selectStmt =
+                db.prepare("SELECT id FROM kg_nodes WHERE node_key = ? AND type = 'blob'");
+            if (!selectStmt)
+                return selectStmt.error();
+
+            auto& stmt = selectStmt.value();
+            std::string nodeKey = std::string("blob:") + std::string(sha256);
+            auto bindRes = stmt.bindAll(nodeKey);
+            if (!bindRes)
+                return bindRes.error();
+
+            auto stepRes = stmt.step();
+            if (!stepRes)
+                return stepRes.error();
+
+            if (stepRes.value()) {
+                // Node exists, return its ID
+                return stmt.getInt64(0);
+            }
+
+            // Node doesn't exist, create it
+            auto insertStmt =
+                db.prepare("INSERT INTO kg_nodes (node_key, label, type, created_time) "
+                           "VALUES (?, ?, 'blob', unixepoch())");
+            if (!insertStmt)
+                return insertStmt.error();
+
+            auto& insert = insertStmt.value();
+            std::string label = std::string(sha256).substr(0, 16) + "..."; // Short label
+            auto insertBind = insert.bindAll(nodeKey, label);
+            if (!insertBind)
+                return insertBind.error();
+
+            auto execRes = insert.execute();
+            if (!execRes)
+                return execRes.error();
+
+            return db.lastInsertRowId();
+        });
     }
 
     Result<std::int64_t> ensurePathNode(const PathNodeDescriptor& descriptor) override {
-        (void)descriptor;
-        return Error{ErrorCode::NotImplemented, "ensurePathNode not implemented"};
+        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+            // Node key: path:<snapshot_id>:<normalized_path>
+            std::string nodeKey = "path:" + descriptor.snapshotId + ":" + descriptor.path;
+
+            // Check if path node exists
+            auto selectStmt =
+                db.prepare("SELECT id FROM kg_nodes WHERE node_key = ? AND type = 'path'");
+            if (!selectStmt)
+                return selectStmt.error();
+
+            auto& stmt = selectStmt.value();
+            auto bindRes = stmt.bindAll(nodeKey);
+            if (!bindRes)
+                return bindRes.error();
+
+            auto stepRes = stmt.step();
+            if (!stepRes)
+                return stepRes.error();
+
+            if (stepRes.value()) {
+                // Node exists, return its ID
+                return stmt.getInt64(0);
+            }
+
+            // Node doesn't exist, create it with properties JSON
+            auto insertStmt =
+                db.prepare("INSERT INTO kg_nodes (node_key, label, type, created_time, properties) "
+                           "VALUES (?, ?, 'path', unixepoch(), ?)");
+            if (!insertStmt)
+                return insertStmt.error();
+
+            auto& insert = insertStmt.value();
+
+            // Build properties JSON
+            std::string properties = "{";
+            properties += "\"snapshot_id\":\"" + descriptor.snapshotId + "\",";
+            properties += "\"path\":\"" + descriptor.path + "\",";
+            properties +=
+                "\"is_directory\":" + std::string(descriptor.isDirectory ? "true" : "false");
+            if (!descriptor.rootTreeHash.empty()) {
+                properties += ",\"root_tree_hash\":\"" + descriptor.rootTreeHash + "\"";
+            }
+            properties += "}";
+
+            auto insertBind = insert.bindAll(nodeKey, descriptor.path, properties);
+            if (!insertBind)
+                return insertBind.error();
+
+            auto execRes = insert.execute();
+            if (!execRes)
+                return execRes.error();
+
+            return db.lastInsertRowId();
+        });
     }
 
     Result<void> linkPathVersion(std::int64_t pathNodeId, std::int64_t blobNodeId,
                                  std::int64_t diffId) override {
-        (void)pathNodeId;
-        (void)blobNodeId;
-        (void)diffId;
-        return Error{ErrorCode::NotImplemented, "linkPathVersion not implemented"};
+        return pool_->withConnection([&](Database& db) -> Result<void> {
+            // Create edge: path --[has_version]--> blob
+            auto insertStmt = db.prepare("INSERT INTO kg_edges (src_node_id, dst_node_id, "
+                                         "relation, created_time, properties) "
+                                         "VALUES (?, ?, 'has_version', unixepoch(), ?)");
+            if (!insertStmt)
+                return insertStmt.error();
+
+            auto& stmt = insertStmt.value();
+            std::string properties = "{\"diff_id\":" + std::to_string(diffId) + "}";
+
+            auto bindRes = stmt.bindAll(pathNodeId, blobNodeId, properties);
+            if (!bindRes)
+                return bindRes.error();
+
+            auto execRes = stmt.execute();
+            if (!execRes)
+                return execRes.error();
+
+            return Result<void>();
+        });
     }
 
     Result<void> recordRenameEdge(std::int64_t fromPathNodeId, std::int64_t toPathNodeId,
                                   std::int64_t diffId) override {
-        (void)fromPathNodeId;
-        (void)toPathNodeId;
-        (void)diffId;
-        return Error{ErrorCode::NotImplemented, "recordRenameEdge not implemented"};
+        return pool_->withConnection([&](Database& db) -> Result<void> {
+            // Create edge: old_path --[renamed_to]--> new_path
+            auto insertStmt = db.prepare("INSERT INTO kg_edges (src_node_id, dst_node_id, "
+                                         "relation, created_time, properties) "
+                                         "VALUES (?, ?, 'renamed_to', unixepoch(), ?)");
+            if (!insertStmt)
+                return insertStmt.error();
+
+            auto& stmt = insertStmt.value();
+            std::string properties = "{\"diff_id\":" + std::to_string(diffId) + "}";
+
+            auto bindRes = stmt.bindAll(fromPathNodeId, toPathNodeId, properties);
+            if (!bindRes)
+                return bindRes.error();
+
+            auto execRes = stmt.execute();
+            if (!execRes)
+                return execRes.error();
+
+            return Result<void>();
+        });
     }
 
     Result<std::vector<PathHistoryRecord>> fetchPathHistory(std::string_view logicalPath,
                                                             std::size_t limit) override {
-        (void)logicalPath;
-        (void)limit;
-        return Error{ErrorCode::NotImplemented, "fetchPathHistory not implemented"};
+        return pool_->withConnection([&](Database& db) -> Result<std::vector<PathHistoryRecord>> {
+            std::vector<PathHistoryRecord> history;
+
+            // Query path nodes that match the logical path across all snapshots
+            // Then follow rename edges to find the complete history
+            auto queryStmt = db.prepare(R"(
+                WITH RECURSIVE rename_chain AS (
+                    -- Base case: find all path nodes matching the logical path
+                    SELECT 
+                        n.id,
+                        n.node_key,
+                        json_extract(n.properties, '$.snapshot_id') AS snapshot_id,
+                        json_extract(n.properties, '$.path') AS path,
+                        0 AS depth
+                    FROM kg_nodes n
+                    WHERE n.type = 'path'
+                      AND json_extract(n.properties, '$.path') = ?
+                    
+                    UNION ALL
+                    
+                    -- Recursive case: follow renamed_to edges
+                    SELECT 
+                        dst_node.id,
+                        dst_node.node_key,
+                        json_extract(dst_node.properties, '$.snapshot_id') AS snapshot_id,
+                        json_extract(dst_node.properties, '$.path') AS path,
+                        rc.depth + 1
+                    FROM rename_chain rc
+                    JOIN kg_edges e ON rc.id = e.src_node_id AND e.relation = 'renamed_to'
+                    JOIN kg_nodes dst_node ON e.dst_node_id = dst_node.id
+                    WHERE rc.depth < 100  -- Safety limit
+                )
+                SELECT DISTINCT
+                    rc.snapshot_id,
+                    rc.path,
+                    json_extract(blob_node.node_key, '$') AS blob_hash,
+                    CAST(json_extract(ver_edge.properties, '$.diff_id') AS INTEGER) AS diff_id
+                FROM rename_chain rc
+                LEFT JOIN kg_edges ver_edge ON rc.id = ver_edge.src_node_id 
+                    AND ver_edge.relation = 'has_version'
+                LEFT JOIN kg_nodes blob_node ON ver_edge.dst_node_id = blob_node.id 
+                    AND blob_node.type = 'blob'
+                ORDER BY rc.snapshot_id DESC
+                LIMIT ?
+            )");
+
+            if (!queryStmt)
+                return queryStmt.error();
+
+            auto& stmt = queryStmt.value();
+            auto bindRes = stmt.bindAll(logicalPath, static_cast<std::int64_t>(limit));
+            if (!bindRes)
+                return bindRes.error();
+
+            while (true) {
+                auto stepRes = stmt.step();
+                if (!stepRes)
+                    return stepRes.error();
+
+                if (!stepRes.value())
+                    break;
+
+                PathHistoryRecord record;
+                record.snapshotId = stmt.getString(0);
+                record.path = stmt.getString(1);
+
+                // blob_hash column (handle NULL)
+                if (!stmt.isNull(2)) {
+                    std::string blobNodeKey = stmt.getString(2);
+                    // Extract hash from node_key format "blob:hash"
+                    if (blobNodeKey.starts_with("blob:")) {
+                        record.blobHash = blobNodeKey.substr(5);
+                    }
+                }
+
+                // diff_id column (handle NULL)
+                if (!stmt.isNull(3)) {
+                    record.diffId = stmt.getInt64(3);
+                }
+
+                record.changeType = std::nullopt; // Could be enhanced later
+
+                history.push_back(record);
+            }
+
+            return history;
+        });
     }
 
     // Maintenance

@@ -1,0 +1,10 @@
+{
+  "summary": {
+    "LatencyAcceptance_10k": { "latest": 750.0, "unit": "ms" },
+    "RenameDetection_1000_rate20": { "latest": 150.0, "unit": "ms" },
+    "StorageOverhead_10000": { "latest": 500.0, "unit": "ms" },
+    "MultiSnapshotStorage_10": { "latest": 100.0, "unit": "ms", "tree_overhead_pct": 15.0 },
+    "MultiSnapshotStorage_100": { "latest": 1000.0, "unit": "ms", "tree_overhead_pct": 15.0 },
+    "MultiSnapshotStorage_1000": { "latest": 10000.0, "unit": "ms", "tree_overhead_pct": 15.0 }
+  }
+}

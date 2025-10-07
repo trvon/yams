@@ -46,9 +46,13 @@ public:
         cmd->add_option("snapshotB", snapshotB_, "Second snapshot ID (newer)")->required();
 
         // Output format options
-        cmd->add_option("--format", format_, "Output format: tree, flat, json")
+        cmd->add_option("--format", format_, "Output format: tree (default), flat, json")
             ->default_val("tree")
             ->check(CLI::IsMember({"tree", "flat", "json"}));
+
+        // Legacy flag for flat diff (convenience shortcut)
+        cmd->add_flag("--flat-diff", flatDiff_,
+                      "Use flat diff format (legacy mode, equivalent to --format flat)");
 
         // Filtering options
         cmd->add_option("--include", includePatterns_,
@@ -155,6 +159,11 @@ public:
                 filteredChanges = applyTypeFilter(filteredChanges, changeType_);
             }
 
+            // Handle --flat-diff flag (overrides --format)
+            if (flatDiff_) {
+                format_ = "flat";
+            }
+
             // Output results
             if (format_ == "json") {
                 outputJson(filteredChanges, *snapshotAMeta, *snapshotBMeta);
@@ -185,6 +194,7 @@ private:
     bool statsOnly_ = false;
     bool noRenames_ = false;
     bool verbose_ = false;
+    bool flatDiff_ = false;
 
     struct SnapshotMetadata {
         std::string snapshot_id;

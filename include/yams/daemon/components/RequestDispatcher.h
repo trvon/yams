@@ -82,6 +82,9 @@ private:
     boost::asio::awaitable<Response>
     handleRemovePathSelectorRequest(const RemovePathSelectorRequest& req);
 
+    // Tree diff handlers (PBI-043)
+    boost::asio::awaitable<Response> handleListTreeDiffRequest(const ListTreeDiffRequest& req);
+
     // Plugin management handlers
     boost::asio::awaitable<Response> handlePluginScanRequest(const PluginScanRequest& req);
     boost::asio::awaitable<Response> handlePluginLoadRequest(const PluginLoadRequest& req);

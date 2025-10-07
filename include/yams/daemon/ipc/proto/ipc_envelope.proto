@@ -529,6 +529,32 @@ message RemovePathSelectorRequest {
   string path = 2;
 }
 
+// Tree diff queries (PBI-043)
+message ListTreeDiffRequest {
+  string base_snapshot_id = 1;
+  string target_snapshot_id = 2;
+  string path_prefix = 3; // optional filter
+  string type_filter = 4; // optional: "added", "modified", "deleted", "renamed"
+  uint64 limit = 5;
+  uint64 offset = 6;
+}
+
+message TreeChangeEntry {
+  string change_type = 1; // "added", "modified", "deleted", "renamed"
+  string path = 2;
+  string old_path = 3; // for renames
+  string hash = 4; // content hash (SHA256)
+  string old_hash = 5; // for modifications
+  uint64 size = 6;
+  uint64 old_size = 7;
+  string content_delta_hash = 8; // optional delta blob hash
+}
+
+message ListTreeDiffResponse {
+  repeated TreeChangeEntry changes = 1;
+  uint64 total_count = 2;
+}
+
 // ENVELOPE
 message Envelope {
   uint32 version = 1;
@@ -574,6 +600,8 @@ message Envelope {
     UseSessionRequest use_session_request = 42;
     AddPathSelectorRequest add_path_selector_request = 43;
     RemovePathSelectorRequest remove_path_selector_request = 44;
+    // Tree diff requests (PBI-043)
+    ListTreeDiffRequest list_tree_diff_request = 45;
 
     // Responses
     SuccessResponse success_response = 100;
@@ -607,5 +635,7 @@ message Envelope {
     PluginTrustListResponse plugin_trust_list_response = 126;
     CatResponse cat_response = 127;
     ListSessionsResponse list_sessions_response = 128;
+    // Tree diff responses (PBI-043)
+    ListTreeDiffResponse list_tree_diff_response = 129;
   }
 }

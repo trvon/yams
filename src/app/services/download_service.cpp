@@ -139,10 +139,13 @@ public:
                         docInfo.sha256Hash = storeRes.value().contentHash;
                         docInfo.mimeType =
                             finalResult.contentType.value_or("application/octet-stream");
+                        using std::chrono::floor;
+                        using namespace std::chrono;
                         auto now = std::chrono::system_clock::now();
-                        docInfo.createdTime = now;
-                        docInfo.modifiedTime = now;
-                        docInfo.indexedTime = now;
+                        auto now_s = floor<seconds>(now);
+                        docInfo.createdTime = now_s;
+                        docInfo.modifiedTime = now_s;
+                        docInfo.indexedTime = now_s;
 
                         auto ins = ctx_.metadataRepo->insertDocument(docInfo);
                         if (ins) {

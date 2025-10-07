@@ -72,13 +72,18 @@ unit_daemon = files(
   'daemon/connection_fsm_test.cpp',
   'daemon/connection_fsm_timeout_retry_test.cpp',
   'daemon/daemon_lifecycle_fsm_test.cpp',
-  'daemon/daemon_metrics_vectordb_ready_test.cpp',
+  'daemon/embedding_provider_fsm_failure_test.cpp',
+  'daemon/embedding_provider_recovery_test.cpp',
+  'daemon/service_manager_fsm_test.cpp',
   'daemon/daemon_test.cpp',
+  'daemon/daemon_fsm_status_test.cpp',
   'daemon/download_protocol_test.cpp',
   'daemon/get_stats_wal_metrics_test.cpp',
   'daemon/ipc_server_test.cpp',
   'daemon/message_framing_test.cpp',
   'daemon/plugin_host_test.cpp',
+  'daemon/plugin_host_fsm_failure_test.cpp',
+  'daemon/daemon_plugins_degraded_status_test.cpp',
   'daemon/plugin_loader_test.cpp',
   'daemon/post_ingest_queue_test.cpp',
   'daemon/grep_response_proto_test.cpp',
@@ -86,19 +91,19 @@ unit_daemon = files(
   'daemon/post_ingest_queue_bus_stress_test.cpp',
   'daemon/repair_coordinator_test.cpp',
   'daemon/repair_scheduling_adapter_test.cpp',
-  'daemon/request_dispatcher_status_vectordb_test.cpp',
   'daemon/request_handler_io_edge_test.cpp',
   'daemon/resource_pool_test.cpp',
   'daemon/response_of_test.cpp',
   'daemon/service_manager_test.cpp',
+  'daemon/service_manager_fsm_status_test.cpp',
   'daemon/socket_server_lifecycle_test.cpp',
   'daemon/status_embedding_test.cpp',
   'daemon/status_response_proto_test.cpp',
+  'daemon/service_manager_provider_degraded_test.cpp',
   'daemon/ipc_message_type_test.cpp',
   'daemon/proto_roundtrip_test.cpp',
   'daemon/streaming_processor_test.cpp',
   'daemon/wasm_plugin_harness_test.cpp',
-  'daemon/daemon_warm_bench_test.cpp',
   # excluded: multiplex_client_test.cpp, request_dispatcher_plugin_test.cpp, onnx_*
 )
 
@@ -146,6 +151,14 @@ unit_metadata = files(
   'metadata/metadata_repository_test.cpp',
   'metadata/metadata_schema_test.cpp',
   'metadata/query_helpers_test.cpp',
+  'metadata/sql_build_select_test.cpp',
+  'metadata/concepts_compile_test.cpp',
+  'metadata/tags_queryspec_integration_test.cpp',
+  'metadata/fts_queryspec_integration_test.cpp',
+  'metadata/query_helpers_integration_test.cpp',
+  'metadata/database_statement_time_test.cpp',
+  'metadata/metadata_repository_cache_test.cpp',
+  'metadata/connection_pool_maintenance_smoke_test.cpp',
   'metadata/tree_builder_test.cpp',
   'metadata/tree_differ_test.cpp',
 )
@@ -182,17 +195,10 @@ unit_storage = files(
 unit_vector = files(
   'vector/document_chunker_test.cpp',
   'vector/embedding_genai_selection_test.cpp',
-  'vector/embedding_generator_test.cpp',
-  'vector/model_management_test.cpp',
-  'vector/test_onnx_runtime.cpp',
-  'vector/vector_database_test.cpp',
-  'vector/vector_index_manager_test.cpp',
 )
 
 unit_wal = files(
-  'wal/wal_dual_read_test.cpp',
-  'wal/wal_manager_comprehensive_test.cpp',
-  'wal/wal_manager_test.cpp',
+  # legacy WAL tests removed
 )
 
 unit_srcs = []

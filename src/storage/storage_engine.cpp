@@ -232,10 +232,6 @@ Result<std::vector<std::byte>> StorageEngine::retrieve(std::string_view hash) co
 
     auto objectPath = getObjectPath(hash);
 
-    // Read lock for path calculation
-    std::shared_lock<std::shared_mutex> lock(pImpl->globalMutex);
-    lock.unlock(); // Path is immutable after calculation
-
     // Check existence
     if (!std::filesystem::exists(objectPath)) {
         return Result<std::vector<std::byte>>(ErrorCode::ChunkNotFound);
@@ -278,7 +274,7 @@ Result<bool> StorageEngine::exists(std::string_view hash) const noexcept {
 
         auto objectPath = getObjectPath(hash);
 
-        // Lock-free existence check
+        // Check existence
         return std::filesystem::exists(objectPath);
 
     } catch (const std::exception& e) {

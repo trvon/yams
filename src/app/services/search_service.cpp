@@ -6,6 +6,7 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/app/services/enhanced_search_executor.h>
 #include <yams/app/services/services.hpp>
+#include <yams/metadata/query_helpers.h>
 #ifdef YAMS_ENABLE_DAEMON_FEATURES
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/resource/plugin_host.h>
@@ -151,75 +152,99 @@ struct MetadataTelemetry {
 };
 
 template <typename Fn>
-auto retryMetadataOp(Fn&& fn, std::size_t maxAttempts = 4,
-                     std::chrono::milliseconds initialDelay = std::chrono::milliseconds(25),
-                     MetadataTelemetry* telemetry = nullptr) -> decltype(fn()) {
-    using ResultT = decltype(fn());
-    if (telemetry)
+boost::asio::awaitable<decltype(std::declval<Fn>()())>
+retryMetadataOp(Fn&& fn, std::size_t maxAttempts = 4,
+                std::chrono::milliseconds initialDelay = std::chrono::milliseconds(25),
+                MetadataTelemetry* telemetry = nullptr) {
+    using ResultT = decltype(std::declval<Fn>()());
+
+    if (telemetry) {
         telemetry->operations.fetch_add(1, std::memory_order_relaxed);
+    }
+
     auto attempt = fn();
-    if (attempt)
-        return attempt;
+    if (attempt) {
+        co_return attempt;
+    }
 
     auto delay = initialDelay;
     bool transient = isTransientMetadataError(attempt.error());
-    if (telemetry && transient)
+    if (telemetry && transient) {
         telemetry->transientFailures.fetch_add(1, std::memory_order_relaxed);
+    }
 
     for (std::size_t i = 1; i < maxAttempts && transient; ++i) {
-        if (telemetry)
+        if (telemetry) {
             telemetry->retries.fetch_add(1, std::memory_order_relaxed);
-        std::this_thread::sleep_for(delay);
+        }
+
+        boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+        timer.expires_after(delay);
+        co_await timer.async_wait(boost::asio::use_awaitable);
+
         delay = std::min(delay * 2, std::chrono::milliseconds(250));
+
         attempt = fn();
-        if (attempt)
-            return attempt;
+        if (attempt) {
+            co_return attempt;
+        }
+
         transient = isTransientMetadataError(attempt.error());
-        if (telemetry && transient)
+        if (telemetry && transient) {
             telemetry->transientFailures.fetch_add(1, std::memory_order_relaxed);
+        }
     }
-    return attempt;
+
+    co_return attempt;
 }
 
-static bool metadataHasTags(metadata::MetadataRepository* repo, int64_t docId,
-                            const std::vector<std::string>& tags, bool matchAll,
-                            MetadataTelemetry* telemetry = nullptr) {
-    if (!repo || tags.empty())
-        return true;
-    auto md = retryMetadataOp([&]() { return repo->getAllMetadata(docId); }, 4,
-                              std::chrono::milliseconds(25), telemetry);
+static boost::asio::awaitable<bool> metadataHasTags(metadata::MetadataRepository* repo,
+                                                    int64_t docId,
+                                                    const std::vector<std::string>& tags,
+                                                    bool matchAll,
+                                                    MetadataTelemetry* telemetry = nullptr) {
+    if (!repo || tags.empty()) {
+        co_return true;
+    }
+
+    auto md = co_await retryMetadataOp([&]() { return repo->getAllMetadata(docId); }, 4,
+                                       std::chrono::milliseconds(25), telemetry);
+
     if (!md) {
         spdlog::debug("SearchService: metadata lookup failed for doc {}: {}", docId,
                       md.error().message);
-        return false;
+        co_return false;
     }
+
     auto& all = md.value();
 
     auto hasTag = [&](const std::string& t) {
-        // Match if key equals tag OR string value equals tag
         auto it = all.find(t);
-        if (it != all.end())
+        if (it != all.end()) {
             return true;
+        }
         for (const auto& [k, v] : all) {
-            (void)k;
-            if (v.asString() == t)
+            if (v.asString() == t) {
                 return true;
+            }
         }
         return false;
     };
 
     if (matchAll) {
         for (const auto& t : tags) {
-            if (!hasTag(t))
-                return false;
+            if (!hasTag(t)) {
+                co_return false;
+            }
         }
-        return true;
+        co_return true;
     } else {
         for (const auto& t : tags) {
-            if (hasTag(t))
-                return true;
+            if (hasTag(t)) {
+                co_return true;
+            }
         }
-        return false;
+        co_return false;
     }
 }
 
@@ -394,7 +419,7 @@ public:
                 co_return Error{ErrorCode::InvalidArgument,
                                 "Invalid hash format (expected hex, 8-64 chars)"};
             }
-            auto result = searchByHashPrefix(normalizedReq, &metadataTelemetry);
+            auto result = co_await searchByHashPrefix(normalizedReq, &metadataTelemetry);
             setExecTime(result, t0);
             if (result) {
                 auto r = std::move(result).value();
@@ -405,7 +430,7 @@ public:
         }
 
         if (looksLikeHash(normalizedReq.query)) {
-            auto result = searchByHashPrefix(normalizedReq, &metadataTelemetry);
+            auto result = co_await searchByHashPrefix(normalizedReq, &metadataTelemetry);
             setExecTime(result, t0);
             if (result) {
                 auto r = std::move(result).value();
@@ -428,7 +453,7 @@ public:
         // Path/filename-first heuristic: if the user likely typed a path-like query,
         // avoid noisy FTS5 attempts and go straight to metadata path/name contains.
         if (looksLikePathQuery(normalizedReq.query)) {
-            auto pathResult = pathSearch(normalizedReq, &metadataTelemetry);
+            auto pathResult = co_await pathSearch(normalizedReq, &metadataTelemetry);
             setExecTime(pathResult, t0);
             if (pathResult) {
                 auto resp = std::move(pathResult).value();
@@ -529,7 +554,7 @@ public:
             auto resp = std::move(result).value();
             if (req.pathsOnly && resp.paths.empty()) {
                 spdlog::info("[SearchService] invoking paths fallback for empty pathsOnly result");
-                ensurePathsFallbackSync(normalizedReq, resp, &metadataTelemetry);
+                co_await ensurePathsFallbackAsync(normalizedReq, resp, &metadataTelemetry);
             }
             auto totalElapsed = duration_cast<milliseconds>(steady_clock::now() - t0).count();
             resp.executionTimeMs = static_cast<int64_t>(totalElapsed);
@@ -551,25 +576,26 @@ public:
         co_return result;
     }
 
-    Result<void> lightIndexForHash(const std::string& hash,
-                                   std::size_t maxBytes = 2 * 1024 * 1024) override {
+    boost::asio::awaitable<Result<void>> lightIndexForHash_impl(const std::string& hash,
+                                                                std::size_t maxBytes) {
         try {
             if (!ctx_.metadataRepo) {
-                return Error{ErrorCode::NotInitialized, "metadata repository not available"};
+                co_return Error{ErrorCode::NotInitialized, "metadata repository not available"};
             }
-            auto di = retryMetadataOp([&]() { return ctx_.metadataRepo->getDocumentByHash(hash); });
+            auto di = co_await retryMetadataOp(
+                [&]() { return ctx_.metadataRepo->getDocumentByHash(hash); });
             if (!di) {
-                return di.error();
+                co_return di.error();
             }
             if (!di.value().has_value()) {
-                return Error{ErrorCode::NotFound, "document not found by hash"};
+                co_return Error{ErrorCode::NotFound, "document not found by hash"};
             }
             auto info = *di.value();
 
             // If already extracted, nothing to do
             if (info.contentExtracted &&
                 info.extractionStatus == metadata::ExtractionStatus::Success) {
-                return Result<void>();
+                co_return Result<void>();
             }
 
             // Only attempt lightweight extraction for text-like types or small files
@@ -586,27 +612,27 @@ public:
             if (!looksTextMime && !looksTextExt) {
                 // Skip non-text types here; daemon/background can handle richer extraction if
                 // needed.
-                return Result<void>();
+                co_return Result<void>();
             }
 
             if (!ctx_.store) {
-                return Error{ErrorCode::NotInitialized, "content store not available"};
+                co_return Error{ErrorCode::NotInitialized, "content store not available"};
             }
 
             // Guard: avoid loading very large files in memory for the light path
             if (info.fileSize > 0 && static_cast<std::size_t>(info.fileSize) > maxBytes) {
                 spdlog::debug("LightIndex: skipping large file {} (size={} > cap={})",
                               info.fileName, info.fileSize, maxBytes);
-                return Result<void>();
+                co_return Result<void>();
             }
 
             auto bytesRes = ctx_.store->retrieveBytes(hash);
             if (!bytesRes) {
-                return bytesRes.error();
+                co_return bytesRes.error();
             }
             auto& buf = bytesRes.value();
             if (buf.empty()) {
-                return Result<void>();
+                co_return Result<void>();
             }
             if (buf.size() > maxBytes) {
                 spdlog::debug("LightIndex: trimming content {} from {} to {} bytes", info.fileName,
@@ -640,25 +666,48 @@ public:
             }
 
             // Index into FTS5 and fuzzy index
-            (void)retryMetadataOp([&]() {
+            (void)co_await retryMetadataOp([&]() {
                 return ctx_.metadataRepo->indexDocumentContent(info.id, info.fileName, text,
                                                                mime.empty() ? "text/plain" : mime);
             });
-            (void)retryMetadataOp([&]() { return ctx_.metadataRepo->updateFuzzyIndex(info.id); });
+            (void)co_await retryMetadataOp(
+                [&]() { return ctx_.metadataRepo->updateFuzzyIndex(info.id); });
 
             // Mark extraction success for this light path
-            auto d = retryMetadataOp([&]() { return ctx_.metadataRepo->getDocument(info.id); });
+            auto d =
+                co_await retryMetadataOp([&]() { return ctx_.metadataRepo->getDocument(info.id); });
             if (d && d.value().has_value()) {
                 auto updated = *d.value();
                 updated.contentExtracted = true;
                 updated.extractionStatus = metadata::ExtractionStatus::Success;
-                (void)retryMetadataOp([&]() { return ctx_.metadataRepo->updateDocument(updated); });
+                (void)co_await retryMetadataOp(
+                    [&]() { return ctx_.metadataRepo->updateDocument(updated); });
             }
 
-            return Result<void>();
+            co_return Result<void>();
         } catch (const std::exception& e) {
-            return Error{ErrorCode::InternalError, e.what()};
+            co_return Error{ErrorCode::InternalError, e.what()};
         }
+    }
+
+    Result<void> lightIndexForHash(const std::string& hash,
+                                   std::size_t maxBytes = 2 * 1024 * 1024) override {
+        if (!ctx_.workerExecutor) {
+            return Error{ErrorCode::NotInitialized, "Worker executor not available"};
+        }
+
+        // Since this is a fire-and-forget, we can spawn and detach.
+        boost::asio::co_spawn(
+            ctx_.workerExecutor,
+            [this, hash, maxBytes]() -> boost::asio::awaitable<void> {
+                auto result = co_await lightIndexForHash_impl(hash, maxBytes);
+                if (!result) {
+                    spdlog::warn("lightIndexForHash failed: {}", result.error().message);
+                }
+            },
+            boost::asio::detached);
+
+        return Result<void>();
     }
 
 private:
@@ -690,40 +739,38 @@ private:
         }
 
         for (size_t i = 0; i < todo.size(); ++i) {
-            co_await boost::asio::co_spawn(
-                ctx_.workerExecutor,
-                [&, idx = todo[i]]() -> boost::asio::awaitable<void> {
-                    auto& out = resp.results[idx];
-                    std::string hash = out.hash;
-                    int64_t docId = -1;
-                    if (!hash.empty()) {
-                        auto d = retryMetadataOp(
-                            [&]() { return ctx_.metadataRepo->getDocumentByHash(hash); }, 4,
-                            std::chrono::milliseconds(25), telemetry);
-                        if (d && d.value().has_value())
-                            docId = d.value()->id;
-                    } else if (!out.path.empty()) {
-                        auto v = retryMetadataOp(
-                            [&]() { return ctx_.metadataRepo->findDocumentsByPath(out.path); }, 4,
-                            std::chrono::milliseconds(25), telemetry);
-                        if (v && !v.value().empty())
-                            docId = v.value().front().id;
-                    }
+            size_t idx = todo[i];
+            auto& out = resp.results[idx];
+            std::string hash = out.hash;
+            int64_t docId = -1;
 
-                    if (docId >= 0) {
-                        auto contentResult =
-                            retryMetadataOp([&]() { return ctx_.metadataRepo->getContent(docId); },
-                                            4, std::chrono::milliseconds(25), telemetry);
-                        if (contentResult && contentResult.value().has_value()) {
-                            const auto& content = contentResult.value().value();
-                            if (!content.contentText.empty()) {
-                                out.snippet = utils::createSnippet(content.contentText, 200, true);
-                            }
-                        }
+            if (!hash.empty()) {
+                auto d = co_await retryMetadataOp(
+                    [&]() { return ctx_.metadataRepo->getDocumentByHash(hash); }, 4,
+                    std::chrono::milliseconds(25), telemetry);
+                if (d && d.value().has_value())
+                    docId = d.value()->id;
+            } else if (!out.path.empty()) {
+                auto v = co_await retryMetadataOp(
+                    [&]() {
+                        return metadata::queryDocumentsByPattern(*ctx_.metadataRepo, out.path);
+                    },
+                    4, std::chrono::milliseconds(25), telemetry);
+                if (v && !v.value().empty())
+                    docId = v.value().front().id;
+            }
+
+            if (docId >= 0) {
+                auto contentResult =
+                    co_await retryMetadataOp([&]() { return ctx_.metadataRepo->getContent(docId); },
+                                             4, std::chrono::milliseconds(25), telemetry);
+                if (contentResult && contentResult.value().has_value()) {
+                    const auto& content = contentResult.value().value();
+                    if (!content.contentText.empty()) {
+                        out.snippet = utils::createSnippet(content.contentText, 200, true);
                     }
-                    co_return;
-                },
-                boost::asio::use_awaitable);
+                }
+            }
         }
     }
 
@@ -755,20 +802,23 @@ private:
                     auto& out = resp.results[idx];
                     int64_t docId = -1;
                     if (!out.hash.empty()) {
-                        if (auto d = retryMetadataOp(
+                        if (auto d = co_await retryMetadataOp(
                                 [&]() { return ctx_.metadataRepo->getDocumentByHash(out.hash); }, 4,
                                 std::chrono::milliseconds(25), telemetry);
                             d && d.value())
                             docId = d.value()->id;
                     } else if (!out.path.empty()) {
-                        if (auto v = retryMetadataOp(
-                                [&]() { return ctx_.metadataRepo->findDocumentsByPath(out.path); },
+                        if (auto v = co_await retryMetadataOp(
+                                [&]() {
+                                    return metadata::queryDocumentsByPattern(*ctx_.metadataRepo,
+                                                                             out.path);
+                                },
                                 4, std::chrono::milliseconds(25), telemetry);
                             v && !v.value().empty())
                             docId = v.value().front().id;
                     }
                     if (docId >= 0) {
-                        if (auto contentResult = retryMetadataOp(
+                        if (auto contentResult = co_await retryMetadataOp(
                                 [&]() { return ctx_.metadataRepo->getContent(docId); }, 4,
                                 std::chrono::milliseconds(25), telemetry);
                             contentResult && contentResult.value()) {
@@ -805,18 +855,19 @@ private:
         }
     }
 
-    void ensurePathsFallbackSync(const SearchRequest& req, SearchResponse& resp,
-                                 MetadataTelemetry* telemetry = nullptr) {
+    boost::asio::awaitable<void> ensurePathsFallbackAsync(const SearchRequest& req,
+                                                          SearchResponse& resp,
+                                                          MetadataTelemetry* telemetry = nullptr) {
         if (!ctx_.metadataRepo)
-            return;
-        auto allDocsResult =
-            retryMetadataOp([&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); }, 4,
-                            std::chrono::milliseconds(25), telemetry);
+            co_return;
+        auto allDocsResult = co_await retryMetadataOp(
+            [&]() { return metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%"); }, 4,
+            std::chrono::milliseconds(25), telemetry);
         if (!allDocsResult) {
             spdlog::warn(
                 "[SearchService] ensurePathsFallback failed to enumerate paths: code={} message={}",
                 static_cast<int>(allDocsResult.error().code), allDocsResult.error().message);
-            return;
+            co_return;
         }
         const auto& docs = allDocsResult.value();
         spdlog::info("[SearchService] ensurePathsFallback scanning {} docs for query '{}'",
@@ -854,56 +905,61 @@ private:
         }
     }
 
-    Result<SearchResponse> pathSearch(const SearchRequest& req,
-                                      MetadataTelemetry* telemetry = nullptr) {
+    boost::asio::awaitable<Result<SearchResponse>>
+    pathSearch(const SearchRequest& req, MetadataTelemetry* telemetry = nullptr) {
+        static auto globToSqlLike = [](const std::string& glob) {
+            std::string like;
+            like.reserve(glob.size());
+            for (char c : glob) {
+                if (c == '*') {
+                    like += '%';
+                } else if (c == '?') {
+                    like += '_';
+                } else {
+                    like += c;
+                }
+            }
+            return like;
+        };
+
         if (!ctx_.metadataRepo) {
-            return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
+            co_return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
         }
         SearchResponse resp;
         resp.type = "path";
         resp.usedHybrid = false;
         std::vector<metadata::DocumentInfo> docs;
-        // If the query contains wildcards, fetch all and filter locally; otherwise use LIKE
+
         const bool wildcard = hasWildcard(req.query);
-        if (!wildcard) {
-            std::string like = "%" + req.query + "%";
-            auto r = retryMetadataOp([&]() { return ctx_.metadataRepo->findDocumentsByPath(like); },
-                                     4, std::chrono::milliseconds(25), telemetry);
-            if (r)
-                docs = std::move(r.value());
+
+        std::string likePattern;
+        if (wildcard) {
+            likePattern = globToSqlLike(req.query);
+        } else {
+            likePattern = "%" + req.query + "%";
         }
-        if (wildcard || docs.empty()) {
-            auto rAll =
-                retryMetadataOp([&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); }, 4,
-                                std::chrono::milliseconds(25), telemetry);
-            if (!rAll)
-                return rAll.error();
-            const auto& all = rAll.value();
-            docs.reserve(all.size());
-            for (const auto& d : all) {
-                const std::string& p = !d.filePath.empty() ? d.filePath : d.fileName;
-                bool match = false;
-                if (wildcard) {
-                    // Treat wildcard patterns as glob over full path
-                    match = wildcardMatch(p, req.query);
-                } else {
-                    match = (p.find(req.query) != std::string::npos);
-                }
-                if (match)
-                    docs.push_back(d);
-            }
+
+        auto r = co_await retryMetadataOp(
+            [&]() { return metadata::queryDocumentsByPattern(*ctx_.metadataRepo, likePattern); }, 4,
+            std::chrono::milliseconds(25), telemetry);
+
+        if (r) {
+            docs = std::move(r.value());
+        } else {
+            co_return r.error();
         }
+
         // Apply additional filters and shape results
-        auto push_path = [&](const metadata::DocumentInfo& d) {
+        auto push_path = [&](const metadata::DocumentInfo& d) -> boost::asio::awaitable<void> {
             if (!req.extension.empty()) {
                 if (d.fileExtension != req.extension && d.fileExtension != ("." + req.extension))
-                    return;
+                    co_return;
             }
             if (!req.mimeType.empty() && d.mimeType != req.mimeType)
-                return;
-            if (!metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags, req.matchAllTags,
-                                 telemetry))
-                return;
+                co_return;
+            if (!(co_await metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags,
+                                           req.matchAllTags, telemetry)))
+                co_return;
             if (req.pathsOnly) {
                 resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
             } else {
@@ -917,7 +973,7 @@ private:
             }
         };
         for (const auto& d : docs) {
-            push_path(d);
+            co_await push_path(d);
             if (req.limit != 0) {
                 if (req.pathsOnly && resp.paths.size() >= req.limit)
                     break;
@@ -929,7 +985,7 @@ private:
             resp.total = resp.paths.size();
         else
             resp.total = resp.results.size();
-        return resp;
+        co_return resp;
     }
 
     template <typename T> void setExecTime(Result<T>& r, std::chrono::steady_clock::time_point t0) {
@@ -951,13 +1007,8 @@ private:
         }
     }
 
-    Result<SearchResponse> searchByHashPrefix(const SearchRequest& req,
-                                              MetadataTelemetry* telemetry = nullptr) {
-        auto fetchAll = [&]() {
-            return retryMetadataOp([&]() { return ctx_.metadataRepo->findDocumentsByPath("%"); }, 4,
-                                   std::chrono::milliseconds(25), telemetry);
-        };
-
+    boost::asio::awaitable<Result<SearchResponse>>
+    searchByHashPrefix(const SearchRequest& req, MetadataTelemetry* telemetry = nullptr) {
         const std::string& rawPrefix = !req.hash.empty() ? req.hash : req.query;
         std::string prefix = rawPrefix;
         std::transform(prefix.begin(), prefix.end(), prefix.begin(),
@@ -966,81 +1017,88 @@ private:
         resp.type = "hash";
         resp.usedHybrid = false;
 
-        std::size_t count = 0;
-        for (int attempt = 0; attempt < 2 && count == 0; ++attempt) {
-            auto docsResult = fetchAll();
-            if (!docsResult) {
-                return Error{ErrorCode::InternalError,
-                             "Failed to enumerate documents for hash search: " +
-                                 docsResult.error().message};
-            }
-            const auto& docs = docsResult.value();
-            for (const auto& doc : docs) {
-                if (doc.sha256Hash.size() < prefix.size())
-                    continue;
-                // Normalize doc hash to lowercase once for robust compare
-                std::string dh = doc.sha256Hash;
-                std::transform(dh.begin(), dh.end(), dh.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                if (dh.compare(0, prefix.size(), prefix) != 0)
-                    continue;
+        const std::size_t fetchLimit = std::max<std::size_t>(req.limit * 4, 32);
+        auto docsResult = co_await retryMetadataOp(
+            [&]() { return ctx_.metadataRepo->findDocumentsByHashPrefix(prefix, fetchLimit); }, 4,
+            std::chrono::milliseconds(25), telemetry);
+        if (!docsResult) {
+            co_return Error{ErrorCode::InternalError,
+                            "Failed to enumerate documents for hash search: " +
+                                docsResult.error().message};
+        }
 
-                // Optional path and tag filters for CLI parity
-                bool pathOk = true;
-                if (!req.pathPattern.empty()) {
-                    if (hasWildcard(req.pathPattern)) {
-                        std::string pattern = req.pathPattern;
-                        if (pattern.front() != '*' && pattern.front() != '/' &&
-                            pattern.find(":/") == std::string::npos) {
-                            pattern = "*" + pattern;
-                        }
-                        pathOk = wildcardMatch(doc.filePath, pattern);
-                    } else {
-                        pathOk = doc.filePath.find(req.pathPattern) != std::string::npos;
+        const auto& docs = docsResult.value();
+        for (const auto& doc : docs) {
+            // Optional path and tag filters for CLI parity
+            bool pathOk = true;
+            if (!req.pathPattern.empty()) {
+                if (hasWildcard(req.pathPattern)) {
+                    std::string pattern = req.pathPattern;
+                    if (!pattern.empty() && pattern.front() != '*' && pattern.front() != '/' &&
+                        pattern.find(":/") == std::string::npos) {
+                        pattern = "*" + pattern;
                     }
+                    pathOk = wildcardMatch(doc.filePath, pattern);
+                } else {
+                    pathOk = doc.filePath.find(req.pathPattern) != std::string::npos;
                 }
-                // Enforce ext/mime filters when available
-                bool metaFiltersOk = true;
-                if (!req.fileType.empty()) {
-                    // keep current behavior (type handled elsewhere)
-                }
-                if (!req.extension.empty()) {
-                    if (doc.fileExtension != req.extension &&
-                        doc.fileExtension != ("." + req.extension)) {
-                        metaFiltersOk = false;
-                    }
-                }
-                if (!req.mimeType.empty() && doc.mimeType != req.mimeType) {
+            }
+
+            bool metaFiltersOk = true;
+            if (!req.extension.empty()) {
+                if (doc.fileExtension != req.extension &&
+                    doc.fileExtension != ("." + req.extension)) {
                     metaFiltersOk = false;
                 }
-                if (!pathOk || !metaFiltersOk ||
-                    !metadataHasTags(ctx_.metadataRepo.get(), doc.id, req.tags, req.matchAllTags,
-                                     telemetry)) {
-                    continue;
-                }
-
-                if (req.pathsOnly) {
-                    resp.paths.push_back(doc.filePath);
-                } else {
-                    SearchItem it;
-                    it.id = doc.id;
-                    it.hash = req.showHash ? doc.sha256Hash : "";
-                    it.title = doc.fileName;
-                    it.path = doc.filePath;
-                    it.score = 1.0;  // Exact/prefix match
-                    it.snippet = ""; // not available here
-                    resp.results.push_back(std::move(it));
-                }
-
-                if (++count >= req.limit)
-                    break;
             }
-            if (count == 0)
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            if (!req.mimeType.empty() && doc.mimeType != req.mimeType) {
+                metaFiltersOk = false;
+            }
+            if (!req.fileType.empty()) {
+                auto classified = utils::classifyFileType(doc.mimeType, doc.fileExtension);
+                if (classified != req.fileType) {
+                    metaFiltersOk = false;
+                }
+            }
+
+            if (!pathOk || !metaFiltersOk ||
+                !(co_await metadataHasTags(ctx_.metadataRepo.get(), doc.id, req.tags,
+                                           req.matchAllTags, telemetry))) {
+                continue;
+            }
+
+            if (req.pathsOnly) {
+                resp.paths.push_back(doc.filePath);
+            } else {
+                SearchItem it;
+                it.id = doc.id;
+                it.hash = req.showHash ? doc.sha256Hash : "";
+                it.title = doc.fileName;
+                it.path = doc.filePath;
+                it.score = 1.0;
+                it.snippet = "";
+                it.mimeType = doc.mimeType;
+                it.fileType = utils::classifyFileType(doc.mimeType, doc.fileExtension);
+                it.size = static_cast<std::uint64_t>(doc.fileSize);
+                it.created = doc.createdTime.time_since_epoch().count();
+                it.modified = doc.modifiedTime.time_since_epoch().count();
+                it.indexed = doc.indexedTime.time_since_epoch().count();
+                if (req.showHash) {
+                    it.metadata["hash"] = doc.sha256Hash;
+                }
+                it.metadata["indexed"] = std::to_string(doc.indexedTime.time_since_epoch().count());
+                it.metadata["path"] = doc.filePath;
+                resp.results.push_back(std::move(it));
+            }
+
+            if ((req.pathsOnly ? resp.paths.size() : resp.results.size()) >= req.limit)
+                break;
         }
 
         resp.total = req.pathsOnly ? resp.paths.size() : resp.results.size();
-        return resp;
+        resp.wasHashSearch = true;
+        resp.detectedHashQuery = rawPrefix;
+        co_return resp;
     }
 
     Result<SearchResponse> hybridSearch(const SearchRequest& req,
@@ -1192,11 +1250,7 @@ private:
         // Get docIds for tags if provided
         std::optional<std::vector<int64_t>> docIds;
         if (!req.tags.empty()) {
-            auto docsResult = retryMetadataOp(
-                [&]() {
-                    return ctx_.metadataRepo->findDocumentsByTags(req.tags, req.matchAllTags);
-                },
-                4, std::chrono::milliseconds(25), telemetry);
+            auto docsResult = ctx_.metadataRepo->findDocumentsByTags(req.tags, req.matchAllTags);
             if (docsResult) {
                 std::vector<int64_t> ids;
                 const auto& docsVec = docsResult.value();
@@ -1226,12 +1280,8 @@ private:
 
         // Fuzzy or full-text via metadata repository
         if (req.fuzzy) {
-            auto r = retryMetadataOp(
-                [&]() {
-                    return ctx_.metadataRepo->fuzzySearch(processedQuery, req.similarity,
-                                                          static_cast<int>(req.limit), docIds);
-                },
-                4, std::chrono::milliseconds(25), telemetry);
+            auto r = ctx_.metadataRepo->fuzzySearch(processedQuery, req.similarity,
+                                                    static_cast<int>(req.limit), docIds);
             if (!r) {
                 return Error{ErrorCode::InternalError, "Fuzzy search failed: " + r.error().message};
             }
@@ -1257,12 +1307,8 @@ private:
             normalizeScores(resp.results, resp.type);
             return resp;
         } else {
-            auto r = retryMetadataOp(
-                [&]() {
-                    return ctx_.metadataRepo->search(processedQuery, static_cast<int>(req.limit), 0,
-                                                     docIds);
-                },
-                4, std::chrono::milliseconds(25), telemetry);
+            auto r =
+                ctx_.metadataRepo->search(processedQuery, static_cast<int>(req.limit), 0, docIds);
             if (!r) {
                 return Error{ErrorCode::InternalError,
                              "Full-text search failed: " + r.error().message};

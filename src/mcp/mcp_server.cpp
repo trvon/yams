@@ -16,6 +16,7 @@
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/migration.h>
+#include <yams/metadata/query_helpers.h>
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -125,11 +126,8 @@ void MCPServer::sendResponse(const nlohmann::json& message) {
 
     // Prefer immediate synchronous flush for stdio transport; fallback to queue
     if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
-        if (stdio->peerPrefersNdjson()) {
-            stdio->sendNdjson(message);
-        } else {
-            stdio->send(message);
-        }
+        // MCP stdio spec: always output NDJSON (newline-delimited JSON)
+        stdio->send(message);
         return;
     }
 
@@ -227,18 +225,6 @@ StdioTransport::StdioTransport() {
     state_.store(TransportState::Connected);
     // Writer thread retired; unified outbound path in MCPServer handles ordering
     writerRunning_.store(false);
-    // Configure content type header for framed messages
-    try {
-        if (const char* ct = std::getenv("YAMS_MCP_CONTENT_TYPE"); ct && *ct) {
-            contentTypeHeader_ = ct;
-        } else {
-            // Default to a widely compatible JSON content type. Some MCP clients expect
-            // 'application/json' and will ignore 'application/vscode-jsonrpc'.
-            contentTypeHeader_ = "application/json; charset=utf-8";
-        }
-    } catch (...) {
-        contentTypeHeader_ = "application/vscode-jsonrpc; charset=utf-8";
-    }
 }
 
 StdioTransport::~StdioTransport() {
@@ -258,14 +244,13 @@ void StdioTransport::send(const json& message) {
     if (currentState == TransportState::Connected) {
         try {
             std::lock_guard<std::mutex> lock(outMutex_);
-            const std::string payload = message.dump();
-            auto& out = std::cout;
-            // Minimal MCP framing, always including Content-Type header for interop
-            out << "Content-Length: " << payload.size() << "\r\n";
-            out << "Content-Type: " << contentTypeHeader_ << "\r\n";
-            out << "\r\n";
-            out << payload;
-            out.flush();
+
+            // MCP stdio spec: newline-delimited JSON (NDJSON)
+            // Messages are delimited by newlines and MUST NOT contain embedded newlines
+            // Use std::endl to ensure proper flushing on all platforms
+            std::cout << message.dump() << std::endl;
+            std::cout.flush(); // Explicit flush for reliability
+
         } catch (const std::exception& e) {
             spdlog::error("StdioTransport::send exception: {}", e.what());
         } catch (...) {
@@ -275,23 +260,12 @@ void StdioTransport::send(const json& message) {
 }
 
 void StdioTransport::sendNdjson(const json& message) {
-    if (state_.load() != TransportState::Connected) {
-        return;
-    }
-    try {
-        std::lock_guard<std::mutex> lock(outMutex_);
-        const std::string payload = message.dump();
-        auto& out = std::cout;
-        out << payload << "\n";
-        out.flush();
-    } catch (const std::exception& e) {
-        spdlog::error("StdioTransport::sendNdjson exception: {}", e.what());
-    } catch (...) {
-        spdlog::error("StdioTransport::sendNdjson unknown exception");
-    }
+    // For stdio transport, sendNdjson() is identical to send()
+    // Both output MCP spec-compliant NDJSON
+    send(message);
 }
 
-// Framed send helper for pre-serialized JSON payloads
+// Send helper for pre-serialized JSON payloads (outputs NDJSON per MCP spec)
 void StdioTransport::sendFramedSerialized(const std::string& payload) {
     if (state_.load() != TransportState::Connected) {
         return;
@@ -299,10 +273,8 @@ void StdioTransport::sendFramedSerialized(const std::string& payload) {
     try {
         std::lock_guard<std::mutex> lock(outMutex_);
         auto& out = std::cout;
-        out << "Content-Length: " << payload.size() << "\r\n";
-        out << "Content-Type: " << contentTypeHeader_ << "\r\n";
-        out << "\r\n";
-        out << payload;
+        // MCP stdio spec: newline-delimited JSON
+        out << payload << "\n";
         out.flush();
     } catch (const std::exception& e) {
         spdlog::error("StdioTransport::sendFramedSerialized exception: {}", e.what());
@@ -443,9 +415,9 @@ MessageResult StdioTransport::receive() {
 
         spdlog::debug("StdioTransport: Read line: '{}'", line);
 
-        // Unframed single-line JSON support (best-effort compatibility)
+        // NDJSON (newline-delimited JSON) - MCP stdio standard format
         if (!line.empty() && line.front() == '{') {
-            spdlog::debug("StdioTransport: Detected single-line JSON mode");
+            spdlog::debug("StdioTransport: Received NDJSON message (MCP stdio standard)");
             auto parsed = json_utils::parse_json(line);
             if (!parsed) {
                 spdlog::error("StdioTransport: Failed to parse JSON: {}", line);
@@ -454,7 +426,6 @@ MessageResult StdioTransport::receive() {
                     state_.store(TransportState::Error);
                 return parsed.error();
             }
-            preferNdjson_.store(true);
             resetErrorCount();
             return parsed.value();
         }
@@ -531,8 +502,8 @@ MessageResult StdioTransport::receive() {
                 state_.store(TransportState::Error);
             return parsed.error();
         }
-        // We parsed a framed message; prefer header framing for outbound
-        preferNdjson_.store(false);
+        // Successfully parsed LSP-framed message (backwards compatibility)
+        // Note: We still output NDJSON per MCP spec regardless of input format
         resetErrorCount();
         return parsed.value();
     }
@@ -920,7 +891,14 @@ MessageResult MCPServer::handleRequest(const json& request) {
 
         // Route to appropriate handler
         if (method == "initialize") {
+            spdlog::debug("MCP handling initialize request with params: {}", params.dump());
             auto initResult = initialize(params);
+
+            // Diagnostic logging for empty result issues
+            spdlog::debug("MCP initialize returned: is_null={}, is_object={}, empty={}, size={}",
+                          initResult.is_null(), initResult.is_object(), initResult.empty(),
+                          initResult.size());
+
             if (initResult.contains("_initialize_error")) {
                 spdlog::error("MCP initialize failed with error");
                 return json{{"jsonrpc", "2.0"},
@@ -932,7 +910,12 @@ MessageResult MCPServer::handleRequest(const json& request) {
             }
             spdlog::debug("MCP initialize successful, protocol version: {}",
                           initResult.value("protocolVersion", "unknown"));
-            return createResponse(id2, initResult);
+
+            auto response = createResponse(id2, initResult);
+            spdlog::debug("MCP createResponse returned: is_null={}, is_object={}, size={}",
+                          response.is_null(), response.is_object(), response.size());
+
+            return response;
         } else if (method == "notifications/cancelled") {
             // MCP cancellation notification; tolerate either 'id' or 'requestId'
             nlohmann::json cancelId;
@@ -1266,6 +1249,15 @@ json MCPServer::initialize(const json& params) {
                    {"serverInfo", {{"name", serverInfo_.name}, {"version", serverInfo_.version}}},
                    {"capabilities", caps}};
 
+    // Debug logging to diagnose empty result issues
+    spdlog::debug("MCP initialize() result built:");
+    spdlog::debug("  - protocolVersion: {}", negotiated);
+    spdlog::debug("  - serverInfo.name: {}", serverInfo_.name);
+    spdlog::debug("  - serverInfo.version: {}", serverInfo_.version);
+    spdlog::debug("  - capabilities size: {}", caps.size());
+    spdlog::debug("  - result is_null: {}, is_object: {}, empty: {}, size: {}", result.is_null(),
+                  result.is_object(), result.empty(), result.size());
+
     return result;
 }
 
@@ -1386,7 +1378,7 @@ json MCPServer::readResource(const std::string& uri) {
                    {"mimeType", "application/json"},
                    {"text", json({{"error", "Metadata repository not initialized"}}).dump()}}}}};
         }
-        auto docsResult = metadataRepo_->findDocumentsByPath("%");
+        auto docsResult = metadata::queryDocumentsByPattern(*metadataRepo_, "%");
         if (!docsResult) {
             return {{"contents", {{"text", "Failed to list documents"}}}};
         }
@@ -2441,7 +2433,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                     // Retrieve indexed content by hash when available
                     std::string indexedContent;
                     if (!hash.empty()) {
-                        yams::daemon::GetRequest greq;
+                        yams::app::services::GetOptions greq;
                         greq.hash = hash;
                         greq.metadataOnly = false;
                         auto gr = rsvc.get(greq, ropts);
@@ -2509,7 +2501,7 @@ MCPServer::handleGrepDocuments(const MCPGrepRequest& req) {
     if (auto ensure = ensureDaemonClient(); !ensure) {
         co_return ensure.error();
     }
-    yams::daemon::GrepRequest dreq;
+    yams::app::services::GrepOptions dreq;
     dreq.pattern = req.pattern;
     dreq.paths = req.paths;
     dreq.caseInsensitive = req.ignoreCase;
@@ -3422,7 +3414,7 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
         co_return ensure.error();
     }
     // Convert MCP request to daemon request
-    daemon::GetRequest daemon_req;
+    yams::app::services::GetOptions daemon_req;
     daemon_req.hash = req.hash;
     daemon_req.name = req.name;
     daemon_req.byName = !req.name.empty();
@@ -3521,7 +3513,13 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
     ropts.requestTimeoutMs = 30000;
     ropts.headerTimeoutMs = 30000;
     ropts.bodyTimeoutMs = 120000;
-    auto dres = rsvc.list(daemon_req, ropts);
+    yams::app::services::ListOptions list_opts;
+    list_opts.limit = daemon_req.limit;
+    list_opts.offset = daemon_req.offset;
+    list_opts.namePattern = daemon_req.namePattern;
+    list_opts.sortBy = daemon_req.sortBy;
+    list_opts.reverse = daemon_req.reverse;
+    auto dres = rsvc.list(list_opts, ropts);
     // Clear after call
     if (!__session.empty()) {
         ::setenv("YAMS_SESSION_CURRENT", "", 1);
@@ -3566,7 +3564,7 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
                         std::string local((std::istreambuf_iterator<char>(ifs)),
                                           std::istreambuf_iterator<char>());
                         // Get indexed content
-                        yams::daemon::GetRequest greq;
+                        yams::app::services::GetOptions greq;
                         greq.hash = item.hash;
                         greq.metadataOnly = false;
                         auto gr = rsvc.get(greq, ropts);
@@ -4012,7 +4010,7 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
             // Fall back to simple basename-list matching similar to handleGetByName
             auto tryList =
                 [&](const std::string& pat) -> std::optional<yams::daemon::ListResponse> {
-                yams::daemon::ListRequest lreq;
+                yams::app::services::ListOptions lreq;
                 lreq.namePattern = pat;
                 lreq.limit = 500;
                 lreq.pathsOnly = false;
@@ -4087,7 +4085,7 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
             if (!cand)
                 co_return Error{ErrorCode::NotFound, "No matching documents"};
             // Build a synthetic GetResponse equivalent
-            yams::daemon::GetRequest greq;
+            yams::app::services::GetOptions greq;
             greq.hash = cand->hash;
             greq.metadataOnly = true;
             auto grres = rsvc.get(greq, ropts);
@@ -4947,7 +4945,7 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
                 // Retrieve content by hash via RetrievalService
                 yams::app::services::RetrievalService rsvc;
                 yams::app::services::RetrievalOptions ropts;
-                yams::daemon::GetRequest greq;
+                yams::app::services::GetOptions greq;
                 greq.hash = pick.hash;
                 greq.metadataOnly = false;
                 auto grres = rsvc.get(greq, ropts);
@@ -4975,7 +4973,7 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
 
             yams::app::services::RetrievalService rsvc;
             yams::app::services::RetrievalOptions ropts;
-            yams::daemon::GetRequest greq;
+            yams::app::services::GetOptions greq;
             greq.hash = chosen.hash;
             greq.metadataOnly = false;
             auto grres = rsvc.get(greq, ropts);
@@ -5018,7 +5016,7 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
     } else {
         // Fallback path: search by base filename using list + simple fuzzy
         auto tryList = [&](const std::string& pat) -> std::optional<yams::daemon::ListResponse> {
-            yams::daemon::ListRequest lreq;
+            yams::app::services::ListOptions lreq;
             lreq.namePattern = pat; // SQL LIKE pattern
             lreq.limit = 500;
             lreq.pathsOnly = false;
@@ -5095,7 +5093,7 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
         auto cand = bestMatch(lr->items);
         if (!cand)
             co_return Error{ErrorCode::NotFound, "document not found by name"};
-        yams::daemon::GetRequest greq;
+        yams::app::services::GetOptions greq;
         greq.hash = cand->hash;
         greq.metadataOnly = false;
         auto grres = rsvc.get(greq, ropts);
@@ -5144,7 +5142,7 @@ yams::mcp::MCPServer::handleCatDocument(const yams::mcp::MCPCatDocumentRequest& 
     ropts.headerTimeoutMs = 30000;
     ropts.bodyTimeoutMs = 120000;
 
-    yams::daemon::GetRequest dreq;
+    yams::app::services::GetOptions dreq;
     dreq.hash = req.hash;
     dreq.name = req.name;
     dreq.byName = !req.name.empty();

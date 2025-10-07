@@ -8,10 +8,25 @@
 #include <random>
 #include <sstream>
 #include <yams/api/metadata_api.h>
+#include <yams/metadata/path_utils.h>
 
 namespace yams::api {
 
 using json = nlohmann::json;
+
+namespace {
+
+void populateDerivedPathFields(metadata::DocumentInfo& info) {
+    auto derived = metadata::computePathDerivedValues(info.filePath);
+    info.filePath = derived.normalizedPath;
+    info.pathPrefix = derived.pathPrefix;
+    info.reversePath = derived.reversePath;
+    info.pathHash = derived.pathHash;
+    info.parentHash = derived.parentHash;
+    info.pathDepth = derived.pathDepth;
+}
+
+} // namespace
 
 MetadataApi::MetadataApi(std::shared_ptr<metadata::MetadataRepository> repository,
                          std::shared_ptr<indexing::IDocumentIndexer> indexer,
@@ -30,9 +45,12 @@ CreateMetadataResponse MetadataApi::createMetadata(const CreateMetadataRequest& 
     response.requestId = request.requestId;
 
     try {
+        metadata::DocumentMetadata requestCopy = request.metadata;
+        populateDerivedPathFields(requestCopy.info);
+
         // Validate request
         if (config_.enableValidation) {
-            auto validation = validateFields(request.metadata);
+            auto validation = validateFields(requestCopy);
             if (!validation.empty()) {
                 response.setError(ErrorCode::InvalidArgument, "Validation failed");
                 return response;
@@ -41,28 +59,37 @@ CreateMetadataResponse MetadataApi::createMetadata(const CreateMetadataRequest& 
 
         // Check uniqueness if requested (using hash instead of path)
         if (request.validateUniqueness) {
-            auto existing = repository_->getDocumentByHash(request.metadata.info.sha256Hash);
+            auto existing = repository_->getDocumentByHash(requestCopy.info.sha256Hash);
             if (existing && existing.value()) {
                 response.setError(ErrorCode::InvalidArgument, "Document already exists");
+                return response;
+            }
+            auto existingPath = repository_->findDocumentByExactPath(requestCopy.info.filePath);
+            if (!existingPath) {
+                response.setError(existingPath.error().code, existingPath.error().message);
+                return response;
+            }
+            if (existingPath.value().has_value()) {
+                response.setError(ErrorCode::InvalidArgument, "Document path already exists");
                 return response;
             }
         }
 
         // Insert metadata (use the DocumentInfo from DocumentMetadata)
-        auto result = repository_->insertDocument(request.metadata.info);
+        auto result = repository_->insertDocument(requestCopy.info);
         if (!result) {
             response.setError(ErrorCode::DatabaseError, result.error().message);
             return response;
         }
 
         response.documentId = result.value();
-        response.createdMetadata = request.metadata;
+        response.createdMetadata = requestCopy;
         response.createdMetadata.info.id = response.documentId;
 
         // Trigger indexing if requested
         if (request.indexImmediately && indexer_) {
             indexing::IndexingConfig indexConfig;
-            auto indexResult = indexer_->indexDocument(request.metadata.info.filePath, indexConfig);
+            auto indexResult = indexer_->indexDocument(requestCopy.info.filePath, indexConfig);
             response.wasIndexed = indexResult.has_value();
         }
 
@@ -538,17 +565,30 @@ ImportMetadataResponse MetadataApi::importMetadata(const ImportMetadataRequest& 
         auto documents = importResult.value();
 
         // Process each document
-        for (const auto& doc : documents) {
-            // Check for existing document using path pattern matching
-            auto existing = repository_->findDocumentsByPath(doc.info.filePath);
+        for (auto& doc : documents) {
+            populateDerivedPathFields(doc.info);
 
-            if (existing && !existing.value().empty()) {
+            // Check for existing document using normalized hash lookup
+            auto existing = repository_->findDocumentByExactPath(doc.info.filePath);
+
+            if (!existing) {
+                response.documentsFailed++;
+                if (!request.continueOnError) {
+                    response.setError(existing.error().code, existing.error().message);
+                    break;
+                }
+                continue;
+            }
+
+            if (existing.value().has_value()) {
                 switch (request.conflictResolution) {
                     case ImportMetadataRequest::ConflictResolution::Skip:
                         response.documentsSkipped++;
                         continue;
 
                     case ImportMetadataRequest::ConflictResolution::Overwrite: {
+                        auto current = existing.value().value();
+                        doc.info.id = current.id;
                         auto updateResult = repository_->updateDocument(doc.info);
                         if (updateResult) {
                             response.documentsUpdated++;
@@ -610,8 +650,10 @@ ValidateMetadataResponse MetadataApi::validateMetadata(const ValidateMetadataReq
 
         // Check uniqueness if requested
         if (request.checkUniqueness) {
-            auto existing = repository_->findDocumentsByPath(request.metadata.info.filePath);
-            if (existing && !existing.value().empty()) {
+            auto infoCopy = request.metadata.info;
+            populateDerivedPathFields(infoCopy);
+            auto existing = repository_->findDocumentByExactPath(infoCopy.filePath);
+            if (existing && existing.value().has_value()) {
                 ValidateMetadataResponse::ValidationError error;
                 error.field = "path";
                 error.error = "Document with this path already exists";

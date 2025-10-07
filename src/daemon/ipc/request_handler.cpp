@@ -16,6 +16,7 @@
 #include <array>
 #include <chrono>
 #include <span>
+#include <utility>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -456,7 +457,7 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
                 }
 
                 // Extract request from message
-                const auto& message = message_result.value();
+                auto message = std::move(message_result.value());
                 auto* request_ptr = std::get_if<Request>(&message.payload);
                 if (!request_ptr) {
                     spdlog::error("Closing connection: received non-request message");
@@ -499,11 +500,13 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
                                                                                 ctx);
                         }
                         MuxMetricsRegistry::instance().incrementActiveHandlers(1);
+                        auto request_id = message.requestId;
+                        auto expects_streaming = message.expectsStreamingResponse;
+                        auto routed_request = std::move(*request_ptr);
                         boost::asio::co_spawn(
                             sock->get_executor(),
-                            [this, sock, req = *request_ptr, req_id = message.requestId,
-                             expects = message.expectsStreamingResponse]()
-                                -> boost::asio::awaitable<void> {
+                            [this, sock, req = std::move(routed_request), req_id = request_id,
+                             expects = expects_streaming]() -> boost::asio::awaitable<void> {
                                 spdlog::info(
                                     "handle_streaming_request spawn req_id={} type={} expects={}",
                                     req_id, static_cast<int>(getMessageType(req)), expects);
@@ -701,12 +704,14 @@ RequestHandler::write_message(boost::asio::local::stream_protocol::socket& socke
     }
     if (config_.enable_multiplexing) {
         // Frame entire message and enqueue for fair writer; treat as last
-        auto framed = framer_.frame_message(message);
-        if (!framed)
-            co_return framed.error();
+        std::vector<uint8_t> frame;
+        frame.reserve(MessageFramer::HEADER_SIZE + 4096);
+        auto frame_result = framer_.frame_message_into(message, frame);
+        if (!frame_result)
+            co_return frame_result.error();
         if (write_strand_exec_)
             co_await boost::asio::dispatch(*write_strand_exec_, use_awaitable);
-        auto enq = co_await enqueue_frame(message.requestId, std::move(framed.value()), true);
+        auto enq = co_await enqueue_frame(message.requestId, std::move(frame), true);
         if (!enq)
             co_return enq.error();
         if (!writer_running_) {
@@ -716,11 +721,12 @@ RequestHandler::write_message(boost::asio::local::stream_protocol::socket& socke
         co_return Result<void>();
     } else {
         // Frame once
-        auto frame_result = framer_.frame_message(message);
-        if (!frame_result) {
-            co_return frame_result.error();
+        std::vector<uint8_t> frame;
+        frame.reserve(MessageFramer::HEADER_SIZE + 4096);
+        auto frame_status = framer_.frame_message_into(message, frame);
+        if (!frame_status) {
+            co_return frame_status.error();
         }
-        auto& frame = frame_result.value();
 
         // Check frame size doesn't exceed reasonable limits
         constexpr size_t MAX_FRAME_SIZE = 100 * 1024 * 1024; // 100MB
@@ -1267,21 +1273,22 @@ RequestHandler::write_header_frame(boost::asio::local::stream_protocol::socket& 
     using boost::asio::use_awaitable;
     (void)flush;
     // Send first streaming frame as HEADER_ONLY to signal start of chunked transfer
-    auto frame_result = framer_.frame_message_header(message /*meta only*/);
-    if (!frame_result) {
-        co_return frame_result.error();
+    std::vector<uint8_t> frame;
+    frame.reserve(MessageFramer::HEADER_SIZE + 1024);
+    auto frame_status = framer_.frame_message_header_into(message /*meta only*/, frame);
+    if (!frame_status) {
+        co_return frame_status.error();
     }
-
-    auto& frame = frame_result.value();
-    stats_.bytes_sent += frame.size();
+    auto& frame_ref = frame;
+    stats_.bytes_sent += frame_ref.size();
     // Best-effort debug: inspect header flags
     if (frame.size() >= sizeof(MessageFramer::FrameHeader)) {
-        auto info = framer_.get_frame_info(frame);
+        auto info = framer_.get_frame_info(frame_ref);
         if (info) {
             const auto& v = info.value();
             spdlog::debug("write_header_frame: header_only={} chunked={} last={} size={}B",
                           v.is_header_only, v.is_chunked, v.is_last_chunk,
-                          static_cast<uint32_t>(frame.size()));
+                          static_cast<uint32_t>(frame_ref.size()));
             if (v.is_header_only && v.payload_size != 0) {
                 spdlog::warn(
                     "write_header_frame: header-only frame advertises payload_size={} — expected 0;"
@@ -1293,13 +1300,14 @@ RequestHandler::write_header_frame(boost::asio::local::stream_protocol::socket& 
 
     // Backpressure accounting and write the header frame with timeout
     if (fsm)
-        fsm->on_write_queued(frame.size());
+        fsm->on_write_queued(frame_ref.size());
     using namespace boost::asio::experimental::awaitable_operators;
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
     timer.expires_after(config_.write_timeout);
-    auto write_or_timeout = co_await (
-        boost::asio::async_write(socket, boost::asio::buffer(frame), boost::asio::use_awaitable) ||
-        timer.async_wait(boost::asio::use_awaitable));
+    auto write_or_timeout =
+        co_await (boost::asio::async_write(socket, boost::asio::buffer(frame_ref),
+                                           boost::asio::use_awaitable) ||
+                  timer.async_wait(boost::asio::use_awaitable));
 
     if (write_or_timeout.index() == 1) {
         const std::string msg = "Write timeout (header)";
@@ -1318,7 +1326,7 @@ RequestHandler::write_header_frame(boost::asio::local::stream_protocol::socket& 
     }
 
     if (fsm)
-        fsm->on_write_flushed(frame.size());
+        fsm->on_write_flushed(frame_ref.size());
     co_return Result<void>();
 }
 
@@ -1329,12 +1337,13 @@ RequestHandler::write_chunk_frame(boost::asio::local::stream_protocol::socket& s
     using boost::asio::use_awaitable;
     (void)flush;
     // Frame chunk
-    auto frame_result = framer_.frame_message_chunk(message, last_chunk);
-    if (!frame_result) {
-        co_return frame_result.error();
+    std::vector<uint8_t> frame;
+    frame.reserve(MessageFramer::HEADER_SIZE + config_.chunk_size + 1024);
+    auto frame_status = framer_.frame_message_chunk_into(message, frame, last_chunk);
+    if (!frame_status) {
+        co_return frame_status.error();
     }
 
-    auto& frame = frame_result.value();
     stats_.bytes_sent += frame.size();
 
     // Extract header info for logging and to split header/payload writes
@@ -1444,12 +1453,14 @@ RequestHandler::write_header(boost::asio::local::stream_protocol::socket& socket
                   static_cast<int>(getMessageType(response)), flush);
     if (config_.enable_multiplexing) {
         // Frame and enqueue for fair writer
-        auto framed = framer_.frame_message_header(response_msg);
+        std::vector<uint8_t> frame;
+        frame.reserve(MessageFramer::HEADER_SIZE + 1024);
+        auto framed = framer_.frame_message_header_into(response_msg, frame);
         if (!framed)
             co_return framed.error();
         if (write_strand_exec_)
             co_await boost::asio::dispatch(*write_strand_exec_, use_awaitable);
-        auto enq = co_await enqueue_frame(request_id, std::move(framed.value()), false, fsm);
+        auto enq = co_await enqueue_frame(request_id, std::move(frame), false, fsm);
         if (!enq) {
             if (enq.error().code == ErrorCode::RateLimited ||
                 enq.error().code == ErrorCode::ResourceExhausted) {
@@ -1481,12 +1492,14 @@ RequestHandler::write_chunk(boost::asio::local::stream_protocol::socket& socket,
     response_msg.timestamp = std::chrono::steady_clock::now();
     response_msg.payload = std::move(response);
     if (config_.enable_multiplexing) {
-        auto framed = framer_.frame_message_chunk(response_msg, last_chunk);
+        std::vector<uint8_t> frame;
+        frame.reserve(MessageFramer::HEADER_SIZE + config_.chunk_size + 1024);
+        auto framed = framer_.frame_message_chunk_into(response_msg, frame, last_chunk);
         if (!framed)
             co_return framed.error();
         if (write_strand_exec_)
             co_await boost::asio::dispatch(*write_strand_exec_, use_awaitable);
-        auto enq = co_await enqueue_frame(request_id, std::move(framed.value()), last_chunk, fsm);
+        auto enq = co_await enqueue_frame(request_id, std::move(frame), last_chunk, fsm);
         if (!enq) {
             if (enq.error().code == ErrorCode::RateLimited ||
                 enq.error().code == ErrorCode::ResourceExhausted) {
@@ -1567,12 +1580,14 @@ RequestHandler::write_error_immediate(boost::asio::local::stream_protocol::socke
     m.requestId = request_id;
     m.timestamp = std::chrono::steady_clock::now();
     m.payload = Response(err);
-    auto framed = framer_.frame_message(m);
+    std::vector<uint8_t> frame;
+    frame.reserve(MessageFramer::HEADER_SIZE + 512);
+    auto framed = framer_.frame_message_into(m, frame);
     if (!framed) {
         co_return framed.error();
     }
     boost::system::error_code ec;
-    co_await boost::asio::async_write(socket, boost::asio::buffer(framed.value()),
+    co_await boost::asio::async_write(socket, boost::asio::buffer(frame),
                                       boost::asio::redirect_error(use_awaitable, ec));
     if (ec) {
         co_return Error{ErrorCode::NetworkError, ec.message()};
@@ -1799,6 +1814,10 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
         }
         spdlog::debug("stream_chunks: chunk #{} type={} items={} last={} (request_id={})",
                       chunk_count + 1, msg_type, item_count, last_chunk_received, request_id);
+        if (msg_type == static_cast<int>(MessageType::AddDocumentResponse)) {
+            spdlog::info("stream_chunks: AddDocument chunk #{} last={} (request_id={})",
+                         chunk_count + 1, last_chunk_received, request_id);
+        }
 
         // FSM guard before chunk write
         if (fsm) {

@@ -487,6 +487,7 @@ std::shared_ptr<app::services::AppContext> YamsCLI::getAppContext() {
         appContext_->store = getContentStore();
         appContext_->searchExecutor = getSearchExecutor();
         appContext_->metadataRepo = getMetadataRepository();
+        appContext_->kgStore = getKnowledgeGraphStore(); // PBI-043: tree diff KG integration
 
         // Initialize HybridSearchEngine so SearchService can use hybrid search by default
         try {

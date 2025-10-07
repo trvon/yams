@@ -253,6 +253,8 @@ boost::asio::awaitable<Response> RequestDispatcher::dispatch(const Request& req)
                     co_return co_await handleAddPathSelectorRequest(arg);
                 } else if constexpr (std::is_same_v<T, RemovePathSelectorRequest>) {
                     co_return co_await handleRemovePathSelectorRequest(arg);
+                } else if constexpr (std::is_same_v<T, ListTreeDiffRequest>) {
+                    co_return co_await handleListTreeDiffRequest(arg);
                 } else if constexpr (std::is_same_v<T, AddDocumentRequest>) {
                     co_return co_await handleAddDocumentRequest(arg);
                 } else if constexpr (std::is_same_v<T, ListRequest>) {

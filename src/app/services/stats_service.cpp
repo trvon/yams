@@ -1,6 +1,7 @@
 #include <spdlog/spdlog.h>
 #include <unordered_set>
 #include <yams/app/services/services.hpp>
+#include <yams/metadata/query_helpers.h>
 #ifdef YAMS_ENABLE_DAEMON_FEATURES
 #include <yams/daemon/components/PoolManager.h>
 #endif
@@ -25,7 +26,7 @@ public:
 
             // Get unique hash count from metadata repository
             if (ctx_.metadataRepo) {
-                auto docsResult = ctx_.metadataRepo->findDocumentsByPath("%");
+                auto docsResult = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%");
                 if (docsResult) {
                     std::unordered_set<std::string> uniqueHashes;
                     for (const auto& doc : docsResult.value()) {
@@ -37,7 +38,7 @@ public:
 
             // Collect file type statistics if requested
             if (req.fileTypes && ctx_.metadataRepo) {
-                auto docsResult = ctx_.metadataRepo->findDocumentsByPath("%");
+                auto docsResult = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%");
                 if (docsResult) {
                     std::unordered_map<std::string, FileTypeStats> typeMap;
 

@@ -65,6 +65,8 @@ public:
     Result<void> bind(int index, const std::string& value);
     Result<void> bind(int index, std::string_view value);
     Result<void> bind(int index, std::span<const std::byte> blob);
+    // C++20 chrono support (seconds precision)
+    Result<void> bind(int index, std::chrono::sys_seconds tp);
     Result<void> bind(int index, const char* value) { return bind(index, std::string_view(value)); }
 
     /**
@@ -94,6 +96,8 @@ public:
     std::string getString(int column) const;
     std::vector<std::byte> getBlob(int column) const;
     bool isNull(int column) const;
+    // C++20 chrono support (seconds precision)
+    std::chrono::sys_seconds getTime(int column) const;
 
     /**
      * @brief Get column count
@@ -185,6 +189,8 @@ public:
      * @brief Rollback transaction
      */
     Result<void> rollback();
+
+    [[nodiscard]] bool inTransaction() const { return inTransaction_; }
 
     /**
      * @brief Execute within transaction
