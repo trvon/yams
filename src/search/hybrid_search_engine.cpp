@@ -975,6 +975,7 @@ public:
     fuseResults(const std::vector<vector::SearchResult>& vector_results,
                 const std::vector<KeywordSearchResult>& keyword_results,
                 const HybridSearchConfig& config) {
+        const float keywordMaxScore = computeKeywordMaxScore(keyword_results);
         // Fast path: if vector is effectively disabled and no vector results, compute
         // keyword/KG-only fusion without extra allocation work.
         if ((config.vector_weight <= 1e-6f || vector_results.empty()) && !keyword_results.empty()) {
@@ -985,7 +986,7 @@ public:
                 HybridSearchResult r;
                 r.id = kr.id;
                 r.content = kr.content;
-                r.keyword_score = normalizeKeywordScore(kr.score, keyword_results);
+                r.keyword_score = normalizeKeywordScore(kr.score, keywordMaxScore);
                 r.keyword_rank = i;
                 r.found_by_keyword = true;
                 r.matched_keywords = kr.matched_terms;
@@ -1103,7 +1104,7 @@ public:
             auto& result = result_map[kr.id];
             result.id = kr.id;
             result.content = kr.content;
-            result.keyword_score = normalizeKeywordScore(kr.score, keyword_results);
+            result.keyword_score = normalizeKeywordScore(kr.score, keywordMaxScore);
             result.keyword_rank = i;
             result.found_by_keyword = true;
             result.matched_keywords = kr.matched_terms;
@@ -1449,17 +1450,25 @@ private:
     ThreadPool pool_;
 
     // Helper methods
-    float normalizeKeywordScore(float score, const std::vector<KeywordSearchResult>& all_results) {
+    float normalizeKeywordScore(float score, float maxScore) const {
+        if (maxScore <= 0.0f) {
+            return 0.0f;
+        }
+        return score / maxScore;
+    }
+
+    float computeKeywordMaxScore(const std::vector<KeywordSearchResult>& all_results) const {
         if (all_results.empty()) {
             return 0.0f;
         }
-
-        float max_score = all_results[0].score; // Assumes sorted
-        if (max_score == 0) {
-            return 0.0f;
+        float max_score = all_results.front().score;
+        if (max_score <= 0.0f) {
+            for (const auto& r : all_results) {
+                if (r.score > max_score)
+                    max_score = r.score;
+            }
         }
-
-        return score / max_score;
+        return max_score;
     }
 
     std::string generateCacheKey(const std::string& query, size_t k,

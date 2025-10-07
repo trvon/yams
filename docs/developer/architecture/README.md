@@ -6,6 +6,7 @@ This index points to architecture references that mirror the live implementation
 
 - Daemon and services — lifecycle, IPC, plugin hosting
   - [Architecture: Daemon and Services](../../architecture/daemon_architecture.md)
+  - [Plan: Daemon Simplification V2 (FSM-first)](../../../DAEMON_SIMPLIFICATION_PLAN_V2.md)
 - Plugin pipeline — manifest parsing, trust, runtime loaders
   - [Architecture: Plugin and Content Extraction](../../architecture/plugin_architecture.md)
 - Search pipeline — ingestion, ranking, hybrid fusion

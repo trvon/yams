@@ -193,10 +193,20 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
     if (!conn->read_started.exchange(true)) {
         co_spawn(
             GlobalIOContext::instance().get_io_context(),
-            [conn]() -> awaitable<void> {
-                co_await boost::asio::dispatch(conn->strand, use_awaitable);
+            [weak_conn = std::weak_ptr(conn)]() -> awaitable<void> {
+                if (auto conn = weak_conn.lock()) {
+                    co_await boost::asio::dispatch(conn->strand, use_awaitable);
+                } else {
+                    co_return;
+                }
+
                 MessageFramer framer;
                 for (;;) {
+                    auto conn = weak_conn.lock();
+                    if (!conn) {
+                        co_return;
+                    }
+
                     auto hres = co_await async_read_exact(
                         *conn->socket, sizeof(MessageFramer::FrameHeader),
                         conn->streaming_started.load(std::memory_order_relaxed)
@@ -204,18 +214,21 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                             : conn->opts.headerTimeout);
                     if (!hres) {
                         Error e = hres.error();
-                        for (auto& [rid, h] : conn->handlers) {
-                            if (h.unary)
-                                h.unary->channel->try_send(
-                                    make_error_code(boost::system::errc::io_error),
-                                    std::make_shared<Result<Response>>(e));
-                            if (h.streaming) {
-                                h.streaming->onError(e);
-                                h.streaming->done_channel->try_send(boost::system::error_code{}, e);
+                        if (auto c = weak_conn.lock()) {
+                            for (auto& [rid, h] : c->handlers) {
+                                if (h.unary)
+                                    h.unary->channel->try_send(
+                                        make_error_code(boost::system::errc::io_error),
+                                        std::make_shared<Result<Response>>(e));
+                                if (h.streaming) {
+                                    h.streaming->onError(e);
+                                    h.streaming->done_channel->try_send(boost::system::error_code{},
+                                                                        e);
+                                }
                             }
+                            c->handlers.clear();
+                            c->alive = false;
                         }
-                        conn->handlers.clear();
-                        conn->alive = false;
                         co_return;
                     }
                     MessageFramer::FrameHeader netHeader;
@@ -229,19 +242,21 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                                                               conn->opts.bodyTimeout);
                         if (!pres) {
                             Error e = pres.error();
-                            for (auto& [rid, h] : conn->handlers) {
-                                if (h.unary)
-                                    h.unary->channel->try_send(
-                                        make_error_code(boost::system::errc::io_error),
-                                        std::make_shared<Result<Response>>(e));
-                                if (h.streaming) {
-                                    h.streaming->onError(e);
-                                    h.streaming->done_channel->try_send(boost::system::error_code{},
-                                                                        e);
+                            if (auto c = weak_conn.lock()) {
+                                for (auto& [rid, h] : c->handlers) {
+                                    if (h.unary)
+                                        h.unary->channel->try_send(
+                                            make_error_code(boost::system::errc::io_error),
+                                            std::make_shared<Result<Response>>(e));
+                                    if (h.streaming) {
+                                        h.streaming->onError(e);
+                                        h.streaming->done_channel->try_send(
+                                            boost::system::error_code{}, e);
+                                    }
                                 }
+                                c->handlers.clear();
+                                c->alive = false;
                             }
-                            conn->handlers.clear();
-                            conn->alive = false;
                             co_return;
                         }
                         payload = std::move(pres.value());

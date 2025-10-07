@@ -216,6 +216,14 @@ public:
                                                       uint64_t total_size = 0);
     Result<std::vector<uint8_t>> frame_message_chunk(const Message& message,
                                                      bool last_chunk = false);
+
+    // Append framed bytes into the provided buffer, preserving existing contents. Callers may
+    // reset or reuse the buffer between invocations to avoid reallocations.
+    Result<void> frame_message_into(const Message& message, std::vector<uint8_t>& buffer);
+    Result<void> frame_message_header_into(const Message& message, std::vector<uint8_t>& buffer,
+                                           uint64_t total_size = 0);
+    Result<void> frame_message_chunk_into(const Message& message, std::vector<uint8_t>& buffer,
+                                          bool last_chunk = false);
     Result<Message> parse_frame(const std::vector<uint8_t>& frame);
 
     // Stream-oriented message framing

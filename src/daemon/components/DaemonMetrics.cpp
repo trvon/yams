@@ -405,6 +405,13 @@ MetricsSnapshot DaemonMetrics::getSnapshot(bool detailed) const {
                     out.retryAfterMs = 0;
                 }
             }
+            auto searchLoad = services_->getSearchLoadMetrics();
+            out.searchActive = searchLoad.active;
+            out.searchQueued = searchLoad.queued;
+            out.searchExecuted = searchLoad.executed;
+            out.searchCacheHitRate = searchLoad.cacheHitRate;
+            out.searchAvgLatencyUs = searchLoad.avgLatencyUs;
+            out.searchConcurrencyLimit = searchLoad.concurrencyLimit;
         }
     } catch (...) {
     }

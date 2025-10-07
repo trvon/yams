@@ -26,113 +26,88 @@ uint32_t MessageFramer::calculate_crc32(std::span<const uint8_t> data) noexcept 
 // MessageFramer Implementation
 // ============================================================================
 
-Result<std::vector<uint8_t>> MessageFramer::frame_message(const Message& message) {
-    // Serialize the message first
-    auto serialized = serialize_message(message);
-    if (!serialized) {
-        return serialized.error();
+namespace {
+
+Result<void> append_frame_bytes(const Message& message, std::vector<uint8_t>& buffer,
+                                std::size_t max_message_size, bool chunked, bool last_chunk,
+                                bool header_only) {
+    const auto base = buffer.size();
+    buffer.resize(base + sizeof(MessageFramer::FrameHeader));
+    const auto payload_offset = buffer.size();
+
+    auto payload_result = ProtoSerializer::encode_payload_into(message, buffer);
+    if (!payload_result) {
+        buffer.resize(base);
+        return payload_result.error();
     }
 
-    auto& data = serialized.value();
-
-    // Check size limits
-    if (data.size() > max_message_size_) {
-        return Error{ErrorCode::InvalidData, "Message size " + std::to_string(data.size()) +
+    const std::size_t payload_size = buffer.size() - payload_offset;
+    if (payload_size > max_message_size) {
+        buffer.resize(base);
+        return Error{ErrorCode::InvalidData, "Message size " + std::to_string(payload_size) +
                                                  " exceeds maximum " +
-                                                 std::to_string(max_message_size_)};
+                                                 std::to_string(max_message_size)};
     }
 
-    // Create frame header
-    FrameHeader header;
-    header.payload_size = static_cast<uint32_t>(data.size());
-    header.checksum = calculate_crc32(data);
-    header.flags = 0; // Default flags are 0 (not chunked, not last chunk, not header-only)
-
-    // Build complete frame
-    std::vector<uint8_t> frame;
-    frame.reserve(sizeof(FrameHeader) + data.size());
-
-    // Convert header to network byte order and append
+    MessageFramer::FrameHeader header;
+    header.payload_size = static_cast<uint32_t>(payload_size);
+    header.checksum = calculate_crc32_impl(buffer.data() + payload_offset, payload_size);
+    header.set_chunked(chunked);
+    header.set_last_chunk(last_chunk);
+    header.set_header_only(header_only);
     header.to_network();
 
-    const uint8_t* header_bytes = reinterpret_cast<const uint8_t*>(&header);
-    frame.insert(frame.end(), header_bytes, header_bytes + sizeof(FrameHeader));
+    std::memcpy(buffer.data() + base, &header, sizeof(header));
 
-    // Append message data
-    frame.insert(frame.end(), data.begin(), data.end());
+    return Result<void>();
+}
 
+} // namespace
+
+Result<void> MessageFramer::frame_message_into(const Message& message,
+                                               std::vector<uint8_t>& buffer) {
+    return append_frame_bytes(message, buffer, max_message_size_, /*chunked=*/false,
+                              /*last_chunk=*/false, /*header_only=*/false);
+}
+
+Result<void> MessageFramer::frame_message_header_into(const Message& message,
+                                                      std::vector<uint8_t>& buffer,
+                                                      uint64_t /*total_size*/) {
+    // Header frames are marked chunked + header_only so readers treat payload as metadata prelude.
+    return append_frame_bytes(message, buffer, max_message_size_, /*chunked=*/true,
+                              /*last_chunk=*/false, /*header_only=*/true);
+}
+
+Result<void> MessageFramer::frame_message_chunk_into(const Message& message,
+                                                     std::vector<uint8_t>& buffer,
+                                                     bool last_chunk) {
+    return append_frame_bytes(message, buffer, max_message_size_, /*chunked=*/true, last_chunk,
+                              /*header_only=*/false);
+}
+
+Result<std::vector<uint8_t>> MessageFramer::frame_message(const Message& message) {
+    std::vector<uint8_t> frame;
+    auto res = frame_message_into(message, frame);
+    if (!res)
+        return res.error();
     return frame;
 }
 
 Result<std::vector<uint8_t>> MessageFramer::frame_message_header(const Message& message,
                                                                  uint64_t /*total_size*/) {
-    // Emit a header-only frame that carries the serialized response payload so clients can parse
-    // header metadata immediately in onHeader(). This has been exercised by integration tests
-    // that assert a header event precedes chunks.
-    auto serialized = serialize_message(message);
-    if (!serialized) {
-        return serialized.error();
-    }
-    const auto& data = serialized.value();
-    if (data.size() > max_message_size_) {
-        return Error{ErrorCode::InvalidData, "Message size " + std::to_string(data.size()) +
-                                                 " exceeds maximum " +
-                                                 std::to_string(max_message_size_)};
-    }
-
-    FrameHeader header;
-    header.payload_size = static_cast<uint32_t>(data.size());
-    header.checksum = calculate_crc32(data);
-    header.set_chunked(true);
-    header.set_header_only(true);
-
     std::vector<uint8_t> frame;
-    frame.reserve(sizeof(FrameHeader) + data.size());
-
-    header.to_network();
-    frame.insert(frame.end(), reinterpret_cast<const uint8_t*>(&header),
-                 reinterpret_cast<const uint8_t*>(&header) + sizeof(header));
-    frame.insert(frame.end(), data.begin(), data.end());
-
+    auto res = frame_message_header_into(message, frame);
+    if (!res)
+        return res.error();
     return frame;
 }
 
 Result<std::vector<uint8_t>> MessageFramer::frame_message_chunk(const Message& message,
                                                                 bool last_chunk) {
-    // Serialize the message first
-    auto serialized = serialize_message(message);
-    if (!serialized) {
-        return serialized.error();
-    }
-
-    auto& data = serialized.value();
-
-    // Check size limits
-    if (data.size() > max_message_size_) {
-        return Error{ErrorCode::InvalidData, "Message size " + std::to_string(data.size()) +
-                                                 " exceeds maximum " +
-                                                 std::to_string(max_message_size_)};
-    }
-
-    // Create frame header
-    FrameHeader header;
-    header.payload_size = static_cast<uint32_t>(data.size());
-    header.checksum = calculate_crc32(data);
-    header.set_chunked(true);
-    header.set_last_chunk(last_chunk);
-
-    // Build complete frame
     std::vector<uint8_t> frame;
-    frame.reserve(sizeof(FrameHeader) + data.size());
-
-    // Convert header to network byte order and append
-    header.to_network();
-    frame.insert(frame.end(), reinterpret_cast<const uint8_t*>(&header),
-                 reinterpret_cast<const uint8_t*>(&header) + sizeof(header));
-
-    // Append payload
-    frame.insert(frame.end(), data.begin(), data.end());
-
+    auto res = frame_message_chunk_into(message, frame, last_chunk);
+    if (!res)
+        return res.error();
     return frame;
 }
 

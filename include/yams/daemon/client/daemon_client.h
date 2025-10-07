@@ -13,6 +13,7 @@
 #include <memory>
 #include <optional>
 #include <unordered_map>
+#include <utility>
 
 namespace yams::daemon {
 
@@ -348,6 +349,7 @@ private:
 
     // Generic request sending
     boost::asio::awaitable<Result<Response>> sendRequest(const Request& req);
+    boost::asio::awaitable<Result<Response>> sendRequest(Request&& req);
 
     // Send request with chunked response handling
     boost::asio::awaitable<Result<void>>
@@ -390,7 +392,8 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
         co_return co_await streamingGrep(req);
     }
 
-    auto r = co_await sendRequest(Request{req});
+    Request request{req};
+    auto r = co_await sendRequest(std::move(request));
     if (!r)
         co_return r.error();
     auto& payload = r.value();

@@ -9,6 +9,7 @@ A concise index for YAMS HTTP API docs. Start here, open the spec, and generate 
 - Topical guides:
   - [Search API](./search_api.md)
   - [Vector Search API](./vector_search_api.md)
+  - [Tree Diff API](./tree_diff_api.md) (PBI-043)
 
 If you’re exploring or automating against YAMS via HTTP, read the guides and treat `openapi.yaml` as the source of truth.
 
@@ -44,6 +45,7 @@ If you’re exploring or automating against YAMS via HTTP, read the guides and t
 For concrete examples, see:
 - [Search API](./search_api.md)
 - [Vector Search API](./vector_search_api.md)
+- [Tree Diff API](./tree_diff_api.md)
 
 ## Development notes
 

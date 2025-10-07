@@ -51,6 +51,7 @@ public:
     void enqueue(Task t);
     // Non-blocking admission: returns false if queue is at capacity (caller may retry/backoff).
     bool tryEnqueue(const Task& t);
+    bool tryEnqueue(Task&& t);
     std::size_t size() const;
     std::size_t processed() const { return processed_.load(); }
     std::size_t failed() const { return failed_.load(); }

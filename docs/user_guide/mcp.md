@@ -28,11 +28,14 @@ docker run -i ghcr.io/trvon/yams:latest serve
 
 The stdio transport uses standard input/output for JSON-RPC communication. This is the standard for local MCP integrations.
 
-Framing compatibility:
-- The server auto-detects the client's framing on first request and mirrors it in responses:
-  - If the client sends raw JSON (ndjson), responses are newline-delimited JSON.
-  - If the client sends LSP-style headers (Content-Length), responses use headers + payload (+ CRLF).
-This keeps YAMS compatible with multiple MCP clients (Inspector, Goose/Jan, LM Studio).
+**Message Format:**
+YAMS follows the [Model Context Protocol stdio specification](https://spec.modelcontextprotocol.io/specification/2025-03-26/basic/transports/#stdio) using **newline-delimited JSON (NDJSON)**:
+- Each message is a single line of JSON followed by a newline character (`\n`)
+- Messages MUST NOT contain embedded newlines in the JSON
+- Simple format: `{"jsonrpc":"2.0",...}\n`
+
+**Backwards Compatibility:**
+For compatibility with legacy clients, YAMS can read LSP-style Content-Length framing on input, but always outputs standard NDJSON per the MCP specification.
 
 **When to use:**
 - Claude Desktop integration
@@ -296,51 +299,40 @@ echo '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"search_documents"
 
 ### Python Client
 
-This example shows how to communicate with the `yams serve` process over stdio using the required `Content-Length` message framing.
+This example shows how to communicate with the `yams serve` process over stdio using the **MCP specification standard: newline-delimited JSON (NDJSON)**.
 
 ```python
 import json
 import subprocess
-import os
-import re
 
 class YamsMCP:
     def __init__(self):
-        # Use text=False (binary mode) for correct byte handling
         self.proc = subprocess.Popen(
             ['yams', 'serve'],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+            stderr=subprocess.PIPE,
+            text=True,  # Text mode for line-based I/O
+            bufsize=1   # Line buffered
         )
         self.request_id = 0
 
     def send_request(self, request_data):
-        """Sends a JSON-RPC request with Content-Length framing."""
+        """Sends a JSON-RPC request using NDJSON (MCP stdio standard)."""
         message = json.dumps(request_data)
-        body = message.encode('utf-8')
-        header = f"Content-Length: {len(body)}\r\n\r\n".encode('utf-8')
-        
-        self.proc.stdin.write(header + body)
+        # MCP stdio spec: messages are newline-delimited
+        self.proc.stdin.write(f"{message}\n")
         self.proc.stdin.flush()
 
     def read_response(self):
-        """Reads a JSON-RPC response with Content-Length framing."""
-        line = self.proc.stdout.readline().decode('utf-8')
+        """Reads a JSON-RPC response using NDJSON (MCP stdio standard)."""
+        line = self.proc.stdout.readline()
         if not line:
-            stderr = self.proc.stderr.read().decode('utf-8')
-            raise ConnectionError(f"Failed to read header. Server stderr:\n{stderr}")
-
-        match = re.match(r"Content-Length: (\d+)", line)
-        if not match:
-            raise ConnectionError(f"Invalid header received: {line}")
-
-        content_length = int(match.group(1))
-        # Read the blank line separator
-        self.proc.stdout.read(2) # Reads \r\n
+            stderr = self.proc.stderr.read()
+            raise ConnectionError(f"Failed to read response. Server stderr:\n{stderr}")
         
-        body_bytes = self.proc.stdout.read(content_length)
-        return json.loads(body_bytes.decode('utf-8'))
+        # Parse the newline-delimited JSON
+        return json.loads(line)
 
     def call(self, method, params):
         """Makes a generic JSON-RPC call."""
@@ -384,10 +376,11 @@ if __name__ == "__main__":
 
 ### Node.js Client
 
-This example shows how to communicate with the `yams serve` process over stdio using the required `Content-Length` message framing. It includes a simple parser to handle the response stream.
+This example shows how to communicate with the `yams serve` process over stdio using the **MCP specification standard: newline-delimited JSON (NDJSON)**.
 
 ```javascript
 const { spawn } = require('child_process');
+const { createInterface } = require('readline');
 
 class YamsMCP {
   constructor() {
@@ -395,45 +388,36 @@ class YamsMCP {
     this.requestId = 0;
     this.responseCallbacks = new Map();
 
-    let buffer = Buffer.alloc(0);
-    this.proc.stdout.on('data', (chunk) => {
-      buffer = Buffer.concat([buffer, chunk]);
-      while (true) {
-        const bufferStr = buffer.toString('utf-8');
-        const match = bufferStr.match(/Content-Length: (\d+)\r\n\r\n/);
-        if (!match) {
-          break;
-        }
+    // MCP stdio spec: newline-delimited JSON
+    // Use readline to process line-by-line
+    const rl = createInterface({
+      input: this.proc.stdout,
+      crlfDelay: Infinity
+    });
 
-        const contentLength = parseInt(match[1], 10);
-        const messageStart = match.index + match[0].length;
-
-        if (buffer.length < messageStart + contentLength) {
-          break;
-        }
-
-        const messageBytes = buffer.slice(messageStart, messageStart + contentLength);
-        buffer = buffer.slice(messageStart + contentLength);
-
-        const response = JSON.parse(messageBytes.toString('utf-8'));
+    rl.on('line', (line) => {
+      if (!line.trim()) return; // Skip empty lines
+      
+      try {
+        const response = JSON.parse(line);
         if (this.responseCallbacks.has(response.id)) {
           this.responseCallbacks.get(response.id)(response);
           this.responseCallbacks.delete(response.id);
         }
+      } catch (err) {
+        console.error('Failed to parse response:', line, err);
       }
     });
     
     this.proc.stderr.on('data', (data) => {
-        console.error(`Server STDERR: ${data}`);
+      console.error(`Server STDERR: ${data}`);
     });
   }
 
   _send(request) {
     const message = JSON.stringify(request);
-    const body = Buffer.from(message, 'utf-8');
-    const header = `Content-Length: ${body.length}\r\n\r\n`;
-    this.proc.stdin.write(header);
-    this.proc.stdin.write(body);
+    // MCP stdio spec: messages are newline-delimited
+    this.proc.stdin.write(message + '\n');
   }
 
   call(method, params) {

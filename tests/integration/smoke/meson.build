@@ -13,6 +13,7 @@ integration_smoke_srcs = files(
   'pdf_search_smoke_test.cpp',
 )
 
+if get_option('enable-integration-tests')
 integ_exe = executable('yams_integration_smoke_tests', integration_smoke_srcs + files('test_main_smoke.cpp'),
   include_directories: incs,
   dependencies: [gtest_dep, test_deps],
@@ -26,3 +27,4 @@ test('integration_smoke', integ_exe,
   is_parallel: false,
   timeout: get_option('integration-smoke-timeout'),
 )
+endif

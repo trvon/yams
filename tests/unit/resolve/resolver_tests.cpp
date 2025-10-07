@@ -5,6 +5,7 @@
 #include <fstream>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -248,6 +249,12 @@ public:
         return Error{ErrorCode::NotImplemented, "NI"};
     }
     Result<int64_t> getDocumentCountByExtractionStatus(yams::metadata::ExtractionStatus) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+
+    Result<
+        std::unordered_map<int64_t, std::unordered_map<std::string, yams::metadata::MetadataValue>>>
+    getMetadataForDocuments(std::span<const int64_t>) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
 

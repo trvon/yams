@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <utility>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
 #include <yams/core/types.h>
@@ -26,6 +27,7 @@ public:
     explicit AsioTransportAdapter(const Options& opts);
 
     boost::asio::awaitable<Result<Response>> send_request(const Request& req);
+    boost::asio::awaitable<Result<Response>> send_request(Request&& req);
 
     using HeaderCallback = std::function<void(const Response&)>;
     using ChunkCallback = std::function<bool(const Response&, bool)>;

@@ -1,5 +1,6 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <atomic>
 #include <regex>
 #include <sstream>
 #include <yams/search/search_executor.h>
@@ -21,15 +22,44 @@ Result<SearchResults> SearchExecutor::search(const SearchRequest& request) {
         return Error{ErrorCode::InvalidArgument, "Query must not be empty"};
     }
 
+    totalSearches_.fetch_add(1, std::memory_order_relaxed);
+    queuedSearches_.fetch_add(1, std::memory_order_relaxed);
+    concurrencyLimiter_.acquire();
+    queuedSearches_.fetch_sub(1, std::memory_order_relaxed);
+    activeSearches_.fetch_add(1, std::memory_order_relaxed);
+    auto concurrencyStart = std::chrono::steady_clock::now();
+    bool releaseCalled = false;
+    auto release = [&](bool recordLatency = true) {
+        if (releaseCalled)
+            return;
+        if (recordLatency) {
+            const auto end = std::chrono::steady_clock::now();
+            const auto micros =
+                std::chrono::duration_cast<std::chrono::microseconds>(end - concurrencyStart)
+                    .count();
+            if (micros > 0) {
+                totalLatencyUs_.fetch_add(static_cast<std::uint64_t>(micros),
+                                          std::memory_order_relaxed);
+            }
+        }
+        activeSearches_.fetch_sub(1, std::memory_order_relaxed);
+        concurrencyLimiter_.release();
+        releaseCalled = true;
+    };
+
     // Check cache first
     std::string cacheKey = generateCacheKey(request);
     if (config_.enableQueryCache) {
         auto cachedResult = getCachedResult(cacheKey);
         if (cachedResult) {
             updateStatistics(std::chrono::milliseconds(0), std::chrono::milliseconds(0), true);
+            totalCacheHits_.fetch_add(1, std::memory_order_relaxed);
+            release();
             return *cachedResult;
         }
     }
+
+    totalCacheMisses_.fetch_add(1, std::memory_order_relaxed);
 
     SearchResults response;
     auto& stats = response.getStatistics();
@@ -46,7 +76,10 @@ Result<SearchResults> SearchExecutor::search(const SearchRequest& request) {
         std::chrono::duration_cast<std::chrono::milliseconds>(parseEndTime - parseStartTime);
 
     if (!parseResult) {
-        return createErrorResponse("Query parsing failed: " + parseResult.error().message, request);
+        auto err =
+            createErrorResponse("Query parsing failed: " + parseResult.error().message, request);
+        release();
+        return err;
     }
 
     auto& queryAst = parseResult.value();
@@ -63,8 +96,10 @@ Result<SearchResults> SearchExecutor::search(const SearchRequest& request) {
         std::chrono::duration_cast<std::chrono::milliseconds>(searchEndTime - searchStartTime);
 
     if (!searchResult) {
-        return createErrorResponse("Search execution failed: " + searchResult.error().message,
-                                   request);
+        auto err = createErrorResponse("Search execution failed: " + searchResult.error().message,
+                                       request);
+        release();
+        return err;
     }
 
     auto results = std::move(searchResult.value());
@@ -150,6 +185,7 @@ Result<SearchResults> SearchExecutor::search(const SearchRequest& request) {
     updateStatistics(stats.searchTime + std::chrono::milliseconds(0), std::chrono::milliseconds(0),
                      false);
 
+    release();
     return response;
 }
 
@@ -538,6 +574,54 @@ void SearchExecutor::evictOldestCacheEntry() const {
         cacheOrder_.erase(cacheOrder_.begin());
         queryCache_.erase(oldestKey);
     }
+}
+
+void SearchExecutor::ConcurrencyLimiter::set_limit(std::uint32_t limit) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    limit_ = (limit == 0) ? kUnlimited : limit;
+    cv_.notify_all();
+}
+
+void SearchExecutor::ConcurrencyLimiter::acquire() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait(lock, [&] { return limit_ == kUnlimited || inFlight_ < limit_; });
+    ++inFlight_;
+}
+
+void SearchExecutor::ConcurrencyLimiter::release() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (inFlight_ > 0) {
+        --inFlight_;
+        cv_.notify_one();
+    }
+}
+
+std::uint32_t SearchExecutor::ConcurrencyLimiter::limit() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return limit_ == kUnlimited ? 0 : limit_;
+}
+
+std::uint32_t SearchExecutor::ConcurrencyLimiter::in_flight() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return inFlight_;
+}
+
+SearchExecutor::LoadMetrics SearchExecutor::getLoadMetrics() const {
+    LoadMetrics snapshot;
+    snapshot.active = activeSearches_.load(std::memory_order_relaxed);
+    snapshot.queued = queuedSearches_.load(std::memory_order_relaxed);
+    snapshot.executed = totalSearches_.load(std::memory_order_relaxed);
+    snapshot.cacheHits = totalCacheHits_.load(std::memory_order_relaxed);
+    snapshot.cacheMisses = totalCacheMisses_.load(std::memory_order_relaxed);
+    const auto executed = snapshot.executed;
+    snapshot.avgLatencyUs =
+        executed > 0 ? totalLatencyUs_.load(std::memory_order_relaxed) / executed : 0;
+    snapshot.concurrencyLimit = concurrencyLimiter_.limit();
+    return snapshot;
+}
+
+void SearchExecutor::setConcurrencyLimit(std::uint32_t limit) {
+    concurrencyLimiter_.set_limit(limit);
 }
 
 SearchResults SearchExecutor::createErrorResponse(const std::string& /*error*/,

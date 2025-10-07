@@ -199,6 +199,23 @@ public:
                     "graph|kg\" --include=\"docs/**/*.md\"\nOr use the explicit option: \n  yams "
                     "grep -e \"--tags|knowledge graph|kg\" --include=\"docs/**/*.md\"");
             }
+
+            // Auto-detect literal strings to enable FTS fast path unless user specified regex
+            if (!literalText_ && !regexOnly_) {
+                const std::string specialChars = "\\^$.|?*+()[]{}";
+                bool isLiteral = true;
+                for (char c : pattern_) {
+                    if (specialChars.find(c) != std::string::npos) {
+                        isLiteral = false;
+                        break;
+                    }
+                }
+                if (isLiteral) {
+                    literalText_ = true;
+                    spdlog::debug("Auto-detected literal pattern, enabling FTS fast path.");
+                }
+            }
+
             // Normalize popular PCRE inline flags like (?i) to CLI flags and ECMAScript-compatible
             // regex Detect and strip all occurrences of (?i) while enabling -i when present
             bool modified = false;

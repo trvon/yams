@@ -141,8 +141,12 @@ subdir('unit')
 
 
 
-subdir('integration/smoke')
-subdir('mobile')
+if get_option('enable-integration-tests')
+  subdir('integration/smoke')
+endif
+if get_option('enable-mobile-tests')
+  subdir('mobile')
+endif
 
 stress_srcs = files(
   'stress/main.cpp',
@@ -206,7 +210,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
     safe_timeout = 600
   endif
 
-  if unit_shards > 1
+  if get_option('enable-full-unit') and unit_shards > 1
     # Derive per-shard timeout (ceil division) with a small floor of 120s
     shard_timeout = (unit_timeout + unit_shards - 1) / unit_shards
     if shard_timeout < 120
@@ -235,7 +239,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
         timeout: shard_timeout
       )
     endforeach
-  else
+  elif get_option('enable-full-unit')
     test('unit', unit_exe,
       suite: 'unit',
       args: ['--gtest_filter=' + unit_exclude],
@@ -252,6 +256,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
       timeout: unit_timeout)
   endif
 
+  if get_option('enable-bench-tests')
   test('unit_isolated_integrity_verifier', unit_exe,
     suite: ['bench', 'isolated'],
     args: ['--gtest_filter=IntegrityVerifierTest.*'],
@@ -263,6 +268,9 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
   )
 
   # Daemon lifecycle smoke coverage remains opt-in because it performs full daemon start/stop sequences.
+  endif
+
+  if get_option('enable-daemon-long-tests')
   test('unit_isolated_daemon', unit_exe,
     suite: ['daemon-long'],
     args: ['--gtest_filter=DaemonTest.*'],
@@ -272,7 +280,9 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
     },
     timeout: bench_timeout,
   )
+  endif
 
+  if get_option('enable-bench-tests')
   test('unit_isolated_streaming_chunker', unit_exe,
     suite: ['bench', 'isolated'],
     args: ['--gtest_filter=StreamingChunkerTest.*'],
@@ -368,6 +378,9 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
     timeout: bench_timeout,
   )
 
+  endif
+
+  if get_option('enable-reliability-tests')
   test('unit_reliability_grep_search_startup', unit_exe,
     suite: ['bench', 'reliability'],
     args: ['--gtest_filter=GrepServiceTest.RetriesTransientMetadataErrors:GrepServiceTest.PropagatesMetadataErrorsWhenTagsUnavailable:SearchServiceTest.LightIndexRetriesTransientMetadataErrors'],
@@ -377,6 +390,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
     },
     timeout: bench_timeout,
   )
+  endif
 
   # Define a fast "smoke" subset using gtest filter for developer iteration
   smoke_filter = 'ContentStoreTest.*:ProgressReporterTest.*:ContentMetadataTest.*:ContentStoreBuilderTest.*:SearchSmoke.*'
@@ -460,7 +474,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
 # Prefer Meson-native subdirs over shell discovery for services integration tests
 subdir('integration/services')
 
-# Benchmarks (standalone executables, not part of "meson test")
+# Benchmarks (standalone executables). Register bench test target only when enabled.
 subdir('benchmarks')
 
 # Standalone, minimal daemon warm-latency bench (does not depend on unit object lib)
@@ -471,20 +485,21 @@ daemon_warm_bench = executable('yams_bench_daemon_warm',
   install: false,
 )
 
-test('bench_daemon_warm_latency', daemon_warm_bench,
-  suite: ['bench'],
-  env: {
-    'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-    # Bench is opt-in; enable by setting YAMS_ENABLE_DAEMON_BENCH=1 when invoking meson test
-  },
-  timeout: bench_timeout,
-)
+if get_option('enable-bench-tests')
+  test('bench_daemon_warm_latency', daemon_warm_bench,
+    suite: ['bench'],
+    env: {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+    },
+    timeout: bench_timeout,
+  )
+endif
 
 # Acceptance tests (E2E validation)
 subdir('acceptance')
 
 # Stress tests can be heavy; register but mark as long-running via suite name
-if all_stress.length() > 0
+if get_option('enable-stress-tests') and all_stress.length() > 0
   stress_exe = executable('yams_stress_tests', all_stress + test_main,
     include_directories: incs,
     dependencies: [gtest_dep, test_deps],

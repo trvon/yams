@@ -80,7 +80,10 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetRequest(const GetRe
             spdlog::debug("RequestDispatcher: Mapping GetRequest to DocumentService (hash='{}', "
                           "name='{}', metadataOnly={})",
                           req.hash, req.name, req.metadataOnly);
-            auto result = documentService->retrieve(serviceReq);
+            auto result = co_await yams::daemon::dispatch::offload_to_worker(
+                serviceManager_, [documentService, serviceReq = std::move(serviceReq)]() mutable {
+                    return documentService->retrieve(serviceReq);
+                });
             if (!result) {
                 spdlog::warn("RequestDispatcher: DocumentService::retrieve failed: {}",
                              result.error().message);
@@ -162,7 +165,10 @@ RequestDispatcher::handleGetInitRequest(const GetInitRequest& req) {
             auto documentService = app::services::makeDocumentService(appContext);
             std::string hash = req.hash;
             if (hash.empty() && req.byName && !req.name.empty()) {
-                auto rh = documentService->resolveNameToHash(req.name);
+                auto rh = co_await yams::daemon::dispatch::offload_to_worker(
+                    serviceManager_, [documentService, name = req.name]() mutable {
+                        return documentService->resolveNameToHash(name);
+                    });
                 if (!rh) {
                     co_return ErrorResponse{rh.error().code, rh.error().message};
                 }
@@ -177,7 +183,8 @@ RequestDispatcher::handleGetInitRequest(const GetInitRequest& req) {
             }
             // Retrieve bytes (in-memory). For very large content, future improvement: stream from
             // CAS; for now, bounded by max memory and typical use in tests/CLI.
-            auto rb = store->retrieveBytes(hash);
+            auto rb = co_await yams::daemon::dispatch::offload_to_worker(
+                serviceManager_, [store, hash]() mutable { return store->retrieveBytes(hash); });
             if (!rb) {
                 co_return ErrorResponse{ErrorCode::InternalError,
                                         std::string("retrieveBytes failed: ") + rb.error().message};
@@ -400,7 +407,10 @@ boost::asio::awaitable<Response> RequestDispatcher::handleCatRequest(const CatRe
             sreq.graph = false;
             sreq.depth = 1;
 
-            auto result = documentService->retrieve(sreq);
+            auto result = co_await yams::daemon::dispatch::offload_to_worker(
+                serviceManager_, [documentService, sreq = std::move(sreq)]() mutable {
+                    return documentService->retrieve(sreq);
+                });
             if (!result) {
                 co_return ErrorResponse{result.error().code, result.error().message};
             }
@@ -451,7 +461,10 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
                 }
                 serviceReq.pattern += "*";
             }
-            auto result = documentService->deleteByName(serviceReq);
+            auto result = co_await yams::daemon::dispatch::offload_to_worker(
+                serviceManager_, [documentService, serviceReq = std::move(serviceReq)]() mutable {
+                    return documentService->deleteByName(serviceReq);
+                });
             if (!result) {
                 co_return ErrorResponse{result.error().code, result.error().message};
             }
@@ -694,7 +707,10 @@ RequestDispatcher::handleUpdateDocumentRequest(const UpdateDocumentRequest& req)
             serviceReq.atomic = req.atomic;
             serviceReq.createBackup = req.createBackup;
             serviceReq.verbose = req.verbose;
-            auto result = documentService->updateMetadata(serviceReq);
+            auto result = co_await yams::daemon::dispatch::offload_to_worker(
+                serviceManager_, [documentService, serviceReq = std::move(serviceReq)]() mutable {
+                    return documentService->updateMetadata(serviceReq);
+                });
             if (!result) {
                 co_return ErrorResponse{result.error().code, result.error().message};
             }

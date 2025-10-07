@@ -170,6 +170,41 @@ void TuningManager::tick_once() {
         }
     }
 
+    // Search pool tuning and concurrency governance
+    try {
+        auto searchMetrics = sm_->getSearchLoadMetrics();
+        PoolManager::Config searchCfg{};
+        searchCfg.min_size = TuneAdvisor::searchPoolMinSize();
+        searchCfg.max_size = TuneAdvisor::searchPoolMaxSize();
+        searchCfg.cooldown_ms = TuneAdvisor::poolCooldownMs();
+        pm.configure("search", searchCfg);
+        auto searchStats = pm.stats("search");
+        std::uint32_t poolSize = searchStats.current_size;
+        if (poolSize == 0)
+            poolSize = searchCfg.min_size;
+
+        const int searchStep = std::max(1, TuneAdvisor::poolScaleStep());
+        if ((searchMetrics.queued > 0 || searchMetrics.active >= poolSize) &&
+            poolSize < searchCfg.max_size) {
+            pm.apply_delta(
+                {"search", +searchStep,
+                 searchMetrics.queued > 0 ? "search_queue_pressure" : "search_active_pressure",
+                 TuneAdvisor::poolCooldownMs()});
+            poolSize = pm.stats("search").current_size;
+        } else if (searchMetrics.active == 0 && searchMetrics.queued == 0 &&
+                   poolSize > searchCfg.min_size) {
+            pm.apply_delta({"search", -searchStep, "search_idle", TuneAdvisor::poolCooldownMs()});
+            poolSize = pm.stats("search").current_size;
+        }
+
+        std::uint32_t concurrencyTarget = std::max<std::uint32_t>(1, poolSize) * 2;
+        auto advisorLimit = TuneAdvisor::searchConcurrencyLimit();
+        if (advisorLimit > 0)
+            concurrencyTarget = std::min(concurrencyTarget, advisorLimit);
+        (void)sm_->applySearchConcurrencyTarget(concurrencyTarget);
+    } catch (...) {
+    }
+
     // Apply pool target to worker pool when changed
     try {
         auto ipcStats = pm.stats("ipc");

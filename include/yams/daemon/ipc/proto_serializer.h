@@ -15,6 +15,11 @@ public:
     // Encode just the payload of Message into protobuf Envelope bytes.
     static yams::Result<std::vector<uint8_t>> encode_payload(const Message& msg);
 
+    // Append serialized payload bytes to the provided buffer. The new bytes are appended
+    // starting at buffer.size(), allowing callers to reserve space (e.g., for frame headers)
+    // and avoid intermediate allocations.
+    static yams::Result<void> encode_payload_into(const Message& msg, std::vector<uint8_t>& buffer);
+
     // Decode protobuf Envelope bytes into Message with payload set; caller sets msg.requestId.
     static yams::Result<Message> decode_payload(const std::vector<uint8_t>& bytes);
 };

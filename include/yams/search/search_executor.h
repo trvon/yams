@@ -1,7 +1,11 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <yams/core/types.h>
@@ -118,6 +122,19 @@ public:
      */
     const SearchConfig& getConfig() const { return config_; }
 
+    struct LoadMetrics {
+        std::uint32_t active{0};
+        std::uint32_t queued{0};
+        std::uint64_t executed{0};
+        std::uint64_t cacheHits{0};
+        std::uint64_t cacheMisses{0};
+        std::uint64_t avgLatencyUs{0};
+        std::uint32_t concurrencyLimit{0};
+    };
+
+    LoadMetrics getLoadMetrics() const;
+    void setConcurrencyLimit(std::uint32_t limit);
+
     /**
      * @brief Get search statistics
      */
@@ -153,6 +170,30 @@ private:
 
     // Statistics
     mutable SearchExecutorStats stats_;
+
+    class ConcurrencyLimiter {
+    public:
+        void set_limit(std::uint32_t limit);
+        void acquire();
+        void release();
+        std::uint32_t limit() const;
+        std::uint32_t in_flight() const;
+
+    private:
+        static constexpr std::uint32_t kUnlimited = std::numeric_limits<std::uint32_t>::max();
+        mutable std::mutex mutex_;
+        std::condition_variable cv_;
+        std::uint32_t limit_{kUnlimited};
+        std::uint32_t inFlight_{0};
+    };
+
+    mutable ConcurrencyLimiter concurrencyLimiter_{};
+    mutable std::atomic<std::uint32_t> activeSearches_{0};
+    mutable std::atomic<std::uint32_t> queuedSearches_{0};
+    mutable std::atomic<std::uint64_t> totalSearches_{0};
+    mutable std::atomic<std::uint64_t> totalCacheHits_{0};
+    mutable std::atomic<std::uint64_t> totalCacheMisses_{0};
+    mutable std::atomic<std::uint64_t> totalLatencyUs_{0};
 
     /**
      * @brief Execute FTS5 query against database

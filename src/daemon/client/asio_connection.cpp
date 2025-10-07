@@ -18,17 +18,21 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
         co_return Result<void>();
     writing = true;
     while (!write_queue.empty()) {
-        std::vector<uint8_t> batch;
-        batch.reserve(write_queue.front().size());
-        std::size_t batched = 0;
         auto cap = batch_cap.load(std::memory_order_relaxed);
+        std::size_t batched = 0;
         std::size_t frames = 0;
-        while (!write_queue.empty() && batched < cap) {
-            auto& f = write_queue.front();
-            batched += f.size();
-            frames++;
-            batch.insert(batch.end(), f.begin(), f.end());
+        std::vector<std::vector<uint8_t>> frames_batch;
+        std::vector<boost::asio::const_buffer> buffers;
+        frames_batch.reserve(write_queue.size());
+        buffers.reserve(write_queue.size());
+        while (!write_queue.empty() && (batched < cap || frames == 0)) {
+            auto frame_data = std::move(write_queue.front());
             write_queue.pop_front();
+            batched += frame_data.size();
+            frames_batch.emplace_back(std::move(frame_data));
+            auto& stored = frames_batch.back();
+            buffers.emplace_back(boost::asio::buffer(stored));
+            frames++;
         }
         total_bytes_written.fetch_add(batched, std::memory_order_relaxed);
         total_batches.fetch_add(1, std::memory_order_relaxed);
@@ -45,10 +49,12 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
                 batch_cap.store(std::max<std::size_t>(cap / 2, 64 * 1024),
                                 std::memory_order_relaxed);
             }
+            total_bytes_written.store(0, std::memory_order_relaxed);
+            total_batches.store(0, std::memory_order_relaxed);
         }
         boost::system::error_code ec;
         auto result = co_await boost::asio::async_write(
-            *socket, boost::asio::buffer(batch), boost::asio::redirect_error(use_awaitable, ec));
+            *socket, buffers, boost::asio::redirect_error(use_awaitable, ec));
         if (ec) {
             writing = false;
             alive = false;

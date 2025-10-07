@@ -1,10 +1,12 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <random>
 #include <regex>
@@ -36,6 +38,89 @@
 namespace yams::cli {
 
 using json = nlohmann::json;
+
+namespace {
+
+std::string trimCopy(std::string_view sv) {
+    std::size_t start = 0;
+    std::size_t end = sv.size();
+    while (start < end && std::isspace(static_cast<unsigned char>(sv[start]))) {
+        ++start;
+    }
+    while (end > start && std::isspace(static_cast<unsigned char>(sv[end - 1]))) {
+        --end;
+    }
+    return std::string(sv.substr(start, end - start));
+}
+
+bool hasUnsupportedControlChars(std::string_view sv) {
+    return std::any_of(sv.begin(), sv.end(), [](unsigned char ch) {
+        return std::iscntrl(ch) && ch != '\n' && ch != '\r' && ch != '\t';
+    });
+}
+
+constexpr std::size_t kMaxPatternLength = 512;
+constexpr std::size_t kMaxTagLength = 128;
+constexpr std::size_t kMaxMetadataKeyLength = 256;
+constexpr std::size_t kMaxMetadataValueLength = 4096;
+constexpr std::size_t kMaxCollectionLength = 256;
+constexpr std::size_t kMaxSnapshotLength = 512;
+constexpr std::size_t kMaxMimeTypeLength = 256;
+constexpr std::size_t kMaxNameLength = 256;
+
+Result<std::vector<std::string>> sanitizeStringList(const std::vector<std::string>& raw,
+                                                    const char* label, std::size_t maxLen) {
+    std::vector<std::string> cleaned;
+    cleaned.reserve(raw.size());
+    for (const auto& entry : raw) {
+        std::string trimmed = trimCopy(entry);
+        if (trimmed.empty())
+            continue;
+        if (trimmed.size() > maxLen) {
+            std::ostringstream oss;
+            oss << label << " exceeds maximum length of " << maxLen << " characters";
+            return Error{ErrorCode::InvalidArgument, oss.str()};
+        }
+        if (hasUnsupportedControlChars(trimmed)) {
+            std::ostringstream oss;
+            oss << label << " contains unsupported control characters";
+            return Error{ErrorCode::InvalidArgument, oss.str()};
+        }
+        cleaned.push_back(std::move(trimmed));
+    }
+    return cleaned;
+}
+
+Result<std::map<std::string, std::string>>
+sanitizeMetadata(const std::vector<std::string>& metadataRaw) {
+    std::map<std::string, std::string> out;
+    for (const auto& kv : metadataRaw) {
+        auto pos = kv.find('=');
+        if (pos == std::string::npos) {
+            return Error{ErrorCode::InvalidArgument,
+                         "Metadata entries must be formatted as key=value"};
+        }
+        std::string key = trimCopy(std::string_view(kv).substr(0, pos));
+        std::string value = trimCopy(std::string_view(kv).substr(pos + 1));
+        if (key.empty()) {
+            return Error{ErrorCode::InvalidArgument, "Metadata key cannot be empty"};
+        }
+        if (key.size() > kMaxMetadataKeyLength) {
+            return Error{ErrorCode::InvalidArgument, "Metadata key exceeds maximum length"};
+        }
+        if (value.size() > kMaxMetadataValueLength) {
+            return Error{ErrorCode::InvalidArgument, "Metadata value exceeds maximum length"};
+        }
+        if (hasUnsupportedControlChars(key) || hasUnsupportedControlChars(value)) {
+            return Error{ErrorCode::InvalidArgument,
+                         "Metadata entries cannot contain control characters"};
+        }
+        out[key] = value;
+    }
+    return out;
+}
+
+} // namespace
 
 class AddCommand : public ICommand {
 public:
@@ -151,108 +236,123 @@ public:
                     }
                 }
 
-                // Connectivity probe only: a successful Status call indicates dispatcher is up.
-                // Do not block on full readiness; add path can operate while daemon is degraded.
-                {
-                    yams::daemon::ClientConfig cfg;
-                    if (cli_->hasExplicitDataDir()) {
-                        cfg.dataDir = cli_->getDataPath();
-                    }
-                    cfg.enableChunkedResponses = false;
-                    cfg.requestTimeout = std::chrono::milliseconds(2000);
-                    auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
-                    if (!leaseRes) {
-                        return leaseRes.error();
-                    }
-                    auto leaseHandle = std::move(leaseRes.value());
+                auto sanitizedTagsRes = sanitizeStringList(tags_, "Tag", kMaxTagLength);
+                if (!sanitizedTagsRes)
+                    return sanitizedTagsRes.error();
+                const auto sanitizedTags = sanitizedTagsRes.value();
 
-                    auto start = std::chrono::steady_clock::now();
-                    for (;;) {
-                        yams::daemon::StatusRequest sreq;
-                        sreq.detailed = true;
-                        auto prom =
-                            std::make_shared<std::promise<Result<yams::daemon::StatusResponse>>>();
-                        auto fut = prom->get_future();
-                        auto work = [prom, leaseHandle, sreq]() -> boost::asio::awaitable<void> {
-                            auto& client = **leaseHandle;
-                            auto r = co_await client.call(sreq);
-                            prom->set_value(std::move(r));
-                            co_return;
-                        };
-                        boost::asio::co_spawn(boost::asio::system_executor{}, work(),
-                                              boost::asio::detached);
-                        if (fut.wait_for(std::chrono::milliseconds(2500)) ==
-                            std::future_status::ready) {
-                            auto st = fut.get();
-                            if (st) {
-                                break; // dispatcher reachable; proceed with add
-                            }
-                        }
-                        if (std::chrono::duration_cast<std::chrono::milliseconds>(
-                                std::chrono::steady_clock::now() - start)
-                                .count() >= daemonReadyTimeoutMs_) {
-                            break; // best-effort: proceed; daemon may return StatusResponse
-                        }
-                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                auto sanitizedIncludeRes =
+                    sanitizeStringList(includePatterns_, "Include pattern", kMaxPatternLength);
+                if (!sanitizedIncludeRes)
+                    return sanitizedIncludeRes.error();
+                const auto sanitizedInclude = sanitizedIncludeRes.value();
+
+                auto sanitizedExcludeRes =
+                    sanitizeStringList(excludePatterns_, "Exclude pattern", kMaxPatternLength);
+                if (!sanitizedExcludeRes)
+                    return sanitizedExcludeRes.error();
+                const auto sanitizedExclude = sanitizedExcludeRes.value();
+
+                auto sanitizedMetadataRes = sanitizeMetadata(metadata_);
+                if (!sanitizedMetadataRes)
+                    return sanitizedMetadataRes.error();
+                const auto sanitizedMetadata = sanitizedMetadataRes.value();
+
+                std::string sanitizedCollection = trimCopy(collection_);
+                if (hasUnsupportedControlChars(sanitizedCollection)) {
+                    return Error{ErrorCode::InvalidArgument,
+                                 "Collection contains unsupported control characters"};
+                }
+                if (sanitizedCollection.size() > kMaxCollectionLength) {
+                    return Error{ErrorCode::InvalidArgument, "Collection name exceeds limit"};
+                }
+                std::string sanitizedSnapshotId = trimCopy(snapshotId_);
+                std::string sanitizedSnapshotLabel = trimCopy(snapshotLabel_);
+                if (hasUnsupportedControlChars(sanitizedSnapshotId) ||
+                    hasUnsupportedControlChars(sanitizedSnapshotLabel)) {
+                    return Error{ErrorCode::InvalidArgument,
+                                 "Snapshot identifiers cannot contain control characters"};
+                }
+                if (sanitizedSnapshotId.size() > kMaxSnapshotLength ||
+                    sanitizedSnapshotLabel.size() > kMaxSnapshotLength) {
+                    return Error{ErrorCode::InvalidArgument,
+                                 "Snapshot identifiers exceed maximum length"};
+                }
+                std::string sanitizedMimeType = trimCopy(mimeType_);
+                if (sanitizedMimeType.size() > kMaxMimeTypeLength) {
+                    return Error{ErrorCode::InvalidArgument, "MIME type exceeds maximum length"};
+                }
+
+                std::map<std::filesystem::path, std::vector<std::string>> groupedPaths;
+                for (const auto& p : paths) {
+                    if (p.string() == "-") {
+                        groupedPaths[p].push_back("-");
+                    } else {
+                        groupedPaths[p.parent_path()].push_back(p.filename().string());
                     }
                 }
 
-                // Process each path with per-path fallback; collect remaining for services
+                // Process each group
                 size_t ok = 0, failed = 0;
                 size_t totalAdded = 0;
-                bool hasStdin = std::any_of(paths.begin(), paths.end(),
-                                            [](const auto& p) { return p.string() == "-"; });
+                bool hasStdin = false;
                 std::vector<std::filesystem::path> serviceDirs;
-                for (const auto& path : paths) {
-                    if (path.string() == "-") {
-                        continue; // handled later via services path (stdin)
+
+                auto render = [&](const yams::daemon::AddDocumentResponse& resp,
+                                  const std::filesystem::path& path) -> void {
+                    if (resp.documentsAdded == 1) {
+                        std::cout << "Added document: " << resp.hash.substr(0, 16) << "..."
+                                  << std::endl;
+                    } else {
+                        std::cout << "Added " << resp.documentsAdded << " documents from "
+                                  << path.string() << std::endl;
                     }
 
-                    // Early sanity: surface missing-path errors before contacting the daemon
-                    if (!std::filesystem::exists(path)) {
-                        std::ostringstream oss;
-                        oss << "Path not found: " << path.string();
-                        // Helpful hint: common singular/plural mix-up (test/ vs tests/)
-                        try {
-                            const auto s = path.string();
-                            auto alt = s;
-                            if (s.find("/tests/") != std::string::npos) {
-                                alt = std::regex_replace(s, std::regex("/tests/"), "/test/");
-                            } else if (s.find("/test/") != std::string::npos) {
-                                alt = std::regex_replace(s, std::regex("/test/"), "/tests/");
-                            }
-                            if (alt != s && std::filesystem::exists(alt)) {
-                                oss << ". Did you mean: " << alt;
-                            }
-                        } catch (...) {
-                            // ignore best-effort hint errors
+                    if (resp.documentsAdded == 0) {
+                        if (!resp.message.empty()) {
+                            std::cout << "  Note: " << resp.message << std::endl;
                         }
-                        spdlog::error("{}", oss.str());
-                        failed++;
-                        continue;
+                        std::cout << "  No new files were ingested from: " << path.string()
+                                  << std::endl;
                     }
 
-                    // Build daemon add options
+                    if (resp.documentsAdded > 0) {
+                        if (auto appContext = cli_->getAppContext()) {
+                            auto searchService = app::services::makeSearchService(*appContext);
+                            if (searchService) {
+                                (void)searchService->lightIndexForHash(resp.hash);
+                            }
+                        }
+                    }
+                };
+
+                for (const auto& [dir, files] : groupedPaths) {
+                    if (dir.string() == "-") {
+                        hasStdin = true;
+                        continue; // Handle stdin via local services later
+                    }
+
                     yams::app::services::AddOptions aopts;
-                    aopts.path = path.string();
-                    aopts.name = documentName_;
-                    aopts.tags = tags_;
-                    for (const auto& kv : metadata_) {
-                        auto pos = kv.find('=');
-                        if (pos != std::string::npos) {
-                            std::string key = kv.substr(0, pos);
-                            std::string value = kv.substr(pos + 1);
-                            aopts.metadata[key] = value;
-                        }
+                    aopts.path = dir.string();
+                    aopts.recursive = true; // A directory is being processed
+                    aopts.includePatterns = files;
+                    aopts.name = trimCopy(documentName_);
+                    if (aopts.name.size() > kMaxNameLength) {
+                        return Error{ErrorCode::InvalidArgument,
+                                     "Document name exceeds maximum length"};
                     }
-                    aopts.recursive = recursive_;
-                    aopts.includePatterns = includePatterns_;
-                    aopts.excludePatterns = excludePatterns_;
-                    aopts.collection = collection_;
-                    aopts.snapshotId = snapshotId_;
-                    aopts.snapshotLabel = snapshotLabel_;
-                    if (!mimeType_.empty()) {
-                        aopts.mimeType = mimeType_;
+                    if (hasUnsupportedControlChars(aopts.name)) {
+                        return Error{ErrorCode::InvalidArgument,
+                                     "Document name contains unsupported control characters"};
+                    }
+                    aopts.tags = sanitizedTags;
+                    aopts.metadata = sanitizedMetadata;
+                    aopts.excludePatterns = sanitizedExclude;
+                    aopts.collection = sanitizedCollection;
+                    aopts.snapshotId = sanitizedSnapshotId;
+                    aopts.snapshotLabel = sanitizedSnapshotLabel;
+                    if (!sanitizedMimeType.empty()) {
+                        aopts.mimeType = sanitizedMimeType;
                     }
                     aopts.disableAutoMime = disableAutoMime_;
                     aopts.noEmbeddings = noEmbeddings_;
@@ -264,93 +364,18 @@ public:
                     aopts.backoffMs = daemonBackoffMs_;
                     aopts.verify = verify_;
 
-                    // Auto-detect directory targets and enable recursive ingestion when omitted
-                    if (std::error_code dir_ec; std::filesystem::is_directory(path, dir_ec)) {
-                        if (!aopts.recursive) {
-                            aopts.recursive = true;
-                            spdlog::info(
-                                "'{}' is a directory — enabling recursive ingestion automatically.",
-                                path.string());
-                        }
-                    }
-
-                    auto render = [&](const yams::daemon::AddDocumentResponse& resp) -> void {
-                        if (resp.documentsAdded == 1) {
-                            std::cout << "Added document: " << resp.hash.substr(0, 16) << "..."
-                                      << std::endl;
-                        } else {
-                            std::cout << "Added " << resp.documentsAdded << " documents"
-                                      << std::endl;
-                        }
-
-                        // If no documents were added, provide actionable diagnostics.
-                        if (resp.documentsAdded == 0) {
-                            // Always surface server-side message when present.
-                            if (!resp.message.empty()) {
-                                std::cout << "  Note: " << resp.message << std::endl;
-                            }
-                            // Directory case: include/exclude filter summary and tips
-                            if (std::error_code dir_ec;
-                                std::filesystem::is_directory(path, dir_ec)) {
-                                std::cout << "  No files were ingested under: " << path.string()
-                                          << std::endl;
-                                if (!includePatterns_.empty()) {
-                                    std::cout << "  include filters: ";
-                                    for (size_t i = 0; i < includePatterns_.size(); ++i) {
-                                        std::cout << (i ? "," : "") << includePatterns_[i];
-                                    }
-                                    std::cout << std::endl;
-                                    std::cout
-                                        << "  Hint: patterns are CSV globs and should be quoted to "
-                                           "avoid shell expansion (e.g., --include=\"**/*.js\")."
-                                        << std::endl;
-                                } else {
-                                    std::cout << "  Hint: use --include to target specific "
-                                                 "extensions (e.g., --include=\"**/*.js\")."
-                                              << std::endl;
-                                }
-                            }
-                        }
-                        // After a successful single-file add, perform lightweight
-                        // text extraction + FTS index so search works immediately.
-                        if (resp.documentsAdded == 1) {
-                            if (auto appContext = cli_->getAppContext()) {
-                                auto searchService = app::services::makeSearchService(*appContext);
-                                if (searchService) {
-                                    (void)searchService->lightIndexForHash(resp.hash);
-                                }
-                            }
-                        }
-                    };
-
-                    // Retry with exponential backoff on transient failures
-                    bool success = false;
-                    std::string lastError;
-                    {
-                        yams::app::services::DocumentIngestionService ing;
-                        auto result = ing.addViaDaemon(aopts);
-                        if (result) {
-                            totalAdded += result.value().documentsAdded;
-                            render(result.value());
-                            success = true;
-                        } else {
-                            lastError = result.error().message;
-                        }
-                    }
-
-                    if (!success) {
-                        if (std::error_code dir_ec; std::filesystem::is_directory(path, dir_ec)) {
-                            spdlog::warn("Daemon add failed for directory '{}': {}. Falling back "
-                                         "to local indexing service.",
-                                         path.string(), lastError);
-                            serviceDirs.push_back(path);
-                        } else {
-                            spdlog::error("Daemon add failed for '{}': {}.", path.string(),
-                                          lastError);
-                            failed++;
-                        }
-                    } else {
+                    yams::app::services::DocumentIngestionService ing;
+                    auto result = ing.addViaDaemon(aopts);
+                    if (result) {
+                        totalAdded += result.value().documentsAdded;
+                        render(result.value(), dir);
                         ok++;
+                    } else {
+                        spdlog::warn("Daemon add failed for directory '{}': {}. Falling back to "
+                                     "local indexing service.",
+                                     dir.string(), result.error().message);
+                        serviceDirs.push_back(dir);
+                        failed++;
                     }
                 }
 

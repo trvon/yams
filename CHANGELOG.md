@@ -17,6 +17,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [v0.7.3] - Unreleased
 
+### Added
+- Bench: minimal daemon warm-start latency check moved to an opt-in bench target and suite.
+  - New standalone binary `tests/yams_bench_daemon_warm` executes a bounded start/sleep/stop
+    cycle with vectors disabled and tight init timeouts; asserts <5s end-to-end.
+  - Meson test registered as `bench_daemon_warm_latency` in the `yams:bench` suite.
+  - Disabled by default in CI; enable by setting `RUN_DAEMON_WARM_BENCH=true` (workflow env)
+    and `YAMS_ENABLE_DAEMON_BENCH=1` (step env) to run only this bench.
+- Tree-Diff Metadata & Retrieval Modernization🎉
+  - **Tree-based snapshot comparison**: Implemented Merkle tree-based diff algorithm for efficient snapshot comparison with O(log n) subtree hash optimization for unchanged directories.
+  - **Rename detection**: Hash-based rename/move detection with ≥99% accuracy, enabled by default in `yams diff` command.
+  - **Knowledge Graph integration**: Path and blob nodes with version edges and rename tracking via `fetchPathHistory()` API.
+  - **Enhanced graph command**: `yams graph` now queries KG store for same-content relationships and rename chains.
+  - **Tree diff as default**: `yams diff` uses tree-based comparison by default; `--flat-diff` flag available for legacy behavior.
+  - **RPC/IPC exposure**: Added `ListTreeDiff` method to daemon protocol (protobuf + binary serialization).
+
+### Changed
+- **Path query pipeline**: Replaced the legacy `findDocumentsByPath` helper with the normalized `queryDocuments` API and the shared `queryDocumentsByPattern` utility. All services (daemon, CLI, MCP, mobile bindings, repair tooling, vector ingestion) now issue structured queries that leverage the `path_prefix`, `reverse_path`, and `path_hash` indexes plus FTS5 for suffix matches, eliminating full-table LIKE scans.
+- **Schema migration**: Migration v13 (`Add path indexing schema`) continues to govern the derived columns/indices; applying this release replays the up hook in place (normalizing existing rows and rebuilding the FTS table), so existing deployments automatically benefit from the optimized lookups after the usual migration step.
+- **CLI Retrieval (get/cat)**: partial-hash resolution now routes through `RetrievalService`
+  using the daemon’s streaming search and the metadata-layer hash-prefix index.
+  - `yams get` and `yams cat` accept 6–64 hex prefixes; ambiguity can be resolved via
+    `--latest/--oldest`. No more local metadata table scans; latency improves especially on
+    large catalogs.
+  - Internals: `RetrievalService::resolveHashPrefix` consumes `SearchService` hash results and applies newest/oldest selection hints; `GetCommand` validates and normalizes hash input before issuing a daemon `Get`.
+
 ### Fixed
 - **Daemon IPC:** Fixed a regression in the `grep` IPC protocol where `GrepRequest` and `GrepResponse` messages were not fully serialized, causing data loss. The protocol definitions and serializers have been updated to correctly handle all fields, including `show_diff` in requests and detailed statistics in responses.
 

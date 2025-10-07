@@ -50,6 +50,12 @@ struct MetricsSnapshot {
     // Tuning pool sizes (via FSM metrics)
     uint32_t ipcPoolSize{0};
     uint32_t ioPoolSize{0};
+    std::uint32_t searchActive{0};
+    std::uint32_t searchQueued{0};
+    std::uint64_t searchExecuted{0};
+    double searchCacheHitRate{0.0};
+    std::uint64_t searchAvgLatencyUs{0};
+    std::uint32_t searchConcurrencyLimit{0};
 
     // Worker pool
     std::size_t workerThreads{0};

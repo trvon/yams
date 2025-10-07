@@ -58,7 +58,7 @@ jobs:
           set -euo pipefail
           rm -rf "$BUILD_DIR"
           conan profile detect --force
-          conan install . -of "$BUILD_DIR" -pr:b=default -pr:h=./conan/profiles/host-linux-clang -s build_type=Release -o sqlite3:fts5=True --build=missing
+          conan install . -of "$BUILD_DIR" -pr:b=default -pr:h=./conan/profiles/host-linux-clang -s build_type=Release -o "sqlite3/*:fts5=True" --build=missing
           # Use Conan-generated Meson toolchain when present
           TOOLCHAIN_DIR="$BUILD_DIR/build-release/conan"
           NATIVE_FILE=$(find "$TOOLCHAIN_DIR" "$BUILD_DIR" -name 'conan_meson_native.ini' -print -quit 2>/dev/null || true)

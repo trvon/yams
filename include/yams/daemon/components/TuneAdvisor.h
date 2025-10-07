@@ -217,7 +217,8 @@ public:
         return def;
     }
 
-    // Suggested maximum worker queue depth before backpressure (0=auto). Default auto: 2x threads.
+    // Suggested maximum worker queue depth before backpressure (0=auto). Default auto scales with
+    // profile.
     static uint64_t maxWorkerQueue(size_t workerThreads) {
         if (const char* s = std::getenv("YAMS_MAX_WORKER_QUEUE")) {
             try {
@@ -227,12 +228,27 @@ public:
         }
         if (workerThreads == 0)
             return 0; // unknown
-        return static_cast<uint64_t>(workerThreads) * 2ull;
+        double scale = profileScale();
+        if (scale < 0.5)
+            scale = 0.5;
+        double multiplier = 2.0 * scale;
+        auto derived = static_cast<uint64_t>(
+            std::max(1.0, std::ceil(static_cast<double>(workerThreads) * multiplier)));
+        return derived;
     }
 
-    // Suggested mux queued-bytes budget before backpressure. Default 256 MiB.
+    // Suggested mux queued-bytes budget before backpressure. Default scales with profile (Balanced:
+    // 256 MiB).
     static uint64_t maxMuxBytes() {
-        uint64_t def = 256ull * 1024ull * 1024ull;
+        constexpr uint64_t kBase = 256ull * 1024ull * 1024ull;
+        double scale = profileScale();
+        if (scale < 0.5)
+            scale = 0.5;
+        if (scale > 2.0)
+            scale = 2.0;
+        uint64_t def = static_cast<uint64_t>(std::llround(static_cast<double>(kBase) * scale));
+        if (def < 64ull * 1024ull * 1024ull)
+            def = 64ull * 1024ull * 1024ull;
         if (const char* s = std::getenv("YAMS_MAX_MUX_BYTES")) {
             try {
                 return static_cast<uint64_t>(std::stoull(s));
@@ -383,9 +399,21 @@ public:
     }
 
     // -------- Central CPU budget and thread caps --------
-    // Global CPU budget percent (10..100). Default 50.
+    // Global CPU budget percent (10..100). Defaults adapt to profile posture.
     static uint32_t cpuBudgetPercent() {
         uint32_t def = 50;
+        switch (tuningProfile()) {
+            case Profile::Efficient:
+                def = 40;
+                break;
+            case Profile::Aggressive:
+                def = 80;
+                break;
+            case Profile::Balanced:
+            default:
+                def = 50;
+                break;
+        }
         if (const char* s = std::getenv("YAMS_CPU_BUDGET_PERCENT")) {
             try {
                 int v = std::stoi(s);
@@ -639,6 +667,18 @@ public:
         if (ov != 0)
             return ov;
         uint32_t def = 500;
+        switch (tuningProfile()) {
+            case Profile::Efficient:
+                def = 750;
+                break;
+            case Profile::Aggressive:
+                def = 250;
+                break;
+            case Profile::Balanced:
+            default:
+                def = 500;
+                break;
+        }
         if (const char* s = std::getenv("YAMS_POOL_COOLDOWN_MS")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
@@ -780,6 +820,61 @@ public:
     }
     static void setPoolHighWatermarkPercent(uint32_t v) {
         poolHighWatermarkPctOverride_.store(v, std::memory_order_relaxed);
+    }
+
+    static uint32_t searchPoolMinSize() {
+        uint32_t ov = searchPoolMinOverride_.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_SEARCH_POOL_MIN")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1 && v <= 64)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return std::max<uint32_t>(2, recommendedThreads(0.25));
+    }
+    static void setSearchPoolMinSize(uint32_t v) {
+        searchPoolMinOverride_.store(v, std::memory_order_relaxed);
+    }
+    static uint32_t searchPoolMaxSize() {
+        uint32_t ov = searchPoolMaxOverride_.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_SEARCH_POOL_MAX")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1 && v <= 256)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return std::max<uint32_t>(searchPoolMinSize(), recommendedThreads(0.5));
+    }
+    static void setSearchPoolMaxSize(uint32_t v) {
+        searchPoolMaxOverride_.store(v, std::memory_order_relaxed);
+    }
+    static uint32_t searchConcurrencyLimit() {
+        uint32_t ov = searchConcurrencyOverride_.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_SEARCH_MAX_CONCURRENT")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1 && v <= 512)
+                    return v;
+            } catch (...) {
+            }
+        }
+        auto derived = searchPoolMaxSize();
+        if (derived == 0)
+            return 0;
+        return derived * 2;
+    }
+    static void setSearchConcurrencyLimit(uint32_t v) {
+        searchConcurrencyOverride_.store(v, std::memory_order_relaxed);
     }
 
     // Writer drain ramp thresholds and multipliers
@@ -965,6 +1060,9 @@ private:
     static inline std::atomic<uint32_t> poolMaxSizeIpcIoOverride_{0};
     static inline std::atomic<uint32_t> poolLowWatermarkPctOverride_{0};
     static inline std::atomic<uint32_t> poolHighWatermarkPctOverride_{0};
+    static inline std::atomic<uint32_t> searchPoolMinOverride_{0};
+    static inline std::atomic<uint32_t> searchPoolMaxOverride_{0};
+    static inline std::atomic<uint32_t> searchConcurrencyOverride_{0};
     static inline std::atomic<unsigned> hwCached_{0};
     static inline std::atomic<uint32_t> postIngestQueueMaxOverride_{0};
     static inline std::atomic<uint32_t> ioConnPerThreadOverride_{0};

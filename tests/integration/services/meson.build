@@ -1,6 +1,7 @@
 # Meson-native registration for services integration tests (no shell globs)
 
 # Explicit file list keeps configuration deterministic and fast
+if get_option('enable-integration-tests')
 services_integration_srcs = files(
   'retrieval_and_ingestion_service_test.cpp',
   'ipc_conformance_test.cpp',
@@ -37,3 +38,4 @@ test('integration_ui', services_integ_exe,
   timeout: get_option('integration-ui-timeout'),
   args: ['--gtest_filter=UiCliExpectationsIT.*:GrepServiceExpectationsIT.*']
 )
+endif

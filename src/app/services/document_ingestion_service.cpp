@@ -26,6 +26,21 @@ Result<yams::daemon::AddDocumentResponse>
 DocumentIngestionService::addViaDaemon(const AddOptions& opts) const {
     using namespace std::chrono_literals;
 
+    if (opts.path.empty() && opts.content.empty()) {
+        return Error{ErrorCode::InvalidArgument,
+                     "Provide a file path or inline content for add operation"};
+    }
+    if (!opts.path.empty() && !opts.content.empty()) {
+        return Error{ErrorCode::InvalidArgument,
+                     "Cannot specify both file path and inline content simultaneously"};
+    }
+    if (!opts.content.empty()) {
+        if (opts.name.empty()) {
+            return Error{ErrorCode::InvalidArgument,
+                         "Inline content requires a non-empty document name"};
+        }
+    }
+
     yams::daemon::AddDocumentRequest dreq;
     dreq.path = normalizePath(opts.path);
     dreq.content = opts.content;
@@ -58,14 +73,14 @@ DocumentIngestionService::addViaDaemon(const AddOptions& opts) const {
             cfg.enableChunkedResponses = false;
             cfg.singleUseConnections = false; // use pooled, multiplexed connection
             cfg.requestTimeout = std::chrono::milliseconds(std::max(1, opts.timeoutMs));
-            yams::daemon::DaemonClient client(cfg);
+            auto client = std::make_shared<yams::daemon::DaemonClient>(cfg);
 
             std::promise<Result<yams::daemon::AddDocumentResponse>> p2;
             auto f2 = p2.get_future();
             boost::asio::co_spawn(
                 yams::daemon::GlobalIOContext::global_executor(),
-                [&client, dreq, pr = std::move(p2)]() mutable -> boost::asio::awaitable<void> {
-                    auto r = co_await client.streamingAddDocument(dreq);
+                [client, dreq, pr = std::move(p2)]() mutable -> boost::asio::awaitable<void> {
+                    auto r = co_await client->streamingAddDocument(dreq);
                     pr.set_value(std::move(r));
                     co_return;
                 },

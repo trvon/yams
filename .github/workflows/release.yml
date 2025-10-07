@@ -526,7 +526,7 @@ jobs:
             HOST_PROFILE="./conan/profiles/host-linux-clang"
           fi
           BUILD_PROFILE="default"
-          CONAN_ARGS="-of build/release -pr:h=$HOST_PROFILE -pr:b=$BUILD_PROFILE -s build_type=Release -o sqlite3:fts5=True -b missing"
+          CONAN_ARGS="-of build/release -pr:h=$HOST_PROFILE -pr:b=$BUILD_PROFILE -s build_type=Release -o \"sqlite3/*:fts5=True\" -b missing"
           if [ "$RUNNER_OS" = "macOS" ]; then
             case "${{ matrix.suffix }}" in
               macos-arm64) CONAN_ARGS="$CONAN_ARGS -s:h arch=armv8" ;;

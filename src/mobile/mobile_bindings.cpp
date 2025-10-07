@@ -7,6 +7,7 @@
 #include <yams/metadata/database.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
+#include <yams/metadata/query_helpers.h>
 
 #include <nlohmann/json.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -58,10 +59,112 @@ using yams::metadata::ConnectionPoolConfig;
 using yams::metadata::Database;
 using yams::metadata::MetadataRepository;
 using yams::metadata::MigrationManager;
+using yams::metadata::queryDocumentsByPattern;
 using yams::metadata::YamsMetadataMigrations;
 using SearchResponseResult = Result<yams::app::services::SearchResponse>;
 
-constexpr yams_mobile_version_info kVersion{0u, 1u, 0u};
+void set_last_error(const std::string& message);
+
+constexpr yams_mobile_version_info kVersion{
+    YAMS_MOBILE_API_VERSION_MAJOR, YAMS_MOBILE_API_VERSION_MINOR, YAMS_MOBILE_API_VERSION_PATCH};
+
+constexpr std::uint32_t pack_version(std::uint16_t major, std::uint16_t minor,
+                                     std::uint16_t patch) {
+    return (static_cast<std::uint32_t>(major) << 16U) | (static_cast<std::uint32_t>(minor) << 8U) |
+           static_cast<std::uint32_t>(patch);
+}
+
+constexpr std::uint32_t pack_version(const yams_mobile_version_info& info) {
+    return pack_version(info.major, info.minor, info.patch);
+}
+
+constexpr std::uint32_t kPackedVersion = pack_version(kVersion);
+
+struct VersionTriplet {
+    std::uint16_t major;
+    std::uint16_t minor;
+    std::uint16_t patch;
+};
+
+constexpr VersionTriplet unpack_version(std::uint32_t encoded) {
+    return VersionTriplet{static_cast<std::uint16_t>((encoded >> 16U) & 0xFFFFU),
+                          static_cast<std::uint16_t>((encoded >> 8U) & 0x00FFU),
+                          static_cast<std::uint16_t>(encoded & 0x00FFU)};
+}
+
+std::string version_to_string(std::uint32_t encoded) {
+    auto v = unpack_version(encoded);
+    std::ostringstream oss;
+    oss << v.major << '.' << v.minor << '.' << v.patch;
+    return oss.str();
+}
+
+bool is_version_supported(std::uint32_t encoded) {
+    if (encoded == 0U)
+        return true;
+    auto version = unpack_version(encoded);
+    if (version.major > kVersion.major)
+        return false;
+    return true;
+}
+
+template <typename T> bool ensure_struct_size(std::uint32_t size, const char* name) {
+    if (size == 0U)
+        return true;
+    if (size < sizeof(T)) {
+        std::ostringstream oss;
+        oss << name << " struct_size=" << size << " is smaller than expected " << sizeof(T);
+        set_last_error(oss.str());
+        return false;
+    }
+    return true;
+}
+
+yams_mobile_status validate_config_header(const yams_mobile_context_config* config) {
+    if (!ensure_struct_size<yams_mobile_context_config>(config->struct_size,
+                                                        "yams_mobile_context_config"))
+        return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
+    if (!is_version_supported(config->version)) {
+        std::ostringstream oss;
+        oss << "unsupported mobile ABI version " << version_to_string(config->version)
+            << "; expected <= " << version_to_string(kPackedVersion);
+        set_last_error(oss.str());
+        return YAMS_MOBILE_STATUS_UNAVAILABLE;
+    }
+    if (config->reserved != 0U) {
+        set_last_error("yams_mobile_context_config.reserved must be zero");
+        return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
+    }
+    if (config->flags != 0U) {
+        set_last_error("yams_mobile_context_config.flags must be zero");
+        return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
+    }
+    return YAMS_MOBILE_STATUS_OK;
+}
+
+yams_mobile_status validate_request_header(const yams_mobile_request_header* header,
+                                           const char* api_name) {
+    if (!header)
+        return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
+    if (!ensure_struct_size<yams_mobile_request_header>(header->struct_size,
+                                                        "yams_mobile_request_header"))
+        return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
+    if (!is_version_supported(header->version)) {
+        std::ostringstream oss;
+        oss << api_name << " request targets unsupported ABI version "
+            << version_to_string(header->version)
+            << " (runtime=" << version_to_string(kPackedVersion) << ")";
+        set_last_error(oss.str());
+        return YAMS_MOBILE_STATUS_UNAVAILABLE;
+    }
+    if (header->flags != 0U) {
+        std::ostringstream oss;
+        oss << api_name << " request uses unsupported flag bits (" << header->flags << ")";
+        set_last_error(oss.str());
+        return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
+    }
+    return YAMS_MOBILE_STATUS_OK;
+}
 
 enum class TelemetrySinkType { None, Console, Stderr, File };
 
@@ -314,6 +417,7 @@ struct MobileContextConfig {
     std::filesystem::path storage_directory;
     uint32_t max_worker_threads = 0;
     uint32_t flags = 0;
+    std::uint32_t api_version = kPackedVersion;
     TelemetrySinkType telemetry_sink = TelemetrySinkType::None;
     std::string telemetry_file_path;
 };
@@ -405,6 +509,9 @@ yams_mobile_status yams_mobile_context_create(const yams_mobile_context_config* 
         return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
     }
 
+    if (auto status = validate_config_header(config); status != YAMS_MOBILE_STATUS_OK)
+        return status;
+
     try {
         auto ctx = std::make_unique<yams_mobile_context_t>();
 
@@ -419,6 +526,7 @@ yams_mobile_status yams_mobile_context_create(const yams_mobile_context_config* 
         ctx->state.config.storage_directory = ctx->state.config.working_directory / "storage";
         ctx->state.config.max_worker_threads = config->max_worker_threads;
         ctx->state.config.flags = config->flags;
+        ctx->state.config.api_version = config->version != 0U ? config->version : kPackedVersion;
 
         if (config->telemetry_sink && *config->telemetry_sink) {
             std::string sink = config->telemetry_sink;
@@ -545,6 +653,9 @@ yams_mobile_status yams_mobile_grep_execute(yams_mobile_context_t* ctx,
         set_last_error("invalid arguments");
         return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
     }
+    if (auto status = validate_request_header(&request->header, "grep");
+        status != YAMS_MOBILE_STATUS_OK)
+        return status;
     auto service = ctx->state.grep_service;
     if (!service) {
         set_last_error("grep service not initialized");
@@ -598,6 +709,9 @@ yams_mobile_status yams_mobile_search_execute(yams_mobile_context_t* ctx,
         set_last_error("invalid arguments");
         return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
     }
+    if (auto status = validate_request_header(&request->header, "search");
+        status != YAMS_MOBILE_STATUS_OK)
+        return status;
     auto service = ctx->state.search_service;
     if (!service) {
         set_last_error("search service not initialized");
@@ -681,6 +795,9 @@ yams_mobile_status yams_mobile_store_document(yams_mobile_context_t* ctx,
         set_last_error("invalid arguments");
         return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
     }
+    if (auto status = validate_request_header(&request->header, "store_document");
+        status != YAMS_MOBILE_STATUS_OK)
+        return status;
     auto service = ctx->state.document_service;
     if (!service) {
         set_last_error("document service not initialized");
@@ -767,6 +884,11 @@ yams_mobile_status yams_mobile_get_metadata(yams_mobile_context_t* ctx,
         set_last_error("metadata repository not initialized");
         return YAMS_MOBILE_STATUS_NOT_INITIALIZED;
     }
+    if (request) {
+        if (auto status = validate_request_header(&request->header, "get_metadata");
+            status != YAMS_MOBILE_STATUS_OK)
+            return status;
+    }
 
     std::vector<yams::metadata::DocumentInfo> docs;
     if (request && request->document_hash && *request->document_hash) {
@@ -781,7 +903,7 @@ yams_mobile_status yams_mobile_get_metadata(yams_mobile_context_t* ctx,
         std::string pattern = "%";
         if (request && request->path && *request->path)
             pattern = request->path;
-        auto list = repo->findDocumentsByPath(pattern);
+        auto list = queryDocumentsByPattern(*repo, pattern);
         if (!list) {
             set_last_error(list.error().message);
             return map_error_code(list.error().code);
@@ -845,6 +967,11 @@ yams_mobile_status yams_mobile_get_vector_status(yams_mobile_context_t* ctx,
         set_last_error("context not initialized");
         return YAMS_MOBILE_STATUS_NOT_INITIALIZED;
     }
+    if (request) {
+        if (auto status = validate_request_header(&request->header, "get_vector_status");
+            status != YAMS_MOBILE_STATUS_OK)
+            return status;
+    }
 
     std::uint64_t docCount = 0;
     auto countRes = repo->getDocumentCount();
@@ -894,6 +1021,9 @@ yams_mobile_status yams_mobile_list_documents(yams_mobile_context_t* ctx,
     req.matchAllTags = false;
 
     if (request) {
+        if (auto status = validate_request_header(&request->header, "list_documents");
+            status != YAMS_MOBILE_STATUS_OK)
+            return status;
         if (request->pattern && *request->pattern)
             req.pattern = request->pattern;
         if (request->limit > 0)
@@ -960,6 +1090,9 @@ yams_mobile_status yams_mobile_get_document(yams_mobile_context_t* ctx,
     req.metadataOnly = false;
 
     if (request) {
+        if (auto status = validate_request_header(&request->header, "get_document");
+            status != YAMS_MOBILE_STATUS_OK)
+            return status;
         if (request->document_hash && *request->document_hash)
             req.hash = request->document_hash;
         else if (request->name && *request->name)

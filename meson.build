@@ -23,7 +23,7 @@ sqlite_dep = dependency('sqlite3', required: true)
 cpp = meson.get_compiler('cpp')
 fts5_prog = cpp.run(files('meson/fts5_check.cpp'), dependencies: sqlite_dep, name: 'sqlite3 FTS5 check')
 if fts5_prog.returncode() != 0
-  msg = 'SQLite3 built without FTS5 support. Enable FTS5 in your package manager or Conan (e.g., -o sqlite3:fts5=True).'
+  msg = 'SQLite3 built without FTS5 support. Enable FTS5 in your package manager or Conan (e.g., -o "sqlite3/*:fts5=True").'
   if require_fts5
     error(msg)
   else

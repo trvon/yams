@@ -83,7 +83,9 @@ unit_daemon = files(
   'daemon/message_framing_test.cpp',
   'daemon/plugin_host_test.cpp',
   'daemon/plugin_host_fsm_failure_test.cpp',
+  'daemon/plugin_host_fsm_recovery_test.cpp',
   'daemon/daemon_plugins_degraded_status_test.cpp',
+  'daemon/daemon_plugins_recovery_status_test.cpp',
   'daemon/plugin_loader_test.cpp',
   'daemon/post_ingest_queue_test.cpp',
   'daemon/grep_response_proto_test.cpp',
@@ -96,6 +98,7 @@ unit_daemon = files(
   'daemon/response_of_test.cpp',
   'daemon/service_manager_test.cpp',
   'daemon/service_manager_fsm_status_test.cpp',
+  'daemon/service_manager_shutdown_ownership_test.cpp',
   'daemon/socket_server_lifecycle_test.cpp',
   'daemon/status_embedding_test.cpp',
   'daemon/status_response_proto_test.cpp',
@@ -129,6 +132,7 @@ unit_manifest = files(
 )
 
 unit_mcp = files(
+  'mcp/initialize_response_test.cpp',
   'mcp/mcp_jsonrpc_roundtrip_test.cpp',
   'mcp/mcp_search_dto_test.cpp',
   'mcp/mcp_server_exec_test.cpp',
@@ -159,6 +163,7 @@ unit_metadata = files(
   'metadata/database_statement_time_test.cpp',
   'metadata/metadata_repository_cache_test.cpp',
   'metadata/connection_pool_maintenance_smoke_test.cpp',
+  'metadata/connection_pool_waiting_guard_test.cpp',
   'metadata/tree_builder_test.cpp',
   'metadata/tree_differ_test.cpp',
 )

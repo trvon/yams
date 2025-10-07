@@ -10,12 +10,15 @@ This guide explains the YAMS tuning profiles and how they shape dynamic scaling.
 
 ## What profiles affect
 
-Profiles modulate these behaviors (multipliers shown):
-- IPC worker pool grow/shrink step: efficient ×0.75, balanced ×1.0, aggressive ×1.5
-- IO pool "connections per thread" threshold: efficient ÷0.75 (higher threshold), balanced ×1.0, aggressive ÷1.5 (lower threshold)
-- Post-ingest worker target: efficient ×0.75, balanced ×1.0, aggressive ×1.5 (before min/max clamps)
-- Backpressure read pause: default 10ms (can still override via env)
+Profiles modulate these behaviors (multipliers shown where applicable):
+- IPC worker pool grow/shrink step: efficient ×0.75, balanced ×1.0, aggressive ×2.0
+- IO pool "connections per thread" threshold: efficient ÷0.75 (higher threshold), balanced ×1.0, aggressive ÷2.0 (lower threshold)
+- Post-ingest worker target: efficient ×0.75, balanced ×1.0, aggressive ×2.0 (before min/max clamps)
+- Multiplexed writer budget per request turn: tuned continuously; aggressive profile now keeps ≥1.5× the balanced byte budget floor, while efficient trims sooner to reduce contention
+- Backpressure read pause: default 10ms (aggressive profile forces a 5ms pause unless overridden)
 - Max connections: derived dynamically; can be overridden via env (see below)
+
+The tuning manager now pushes writer-budget updates straight into the socket server, so active IPC streams pick up profile changes immediately—no restart required. This applies to profile switches and to any live adjustments you make through CLI or env overrides.
 
 ## How to set a profile
 
@@ -44,4 +47,3 @@ Allowed values: `efficient | balanced | aggressive`
 - Start with balanced. If many agents push concurrent adds/search, try aggressive.
 - For single-box, resource-constrained setups, efficient reduces CPU churn.
 - Profiles are safe overlays; fine-grained knobs (e.g., `tuning.pool_scale_step`) still apply when set.
-

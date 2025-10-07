@@ -157,6 +157,11 @@ AsioTransportAdapter::async_write_all(boost::asio::local::stream_protocol::socke
 }
 
 boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(const Request& req) {
+    Request copy = req;
+    co_return co_await send_request(std::move(copy));
+}
+
+boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Request&& req) {
     auto conn = co_await get_or_create_connection(opts_);
     if (!conn || !conn->alive) {
         co_return Error{ErrorCode::NetworkError, "Failed to establish connection"};
@@ -165,17 +170,21 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(cons
     static std::atomic<uint64_t> g_req_id{
         static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count())};
 
+    const auto req_type = getMessageType(req);
+
     Message msg;
     msg.version = PROTOCOL_VERSION;
     msg.requestId = g_req_id.fetch_add(1, std::memory_order_relaxed);
     msg.timestamp = std::chrono::steady_clock::now();
-    msg.payload = req;
+    msg.payload = std::move(req);
     msg.clientVersion = "yams-client-0.3.4";
     msg.expectsStreamingResponse = false;
 
     MessageFramer framer;
-    auto framed = framer.frame_message(msg);
-    if (!framed) {
+    std::vector<uint8_t> frame;
+    frame.reserve(MessageFramer::HEADER_SIZE + 4096);
+    auto frame_res = framer.frame_message_into(msg, frame);
+    if (!frame_res) {
         co_return Error{ErrorCode::InvalidData, "Frame build failed"};
     }
 
@@ -192,14 +201,14 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(cons
         conn->handlers.emplace(msg.requestId, std::move(h));
     }
 
-    auto wres = co_await conn->async_write_frame(framed.value());
+    auto wres = co_await conn->async_write_frame(std::move(frame));
     if (!wres) {
         co_await boost::asio::dispatch(conn->strand, use_awaitable);
         conn->handlers.erase(msg.requestId);
         co_return wres.error();
     }
     spdlog::info("AsioTransportAdapter::send_request wrote frame req_id={} type={}", msg.requestId,
-                 static_cast<int>(getMessageType(req)));
+                 static_cast<int>(req_type));
 
     auto [ec, response_result] =
         co_await response_ch->async_receive(boost::asio::as_tuple(use_awaitable));
@@ -230,8 +239,10 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
     msg.expectsStreamingResponse = true;
 
     MessageFramer framer;
-    auto framed = framer.frame_message(msg);
-    if (!framed) {
+    std::vector<uint8_t> frame;
+    frame.reserve(MessageFramer::HEADER_SIZE + 4096);
+    auto frame_res = framer.frame_message_into(msg, frame);
+    if (!frame_res) {
         co_return Error{ErrorCode::InvalidData, "Frame build failed"};
     }
 
@@ -249,7 +260,7 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
         conn->handlers.emplace(msg.requestId, std::move(h));
     }
 
-    auto wres = co_await conn->async_write_frame(framed.value());
+    auto wres = co_await conn->async_write_frame(std::move(frame));
     if (!wres) {
         co_await boost::asio::dispatch(conn->strand, use_awaitable);
         conn->handlers.erase(msg.requestId);

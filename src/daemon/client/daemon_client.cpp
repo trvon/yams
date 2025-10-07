@@ -643,12 +643,19 @@ boost::asio::awaitable<Result<void>> DaemonClient::ping() {
 boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(const Request& req) {
     spdlog::debug("DaemonClient::sendRequest: [{}] streaming={} sock='{}'", getRequestName(req),
                   false, pImpl->config_.socketPath.string());
-    // Skip the legacy connect() call when using AsioTransportAdapter
-    // The adapter creates its own connection, and calling connect() here
-    // causes a double connection issue where the POSIX socket immediately EOFs
-
     AsioTransportAdapter adapter(pImpl->transportOptions_);
     auto r = co_await adapter.send_request(req);
+    if (!r)
+        co_return r.error();
+    co_return r.value();
+}
+
+boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(Request&& req) {
+    const auto type = getRequestName(req);
+    spdlog::debug("DaemonClient::sendRequest(move): [{}] streaming={} sock='{}'", type, false,
+                  pImpl->config_.socketPath.string());
+    AsioTransportAdapter adapter(pImpl->transportOptions_);
+    auto r = co_await adapter.send_request(std::move(req));
     if (!r)
         co_return r.error();
     co_return r.value();
@@ -1238,7 +1245,8 @@ DaemonClient::streamingBatchEmbeddings(const BatchEmbeddingRequest& req) {
         while (remaining > 0) {
             GetChunkRequest creq{ir.transferId, offset,
                                  static_cast<uint32_t>(std::min<uint64_t>(remaining, step))};
-            auto cres = co_await sendRequest(Request{creq});
+            Request chunk_req{creq};
+            auto cres = co_await sendRequest(std::move(chunk_req));
             if (!cres)
                 co_return cres.error();
             auto* chunk = std::get_if<GetChunkResponse>(&cres.value());
@@ -1254,7 +1262,8 @@ DaemonClient::streamingBatchEmbeddings(const BatchEmbeddingRequest& req) {
         }
         if (ir.transferId != 0) {
             GetEndRequest ereq{ir.transferId};
-            (void)co_await sendRequest(Request{ereq});
+            Request end_req{ereq};
+            (void)co_await sendRequest(std::move(end_req));
         }
         // Parse metadata
         size_t dim = 0, count = 0;

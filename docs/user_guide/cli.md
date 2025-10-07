@@ -133,19 +133,73 @@ Options:
   - Custom metadata key-value pairs (can be used multiple times)
 - --mime-type <type>
   - Override MIME type detection
+- --label <label>
+  - Human-readable label for the automatic snapshot (optional)
+- --collection <name>
+  - Group snapshots into a named collection
 
 Description:
 - Ingests the specified file or standard input and stores it in the content-addressed store.
 - Rich metadata support for tagging, naming, and custom properties.
 - Content is automatically indexed for full-text and fuzzy search.
+- **Automatic snapshots (PBI-043):** Every `yams add` operation automatically creates a snapshot with a timestamp-based ID (e.g., `2025-10-01T14:30:00.123Z`). A Merkle tree is built and stored for efficient diff operations.
+- Trees enable fast `yams diff` operations using O(log n) subtree matching.
+- **Git integration:** When run in a git repository, snapshot metadata includes the current commit hash and branch name.
 
 Examples:
-```
+```bash
+# Basic document addition (automatic snapshot created)
 yams add ./README.md
+# → Snapshot: 2025-10-01T14:30:00.123Z
+
+# Add with human-friendly label
+yams add . --recursive --label "Release 1.0"
+# → Snapshot: 2025-10-01T14:30:00.456Z (label: "Release 1.0")
+
+# Organize by collection
+yams add docs/ --recursive --collection=documentation
+# → Snapshot: 2025-10-01T14:30:01.789Z (collection: "documentation")
+
+# Standard operations (all create automatic snapshots)
 cat notes.txt | yams add - --name "meeting-notes" --tags "work,meeting"
 yams add document.pdf --tags "research,papers" --metadata "author=John Doe"
-echo "Quick note" | yams add - --name "reminder.txt" --mime-type "text/plain"
+yams add src/ --recursive --include="*.cpp,*.h" --tags "code,source"
 ```
+
+**Automatic Snapshot Workflows:**
+
+1. **Initial import (automatic snapshot):**
+   ```bash
+   yams add . --recursive --include="*.cpp,*.h,*.md" --label "Initial import"
+   # → Snapshot: 2025-10-01T09:00:00.000Z
+   ```
+
+2. **After making changes (automatic snapshot):**
+   ```bash
+   yams add . --recursive --include="*.cpp,*.h,*.md" --label "Added new feature"
+   # → Snapshot: 2025-10-01T14:30:00.000Z
+   ```
+
+3. **Compare any two snapshots:**
+   ```bash
+   # List all snapshots to find IDs
+   yams list --snapshots
+   
+   # Compare using timestamp IDs
+   yams diff 2025-10-01T09:00:00.000Z 2025-10-01T14:30:00.000Z
+   ```
+
+4. **View snapshot timeline:**
+   ```bash
+   yams list --snapshots
+   # Shows chronological list of all automatic snapshots
+   ```
+
+**Performance Notes:**
+- Tree building adds ~5-10% overhead to `yams add` but enables O(log n) diff operations.
+- Trees are stored once in CAS and deduplicated across snapshots.
+- For large repositories (>10K files), tree-based diff is 10-100x faster than flat comparison.
+- Automatic snapshots have zero mental overhead - just use `yams add` normally.
 
 ---
 
@@ -351,6 +405,190 @@ yams ls --format csv --limit 50  # Using alias
 yams list --format minimal --offset 20
 yams list --no-snippets --show-metadata  # No previews, full metadata
 ```
+
+### Snapshot Operations (Enhanced in PBI-043)
+
+The `list` command has been enhanced with smart snapshot and file history capabilities:
+
+**List all snapshots:**
+```bash
+yams list --snapshots
+yams list --snapshots --format json
+yams list --snapshots --collection myproject
+```
+
+**Show file history across snapshots:**
+```bash
+# Shows timeline of changes (Added, Modified, Renamed) across all snapshots
+yams list src/main.cpp
+
+# Output example:
+# File: src/main.cpp
+# 
+# Snapshot History:
+# v1.2  2025-10-01 14:30  Modified  hash: abc123...  2.5 KB  (current)
+# v1.1  2025-09-22 10:15  Modified  hash: def456...  2.3 KB  
+# v1.0  2025-09-15 09:00  Added     hash: ghi789...  2.1 KB
+```
+
+**Show file at specific snapshot:**
+```bash
+yams list src/main.cpp --snapshot-id=v1.0
+
+# Output shows metadata and suggests next actions:
+# File: src/main.cpp (v1.0)
+# Size: 2.1 KB
+# Hash: ghi789...
+# 
+# Use 'yams cat src/main.cpp --snapshot-id=v1.0' to view content
+# Use 'yams list src/main.cpp' to see history across all snapshots
+```
+
+**Compare file between snapshots (inline diff):**
+```bash
+yams list src/main.cpp --snapshot-id=v1.0 --compare-to=v1.1
+
+# Shows inline diff with syntax highlighting:
+# File: src/main.cpp
+# Comparing: v1.0 → v1.1
+# 
+# @@ -10,6 +10,8 @@
+#  int main(int argc, char** argv) {
+# +    // Initialize logging
+# +    initLogger();
+#      processArgs(argc, argv);
+#      return runApp();
+#  }
+```
+
+**Smart behavior:**
+- `yams list` → List all documents
+- `yams list --snapshots` → List all available snapshots
+- `yams list <filepath>` → Show file history across snapshots
+- `yams list <filepath> --snapshot-id=X` → Show file at snapshot X
+- `yams list <filepath> --snapshot-id=X --compare-to=Y` → Inline diff
+
+The command automatically detects file paths (contain `/` or `.`) and adapts its behavior accordingly.
+
+---
+
+## diff {#cmd-diff}
+
+Compare two snapshots and show file changes with tree diff.
+
+**New in PBI-043:** Efficient snapshot comparison using Merkle tree diffs with rename detection.
+
+Synopsis:
+- yams diff <snapshotA> <snapshotB> [options]
+
+Options:
+- --format <format>
+  - Output format: tree (default) | flat | json
+  - tree: Structured diff with rename detection (recommended)
+  - flat: Legacy flat diff without rename tracking
+  - json: Machine-readable output for tools
+- --include <patterns>
+  - Include only files matching patterns (comma-separated globs)
+  - Example: --include="*.cpp,*.h"
+- --exclude <patterns>
+  - Exclude files matching patterns (comma-separated globs)
+  - Example: --exclude="*.log,*.tmp,build/**"
+- --type <change-type>
+  - Filter by change type: added | deleted | modified | renamed
+  - Example: --type=modified (show only modified files)
+- --stats
+  - Show only summary statistics (no file list)
+- --no-renames
+  - Disable rename detection (faster, but less accurate)
+- -v, --verbose
+  - Show detailed information including file hashes
+
+Description:
+- Compares two snapshots and displays changes using efficient tree diff algorithm.
+- **Rename detection:** Automatically detects moved/renamed files by matching content hashes.
+- **O(log n) subtree matching:** Unchanged subtrees are skipped for performance.
+- Changes are grouped by type: Added, Deleted, Modified, Renamed, Moved.
+- Tree format is the default and recommended for most use cases.
+
+Examples:
+```bash
+# Basic diff
+yams diff v1.0 v1.1
+
+# Output example:
+# Comparing v1.0 → v1.1
+# 
+# Added (6 files):
+#   + src/new-feature.cpp
+#   + src/new-feature.h
+#   + tests/test_new_feature.cpp
+#   + docs/new-feature.md
+#   + lib/dependency.so
+#   + config/feature-flags.json
+# 
+# Deleted (2 files):
+#   - src/deprecated.cpp
+#   - src/deprecated.h
+# 
+# Modified (3 files):
+#   ~ src/main.cpp                 (2.3 KB → 2.5 KB)
+#   ~ README.md                     (1.1 KB → 1.3 KB)
+#   ~ Makefile                      (845 B → 920 B)
+# 
+# Renamed (1 file):
+#   → src/utils.cpp → src/common/utils.cpp
+# 
+# Summary:
+#   +6 files added
+#   -2 files deleted
+#   ~3 files modified
+#   →1 file renamed
+#   Total: 12 changes
+
+# Filter by file type
+yams diff v1.0 v1.1 --include="*.cpp,*.h"
+
+# Show only modified files
+yams diff v1.0 v1.1 --type=modified
+
+# Show summary statistics only
+yams diff v1.0 v1.1 --stats
+
+# Output example (stats):
+# Snapshot Comparison: v1.0 → v1.1
+#   Files added:    6
+#   Files deleted:  2
+#   Files modified: 3
+#   Files renamed:  1
+#   Total changes:  12
+
+# JSON output for tools
+yams diff v1.0 v1.1 --format=json
+
+# Legacy flat diff (convenience flag)
+yams diff v1.0 v1.1 --flat-diff
+# Or equivalently:
+yams diff v1.0 v1.1 --format=flat
+
+# Compare specific directory
+yams diff v1.0 v1.1 --include="src/**"
+
+# Exclude build artifacts
+yams diff v1.0 v1.1 --exclude="build/**,*.o,*.so"
+
+# Verbose output with hashes
+yams diff v1.0 v1.1 -v
+```
+
+**Performance Notes:**
+- Tree diff is computed in O(log n) time when trees are pre-built during `yams add`.
+- If trees don't exist, they will be computed on-demand (may be slower for large snapshots).
+- Use `--no-renames` to skip rename detection for faster results on very large diffs.
+
+**See Also:**
+- `yams list --snapshots` - List available snapshots
+- `yams list <file>` - Show file history across snapshots
+- `yams add --snapshot-id` - Create snapshots
 
 ---
 
@@ -1042,6 +1280,327 @@ yams completion fish > ~/.config/fish/completions/yams.fish
 - 0  Success.
 - 1  General error (unexpected exception or failure).
 - Non-zero values may indicate specific errors depending on the subcommand.
+
+---
+
+## Snapshot Workflows
+
+**New in PBI-043:** Efficient snapshot management with Merkle tree diffs and rename detection.
+
+### Overview
+
+Snapshots provide point-in-time captures of your repository content. YAMS automatically builds Merkle trees during `yams add --snapshot-id` operations, enabling fast O(log n) diff comparisons between snapshots.
+
+### Basic Workflow
+
+**1. Initial import (automatic snapshot):**
+```bash
+# Capture current state of source code
+yams add . --recursive \
+  --include="*.cpp,*.hpp,*.h,*.md" \
+  --label "Initial release" \
+  --tags "code,release"
+
+# Snapshot created automatically: 2025-10-01T09:00:00.000Z
+```
+
+**2. Make changes to your codebase:**
+```bash
+# Edit files, add features, fix bugs...
+vim src/main.cpp
+git commit -am "Added new feature"
+```
+
+**3. Capture updated state (automatic snapshot):**
+```bash
+# Just add again - snapshot created automatically
+yams add . --recursive \
+  --include="*.cpp,*.hpp,*.h,*.md" \
+  --label "Feature release" \
+  --tags "code,release"
+
+# New snapshot: 2025-10-01T14:30:00.000Z
+```
+
+**4. Compare snapshots:**
+```bash
+# List snapshots to find timestamp IDs
+yams list --snapshots
+
+# Compare using timestamp IDs (fast O(log n) tree diff)
+yams diff 2025-10-01T09:00:00.000Z 2025-10-01T14:30:00.000Z
+
+# Output example:
+# Comparing v1.0 → v1.1
+# 
+# Added (3 files):
+#   + src/new-feature.cpp
+#   + src/new-feature.h
+#   + tests/test_new_feature.cpp
+# 
+# Modified (2 files):
+#   ~ src/main.cpp                 (2.3 KB → 2.5 KB)
+#   ~ README.md                     (1.1 KB → 1.3 KB)
+# 
+# Renamed (1 file):
+#   → src/utils.cpp → src/common/utils.cpp
+# 
+# Summary: 6 changes (+3, ~2, →1)
+```
+
+### Snapshot Discovery
+
+**List all snapshots:**
+```bash
+yams list --snapshots
+
+# Output example (chronological, newest first):
+# Snapshot ID                  Label              Collection      Files  Date
+# 2025-10-01T14:30:00.000Z    Feature release    -               125    2025-10-01 14:30
+# 2025-09-20T10:15:00.000Z    Updated docs       documentation    45    2025-09-20 10:15
+# 2025-09-15T09:00:00.000Z    Initial release    -               122    2025-09-15 09:00
+```
+
+**Filter by collection:**
+```bash
+yams list --snapshots --collection=releases
+```
+
+**JSON output for tools:**
+```bash
+yams list --snapshots --format=json | jq '.[] | select(.label | contains("release"))'
+```
+
+### File History Tracking
+
+**View file history across snapshots:**
+```bash
+yams list src/main.cpp
+
+# Output example:
+# File: src/main.cpp
+# 
+# Snapshot History:
+# v1.1  2025-10-01 14:30  Modified  hash: abc123...  2.5 KB  (current)
+# v1.0  2025-09-15 09:00  Added     hash: def456...  2.3 KB
+```
+
+**View file at specific snapshot:**
+```bash
+# See metadata
+yams list src/main.cpp --snapshot-id=v1.0
+
+# View content
+yams cat src/main.cpp --snapshot-id=v1.0
+
+# Restore to disk
+yams get --name src/main.cpp --snapshot-id=v1.0 -o main-v1.0.cpp
+```
+
+**Inline diff between snapshots:**
+```bash
+yams list src/main.cpp --snapshot-id=v1.0 --compare-to=v1.1
+
+# Shows inline diff with syntax highlighting
+```
+
+### Advanced Diff Operations
+
+**Filter by file type:**
+```bash
+# Show only C++ changes
+yams diff v1.0 v1.1 --include="*.cpp,*.hpp"
+
+# Exclude build artifacts
+yams diff v1.0 v1.1 --exclude="build/**,*.o"
+```
+
+**Filter by change type:**
+```bash
+# Show only added files
+yams diff v1.0 v1.1 --type=added
+
+# Show only renames (useful for tracking file moves)
+yams diff v1.0 v1.1 --type=renamed
+```
+
+**Summary statistics:**
+```bash
+yams diff v1.0 v1.1 --stats
+
+# Output:
+# Snapshot Comparison: v1.0 → v1.1
+#   Files added:    3
+#   Files deleted:  0
+#   Files modified: 2
+#   Files renamed:  1
+#   Total changes:  6
+```
+
+**JSON output for tools:**
+```bash
+yams diff v1.0 v1.1 --format=json > diff.json
+
+# Analyze with jq:
+jq '.changes[] | select(.type == "modified")' diff.json
+```
+
+**Verbose output with hashes:**
+```bash
+yams diff v1.0 v1.1 -v
+
+# Shows full file hashes for each change
+```
+
+### Collections and Organization
+
+**Organize snapshots by collection:**
+```bash
+# Development snapshots
+yams add src/ --recursive --collection=dev --snapshot-id=dev-2025-10-01
+
+# Documentation snapshots
+yams add docs/ --recursive --collection=documentation --snapshot-id=docs-v3
+
+# Release snapshots
+yams add . --recursive --collection=releases --snapshot-id=v2.0 --snapshot-label="Major release"
+```
+
+**Compare within collections:**
+```bash
+yams list --snapshots --collection=releases
+yams diff v1.0 v2.0  # Compare releases
+```
+
+### Restoration Workflows
+
+**Restore entire snapshot:**
+```bash
+# Restore to specific directory
+yams restore --snapshot-id=v1.0 --output-directory=./restore-v1.0
+
+# Preview without writing files
+yams restore --snapshot-id=v1.0 --output-directory=./test --dry-run
+
+# Overwrite existing files
+yams restore --snapshot-id=v1.0 --output-directory=. --overwrite
+```
+
+**Selective restoration:**
+```bash
+# Restore only specific file types
+yams restore --snapshot-id=v1.0 \
+  --output-directory=./restore \
+  --include-patterns="*.cpp,*.h"
+
+# Exclude directories
+yams restore --snapshot-id=v1.0 \
+  --output-directory=./restore \
+  --exclude-patterns="build/**,third_party/**"
+```
+
+**Restore by collection:**
+```bash
+yams restore-collection --collection=releases --output-directory=./releases
+```
+
+### Performance Characteristics
+
+**Tree-based diff performance:**
+- **Small changes (< 1%)**: O(log n) subtree matching, ~100x faster than flat diff
+- **Large changes (> 50%)**: Approaches O(n) but still faster due to hash-based comparison
+- **Rename detection**: Hash-based matching is O(n) but only runs on Added/Deleted pairs
+
+**Storage efficiency:**
+- Merkle trees are stored once in CAS and deduplicated across snapshots
+- Unchanged subtrees share the same tree hash (deduplication)
+- Tree overhead: ~5-10% additional storage for large repositories
+- Diff computation: ~5-10% slower during `yams add --snapshot-id` (tree building)
+
+**Optimization tips:**
+- Use `--exclude` patterns to skip build artifacts, caches, and temporary files
+- Use `--no-renames` for faster diff when rename tracking isn't needed
+- Pre-build trees during snapshot creation for instant diff operations
+
+### Integration with Git
+
+**Automatic git integration:**
+When `yams add` runs in a git repository, snapshot metadata automatically includes:
+- `git_commit`: Current commit hash (e.g., `abc123def456`)
+- `git_branch`: Current branch name (e.g., `main`, `develop`)
+- `git_remote`: Remote repository URL (if configured)
+
+This creates a natural bidirectional link between YAMS snapshots and git history.
+
+**Snapshot on git commit (hook):**
+```bash
+#!/bin/bash
+# Hook: .git/hooks/post-commit
+# Automatically snapshot on every commit
+yams add . --recursive \
+  --include="*.cpp,*.hpp,*.h,*.md" \
+  --label "$(git log -1 --pretty=%B | head -1)" \
+  --tags "code,git,auto"
+```
+
+**Snapshot on git tag:**
+```bash
+#!/bin/bash
+# Hook: .git/hooks/post-tag
+TAG=$(git describe --tags --abbrev=0)
+yams add . --recursive \
+  --include="*.cpp,*.hpp,*.h,*.md" \
+  --label="Git tag: $TAG" \
+  --tags "code,git,release"
+```
+
+**Daily snapshots:**
+```bash
+#!/bin/bash
+# Cron: daily snapshot at midnight
+yams add . --recursive \
+  --include="*.cpp,*.hpp,*.h,*.md" \
+  --label="Daily backup" \
+  --tags "code,daily"
+# Snapshot ID is auto-generated with current timestamp
+```
+
+### Troubleshooting
+
+**Missing trees:**
+```bash
+# If diff is slow, trees may not exist
+# Rebuild trees for existing snapshots:
+yams list --snapshots  # Find snapshot IDs
+yams doctor repair --snapshots  # Rebuild missing trees (future feature)
+```
+
+**Large diff output:**
+```bash
+# Use filters to reduce output
+yams diff v1.0 v2.0 --type=modified --include="src/**"
+yams diff v1.0 v2.0 --stats  # Summary only
+```
+
+**Restore conflicts:**
+```bash
+# Preview first
+yams restore --snapshot-id=v1.0 --output-directory=./test --dry-run
+
+# Use overwrite cautiously
+yams restore --snapshot-id=v1.0 --output-directory=. --overwrite
+```
+
+### Best Practices
+
+1. **Use labels liberally:** Labels make snapshot timelines human-readable (`--label "Before refactor"`)
+2. **Leverage automatic IDs:** No need to manually manage snapshot IDs - timestamps provide natural ordering
+3. **Exclude build artifacts:** Use `--exclude="build/**,*.o,*.so"` to reduce noise and improve performance
+4. **Tag meaningful snapshots:** Use `--tags` for filtering (e.g., `release`, `milestone`, `backup`)
+5. **Collections for organization:** Group related content (`--collection=releases`, `--collection=docs`)
+6. **Automate with git hooks:** Snapshot on every commit or tag for complete history tracking
+7. **Test restores:** Verify snapshots with `--dry-run` before overwriting files
+8. **Trust the timestamps:** Snapshot IDs are ISO 8601 timestamps - sort naturally and are globally unique
 
 ## Tips
 

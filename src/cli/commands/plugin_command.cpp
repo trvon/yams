@@ -2,16 +2,58 @@
 #include <spdlog/spdlog.h>
 #include <future>
 #include <iostream>
+#include <optional>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/core/types.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 
 namespace yams::cli {
+
+namespace {
+using StatusResult = yams::Result<yams::daemon::StatusResponse>;
+
+void print_plugin_not_ready_hint(const std::optional<yams::daemon::StatusResponse>& statusOpt) {
+    std::cout << "Plugin subsystem is not ready yet; the daemon is still initializing plugins."
+              << '\n';
+    if (statusOpt) {
+        const auto& st = *statusOpt;
+        auto it = st.readinessStates.find("plugins");
+        if (it != st.readinessStates.end()) {
+            std::cout << "  readiness.plugins=" << (it->second ? "true" : "false") << '\n';
+        }
+        if (!st.lifecycleState.empty()) {
+            std::cout << "  lifecycle=" << st.lifecycleState << '\n';
+        }
+        if (!st.lastError.empty()) {
+            std::cout << "  last_error=" << st.lastError << '\n';
+        }
+    }
+    std::cout << "Inspect 'yams daemon status -d' or '~/.yams/data/status.json' for detailed "
+                 "plugin state."
+              << '\n';
+}
+
+template <typename FetchStatusFn>
+bool handle_plugin_rpc_error(const Error& err, const FetchStatusFn& fetchStatus,
+                             const std::string& actionLabel) {
+    if (err.code == ErrorCode::InvalidState) {
+        std::optional<yams::daemon::StatusResponse> statusOpt;
+        auto status = fetchStatus();
+        if (status)
+            statusOpt = status.value();
+        print_plugin_not_ready_hint(statusOpt);
+        return false;
+    }
+    std::cout << actionLabel << " failed: " << err.message << '\n';
+    return false;
+}
+} // namespace
 
 class PluginCommand : public ICommand {
 public:
@@ -229,8 +271,14 @@ void PluginCommand::listPlugins() {
         if (need_scan) {
             PluginScanRequest scan; // empty -> server uses configured search paths
             auto& client = **leaseHandle;
-            (void)yams::cli::run_result<PluginScanResponse>(client.call(scan),
-                                                            std::chrono::milliseconds(10000));
+            auto scanRes = yams::cli::run_result<PluginScanResponse>(
+                client.call(scan), std::chrono::milliseconds(10000));
+            if (!scanRes) {
+                auto err = scanRes.error();
+                auto statusFetcher = [&]() -> StatusResult { return fetch_status(); };
+                if (!handle_plugin_rpc_error(err, statusFetcher, "Plugin scan"))
+                    return;
+            }
             // Wait up to ~3s for plugin readiness/providers
             for (int i = 0; i < 6; ++i) {
                 sres = fetch_status();
@@ -485,7 +533,12 @@ void PluginCommand::loadPlugin(const std::string& arg, const std::string& cfgJso
         auto res = yams::cli::run_result<PluginLoadResponse>(client.call(req),
                                                              std::chrono::milliseconds(20000));
         if (!res) {
-            std::cout << "Load failed: " << res.error().message << "\n";
+            auto statusFetcher = [&]() -> StatusResult {
+                return yams::cli::run_result<yams::daemon::StatusResponse>(
+                    client.status(), std::chrono::milliseconds(5000));
+            };
+            if (!handle_plugin_rpc_error(res.error(), statusFetcher, "Plugin load"))
+                return;
             return;
         }
         const auto& r = res.value();
@@ -518,7 +571,12 @@ void PluginCommand::unloadPlugin(const std::string& name) {
         auto res = yams::cli::run_result<SuccessResponse>(client.call(req),
                                                           std::chrono::milliseconds(10000));
         if (!res) {
-            std::cout << "Unload failed: " << res.error().message << "\n";
+            auto statusFetcher = [&]() -> StatusResult {
+                return yams::cli::run_result<yams::daemon::StatusResponse>(
+                    client.status(), std::chrono::milliseconds(5000));
+            };
+            if (!handle_plugin_rpc_error(res.error(), statusFetcher, "Plugin unload"))
+                return;
             return;
         }
         std::cout << "Unloaded: " << name << "\n";
@@ -546,7 +604,12 @@ void PluginCommand::trustList() {
         auto res = yams::cli::run_result<PluginTrustListResponse>(client.call(req),
                                                                   std::chrono::milliseconds(15000));
         if (!res) {
-            std::cout << "Trust list failed: " << res.error().message << "\n";
+            auto statusFetcher = [&]() -> StatusResult {
+                return yams::cli::run_result<yams::daemon::StatusResponse>(
+                    client.status(), std::chrono::milliseconds(5000));
+            };
+            if (!handle_plugin_rpc_error(res.error(), statusFetcher, "Plugin trust list"))
+                return;
             return;
         }
         const auto& r = res.value();
@@ -578,7 +641,12 @@ void PluginCommand::trustAdd(const std::string& path) {
         auto res = yams::cli::run_result<SuccessResponse>(client.call(req),
                                                           std::chrono::milliseconds(15000));
         if (!res) {
-            std::cout << "Trust add failed: " << res.error().message << "\n";
+            auto statusFetcher = [&]() -> StatusResult {
+                return yams::cli::run_result<yams::daemon::StatusResponse>(
+                    client.status(), std::chrono::milliseconds(5000));
+            };
+            if (!handle_plugin_rpc_error(res.error(), statusFetcher, "Plugin trust add"))
+                return;
             return;
         }
         std::cout << "Trusted: " << path
@@ -608,7 +676,12 @@ void PluginCommand::trustRemove(const std::string& path) {
         auto res = yams::cli::run_result<SuccessResponse>(client.call(req),
                                                           std::chrono::milliseconds(15000));
         if (!res) {
-            std::cout << "Trust remove failed: " << res.error().message << "\n";
+            auto statusFetcher = [&]() -> StatusResult {
+                return yams::cli::run_result<yams::daemon::StatusResponse>(
+                    client.status(), std::chrono::milliseconds(5000));
+            };
+            if (!handle_plugin_rpc_error(res.error(), statusFetcher, "Plugin trust remove"))
+                return;
             return;
         }
         std::cout << "Untrusted: " << path << "\n";

@@ -82,8 +82,8 @@ RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
             } catch (...) {
             }
         }
-        Result<void> r = yams::daemon::dispatch::ensure_model_loaded(provider.get(), req.modelName,
-                                                                     timeout_ms, req.optionsJson);
+        Result<void> r = co_await yams::daemon::dispatch::ensure_model_loaded(
+            serviceManager_, provider, req.modelName, timeout_ms, req.optionsJson);
         if (!r) {
             if (daemon_) {
                 daemon_->setSubsystemDegraded("embedding", true, "provider_load_failed");

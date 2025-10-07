@@ -50,7 +50,7 @@ private:
     // Lazy compute: store request to compute on first next_chunk() to allow
     // header to be written immediately by RequestHandler before heavy work
     // (critical for Grep to avoid header-timeouts in clients/pools).
-    std::optional<Request> pending_request_;
+    std::optional<std::unique_ptr<Request>> pending_request_;
     bool heartbeat_sent_{false};
 
     struct SearchState {

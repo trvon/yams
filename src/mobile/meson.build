@@ -30,3 +30,9 @@ yams_mobile_dep = declare_dependency(
 )
 
 meson.override_dependency('yams_mobile', yams_mobile_dep)
+
+pkg.generate(yams_mobile_lib,
+  name: 'yams_mobile',
+  description: 'YAMS mobile C ABI',
+  subdirs: ['yams/api'],
+)

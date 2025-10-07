@@ -125,15 +125,15 @@ jobs:
           set -euo pipefail
           export CONAN_CPU_COUNT=$(nproc || getconf _NPROCESSORS_ONLN || echo 4)
           ONNX=$([ "${{ inputs.enable_onnx }}" = 'true' ] && echo True || echo False)
-          conan install . \
-            -of build/warm-${{ inputs.build_type }} \
-            -pr:b=default \
-            -pr:h=${{ matrix.conan_host_profile }} \
-            -s build_type=${{ inputs.build_type }} \
-            -s:h arch=${{ matrix.conan_arch }} \
-            -o sqlite3:fts5=True \
-            -o "yams/*:enable_onnx=${ONNX}" \
-            --build=missing
+            conan install . \
+              -of build/warm-${{ inputs.build_type }} \
+              -pr:b=default \
+              -pr:h=${{ matrix.conan_host_profile }} \
+              -s build_type=${{ inputs.build_type }} \
+              -s:h arch=${{ matrix.conan_arch }} \
+              -o "sqlite3/*:fts5=True" \
+              -o "yams/*:enable_onnx=${ONNX}" \
+              --build=missing
 
       - name: Warm summary
         shell: bash

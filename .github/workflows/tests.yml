@@ -247,7 +247,7 @@ jobs:
             -pr:h="${{ matrix.conan_host_profile }}" \
             -s build_type=Debug \
             -s:h arch=${{ matrix.conan_arch }} \
-            -o sqlite3:fts5=True \
+            -o "sqlite3/*:fts5=True" \
             -o "yams/*:build_tests=True" \
             -o "yams/*:enable_onnx=False" \
             --build=missing
