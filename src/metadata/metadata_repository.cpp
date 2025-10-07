@@ -267,11 +267,10 @@ Result<std::optional<DocumentInfo>> MetadataRepository::getDocument(int64_t id) 
             using yams::metadata::sql::QuerySpec;
             const char* cols =
                 hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
-            QuerySpec spec{
-                .table = "documents",
-                .columns = {cols},
-                .conditions = {"id = ?"},
-            };
+            QuerySpec spec{};
+            spec.table = "documents";
+            spec.columns = {cols};
+            spec.conditions = {"id = ?"};
             auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
 
             if (!stmtResult)
@@ -300,11 +299,10 @@ Result<std::optional<DocumentInfo>> MetadataRepository::getDocumentByHash(const 
             using yams::metadata::sql::QuerySpec;
             const char* cols =
                 hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
-            QuerySpec spec{
-                .table = "documents",
-                .columns = {cols},
-                .conditions = {"sha256_hash = ?"},
-            };
+            QuerySpec spec{};
+            spec.table = "documents";
+            spec.columns = {cols};
+            spec.conditions = {"sha256_hash = ?"};
             auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
 
             if (!stmtResult)
@@ -503,7 +501,7 @@ Result<std::optional<MetadataValue>> MetadataRepository::getMetadata(int64_t doc
     return executeQuery<std::optional<MetadataValue>>(
         [&](Database& db) -> Result<std::optional<MetadataValue>> {
             using yams::metadata::sql::QuerySpec;
-            QuerySpec spec;
+            QuerySpec spec{};
             spec.table = "metadata";
             spec.columns = {"value", "value_type"};
             spec.conditions = {"document_id = ?", "key = ?"};
@@ -538,7 +536,7 @@ MetadataRepository::getAllMetadata(int64_t documentId) {
     return executeQuery<std::unordered_map<std::string, MetadataValue>>(
         [&](Database& db) -> Result<std::unordered_map<std::string, MetadataValue>> {
             using yams::metadata::sql::QuerySpec;
-            QuerySpec spec;
+            QuerySpec spec{};
             spec.table = "metadata";
             spec.columns = {"key", "value", "value_type"};
             spec.conditions = {"document_id = ?"};
@@ -591,7 +589,7 @@ MetadataRepository::getMetadataForDocuments(std::span<const int64_t> documentIds
                 inList += '?';
             }
             inList += ')';
-            QuerySpec spec;
+            QuerySpec spec{};
             spec.table = "metadata";
             spec.columns = {"document_id", "key", "value", "value_type"};
             spec.conditions = {"document_id IN " + inList};
@@ -1096,10 +1094,10 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
         std::string sanitizedQuery = sanitizeFTS5Query(query);
 
         using yams::metadata::sql::QuerySpec;
-        QuerySpec spec;
+        QuerySpec spec{};
+        spec.table = "documents_fts";
         spec.from =
             std::optional<std::string>{"documents_fts fts JOIN documents d ON d.id = fts.rowid"};
-        spec.table = "documents_fts";
         spec.columns = {"fts.rowid",
                         "fts.title",
                         "snippet(documents_fts, 0, '<b>', '</b>', '...', 32) as snippet",
@@ -1258,16 +1256,15 @@ MetadataRepository::findDocumentByExactPath(const std::string& path) {
             using yams::metadata::sql::QuerySpec;
             const char* cols =
                 hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
-            QuerySpec spec{
-                .table = "documents",
-                .columns = {cols},
-                .conditions = {"path_hash = ?"},
-                .orderBy = std::nullopt,
-                .groupBy = std::nullopt,
-                .having = std::nullopt,
-                .limit = 1,
-                .offset = std::nullopt,
-            };
+            QuerySpec spec{};
+            spec.table = "documents";
+            spec.columns = {cols};
+            spec.conditions = {"path_hash = ?"};
+            spec.orderBy = std::nullopt;
+            spec.groupBy = std::nullopt;
+            spec.having = std::nullopt;
+            spec.limit = 1;
+            spec.offset = std::nullopt;
             auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
             if (!stmtResult)
                 return stmtResult.error();
@@ -1529,14 +1526,13 @@ MetadataRepository::findDocumentsByHashPrefix(const std::string& hashPrefix, std
             // Build query via helper
             const char* cols =
                 hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
-            sql::QuerySpec spec{
-                .table = "documents",
-                .columns = {cols},
-                .conditions = {"lower(sha256_hash) LIKE ?"},
-                .orderBy = std::optional<std::string>("indexed_time DESC"),
-                .limit = static_cast<int>(limit),
-                .offset = std::nullopt,
-            };
+            sql::QuerySpec spec{};
+            spec.table = "documents";
+            spec.columns = {cols};
+            spec.conditions = {"lower(sha256_hash) LIKE ?"};
+            spec.orderBy = std::optional<std::string>("indexed_time DESC");
+            spec.limit = static_cast<int>(limit);
+            spec.offset = std::nullopt;
             auto stmtResult = db.prepare(sql::buildSelect(spec));
 
             if (!stmtResult)
@@ -1569,14 +1565,13 @@ MetadataRepository::findDocumentsByExtension(const std::string& extension) {
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
             const char* cols =
                 hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
-            sql::QuerySpec spec{
-                .table = "documents",
-                .columns = {cols},
-                .conditions = {"file_extension = ?"},
-                .orderBy = std::optional<std::string>("file_name"),
-                .limit = std::nullopt,
-                .offset = std::nullopt,
-            };
+            sql::QuerySpec spec{};
+            spec.table = "documents";
+            spec.columns = {cols};
+            spec.conditions = {"file_extension = ?"};
+            spec.orderBy = std::optional<std::string>("file_name");
+            spec.limit = std::nullopt;
+            spec.offset = std::nullopt;
 
             auto stmtResult = db.prepare(sql::buildSelect(spec));
             if (!stmtResult)
@@ -1610,12 +1605,11 @@ MetadataRepository::findDocumentsModifiedSince(std::chrono::system_clock::time_p
 
             const char* cols =
                 hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
-            QuerySpec spec{
-                .table = "documents",
-                .columns = {cols},
-                .conditions = {"modified_time >= ?"},
-                .orderBy = std::optional<std::string>("modified_time DESC"),
-            };
+            QuerySpec spec{};
+            spec.table = "documents";
+            spec.columns = {cols};
+            spec.conditions = {"modified_time >= ?"};
+            spec.orderBy = std::optional<std::string>("modified_time DESC");
 
             auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
 
@@ -1647,10 +1641,9 @@ MetadataRepository::findDocumentsModifiedSince(std::chrono::system_clock::time_p
 Result<int64_t> MetadataRepository::getDocumentCount() {
     return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
         using yams::metadata::sql::QuerySpec;
-        QuerySpec spec{
-            .table = "documents",
-            .columns = {"COUNT(*)"},
-        };
+        QuerySpec spec{};
+        spec.table = "documents";
+        spec.columns = {"COUNT(*)"};
         auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
         if (!stmtResult)
             return stmtResult.error();
@@ -1685,11 +1678,10 @@ Result<int64_t> MetadataRepository::getIndexedDocumentCount() {
 Result<int64_t> MetadataRepository::getContentExtractedDocumentCount() {
     return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
         using yams::metadata::sql::QuerySpec;
-        QuerySpec spec{
-            .table = "documents",
-            .columns = {"COUNT(*)"},
-            .conditions = {"content_extracted = 1"},
-        };
+        QuerySpec spec{};
+        spec.table = "documents";
+        spec.columns = {"COUNT(*)"};
+        spec.conditions = {"content_extracted = 1"};
         auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
         if (!stmtResult)
             return stmtResult.error();
@@ -1704,11 +1696,10 @@ Result<int64_t> MetadataRepository::getContentExtractedDocumentCount() {
 Result<int64_t> MetadataRepository::getDocumentCountByExtractionStatus(ExtractionStatus status) {
     return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
         using yams::metadata::sql::QuerySpec;
-        QuerySpec spec{
-            .table = "documents",
-            .columns = {"COUNT(*)"},
-            .conditions = {"extraction_status = ?"},
-        };
+        QuerySpec spec{};
+        spec.table = "documents";
+        spec.columns = {"COUNT(*)"};
+        spec.conditions = {"extraction_status = ?"};
         auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
         if (!stmtResult)
             return stmtResult.error();
@@ -1731,12 +1722,11 @@ MetadataRepository::getDocumentCountsByExtension() {
     return executeQuery<std::unordered_map<std::string, int64_t>>(
         [&](Database& db) -> Result<std::unordered_map<std::string, int64_t>> {
             using yams::metadata::sql::QuerySpec;
-            QuerySpec spec{
-                .table = "documents",
-                .columns = {"file_extension", "COUNT(*) as count"},
-                .groupBy = std::optional<std::string>("file_extension"),
-                .orderBy = std::optional<std::string>("count DESC"),
-            };
+            QuerySpec spec{};
+            spec.table = "documents";
+            spec.columns = {"file_extension", "COUNT(*) as count"};
+            spec.orderBy = std::optional<std::string>("count DESC");
+            spec.groupBy = std::optional<std::string>("file_extension");
             auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
 
             if (!stmtResult)
@@ -2254,7 +2244,7 @@ MetadataRepository::listTreeChanges(const TreeDiffQuery& query) {
     return executeQuery<std::vector<TreeChangeRecord>>(
         [&](Database& db) -> Result<std::vector<TreeChangeRecord>> {
             using yams::metadata::sql::QuerySpec;
-            QuerySpec spec;
+            QuerySpec spec{};
             spec.from = std::optional<std::string>{
                 "tree_changes tc JOIN tree_diffs td ON tc.diff_id = td.diff_id"};
             spec.table = "tree_changes"; // not used when from is set
@@ -2999,7 +2989,7 @@ Result<std::vector<std::string>> MetadataRepository::getCollections() {
     return executeQuery<std::vector<std::string>>(
         [&](Database& db) -> Result<std::vector<std::string>> {
             using yams::metadata::sql::QuerySpec;
-            QuerySpec spec;
+            QuerySpec spec{};
             spec.table = "metadata";
             spec.columns = {"DISTINCT value"};
             spec.conditions = {"key = 'collection'"};
@@ -3031,7 +3021,7 @@ Result<std::vector<std::string>> MetadataRepository::getSnapshots() {
     return executeQuery<std::vector<std::string>>(
         [&](Database& db) -> Result<std::vector<std::string>> {
             using yams::metadata::sql::QuerySpec;
-            QuerySpec spec;
+            QuerySpec spec{};
             spec.table = "metadata";
             spec.columns = {"DISTINCT value"};
             spec.conditions = {"key = 'snapshot_id'"};
@@ -3063,7 +3053,7 @@ Result<std::vector<std::string>> MetadataRepository::getSnapshotLabels() {
     return executeQuery<std::vector<std::string>>(
         [&](Database& db) -> Result<std::vector<std::string>> {
             using yams::metadata::sql::QuerySpec;
-            QuerySpec spec;
+            QuerySpec spec{};
             spec.table = "metadata";
             spec.columns = {"DISTINCT value"};
             spec.conditions = {"key = 'snapshot_label'"};
@@ -3117,7 +3107,7 @@ MetadataRepository::findDocumentsByTags(const std::vector<std::string>& tags, bo
             }
             inKeys += ')';
 
-            QuerySpec spec;
+            QuerySpec spec{};
             if (matchAll) {
                 // d.id IN (SELECT document_id FROM metadata WHERE key IN ('tag:a','tag:b') GROUP BY
                 // document_id HAVING COUNT(DISTINCT key)=N)
@@ -3213,7 +3203,7 @@ Result<std::vector<std::string>> MetadataRepository::getAllTags() {
     return executeQuery<std::vector<std::string>>(
         [&](Database& db) -> Result<std::vector<std::string>> {
             using yams::metadata::sql::QuerySpec;
-            QuerySpec spec;
+            QuerySpec spec{};
             spec.table = "metadata";
             spec.columns = {"DISTINCT key"};
             spec.conditions = {"key LIKE 'tag:%'"};

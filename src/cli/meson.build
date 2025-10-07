@@ -110,6 +110,10 @@ if not cli11_dep.found()
 endif
 
 if not cli11_dep.found()
+  cli11_dep = dependency('CLI11', method: 'cmake', required: false)
+endif
+
+if not cli11_dep.found()
   if get_option('build-cli')
     message('CLI11 not found; skipping CLI build. Provide -Dcli11-cmake-path=<...>/lib/cmake/CLI11 to enable, or pass -Dbuild-cli=false to silence this message.')
     subdir_done()

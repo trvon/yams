@@ -135,21 +135,67 @@ std::string HtmlTextExtractor::extractTextFromHtml(const std::string& html) {
     return text;
 }
 
+namespace {
+// Helper for case-insensitive find
+size_t find_caseless(const std::string& haystack, const std::string& needle, size_t offset = 0) {
+    auto it = std::search(
+        haystack.begin() + offset, haystack.end(), needle.begin(), needle.end(),
+        [](unsigned char c1, unsigned char c2) { return std::tolower(c1) == std::tolower(c2); });
+    if (it == haystack.end()) {
+        return std::string::npos;
+    }
+    return std::distance(haystack.begin(), it);
+}
+} // namespace
+
 std::string HtmlTextExtractor::removeScriptAndStyle(const std::string& html) {
-    std::string result = html;
+    std::string result;
+    result.reserve(html.size());
+    size_t last_pos = 0;
 
-    // Remove script blocks (including content)
-    std::regex scriptRegex(R"(<script[^>]*>[\s\S]*?</script>)", std::regex::icase);
-    result = std::regex_replace(result, scriptRegex, "");
+    while (last_pos < html.size()) {
+        size_t script_start = find_caseless(html, "<script", last_pos);
+        size_t style_start = find_caseless(html, "<style", last_pos);
+        size_t comment_start = html.find("<!--", last_pos);
 
-    // Remove style blocks (including content)
-    std::regex styleRegex(R"(<style[^>]*>[\s\S]*?</style>)", std::regex::icase);
-    result = std::regex_replace(result, styleRegex, "");
+        size_t next_block = std::string::npos;
+        if (script_start != std::string::npos)
+            next_block = script_start;
+        if (style_start != std::string::npos)
+            next_block = std::min(next_block, style_start);
+        if (comment_start != std::string::npos)
+            next_block = std::min(next_block, comment_start);
 
-    // Remove comments
-    std::regex commentRegex(R"(<!--[\s\S]*?-->)");
-    result = std::regex_replace(result, commentRegex, "");
+        if (next_block == std::string::npos) {
+            result.append(html, last_pos, std::string::npos);
+            break;
+        }
 
+        result.append(html, last_pos, next_block - last_pos);
+
+        if (next_block == script_start) {
+            size_t end_tag = find_caseless(html, "</script>", next_block);
+            if (end_tag == std::string::npos) {
+                last_pos = next_block + 1; // Malformed, skip '<'
+            } else {
+                last_pos = end_tag + 9;
+            }
+        } else if (next_block == style_start) {
+            size_t end_tag = find_caseless(html, "</style>", next_block);
+            if (end_tag == std::string::npos) {
+                last_pos = next_block + 1;
+            } else {
+                last_pos = end_tag + 8;
+            }
+        } else { // comment
+            size_t end_tag = html.find("-->", next_block);
+            if (end_tag == std::string::npos) {
+                last_pos = next_block + 1;
+            } else {
+                last_pos = end_tag + 3;
+            }
+        }
+    }
     return result;
 }
 
@@ -181,9 +227,19 @@ std::string HtmlTextExtractor::convertBlockTagsToNewlines(const std::string& htm
 }
 
 std::string HtmlTextExtractor::stripHtmlTags(const std::string& html) {
-    // Remove all remaining HTML tags
-    std::regex tagRegex(R"(<[^>]+>)");
-    return std::regex_replace(html, tagRegex, "");
+    std::string result;
+    result.reserve(html.length());
+    bool in_tag = false;
+    for (char c : html) {
+        if (c == '<') {
+            in_tag = true;
+        } else if (c == '>') {
+            in_tag = false;
+        } else if (!in_tag) {
+            result += c;
+        }
+    }
+    return result;
 }
 
 std::string HtmlTextExtractor::decodeHtmlEntities(const std::string& text) {

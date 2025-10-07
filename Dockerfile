@@ -7,7 +7,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
   build-essential git curl pkg-config ca-certificates \
   libssl-dev libsqlite3-dev protobuf-compiler libprotobuf-dev \
-  libncurses-dev libcurl4-openssl-dev \
+  libcurl4-openssl-dev \
   python3 python3-venv python3-pip \
   gcc g++ ninja-build openssl lld llvm clang \
   libc++-dev libc++abi-dev \

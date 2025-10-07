@@ -85,6 +85,21 @@ public:
 
     Result<ExtractionResult> extract(std::span<const std::byte> bytes,
                                      const ExtractionQuery& query) override {
+        // Fast path for Scope::All with no search or range filtering.
+        if (query.scope == Scope::All && query.range.empty() && query.search.empty()) {
+            ExtractionResult out;
+            const std::string fmt = toLower(query.format.empty() ? "text" : query.format);
+            if (fmt == "json") {
+                out.mime = "application/json";
+                out.json = buildJson(
+                    std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()), {});
+            } else {
+                out.mime = (fmt == "markdown") ? "text/markdown" : "text/plain";
+                out.text = std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+            }
+            return out;
+        }
+
         // Reject unsupported scopes for this handler
         switch (query.scope) {
             case Scope::All:
