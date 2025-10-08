@@ -23,6 +23,7 @@ struct RetrievalOptions {
     int headerTimeoutMs{30000};
     int bodyTimeoutMs{120000};
     int requestTimeoutMs{30000};
+    bool acceptCompressed{true};
 };
 
 struct GetOptions {
@@ -48,6 +49,7 @@ struct GetOptions {
     uint32_t chunkSize = 524288;
     bool raw = false;
     bool extract = false;
+    bool acceptCompressed = false;
     bool showGraph = false;
     int graphDepth = 1;
     bool verbose = false;

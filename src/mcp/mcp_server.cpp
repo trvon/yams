@@ -24,6 +24,7 @@
 #include <boost/asio/this_coro.hpp>
 
 #include <future>
+#include <iomanip>
 #include <mutex>
 #include <thread>
 
@@ -3422,6 +3423,7 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
     daemon_req.showGraph = req.graph;
     daemon_req.graphDepth = req.depth;
     daemon_req.metadataOnly = !req.includeContent;
+    daemon_req.acceptCompressed = true;
 
     // Unified path: use RetrievalService name-smart get when name provided, else direct get
     yams::app::services::RetrievalService rsvc;
@@ -3441,6 +3443,29 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
     mcp_response.name = resp.name;
     mcp_response.size = resp.size;
     mcp_response.mimeType = resp.mimeType;
+    mcp_response.compressed = resp.compressed;
+    if (resp.compressionAlgorithm.has_value()) {
+        mcp_response.compressionAlgorithm = resp.compressionAlgorithm.value();
+    }
+    if (resp.compressionLevel.has_value()) {
+        mcp_response.compressionLevel = resp.compressionLevel.value();
+    }
+    if (resp.uncompressedSize.has_value()) {
+        mcp_response.uncompressedSize = resp.uncompressedSize.value();
+    }
+    if (resp.compressedCrc32.has_value()) {
+        mcp_response.compressedCrc32 = resp.compressedCrc32.value();
+    }
+    if (resp.uncompressedCrc32.has_value()) {
+        mcp_response.uncompressedCrc32 = resp.uncompressedCrc32.value();
+    }
+    if (!resp.compressionHeader.empty()) {
+        std::ostringstream oss;
+        for (uint8_t byte : resp.compressionHeader) {
+            oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte);
+        }
+        mcp_response.compressionHeader = oss.str();
+    }
     if (resp.hasContent) {
         mcp_response.content = resp.content;
     }

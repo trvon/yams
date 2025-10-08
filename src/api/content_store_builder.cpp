@@ -7,6 +7,7 @@
 #include <spdlog/spdlog.h>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <sstream>
 
@@ -63,24 +64,16 @@ struct ContentStoreBuilder::Impl {
                 // Load compression settings from config if available
                 loadCompressionSettings(policyRules);
 
-                // Use configured values or defaults
-                if (policyRules.neverCompressBelow == 0) {
-                    policyRules.neverCompressBelow = 1024; // Default: Don't compress < 1KB
-                }
-                if (policyRules.alwaysCompressAbove == 0) {
-                    policyRules.alwaysCompressAbove =
-                        10 * 1024 * 1024; // Default: Always compress >10MB
-                }
+                // Force eager compression defaults so every write is stored compressed.
+                policyRules.neverCompressBelow = 0;
+                policyRules.alwaysCompressAbove = 1;
                 if (policyRules.preferZstdBelow == 0) {
-                    policyRules.preferZstdBelow = 50 * 1024 * 1024; // Default: Use Zstd for <50MB
+                    policyRules.preferZstdBelow = std::numeric_limits<uint64_t>::max();
                 }
-                if (policyRules.compressAfterAge.count() == 0) {
-                    policyRules.compressAfterAge =
-                        std::chrono::hours(24); // Default: Compress after 1 day
-                }
+                policyRules.compressAfterAge = std::chrono::hours(0);
+                // Retain archive defaults unless explicitly configured.
                 if (policyRules.archiveAfterAge.count() == 0) {
-                    policyRules.archiveAfterAge =
-                        std::chrono::hours(24 * 30); // Default: Archive after 30 days
+                    policyRules.archiveAfterAge = std::chrono::hours(24 * 30);
                 }
 
                 // Configure compressed storage
@@ -88,10 +81,9 @@ struct ContentStoreBuilder::Impl {
                     .enableCompression = true,
                     .compressExisting = false, // Don't compress existing data on startup
                     .policyRules = policyRules,
-                    .compressionThreshold =
-                        policyRules.neverCompressBelow, // Use configured threshold
-                    .asyncCompression = getConfigBool("compression.async_compression", true),
-                    .maxAsyncQueue = 1000,
+                    .compressionThreshold = 0,
+                    .asyncCompression = false,
+                    .maxAsyncQueue = 0,
                     .metadataCacheTTL = std::chrono::seconds(300)};
 
                 // Convert unique_ptr to shared_ptr and cast to concrete type

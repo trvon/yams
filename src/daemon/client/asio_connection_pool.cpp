@@ -134,8 +134,8 @@ std::mutex& registry_mutex() {
     return m;
 }
 
-std::unordered_map<std::string, std::weak_ptr<AsioConnectionPool>>& registry_map() {
-    static std::unordered_map<std::string, std::weak_ptr<AsioConnectionPool>> map;
+std::unordered_map<std::string, std::shared_ptr<AsioConnectionPool>>& registry_map() {
+    static std::unordered_map<std::string, std::shared_ptr<AsioConnectionPool>> map;
     return map;
 }
 } // namespace
@@ -152,8 +152,7 @@ AsioConnectionPool::get_or_create(const TransportOptions& opts) {
     auto key = opts.socketPath.string();
     auto& map = registry_map();
     if (auto it = map.find(key); it != map.end()) {
-        if (auto sp = it->second.lock())
-            return sp;
+        return it->second;
     }
     auto pool = std::make_shared<AsioConnectionPool>(opts, true);
     map[key] = pool;
@@ -167,15 +166,23 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::acquire() {
     std::shared_ptr<AsioConnection> existing;
     {
         std::lock_guard<std::mutex> lk(mutex_);
-        existing = cached_.lock();
+        existing = cachedStrong_;
     }
     if (existing && existing->alive.load(std::memory_order_relaxed) && existing->socket &&
         existing->socket->is_open()) {
         co_return existing;
     }
+    if (existing) {
+        std::lock_guard<std::mutex> lk(mutex_);
+        if (cachedStrong_.get() == existing.get()) {
+            cachedStrong_.reset();
+            cached_.reset();
+        }
+    }
     auto fresh = co_await create_connection();
     if (shared_ && fresh && fresh->alive.load(std::memory_order_relaxed)) {
         std::lock_guard<std::mutex> lk(mutex_);
+        cachedStrong_ = fresh;
         cached_ = fresh;
     }
     co_return fresh;

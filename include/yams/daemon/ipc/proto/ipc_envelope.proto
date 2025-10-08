@@ -75,6 +75,7 @@ message GetRequest {
   bool show_graph = 23;
   int32 graph_depth = 24;
   bool verbose = 25;
+  bool accept_compressed = 40;
 }
 
 message GetInitRequest {
@@ -304,9 +305,16 @@ message AddResponse {
 
 message GetResponse {
   string hash = 1;
+  bool compressed = 10;
+  optional uint32 compression_algorithm = 11;
+  optional uint32 compression_level = 12;
+  optional uint64 uncompressed_size = 13;
+  optional uint32 compressed_crc32 = 14;
+  optional uint32 uncompressed_crc32 = 15;
+  bytes compression_header = 16;
   string name = 2;
   string path = 3;
-  string content = 4; // for small responses
+  bytes content = 4; // for small responses
   repeated KvPair metadata = 5;
 }
 
@@ -428,6 +436,8 @@ message AddDocumentResponse {
   uint64 size = 5;             // size of added content if applicable (single-file adds)
   string snapshot_id = 6;      // auto-generated ISO 8601 timestamp for directory operations
   string snapshot_label = 7;   // optional human-friendly label
+  uint64 documents_updated = 8;
+  uint64 documents_skipped = 9;
 }
 // First-class grep match with full context
 message GrepMatch {

@@ -32,6 +32,18 @@ public:
         return byteData;
     }
 
+    Result<IStorageEngine::RawObject> retrieveRaw(std::string_view hash) const override {
+        auto it = storage_.find(std::string(hash));
+        if (it == storage_.end()) {
+            return Error{ErrorCode::NotFound, "Hash not found"};
+        }
+        IStorageEngine::RawObject obj;
+        obj.data.resize(it->second.size());
+        std::memcpy(obj.data.data(), it->second.data(), it->second.size());
+        obj.header = std::nullopt;
+        return obj;
+    }
+
     Result<bool> exists(std::string_view hash) const noexcept override {
         return storage_.find(std::string(hash)) != storage_.end();
     }
@@ -52,6 +64,13 @@ public:
     retrieveAsync(std::string_view hash) const override {
         std::promise<Result<std::vector<std::byte>>> promise;
         promise.set_value(retrieve(hash));
+        return promise.get_future();
+    }
+
+    std::future<Result<IStorageEngine::RawObject>>
+    retrieveRawAsync(std::string_view hash) const override {
+        std::promise<Result<IStorageEngine::RawObject>> promise;
+        promise.set_value(retrieveRaw(hash));
         return promise.get_future();
     }
 

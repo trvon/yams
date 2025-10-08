@@ -35,6 +35,7 @@ struct ClientConfig {
     // specialized scenarios (debugging, isolation) where pooling is undesirable.
     bool singleUseConnections = false;
     bool disableStreamingForLargeQueries = false;
+    bool acceptCompressed = false;
 };
 
 class DaemonClient {

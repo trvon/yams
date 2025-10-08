@@ -746,79 +746,26 @@ RequestHandler::write_message(boost::asio::local::stream_protocol::socket& socke
             "write_message: framed message type={} request_id={} frame_size={} header_size={}",
             msgType, message.requestId, frame.size(), sizeof(MessageFramer::FrameHeader));
 
-        // Always send the frame header immediately to unblock clients waiting for it
-        if (frame.size() < sizeof(MessageFramer::FrameHeader)) {
-            co_return Error{ErrorCode::SerializationError, "Framed message smaller than header"};
+        // Write the entire frame at once
+        boost::system::error_code ec;
+        co_await boost::asio::async_write(
+            socket, boost::asio::buffer(frame),
+            boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+        if (ec) {
+            const auto& msg = ec.message();
+            if (msg.find("Connection reset by peer") != std::string::npos ||
+                msg.find("Broken pipe") != std::string::npos ||
+                msg.find("EPIPE") != std::string::npos ||
+                msg.find("ECONNRESET") != std::string::npos) {
+                spdlog::debug("Client closed during frame write: {}", msg);
+            }
+            co_return Error{ErrorCode::NetworkError, msg};
         }
 
-        constexpr std::size_t headerSize = sizeof(MessageFramer::FrameHeader);
-
-        // 1) Send header first
-        {
-            std::span<const uint8_t> header{frame.data(), headerSize};
-            spdlog::debug("write_message: writing header {} bytes (request_id={})", header.size(),
-                          message.requestId);
-            boost::system::error_code ec;
-            co_await boost::asio::async_write(
-                socket, boost::asio::buffer(header),
-                boost::asio::redirect_error(boost::asio::use_awaitable, ec));
-            if (ec) {
-                const auto& msg = ec.message();
-                if (msg.find("Connection reset by peer") != std::string::npos ||
-                    msg.find("Broken pipe") != std::string::npos ||
-                    msg.find("EPIPE") != std::string::npos ||
-                    msg.find("ECONNRESET") != std::string::npos) {
-                    spdlog::debug("Client closed during header write: {}", msg);
-                }
-                co_return Error{ErrorCode::NetworkError, msg};
-            }
-            // FSM metrics: count payload writes and bytes sent (header)
-            FsmMetricsRegistry::instance().incrementPayloadWrites(1);
-            FsmMetricsRegistry::instance().addBytesSent(header.size());
-            spdlog::debug("write_message: header write complete (request_id={})",
-                          message.requestId);
-        }
-
-        // 2) Stream the payload in chunks; this allows the client to start reading immediately
-        const std::size_t kChunk = std::max<std::size_t>(4096, config_.chunk_size);
-        std::size_t offset = headerSize;
-        std::size_t payload_written = 0;
-        while (offset < frame.size()) {
-            std::size_t to_write = std::min<std::size_t>(kChunk, frame.size() - offset);
-            std::span<const uint8_t> chunk{frame.data() + offset, to_write};
-            spdlog::debug("write_message: writing payload chunk {} bytes (request_id={})", to_write,
-                          message.requestId);
-            boost::system::error_code ec;
-            co_await boost::asio::async_write(
-                socket, boost::asio::buffer(chunk),
-                boost::asio::redirect_error(boost::asio::use_awaitable, ec));
-            if (ec) {
-                const auto& msg = ec.message();
-                if (msg.find("Connection reset by peer") != std::string::npos ||
-                    msg.find("Broken pipe") != std::string::npos ||
-                    msg.find("EPIPE") != std::string::npos ||
-                    msg.find("ECONNRESET") != std::string::npos) {
-                    spdlog::debug("Client closed during payload write: {}", msg);
-                }
-                co_return Error{ErrorCode::NetworkError, msg};
-            }
-            payload_written += to_write;
-            FsmMetricsRegistry::instance().incrementPayloadWrites(1);
-            FsmMetricsRegistry::instance().addBytesSent(to_write);
-            if (to_write == 0) {
-                using namespace std::chrono_literals;
-                std::this_thread::sleep_for(1ms);
-            } else if (config_.chunk_flush_delay_ms > 0) {
-                using namespace std::chrono_literals;
-                std::this_thread::sleep_for(
-                    std::chrono::milliseconds(config_.chunk_flush_delay_ms));
-            }
-
-            offset += to_write;
-        }
-
-        spdlog::debug("write_message: payload write complete ({} bytes) request_id={}",
-                      payload_written, message.requestId);
+        FsmMetricsRegistry::instance().incrementPayloadWrites(1);
+        FsmMetricsRegistry::instance().addBytesSent(frame.size());
+        spdlog::debug("write_message: full frame write complete (request_id={})",
+                      message.requestId);
 
         co_return Result<void>();
     }
@@ -1121,7 +1068,17 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
             spdlog::debug(
                 "handle_streaming_request: one-shot streaming response type={} (request_id={})",
                 static_cast<int>(getMessageType(response)), request_id);
-            // Write header frame (no payload)
+
+            // Create a content-less copy for the header
+            Response header_response = response;
+            if (auto* get_resp = std::get_if<GetResponse>(&header_response)) {
+                get_resp->content.clear();
+                get_resp->hasContent = false;
+            } else if (auto* cat_resp = std::get_if<CatResponse>(&header_response)) {
+                cat_resp->content.clear();
+            }
+
+            // Write header frame (with metadata but no content)
             if (fsm) {
                 try {
                     fsm_helpers::require_can_write(*fsm, "handle_streaming_request:write_header");
@@ -1133,11 +1090,11 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
                 }
             }
             {
-                int mt = static_cast<int>(getMessageType(response));
+                int mt = static_cast<int>(getMessageType(header_response));
                 spdlog::debug("handle_streaming_request: writing header for request_id={} type={}",
                               request_id, mt);
             }
-            auto hdr_res = co_await write_header(socket, response, request_id, true, fsm);
+            auto hdr_res = co_await write_header(socket, header_response, request_id, true, fsm);
             if (!hdr_res) {
                 spdlog::debug("handle_streaming_request: write_header failed (request_id={}): {}",
                               request_id, hdr_res.error().message);
@@ -1146,7 +1103,7 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
             if (fsm)
                 fsm->on_stream_next(false);
 
-            // Write final chunk with the same response payload
+            // Write final chunk with the full response payload
             auto chk_res = co_await write_chunk(socket, response, request_id, true, true, fsm);
             if (!chk_res) {
                 spdlog::debug("handle_streaming_request: write_chunk failed (request_id={}): {}",
@@ -1346,94 +1303,23 @@ RequestHandler::write_chunk_frame(boost::asio::local::stream_protocol::socket& s
 
     stats_.bytes_sent += frame.size();
 
-    // Extract header info for logging and to split header/payload writes
-    const std::size_t headerSize = sizeof(MessageFramer::FrameHeader);
-    MessageFramer::FrameHeader hdr{};
-    if (frame.size() >= headerSize) {
-        std::memcpy(&hdr, frame.data(), headerSize);
-        hdr.from_network();
-        spdlog::debug(
-            "write_chunk_frame: header_only={} chunked={} last={} payload_size={}B frame={}B",
-            hdr.is_header_only(), hdr.is_chunked(), hdr.is_last_chunk(), hdr.payload_size,
-            static_cast<uint32_t>(frame.size()));
+    // Write the entire frame at once
+    boost::system::error_code ec;
+    co_await boost::asio::async_write(socket, boost::asio::buffer(frame),
+                                      boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+
+    if (ec) {
+        const auto& msg = ec.message();
+        if (msg.find("Connection reset by peer") != std::string::npos ||
+            msg.find("Broken pipe") != std::string::npos ||
+            msg.find("EPIPE") != std::string::npos || msg.find("ECONNRESET") != std::string::npos) {
+            spdlog::debug("Client closed during chunk frame write: {}", msg);
+        }
+        co_return Error{ErrorCode::NetworkError, msg};
     }
 
-    // 1) Send header first (unblocks client waiting on chunk header) with timeout
-    {
-        std::span<const uint8_t> header{frame.data(), headerSize};
-        using namespace boost::asio::experimental::awaitable_operators;
-        boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
-        timer.expires_after(config_.write_timeout);
-        if (fsm)
-            fsm->on_write_queued(header.size());
-        auto write_or_timeout =
-            co_await (boost::asio::async_write(socket, boost::asio::buffer(header),
-                                               boost::asio::use_awaitable) ||
-                      timer.async_wait(boost::asio::use_awaitable));
-        if (write_or_timeout.index() == 1) {
-            const std::string msg = "Write timeout (chunk header)";
-            spdlog::debug("{}", msg);
-            co_return Error{ErrorCode::Timeout, msg};
-        }
-        boost::system::error_code ec;
-        if (ec) {
-            const auto& msg = ec.message();
-            if (msg.find("Connection reset by peer") != std::string::npos ||
-                msg.find("Broken pipe") != std::string::npos ||
-                msg.find("EPIPE") != std::string::npos ||
-                msg.find("ECONNRESET") != std::string::npos) {
-                spdlog::debug("Client closed during chunk header write: {}", msg);
-            }
-            co_return Error{ErrorCode::NetworkError, msg};
-        }
-        if (fsm)
-            fsm->on_write_flushed(header.size());
-    }
-
-    // 2) Stream payload in chunks
-    const std::size_t kWriteChunk = std::max<std::size_t>(4096, config_.chunk_size);
-    std::size_t offset = headerSize;
-    while (offset < frame.size()) {
-        std::size_t to_write = std::min<std::size_t>(kWriteChunk, frame.size() - offset);
-        std::span<const uint8_t> chunk{frame.data() + offset, to_write};
-
-        using namespace boost::asio::experimental::awaitable_operators;
-        boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
-        timer.expires_after(config_.write_timeout);
-        if (fsm)
-            fsm->on_write_queued(to_write);
-        auto write_or_timeout =
-            co_await (boost::asio::async_write(socket, boost::asio::buffer(chunk),
-                                               boost::asio::use_awaitable) ||
-                      timer.async_wait(boost::asio::use_awaitable));
-        if (write_or_timeout.index() == 1) {
-            const std::string msg = "Write timeout (chunk payload)";
-            spdlog::debug("{}", msg);
-            co_return Error{ErrorCode::Timeout, msg};
-        }
-        if (fsm)
-            fsm->on_write_flushed(to_write);
-        boost::system::error_code ec;
-        if (ec) {
-            const auto& msg = ec.message();
-            if (msg.find("Connection reset by peer") != std::string::npos ||
-                msg.find("Broken pipe") != std::string::npos ||
-                msg.find("EPIPE") != std::string::npos ||
-                msg.find("ECONNRESET") != std::string::npos) {
-                spdlog::debug("Client closed during chunk payload write: {}", msg);
-            }
-            co_return Error{ErrorCode::NetworkError, msg};
-        }
-
-        offset += to_write;
-        if (to_write == 0) {
-            using namespace std::chrono_literals;
-            std::this_thread::sleep_for(1ms);
-        } else if (config_.chunk_flush_delay_ms > 0) {
-            using namespace std::chrono_literals;
-            std::this_thread::sleep_for(std::chrono::milliseconds(config_.chunk_flush_delay_ms));
-        }
-    }
+    if (fsm)
+        fsm->on_write_flushed(frame.size());
 
     co_return Result<void>();
 }

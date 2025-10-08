@@ -72,7 +72,8 @@ jobs:
           sudo apt-get update
           # Provide system Boost as a fallback per docs/BUILD-GCC.md when CMakeDeps resolution
           # is not detected by CMake (module mode will pick this up).
-          sudo apt-get install -y --no-install-recommends libboost-all-dev meson pkg-config
+          # Install libbenchmark-dev for Google Benchmark support
+          sudo apt-get install -y --no-install-recommends libboost-all-dev meson pkg-config libbenchmark-dev
           echo "Installed system Boost headers/libs for module-mode fallback"
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
@@ -81,7 +82,8 @@ jobs:
           set -euo pipefail
           brew update
           # Align with release workflow to ensure Meson builds have required toolchain bits.
-          brew install pkg-config cmake ninja meson ccache boost || true
+          # Install google-benchmark for benchmark tests
+          brew install pkg-config cmake ninja meson ccache boost google-benchmark || true
           # Guard against Homebrew reporting success without linking binaries (nondefault prefixes).
           command -v meson >/dev/null 2>&1 || python3 -m pip install --user --upgrade meson
           command -v ninja >/dev/null 2>&1 || python3 -m pip install --user --upgrade 'ninja>=1.10'
@@ -205,7 +207,7 @@ jobs:
         run: |
           set -euo pipefail
           brew update || true
-          brew install pkg-config cmake ninja meson boost || true
+          brew install pkg-config cmake ninja meson boost google-benchmark || true
           command -v meson >/dev/null 2>&1 || {
             python3 -m pip install --user --upgrade meson || pip3 install --user --upgrade meson || true
             [ -d "$HOME/.local/bin" ] && echo "$HOME/.local/bin" >> "$GITHUB_PATH" || true

@@ -437,9 +437,10 @@ struct RetrieveDocumentRequest {
     uint32_t chunkSize{262144}; // streaming chunk size
 
     // Content options
-    bool includeContent{true}; // include document content
-    bool raw{false};           // raw content without text extraction
-    bool extract{false};       // force text extraction
+    bool includeContent{true};   // include document content
+    bool raw{false};             // raw content without text extraction
+    bool extract{false};         // force text extraction
+    bool acceptCompressed{true}; // request compressed payload when supported
 
     // Knowledge graph options
     bool graph{false}; // show related documents
@@ -486,6 +487,13 @@ struct RetrievedDocument {
     // Content
     std::optional<std::string> content;       // set if includeContent=true
     std::optional<std::string> extractedText; // text extraction result
+    bool compressed{false};
+    std::optional<uint8_t> compressionAlgorithm;
+    std::optional<uint8_t> compressionLevel;
+    std::optional<uint64_t> uncompressedSize;
+    std::optional<uint32_t> compressedCrc32;
+    std::optional<uint32_t> uncompressedCrc32;
+    std::vector<uint8_t> compressionHeader;
 
     // Metadata
     std::unordered_map<std::string, std::string> metadata;

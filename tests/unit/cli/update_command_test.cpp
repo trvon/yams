@@ -1,4 +1,5 @@
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <thread>
 #include <gmock/gmock.h>
@@ -69,10 +70,23 @@ public:
                  const std::string& contentType),
                 (override));
     MOCK_METHOD(Result<void>, removeFromIndex, (int64_t documentId), (override));
-    MOCK_METHOD(Result<SearchResults>, search, (const std::string& query, int limit, int offset),
-                (override));
-    MOCK_METHOD(Result<SearchResults>, fuzzySearch,
-                (const std::string& query, float minSimilarity, int limit), (override));
+    MOCK_METHOD(Result<SearchResults>, searchImpl,
+                (const std::string& query, int limit, int offset,
+                 const std::optional<std::vector<int64_t>>& docIds));
+    Result<SearchResults>
+    search(const std::string& query, int limit = 50, int offset = 0,
+           const std::optional<std::vector<int64_t>>& docIds = std::nullopt) override {
+        return searchImpl(query, limit, offset, docIds);
+    }
+
+    MOCK_METHOD(Result<SearchResults>, fuzzySearchImpl,
+                (const std::string& query, float minSimilarity, int limit,
+                 const std::optional<std::vector<int64_t>>& docIds));
+    Result<SearchResults>
+    fuzzySearch(const std::string& query, float minSimilarity = 0.7f, int limit = 50,
+                const std::optional<std::vector<int64_t>>& docIds = std::nullopt) override {
+        return fuzzySearchImpl(query, minSimilarity, limit, docIds);
+    }
     MOCK_METHOD(Result<void>, buildFuzzyIndex, (), (override));
     MOCK_METHOD(Result<void>, updateFuzzyIndex, (int64_t documentId), (override));
     MOCK_METHOD((Result<std::optional<DocumentInfo>>), findDocumentByExactPath,
@@ -119,6 +133,9 @@ public:
     MOCK_METHOD(Result<StoreResult>, storeBytes,
                 (std::span<const std::byte> data, const ContentMetadata& metadata), (override));
     MOCK_METHOD((Result<std::vector<std::byte>>), retrieveBytes, (const std::string& hash),
+                (override));
+    MOCK_METHOD(Result<RawContent>, retrieveRaw, (const std::string& hash), (override));
+    MOCK_METHOD((std::future<Result<RawContent>>), retrieveRawAsync, (const std::string& hash),
                 (override));
     MOCK_METHOD(Result<bool>, exists, (const std::string& hash), (const, override));
     MOCK_METHOD(Result<bool>, remove, (const std::string& hash), (override));

@@ -3,7 +3,9 @@
 #include <spdlog/spdlog.h>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -12,9 +14,11 @@
 #include <boost/system/error_code.hpp>
 
 #include "../daemon/test_async_helpers.h"
+#include "../daemon/test_daemon_harness.h"
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
+#include <yams/compression/compression_header.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
 
@@ -26,10 +30,10 @@ namespace fs = std::filesystem;
 
 class UiCliExpectationsIT : public ::testing::Test {
 protected:
+    std::unique_ptr<yams::test::DaemonHarness> harness_;
     fs::path root_;
     fs::path storageDir_;
     fs::path socketPath_;
-    std::unique_ptr<yams::daemon::YamsDaemon> daemon_;
 
     static bool canBindUnixSocketHere() {
         try {
@@ -59,32 +63,18 @@ protected:
         if (!canBindUnixSocketHere()) {
             GTEST_SKIP() << "Skipping: AF_UNIX not available in this environment.";
         }
-        auto unique = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
-        root_ = fs::temp_directory_path() / ("yams_ui_cli_it_" + unique);
-        storageDir_ = root_ / "storage";
-        fs::create_directories(storageDir_);
-        socketPath_ = fs::path("/tmp") / ("yams-ui-cli-" + unique + ".sock");
-
-        yams::daemon::DaemonConfig cfg;
-        cfg.dataDir = storageDir_;
-        cfg.socketPath = socketPath_;
-        cfg.pidFile = root_ / "daemon.pid";
-        cfg.logFile = root_ / "daemon.log";
-        // Use mock embeddings to keep deterministic and fast
-        cfg.enableModelProvider = true;
-        cfg.useMockModelProvider = true;
-
-        daemon_ = std::make_unique<yams::daemon::YamsDaemon>(cfg);
-        auto started = daemon_->start();
-        ASSERT_TRUE(started) << started.error().message;
-        std::this_thread::sleep_for(150ms);
+        harness_ = std::make_unique<yams::test::DaemonHarness>();
+        ASSERT_TRUE(harness_->start(5s)) << "Failed to start daemon";
+        storageDir_ = harness_->dataDir();
+        socketPath_ = harness_->socketPath();
+        root_ = storageDir_.parent_path();
+        fs::create_directories(root_ / "ingest");
     }
 
-    void TearDown() override {
-        if (daemon_)
-            daemon_->stop();
-        std::error_code ec;
-        fs::remove_all(root_, ec);
+    void TearDown() override { harness_.reset(); }
+
+    yams::daemon::ServiceManager* serviceManager() const {
+        return harness_ ? harness_->daemon()->getServiceManager() : nullptr;
     }
 };
 
@@ -168,6 +158,99 @@ TEST_F(UiCliExpectationsIT, GetByHashMetadataOnlyHasNoContent) {
     ASSERT_TRUE(gres) << (gres ? "" : gres.error().message);
     EXPECT_FALSE(gres.value().hasContent);
     EXPECT_TRUE(gres.value().content.empty());
+}
+
+TEST_F(UiCliExpectationsIT, GetHonorsAcceptCompressedFlag) {
+    fs::create_directories(root_ / "ingest");
+    const std::string payload = "payload with enough entropy to compress";
+    const std::filesystem::path payloadPath = root_ / "ingest" / "compress.txt";
+    {
+        std::ofstream out(payloadPath, std::ios::binary);
+        for (int i = 0; i < 4096; ++i) {
+            out << payload;
+        }
+    }
+
+    const uint64_t expectedUncompressedSize = static_cast<uint64_t>(payload.size()) * 4096ULL;
+    ASSERT_EQ(std::filesystem::file_size(payloadPath), expectedUncompressedSize);
+
+    yams::app::services::DocumentIngestionService ing;
+    yams::app::services::AddOptions addOpts;
+    addOpts.socketPath = socketPath_;
+    addOpts.explicitDataDir = storageDir_;
+    addOpts.path = payloadPath.string();
+    addOpts.recursive = false;
+    addOpts.noEmbeddings = true;
+    auto addRes = ing.addViaDaemon(addOpts);
+    ASSERT_TRUE(addRes) << (addRes ? "" : addRes.error().message);
+    ASSERT_FALSE(addRes.value().hash.empty());
+
+    yams::app::services::RetrievalService rsvc;
+    yams::app::services::RetrievalOptions defaultOpts;
+    defaultOpts.socketPath = socketPath_;
+    defaultOpts.explicitDataDir = storageDir_;
+
+    yams::app::services::GetOptions getReq;
+    getReq.hash = addRes.value().hash;
+
+    std::optional<yams::daemon::GetResponse> compressedResp;
+    for (int attempt = 0; attempt < 60 && !compressedResp; ++attempt) {
+        auto attemptResp = rsvc.get(getReq, defaultOpts);
+        if (attemptResp) {
+            compressedResp = std::move(attemptResp.value());
+        } else {
+            std::this_thread::sleep_for(50ms);
+        }
+    }
+    ASSERT_TRUE(compressedResp.has_value()) << "Default compressed retrieval did not materialize";
+
+    const auto& compressed = *compressedResp;
+    ASSERT_TRUE(compressed.compressed);
+    EXPECT_TRUE(compressed.hasContent);
+    EXPECT_TRUE(compressed.compressionAlgorithm.has_value());
+    EXPECT_TRUE(compressed.compressionLevel.has_value());
+    EXPECT_TRUE(compressed.uncompressedSize.has_value());
+    EXPECT_EQ(*compressed.uncompressedSize, expectedUncompressedSize);
+    ASSERT_FALSE(compressed.compressionHeader.empty());
+    EXPECT_EQ(compressed.compressionHeader.size(), yams::compression::CompressionHeader::SIZE);
+
+    // Validate compressed payload header matches reported metadata
+    ASSERT_GE(compressed.content.size(), yams::compression::CompressionHeader::SIZE);
+    yams::compression::CompressionHeader headerFromContent{};
+    std::memcpy(&headerFromContent, compressed.content.data(),
+                yams::compression::CompressionHeader::SIZE);
+    EXPECT_EQ(headerFromContent.magic, yams::compression::CompressionHeader::MAGIC);
+    EXPECT_EQ(headerFromContent.uncompressedSize, expectedUncompressedSize);
+    EXPECT_EQ(static_cast<uint8_t>(headerFromContent.algorithm),
+              compressed.compressionAlgorithm.value());
+    EXPECT_EQ(headerFromContent.level, compressed.compressionLevel.value());
+    EXPECT_EQ(0, std::memcmp(compressed.compressionHeader.data(), &headerFromContent,
+                             yams::compression::CompressionHeader::SIZE));
+
+    // Request explicit uncompressed payloads
+    yams::app::services::RetrievalOptions uncompressedOpts = defaultOpts;
+    uncompressedOpts.acceptCompressed = false;
+    yams::app::services::GetOptions uncompressedReq = getReq;
+    uncompressedReq.acceptCompressed = false;
+
+    std::optional<yams::daemon::GetResponse> plainResp;
+    for (int attempt = 0; attempt < 60 && !plainResp; ++attempt) {
+        auto attemptResp = rsvc.get(uncompressedReq, uncompressedOpts);
+        if (attemptResp) {
+            plainResp = std::move(attemptResp.value());
+        } else {
+            std::this_thread::sleep_for(50ms);
+        }
+    }
+    ASSERT_TRUE(plainResp.has_value()) << "Uncompressed retrieval did not materialize";
+
+    const auto& uncompressed = *plainResp;
+    EXPECT_FALSE(uncompressed.compressed);
+    EXPECT_TRUE(uncompressed.hasContent);
+    EXPECT_TRUE(uncompressed.compressionHeader.empty());
+    EXPECT_GE(uncompressed.content.size(), payload.size());
+    EXPECT_NE(0, std::memcmp(compressed.content.data(), uncompressed.content.data(),
+                             std::min(compressed.content.size(), uncompressed.content.size())));
 }
 
 // 3) List — limit + namePattern (structure-focused)
@@ -406,7 +489,8 @@ TEST_F(UiCliExpectationsIT, FuzzySearchPathsOnly) {
     ASSERT_TRUE(addRes) << (addRes ? "" : addRes.error().message);
 
     // Build AppContext and SearchService
-    auto* sm = daemon_->getServiceManager();
+    auto* sm = serviceManager();
+    ASSERT_NE(sm, nullptr);
     ASSERT_NE(sm, nullptr);
     auto ctx = sm->getAppContext();
     auto searchSvc = yams::app::services::makeSearchService(ctx);
@@ -449,7 +533,8 @@ TEST_F(UiCliExpectationsIT, VerboseHybridIncludesScoresWhenAvailable) {
     opts.noEmbeddings = true; // indexing focus
     ASSERT_TRUE(ing.addViaDaemon(opts));
 
-    auto* sm = daemon_->getServiceManager();
+    auto* sm = serviceManager();
+    ASSERT_NE(sm, nullptr);
     ASSERT_NE(sm, nullptr);
     // Poll for hybrid engine readiness
     std::shared_ptr<yams::search::HybridSearchEngine> snap;
@@ -512,7 +597,8 @@ TEST_F(UiCliExpectationsIT, PathsOnlyWithPatternAndTags) {
     opts2.tags = {};
     ASSERT_TRUE(ing.addViaDaemon(opts2));
 
-    auto* sm = daemon_->getServiceManager();
+    auto* sm = serviceManager();
+    ASSERT_NE(sm, nullptr);
     auto ctx = sm->getAppContext();
     auto searchSvc = yams::app::services::makeSearchService(ctx);
 
@@ -562,7 +648,8 @@ TEST_F(UiCliExpectationsIT, PathsOnlyWithPatternAndMatchAllTagsStrict) {
     auto add2 = ing.addViaDaemon(a);
     ASSERT_TRUE(add2) << (add2 ? "" : add2.error().message);
 
-    auto* sm = daemon_->getServiceManager();
+    auto* sm = serviceManager();
+    ASSERT_NE(sm, nullptr);
     auto ctx = sm->getAppContext();
     auto searchSvc = yams::app::services::makeSearchService(ctx);
 
@@ -649,7 +736,8 @@ TEST_F(UiCliExpectationsIT, PathsOnlyWithPatternAndMatchAnyTags) {
     a.path = p2.string();
     ASSERT_TRUE(ing.addViaDaemon(a));
 
-    auto* sm = daemon_->getServiceManager();
+    auto* sm = serviceManager();
+    ASSERT_NE(sm, nullptr);
     auto ctx = sm->getAppContext();
     auto searchSvc = yams::app::services::makeSearchService(ctx);
 
@@ -685,7 +773,8 @@ TEST_F(UiCliExpectationsIT, StressTail) {
     a.recursive = false;
     ASSERT_TRUE(ing.addViaDaemon(a));
 
-    auto* sm = daemon_->getServiceManager();
+    auto* sm = serviceManager();
+    ASSERT_NE(sm, nullptr);
     auto ctx = sm->getAppContext();
     auto searchSvc = yams::app::services::makeSearchService(ctx);
     yams::app::services::SearchRequest s;
@@ -711,7 +800,8 @@ TEST_F(UiCliExpectationsIT, StressTail) {
 
 // 7) Search — negative case (no match ⇒ empty paths, no error)
 TEST_F(UiCliExpectationsIT, NegativeNoMatchPathsOnly) {
-    auto* sm = daemon_->getServiceManager();
+    auto* sm = serviceManager();
+    ASSERT_NE(sm, nullptr);
     auto ctx = sm->getAppContext();
     auto searchSvc = yams::app::services::makeSearchService(ctx);
 
@@ -743,7 +833,8 @@ TEST_F(UiCliExpectationsIT, JsonOutputStructurePathsOnly) {
     opts.noEmbeddings = true;
     ASSERT_TRUE(ing.addViaDaemon(opts));
 
-    auto* sm = daemon_->getServiceManager();
+    auto* sm = serviceManager();
+    ASSERT_NE(sm, nullptr);
     auto ctx = sm->getAppContext();
     auto searchSvc = yams::app::services::makeSearchService(ctx);
 
@@ -781,7 +872,8 @@ TEST_F(UiCliExpectationsIT, HashSearchNormalization) {
     auto hash = add.value().hash;
     ASSERT_GT(hash.size(), 12u);
 
-    auto* sm = daemon_->getServiceManager();
+    auto* sm = serviceManager();
+    ASSERT_NE(sm, nullptr);
     auto ctx = sm->getAppContext();
     auto searchSvc = yams::app::services::makeSearchService(ctx);
 
@@ -821,7 +913,8 @@ TEST_F(UiCliExpectationsIT, HashSearchPrefixTooShortIsRejected) {
     auto full = add.value().hash;
     ASSERT_GT(full.size(), 12u);
 
-    auto* sm = daemon_->getServiceManager();
+    auto* sm = serviceManager();
+    ASSERT_NE(sm, nullptr);
     auto ctx = sm->getAppContext();
     auto searchSvc = yams::app::services::makeSearchService(ctx);
 
@@ -863,7 +956,8 @@ TEST_F(UiCliExpectationsIT, SearchDegradedFallbackStructure) {
     a.noEmbeddings = true;
     ASSERT_TRUE(ing.addViaDaemon(a));
 
-    auto* sm = daemon_->getServiceManager();
+    auto* sm = serviceManager();
+    ASSERT_NE(sm, nullptr);
     auto ctx = sm->getAppContext();
     auto searchSvc = yams::app::services::makeSearchService(ctx);
 
@@ -917,7 +1011,8 @@ TEST_F(UiCliExpectationsIT, FuzzyBoundsSimilarityZeroAndOne) {
     opts.noEmbeddings = true;
     ASSERT_TRUE(ing.addViaDaemon(opts));
 
-    auto* sm = daemon_->getServiceManager();
+    auto* sm = serviceManager();
+    ASSERT_NE(sm, nullptr);
     auto ctx = sm->getAppContext();
     auto searchSvc = yams::app::services::makeSearchService(ctx);
 
@@ -978,7 +1073,8 @@ TEST_F(UiCliExpectationsIT, TagFilterMatchAnyVsAll) {
     auto add2 = ing.addViaDaemon(a);
     ASSERT_TRUE(add2) << (add2 ? "" : add2.error().message);
 
-    auto* sm = daemon_->getServiceManager();
+    auto* sm = serviceManager();
+    ASSERT_NE(sm, nullptr);
     auto ctx = sm->getAppContext();
     auto searchSvc = yams::app::services::makeSearchService(ctx);
     // Ensure immediate visibility for small text docs
@@ -1041,7 +1137,8 @@ TEST_F(UiCliExpectationsIT, NegativeTagMismatchPathsOnly) {
     a.tags = {"misc"};
     ASSERT_TRUE(ing.addViaDaemon(a));
 
-    auto* sm = daemon_->getServiceManager();
+    auto* sm = serviceManager();
+    ASSERT_NE(sm, nullptr);
     auto ctx = sm->getAppContext();
     auto searchSvc = yams::app::services::makeSearchService(ctx);
 
@@ -1079,7 +1176,8 @@ TEST_F(UiCliExpectationsIT, FilenamePathQueriesPreferMetadata) {
     // Give post-ingest a brief moment
     std::this_thread::sleep_for(200ms);
 
-    auto* sm = daemon_->getServiceManager();
+    auto* sm = serviceManager();
+    ASSERT_NE(sm, nullptr);
     auto ctx = sm->getAppContext();
     auto searchSvc = yams::app::services::makeSearchService(ctx);
 
@@ -1141,7 +1239,8 @@ TEST_F(UiCliExpectationsIT, PathWildcardMatches) {
     // Give post-ingest a brief moment
     std::this_thread::sleep_for(200ms);
 
-    auto* sm = daemon_->getServiceManager();
+    auto* sm = serviceManager();
+    ASSERT_NE(sm, nullptr);
     auto ctx = sm->getAppContext();
     auto searchSvc = yams::app::services::makeSearchService(ctx);
 

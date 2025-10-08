@@ -1052,6 +1052,13 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
         SearchResults results;
         results.query = query;
 
+        // PERFORMANCE FIX: Cap limit to prevent massive result processing
+        constexpr int kMaxSearchLimit = 10000;
+        const int effectiveLimit = std::min(limit > 0 ? limit : 100, kMaxSearchLimit);
+        if (limit > kMaxSearchLimit) {
+            spdlog::debug("Search limit {} exceeds max {}, capping", limit, kMaxSearchLimit);
+        }
+
         const bool cacheable = !docIds.has_value() || docIds->empty();
         std::string cacheKey;
         if (cacheable) {
@@ -1128,7 +1135,7 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
             spec.conditions.push_back(idIn);
         }
         spec.orderBy = std::optional<std::string>{"score"};
-        spec.limit = limit;
+        spec.limit = effectiveLimit;
         spec.offset = offset;
         auto sql = yams::metadata::sql::buildSelect(spec);
 
@@ -1194,19 +1201,48 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
                 }
 
                 // Get total count for FTS5 results
+                // PERFORMANCE FIX: Skip expensive COUNT(*) for large result sets
+                // If we got back fewer results than the limit, that's the total count
                 if (ftsSearchSucceeded) {
-                    auto countStmtResult = db.prepare(R"(
-                        SELECT COUNT(*) FROM documents_fts WHERE documents_fts MATCH ?
-                    )");
+                    const size_t resultSize = results.results.size();
+                    const size_t requestedLimit = static_cast<size_t>(limit);
 
-                    if (countStmtResult) {
-                        Statement countStmt = std::move(countStmtResult).value();
-                        auto bindRes = countStmt.bind(1, sanitizedQuery);
-                        if (bindRes.has_value()) {
-                            auto stepRes = countStmt.step();
-                            if (stepRes.has_value() && stepRes.value()) {
-                                results.totalCount = countStmt.getInt64(0);
+                    // Fast path: if we got fewer than limit, that's the exact count
+                    if (resultSize < requestedLimit) {
+                        results.totalCount = resultSize;
+                    } else {
+                        // We hit the limit - need to count, but with timeout protection
+                        // Use a fast heuristic: try counting with a LIMIT to avoid full scans
+                        constexpr int64_t kMaxCountLimit = 10000;
+                        auto countStmtResult = db.prepare(R"(
+                            SELECT COUNT(*) FROM (
+                                SELECT 1 FROM documents_fts 
+                                WHERE documents_fts MATCH ? 
+                                LIMIT ?
+                            )
+                        )");
+
+                        if (countStmtResult) {
+                            Statement countStmt = std::move(countStmtResult).value();
+                            auto bindRes1 = countStmt.bind(1, sanitizedQuery);
+                            auto bindRes2 = countStmt.bind(2, kMaxCountLimit);
+                            if (bindRes1.has_value() && bindRes2.has_value()) {
+                                auto stepRes = countStmt.step();
+                                if (stepRes.has_value() && stepRes.value()) {
+                                    int64_t boundedCount = countStmt.getInt64(0);
+                                    results.totalCount = boundedCount;
+                                    // If we hit the limit, indicate there are "many more"
+                                    if (boundedCount >= kMaxCountLimit) {
+                                        spdlog::debug(
+                                            "Search matched >{} results, using approximate count",
+                                            kMaxCountLimit);
+                                    }
+                                }
                             }
+                        } else {
+                            // Fallback: just use result size as lower bound
+                            results.totalCount = resultSize;
+                            spdlog::debug("Count query failed, using result size as count");
                         }
                     }
                 }

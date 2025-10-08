@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <filesystem>
+#include <future>
 #include <random>
 #include <thread>
 #include <yams/daemon/components/InternalEventBus.h>
@@ -37,6 +38,15 @@ public:
     }
     Result<std::vector<std::byte>> retrieveBytes(const std::string&) override {
         return ErrorCode::NotImplemented;
+    }
+    Result<api::IContentStore::RawContent> retrieveRaw(const std::string&) override {
+        return ErrorCode::NotImplemented;
+    }
+    std::future<Result<api::IContentStore::RawContent>>
+    retrieveRawAsync(const std::string&) override {
+        return std::async(std::launch::deferred, [] {
+            return Result<api::IContentStore::RawContent>(ErrorCode::NotImplemented);
+        });
     }
     Result<bool> exists(const std::string&) const override { return ErrorCode::NotImplemented; }
     Result<bool> remove(const std::string&) override { return ErrorCode::NotImplemented; }

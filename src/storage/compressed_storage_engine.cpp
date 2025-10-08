@@ -1,5 +1,6 @@
 #include <spdlog/spdlog.h>
 #include <condition_variable>
+#include <cstring>
 #include <future>
 #include <mutex>
 #include <queue>
@@ -56,30 +57,22 @@ public:
     ~Impl() { shutdown(); }
 
     Result<void> store(std::string_view hash, std::span<const std::byte> data) {
-        if (!compressionEnabled_ || data.size() < config_.compressionThreshold) {
+        if (!compressionEnabled_) {
             return underlying_->store(hash, data);
         }
 
-        // Simplified policy decision - compress if above threshold
-        struct SimpleDecision {
-            bool shouldCompress = true;
-            compression::CompressionAlgorithm algorithm =
-                compression::CompressionAlgorithm::Zstandard;
-            uint8_t level = 3;
-        };
-
-        SimpleDecision decision;
-        if (data.size() < config_.compressionThreshold) {
-            decision.shouldCompress = false;
-        }
-
-        if (!decision.shouldCompress) {
+        if (isCompressedData(data)) {
             updateStats([&](compression::CompressionStats& stats) {
-                stats.totalUncompressedFiles++;
-                stats.totalUncompressedBytes += data.size();
+                stats.totalCompressedFiles++;
+                stats.totalCompressedBytes += data.size();
             });
             return underlying_->store(hash, data);
         }
+
+        auto level =
+            config_.policyRules.defaultZstdLevel == 0 ? 3 : config_.policyRules.defaultZstdLevel;
+        auto decision = compression::CompressionDecision::compress(
+            compression::CompressionAlgorithm::Zstandard, level, "eager compression");
 
         // Compress data
         auto compressedResult = compressData(data, decision);
@@ -96,17 +89,34 @@ public:
         return underlying_->store(hash, compressedSpan);
     }
 
-    Result<std::vector<std::byte>> retrieve(std::string_view hash) const {
-        auto result = underlying_->retrieve(hash);
-        if (!result) {
-            return result;
+    Result<IStorageEngine::RawObject> retrieveRaw(std::string_view hash) const {
+        auto raw = underlying_->retrieveRaw(hash);
+        if (!raw) {
+            return raw;
         }
 
-        std::span<const std::byte> data{result.value().data(), result.value().size()};
+        auto obj = std::move(raw.value());
+        std::span<const std::byte> data{obj.data.data(), obj.data.size()};
 
-        // Check if data is compressed
-        if (!isCompressedData(data)) {
-            return result;
+        if (!obj.header && isCompressedData(data)) {
+            compression::CompressionHeader header;
+            std::memcpy(&header, data.data(), sizeof(header));
+            obj.header = header;
+        }
+
+        return obj;
+    }
+
+    Result<std::vector<std::byte>> retrieve(std::string_view hash) const {
+        auto rawResult = retrieveRaw(hash);
+        if (!rawResult) {
+            return rawResult.error();
+        }
+
+        auto& obj = rawResult.value();
+        std::span<const std::byte> data{obj.data.data(), obj.data.size()};
+        if (!obj.header) {
+            return std::move(obj.data);
         }
 
         // Decompress data
@@ -118,24 +128,20 @@ public:
     Result<void> remove(std::string_view hash) { return underlying_->remove(hash); }
 
     Result<uint64_t> size(std::string_view hash) {
-        auto dataResult = underlying_->retrieve(hash);
-        if (!dataResult) {
-            if (dataResult.error().code == ErrorCode::NotFound) {
+        auto rawResult = retrieveRaw(hash);
+        if (!rawResult) {
+            if (rawResult.error().code == ErrorCode::NotFound) {
                 return Error(ErrorCode::NotFound);
             }
-            return dataResult.error();
+            return rawResult.error();
         }
 
-        std::span<const std::byte> data{dataResult.value().data(), dataResult.value().size()};
-
-        // If compressed, return original size
-        if (isCompressedData(data)) {
-            compression::CompressionHeader header;
-            std::memcpy(&header, data.data(), sizeof(header));
-            return header.uncompressedSize;
+        const auto& obj = rawResult.value();
+        if (obj.header) {
+            return obj.header->uncompressedSize;
         }
 
-        return data.size();
+        return obj.data.size();
     }
 
     // Note: list(), stats(), and compact() methods removed as they're not part of the StorageEngine
@@ -153,6 +159,11 @@ public:
                            data = std::vector<std::byte>(data.begin(), data.end())] {
                               return this->store(hash, std::span<const std::byte>(data));
                           });
+    }
+
+    std::future<Result<IStorageEngine::RawObject>> retrieveRawAsync(std::string_view hash) const {
+        return std::async(std::launch::async,
+                          [this, hash = std::string(hash)] { return this->retrieveRaw(hash); });
     }
 
     std::future<Result<std::vector<std::byte>>> retrieveAsync(std::string_view hash) const {
@@ -177,15 +188,16 @@ public:
     }
 
     Result<void> compressExisting(std::string_view hash, bool force) {
-        auto dataResult = underlying_->retrieve(hash);
-        if (!dataResult) {
-            return dataResult.error();
+        auto rawResult = underlying_->retrieveRaw(hash);
+        if (!rawResult) {
+            return rawResult.error();
         }
 
-        std::span<const std::byte> data{dataResult.value().data(), dataResult.value().size()};
+        auto& obj = rawResult.value();
+        std::span<const std::byte> data{obj.data.data(), obj.data.size()};
 
         // Check if already compressed
-        if (isCompressedData(data)) {
+        if (obj.header || isCompressedData(data)) {
             return Error(ErrorCode::InvalidState, "Data is already compressed");
         }
 
@@ -233,15 +245,16 @@ public:
     }
 
     Result<void> decompressExisting(std::string_view hash) {
-        auto dataResult = underlying_->retrieve(hash);
-        if (!dataResult) {
-            return dataResult.error();
+        auto rawResult = underlying_->retrieveRaw(hash);
+        if (!rawResult) {
+            return rawResult.error();
         }
 
-        std::span<const std::byte> data{dataResult.value().data(), dataResult.value().size()};
+        auto& obj = rawResult.value();
+        std::span<const std::byte> data{obj.data.data(), obj.data.size()};
 
         // Check if compressed
-        if (!isCompressedData(data)) {
+        if (!(obj.header || isCompressedData(data))) {
             return Error(ErrorCode::InvalidState, "Data is not compressed");
         }
 
@@ -551,6 +564,11 @@ Result<std::vector<std::byte>> CompressedStorageEngine::retrieve(std::string_vie
     return pImpl->retrieve(hash);
 }
 
+Result<IStorageEngine::RawObject>
+CompressedStorageEngine::retrieveRaw(std::string_view hash) const {
+    return pImpl->retrieveRaw(hash);
+}
+
 Result<bool> CompressedStorageEngine::exists(std::string_view hash) const noexcept {
     return pImpl->exists(hash);
 }
@@ -577,6 +595,11 @@ std::future<Result<void>> CompressedStorageEngine::storeAsync(std::string_view h
 std::future<Result<std::vector<std::byte>>>
 CompressedStorageEngine::retrieveAsync(std::string_view hash) const {
     return pImpl->retrieveAsync(hash);
+}
+
+std::future<Result<IStorageEngine::RawObject>>
+CompressedStorageEngine::retrieveRawAsync(std::string_view hash) const {
+    return pImpl->retrieveRawAsync(hash);
 }
 
 // Batch operations

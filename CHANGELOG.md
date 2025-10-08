@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
-## [v0.7.3] - Unreleased
+## [v0.7.3] - 2025-10-08
 
 ### Added
 - Bench: minimal daemon warm-start latency check moved to an opt-in bench target and suite.
@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **RPC/IPC exposure**: Added `ListTreeDiff` method to daemon protocol (protobuf + binary serialization).
 
 ### Changed
+- **Compression-first retrieval** DocumentService, CLI, and daemon IPC now default to
+  returning compressed payloads with full metadata (algorithm, CRC32s, sizes)
 - **Path query pipeline**: Replaced the legacy `findDocumentsByPath` helper with the normalized `queryDocuments` API and the shared `queryDocumentsByPattern` utility. All services (daemon, CLI, MCP, mobile bindings, repair tooling, vector ingestion) now issue structured queries that leverage the `path_prefix`, `reverse_path`, and `path_hash` indexes plus FTS5 for suffix matches, eliminating full-table LIKE scans.
 - **Schema migration**: Migration v13 (`Add path indexing schema`) continues to govern the derived columns/indices; applying this release replays the up hook in place (normalizing existing rows and rebuilding the FTS table), so existing deployments automatically benefit from the optimized lookups after the usual migration step.
 - **CLI Retrieval (get/cat)**: partial-hash resolution now routes through `RetrievalService`
@@ -44,6 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Daemon IPC:** Fixed a regression in the `grep` IPC protocol where `GrepRequest` and `GrepResponse` messages were not fully serialized, causing data loss. The protocol definitions and serializers have been updated to correctly handle all fields, including `show_diff` in requests and detailed statistics in responses.
+- **Indexing**: Fixed an issue where updated files were not being re-indexed. The change detection logic now correctly considers file modification time and size, in addition to content hash, to reliably identify changes.
+- **Indexing**: Corrected the document update process to prevent duplicate records for the same file path when a file is updated. The indexer now properly distinguishes between new documents and updates to existing ones.
+- **Daemon IPC**: Fixed an issue where `search` and `grep` commands could time out without producing output by improving the efficiency of the daemon's streaming response mechanism.
+- **Daemon IPC**: Optimized non-multiplexed communication paths to prevent performance issues and potential timeouts with large responses from commands like `get` and `cat`.
 
 ## [v0.7.2] - 2025-10-03
 

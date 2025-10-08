@@ -37,10 +37,22 @@ unit_chunking = files(
 )
 
 unit_cli = []
-if get_option('enable-tui')
+if tests_has_cli
   unit_cli += files(
-    'cli/highlight_utils_test.cpp',
+    'cli/daemon_command_test.cpp',
+    'cli/model_command_test.cpp',
+    'cli/recommendation_util_test.cpp',
+    'cli/session_command_test.cpp',
+    'cli/stream_heuristics_test.cpp',
+    'cli/update_command_test.cpp',
   )
+
+  if get_option('enable-tui')
+    unit_cli += files(
+      'cli/highlight_utils_test.cpp',
+      'cli/test_tui_services.cpp',
+    )
+  endif
 endif
 
 unit_compression = files(

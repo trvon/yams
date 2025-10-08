@@ -29,6 +29,7 @@ static yams::daemon::ClientConfig makeClientConfig(const RetrievalOptions& opts)
     cfg.headerTimeout = std::chrono::milliseconds(opts.headerTimeoutMs);
     cfg.bodyTimeout = std::chrono::milliseconds(opts.bodyTimeoutMs);
     cfg.requestTimeout = std::chrono::milliseconds(opts.requestTimeoutMs);
+    cfg.acceptCompressed = opts.acceptCompressed;
     return cfg;
 }
 
@@ -36,6 +37,7 @@ Result<yams::daemon::GetResponse> RetrievalService::get(const GetOptions& req_op
                                                         const RetrievalOptions& opts) const {
     yams::daemon::GetRequest req;
     req.hash = req_opts.hash;
+    req.acceptCompressed = req_opts.acceptCompressed || opts.acceptCompressed;
     req.name = req_opts.name;
     req.byName = req_opts.byName;
     req.fileType = req_opts.fileType;
@@ -545,13 +547,6 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
             greq_opts.metadataOnly = !includeContent;
             return get(greq_opts, opts);
         }
-        // Suffix by subpath (e.g., %/docs/delivery/13/tasks.md or %/tasks.md)
-        if (auto suffix = try_list_pattern(std::string("%/") + name, 32)) {
-            GetOptions greq_opts;
-            greq_opts.hash = suffix->hash;
-            greq_opts.metadataOnly = !includeContent;
-            return get(greq_opts, opts);
-        }
     }
 
     // 3) Try session-aware list by (base)name equality
@@ -617,20 +612,18 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
     // 4) Base-name list fallback (portable and fast): "% /name", then stem, then contains
     {
         std::optional<yams::daemon::ListEntry> cand;
-        if (!looksPathLike) {
-            if (!cand)
-                cand = try_list_pattern(std::string("%/") + name, 32);
-            if (!cand) {
-                std::string stem = name;
-                try {
-                    stem = std::filesystem::path(name).stem().string();
-                } catch (...) {
-                }
-                cand = try_list_pattern(std::string("%/") + stem + "%", 64);
+        if (!cand)
+            cand = try_list_pattern(std::string("%/") + name, 32);
+        if (!cand) {
+            std::string stem = name;
+            try {
+                stem = std::filesystem::path(name).stem().string();
+            } catch (...) {
             }
-            if (!cand)
-                cand = try_list_pattern(std::string("%") + name + "%", 64);
+            cand = try_list_pattern(std::string("%/") + stem + "%", 64);
         }
+        if (!cand)
+            cand = try_list_pattern(std::string("%") + name + "%", 64);
         if (cand) {
             GetOptions greq_opts;
             greq_opts.hash = cand->hash;

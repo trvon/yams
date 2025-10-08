@@ -31,30 +31,28 @@ search_bench = executable('yams_search_benchmarks', files('search_benchmarks.cpp
   install: false,
 )
 
-retrieval_bench_deps = [test_deps, dependency('yams_benchmarks')] + tracy_deps
 if benchmark_dep.found()
-  retrieval_bench_deps += [benchmark_dep]
+  retrieval_bench_deps = [test_deps, dependency('yams_benchmarks')] + tracy_deps + [benchmark_dep]
+
+  retrieval_bench = executable('yams_retrieval_service_benchmarks',
+    files('retrieval_service_benchmarks.cpp'),
+    include_directories: incs,
+    dependencies: retrieval_bench_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    install: false,
+  )
+
+  metadata_query_bench_deps = [dependency('yams_metadata'), dependency('yams_search')] + tracy_deps + [benchmark_dep]
+
+  metadata_query_bench = executable('metadata_path_query_bench', files('metadata_path_query_bench.cpp'),
+    include_directories: incs,
+    dependencies: metadata_query_bench_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    install: false,
+  )
+else
+  message('Google Benchmark not found; skipping service and metadata benchmark executables')
 endif
-
-retrieval_bench = executable('yams_retrieval_service_benchmarks', 
-  files('retrieval_service_benchmarks.cpp'),
-  include_directories: incs,
-  dependencies: retrieval_bench_deps,
-  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
-  install: false,
-)
-
-metadata_query_bench_deps = [dependency('yams_metadata'), dependency('yams_search')] + tracy_deps
-if benchmark_dep.found()
-  metadata_query_bench_deps += [benchmark_dep]
-endif
-
-metadata_query_bench = executable('metadata_path_query_bench', files('metadata_path_query_bench.cpp'),
-  include_directories: incs,
-  dependencies: metadata_query_bench_deps,
-  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
-  install: false,
-)
 
 ingestion_bench = executable('ingestion_throughput_bench', files('ingestion_throughput_bench.cpp'),
   include_directories: incs,

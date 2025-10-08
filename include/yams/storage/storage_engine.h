@@ -16,6 +16,8 @@
 #include <thread>
 #include <vector>
 
+#include <yams/compression/compression_header.h>
+
 namespace yams::storage {
 
 // Forward declarations
@@ -63,9 +65,15 @@ class IStorageEngine {
 public:
     virtual ~IStorageEngine() = default;
 
+    struct RawObject {
+        std::vector<std::byte> data;
+        std::optional<compression::CompressionHeader> header;
+    };
+
     // Core operations
     virtual Result<void> store(std::string_view hash, std::span<const std::byte> data) = 0;
     virtual Result<std::vector<std::byte>> retrieve(std::string_view hash) const = 0;
+    virtual Result<RawObject> retrieveRaw(std::string_view hash) const = 0;
     virtual Result<bool> exists(std::string_view hash) const noexcept = 0;
     virtual Result<void> remove(std::string_view hash) = 0;
 
@@ -74,6 +82,7 @@ public:
                                                  std::span<const std::byte> data) = 0;
     virtual std::future<Result<std::vector<std::byte>>>
     retrieveAsync(std::string_view hash) const = 0;
+    virtual std::future<Result<RawObject>> retrieveRawAsync(std::string_view hash) const = 0;
 
     // Batch operations
     virtual std::vector<Result<void>>
@@ -99,6 +108,7 @@ public:
     // Core operations
     Result<void> store(std::string_view hash, std::span<const std::byte> data) override;
     Result<std::vector<std::byte>> retrieve(std::string_view hash) const override;
+    Result<RawObject> retrieveRaw(std::string_view hash) const override;
     Result<bool> exists(std::string_view hash) const noexcept override;
     Result<void> remove(std::string_view hash) override;
 
@@ -107,6 +117,7 @@ public:
                                          std::span<const std::byte> data) override;
 
     std::future<Result<std::vector<std::byte>>> retrieveAsync(std::string_view hash) const override;
+    std::future<Result<RawObject>> retrieveRawAsync(std::string_view hash) const override;
 
     // Batch operations implementation
     std::vector<Result<void>>

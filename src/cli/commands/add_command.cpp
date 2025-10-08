@@ -294,26 +294,22 @@ public:
 
                 // Process each group
                 size_t ok = 0, failed = 0;
-                size_t totalAdded = 0;
+                size_t totalAdded = 0, totalUpdated = 0, totalSkipped = 0;
                 bool hasStdin = false;
                 std::vector<std::filesystem::path> serviceDirs;
 
                 auto render = [&](const yams::daemon::AddDocumentResponse& resp,
                                   const std::filesystem::path& path) -> void {
-                    if (resp.documentsAdded == 1) {
-                        std::cout << "Added document: " << resp.hash.substr(0, 16) << "..."
-                                  << std::endl;
+                    if (resp.documentsAdded > 0 || resp.documentsUpdated > 0) {
+                        std::cout << "From " << path.string() << ": added=" << resp.documentsAdded
+                                  << ", updated=" << resp.documentsUpdated
+                                  << ", skipped=" << resp.documentsSkipped << std::endl;
                     } else {
-                        std::cout << "Added " << resp.documentsAdded << " documents from "
-                                  << path.string() << std::endl;
-                    }
-
-                    if (resp.documentsAdded == 0) {
+                        std::cout << "No new or updated documents from " << path.string()
+                                  << std::endl;
                         if (!resp.message.empty()) {
                             std::cout << "  Note: " << resp.message << std::endl;
                         }
-                        std::cout << "  No new files were ingested from: " << path.string()
-                                  << std::endl;
                     }
 
                     if (resp.documentsAdded > 0) {
@@ -368,6 +364,8 @@ public:
                     auto result = ing.addViaDaemon(aopts);
                     if (result) {
                         totalAdded += result.value().documentsAdded;
+                        totalUpdated += result.value().documentsUpdated;
+                        totalSkipped += result.value().documentsSkipped;
                         render(result.value(), dir);
                         ok++;
                     } else {
@@ -382,10 +380,11 @@ public:
                 // If there were any non-stdin paths processed, report summary here
                 if (ok + failed > 0) {
                     std::cout << "Daemon add completed: " << ok << " ok, " << failed << " failed";
-                    if (totalAdded == 0) {
+                    if (totalAdded == 0 && totalUpdated == 0) {
                         std::cout << " (no changes)";
                     } else {
-                        std::cout << ", documents added: " << totalAdded;
+                        std::cout << ", added: " << totalAdded << ", updated: " << totalUpdated
+                                  << ", skipped: " << totalSkipped;
                     }
                     std::cout << std::endl;
                 }

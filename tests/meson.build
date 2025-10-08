@@ -111,8 +111,24 @@ if gmock_dep.found()
   test_deps += gmock_dep
 endif
 
+tests_has_cli = false
+tests_has_cli11 = cli11_dep.found()
+
 if get_option('build-cli')
-  test_deps += dependency('yams_cli')
+  yams_cli_dep = dependency('yams_cli', required: false)
+  if yams_cli_dep.found()
+    test_deps += yams_cli_dep
+    tests_has_cli = true
+  else
+    message('build-cli enabled but yams_cli dependency not found; skipping CLI-dependent tests.')
+  endif
+else
+  # If build-cli is disabled, still try to find yams_cli but don't error if missing
+  yams_cli_dep = dependency('yams_cli', required: false)
+  if yams_cli_dep.found()
+    test_deps += yams_cli_dep
+    tests_has_cli = true
+  endif
 endif
 
 incs = [

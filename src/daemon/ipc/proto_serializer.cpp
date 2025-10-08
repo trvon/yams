@@ -127,6 +127,20 @@ template <> struct ProtoBinding<GetResponse> {
         o->set_hash(r.hash);
         o->set_name(r.name);
         o->set_path(r.path);
+        o->set_compressed(r.compressed);
+        if (r.compressionAlgorithm)
+            o->set_compression_algorithm(*r.compressionAlgorithm);
+        if (r.compressionLevel)
+            o->set_compression_level(*r.compressionLevel);
+        if (r.uncompressedSize)
+            o->set_uncompressed_size(*r.uncompressedSize);
+        if (r.compressedCrc32)
+            o->set_compressed_crc32(*r.compressedCrc32);
+        if (r.uncompressedCrc32)
+            o->set_uncompressed_crc32(*r.uncompressedCrc32);
+        if (!r.compressionHeader.empty())
+            o->set_compression_header(r.compressionHeader.data(),
+                                      static_cast<int>(r.compressionHeader.size()));
         if (r.hasContent)
             o->set_content(r.content);
         to_kv_pairs(r.metadata, o->mutable_metadata());
@@ -137,6 +151,20 @@ template <> struct ProtoBinding<GetResponse> {
         r.hash = i.hash();
         r.name = i.name();
         r.path = i.path();
+        r.compressed = i.compressed();
+        if (i.has_compression_algorithm())
+            r.compressionAlgorithm = static_cast<uint8_t>(i.compression_algorithm());
+        if (i.has_compression_level())
+            r.compressionLevel = static_cast<uint8_t>(i.compression_level());
+        if (i.has_uncompressed_size())
+            r.uncompressedSize = i.uncompressed_size();
+        if (i.has_compressed_crc32())
+            r.compressedCrc32 = i.compressed_crc32();
+        if (i.has_uncompressed_crc32())
+            r.uncompressedCrc32 = i.uncompressed_crc32();
+        if (!i.compression_header().empty())
+            r.compressionHeader.assign(i.compression_header().begin(),
+                                       i.compression_header().end());
         r.content = i.content();
         r.hasContent = !r.content.empty();
         r.metadata = from_kv_pairs(i.metadata());
@@ -228,6 +256,7 @@ template <> struct ProtoBinding<GetRequest> {
     static void set(Envelope& env, const GetRequest& r) {
         auto* o = env.mutable_get_request();
         o->set_hash(r.hash);
+        o->set_accept_compressed(r.acceptCompressed);
         o->set_name(r.name);
         o->set_by_name(r.byName);
         o->set_file_type(r.fileType);
@@ -281,6 +310,7 @@ template <> struct ProtoBinding<GetRequest> {
         r.showGraph = i.show_graph();
         r.graphDepth = i.graph_depth();
         r.verbose = i.verbose();
+        r.acceptCompressed = i.accept_compressed();
         return r;
     }
 };
@@ -1497,6 +1527,8 @@ template <> struct ProtoBinding<AddDocumentResponse> {
         o->set_message(r.message);
         o->set_path(r.path);
         o->set_documents_added(static_cast<uint64_t>(r.documentsAdded));
+        o->set_documents_updated(static_cast<uint64_t>(r.documentsUpdated));
+        o->set_documents_skipped(static_cast<uint64_t>(r.documentsSkipped));
         o->set_size(static_cast<uint64_t>(r.size));
         o->set_snapshot_id(r.snapshotId);
         o->set_snapshot_label(r.snapshotLabel);
@@ -1508,6 +1540,8 @@ template <> struct ProtoBinding<AddDocumentResponse> {
         r.message = i.message();
         r.path = i.path();
         r.documentsAdded = i.documents_added();
+        r.documentsUpdated = i.documents_updated();
+        r.documentsSkipped = i.documents_skipped();
         r.size = i.size();
         r.snapshotId = i.snapshot_id();
         r.snapshotLabel = i.snapshot_label();

@@ -25,6 +25,8 @@ option('stress-iters', type: 'integer', value: 100, description: 'Default iterat
 
 # Test registration toggles (CI-friendly defaults)
 option('enable-integration-tests', type: 'boolean', value: false, description: 'Register integration smoke/services tests')
+option('enable-integration-services', type: 'boolean', value: false, description: 'Register integration services test binary')
+option('enable-integration-smoke', type: 'boolean', value: false, description: 'Register integration smoke test binary')
 option('enable-mobile-tests', type: 'boolean', value: false, description: 'Register mobile ABI tests')
 option('enable-full-unit', type: 'boolean', value: false, description: 'Register full unit shards (instead of only unit_safe/targeted)')
 option('enable-bench-tests', type: 'boolean', value: false, description: 'Register bench/isolated performance-heavy unit tests')

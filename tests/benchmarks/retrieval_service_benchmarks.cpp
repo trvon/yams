@@ -1,6 +1,6 @@
 // PBI-040: Service layer performance benchmarks
 // These benchmarks test the app/services layer to catch performance regressions
-// in user-facing operations like get-by-name, grep, search.
+// in user-facing operations like get-by-name, cat, grep, search.
 
 #include <algorithm>
 #include <chrono>
@@ -20,6 +20,7 @@
 #include "../integration/daemon/test_async_helpers.h"
 #include "../integration/daemon/test_daemon_harness.h"
 #include <yams/app/services/document_ingestion_service.h>
+#include <yams/app/services/retrieval_service.h>
 #include <yams/daemon/client/daemon_client.h>
 
 using namespace yams;
@@ -30,7 +31,8 @@ namespace {
 // Global daemon harness for benchmark suite (setup once, reused across benchmarks)
 std::unique_ptr<DaemonHarness> g_harness;
 std::unique_ptr<daemon::DaemonClient> g_client;
-std::vector<std::string> g_test_docs; // Hashes of test documents
+std::vector<std::string> g_test_docs;      // Hashes of test documents
+std::vector<std::string> g_test_doc_names; // Names used for by-name retrieval
 
 // Setup: Start daemon and add test documents
 void SetupBenchmarkSuite() {
@@ -55,7 +57,8 @@ void SetupBenchmarkSuite() {
     // Add test documents (small set for benchmarking)
     std::cout << "Adding test documents...\n";
     for (int i = 0; i < 50; ++i) {
-        auto path = g_harness->dataDir() / ("test_doc_" + std::to_string(i) + ".txt");
+        const std::string docName = "test_doc_" + std::to_string(i) + ".txt";
+        auto path = g_harness->dataDir() / docName;
         std::ofstream ofs(path);
         ofs << "Test document " << i << "\n";
         ofs << "This is sample content for performance benchmarking.\n";
@@ -75,6 +78,7 @@ void SetupBenchmarkSuite() {
             // AddViaDaemon returns AddDocumentResponse, check hash field
             if (!result.value().hash.empty()) {
                 g_test_docs.push_back(result.value().hash);
+                g_test_doc_names.push_back(docName);
             }
         }
     }
@@ -147,6 +151,130 @@ static void BM_RetrievalService_GetByName_FTS5Ready(benchmark::State& state) {
     // Check performance target: < 500ms (500,000 us)
     if (p95 > 500000) {
         std::cerr << "⚠️  WARNING: P95 latency " << (p95 / 1000.0) << "ms exceeds 500ms target\n";
+    }
+}
+
+// Benchmark: Cat by name (CLI-equivalent retrieval path)
+static void BM_RetrievalService_CatByName(benchmark::State& state) {
+#ifdef TRACY_ENABLE
+    ZoneScopedN("BM_CatByName");
+#endif
+
+    if (g_test_doc_names.empty()) {
+        state.SkipWithError("No document names available for cat benchmark");
+        return;
+    }
+
+    app::services::RetrievalService rsvc;
+    app::services::RetrievalOptions ropts;
+    ropts.socketPath = g_harness->socketPath();
+    ropts.explicitDataDir = g_harness->dataDir();
+    ropts.requestTimeoutMs = 5000;
+    ropts.enableStreaming = false;
+
+    size_t success_count = 0;
+    std::vector<int64_t> latencies_us;
+
+    for (auto _ : state) {
+        auto start = std::chrono::high_resolution_clock::now();
+
+#ifdef TRACY_ENABLE
+        {
+            ZoneScopedN("catByName");
+#endif
+            app::services::GetOptions getOpts;
+            getOpts.name = g_test_doc_names[success_count % g_test_doc_names.size()];
+            getOpts.byName = true;
+            getOpts.raw = true;
+
+            auto result = rsvc.get(getOpts, ropts);
+
+            if (result && result.value().hasContent) {
+                success_count++;
+            }
+#ifdef TRACY_ENABLE
+        }
+#endif
+
+        auto end = std::chrono::high_resolution_clock::now();
+        auto latency_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+        latencies_us.push_back(latency_us);
+    }
+
+    if (latencies_us.empty()) {
+        state.SkipWithError("No samples collected for cat benchmark");
+        return;
+    }
+
+    std::sort(latencies_us.begin(), latencies_us.end());
+    auto p50 = latencies_us[latencies_us.size() / 2];
+    auto p95 = latencies_us[static_cast<size_t>(latencies_us.size() * 0.95)];
+    auto max_us = latencies_us.back();
+
+    state.counters["success_count"] = static_cast<double>(success_count);
+    state.counters["p50_us"] = static_cast<double>(p50);
+    state.counters["p95_us"] = static_cast<double>(p95);
+    state.counters["max_us"] = static_cast<double>(max_us);
+
+    if (p95 > 500000) {
+        std::cerr << "⚠️  WARNING: Cat P95 latency " << (p95 / 1000.0)
+                  << "ms exceeds 500ms target\n";
+    }
+}
+
+// Benchmark: Search service query performance
+static void BM_RetrievalService_Search(benchmark::State& state) {
+#ifdef TRACY_ENABLE
+    ZoneScopedN("BM_Search");
+#endif
+
+    std::vector<int64_t> latencies_us;
+    size_t total_results = 0;
+
+    for (auto _ : state) {
+        auto start = std::chrono::high_resolution_clock::now();
+
+#ifdef TRACY_ENABLE
+        {
+            ZoneScopedN("searchQuery");
+#endif
+            daemon::SearchRequest req;
+            req.query = "document";
+            req.limit = 20;
+            req.pathsOnly = false;
+
+            auto result = cli::run_sync(g_client->search(req), std::chrono::milliseconds(2000));
+
+            if (result) {
+                total_results += result.value().results.size();
+            }
+#ifdef TRACY_ENABLE
+        }
+#endif
+
+        auto end = std::chrono::high_resolution_clock::now();
+        auto latency_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+        latencies_us.push_back(latency_us);
+    }
+
+    if (latencies_us.empty()) {
+        state.SkipWithError("No samples collected for search benchmark");
+        return;
+    }
+
+    std::sort(latencies_us.begin(), latencies_us.end());
+    auto p95 = latencies_us[static_cast<size_t>(latencies_us.size() * 0.95)];
+    auto max_us = latencies_us.back();
+
+    state.counters["total_results"] = static_cast<double>(total_results);
+    state.counters["p95_us"] = static_cast<double>(p95);
+    state.counters["max_us"] = static_cast<double>(max_us);
+
+    if (p95 > 500000) {
+        std::cerr << "⚠️  WARNING: Search P95 latency " << (p95 / 1000.0)
+                  << "ms exceeds 500ms target\n";
     }
 }
 
@@ -238,9 +366,16 @@ static void BM_RetrievalService_List(benchmark::State& state) {
 
     std::sort(latencies_us.begin(), latencies_us.end());
     auto p95 = latencies_us[static_cast<size_t>(latencies_us.size() * 0.95)];
+    auto max_us = latencies_us.back();
 
     state.counters["total_docs"] = static_cast<double>(total_docs);
     state.counters["p95_us"] = static_cast<double>(p95);
+    state.counters["max_us"] = static_cast<double>(max_us);
+
+    if (max_us > 1000000) {
+        state.SkipWithError("List latency exceeded 1s — possible hang");
+        return;
+    }
 }
 
 // Benchmark: Grep search (tests FTS5 query + content retrieval)
@@ -251,6 +386,8 @@ static void BM_GrepService_Search(benchmark::State& state) {
 
     std::vector<int64_t> latencies_us;
     size_t total_matches = 0;
+    size_t timeout_count = 0;
+    size_t error_count = 0;
 
     for (auto _ : state) {
         auto start = std::chrono::high_resolution_clock::now();
@@ -265,7 +402,14 @@ static void BM_GrepService_Search(benchmark::State& state) {
 
             auto result = cli::run_sync(g_client->grep(req), std::chrono::milliseconds(2000));
 
-            if (result) {
+            if (!result) {
+                const auto& err = result.error();
+                if (err.code == ErrorCode::Timeout) {
+                    ++timeout_count;
+                } else {
+                    ++error_count;
+                }
+            } else {
                 total_matches += result.value().matches.size();
             }
 #ifdef TRACY_ENABLE
@@ -278,11 +422,39 @@ static void BM_GrepService_Search(benchmark::State& state) {
         latencies_us.push_back(latency_us);
     }
 
+    if (latencies_us.empty()) {
+        state.SkipWithError("No samples collected for grep benchmark");
+        return;
+    }
+
     std::sort(latencies_us.begin(), latencies_us.end());
     auto p95 = latencies_us[static_cast<size_t>(latencies_us.size() * 0.95)];
+    auto max_us = latencies_us.back();
 
     state.counters["total_matches"] = static_cast<double>(total_matches);
     state.counters["p95_us"] = static_cast<double>(p95);
+    state.counters["max_us"] = static_cast<double>(max_us);
+    state.counters["timeout_count"] = static_cast<double>(timeout_count);
+    state.counters["error_count"] = static_cast<double>(error_count);
+
+    if (max_us > 1000000) {
+        std::cerr << "🔴 CRITICAL: Grep latency " << (max_us / 1000.0)
+                  << "ms exceeded 1s; potential hang detected\n";
+        state.SkipWithError("Grep latency exceeded 1s");
+        return;
+    }
+
+    if (timeout_count > 0) {
+        std::cerr << "🔴 CRITICAL: Grep benchmark experienced " << timeout_count
+                  << " timeout(s); potential hang detected\n";
+        state.SkipWithError("Grep timeout detected");
+        return;
+    }
+
+    if (error_count > 0) {
+        std::cerr << "⚠️  WARNING: Grep benchmark observed " << error_count
+                  << " non-timeout error(s).\n";
+    }
 
     // Target: < 500ms for grep with sync indexing (when 040-4 is complete)
     if (p95 > 500000) {
@@ -294,11 +466,15 @@ static void BM_GrepService_Search(benchmark::State& state) {
 // Register benchmarks with appropriate iteration counts
 BENCHMARK(BM_RetrievalService_GetByName_FTS5Ready)->Unit(benchmark::kMicrosecond)->Iterations(100);
 
-BENCHMARK(BM_RetrievalService_GetByName_NotFound)->Unit(benchmark::kMicrosecond)->Iterations(50);
+BENCHMARK(BM_RetrievalService_CatByName)->Unit(benchmark::kMicrosecond)->Iterations(60);
+
+BENCHMARK(BM_RetrievalService_GetByName_NotFound)->Unit(benchmark::kMicrosecond)->Iterations(10);
 
 BENCHMARK(BM_RetrievalService_List)->Unit(benchmark::kMicrosecond)->Iterations(50);
 
 BENCHMARK(BM_GrepService_Search)->Unit(benchmark::kMicrosecond)->Iterations(30);
+
+BENCHMARK(BM_RetrievalService_Search)->Unit(benchmark::kMicrosecond)->Iterations(40);
 
 // Custom main to setup/teardown daemon
 int main(int argc, char** argv) {
@@ -308,7 +484,9 @@ int main(int argc, char** argv) {
     std::cout << "╚═══════════════════════════════════════════════════════════╝\n";
     std::cout << "\nPerformance Targets:\n";
     std::cout << "  • GetByName (FTS5 ready):     P95 < 500ms\n";
+    std::cout << "  • Cat (by name):              P95 < 500ms\n";
     std::cout << "  • GetByName (not found):      P95 < 1000ms (fast error)\n";
+    std::cout << "  • Search query:               P95 < 500ms\n";
     std::cout << "  • List documents:             Responsive metadata queries\n";
     std::cout << "  • Grep search:                P95 < 500ms (with sync indexing)\n";
     std::cout << "\n";

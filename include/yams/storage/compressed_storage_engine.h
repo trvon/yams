@@ -44,6 +44,8 @@ public:
                                      std::span<const std::byte> data) override;
 
     [[nodiscard]] Result<std::vector<std::byte>> retrieve(std::string_view hash) const override;
+    [[nodiscard]] Result<IStorageEngine::RawObject>
+    retrieveRaw(std::string_view hash) const override;
 
     [[nodiscard]] Result<bool> exists(std::string_view hash) const noexcept override;
 
@@ -58,6 +60,8 @@ public:
     std::future<Result<void>> storeAsync(std::string_view hash,
                                          std::span<const std::byte> data) override;
     std::future<Result<std::vector<std::byte>>> retrieveAsync(std::string_view hash) const override;
+    std::future<Result<IStorageEngine::RawObject>>
+    retrieveRawAsync(std::string_view hash) const override;
 
     // Batch operations
     std::vector<Result<void>>

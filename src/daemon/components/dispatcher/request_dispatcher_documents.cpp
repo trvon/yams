@@ -75,6 +75,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetRequest(const GetRe
             serviceReq.includeContent = !req.metadataOnly;
             serviceReq.raw = req.raw;
             serviceReq.extract = req.extract;
+            serviceReq.acceptCompressed = req.acceptCompressed;
             serviceReq.graph = req.showGraph;
             serviceReq.depth = req.graphDepth;
             spdlog::debug("RequestDispatcher: Mapping GetRequest to DocumentService (hash='{}', "
@@ -107,8 +108,16 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetRequest(const GetRe
                     response.content = doc.content.value();
                     response.hasContent = true;
                 } else {
+                    response.content.clear();
                     response.hasContent = false;
                 }
+                response.compressed = doc.compressed;
+                response.compressionAlgorithm = doc.compressionAlgorithm;
+                response.compressionLevel = doc.compressionLevel;
+                response.uncompressedSize = doc.uncompressedSize;
+                response.compressedCrc32 = doc.compressedCrc32;
+                response.uncompressedCrc32 = doc.uncompressedCrc32;
+                response.compressionHeader = doc.compressionHeader;
                 for (const auto& [key, value] : doc.metadata) {
                     response.metadata[key] = value;
                 }
@@ -128,8 +137,16 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetRequest(const GetRe
                     response.content = doc.content.value();
                     response.hasContent = true;
                 } else {
+                    response.content.clear();
                     response.hasContent = false;
                 }
+                response.compressed = doc.compressed;
+                response.compressionAlgorithm = doc.compressionAlgorithm;
+                response.compressionLevel = doc.compressionLevel;
+                response.uncompressedSize = doc.uncompressedSize;
+                response.compressedCrc32 = doc.compressedCrc32;
+                response.uncompressedCrc32 = doc.uncompressedCrc32;
+                response.compressionHeader = doc.compressionHeader;
                 for (const auto& [key, value] : doc.metadata) {
                     response.metadata[key] = value;
                 }
@@ -541,6 +558,8 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                 response.hash = "";
                 response.path = req.path;
                 response.documentsAdded = static_cast<size_t>(serviceResp.filesIndexed);
+                response.documentsUpdated = 0; // Placeholder
+                response.documentsSkipped = static_cast<size_t>(serviceResp.filesSkipped);
                 response.snapshotId = serviceResp.snapshotId;
                 response.snapshotLabel = serviceResp.snapshotLabel;
 

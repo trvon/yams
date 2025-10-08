@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -65,6 +66,18 @@ public:
         if (it == blobs_.end())
             return Error{ErrorCode::NotFound, "no blob"};
         return it->second;
+    }
+    Result<api::IContentStore::RawContent> retrieveRaw(const std::string& hash) override {
+        auto bytes = retrieveBytes(hash);
+        if (!bytes)
+            return bytes.error();
+        api::IContentStore::RawContent raw;
+        raw.data = std::move(bytes.value());
+        return raw;
+    }
+    std::future<Result<api::IContentStore::RawContent>>
+    retrieveRawAsync(const std::string& hash) override {
+        return std::async(std::launch::deferred, [this, hash]() { return retrieveRaw(hash); });
     }
 
     // Unused methods in this test

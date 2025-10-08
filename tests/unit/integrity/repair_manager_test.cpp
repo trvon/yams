@@ -27,6 +27,17 @@ public:
         return it->second;
     }
 
+    Result<IStorageEngine::RawObject> retrieveRaw(std::string_view hash) const override {
+        auto it = data_.find(std::string(hash));
+        if (it == data_.end()) {
+            return Error{ErrorCode::NotFound, "missing"};
+        }
+        IStorageEngine::RawObject obj;
+        obj.data = it->second;
+        obj.header = std::nullopt;
+        return obj;
+    }
+
     Result<bool> exists(std::string_view hash) const noexcept override {
         return data_.contains(std::string(hash));
     }
@@ -50,6 +61,12 @@ public:
     retrieveAsync(std::string_view hash) const override {
         return std::async(std::launch::deferred,
                           [this, hash = std::string(hash)]() { return retrieve(hash); });
+    }
+
+    std::future<Result<IStorageEngine::RawObject>>
+    retrieveRawAsync(std::string_view hash) const override {
+        return std::async(std::launch::deferred,
+                          [this, hash = std::string(hash)]() { return retrieveRaw(hash); });
     }
 
     std::vector<Result<void>>

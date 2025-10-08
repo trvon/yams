@@ -315,6 +315,13 @@ struct MCPRetrieveDocumentResponse {
     std::string name;
     uint64_t size = 0;
     std::string mimeType;
+    bool compressed = false;
+    std::optional<uint8_t> compressionAlgorithm;
+    std::optional<uint8_t> compressionLevel;
+    std::optional<uint64_t> uncompressedSize;
+    std::optional<uint32_t> compressedCrc32;
+    std::optional<uint32_t> uncompressedCrc32;
+    std::optional<std::string> compressionHeader;
     std::optional<std::string> content;
     bool graphEnabled = false;
     std::vector<json> related;

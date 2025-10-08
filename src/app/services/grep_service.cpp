@@ -313,25 +313,23 @@ public:
         }
 
         if (!ftsPathTaken) {
-            bool has_restrictive_filters =
-                !req.tags.empty() || !req.paths.empty() || !req.includePatterns.empty();
-
-            if (has_restrictive_filters) {
-                if (!req.tags.empty()) {
-                    auto tRes = retryMetadataOp(
-                        [&]() {
-                            return ctx_.metadataRepo->findDocumentsByTags(req.tags,
-                                                                          req.matchAllTags);
-                        },
-                        4, std::chrono::milliseconds(25), &metadataTelemetry);
-                    if (tRes)
-                        addDocs(std::move(tRes.value()));
-                }
-                if (!req.paths.empty() || !req.includePatterns.empty()) {
-                    // ... (original path/include pattern logic)
+            if (!req.tags.empty()) {
+                auto tRes = retryMetadataOp(
+                    [&]() {
+                        return ctx_.metadataRepo->findDocumentsByTags(req.tags, req.matchAllTags);
+                    },
+                    4, std::chrono::milliseconds(25), &metadataTelemetry);
+                if (tRes) {
+                    addDocs(std::move(tRes.value()));
                 }
             } else {
-                // ... (original smart search logic)
+                // No FTS and no tags, so we have to get all docs and filter later.
+                auto allDocsRes = retryMetadataOp(
+                    [&]() { return metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%"); }, 4,
+                    std::chrono::milliseconds(25), &metadataTelemetry);
+                if (allDocsRes) {
+                    addDocs(std::move(allDocsRes.value()));
+                }
             }
         }
 

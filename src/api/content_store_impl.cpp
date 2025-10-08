@@ -361,39 +361,32 @@ public:
         return result;
     }
 
+    Result<RawContent> retrieveRaw(const std::string& hash) override {
+        auto storageRes = storage_->retrieveRaw(hash);
+        if (!storageRes) {
+            return storageRes.error();
+        }
+        auto rawObj = std::move(storageRes).value();
+        RawContent out;
+        out.data = std::move(rawObj.data);
+        if (rawObj.header) {
+            out.header = rawObj.header;
+        }
+        return out;
+    }
+
+    std::future<Result<RawContent>> retrieveRawAsync(const std::string& hash) override {
+        return std::async(std::launch::async, [this, hash]() { return retrieveRaw(hash); });
+    }
+
     // Memory-based retrieve operation
     Result<std::vector<std::byte>> retrieveBytes(const std::string& hash) override {
-        // Try direct retrieval first (for small files stored without chunking)
-        auto directResult = storage_->retrieve(hash);
-        if (directResult) {
-            updateStats(0, 0, directResult.value().size(), 0, 0, 1, 0);
-            return directResult;
+        auto dataResult = storage_->retrieve(hash);
+        if (!dataResult) {
+            return dataResult.error();
         }
-
-        // Otherwise, retrieve via temporary file
-        auto tempPath = config_.storagePath / "temp" / (hash + "_ret");
-
-        auto result = retrieve(hash, tempPath, nullptr);
-        if (!result) {
-            return Result<std::vector<std::byte>>(result.error());
-        }
-
-        // Read file into memory
-        std::ifstream file(tempPath, std::ios::binary | std::ios::ate);
-        if (!file) {
-            std::filesystem::remove(tempPath);
-            return Result<std::vector<std::byte>>(ErrorCode::Unknown);
-        }
-
-        size_t size = static_cast<size_t>(file.tellg());
-        file.seekg(0);
-
-        std::vector<std::byte> data(size);
-        file.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(size));
-        file.close();
-
-        std::filesystem::remove(tempPath);
-
+        auto data = std::move(dataResult.value());
+        updateStats(0, 0, data.size(), 0, 0, 1, 0);
         return data;
     }
 

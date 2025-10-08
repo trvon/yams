@@ -19,6 +19,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <regex>
@@ -312,7 +313,8 @@ static void normalizeScores(std::vector<SearchItem>& results, const std::string&
 
 } // namespace
 
-class SearchServiceImpl final : public ISearchService {
+class SearchServiceImpl final : public ISearchService,
+                                public std::enable_shared_from_this<SearchServiceImpl> {
 public:
     explicit SearchServiceImpl(const AppContext& ctx) : ctx_(ctx) {
         // Initialize degraded mode from AppContext repair flags (preferred), falling back to env
@@ -492,7 +494,18 @@ public:
                     auto resp = std::move(result).value();
                     std::vector<SearchItem> filtered;
                     for (const auto& item : resp.results) {
-                        if (wildcardMatch(item.path, req.pathPattern)) {
+                        bool pathOk = true;
+                        if (hasWildcard(req.pathPattern)) {
+                            std::string pattern = req.pathPattern;
+                            if (!pattern.empty() && pattern.front() != '*' &&
+                                pattern.front() != '/' && pattern.find(":/") == std::string::npos) {
+                                pattern = "*" + pattern;
+                            }
+                            pathOk = wildcardMatch(item.path, pattern);
+                        } else {
+                            pathOk = item.path.find(req.pathPattern) != std::string::npos;
+                        }
+                        if (pathOk) {
                             filtered.push_back(item);
                         }
                     }
@@ -696,11 +709,14 @@ public:
             return Error{ErrorCode::NotInitialized, "Worker executor not available"};
         }
 
-        // Since this is a fire-and-forget, we can spawn and detach.
+        // Since this is a fire-and-forget, retain a shared handle so the service outlives the
+        // coroutine. Without this, tests that tear down the service immediately after invoking
+        // lightIndexForHash could destroy the instance while the detached coroutine still runs.
+        auto self = shared_from_this();
         boost::asio::co_spawn(
             ctx_.workerExecutor,
-            [this, hash, maxBytes]() -> boost::asio::awaitable<void> {
-                auto result = co_await lightIndexForHash_impl(hash, maxBytes);
+            [self, hash, maxBytes]() -> boost::asio::awaitable<void> {
+                auto result = co_await self->lightIndexForHash_impl(hash, maxBytes);
                 if (!result) {
                     spdlog::warn("lightIndexForHash failed: {}", result.error().message);
                 }
@@ -1153,13 +1169,23 @@ private:
         applyBudget(req.keywordStageTimeoutMs, engineConfig.keyword_timeout_ms,
                     stageBudgets.keyword_timeout);
 
-        auto hres = ctx_.hybridEngine->search(req.query, req.limit, filter,
+        // Defensive limit: cap hybrid engine query to prevent memory exhaustion
+        constexpr size_t kMaxHybridResults = 10000;
+        const size_t effectiveLimit = std::min(static_cast<size_t>(req.limit), kMaxHybridResults);
+
+        auto hres = ctx_.hybridEngine->search(req.query, effectiveLimit, filter,
                                               budgetsActive ? &stageBudgets : nullptr);
         if (!hres) {
             return Error{ErrorCode::InternalError, "Hybrid search failed: " + hres.error().message};
         }
 
         const auto& vec = hres.value();
+
+        // Safety check: if result set is unexpectedly large, truncate with warning
+        if (vec.size() > kMaxHybridResults) {
+            spdlog::warn("Hybrid search returned {} results, truncating to {} to prevent crash",
+                         vec.size(), kMaxHybridResults);
+        }
 
         SearchResponse resp;
         resp.type = "hybrid";
@@ -1194,8 +1220,14 @@ private:
         }
 
         {
-            const size_t n = vec.size();
-            const size_t workers = recommendedWorkers(n);
+            // Defensive: limit processing to prevent crash on large result sets
+            constexpr size_t kMaxProcessableResults = 10000;
+            const size_t n = std::min(vec.size(), kMaxProcessableResults);
+
+            // Cap worker count to avoid thread explosion
+            constexpr size_t kMaxWorkers = 16;
+            const size_t workers = std::min(recommendedWorkers(n), kMaxWorkers);
+
             std::atomic<size_t> next{0};
             std::vector<std::optional<SearchItem>> slots(n);
             auto worker = [&]() {

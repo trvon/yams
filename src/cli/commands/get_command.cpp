@@ -1,17 +1,22 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <optional>
 #include <sstream>
+#include <vector>
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/time_parser.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/compression/compression_header.h>
+#include <yams/compression/compressor_interface.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/response_of.hpp>
@@ -214,6 +219,7 @@ public:
             // Content options
             dreq.raw = raw_;
             dreq.extract = extract_;
+            dreq.acceptCompressed = true;
 
             // Knowledge graph options
             dreq.showGraph = showGraph_;
@@ -247,6 +253,8 @@ public:
                         std::cerr << key << ": " << value << std::endl;
                     }
 
+                    printCompressionDetails(resp, std::cerr);
+
                     // Display knowledge graph if enabled
                     if (resp.graphEnabled && !resp.related.empty()) {
                         std::cerr << "\nRelated documents (depth " << graphDepth_ << "):\n";
@@ -276,6 +284,10 @@ public:
                             std::cerr << "Output: " << outputPath_ << std::endl;
                             std::cerr << "Size: " << resp.totalBytes << " bytes" << std::endl;
                         }
+                    }
+
+                    if (verbose_ || resp.compressed) {
+                        printCompressionDetails(resp, std::cerr);
                     }
 
                     // Display knowledge graph if enabled
@@ -1087,6 +1099,101 @@ private:
         }
 
         return score;
+    }
+
+    std::optional<compression::CompressionHeader>
+    decodeCompressionHeader(const std::vector<uint8_t>& buffer) const {
+        if (buffer.size() != compression::CompressionHeader::SIZE) {
+            return std::nullopt;
+        }
+
+        compression::CompressionHeader header{};
+        std::memcpy(&header, buffer.data(), buffer.size());
+        if (header.magic != compression::CompressionHeader::MAGIC) {
+            return std::nullopt;
+        }
+
+        return header;
+    }
+
+    std::string compressionAlgorithmName(uint8_t algorithm) const {
+        using compression::CompressionAlgorithm;
+        switch (static_cast<CompressionAlgorithm>(algorithm)) {
+            case CompressionAlgorithm::None:
+                return "none";
+            case CompressionAlgorithm::Zstandard:
+                return "zstd";
+            case CompressionAlgorithm::LZMA:
+                return "lzma";
+            default:
+                return "unknown(" + std::to_string(static_cast<int>(algorithm)) + ")";
+        }
+    }
+
+    void printCompressionDetails(const yams::daemon::GetResponse& resp, std::ostream& os) const {
+        const bool compressed = resp.compressed;
+
+        auto headerOpt = decodeCompressionHeader(resp.compressionHeader);
+        std::optional<uint8_t> algorithm = resp.compressionAlgorithm;
+        std::optional<uint8_t> level = resp.compressionLevel;
+        std::optional<uint64_t> uncompressed = resp.uncompressedSize;
+        std::optional<uint32_t> compressedCrc = resp.compressedCrc32;
+        std::optional<uint32_t> uncompressedCrc = resp.uncompressedCrc32;
+
+        if (headerOpt) {
+            algorithm = headerOpt->algorithm;
+            level = headerOpt->level;
+            uncompressed = headerOpt->uncompressedSize;
+            compressedCrc = headerOpt->compressedCRC32;
+            uncompressedCrc = headerOpt->uncompressedCRC32;
+        }
+
+        os << "Compression: " << (compressed ? "enabled" : "disabled");
+        if (compressed && algorithm.has_value()) {
+            os << " (" << compressionAlgorithmName(*algorithm);
+            if (level.has_value()) {
+                os << " level " << static_cast<int>(*level);
+            }
+            os << ")";
+        }
+        os << '\n';
+
+        if (compressed) {
+            uint64_t compressedSize = 0;
+            if (headerOpt) {
+                compressedSize = headerOpt->compressedSize;
+            } else if (resp.hasContent) {
+                compressedSize = static_cast<uint64_t>(resp.content.size());
+            }
+            if (compressedSize > 0) {
+                os << "  Compressed size: " << compressedSize << " bytes\n";
+            }
+        }
+
+        if (uncompressed.has_value() && *uncompressed > 0) {
+            os << "  Uncompressed size: " << *uncompressed << " bytes\n";
+        } else {
+            os << "  Uncompressed size: " << resp.size << " bytes\n";
+        }
+
+        if (compressed && headerOpt) {
+            std::ostringstream ratioStream;
+            ratioStream << std::fixed << std::setprecision(2) << headerOpt->compressionRatio();
+            os << "  Compression ratio: " << ratioStream.str() << "x\n";
+        }
+
+        auto formatCrc = [](uint32_t value) {
+            std::ostringstream oss;
+            oss << "0x" << std::uppercase << std::hex << std::setw(8) << std::setfill('0') << value;
+            return oss.str();
+        };
+
+        if (compressed && compressedCrc.has_value()) {
+            os << "  CRC32 (compressed): " << formatCrc(*compressedCrc) << '\n';
+        }
+        if (uncompressedCrc.has_value()) {
+            os << "  CRC32 (original): " << formatCrc(*uncompressedCrc) << '\n';
+        }
     }
 
     YamsCLI* cli_ = nullptr;

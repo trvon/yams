@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -72,6 +73,19 @@ public:
             return Error{ErrorCode::NotFound, "content not found"};
         }
         return it->second;
+    }
+    Result<api::IContentStore::RawContent> retrieveRaw(const std::string& hash) override {
+        auto bytes = retrieveBytes(hash);
+        if (!bytes) {
+            return bytes.error();
+        }
+        api::IContentStore::RawContent raw;
+        raw.data = std::move(bytes.value());
+        return raw;
+    }
+    std::future<Result<api::IContentStore::RawContent>>
+    retrieveRawAsync(const std::string& hash) override {
+        return std::async(std::launch::deferred, [this, hash]() { return retrieveRaw(hash); });
     }
     Result<bool> exists(const std::string&) const override { return ErrorCode::NotImplemented; }
     Result<bool> remove(const std::string&) override { return ErrorCode::NotImplemented; }

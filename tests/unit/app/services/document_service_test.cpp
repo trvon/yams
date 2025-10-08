@@ -288,6 +288,7 @@ TEST_F(DocumentServiceTest, RetrieveDocumentByHash) {
     RetrieveDocumentRequest request;
     request.hash = testHash1_;
     request.includeContent = true;
+    request.acceptCompressed = false;
 
     auto result = documentService_->retrieve(request);
 
@@ -297,11 +298,68 @@ TEST_F(DocumentServiceTest, RetrieveDocumentByHash) {
     EXPECT_TRUE(result.value().document->content.has_value());
 }
 
+TEST_F(DocumentServiceTest, RetrieveDocumentAcceptCompressedProvidesMetadataAndRawBytes) {
+    auto sourcePath = testDir_ / "compressed_fixture.bin";
+    {
+        std::ofstream out(sourcePath, std::ios::binary);
+        ASSERT_TRUE(out.good());
+        const std::string block(64 * 1024, 'A');
+        for (int i = 0; i < 8; ++i) {
+            out.write(block.data(), static_cast<std::streamsize>(block.size()));
+        }
+        out.flush();
+        ASSERT_TRUE(out.good());
+    }
+
+    StoreDocumentRequest storeReq;
+    storeReq.path = sourcePath.string();
+    storeReq.tags = {"compressed"};
+    auto stored = documentService_->store(storeReq);
+    ASSERT_TRUE(stored) << stored.error().message;
+    const std::string storedHash = stored.value().hash;
+    ASSERT_FALSE(storedHash.empty());
+
+    const auto expectedSize = std::filesystem::file_size(sourcePath);
+
+    // Baseline: standard retrieval should return uncompressed payload
+    RetrieveDocumentRequest plainReq;
+    plainReq.hash = storedHash;
+    plainReq.includeContent = true;
+    plainReq.acceptCompressed = false;
+    auto plain = documentService_->retrieve(plainReq);
+    ASSERT_TRUE(plain) << plain.error().message;
+    ASSERT_TRUE(plain.value().document.has_value());
+    const auto& plainDoc = plain.value().document.value();
+    ASSERT_TRUE(plainDoc.content.has_value());
+    EXPECT_FALSE(plainDoc.compressed);
+    EXPECT_FALSE(plainDoc.compressionAlgorithm.has_value());
+
+    // With acceptCompressed enabled we expect raw compressed bytes plus metadata
+    RetrieveDocumentRequest compressedReq;
+    compressedReq.hash = storedHash;
+    compressedReq.includeContent = true;
+    compressedReq.acceptCompressed = true;
+    auto compressed = documentService_->retrieve(compressedReq);
+    ASSERT_TRUE(compressed) << compressed.error().message;
+    ASSERT_TRUE(compressed.value().document.has_value());
+    const auto& compressedDoc = compressed.value().document.value();
+    ASSERT_TRUE(compressedDoc.content.has_value());
+    EXPECT_TRUE(compressedDoc.compressed);
+    EXPECT_TRUE(compressedDoc.compressionAlgorithm.has_value());
+    EXPECT_TRUE(compressedDoc.uncompressedSize.has_value());
+    EXPECT_EQ(expectedSize, compressedDoc.uncompressedSize.value());
+    EXPECT_EQ(expectedSize, compressedDoc.size);
+    EXPECT_FALSE(compressedDoc.compressionHeader.empty());
+    EXPECT_NE(*compressedDoc.content, *plainDoc.content);
+    EXPECT_LT(compressedDoc.content->size(), expectedSize);
+}
+
 TEST_F(DocumentServiceTest, RetrieveDocumentByName) {
     // This test depends on having documents stored with names
     RetrieveDocumentRequest request;
     request.name = "test1.txt";
     request.includeContent = true;
+    request.acceptCompressed = false;
 
     auto result = documentService_->retrieve(request);
 
@@ -318,6 +376,7 @@ TEST_F(DocumentServiceTest, RetrieveDocumentByName) {
 TEST_F(DocumentServiceTest, RetrieveNonExistentDocument) {
     RetrieveDocumentRequest request;
     request.hash = "nonexistent_hash_that_does_not_exist";
+    request.acceptCompressed = false;
 
     auto result = documentService_->retrieve(request);
 
@@ -359,6 +418,7 @@ TEST_F(DocumentServiceTest, DeleteDocumentByHash) {
     // Verify document is actually deleted
     RetrieveDocumentRequest getRequest;
     getRequest.hash = hashToDelete;
+    getRequest.acceptCompressed = false;
     auto getResult = documentService_->retrieve(getRequest);
     if (getResult) {
         EXPECT_FALSE(getResult.value().document.has_value()); // Should not be found
@@ -394,6 +454,7 @@ TEST_F(DocumentServiceTest, DeleteWithDryRun) {
     // Verify document still exists
     RetrieveDocumentRequest getRequest;
     getRequest.hash = testHash1_;
+    getRequest.acceptCompressed = false;
     auto getResult = documentService_->retrieve(getRequest);
     // Should still exist (unless it wasn't there to begin with)
 }

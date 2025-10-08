@@ -4,6 +4,9 @@
 
 #include <spdlog/spdlog.h>
 #include <yams/api/content_store.h>
+#include <yams/compression/compression_header.h>
+#include <yams/compression/compression_utils.h>
+#include <yams/compression/compressor_interface.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/extraction/format_handlers/format_handler.hpp>
@@ -19,6 +22,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -26,6 +30,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -120,6 +125,88 @@ inline bool looksLikePartialHash(const std::string& s) {
     if (s.size() < 6 || s.size() >= 64)
         return false;
     return isHex(s);
+}
+
+struct CompressedPayload {
+    std::string blob;
+    compression::CompressionHeader header;
+};
+
+Result<CompressedPayload> makeCompressedPayload(std::span<const std::byte> data) {
+    auto& registry = compression::CompressionRegistry::instance();
+    auto compressor = registry.createCompressor(compression::CompressionAlgorithm::Zstandard);
+    if (!compressor) {
+        return Error{ErrorCode::InvalidState, "Zstandard compressor unavailable"};
+    }
+
+    constexpr uint8_t kDefaultLevel = 3;
+    auto compressedResult = compressor->compress(data, kDefaultLevel);
+    if (!compressedResult) {
+        return compressedResult.error();
+    }
+
+    const auto& compressedVal = compressedResult.value();
+
+    compression::CompressionHeader header{};
+    header.magic = compression::CompressionHeader::MAGIC;
+    header.version = compression::CompressionHeader::VERSION;
+    header.algorithm = static_cast<uint8_t>(compression::CompressionAlgorithm::Zstandard);
+    header.level = kDefaultLevel;
+    header.uncompressedSize = static_cast<uint64_t>(compressedVal.originalSize);
+    header.compressedSize = static_cast<uint64_t>(compressedVal.compressedSize);
+    header.uncompressedCRC32 = compression::calculateCRC32(data);
+    auto compressedSpan =
+        std::span<const std::byte>(compressedVal.data.data(), compressedVal.data.size());
+    header.compressedCRC32 = compression::calculateCRC32(compressedSpan);
+    const auto nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::system_clock::now().time_since_epoch())
+                           .count();
+    header.timestamp = nowNs < 0 ? 0ULL : static_cast<uint64_t>(nowNs);
+    header.flags = 0;
+    header.reserved1 = 0;
+    std::memset(header.reserved2, 0, sizeof(header.reserved2));
+
+    CompressedPayload payload;
+    payload.blob.resize(sizeof(header) + compressedVal.data.size());
+    std::memcpy(payload.blob.data(), &header, sizeof(header));
+    std::memcpy(payload.blob.data() + sizeof(header), compressedVal.data.data(),
+                compressedVal.data.size());
+    payload.header = header;
+    return payload;
+}
+
+inline void resetCompressionMetadata(RetrievedDocument& doc) {
+    doc.compressed = false;
+    doc.compressionAlgorithm.reset();
+    doc.compressionLevel.reset();
+    doc.uncompressedSize.reset();
+    doc.compressedCrc32.reset();
+    doc.uncompressedCrc32.reset();
+    doc.compressionHeader.clear();
+}
+
+inline void applyCompressionMetadata(RetrievedDocument& doc,
+                                     const compression::CompressionHeader& header) {
+    doc.compressed = true;
+    doc.compressionAlgorithm = header.algorithm;
+    doc.compressionLevel = header.level;
+    doc.uncompressedSize = header.uncompressedSize;
+    doc.compressedCrc32 = header.compressedCRC32;
+    doc.uncompressedCrc32 = header.uncompressedCRC32;
+    const auto* bytes = reinterpret_cast<const uint8_t*>(&header);
+    doc.compressionHeader.assign(bytes, bytes + sizeof(header));
+    doc.size = header.uncompressedSize;
+}
+
+inline void markUncompressed(RetrievedDocument& doc, uint64_t size) {
+    doc.compressed = false;
+    doc.compressionAlgorithm.reset();
+    doc.compressionLevel.reset();
+    doc.compressedCrc32.reset();
+    doc.uncompressedCrc32.reset();
+    doc.compressionHeader.clear();
+    doc.uncompressedSize = size;
+    doc.size = size;
 }
 
 inline std::string makeTempFilePathFor(const std::string& name) {
@@ -497,6 +584,11 @@ public:
             }
         }
 
+        resetCompressionMetadata(doc);
+        if (doc.size > 0) {
+            doc.uncompressedSize = doc.size;
+        }
+
         // Include content if requested (prefer hot extracted text when available)
         if (req.includeContent) {
             bool filled = false;
@@ -504,7 +596,8 @@ public:
                 auto contentResult = ctx_.metadataRepo->getContent(foundDoc->id);
                 if (contentResult) {
                     const auto& optionalContent = contentResult.value();
-                    if (optionalContent.has_value() && !optionalContent->contentText.empty()) {
+                    if (optionalContent.has_value() && !optionalContent->contentText.empty() &&
+                        !req.acceptCompressed) {
                         doc.content = optionalContent->contentText;
                         doc.size = static_cast<uint64_t>(doc.content->size());
                         filled = true;
@@ -512,13 +605,64 @@ public:
                 }
             }
             if (!filled) {
-                std::ostringstream oss;
-                auto rs = ctx_.store->retrieveStream(resolvedHash, oss, nullptr);
-                if (!rs) {
-                    return Error{ErrorCode::NotFound, "Document content not found"};
+                bool compressedAttached = false;
+                if (req.acceptCompressed) {
+                    auto rawResult = ctx_.store->retrieveRaw(resolvedHash);
+                    if (rawResult) {
+                        auto raw = std::move(rawResult.value());
+                        const auto rawSize = static_cast<uint64_t>(raw.data.size());
+                        const auto rawSpan =
+                            std::span<const std::byte>(raw.data.data(), raw.data.size());
+
+                        if (raw.header) {
+                            applyCompressionMetadata(doc, *raw.header);
+                            doc.content.emplace(reinterpret_cast<const char*>(raw.data.data()),
+                                                raw.data.size());
+                            compressedAttached = true;
+                        } else {
+                            auto compressedPayload = makeCompressedPayload(rawSpan);
+                            if (compressedPayload) {
+                                auto payload = std::move(compressedPayload.value());
+                                applyCompressionMetadata(doc, payload.header);
+                                doc.content.emplace(std::move(payload.blob));
+                                compressedAttached = true;
+                            } else {
+                                markUncompressed(doc, rawSize);
+                                doc.content.emplace(reinterpret_cast<const char*>(raw.data.data()),
+                                                    raw.data.size());
+                                compressedAttached = true;
+                            }
+                        }
+                        filled = compressedAttached;
+                    } else if (rawResult.error().code != ErrorCode::NotFound) {
+                        return Error{rawResult.error().code, "Document content retrieval failed: " +
+                                                                 rawResult.error().message};
+                    }
                 }
-                doc.content = oss.str();
-                doc.size = static_cast<uint64_t>(doc.content->size());
+
+                if (!filled) {
+                    auto bytesResult = ctx_.store->retrieveBytes(resolvedHash);
+                    if (!bytesResult) {
+                        return Error{bytesResult.error().code, "Document content not found"};
+                    }
+                    auto data = std::move(bytesResult.value());
+                    doc.content.emplace(reinterpret_cast<const char*>(data.data()), data.size());
+                    markUncompressed(doc, static_cast<uint64_t>(data.size()));
+                    filled = true;
+                }
+            }
+        } else if (req.acceptCompressed) {
+            auto rawResult = ctx_.store->retrieveRaw(resolvedHash);
+            if (rawResult) {
+                auto raw = std::move(rawResult.value());
+                if (raw.header) {
+                    applyCompressionMetadata(doc, *raw.header);
+                } else {
+                    markUncompressed(doc, doc.size);
+                }
+            } else if (rawResult.error().code != ErrorCode::NotFound) {
+                return Error{rawResult.error().code,
+                             "Document metadata retrieval failed: " + rawResult.error().message};
             }
         }
 
@@ -1424,30 +1568,82 @@ public:
         if (!ctx_.metadataRepo) {
             return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
         }
-        // Match filename anywhere at end of path; fallback to direct LIKE
-        auto byName = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%/" + name);
-        if (!byName) {
-            auto direct = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, name);
-            if (!direct) {
-                return Error{ErrorCode::NotFound, "Document not found: " + name};
-            }
-            if (direct.value().empty()) {
-                return Error{ErrorCode::NotFound, "Document not found: " + name};
-            }
-            if (direct.value().size() > 1) {
-                return Error{ErrorCode::InvalidOperation,
-                             "Ambiguous name: multiple matches for '" + name + "'"};
-            }
-            return direct.value()[0].sha256Hash;
+
+        std::vector<std::string> candidatePatterns;
+        std::string basename;
+
+        // Extract basename for fallback matching
+        auto lastSlash = name.find_last_of("/\\");
+        if (lastSlash != std::string::npos) {
+            basename = name.substr(lastSlash + 1);
+        } else {
+            basename = name;
         }
-        if (byName.value().empty()) {
+
+        // Strategy 1: Exact match on full name
+        candidatePatterns.push_back(name);
+
+        // Strategy 2: If absolute path, try stripping cwd prefix
+        if (!name.empty() && (name[0] == '/' || name.find(":\\") != std::string::npos)) {
+            try {
+                std::filesystem::path inputPath(name);
+                std::filesystem::path cwd = std::filesystem::current_path();
+                if (inputPath.string().find(cwd.string()) == 0) {
+                    auto rel = std::filesystem::relative(inputPath, cwd).string();
+                    if (!rel.empty() && rel != name) {
+                        candidatePatterns.push_back(rel);
+                    }
+                }
+            } catch (...) {
+                // Ignore path manipulation errors
+            }
+        }
+
+        // Strategy 3: Match basename at end of any path
+        if (!basename.empty() && basename != name) {
+            candidatePatterns.push_back("%/" + basename);
+        }
+
+        // Strategy 4: Just the basename (fuzzy)
+        if (!basename.empty() && basename != name) {
+            candidatePatterns.push_back(basename);
+        }
+
+        // Try each pattern
+        std::vector<metadata::DocumentInfo> allMatches;
+        for (const auto& pattern : candidatePatterns) {
+            auto res = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, pattern);
+            if (res && !res.value().empty()) {
+                allMatches.insert(allMatches.end(), res.value().begin(), res.value().end());
+            }
+        }
+
+        // Deduplicate by hash
+        std::unordered_set<std::string> seenHashes;
+        std::vector<metadata::DocumentInfo> uniqueMatches;
+        for (const auto& doc : allMatches) {
+            if (seenHashes.insert(doc.sha256Hash).second) {
+                uniqueMatches.push_back(doc);
+            }
+        }
+
+        if (uniqueMatches.empty()) {
             return Error{ErrorCode::NotFound, "Document not found: " + name};
         }
-        if (byName.value().size() > 1) {
-            return Error{ErrorCode::InvalidOperation,
-                         "Ambiguous name: multiple matches for '" + name + "'"};
+        if (uniqueMatches.size() > 1) {
+            std::string msg = "Ambiguous name: " + std::to_string(uniqueMatches.size()) +
+                              " matches for '" + name + "': ";
+            for (size_t i = 0; i < std::min(size_t(5), uniqueMatches.size()); ++i) {
+                if (i > 0)
+                    msg += ", ";
+                msg += uniqueMatches[i].fileName;
+            }
+            if (uniqueMatches.size() > 5) {
+                msg += ", ...";
+            }
+            return Error{ErrorCode::InvalidOperation, msg};
         }
-        return byName.value()[0].sha256Hash;
+        return uniqueMatches[0].sha256Hash;
     }
 
     // Delete by name(s) or pattern (dry-run supported)

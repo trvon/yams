@@ -220,28 +220,28 @@ Result<void> StorageEngine::store(std::string_view hash, std::span<const std::by
     return result;
 }
 
-Result<std::vector<std::byte>> StorageEngine::retrieve(std::string_view hash) const {
+Result<IStorageEngine::RawObject> StorageEngine::retrieveRaw(std::string_view hash) const {
     // Allow manifest keys (hash.manifest) and regular hashes
     bool isManifest = hash.ends_with(".manifest");
     if (!isManifest && hash.length() != HASH_STRING_SIZE) {
         spdlog::error(
             "Invalid hash length for retrieve: expected {} characters, got {} for hash '{}'",
             HASH_STRING_SIZE, hash.length(), hash);
-        return Result<std::vector<std::byte>>(ErrorCode::InvalidArgument);
+        return Result<IStorageEngine::RawObject>(ErrorCode::InvalidArgument);
     }
 
     auto objectPath = getObjectPath(hash);
 
     // Check existence
     if (!std::filesystem::exists(objectPath)) {
-        return Result<std::vector<std::byte>>(ErrorCode::ChunkNotFound);
+        return Result<IStorageEngine::RawObject>(ErrorCode::ChunkNotFound);
     }
 
     // Read file
     std::ifstream file(objectPath, std::ios::binary | std::ios::ate);
     if (!file) {
         pImpl->stats.failedOperations.fetch_add(1);
-        return Result<std::vector<std::byte>>(ErrorCode::PermissionDenied);
+        return Result<IStorageEngine::RawObject>(ErrorCode::PermissionDenied);
     }
 
     auto fileSize = file.tellg();
@@ -252,13 +252,24 @@ Result<std::vector<std::byte>> StorageEngine::retrieve(std::string_view hash) co
 
     if (!file) {
         pImpl->stats.failedOperations.fetch_add(1);
-        return Result<std::vector<std::byte>>(ErrorCode::CorruptedData);
+        return Result<IStorageEngine::RawObject>(ErrorCode::CorruptedData);
     }
 
     // Update statistics
     pImpl->stats.readOperations.fetch_add(1);
 
-    return data;
+    IStorageEngine::RawObject obj;
+    obj.data = std::move(data);
+    obj.header = std::nullopt;
+    return obj;
+}
+
+Result<std::vector<std::byte>> StorageEngine::retrieve(std::string_view hash) const {
+    auto rawResult = retrieveRaw(hash);
+    if (!rawResult) {
+        return rawResult.error();
+    }
+    return std::move(rawResult.value().data);
 }
 
 Result<bool> StorageEngine::exists(std::string_view hash) const noexcept {
@@ -342,6 +353,14 @@ StorageEngine::retrieveAsync(std::string_view hash) const {
 
     return std::async(std::launch::async,
                       [this, hash = std::move(hashCopy)]() { return retrieve(hash); });
+}
+
+std::future<Result<IStorageEngine::RawObject>>
+StorageEngine::retrieveRawAsync(std::string_view hash) const {
+    std::string hashCopy(hash);
+
+    return std::async(std::launch::async,
+                      [this, hash = std::move(hashCopy)]() { return retrieveRaw(hash); });
 }
 
 StorageStats StorageEngine::getStats() const noexcept {

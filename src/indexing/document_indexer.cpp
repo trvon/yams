@@ -167,16 +167,6 @@ public:
             docInfo.contentExtracted = !extractedText.empty();
             docInfo.extractionStatus = metadata::ExtractionStatus::Success;
 
-            // Store additional metadata from content handler
-            // Note: This would require updating DocumentInfo to support arbitrary metadata
-            // For now, we can at least log it
-            if (!metadata.empty()) {
-                spdlog::debug("Document {} has {} metadata items", path.string(), metadata.size());
-                for (const auto& [key, value] : metadata) {
-                    spdlog::trace("  {}: {}", key, value);
-                }
-            }
-
             // Calculate SHA256 hash
             auto hashResult = calculateFileHash(path);
             if (hashResult) {
@@ -187,72 +177,42 @@ public:
                 spdlog::error("indexDocument: Failed to calculate hash for {}", path.string());
             }
 
-            // Check if document with same hash already exists (duplicate content)
-            auto existingDoc = metadataRepo_->getDocumentByHash(docInfo.sha256Hash);
+            auto existingDocByPath = metadataRepo_->findDocumentByExactPath(path.string());
+            if (!existingDocByPath) {
+                return Error{ErrorCode::InternalError,
+                             "Failed to query by path: " + existingDocByPath.error().message};
+            }
+
             int64_t documentId = -1;
-            bool isNewDocument = true;
+            bool contentChanged = true;
+            bool isNewDocument = false;
 
-            if (existingDoc && existingDoc.value().has_value()) {
-                // Document with same hash exists
-                auto& existing = existingDoc.value().value();
+            if (existingDocByPath.value().has_value()) {
+                // Update existing document
+                isNewDocument = false;
+                auto& existingDoc = existingDocByPath.value().value();
+                documentId = existingDoc.id;
+                docInfo.id = documentId;
 
-                if (existing.filePath != path.string()) {
-                    // Same content, different location
-                    spdlog::info("Duplicate content detected: {} has same content as {}",
-                                 path.string(), existing.filePath);
+                if (existingDoc.sha256Hash == docInfo.sha256Hash) {
+                    contentChanged = false;
+                }
 
-                    // Track alternate location
-                    auto metaResult = metadataRepo_->setMetadata(
-                        existing.id,
-                        "alternate_location_" +
-                            std::to_string(
-                                std::chrono::system_clock::now().time_since_epoch().count()),
-                        metadata::MetadataValue(path.string()));
-
-                    // Create automatic snapshot if significant time has passed
-                    auto timeDiff = docInfo.indexedTime - existing.indexedTime;
-                    auto hoursSinceLastIndex =
-                        std::chrono::duration_cast<std::chrono::hours>(timeDiff).count();
-
-                    if (hoursSinceLastIndex > 24) {
-                        auto timestamp = std::chrono::system_clock::now();
-                        auto snapshotId =
-                            "auto_" +
-                            std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
-                                               timestamp.time_since_epoch())
-                                               .count());
-
-                        metadataRepo_->setMetadata(existing.id, "snapshot_id",
-                                                   metadata::MetadataValue(snapshotId));
-
-                        spdlog::info("Created automatic snapshot {} for duplicate content",
-                                     snapshotId);
-                    }
-
-                    // Update indexed time (make a copy since existing is const)
-                    auto updatedDoc = existing;
-                    updatedDoc.indexedTime = docInfo.indexedTime;
-                    metadataRepo_->updateDocument(updatedDoc);
-
-                    documentId = existing.id;
-                    isNewDocument = false;
-                } else {
-                    // Same file, same content - shouldn't happen as needsIndexing() would return
-                    // false
-                    spdlog::warn("Unexpected: indexDocument called for unchanged file {}",
-                                 path.string());
-                    documentId = existing.id;
-                    isNewDocument = false;
+                auto updateResult = metadataRepo_->updateDocument(docInfo);
+                if (!updateResult) {
+                    result.status = IndexingStatus::Failed;
+                    result.error = updateResult.error().message;
+                    return result;
                 }
             } else {
-                // New document - insert it
+                // Insert new document
+                isNewDocument = true;
                 auto insertResult = metadataRepo_->insertDocument(docInfo);
                 if (!insertResult) {
                     result.status = IndexingStatus::Failed;
                     result.error = insertResult.error().message;
                     return result;
                 }
-
                 documentId = insertResult.value();
 
                 // Feature-flagged versioning (Phase 1: path-series only)
@@ -370,8 +330,8 @@ public:
                               documentId);
             }
 
-            // Process and chunk content (only for new documents)
-            if (isNewDocument) {
+            // Process and chunk content (only for new documents or if content changed)
+            if (isNewDocument || contentChanged) {
                 auto chunks =
                     contentProcessor_->chunkContent(extractedText, result.documentId, config);
 
@@ -388,7 +348,7 @@ public:
                 result.chunksCreated = chunks.size();
                 chunksCreated_ += chunks.size();
             } else {
-                result.chunksCreated = 0; // No new chunks for duplicate content
+                result.chunksCreated = 0; // No new chunks for metadata-only update
             }
             result.status = IndexingStatus::Completed;
 
@@ -483,44 +443,61 @@ public:
             return Error{ErrorCode::FileNotFound, "File does not exist: " + path.string()};
         }
 
-        // Calculate current file hash
-        auto hashResult = calculateFileHash(path);
-        if (!hashResult) {
-            return Error{ErrorCode::InternalError, "Failed to calculate file hash"};
-        }
-
-        spdlog::debug("needsIndexing: Calculated hash for {}: {}", path.string(),
-                      hashResult.value());
-
-        // Check if document exists in index
-        auto docResult = metadataRepo_->getDocumentByHash(hashResult.value());
+        // Query by path to get existing document info
+        auto docResult = metadataRepo_->findDocumentByExactPath(path.string());
         if (!docResult) {
-            return Error{ErrorCode::InternalError, docResult.error().message};
+            return Error{ErrorCode::InternalError,
+                         "Failed to query by path: " + docResult.error().message};
         }
 
         if (!docResult.value().has_value()) {
-            // Document not in index, needs indexing
-            spdlog::debug("needsIndexing: Document with hash {} not found in index",
-                          hashResult.value());
+            // Not in DB, needs indexing
             return true;
         }
 
-        // Document with this hash exists - check if it's the same file
         auto& existingDoc = docResult.value().value();
 
-        if (existingDoc.filePath == path.string()) {
-            // Same file, same content - no re-indexing needed
-            spdlog::debug("needsIndexing: Document {} already indexed with same hash",
-                          path.string());
+        // Compare metadata (mtime and size) for a fast check
+        std::error_code ec;
+        auto current_mtime_fs = std::filesystem::last_write_time(path, ec);
+        if (ec) {
+            return Error{ErrorCode::IOError,
+                         "Failed to get modification time for " + path.string()};
+        }
+        auto current_size = std::filesystem::file_size(path, ec);
+        if (ec) {
+            return Error{ErrorCode::IOError, "Failed to get file size for " + path.string()};
+        }
+
+        auto current_mtime_sc = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+            current_mtime_fs - std::filesystem::file_time_type::clock::now() +
+            std::chrono::system_clock::now());
+
+        // Compare seconds since epoch to avoid sub-second precision issues
+        if (std::chrono::duration_cast<std::chrono::seconds>(
+                existingDoc.modifiedTime.time_since_epoch())
+                    .count() == std::chrono::duration_cast<std::chrono::seconds>(
+                                    current_mtime_sc.time_since_epoch())
+                                    .count() &&
+            existingDoc.fileSize == static_cast<int64_t>(current_size)) {
             return false;
-        } else {
-            // Same content, different file - this needs special handling
-            // We'll track this as an alternate location but won't re-index the content
-            spdlog::debug("needsIndexing: Found duplicate content - {} has same hash as {}",
-                          path.string(), existingDoc.filePath);
-            // Return true so indexDocument() can handle the relationship tracking
+        }
+
+        // For robustness, if metadata differs, check hash to be sure.
+        auto newHashResult = calculateFileHash(path);
+        if (!newHashResult) {
+            return newHashResult.error();
+        }
+
+        if (existingDoc.sha256Hash == newHashResult.value()) {
+            // Hashes match, but mtime/size was different.
+            // This means only metadata changed. We should update it.
+            // Returning true will trigger indexDocument, which should handle the update.
             return true;
         }
+
+        // Hashes differ, needs indexing.
+        return true;
     }
 
     std::unordered_map<std::string, int64_t> getStatistics() const override {

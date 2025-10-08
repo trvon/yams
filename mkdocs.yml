@@ -3,7 +3,7 @@ site_description: Yet Another Memory System — persistent memory for LLMs and a
 site_url: https://trvon.github.io/yams
 repo_url: https://sr.ht/~trvon/yams/
 repo_name: sr.ht/~trvon/yams
-docs_dir: docs
+docs_dir: docs/site
 site_dir: public
 use_directory_urls: true
 

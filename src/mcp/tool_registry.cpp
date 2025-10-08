@@ -525,6 +525,25 @@ MCPRetrieveDocumentResponse MCPRetrieveDocumentResponse::fromJson(const json& j)
     resp.name = j.value("name", std::string{});
     resp.size = j.value("size", uint64_t{0});
     resp.mimeType = j.value("mime_type", std::string{});
+    resp.compressed = j.value("compressed", false);
+    if (auto it = j.find("compression_algorithm"); it != j.end() && !it->is_null()) {
+        resp.compressionAlgorithm = static_cast<uint8_t>(it->get<uint32_t>());
+    }
+    if (auto it = j.find("compression_level"); it != j.end() && !it->is_null()) {
+        resp.compressionLevel = static_cast<uint8_t>(it->get<uint32_t>());
+    }
+    if (auto it = j.find("uncompressed_size"); it != j.end() && !it->is_null()) {
+        resp.uncompressedSize = it->get<uint64_t>();
+    }
+    if (auto it = j.find("compressed_crc32"); it != j.end() && !it->is_null()) {
+        resp.compressedCrc32 = it->get<uint32_t>();
+    }
+    if (auto it = j.find("uncompressed_crc32"); it != j.end() && !it->is_null()) {
+        resp.uncompressedCrc32 = it->get<uint32_t>();
+    }
+    if (auto it = j.find("compression_header"); it != j.end() && !it->is_null()) {
+        resp.compressionHeader = it->get<std::string>();
+    }
     if (j.contains("content")) {
         resp.content = j["content"].get<std::string>();
     }
@@ -536,12 +555,29 @@ MCPRetrieveDocumentResponse MCPRetrieveDocumentResponse::fromJson(const json& j)
 }
 
 json MCPRetrieveDocumentResponse::toJson() const {
-    json j{{"hash", hash}, {"path", path},          {"name", name},
-           {"size", size}, {"mime_type", mimeType}, {"graph_enabled", graphEnabled}};
+    json j{{"hash", hash},
+           {"path", path},
+           {"name", name},
+           {"size", size},
+           {"mime_type", mimeType},
+           {"compressed", compressed},
+           {"graph_enabled", graphEnabled}};
     if (content)
         j["content"] = *content;
     if (!related.empty())
         j["related"] = related;
+    if (compressionAlgorithm.has_value())
+        j["compression_algorithm"] = *compressionAlgorithm;
+    if (compressionLevel.has_value())
+        j["compression_level"] = *compressionLevel;
+    if (uncompressedSize.has_value())
+        j["uncompressed_size"] = *uncompressedSize;
+    if (compressedCrc32.has_value())
+        j["compressed_crc32"] = *compressedCrc32;
+    if (uncompressedCrc32.has_value())
+        j["uncompressed_crc32"] = *uncompressedCrc32;
+    if (compressionHeader.has_value())
+        j["compression_header"] = *compressionHeader;
     return j;
 }
 

@@ -2,10 +2,13 @@
 
 #include <yams/api/content_metadata.h>
 #include <yams/api/progress_reporter.h>
+#include <yams/compression/compression_header.h>
 #include <yams/core/types.h>
 
 #include <chrono>
 #include <filesystem>
+#include <future>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -64,6 +67,11 @@ struct HealthStatus {
 // Main content store interface
 class IContentStore {
 public:
+    struct RawContent {
+        std::vector<std::byte> data;
+        std::optional<compression::CompressionHeader> header;
+    };
+
     virtual ~IContentStore() = default;
 
     // File-based operations
@@ -88,6 +96,8 @@ public:
                                            const ContentMetadata& metadata = {}) = 0;
 
     virtual Result<std::vector<std::byte>> retrieveBytes(const std::string& hash) = 0;
+    virtual Result<RawContent> retrieveRaw(const std::string& hash) = 0;
+    virtual std::future<Result<RawContent>> retrieveRawAsync(const std::string& hash) = 0;
 
     // Management operations
     virtual Result<bool> exists(const std::string& hash) const = 0;

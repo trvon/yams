@@ -308,7 +308,8 @@ struct GetRequest {
     int graphDepth = 1;     // depth of graph traversal (1-5)
 
     // Display options
-    bool verbose = false; // enable verbose output
+    bool verbose = false;          // enable verbose output
+    bool acceptCompressed = false; // prefer compressed payloads when supported
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -337,7 +338,7 @@ struct GetRequest {
         ser << showGraph << static_cast<int32_t>(graphDepth);
 
         // Display options
-        ser << verbose;
+        ser << verbose << acceptCompressed;
     }
 
     template <typename Deserializer>
@@ -477,6 +478,11 @@ struct GetRequest {
         if (!verboseResult)
             return verboseResult.error();
         req.verbose = verboseResult.value();
+
+        auto acceptCompressedResult = deser.template read<bool>();
+        if (!acceptCompressedResult)
+            return acceptCompressedResult.error();
+        req.acceptCompressed = acceptCompressedResult.value();
 
         return req;
     }
@@ -2369,6 +2375,13 @@ struct RelatedDocumentEntry {
 
 // Enhanced GetResponse supporting rich document information and knowledge graph
 struct GetResponse {
+    bool compressed{false};
+    std::optional<uint8_t> compressionAlgorithm;
+    std::optional<uint8_t> compressionLevel;
+    std::optional<uint64_t> uncompressedSize;
+    std::optional<uint32_t> compressedCrc32;
+    std::optional<uint32_t> uncompressedCrc32;
+    std::vector<uint8_t> compressionHeader;
     // Single document result (for hash/name queries)
     std::string hash;
     std::string path;
@@ -2404,6 +2417,42 @@ struct GetResponse {
         // Basic document information
         ser << hash << path << name << fileName << static_cast<uint64_t>(size) << mimeType
             << fileType;
+
+        // Compression metadata
+        ser << compressed;
+
+        const bool hasAlgorithm = compressionAlgorithm.has_value();
+        ser << hasAlgorithm;
+        if (hasAlgorithm) {
+            ser << static_cast<uint32_t>(*compressionAlgorithm);
+        }
+
+        const bool hasLevel = compressionLevel.has_value();
+        ser << hasLevel;
+        if (hasLevel) {
+            ser << static_cast<uint32_t>(*compressionLevel);
+        }
+
+        const bool hasUncompressedSize = uncompressedSize.has_value();
+        ser << hasUncompressedSize;
+        if (hasUncompressedSize) {
+            ser << static_cast<uint64_t>(*uncompressedSize);
+        }
+
+        const bool hasCompressedCrc32 = compressedCrc32.has_value();
+        ser << hasCompressedCrc32;
+        if (hasCompressedCrc32) {
+            ser << static_cast<uint32_t>(*compressedCrc32);
+        }
+
+        const bool hasUncompressedCrc32 = uncompressedCrc32.has_value();
+        ser << hasUncompressedCrc32;
+        if (hasUncompressedCrc32) {
+            ser << static_cast<uint32_t>(*uncompressedCrc32);
+        }
+
+        std::string headerBlob(compressionHeader.begin(), compressionHeader.end());
+        ser << headerBlob;
 
         // Time information
         ser << static_cast<int64_t>(created) << static_cast<int64_t>(modified)
@@ -2464,6 +2513,67 @@ struct GetResponse {
         if (!fileTypeResult)
             return fileTypeResult.error();
         res.fileType = std::move(fileTypeResult.value());
+
+        auto compressedResult = deser.template read<bool>();
+        if (!compressedResult)
+            return compressedResult.error();
+        res.compressed = compressedResult.value();
+
+        auto hasAlgorithmResult = deser.template read<bool>();
+        if (!hasAlgorithmResult)
+            return hasAlgorithmResult.error();
+        if (hasAlgorithmResult.value()) {
+            auto valueResult = deser.template read<uint32_t>();
+            if (!valueResult)
+                return valueResult.error();
+            res.compressionAlgorithm = static_cast<uint8_t>(valueResult.value());
+        }
+
+        auto hasLevelResult = deser.template read<bool>();
+        if (!hasLevelResult)
+            return hasLevelResult.error();
+        if (hasLevelResult.value()) {
+            auto valueResult = deser.template read<uint32_t>();
+            if (!valueResult)
+                return valueResult.error();
+            res.compressionLevel = static_cast<uint8_t>(valueResult.value());
+        }
+
+        auto hasUncompressedSizeResult = deser.template read<bool>();
+        if (!hasUncompressedSizeResult)
+            return hasUncompressedSizeResult.error();
+        if (hasUncompressedSizeResult.value()) {
+            auto valueResult = deser.template read<uint64_t>();
+            if (!valueResult)
+                return valueResult.error();
+            res.uncompressedSize = valueResult.value();
+        }
+
+        auto hasCompressedCrc32Result = deser.template read<bool>();
+        if (!hasCompressedCrc32Result)
+            return hasCompressedCrc32Result.error();
+        if (hasCompressedCrc32Result.value()) {
+            auto valueResult = deser.template read<uint32_t>();
+            if (!valueResult)
+                return valueResult.error();
+            res.compressedCrc32 = valueResult.value();
+        }
+
+        auto hasUncompressedCrc32Result = deser.template read<bool>();
+        if (!hasUncompressedCrc32Result)
+            return hasUncompressedCrc32Result.error();
+        if (hasUncompressedCrc32Result.value()) {
+            auto valueResult = deser.template read<uint32_t>();
+            if (!valueResult)
+                return valueResult.error();
+            res.uncompressedCrc32 = valueResult.value();
+        }
+
+        auto headerResult = deser.readString();
+        if (!headerResult)
+            return headerResult.error();
+        auto headerStr = std::move(headerResult.value());
+        res.compressionHeader.assign(headerStr.begin(), headerStr.end());
 
         // Time information
         auto createdResult = deser.template read<int64_t>();
@@ -3721,6 +3831,8 @@ struct AddDocumentResponse {
     std::string path;
     std::string message;
     size_t documentsAdded = 0;
+    size_t documentsUpdated = 0;
+    size_t documentsSkipped = 0;
     size_t size = 0;
     std::string snapshotId;    // Auto-generated timestamp ID for directory operations
     std::string snapshotLabel; // Optional human-friendly label
@@ -3728,8 +3840,8 @@ struct AddDocumentResponse {
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
-        ser << hash << path << documentsAdded << message << static_cast<uint64_t>(size)
-            << snapshotId << snapshotLabel;
+        ser << hash << path << documentsAdded << documentsUpdated << documentsSkipped << message
+            << static_cast<uint64_t>(size) << snapshotId << snapshotLabel;
     }
 
     template <typename Deserializer>
@@ -3748,6 +3860,20 @@ struct AddDocumentResponse {
         if (!da)
             return da.error();
         res.documentsAdded = static_cast<size_t>(da.value());
+        auto du = deser.template read<uint64_t>();
+        if (!du) {
+            // For backward compatibility, assume 0 if read fails
+            res.documentsUpdated = 0;
+        } else {
+            res.documentsUpdated = static_cast<size_t>(du.value());
+        }
+        auto ds = deser.template read<uint64_t>();
+        if (!ds) {
+            // For backward compatibility, assume 0 if read fails
+            res.documentsSkipped = 0;
+        } else {
+            res.documentsSkipped = static_cast<size_t>(ds.value());
+        }
         auto m = deser.readString();
         if (!m)
             return m.error();

@@ -27,6 +27,7 @@ private:
     TransportOptions opts_;
     bool shared_{true};
     std::mutex mutex_;
+    std::shared_ptr<AsioConnection> cachedStrong_;
     std::weak_ptr<AsioConnection> cached_;
 };
 
