@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
+## [v0.7.3] - Unreleased
+
+- **Grep Service**: Fixed critical bug where `--paths-only` mode returned all candidate documents without checking pattern matches, causing incorrect "(no results)" responses. Removed premature fast-exit optimization; grep now properly runs pattern matching and returns only files that match. (Issue: 135K docs indexed but grep returned empty, audit revealed fast-exit bypassed validation)
+- **Grep CLI**: Fixed session pattern handling bug where session include patterns were incorrectly used as document selectors instead of result filters. Session patterns now properly merged into `includePatterns` for filtering, not `paths` for selection. This prevented grep from finding any results when a session was active.
+
 ## [v0.7.3] - 2025-10-08
 
 ### Added

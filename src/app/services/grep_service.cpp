@@ -341,21 +341,9 @@ public:
         // Post-filtering logic (tags, paths) applied to the candidate set `docs`
         // ...
 
-        // --- Paths-Only Fast Exit ---
-        if (req.pathsOnly) {
-            GrepResponse response;
-            response.filesSearched = docs.size();
-            for (const auto& doc : docs) {
-                response.pathsOnly.push_back(doc.filePath);
-            }
-            response.totalMatches = docs.size();
-            auto total_grep_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                           std::chrono::steady_clock::now() - grep_start_time)
-                                           .count();
-            spdlog::debug("[GrepTrace] GrepServiceImpl::grep finished in {}ms (paths-only).",
-                          total_grep_duration);
-            return Result<GrepResponse>(std::move(response));
-        }
+        // Note: pathsOnly mode used to take a fast exit here, but that returned ALL candidate
+        // docs without checking if they match the pattern. Now we let normal grep logic run
+        // and collect filesWith at the end.
 
         // Prefer hot docs (extracted/text) then cold; cap both sets
         std::vector<metadata::DocumentInfo> hotDocs;

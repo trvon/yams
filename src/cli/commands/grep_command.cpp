@@ -281,9 +281,6 @@ public:
                 yams::app::services::GrepOptions dreq;
                 dreq.pattern = pattern_;
                 dreq.paths = paths_; // Use new paths field for multiple paths
-                if (dreq.paths.empty() && !sessionPatterns_.empty()) {
-                    dreq.paths = sessionPatterns_;
-                }
                 // Expand concrete paths/basenames into suffix-matching globs for subpath use-cases
                 if (!dreq.paths.empty()) {
                     std::vector<std::string> extra;
@@ -317,6 +314,11 @@ public:
 
                 // Map all CLI options to daemon protocol
                 dreq.includePatterns = parseCommaSeparated(includePatterns_);
+                // Merge session patterns as include filters (not paths!)
+                if (!sessionPatterns_.empty()) {
+                    dreq.includePatterns.insert(dreq.includePatterns.end(),
+                                                sessionPatterns_.begin(), sessionPatterns_.end());
+                }
                 dreq.recursive = true; // Default to recursive
                 dreq.wholeWord = wholeWord_;
                 dreq.showLineNumbers = showLineNumbers_;
