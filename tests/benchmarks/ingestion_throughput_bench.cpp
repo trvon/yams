@@ -17,7 +17,6 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
-#include <spdlog/spdlog.h>
 #include <numeric>
 #include <unordered_map>
 
@@ -29,6 +28,8 @@
 #include <yams/metadata/database.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
+
+#include <spdlog/spdlog.h>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;

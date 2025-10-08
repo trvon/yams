@@ -63,6 +63,7 @@ ingestion_bench = executable('ingestion_throughput_bench', files('ingestion_thro
     dependency('yams_metadata'),
     dependency('yams_storage_engine'),
     dependency('nlohmann_json'),
+    dependency('spdlog'),
   ] + tracy_deps,
   cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
   install: false,
