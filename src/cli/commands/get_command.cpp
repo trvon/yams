@@ -117,6 +117,13 @@ public:
                     hash_ = target_;
                 } else {
                     name_ = target_;
+                    if (!name_.empty() && name_[0] != '/' && !isValidHashPrefix(name_)) {
+                        try {
+                            name_ = std::filesystem::weakly_canonical(name_).string();
+                        } catch (const std::filesystem::filesystem_error&) {
+                            // Not a path, treat as name
+                        }
+                    }
                 }
             }
 
@@ -283,6 +290,13 @@ public:
                             std::cerr << "Document retrieved successfully!" << std::endl;
                             std::cerr << "Output: " << outputPath_ << std::endl;
                             std::cerr << "Size: " << resp.totalBytes << " bytes" << std::endl;
+                        }
+                    }
+
+                    if (verbose_ && !resp.metadata.empty()) {
+                        std::cerr << "\nMetadata:\n";
+                        for (const auto& [key, value] : resp.metadata) {
+                            std::cerr << "  " << key << ": " << value << std::endl;
                         }
                     }
 

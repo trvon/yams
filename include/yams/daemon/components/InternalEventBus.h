@@ -19,7 +19,7 @@ namespace yams::daemon {
 //   - YAMS_INTERNAL_BUS_MPMC=1 (default): MPMC-safe using a small mutex
 //   - YAMS_INTERNAL_BUS_MPMC=0: original lock-free SPSC (single producer/consumer only)
 #ifndef YAMS_INTERNAL_BUS_MPMC
-#define YAMS_INTERNAL_BUS_MPMC 0
+#define YAMS_INTERNAL_BUS_MPMC 1
 #endif
 
 // Capacity must be > 0 (not required to be power-of-two).

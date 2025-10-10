@@ -1,10 +1,13 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <shared_mutex>
 #include <string>
+#include <thread>
 
 namespace yams::daemon {
 
@@ -93,6 +96,11 @@ struct MetricsSnapshot {
     std::string serviceSearchExecutor; // "available"|"unavailable"
     std::string searchExecutorReason;  // optional reason when unavailable
 
+    // Document counts (cached from metadata repo, avoid live DB queries on hot path)
+    std::uint64_t documentsTotal{0};
+    std::uint64_t documentsIndexed{0};
+    std::uint64_t documentsContentExtracted{0};
+
     // Content store & compression snapshot (best-effort)
     std::uint64_t storeObjects{0};
     std::uint64_t uniqueBlocks{0};
@@ -132,12 +140,19 @@ class DaemonMetrics {
 public:
     DaemonMetrics(const DaemonLifecycleFsm* lifecycle, const StateComponent* state,
                   const ServiceManager* services);
+    ~DaemonMetrics();
+
+    // Start background polling thread to keep metrics cache hot
+    void startPolling();
+    // Stop background polling thread
+    void stopPolling();
 
     // Retrieve metrics snapshot. When detailed is true, include deep store stats
     // (may perform additional I/O) without poisoning the basic cache.
-    MetricsSnapshot getSnapshot(bool detailed) const;
+    // Returns a shared_ptr for zero-copy, thread-safe access.
+    std::shared_ptr<const MetricsSnapshot> getSnapshot(bool detailed) const;
     // Backward-compatible basic snapshot (no deep store stats)
-    MetricsSnapshot getSnapshot() const { return getSnapshot(false); }
+    std::shared_ptr<const MetricsSnapshot> getSnapshot() const { return getSnapshot(false); }
     // Optional: force refresh cache now (used by periodic ticker)
     void refresh();
 
@@ -145,14 +160,23 @@ public:
     EmbeddingServiceInfo getEmbeddingServiceInfo() const;
 
 private:
+    void pollingLoop(); // Background thread loop
+
     const DaemonLifecycleFsm* lifecycle_;
     const StateComponent* state_;
     const ServiceManager* services_;
     // Lightweight memoization to avoid repeated /proc reads; 0 disables caching
     uint32_t cacheMs_{200};
-    mutable std::mutex cacheMutex_;
+    // Shared mutex for concurrent reads, exclusive writes
+    mutable std::shared_mutex cacheMutex_;
+    mutable std::shared_ptr<MetricsSnapshot> cachedSnapshot_{nullptr};
     mutable std::chrono::steady_clock::time_point lastUpdate_{};
-    mutable MetricsSnapshot cached_{};
+    // Physical storage breakdown (updated separately with TTL, reuses cacheMutex_)
+    mutable MetricsSnapshot cached_{}; // Only physical storage breakdown fields used
+
+    // Background polling thread
+    std::atomic<bool> pollingActive_{false};
+    std::thread pollingThread_;
 
     // CPU utilization sampling state (Linux): deltas over /proc since last snapshot
     mutable std::uint64_t lastProcJiffies_{0};
@@ -162,6 +186,14 @@ private:
     mutable std::chrono::steady_clock::time_point lastPhysicalAt_{};
     mutable std::uint64_t lastPhysicalBytes_{0};
     uint32_t physicalTtlMs_{60000}; // default 60s; may be tuned via env later
+
+    // TTL cache for expensive document counts (avoid blocking DB queries on hot path)
+    mutable std::chrono::steady_clock::time_point lastDocCountsAt_{};
+    mutable std::uint64_t cachedDocumentsTotal_{0};
+    mutable std::uint64_t cachedDocumentsIndexed_{0};
+    mutable std::uint64_t cachedDocumentsExtracted_{0};
+    mutable std::uint64_t cachedVectorRows_{0};
+    uint32_t docCountsTtlMs_{5000}; // 5s TTL for document counts
 };
 
 } // namespace yams::daemon

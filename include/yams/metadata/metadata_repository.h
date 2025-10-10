@@ -67,6 +67,18 @@ struct TreeDiffQuery {
     std::size_t offset = 0;
 };
 
+struct PathTreeNode {
+    static constexpr int64_t kNullParent = -1;
+
+    int64_t id{0};
+    int64_t parentId{kNullParent};
+    std::string pathSegment;
+    std::string fullPath;
+    int64_t docCount{0};
+    int64_t centroidWeight{0};
+    std::vector<float> centroid;
+};
+
 struct DocumentQueryOptions {
     std::optional<std::string> exactPath;
     std::optional<std::string> pathPrefix;
@@ -203,6 +215,20 @@ public:
      */
     virtual Result<void> checkpointWal() = 0;
 
+    // Path tree operations (PBI-051 scaffold)
+    virtual Result<std::optional<PathTreeNode>> findPathTreeNode(int64_t parentId,
+                                                                 std::string_view pathSegment) = 0;
+    virtual Result<PathTreeNode> insertPathTreeNode(int64_t parentId, std::string_view pathSegment,
+                                                    std::string_view fullPath) = 0;
+    virtual Result<void> incrementPathTreeDocCount(int64_t nodeId, int64_t documentId) = 0;
+    virtual Result<void> accumulatePathTreeCentroid(int64_t nodeId,
+                                                    std::span<const float> embeddingValues) = 0;
+    virtual Result<std::optional<PathTreeNode>>
+    findPathTreeNodeByFullPath(std::string_view fullPath) = 0;
+    virtual Result<void> upsertPathTreeForDocument(const DocumentInfo& info, int64_t documentId,
+                                                   bool isNewDocument,
+                                                   std::span<const float> embeddingValues) = 0;
+
     // Tree diff persistence (PBI-043)
     virtual Result<void> upsertTreeSnapshot(const TreeSnapshotRecord& record) = 0;
     virtual Result<std::optional<TreeSnapshotRecord>>
@@ -316,6 +342,25 @@ public:
     Result<std::unordered_map<std::string, int64_t>> getDocumentCountsByExtension() override;
     Result<int64_t> getDocumentCountByExtractionStatus(ExtractionStatus status) override;
 
+    // Component-owned metrics (lock-free, updated on insert/delete)
+    uint64_t getCachedDocumentCount() const noexcept {
+        return cachedDocumentCount_.load(std::memory_order_relaxed);
+    }
+    uint64_t getCachedIndexedCount() const noexcept {
+        return cachedIndexedCount_.load(std::memory_order_relaxed);
+    }
+    uint64_t getCachedExtractedCount() const noexcept {
+        return cachedExtractedCount_.load(std::memory_order_relaxed);
+    }
+    void initializeCounters(); // Called once during startup to sync with DB
+
+    // Batch operations for search/grep performance (eliminates N queries → 1 query)
+    Result<std::unordered_map<std::string, DocumentInfo>>
+    batchGetDocumentsByHash(const std::vector<std::string>& hashes);
+
+    Result<std::unordered_map<int64_t, DocumentContent>>
+    batchGetContent(const std::vector<int64_t>& documentIds);
+
     // Embedding status operations
     Result<void> updateDocumentEmbeddingStatus(int64_t documentId, bool hasEmbedding,
                                                const std::string& modelId = "") override;
@@ -323,6 +368,20 @@ public:
                                                      const std::string& modelId = "") override;
 
     Result<void> checkpointWal() override;
+
+    // Path tree operations (PBI-051 scaffold)
+    Result<std::optional<PathTreeNode>> findPathTreeNode(int64_t parentId,
+                                                         std::string_view pathSegment) override;
+    Result<PathTreeNode> insertPathTreeNode(int64_t parentId, std::string_view pathSegment,
+                                            std::string_view fullPath) override;
+    Result<void> incrementPathTreeDocCount(int64_t nodeId, int64_t documentId) override;
+    Result<void> accumulatePathTreeCentroid(int64_t nodeId,
+                                            std::span<const float> embeddingValues) override;
+    Result<std::optional<PathTreeNode>>
+    findPathTreeNodeByFullPath(std::string_view fullPath) override;
+    Result<void> upsertPathTreeForDocument(const DocumentInfo& info, int64_t documentId,
+                                           bool isNewDocument,
+                                           std::span<const float> embeddingValues) override;
 
     // Tree diff persistence
     Result<void> upsertTreeSnapshot(const TreeSnapshotRecord& record) override;
@@ -344,6 +403,12 @@ private:
     ConnectionPool& pool_;
     bool hasPathIndexing_{false};
     std::shared_ptr<KnowledgeGraphStore> kgStore_; // PBI-043: tree diff KG integration
+
+    // Component-owned metrics (updated on insert/delete, read by DaemonMetrics)
+    mutable std::atomic<uint64_t> cachedDocumentCount_{0};
+    mutable std::atomic<uint64_t> cachedIndexedCount_{0};
+    mutable std::atomic<uint64_t> cachedExtractedCount_{0};
+    mutable std::atomic<bool> countersInitialized_{false};
 
     // Legacy makeSelect removed; callers now use sql::QuerySpec to build SELECTs
 

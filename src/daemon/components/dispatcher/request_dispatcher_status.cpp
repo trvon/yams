@@ -28,68 +28,75 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
     // Minimal and safe status path using centralized DaemonMetrics when available
     StatusResponse res;
     try {
-        // fastMode flag removed; status path remains lightweight via DaemonMetrics
+        // Status path returns cached snapshot - NO I/O on request path
+        // DaemonMetrics background thread keeps cache hot
         if (metrics_) {
-            // Refresh basic cache in background; honor per-request detail level
-            metrics_->refresh();
             auto snap = metrics_->getSnapshot(req.detailed);
-            res.running = snap.running;
-            res.version = snap.version;
-            res.uptimeSeconds = snap.uptimeSeconds;
-            res.requestsProcessed = snap.requestsProcessed;
-            res.activeConnections = snap.activeConnections;
-            res.memoryUsageMb = snap.memoryUsageMb;
-            res.cpuUsagePercent = snap.cpuUsagePercent;
+            if (!snap) {
+                // Fallback: return minimal response if snapshot is null
+                res.running = true;
+                res.version = YAMS_VERSION_STRING;
+                res.ready = false;
+                res.overallStatus = "initializing";
+                co_return res;
+            }
+            res.running = snap->running;
+            res.version = snap->version;
+            res.uptimeSeconds = snap->uptimeSeconds;
+            res.requestsProcessed = snap->requestsProcessed;
+            res.activeConnections = snap->activeConnections;
+            res.memoryUsageMb = snap->memoryUsageMb;
+            res.cpuUsagePercent = snap->cpuUsagePercent;
             // Resolved via DaemonMetrics: ready reflects lifecycle readiness
-            res.ready = snap.ready;
-            res.overallStatus = snap.overallStatus;   // normalized lowercase
-            res.lifecycleState = snap.lifecycleState; // normalized lowercase
-            res.lastError = snap.lastError;
-            res.fsmTransitions = snap.fsmTransitions;
-            res.fsmHeaderReads = snap.fsmHeaderReads;
-            res.fsmPayloadReads = snap.fsmPayloadReads;
-            res.fsmPayloadWrites = snap.fsmPayloadWrites;
-            res.fsmBytesSent = snap.fsmBytesSent;
-            res.fsmBytesReceived = snap.fsmBytesReceived;
-            res.muxActiveHandlers = snap.muxActiveHandlers;
-            res.muxQueuedBytes = snap.muxQueuedBytes;
-            res.muxWriterBudgetBytes = snap.muxWriterBudgetBytes;
+            res.ready = snap->ready;
+            res.overallStatus = snap->overallStatus;   // normalized lowercase
+            res.lifecycleState = snap->lifecycleState; // normalized lowercase
+            res.lastError = snap->lastError;
+            res.fsmTransitions = snap->fsmTransitions;
+            res.fsmHeaderReads = snap->fsmHeaderReads;
+            res.fsmPayloadReads = snap->fsmPayloadReads;
+            res.fsmPayloadWrites = snap->fsmPayloadWrites;
+            res.fsmBytesSent = snap->fsmBytesSent;
+            res.fsmBytesReceived = snap->fsmBytesReceived;
+            res.muxActiveHandlers = snap->muxActiveHandlers;
+            res.muxQueuedBytes = snap->muxQueuedBytes;
+            res.muxWriterBudgetBytes = snap->muxWriterBudgetBytes;
             // Pool sizes via FSM metrics (in DaemonMetrics snapshot)
-            res.ipcPoolSize = snap.ipcPoolSize;
-            res.ioPoolSize = snap.ioPoolSize;
+            res.ipcPoolSize = snap->ipcPoolSize;
+            res.ioPoolSize = snap->ioPoolSize;
             // Vector DB snapshot (best-effort)
-            res.vectorDbInitAttempted = snap.vectorDbInitAttempted;
-            res.vectorDbReady = snap.vectorDbReady;
-            res.vectorDbDim = snap.vectorDbDim;
+            res.vectorDbInitAttempted = snap->vectorDbInitAttempted;
+            res.vectorDbReady = snap->vectorDbReady;
+            res.vectorDbDim = snap->vectorDbDim;
             // Embedding runtime details (best-effort)
-            res.embeddingAvailable = snap.embeddingAvailable;
-            res.embeddingBackend = snap.embeddingBackend;
-            res.embeddingModel = snap.embeddingModel;
-            res.embeddingModelPath = snap.embeddingModelPath;
-            res.embeddingDim = snap.embeddingDim;
-            res.requestCounts["worker_threads"] = snap.workerThreads;
-            res.requestCounts["worker_active"] = snap.workerActive;
-            res.requestCounts["worker_queued"] = snap.workerQueued;
-            res.requestCounts["post_ingest_threads"] = snap.postIngestThreads;
-            res.requestCounts["post_ingest_queued"] = snap.postIngestQueued;
-            res.searchMetrics.active = snap.searchActive;
-            res.searchMetrics.queued = snap.searchQueued;
-            res.searchMetrics.executed = snap.searchExecuted;
-            res.searchMetrics.cacheHitRate = snap.searchCacheHitRate;
-            res.searchMetrics.avgLatencyUs = snap.searchAvgLatencyUs;
-            res.searchMetrics.concurrencyLimit = snap.searchConcurrencyLimit;
-            res.requestCounts["search_active"] = snap.searchActive;
-            res.requestCounts["search_queued"] = snap.searchQueued;
-            res.requestCounts["search_executed"] = static_cast<size_t>(snap.searchExecuted);
+            res.embeddingAvailable = snap->embeddingAvailable;
+            res.embeddingBackend = snap->embeddingBackend;
+            res.embeddingModel = snap->embeddingModel;
+            res.embeddingModelPath = snap->embeddingModelPath;
+            res.embeddingDim = snap->embeddingDim;
+            res.requestCounts["worker_threads"] = snap->workerThreads;
+            res.requestCounts["worker_active"] = snap->workerActive;
+            res.requestCounts["worker_queued"] = snap->workerQueued;
+            res.requestCounts["post_ingest_threads"] = snap->postIngestThreads;
+            res.requestCounts["post_ingest_queued"] = snap->postIngestQueued;
+            res.searchMetrics.active = snap->searchActive;
+            res.searchMetrics.queued = snap->searchQueued;
+            res.searchMetrics.executed = snap->searchExecuted;
+            res.searchMetrics.cacheHitRate = snap->searchCacheHitRate;
+            res.searchMetrics.avgLatencyUs = snap->searchAvgLatencyUs;
+            res.searchMetrics.concurrencyLimit = snap->searchConcurrencyLimit;
+            res.requestCounts["search_active"] = snap->searchActive;
+            res.requestCounts["search_queued"] = snap->searchQueued;
+            res.requestCounts["search_executed"] = static_cast<size_t>(snap->searchExecuted);
             res.requestCounts["search_cache_hit_rate_pct"] =
-                static_cast<size_t>(snap.searchCacheHitRate * 100.0);
+                static_cast<size_t>(snap->searchCacheHitRate * 100.0);
             res.requestCounts["search_avg_latency_us"] =
-                static_cast<size_t>(snap.searchAvgLatencyUs);
-            res.requestCounts["search_concurrency_limit"] = snap.searchConcurrencyLimit;
+                static_cast<size_t>(snap->searchAvgLatencyUs);
+            res.requestCounts["search_concurrency_limit"] = snap->searchConcurrencyLimit;
             // PBI-040, task 040-1: Expose queue depth for FTS5 readiness checks
-            res.postIngestQueueDepth = static_cast<uint32_t>(snap.postIngestQueued);
-            res.requestCounts["post_ingest_inflight"] = snap.postIngestInflight;
-            res.requestCounts["post_ingest_capacity"] = snap.postIngestCapacity;
+            res.postIngestQueueDepth = static_cast<uint32_t>(snap->postIngestQueued);
+            res.requestCounts["post_ingest_inflight"] = snap->postIngestInflight;
+            res.requestCounts["post_ingest_capacity"] = snap->postIngestCapacity;
             // Export selected tuning config values for clients (best-effort)
             try {
                 if (serviceManager_) {
@@ -128,40 +135,42 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 }
             } catch (...) {
             }
-            res.requestCounts["post_ingest_processed"] = snap.postIngestProcessed;
-            res.requestCounts["post_ingest_failed"] = snap.postIngestFailed;
+            res.requestCounts["post_ingest_processed"] = snap->postIngestProcessed;
+            res.requestCounts["post_ingest_failed"] = snap->postIngestFailed;
             res.requestCounts["post_ingest_latency_ms_ema"] =
-                static_cast<size_t>(snap.postIngestLatencyMsEma);
+                static_cast<size_t>(snap->postIngestLatencyMsEma);
             res.requestCounts["post_ingest_rate_sec_ema"] =
-                static_cast<size_t>(snap.postIngestRateSecEma);
+                static_cast<size_t>(snap->postIngestRateSecEma);
             // Surface whether the InternalEventBus is being used for post-ingest
             try {
                 res.requestCounts["post_ingest_use_bus"] =
                     yams::daemon::TuneAdvisor::useInternalBusForPostIngest() ? 1 : 0;
             } catch (...) {
             }
-            res.retryAfterMs = snap.retryAfterMs;
-            for (const auto& [k, v] : snap.readinessStates)
+            res.retryAfterMs = snap->retryAfterMs;
+            for (const auto& [k, v] : snap->readinessStates)
                 res.readinessStates[k] = v;
-            for (const auto& [k, v] : snap.initProgress)
+            for (const auto& [k, v] : snap->initProgress)
                 res.initProgress[k] = v;
             // Content store diagnostics
-            res.contentStoreRoot = snap.contentStoreRoot;
-            res.contentStoreError = snap.contentStoreError;
+            res.contentStoreRoot = snap->contentStoreRoot;
+            res.contentStoreError = snap->contentStoreError;
             // Storage size summary (exposed via requestCounts for backwards compatible clients)
-            if (snap.logicalBytes > 0)
-                res.requestCounts["storage_logical_bytes"] = static_cast<size_t>(snap.logicalBytes);
-            if (snap.physicalBytes > 0)
+            if (snap->logicalBytes > 0)
+                res.requestCounts["storage_logical_bytes"] =
+                    static_cast<size_t>(snap->logicalBytes);
+            if (snap->physicalBytes > 0)
                 res.requestCounts["storage_physical_bytes"] =
-                    static_cast<size_t>(snap.physicalBytes);
-            if (snap.storeObjects > 0)
-                res.requestCounts["storage_documents"] = static_cast<size_t>(snap.storeObjects);
-            if (snap.logicalBytes > 0 && snap.physicalBytes > 0) {
-                std::uint64_t saved = (snap.logicalBytes > snap.physicalBytes)
-                                          ? (snap.logicalBytes - snap.physicalBytes)
+                    static_cast<size_t>(snap->physicalBytes);
+            if (snap->storeObjects > 0)
+                res.requestCounts["storage_documents"] = static_cast<size_t>(snap->storeObjects);
+            if (snap->logicalBytes > 0 && snap->physicalBytes > 0) {
+                std::uint64_t saved = (snap->logicalBytes > snap->physicalBytes)
+                                          ? (snap->logicalBytes - snap->physicalBytes)
                                           : 0ULL;
                 res.requestCounts["storage_saved_bytes"] = static_cast<size_t>(saved);
-                std::uint64_t pct = snap.logicalBytes ? (saved * 100ULL) / snap.logicalBytes : 0ULL;
+                std::uint64_t pct =
+                    snap->logicalBytes ? (saved * 100ULL) / snap->logicalBytes : 0ULL;
                 res.requestCounts["storage_saved_pct"] = static_cast<size_t>(pct);
             } else {
                 // Avoid signaling 100% savings when physical is unknown
@@ -169,54 +178,45 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 res.requestCounts.erase("storage_saved_pct");
             }
             // New: detailed storage breakdown (when available)
-            if (snap.casPhysicalBytes > 0)
+            if (snap->casPhysicalBytes > 0)
                 res.requestCounts["cas_physical_bytes"] =
-                    static_cast<size_t>(snap.casPhysicalBytes);
-            if (snap.casUniqueRawBytes > 0)
+                    static_cast<size_t>(snap->casPhysicalBytes);
+            if (snap->casUniqueRawBytes > 0)
                 res.requestCounts["cas_unique_raw_bytes"] =
-                    static_cast<size_t>(snap.casUniqueRawBytes);
-            if (snap.casDedupSavedBytes > 0)
+                    static_cast<size_t>(snap->casUniqueRawBytes);
+            if (snap->casDedupSavedBytes > 0)
                 res.requestCounts["cas_dedup_saved_bytes"] =
-                    static_cast<size_t>(snap.casDedupSavedBytes);
-            if (snap.casCompressSavedBytes > 0)
+                    static_cast<size_t>(snap->casDedupSavedBytes);
+            if (snap->casCompressSavedBytes > 0)
                 res.requestCounts["cas_compress_saved_bytes"] =
-                    static_cast<size_t>(snap.casCompressSavedBytes);
-            if (snap.metadataPhysicalBytes > 0)
+                    static_cast<size_t>(snap->casCompressSavedBytes);
+            if (snap->metadataPhysicalBytes > 0)
                 res.requestCounts["metadata_physical_bytes"] =
-                    static_cast<size_t>(snap.metadataPhysicalBytes);
-            if (snap.indexPhysicalBytes > 0)
+                    static_cast<size_t>(snap->metadataPhysicalBytes);
+            if (snap->indexPhysicalBytes > 0)
                 res.requestCounts["index_physical_bytes"] =
-                    static_cast<size_t>(snap.indexPhysicalBytes);
-            if (snap.vectorPhysicalBytes > 0)
+                    static_cast<size_t>(snap->indexPhysicalBytes);
+            if (snap->vectorPhysicalBytes > 0)
                 res.requestCounts["vector_physical_bytes"] =
-                    static_cast<size_t>(snap.vectorPhysicalBytes);
-            if (snap.logsTmpPhysicalBytes > 0)
+                    static_cast<size_t>(snap->vectorPhysicalBytes);
+            if (snap->logsTmpPhysicalBytes > 0)
                 res.requestCounts["logs_tmp_physical_bytes"] =
-                    static_cast<size_t>(snap.logsTmpPhysicalBytes);
-            if (snap.physicalTotalBytes > 0)
+                    static_cast<size_t>(snap->logsTmpPhysicalBytes);
+            if (snap->physicalTotalBytes > 0)
                 res.requestCounts["physical_total_bytes"] =
-                    static_cast<size_t>(snap.physicalTotalBytes);
+                    static_cast<size_t>(snap->physicalTotalBytes);
 
-            // Document counters from metadata repository (authoritative document totals)
-            try {
-                if (serviceManager_) {
-                    auto repo = serviceManager_->getMetadataRepo();
-                    if (repo) {
-                        if (auto total = repo->getDocumentCount(); total) {
-                            res.requestCounts["documents_total"] =
-                                static_cast<size_t>(total.value());
-                        }
-                        if (auto idx = repo->getIndexedDocumentCount(); idx) {
-                            res.requestCounts["documents_indexed"] =
-                                static_cast<size_t>(idx.value());
-                        }
-                        if (auto ext = repo->getContentExtractedDocumentCount(); ext) {
-                            res.requestCounts["documents_content_extracted"] =
-                                static_cast<size_t>(ext.value());
-                        }
-                    }
-                }
-            } catch (...) {
+            // Document counters from cached metrics (no live DB queries on hot path!)
+            if (snap->documentsTotal > 0) {
+                res.requestCounts["documents_total"] = static_cast<size_t>(snap->documentsTotal);
+            }
+            if (snap->documentsIndexed > 0) {
+                res.requestCounts["documents_indexed"] =
+                    static_cast<size_t>(snap->documentsIndexed);
+            }
+            if (snap->documentsContentExtracted > 0) {
+                res.requestCounts["documents_content_extracted"] =
+                    static_cast<size_t>(snap->documentsContentExtracted);
             }
         } else {
             auto uptime = std::chrono::steady_clock::now() - state_->stats.startTime;
@@ -261,50 +261,21 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 }
             } catch (...) {
             }
-            if (!res.vectorDbReady) {
+            if (!res.vectorDbReady && serviceManager_) {
                 try {
-                    if (serviceManager_) {
-                        if (auto vdb = serviceManager_->getVectorDatabase();
-                            vdb && vdb->isInitialized()) {
-                            res.vectorDbReady = true;
-                            auto dim = vdb->getConfig().embedding_dim;
+                    // Only check if already initialized - never create/initialize here
+                    if (auto vdb = serviceManager_->getVectorDatabase();
+                        vdb && vdb->isInitialized()) {
+                        res.vectorDbReady = true;
+                        auto dim = vdb->getConfig().embedding_dim;
+                        if (dim > 0) {
+                            res.vectorDbDim = static_cast<uint32_t>(dim);
+                        }
+                        if (state_) {
+                            state_->readiness.vectorDbReady.store(true, std::memory_order_relaxed);
                             if (dim > 0) {
-                                res.vectorDbDim = static_cast<uint32_t>(dim);
-                            }
-                            if (state_) {
-                                state_->readiness.vectorDbReady.store(true,
-                                                                      std::memory_order_relaxed);
-                                if (dim > 0) {
-                                    state_->readiness.vectorDbDim.store(static_cast<uint32_t>(dim),
-                                                                        std::memory_order_relaxed);
-                                }
-                            }
-                        } else {
-                            auto dd = serviceManager_->getResolvedDataDir();
-                            if (!dd.empty()) {
-                                auto vdbPath = dd / "vectors.db";
-                                if (std::filesystem::exists(vdbPath)) {
-                                    yams::vector::VectorDatabaseConfig cfg;
-                                    cfg.database_path = vdbPath.string();
-                                    cfg.create_if_missing = false;
-                                    auto tmp = std::make_unique<yams::vector::VectorDatabase>(cfg);
-                                    if (tmp->initialize()) {
-                                        res.vectorDbReady = true;
-                                        auto dim = tmp->getConfig().embedding_dim;
-                                        if (dim > 0) {
-                                            res.vectorDbDim = static_cast<uint32_t>(dim);
-                                        }
-                                        if (state_) {
-                                            state_->readiness.vectorDbReady.store(
-                                                true, std::memory_order_relaxed);
-                                            if (dim > 0) {
-                                                state_->readiness.vectorDbDim.store(
-                                                    static_cast<uint32_t>(dim),
-                                                    std::memory_order_relaxed);
-                                            }
-                                        }
-                                    }
-                                }
+                                state_->readiness.vectorDbDim.store(static_cast<uint32_t>(dim),
+                                                                    std::memory_order_relaxed);
                             }
                         }
                     }
@@ -373,9 +344,13 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             res.lifecycleState = res.overallStatus;
         }
         // Populate typed provider details (prefer clients to use this)
-        try {
-            res.providers = yams::daemon::dispatch::build_typed_providers(serviceManager_, state_);
-        } catch (...) {
+        // CRITICAL: Only do this for detailed requests to avoid blocking on plugin operations
+        if (req.detailed) {
+            try {
+                res.providers =
+                    yams::daemon::dispatch::build_typed_providers(serviceManager_, state_);
+            } catch (...) {
+            }
         }
         // Populate skipped plugin diagnostics from last scan (if available)
         try {
@@ -519,15 +494,19 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
             if (metrics_) {
                 metrics_->refresh();
                 auto snap = metrics_->getSnapshot();
-                response.vectorIndexSize = snap.vectorDbSizeBytes;
-                if (snap.vectorRowsExact > 0)
-                    response.additionalStats["vector_rows"] = std::to_string(snap.vectorRowsExact);
+                if (!snap) {
+                    // Fallback: leave defaults if snapshot is null
+                    co_return response;
+                }
+                response.vectorIndexSize = snap->vectorDbSizeBytes;
+                if (snap->vectorRowsExact > 0)
+                    response.additionalStats["vector_rows"] = std::to_string(snap->vectorRowsExact);
 
                 // Compute storage/db sizes (best-effort, inexpensive on request)
                 try {
                     namespace fs = std::filesystem;
-                    if (!snap.contentStoreRoot.empty()) {
-                        fs::path storageRoot{snap.contentStoreRoot};
+                    if (!snap->contentStoreRoot.empty()) {
+                        fs::path storageRoot{snap->contentStoreRoot};
                         fs::path dataRoot = storageRoot.parent_path();
 
                         auto fileSize = [](const fs::path& p) -> uint64_t {

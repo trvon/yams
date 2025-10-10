@@ -429,7 +429,13 @@ cp -a %{_builddir}/%{name}-%{version}/. %{buildroot}/
 %defattr(-,root,root,-)
 __RPM_SPEC__
   local rpm_version rpm_release
-  read -r rpm_version rpm_release < <(compute_rpm_nv "$version")
+  local rpm_output
+  rpm_output="$(compute_rpm_nv "$version")"
+  rpm_version="$(echo "$rpm_output" | sed -n '1p')"
+  rpm_release="$(echo "$rpm_output" | sed -n '2p')"
+  # Ensure rpm_release has a default value if empty
+  rpm_release="${rpm_release:-1}"
+  echo "DEBUG: version=$version, rpm_version=$rpm_version, rpm_release=$rpm_release" >&2
   sed -i "s|__VERSION__|${rpm_version}|" "${spec}"
   sed -i "s|__RELEASE__|${rpm_release}|" "${spec}"
   sed -i "s|__RPM_ARCH__|${rpm_arch}|" "${spec}"

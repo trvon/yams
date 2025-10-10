@@ -2,9 +2,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <span>
 #include <sstream>
 #include <string_view>
 #include <unordered_set>
+#include <vector>
 #include <yams/content/content_handler_registry.h>
 #include <yams/crypto/hasher.h>
 #include <yams/detection/file_type_detector.h>
@@ -311,6 +313,15 @@ public:
                         spdlog::warn("Versioning: exception while updating lineage for '{}': {}",
                                      path.string(), ex.what());
                     }
+                }
+            }
+
+            if (metadataRepo_) {
+                auto treeRes = metadataRepo_->upsertPathTreeForDocument(
+                    docInfo, documentId, isNewDocument, std::span<const float>());
+                if (!treeRes) {
+                    spdlog::warn("Failed to update path tree for {}: {}", docInfo.filePath,
+                                 treeRes.error().message);
                 }
             }
 

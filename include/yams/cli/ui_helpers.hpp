@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -39,6 +40,11 @@ struct Ansi {
     static constexpr const char* RESET = "\x1b[0m";
     static constexpr const char* BOLD = "\x1b[1m";
     static constexpr const char* DIM = "\x1b[2m";
+    static constexpr const char* ITALIC = "\x1b[3m";
+    static constexpr const char* UNDERLINE = "\x1b[4m";
+
+    // Standard colors
+    static constexpr const char* BLACK = "\x1b[30m";
     static constexpr const char* RED = "\x1b[31m";
     static constexpr const char* GREEN = "\x1b[32m";
     static constexpr const char* YELLOW = "\x1b[33m";
@@ -46,6 +52,26 @@ struct Ansi {
     static constexpr const char* MAGENTA = "\x1b[35m";
     static constexpr const char* CYAN = "\x1b[36m";
     static constexpr const char* WHITE = "\x1b[37m";
+
+    // Bright colors
+    static constexpr const char* BRIGHT_BLACK = "\x1b[90m";
+    static constexpr const char* BRIGHT_RED = "\x1b[91m";
+    static constexpr const char* BRIGHT_GREEN = "\x1b[92m";
+    static constexpr const char* BRIGHT_YELLOW = "\x1b[93m";
+    static constexpr const char* BRIGHT_BLUE = "\x1b[94m";
+    static constexpr const char* BRIGHT_MAGENTA = "\x1b[95m";
+    static constexpr const char* BRIGHT_CYAN = "\x1b[96m";
+    static constexpr const char* BRIGHT_WHITE = "\x1b[97m";
+
+    // Background colors
+    static constexpr const char* BG_BLACK = "\x1b[40m";
+    static constexpr const char* BG_RED = "\x1b[41m";
+    static constexpr const char* BG_GREEN = "\x1b[42m";
+    static constexpr const char* BG_YELLOW = "\x1b[43m";
+    static constexpr const char* BG_BLUE = "\x1b[44m";
+    static constexpr const char* BG_MAGENTA = "\x1b[45m";
+    static constexpr const char* BG_CYAN = "\x1b[46m";
+    static constexpr const char* BG_WHITE = "\x1b[47m";
 };
 
 // Basic TTY detection on stdout
@@ -307,7 +333,8 @@ inline std::string progress_bar(double fraction, size_t width, std::string_view 
 }
 
 // Title banner: == <title> ==
-inline std::string title_banner(std::string_view title, int width = -1) {
+inline std::string title_banner(std::string_view title, int width = -1,
+                                const char* color = Ansi::BOLD) {
     if (width <= 0)
         width = terminal_width();
     std::string t = " " + std::string(title) + " ";
@@ -316,18 +343,46 @@ inline std::string title_banner(std::string_view title, int width = -1) {
     std::string right = repeat(
         '=', static_cast<size_t>(std::max(0, width - sides - static_cast<int>(t.size()) - 4)));
     std::string line = "==" + left + t + right + "==";
-    return colors_enabled() ? colorize(line, Ansi::MAGENTA) : line;
+    return colors_enabled() ? colorize(line, color) : line;
 }
 
 // Section header: [ Title ] ------
-inline std::string section_header(std::string_view title, int width = -1) {
+inline std::string section_header(std::string_view title, int width = -1,
+                                  const char* color = Ansi::CYAN) {
     if (width <= 0)
         width = terminal_width();
     std::string head = "[ " + std::string(title) + " ] ";
     int dashes = std::max(0, width - static_cast<int>(head.size()));
     std::string line = head + repeat('-', static_cast<size_t>(dashes));
-    return colors_enabled() ? colorize(line, Ansi::CYAN) : line;
+    return colors_enabled() ? colorize(line, color) : line;
 }
+
+// Subsection header (lighter styling): ─── Title ───
+inline std::string subsection_header(std::string_view title, int width = -1) {
+    if (width <= 0)
+        width = terminal_width();
+    std::string t = " " + std::string(title) + " ";
+    int sides = std::max(0, (width - static_cast<int>(t.size())) / 2);
+    std::string left = repeat('-', std::min(static_cast<size_t>(sides), size_t(3)));
+    std::string right = repeat('-', std::min(static_cast<size_t>(sides), size_t(3)));
+    std::string line = left + t + right;
+    return colors_enabled() ? colorize(line, Ansi::DIM) : line;
+}
+
+// Box drawing characters for tables
+struct Box {
+    static constexpr const char* TOP_LEFT = "┌";
+    static constexpr const char* TOP_RIGHT = "┐";
+    static constexpr const char* BOTTOM_LEFT = "└";
+    static constexpr const char* BOTTOM_RIGHT = "┘";
+    static constexpr const char* HORIZONTAL = "─";
+    static constexpr const char* VERTICAL = "│";
+    static constexpr const char* T_DOWN = "┬";
+    static constexpr const char* T_UP = "┴";
+    static constexpr const char* T_RIGHT = "├";
+    static constexpr const char* T_LEFT = "┤";
+    static constexpr const char* CROSS = "┼";
+};
 
 // Simple row layout support
 struct Row {
@@ -335,6 +390,186 @@ struct Row {
     std::string value;
     std::string extra;
 };
+
+// Helper for formatting byte sizes in human-readable form
+inline std::string format_bytes(uint64_t bytes, int precision = 1) {
+    if (bytes == 0)
+        return "0 B";
+
+    const char* units[] = {"B", "KB", "MB", "GB", "TB", "PB"};
+    double value = static_cast<double>(bytes);
+    int unit_idx = 0;
+
+    while (value >= 1024.0 && unit_idx < 5) {
+        value /= 1024.0;
+        ++unit_idx;
+    }
+
+    std::ostringstream oss;
+    if (unit_idx == 0) {
+        // Bytes: no decimal places
+        oss << bytes << " B";
+    } else {
+        // Use dynamic precision: show more precision for small values
+        int prec = (value < 10.0) ? precision : 0;
+        oss << std::fixed << std::setprecision(prec) << value << " " << units[unit_idx];
+    }
+    return oss.str();
+}
+
+// Helper for formatting large numbers with thousand separators
+inline std::string format_number(uint64_t value, char separator = ',') {
+    if (value < 1000)
+        return std::to_string(value);
+
+    std::string num = std::to_string(value);
+    std::string result;
+    result.reserve(num.size() + num.size() / 3);
+
+    int count = 0;
+    for (auto it = num.rbegin(); it != num.rend(); ++it) {
+        if (count > 0 && count % 3 == 0)
+            result.insert(0, 1, separator);
+        result.insert(0, 1, *it);
+        ++count;
+    }
+    return result;
+}
+
+// Helper for formatting large numbers in compact "k/M/B" notation
+inline std::string format_number_compact(uint64_t value, int precision = 1) {
+    if (value < 1000)
+        return std::to_string(value);
+
+    const char* suffixes[] = {"", "k", "M", "B", "T"};
+    double val = static_cast<double>(value);
+    int suffix_idx = 0;
+
+    while (val >= 1000.0 && suffix_idx < 4) {
+        val /= 1000.0;
+        ++suffix_idx;
+    }
+
+    std::ostringstream oss;
+    int prec = (val < 10.0) ? precision : 0;
+    oss << std::fixed << std::setprecision(prec) << val << suffixes[suffix_idx];
+    return oss.str();
+}
+
+// Helper for formatting duration in human-readable form
+inline std::string format_duration(uint64_t seconds) {
+    if (seconds == 0)
+        return "0s";
+
+    std::ostringstream oss;
+
+    if (seconds >= 86400) {
+        uint64_t days = seconds / 86400;
+        oss << days << "d";
+        seconds %= 86400;
+        if (seconds >= 3600) {
+            oss << " " << (seconds / 3600) << "h";
+        }
+    } else if (seconds >= 3600) {
+        uint64_t hours = seconds / 3600;
+        oss << hours << "h";
+        seconds %= 3600;
+        if (seconds >= 60) {
+            oss << " " << (seconds / 60) << "m";
+        }
+    } else if (seconds >= 60) {
+        uint64_t minutes = seconds / 60;
+        oss << minutes << "m";
+        seconds %= 60;
+        if (seconds > 0) {
+            oss << " " << seconds << "s";
+        }
+    } else {
+        oss << seconds << "s";
+    }
+
+    return oss.str();
+}
+
+// Helper for formatting percentage with color coding
+inline std::string format_percentage(double value, double warn_threshold = 75.0,
+                                     double critical_threshold = 90.0, int precision = 1) {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(precision) << value << "%";
+    std::string text = oss.str();
+
+    if (!colors_enabled())
+        return text;
+
+    if (value >= critical_threshold)
+        return colorize(text, Ansi::RED);
+    if (value >= warn_threshold)
+        return colorize(text, Ansi::YELLOW);
+    return colorize(text, Ansi::GREEN);
+}
+
+// Status indicator helpers
+inline std::string status_ok(std::string_view text) {
+    if (!colors_enabled())
+        return "✓ " + std::string(text);
+    return colorize("✓ " + std::string(text), Ansi::GREEN);
+}
+
+inline std::string status_warning(std::string_view text) {
+    if (!colors_enabled())
+        return "⚠ " + std::string(text);
+    return colorize("⚠ " + std::string(text), Ansi::YELLOW);
+}
+
+inline std::string status_error(std::string_view text) {
+    if (!colors_enabled())
+        return "✗ " + std::string(text);
+    return colorize("✗ " + std::string(text), Ansi::RED);
+}
+
+inline std::string status_info(std::string_view text) {
+    if (!colors_enabled())
+        return "ℹ " + std::string(text);
+    return colorize("ℹ " + std::string(text), Ansi::BLUE);
+}
+
+inline std::string status_pending(std::string_view text) {
+    if (!colors_enabled())
+        return "◷ " + std::string(text);
+    return colorize("◷ " + std::string(text), Ansi::YELLOW);
+}
+
+// Spinner frames for progress indication
+struct Spinner {
+    static constexpr const char* FRAMES[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
+    static constexpr size_t FRAME_COUNT = 10;
+
+    static const char* frame(size_t index) { return FRAMES[index % FRAME_COUNT]; }
+};
+
+// Bullet point helpers for lists
+inline std::string bullet(std::string_view text, int indent = 0) {
+    std::string prefix(indent, ' ');
+    return prefix + "• " + std::string(text);
+}
+
+inline std::string numbered_item(std::string_view text, int number, int indent = 0) {
+    std::string prefix(indent, ' ');
+    return prefix + std::to_string(number) + ". " + std::string(text);
+}
+
+// Key-value pair formatter
+inline std::string key_value(std::string_view key, std::string_view value,
+                             const char* key_color = Ansi::CYAN, int key_width = 0) {
+    std::string k = std::string(key);
+    if (key_width > 0) {
+        k = pad_right(k, static_cast<size_t>(key_width));
+    }
+    if (colors_enabled() && key_color) {
+        k = colorize(k, key_color);
+    }
+    return k + ": " + std::string(value);
+}
 
 // Render rows with dynamic width allocation and visible-width-safe truncation.
 // - padding controls the spaces between columns
@@ -413,6 +648,203 @@ inline void render_rows(std::ostream& os, const std::vector<Row>& rows, int term
         }
         os << '\n';
     }
+}
+
+// Simple table structure for multi-column data
+struct Table {
+    std::vector<std::string> headers;
+    std::vector<std::vector<std::string>> rows;
+    bool has_header = true;
+
+    void add_row(const std::vector<std::string>& row) { rows.push_back(row); }
+};
+
+// Render a simple table with borders
+inline void render_table(std::ostream& os, const Table& table, int term_width = -1) {
+    if (table.rows.empty())
+        return;
+    if (term_width <= 0)
+        term_width = terminal_width();
+
+    size_t num_cols =
+        table.has_header ? table.headers.size() : (!table.rows.empty() ? table.rows[0].size() : 0);
+    if (num_cols == 0)
+        return;
+
+    // Calculate column widths
+    std::vector<size_t> col_widths(num_cols, 0);
+
+    if (table.has_header) {
+        for (size_t i = 0; i < num_cols && i < table.headers.size(); ++i) {
+            col_widths[i] = visible_width(table.headers[i]);
+        }
+    }
+
+    for (const auto& row : table.rows) {
+        for (size_t i = 0; i < num_cols && i < row.size(); ++i) {
+            col_widths[i] = std::max(col_widths[i], visible_width(row[i]));
+        }
+    }
+
+    // Render header
+    if (table.has_header) {
+        os << "  ";
+        for (size_t i = 0; i < num_cols && i < table.headers.size(); ++i) {
+            if (i > 0)
+                os << "  ";
+            os << pad_right(table.headers[i], col_widths[i]);
+        }
+        os << '\n';
+
+        // Header separator
+        os << "  ";
+        for (size_t i = 0; i < num_cols; ++i) {
+            if (i > 0)
+                os << "  ";
+            os << repeat('-', col_widths[i]);
+        }
+        os << '\n';
+    }
+
+    // Render rows
+    for (const auto& row : table.rows) {
+        os << "  ";
+        for (size_t i = 0; i < num_cols; ++i) {
+            if (i > 0)
+                os << "  ";
+            std::string cell = (i < row.size()) ? row[i] : "";
+            os << pad_right(cell, col_widths[i]);
+        }
+        os << '\n';
+    }
+}
+
+// Horizontal rule / separator
+inline std::string horizontal_rule(int width = -1, char ch = '-') {
+    if (width <= 0)
+        width = terminal_width();
+    return repeat(ch, static_cast<size_t>(width));
+}
+
+// Indent helper for nested content
+inline std::string indent(std::string_view text, int spaces = 2) {
+    std::string prefix(spaces, ' ');
+    std::string result;
+    result.reserve(text.size() + prefix.size() * 10); // Rough estimate
+
+    bool at_line_start = true;
+    for (char ch : text) {
+        if (at_line_start && ch != '\n') {
+            result += prefix;
+            at_line_start = false;
+        }
+        result.push_back(ch);
+        if (ch == '\n') {
+            at_line_start = true;
+        }
+    }
+
+    return result;
+}
+
+// Progress bar with percentage
+inline std::string progress_bar(double fraction, int width = 30, bool show_percentage = true) {
+    double clamped = std::clamp(fraction, 0.0, 1.0);
+    int filled = static_cast<int>(std::llround(clamped * static_cast<double>(width)));
+
+    std::string bar = "[";
+    bar += repeat('=', static_cast<size_t>(filled));
+    bar += repeat(' ', static_cast<size_t>(width - filled));
+    bar += "]";
+
+    if (show_percentage) {
+        bar += " " + format_percentage(fraction);
+    }
+
+    // Color code based on progress
+    if (colors_enabled()) {
+        const char* color = Ansi::RED;
+        if (clamped >= 0.9)
+            color = Ansi::GREEN;
+        else if (clamped >= 0.5)
+            color = Ansi::YELLOW;
+        return colorize(bar, color);
+    }
+
+    return bar;
+}
+
+// Word wrap text to fit within width
+inline std::vector<std::string> wrap_text(std::string_view text, int width = -1) {
+    if (width <= 0)
+        width = terminal_width();
+
+    std::vector<std::string> lines;
+    std::string current_line;
+    std::string current_word;
+
+    for (char ch : text) {
+        if (ch == '\n') {
+            if (!current_word.empty()) {
+                if (!current_line.empty())
+                    current_line += ' ';
+                current_line += current_word;
+                current_word.clear();
+            }
+            lines.push_back(current_line);
+            current_line.clear();
+        } else if (ch == ' ' || ch == '\t') {
+            if (!current_word.empty()) {
+                if (!current_line.empty()) {
+                    if (static_cast<int>(visible_width(current_line + ' ' + current_word)) <=
+                        width) {
+                        current_line += ' ' + current_word;
+                    } else {
+                        lines.push_back(current_line);
+                        current_line = current_word;
+                    }
+                } else {
+                    current_line = current_word;
+                }
+                current_word.clear();
+            }
+        } else {
+            current_word.push_back(ch);
+        }
+    }
+
+    // Handle remaining word
+    if (!current_word.empty()) {
+        if (!current_line.empty()) {
+            if (static_cast<int>(visible_width(current_line + ' ' + current_word)) <= width) {
+                current_line += ' ' + current_word;
+            } else {
+                lines.push_back(current_line);
+                current_line = current_word;
+            }
+        } else {
+            current_line = current_word;
+        }
+    }
+
+    if (!current_line.empty()) {
+        lines.push_back(current_line);
+    }
+
+    return lines;
+}
+
+// Center text within width
+inline std::string center_text(std::string_view text, int width = -1) {
+    if (width <= 0)
+        width = terminal_width();
+
+    int text_width = static_cast<int>(visible_width(text));
+    if (text_width >= width)
+        return std::string(text);
+
+    int padding = (width - text_width) / 2;
+    return repeat(' ', static_cast<size_t>(padding)) + std::string(text);
 }
 
 } // namespace yams::cli::ui

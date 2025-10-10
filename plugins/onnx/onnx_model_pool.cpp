@@ -1159,6 +1159,9 @@ Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
                  modelSize / (1024 * 1024), poolConfig.preCreateResources ? "true" : "false", ms,
                  modelPath);
 
+    // Update cached model count for non-blocking status queries
+    loadedModelCount_.fetch_add(1, std::memory_order_relaxed);
+
     return Result<void>();
 }
 
@@ -1177,6 +1180,9 @@ Result<void> OnnxModelPool::unloadModel(const std::string& modelName) {
     if (it->second.pool) {
         it->second.pool->shutdown();
         it->second.pool.reset();
+
+        // Update cached model count for non-blocking status queries
+        loadedModelCount_.fetch_sub(1, std::memory_order_relaxed);
     }
 
     spdlog::info("Unloaded ONNX model: {}", modelName);

@@ -48,13 +48,11 @@ using yams::app::services::utils::normalizeLookupPath;
 
 class SearchCommand : public ICommand {
 private:
-    // Streaming configuration
-    bool enableStreaming_ = true;
+    // Streaming configuration (disabled by default for reliability)
+    bool enableStreaming_ = false;
     int headerTimeoutMs_ = 15000;
     int bodyTimeoutMs_ = 60000;
     int chunkSize_ = 64 * 1024;
-    // Default to streaming; users can opt out with --no-streaming
-    bool disableStreaming_ = false;
 
     YamsCLI* cli_ = nullptr;
     std::string query_;
@@ -363,9 +361,8 @@ public:
                         "Timeout for receiving response body (milliseconds)")
             ->default_val(60000);
 
-        cmd->add_flag("--no-streaming", disableStreaming_,
-                      "Disable streaming responses (progressive output)")
-            ->default_val(false);
+        cmd->add_flag("--streaming", enableStreaming_,
+                      "Enable streaming responses (progressive output, off by default)");
         cmd->add_option("--chunk-size", chunkSize_,
                         "Size of chunks for streaming responses (bytes)")
             ->default_val(64 * 1024);
@@ -427,7 +424,7 @@ public:
             cli_->setPendingCommand(this);
             if (cold_) {
                 // When --cold is provided, prefer non-streaming thorough execution
-                disableStreaming_ = true;
+                enableStreaming_ = false;
             }
             // Apply local inversion flags captured above
             // Note: CLI11 stores flag states; re-fetch via app to avoid capture issues
@@ -580,8 +577,8 @@ public:
             clientConfig.headerTimeout = std::chrono::milliseconds(headerTimeoutMs_);
             clientConfig.bodyTimeout = std::chrono::milliseconds(bodyTimeoutMs_);
             clientConfig.requestTimeout = std::chrono::milliseconds(30000);
-            // Allow streaming by default; CLI will retry unary on timeout
-            clientConfig.enableChunkedResponses = !disableStreaming_ && enableStreaming_;
+            // Streaming disabled by default for reliability; enable with --streaming
+            clientConfig.enableChunkedResponses = enableStreaming_;
             clientConfig.progressiveOutput = true;
             clientConfig.maxChunkSize = chunkSize_;
             clientConfig.singleUseConnections = false;
@@ -1306,7 +1303,7 @@ public:
         clientConfig.headerTimeout = std::chrono::milliseconds(headerTimeoutMs_);
         clientConfig.bodyTimeout = std::chrono::milliseconds(bodyTimeoutMs_);
         clientConfig.requestTimeout = std::chrono::milliseconds(30000);
-        clientConfig.enableChunkedResponses = !disableStreaming_ && enableStreaming_;
+        clientConfig.enableChunkedResponses = enableStreaming_;
         clientConfig.progressiveOutput = true;
         clientConfig.maxChunkSize = chunkSize_;
         clientConfig.singleUseConnections = true;

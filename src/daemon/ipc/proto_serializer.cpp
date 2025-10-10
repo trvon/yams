@@ -141,6 +141,16 @@ template <> struct ProtoBinding<GetResponse> {
         if (!r.compressionHeader.empty())
             o->set_compression_header(r.compressionHeader.data(),
                                       static_cast<int>(r.compressionHeader.size()));
+        if (r.centroidWeight)
+            o->set_centroid_weight(*r.centroidWeight);
+        if (r.centroidDims)
+            o->set_centroid_dims(*r.centroidDims);
+        if (!r.centroidPreview.empty()) {
+            o->clear_centroid_preview();
+            for (float v : r.centroidPreview)
+                o->add_centroid_preview(v);
+        }
+        o->set_has_content(r.hasContent);
         if (r.hasContent)
             o->set_content(r.content);
         to_kv_pairs(r.metadata, o->mutable_metadata());
@@ -165,8 +175,15 @@ template <> struct ProtoBinding<GetResponse> {
         if (!i.compression_header().empty())
             r.compressionHeader.assign(i.compression_header().begin(),
                                        i.compression_header().end());
+        if (i.has_centroid_weight())
+            r.centroidWeight = i.centroid_weight();
+        if (i.has_centroid_dims())
+            r.centroidDims = i.centroid_dims();
+        if (!i.centroid_preview().empty()) {
+            r.centroidPreview.assign(i.centroid_preview().begin(), i.centroid_preview().end());
+        }
         r.content = i.content();
-        r.hasContent = !r.content.empty();
+        r.hasContent = i.has_content(); // Use explicit protobuf field
         r.metadata = from_kv_pairs(i.metadata());
         return r;
     }
@@ -1824,6 +1841,7 @@ template <> struct ProtoBinding<CatResponse> {
         o->set_name(r.name);
         o->set_content(r.content);
         o->set_size(r.size);
+        o->set_has_content(r.hasContent);
     }
     static CatResponse get(const Envelope& env) {
         const auto& i = env.cat_response();
@@ -1832,6 +1850,7 @@ template <> struct ProtoBinding<CatResponse> {
         r.name = i.name();
         r.content = i.content();
         r.size = i.size();
+        r.hasContent = i.has_content();
         return r;
     }
 };

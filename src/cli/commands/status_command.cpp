@@ -1,5 +1,6 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <future>
 #include <iomanip>
 #include <iostream>
@@ -18,6 +19,7 @@
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/recommendation_util.h>
+#include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_migration.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -845,169 +847,133 @@ private:
         std::cout << "}\n";
     }
 
-    struct Row {
-        std::string label;
-        std::string value;
-        std::string extra;
-    };
-
-    static size_t visibleWidth(const std::string& s) {
-        size_t w = 0;
-        bool inEsc = false;
-        for (char c : s) {
-            if (c == '\x1b') {
-                inEsc = true;
-                continue;
-            }
-            if (inEsc) {
-                if (c == 'm')
-                    inEsc = false;
-                continue;
-            }
-            ++w;
-        }
-        return w;
-    }
-    static std::string truncateToWidth(const std::string& s, size_t maxw) {
-        if (maxw == 0)
-            return "";
-        if (visibleWidth(s) <= maxw)
-            return s;
-        std::string out;
-        out.reserve(s.size());
-        size_t w = 0;
-        bool inEsc = false;
-        for (char c : s) {
-            if (c == '\x1b') {
-                inEsc = true;
-                out.push_back(c);
-                continue;
-            }
-            if (inEsc) {
-                out.push_back(c);
-                if (c == 'm')
-                    inEsc = false;
-                continue;
-            }
-            if (w + 1 > maxw - 1)
-                break;
-            out.push_back(c);
-            ++w;
-        }
-        out += "…";
-        return out;
-    }
-    static int detectTerminalWidth() {
-        const char* cols = getenv("COLUMNS");
-        if (cols) {
-            try {
-                return std::max(60, std::min(200, std::stoi(cols)));
-            } catch (...) {
-            }
-        }
-        return 100;
-    }
-
-    static void renderRows(const std::vector<Row>& rows) {
-        if (rows.empty())
-            return;
-        int term = detectTerminalWidth();
-        const int pad = 2;
-        size_t maxL = 8, maxV = 8;
-        for (const auto& r : rows) {
-            maxL = std::max(maxL, visibleWidth(r.label));
-            maxV = std::max(maxV, visibleWidth(r.value));
-        }
-        for (const auto& r : rows) {
-            std::string l = r.label, v = r.value, e = r.extra;
-            size_t lW = maxL, vW = maxV;
-            int base = 2 + (int)lW + pad + (int)vW;
-            int need = base + (e.empty() ? 0 : pad + (int)visibleWidth(e));
-            int over = need - term;
-            if (over > 0) {
-                if (!e.empty()) {
-                    size_t ew = visibleWidth(e);
-                    size_t tgt = (over >= (int)ew) ? 0 : ew - over;
-                    e = truncateToWidth(e, tgt);
-                    need = base + (e.empty() ? 0 : pad + (int)visibleWidth(e));
-                    over = need - term;
-                }
-                if (over > 0 && vW > 8) {
-                    size_t tgt = std::max((size_t)8, vW - (size_t)over);
-                    v = truncateToWidth(v, tgt);
-                    vW = visibleWidth(v);
-                    need =
-                        2 + (int)lW + pad + (int)vW + (e.empty() ? 0 : pad + (int)visibleWidth(e));
-                    over = need - term;
-                }
-                if (over > 0 && lW > 8) {
-                    size_t tgt = std::max((size_t)8, lW - (size_t)over);
-                    l = truncateToWidth(l, tgt);
-                    lW = visibleWidth(l);
-                }
-            }
-            std::cout << "  " << std::left << std::setw((int)lW) << l << std::string(pad, ' ')
-                      << std::right << std::setw((int)vW) << v;
-            if (!e.empty())
-                std::cout << std::string(pad, ' ') << e;
-            std::cout << "\n";
-        }
-    }
-
     void outputText(const StatusInfo& info) {
-        std::cout << "YAMS System Status\n";
-        std::cout << "==================\n\n";
+        using namespace yams::cli::ui;
 
-        std::vector<Row> rows;
-        rows.push_back({std::string(info.storageHealthy ? "✓ Storage" : "✗ Storage"),
-                        info.storageHealthy ? ("Healthy (" + formatSize(info.totalSize) + ", " +
-                                               std::to_string(info.totalDocuments) + " documents)")
-                                            : std::string("Issues detected"),
-                        ""});
-        rows.push_back(
-            {std::string(info.configMigrationNeeded ? "⚠ Configuration" : "✓ Configuration"),
-             std::string("v") + info.configVersion +
-                 (info.configMigrationNeeded ? " (migration recommended)" : " (current)"),
-             ""});
-        rows.push_back({std::string(info.hasModels ? "✓ Models" : "⚠ Models"),
-                        info.hasModels
-                            ? (std::to_string(info.availableModels.size()) + " available (" +
-                               [&]() {
-                                   std::ostringstream oss;
-                                   for (size_t i = 0; i < info.availableModels.size(); ++i) {
-                                       if (i)
-                                           oss << ", ";
-                                       oss << info.availableModels[i];
-                                   }
-                                   return oss.str();
-                               }() +
-                               ")")
-                            : std::string("No embedding models found"),
-                        ""});
-        rows.push_back({std::string(info.autoGenerationEnabled ? "✓ Embeddings" : "⚠ Embeddings"),
-                        std::string(info.autoGenerationEnabled ? "Auto-generation enabled"
-                                                               : "Auto-generation disabled") +
-                            (info.embeddingCount > 0 ? (" (" + std::to_string(info.embeddingCount) +
-                                                        " embeddings ready)")
-                                                     : std::string()),
-                        ""});
-        rows.push_back(
-            {std::string(info.vectorDbHealthy ? "✓ Vector DB" : "⚠ Vector DB"),
-             std::string(info.vectorDbHealthy ? "Ready for semantic search" : "Not available"),
-             ""});
-        if (info.workerThreads > 0) {
+        std::cout << title_banner("YAMS System Status") << "\n\n";
+
+        auto severityLabel = [](std::string label, const char* color, std::string icon) {
+            return colorize(icon + " " + std::move(label), color);
+        };
+
+        auto humanCount = [](uint64_t value) {
+            if (value < 1000)
+                return std::to_string(value);
             std::ostringstream oss;
-            oss << "threads=" << info.workerThreads << ", active=" << info.workerActive
-                << ", queued=" << info.workerQueued << ", util=" << info.workerUtilPct << "%";
-            rows.push_back({"✓ Worker Pool", "Healthy", oss.str()});
+            oss << std::fixed << std::setprecision(value < 10000 ? 1 : 0)
+                << static_cast<double>(value) / 1000.0 << "k";
+            return oss.str();
+        };
+
+        const bool configWarn = info.configMigrationNeeded;
+        const bool embeddingsWarn = !info.autoGenerationEnabled;
+        const bool modelsWarn = !info.hasModels;
+        const bool vectorWarn = !info.vectorDbHealthy;
+        const bool storageOk = info.storageHealthy;
+
+        std::vector<Row> overview;
+        overview.push_back(
+            {severityLabel("Storage", storageOk ? Ansi::GREEN : Ansi::RED, storageOk ? "✓" : "✗"),
+             storageOk ? ("Healthy · " + formatSize(info.totalSize) + " · " +
+                          humanCount(info.totalDocuments) + " docs")
+                       : std::string("Check logs for storage errors"),
+             info.storagePath.empty() ? std::string{} : std::string{"path: " + info.storagePath}});
+
+        overview.push_back(
+            {severityLabel("Configuration", configWarn ? Ansi::YELLOW : Ansi::GREEN,
+                           configWarn ? "⚠" : "✓"),
+             std::string("v") + info.configVersion +
+                 (configWarn ? " · migration recommended" : " · up-to-date"),
+             info.configPath.empty() ? std::string{} : std::string{"config: " + info.configPath}});
+
+        overview.push_back({severityLabel("Models", modelsWarn ? Ansi::YELLOW : Ansi::GREEN,
+                                          modelsWarn ? "⚠" : "✓"),
+                            info.hasModels
+                                ? (std::to_string(info.availableModels.size()) + " available" +
+                                   (info.availableModels.size() > 0
+                                        ? " (" +
+                                              [&]() {
+                                                  std::ostringstream oss;
+                                                  for (size_t i = 0;
+                                                       i < info.availableModels.size(); ++i) {
+                                                      if (i)
+                                                          oss << ", ";
+                                                      oss << info.availableModels[i];
+                                                  }
+                                                  return oss.str();
+                                              }() +
+                                              ")"
+                                        : std::string()))
+                                : std::string("No embedding models detected"),
+                            std::string{}});
+
+        const bool hasEmbeddings = info.embeddingCount > 0;
+        const bool embeddingsCritical = (info.totalDocuments > 0 && !hasEmbeddings);
+        std::ostringstream embVal;
+        embVal << (info.autoGenerationEnabled ? "Auto-build enabled" : "Auto-build disabled");
+        if (info.embeddingCount > 0) {
+            embVal << " · " << humanCount(info.embeddingCount) << " vectors";
+            if (info.totalDocuments > 0) {
+                const double coverage =
+                    static_cast<double>(info.embeddingCount) /
+                    static_cast<double>(std::max<uint64_t>(1, info.totalDocuments));
+                embVal << " · " << std::fixed << std::setprecision(0) << (coverage * 100.0)
+                       << "% coverage";
+            }
+        } else if (info.totalDocuments > 0) {
+            embVal << " · 0 of " << humanCount(info.totalDocuments) << " documents";
         }
-        renderRows(rows);
+
+        const char* embeddingColor =
+            embeddingsCritical
+                ? Ansi::RED
+                : ((info.autoGenerationEnabled && hasEmbeddings) ? Ansi::GREEN : Ansi::YELLOW);
+        const char* embeddingIcon = embeddingsCritical                              ? "✗"
+                                    : (info.autoGenerationEnabled && hasEmbeddings) ? "✓"
+                                                                                    : "⚠";
+
+        overview.push_back(
+            {severityLabel("Embeddings", embeddingColor, embeddingIcon), embVal.str(),
+             info.preferredModel == "none" ? std::string{}
+                                           : std::string{"preferred: " + info.preferredModel}});
+
+        overview.push_back({severityLabel("Vector DB", vectorWarn ? Ansi::YELLOW : Ansi::GREEN,
+                                          vectorWarn ? "⚠" : "✓"),
+                            info.vectorDbHealthy ? "Operational" : "Not available", std::string{}});
+
+        std::cout << section_header("Overview") << "\n\n";
+        render_rows(std::cout, overview);
+
+        std::vector<Row> worker;
+        if (info.workerThreads > 0) {
+            std::ostringstream details;
+            details << info.workerThreads << " threads · " << info.workerActive << " active · "
+                    << info.workerQueued << " queued";
+            std::string util = std::to_string(info.workerUtilPct) + "%";
+            const char* utilColor = info.workerUtilPct >= 85
+                                        ? (info.workerUtilPct >= 95 ? Ansi::RED : Ansi::YELLOW)
+                                        : Ansi::GREEN;
+            const char* workerIcon = "✓";
+            if (info.workerUtilPct >= 95)
+                workerIcon = "✗";
+            else if (info.workerUtilPct >= 85)
+                workerIcon = "⚠";
+            worker.push_back({severityLabel("Worker Pool", utilColor, workerIcon),
+                              colorize(util, utilColor), details.str()});
+        }
+        if (!worker.empty()) {
+            std::cout << "\n" << section_header("Background Processing") << "\n\n";
+            render_rows(std::cout, worker);
+        }
 
         if (!info.advice.empty()) {
+            std::cout << "\n" << section_header("Recommendations") << "\n\n";
             yams::cli::printRecommendationsText(info.advice, std::cout);
         }
-        std::cout << "\nFor detailed statistics: yams stats\n";
-        std::cout << "For configuration help: yams config --help\n";
+
+        std::cout << "\n"
+                  << colorize("→ For daemon telemetry run 'yams daemon status -d'", Ansi::DIM)
+                  << "\n";
     }
 
     std::string formatSize(uint64_t bytes) const {

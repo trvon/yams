@@ -253,10 +253,11 @@ build_typed_providers(ServiceManager* sm, const yams::daemon::StateComponent* st
         }
         const std::string lastErr = sm->lastModelError();
         uint32_t modelsLoaded = 0;
+        // Use non-blocking cached count instead of getLoadedModels().size()
         try {
             auto mp = sm->getModelProvider();
             if (mp)
-                modelsLoaded = static_cast<uint32_t>(mp->getLoadedModels().size());
+                modelsLoaded = static_cast<uint32_t>(mp->getLoadedModelCount());
         } catch (...) {
         }
         std::string adopted = sm->adoptedProviderPluginName();

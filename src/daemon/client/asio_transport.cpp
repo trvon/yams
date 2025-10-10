@@ -185,6 +185,8 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
     frame.reserve(MessageFramer::HEADER_SIZE + 4096);
     auto frame_res = framer.frame_message_into(msg, frame);
     if (!frame_res) {
+        // Release connection before returning error
+        conn->in_use.store(false, std::memory_order_release);
         co_return Error{ErrorCode::InvalidData, "Frame build failed"};
     }
 
@@ -193,6 +195,8 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
 
     co_await boost::asio::dispatch(conn->strand, use_awaitable);
     if (conn->handlers.size() >= conn->opts.maxInflight) {
+        // Release connection before returning error
+        conn->in_use.store(false, std::memory_order_release);
         co_return Error{ErrorCode::ResourceExhausted, "Too many in-flight requests"};
     }
     {
@@ -205,10 +209,16 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
     if (!wres) {
         co_await boost::asio::dispatch(conn->strand, use_awaitable);
         conn->handlers.erase(msg.requestId);
+        // Release connection before returning error
+        conn->in_use.store(false, std::memory_order_release);
         co_return wres.error();
     }
     spdlog::info("AsioTransportAdapter::send_request wrote frame req_id={} type={}", msg.requestId,
                  static_cast<int>(req_type));
+
+    // Release connection AFTER writing frame - connection can now be reused while we wait for
+    // response
+    conn->in_use.store(false, std::memory_order_release);
 
     auto [ec, response_result] =
         co_await response_ch->async_receive(boost::asio::as_tuple(use_awaitable));
@@ -243,6 +253,8 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
     frame.reserve(MessageFramer::HEADER_SIZE + 4096);
     auto frame_res = framer.frame_message_into(msg, frame);
     if (!frame_res) {
+        // Release connection before returning error
+        conn->in_use.store(false, std::memory_order_release);
         co_return Error{ErrorCode::InvalidData, "Frame build failed"};
     }
 
@@ -251,6 +263,8 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
 
     co_await boost::asio::dispatch(conn->strand, use_awaitable);
     if (conn->handlers.size() >= conn->opts.maxInflight) {
+        // Release connection before returning error
+        conn->in_use.store(false, std::memory_order_release);
         co_return Error{ErrorCode::ResourceExhausted, "Too many in-flight requests"};
     }
     {
@@ -264,10 +278,16 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
     if (!wres) {
         co_await boost::asio::dispatch(conn->strand, use_awaitable);
         conn->handlers.erase(msg.requestId);
+        // Release connection before returning error
+        conn->in_use.store(false, std::memory_order_release);
         co_return wres.error();
     }
     spdlog::info("AsioTransportAdapter::send_request_streaming wrote frame req_id={} type={}",
                  msg.requestId, static_cast<int>(getMessageType(req)));
+
+    // Release connection AFTER writing frame - connection can now be reused while we wait for
+    // streaming response
+    conn->in_use.store(false, std::memory_order_release);
 
     auto [ec, void_result] = co_await done_ch->async_receive(boost::asio::as_tuple(use_awaitable));
     if (ec) {

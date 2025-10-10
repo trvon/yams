@@ -40,19 +40,7 @@ bool stream_trace_enabled() {
     return enabled != 0;
 }
 
-bool socket_run_diag_enabled() {
-    static int enabled = [] {
-        if (const char* raw = std::getenv("YAMS_SOCKET_RUN_DIAG")) {
-            std::string v(raw);
-            for (auto& ch : v)
-                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-            if (v == "1" || v == "true" || v == "on")
-                return 1;
-        }
-        return 0;
-    }();
-    return enabled != 0;
-}
+// Diagnostic thread removed - simplified architecture with fixed worker pool
 } // namespace
 
 #include <spdlog/spdlog.h>
@@ -172,73 +160,32 @@ Result<void> SocketServer::start() {
             detached);
         spdlog::info("SocketServer: accept_loop scheduled");
 
+        // Get tuneable worker count from TuneAdvisor
+        // Use poolMaxSizeIpc() for fixed pool sized for peak load (deterministic, no runtime
+        // scaling) Override via YAMS_POOL_IPC_MAX env var
         try {
-            auto rec = TuneAdvisor::recommendedThreads(0.5 /*backgroundFactor*/);
+            auto rec = TuneAdvisor::poolMaxSizeIpc();
             if (rec > 0) {
-                config_.workerThreads = std::max<std::size_t>(
-                    1, std::min<std::size_t>(config_.workerThreads, static_cast<std::size_t>(rec)));
+                config_.workerThreads = rec;
             }
         } catch (...) {
         }
 
-        workerGuards_.reserve(config_.workerThreads);
+        // Simple worker pool: blocking io_context_.run(), no polling, deterministic shutdown
+        workers_.reserve(config_.workerThreads);
         for (size_t i = 0; i < config_.workerThreads; ++i) {
-            auto flag = std::make_shared<std::atomic<bool>>(false);
-            IoWorker w{};
-            w.exit = flag;
-            workerGuards_.push_back(
-                std::make_shared<
-                    boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>(
-                    io_context_.get_executor()));
-            w.th = std::thread([this, i, flag, guard = workerGuards_.back()] {
-                set_current_thread_name("yams-ipc-worker-" + std::to_string(i));
-                const bool trace = stream_trace_enabled();
-                if (trace) {
-                    spdlog::info("stream-trace: worker {} entering io_context.run loop", i);
-                }
+            workers_.emplace_back([this, i](yams::compat::stop_token /*token*/) {
+                set_current_thread_name("yams-ipc-" + std::to_string(i));
+                spdlog::info("SocketServer: worker {} starting (blocking run)", i);
                 try {
-                    while (!stopping_.load(std::memory_order_relaxed) &&
-                           !flag->load(std::memory_order_relaxed)) {
-                        auto processed = io_context_.run_one();
-                        if (processed == 0) {
-                            using namespace std::chrono_literals;
-                            std::this_thread::sleep_for(1ms);
-                            if (trace) {
-                                static thread_local uint32_t idle_ticks = 0;
-                                if (++idle_ticks % 500 == 0) {
-                                    spdlog::info("stream-trace: worker {} idle", i);
-                                }
-                            }
-                        } else if (trace) {
-                            spdlog::info("stream-trace: worker {} handled {} events", i, processed);
-                        }
-                    }
+                    // Blocking run() - exits when work_guard_ is reset or io_context_ stopped
+                    io_context_.run();
                 } catch (const std::exception& e) {
-                    spdlog::error("Worker thread exception: {}", e.what());
+                    spdlog::error("SocketServer: worker {} exception: {}", i, e.what());
                 }
-            });
-            {
-                std::lock_guard<std::mutex> lk(workersMutex_);
-                workers_.emplace_back(std::move(w));
-            }
-        }
-
-        if (socket_run_diag_enabled()) {
-            diagThread_ = std::thread([this] {
-                set_current_thread_name("yams-ipc-diag");
-                try {
-                    spdlog::info("SocketServer diag thread: io_context.run starting");
-                    auto handlers = io_context_.run();
-                    spdlog::info(
-                        "SocketServer diag thread: io_context.run exited handlers={} stopped={}",
-                        handlers, io_context_.stopped());
-                } catch (const std::exception& e) {
-                    spdlog::error("SocketServer diag thread exception: {}", e.what());
-                }
+                spdlog::info("SocketServer: worker {} exiting", i);
             });
         }
-
-        start_io_reconciler();
 
         if (state_) {
             state_->readiness.ipcServerReady.store(true);
@@ -271,6 +218,41 @@ Result<void> SocketServer::stop() {
         spdlog::info("Stopping socket server");
         stopping_ = true;
 
+        // Request stop on all active connections via stop_source
+        // This will cause the token.stop_requested() checks to trigger
+        try {
+            stop_source_.request_stop();
+        } catch (...) {
+        }
+
+        // Close all active sockets IMMEDIATELY for deterministic shutdown
+        // This is the C++ way: no timeouts, explicit resource cleanup
+        try {
+            std::vector<std::shared_ptr<boost::asio::local::stream_protocol::socket>> sockets;
+            {
+                std::lock_guard<std::mutex> lk(activeSocketsMutex_);
+                for (auto& weak_sock : activeSockets_) {
+                    if (auto sock = weak_sock.lock()) {
+                        sockets.push_back(sock);
+                    }
+                }
+                activeSockets_.clear();
+            }
+            // Close outside the lock to avoid deadlock
+            for (auto& sock : sockets) {
+                if (sock && sock->is_open()) {
+                    boost::system::error_code ec;
+                    sock->close(ec);
+                    // Ignore errors - socket may already be closed
+                }
+            }
+            spdlog::info("Closed {} active connections", sockets.size());
+        } catch (const std::exception& e) {
+            spdlog::warn("Exception while closing active sockets: {}", e.what());
+        } catch (...) {
+            spdlog::warn("Unknown exception while closing active sockets");
+        }
+
         try {
             if (acceptor_ && acceptor_->is_open()) {
                 boost::system::error_code ec;
@@ -285,99 +267,21 @@ Result<void> SocketServer::stop() {
             spdlog::warn("Unknown exception while closing acceptor");
         }
 
-        // Stop and join the IO reconciler thread BEFORE touching workers_ to avoid
-        // concurrent modifications while we iterate/join worker threads.
-        try {
-            stop_io_reconciler();
-        } catch (...) {
-        }
-        try {
-            if (ioReconThread_.joinable()) {
-                // Request cooperative stop (no-op on fallback) then join.
-                try {
-                    ioReconThread_.request_stop();
-                } catch (...) {
-                }
-                try {
-                    ioReconThread_.join();
-                } catch (const std::exception& e) {
-                    spdlog::warn("ioReconThread join exception: {}", e.what());
-                } catch (...) {
-                    spdlog::warn("ioReconThread join unknown exception");
-                }
-            }
-        } catch (...) {
-        }
+        // Simplified shutdown: reset work guard, stop io_context, RAII joins workers
+        spdlog::info("SocketServer: resetting work guard");
+        work_guard_.reset();
 
-        // Signal all workers to exit under lock, then stop the io_context.
-        try {
-            std::lock_guard<std::mutex> lk(workersMutex_);
-            for (auto& w : workers_) {
-                if (w.exit)
-                    w.exit->store(true, std::memory_order_relaxed);
-            }
-        } catch (...) {
-        }
+        spdlog::info("SocketServer: stopping io_context");
         try {
             io_context_.stop();
         } catch (...) {
         }
 
-        // Move workers to a local list under lock to avoid iterator invalidation
-        // if any other component attempts to resize during shutdown (defensive).
-        std::vector<IoWorker> localWorkers;
-        try {
-            std::lock_guard<std::mutex> lk(workersMutex_);
-            localWorkers = std::move(workers_);
-            workers_.clear();
-        } catch (...) {
-            // If the move failed, fall back to joining what's present without lock.
-        }
-
-        // Join/detach worker threads safely.
-        const auto self_id = std::this_thread::get_id();
-        auto join_worker = [&](IoWorker& w) {
-            if (!w.th.joinable())
-                return;
-            if (w.th.get_id() == self_id) {
-                try {
-                    w.th.detach();
-                } catch (...) {
-                }
-            } else {
-                try {
-                    w.th.join();
-                } catch (const std::exception& e) {
-                    spdlog::warn("Worker join exception: {}", e.what());
-                } catch (...) {
-                    spdlog::warn("Worker join unknown exception");
-                }
-            }
-        };
-
-        if (!localWorkers.empty()) {
-            for (auto& w : localWorkers) {
-                join_worker(w);
-            }
-        } else {
-            // Fallback path if move failed: join workers_ directly (may be empty already)
-            for (auto& w : workers_) {
-                join_worker(w);
-            }
-            workers_.clear();
-        }
-        work_guard_.reset();
-        workerGuards_.clear();
-
-        if (diagThread_.joinable()) {
-            try {
-                diagThread_.join();
-            } catch (const std::exception& e) {
-                spdlog::warn("Diag thread join exception: {}", e.what());
-            } catch (...) {
-                spdlog::warn("Diag thread join unknown exception");
-            }
-        }
+        // jthread RAII: destructor automatically request_stop() + join()
+        // Workers exit naturally when io_context_.run() completes
+        spdlog::info("SocketServer: clearing workers (RAII join)");
+        workers_.clear();
+        spdlog::info("SocketServer: workers joined");
 
         if (state_) {
             state_->readiness.ipcServerReady.store(false);
@@ -414,117 +318,6 @@ void SocketServer::setWriterBudget(std::size_t bytes) {
     else
         writerBudget_->store(bytes, std::memory_order_relaxed);
     MuxMetricsRegistry::instance().setWriterBudget(bytes);
-}
-
-void SocketServer::start_io_reconciler() {
-    try {
-        ioReconThread_ = yams::compat::jthread([this](yams::compat::stop_token st) {
-            using namespace std::chrono_literals;
-            while (!st.stop_requested() && running_.load(std::memory_order_relaxed)) {
-                try {
-                    std::uint32_t desired = 0;
-                    try {
-                        desired =
-                            yams::daemon::PoolManager::instance().stats("ipc_io").current_size;
-                    } catch (...) {
-                        desired = 0;
-                    }
-                    if (desired == 0) {
-                        desired = static_cast<std::uint32_t>(
-                            std::max<std::size_t>(1, config_.workerThreads));
-                    }
-                    std::size_t current = 0;
-                    {
-                        std::lock_guard<std::mutex> lk(workersMutex_);
-                        current = workers_.size();
-                    }
-                    if (desired > current) {
-                        const std::size_t add = desired - current;
-                        for (std::size_t i = 0; i < add; ++i) {
-                            auto flag = std::make_shared<std::atomic<bool>>(false);
-                            IoWorker w{};
-                            w.exit = flag;
-                            const std::size_t idx = current + i;
-                            w.th = std::thread([this, idx, flag] {
-                                set_current_thread_name("yams-ipc-worker-" + std::to_string(idx));
-                                const bool trace = stream_trace_enabled();
-                                try {
-                                    while (!stopping_.load(std::memory_order_relaxed) &&
-                                           !flag->load(std::memory_order_relaxed)) {
-                                        uint32_t poll_ms = 100;
-                                        try {
-                                            if (auto snap =
-                                                    TuningSnapshotRegistry::instance().get())
-                                                poll_ms = snap->workerPollMs;
-                                            else
-                                                poll_ms = TuneAdvisor::workerPollMs();
-                                        } catch (...) {
-                                        }
-                                        auto handled =
-                                            io_context_.run_for(std::chrono::milliseconds(poll_ms));
-                                        if (trace && handled > 0) {
-                                            spdlog::info("stream-trace: worker {} processed {} "
-                                                         "handlers (io_stopped={})",
-                                                         idx, handled, io_context_.stopped());
-                                        }
-                                        if (trace && handled == 0) {
-                                            static thread_local uint32_t idle_ticks = 0;
-                                            if (++idle_ticks % 50 == 0) {
-                                                spdlog::info(
-                                                    "stream-trace: worker {} idle (io_stopped={})",
-                                                    idx, io_context_.stopped());
-                                            }
-                                        }
-                                        if (io_context_.stopped()) {
-                                            io_context_.restart();
-                                            if (trace) {
-                                                spdlog::info(
-                                                    "stream-trace: worker {} restarting io_context",
-                                                    idx);
-                                            }
-                                        }
-                                    }
-                                } catch (const std::exception& e) {
-                                    spdlog::error("Worker thread exception: {}", e.what());
-                                }
-                            });
-                            std::lock_guard<std::mutex> lk(workersMutex_);
-                            workers_.emplace_back(std::move(w));
-                        }
-                    } else if (desired < current) {
-                        const std::size_t remove = current - desired;
-                        for (std::size_t i = 0; i < remove; ++i) {
-                            IoWorker victim;
-                            {
-                                std::lock_guard<std::mutex> lk(workersMutex_);
-                                if (workers_.empty())
-                                    break;
-                                victim = std::move(workers_.back());
-                                workers_.pop_back();
-                            }
-                            if (victim.exit)
-                                victim.exit->store(true, std::memory_order_relaxed);
-                            boost::asio::post(io_context_, [] {});
-                            if (victim.th.joinable())
-                                victim.th.join();
-                        }
-                    }
-                } catch (...) {
-                }
-                std::this_thread::sleep_for(500ms);
-            }
-        });
-    } catch (...) {
-    }
-}
-
-void SocketServer::stop_io_reconciler() {
-    try {
-        if (ioReconThread_.joinable()) {
-            ioReconThread_.request_stop();
-        }
-    } catch (...) {
-    }
 }
 
 awaitable<void> SocketServer::accept_loop() {
@@ -797,7 +590,9 @@ awaitable<void> SocketServer::handle_connection(local::socket socket) {
         handlerConfig.graceful_half_close = true;
         auto connectionTimeout = config_.connectionTimeout;
         if (connectionTimeout.count() == 0) {
-            connectionTimeout = std::chrono::milliseconds(30000);
+            // C++ IPC should be fast: 2s read timeout is generous for local sockets
+            // This prevents hanging connections during shutdown and keeps everything sub-second
+            connectionTimeout = std::chrono::milliseconds(2000);
         }
         auto timeoutSeconds = std::chrono::duration_cast<std::chrono::seconds>(connectionTimeout);
         if (timeoutSeconds.count() == 0 && connectionTimeout.count() > 0) {
@@ -833,12 +628,30 @@ awaitable<void> SocketServer::handle_connection(local::socket socket) {
         }
         RequestHandler handler(disp, handlerConfig);
 
-        yams::compat::stop_token token{};
+        // Wrap socket in shared_ptr for tracking and use modern C++20 move semantics
+        auto sock =
+            std::make_shared<boost::asio::local::stream_protocol::socket>(std::move(socket));
 
-        co_await handler.handle_connection(std::move(socket), token);
+        // Register for deterministic shutdown
+        register_socket(sock);
+
+        // Use the server's stop_source token so we can cancel connections during shutdown
+        auto token = stop_source_.get_token();
+
+        co_await handler.handle_connection(std::move(*sock), token);
     } catch (const std::exception& e) {
         spdlog::error("SocketServer::handle_connection error: {}", e.what());
     }
+}
+
+void SocketServer::register_socket(
+    std::weak_ptr<boost::asio::local::stream_protocol::socket> socket) {
+    std::lock_guard<std::mutex> lk(activeSocketsMutex_);
+    // Clean up expired weak_ptrs while we're here
+    activeSockets_.erase(std::remove_if(activeSockets_.begin(), activeSockets_.end(),
+                                        [](const auto& weak) { return weak.expired(); }),
+                         activeSockets_.end());
+    activeSockets_.push_back(std::move(socket));
 }
 
 } // namespace yams::daemon

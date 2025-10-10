@@ -181,6 +181,19 @@ std::vector<std::string> AbiModelProviderAdapter::getLoadedModels() const {
     return out;
 }
 
+size_t AbiModelProviderAdapter::getLoadedModelCount() const {
+    if (!table_ || !table_->get_loaded_models)
+        return 0;
+    const char** ids = nullptr;
+    size_t count = 0;
+    if (table_->get_loaded_models(table_->self, &ids, &count) != YAMS_OK)
+        return 0;
+    // Free the list immediately - we only wanted the count
+    if (table_->free_model_list)
+        table_->free_model_list(table_->self, ids, count);
+    return count;
+}
+
 Result<ModelInfo> AbiModelProviderAdapter::getModelInfo(const std::string& modelName) const {
     if (!isModelLoaded(modelName))
         return Error{ErrorCode::NotFound, "Model not loaded"};

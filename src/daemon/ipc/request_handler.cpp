@@ -254,7 +254,9 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
         uint64_t fsm_guard_fail_count = 0;
         // Track consecutive idle read timeouts to prevent leaking idle connections forever
         std::uint32_t consecutive_idle_timeouts = 0;
-        constexpr std::uint32_t kMaxIdleTimeouts = 120; // ~4 minutes if read_timeout ≈ 2s
+        // C++ IPC should be fast: 3 idle timeouts = 6s max idle with 2s read_timeout
+        // This ensures connections don't hang during shutdown or idle periods
+        constexpr std::uint32_t kMaxIdleTimeouts = 3;
         while (!token.stop_requested() && sock->is_open()) {
             // Pause reads when backpressured to avoid amplifying write pressure
             if (fsm.backpressured()) {
@@ -901,39 +903,14 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
                       request_id, client_expects_streaming, request.index());
         std::optional<Response> response_opt;
 
-        // Preflight readiness gate: if the client expects streaming but core services are not
-        // ready, prefer a lightweight streaming stub to avoid invoking heavy services during
-        // startup; if stubbing is disabled, fall back to unary.
+        // Preflight readiness gate REMOVED: was blocking all workers on status requests!
+        // RequestDispatcher already checks readiness before processing requests.
+        // This preflight check caused head-of-line blocking under concurrent load.
         bool force_unary = false;
         bool prefer_stub_stream = false;
-        if (client_expects_streaming) {
-            try {
-                StatusRequest s;
-                s.detailed = true;
-                auto sr = co_await proc->process(Request{s});
-                if (auto* st = std::get_if<StatusResponse>(&sr)) {
-                    auto it_cs = st->readinessStates.find("content_store");
-                    auto it_db = st->readinessStates.find("metadata_repo");
-                    bool csReady = (it_cs != st->readinessStates.end() && it_cs->second);
-                    bool dbReady = (it_db != st->readinessStates.end() && it_db->second);
-                    // If core services are not ready, choose stub streaming when allowed
-                    if (!csReady || !dbReady) {
-                        prefer_stub_stream = config_.stream_stub_on_init;
-                        force_unary = !prefer_stub_stream;
-                    }
-                    // If the search engine is not ready, also prefer stub streaming
-                    auto it_se = st->readinessStates.find("search_engine");
-                    bool seReady = (it_se != st->readinessStates.end() && it_se->second);
-                    if (!seReady) {
-                        prefer_stub_stream = config_.stream_stub_on_init;
-                    }
-                }
-            } catch (...) {
-                // On any error, do not stream to avoid half-open streams
-                prefer_stub_stream = config_.stream_stub_on_init;
-                force_unary = !prefer_stub_stream;
-            }
-        }
+        // Skip preflight - let RequestDispatcher handle readiness gating
+        // This eliminates the blocking co_await proc->process(StatusRequest) that
+        // tied up all worker threads waiting for status responses.
 
         // Always-unary requests (control/health) regardless of client hint
         const bool always_unary = std::holds_alternative<ShutdownRequest>(request) ||
@@ -1039,11 +1016,14 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
                                 std::holds_alternative<StatusRequest>(request) ||
                                 std::holds_alternative<GetStatsRequest>(request) ||
                                 std::holds_alternative<PrepareSessionRequest>(request);
-        if (!client_expects_streaming || is_control) {
+        // Force unary mode for GetResponse and CatResponse to avoid header/data frame split
+        const bool force_unary_response = std::holds_alternative<GetResponse>(response) ||
+                                          std::holds_alternative<CatResponse>(response);
+        if (!client_expects_streaming || is_control || force_unary_response) {
             spdlog::debug("handle_streaming_request: writing classic unary (request_id={} type={} "
-                          "expects_streaming={} is_control={})",
+                          "expects_streaming={} is_control={} force_unary={})",
                           request_id, static_cast<int>(getMessageType(response)),
-                          client_expects_streaming, is_control);
+                          client_expects_streaming, is_control, force_unary_response);
             // Frame a complete non-chunked message and send with write_message helper
             Message response_msg;
             response_msg.version = PROTOCOL_VERSION;
@@ -1069,13 +1049,34 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
                 "handle_streaming_request: one-shot streaming response type={} (request_id={})",
                 static_cast<int>(getMessageType(response)), request_id);
 
-            // Create a content-less copy for the header
-            Response header_response = response;
+            Response header_response;
+            try {
+                header_response = response;
+            } catch (const std::exception& e) {
+                // If copy fails (e.g. variant holds non-copyable), create from scratch
+                if (std::holds_alternative<GetResponse>(response)) {
+                    header_response = GetResponse{};
+                } else if (std::holds_alternative<CatResponse>(response)) {
+                    header_response = CatResponse{};
+                } else {
+                    // Fallback for other types
+                    header_response = SuccessResponse{"Header"};
+                }
+            }
+
             if (auto* get_resp = std::get_if<GetResponse>(&header_response)) {
-                get_resp->content.clear();
-                get_resp->hasContent = false;
+                if (const auto* orig_resp = std::get_if<GetResponse>(&response)) {
+                    // Copy metadata, clear content
+                    *get_resp = *orig_resp;
+                    get_resp->content.clear();
+                    get_resp->hasContent = false;
+                }
             } else if (auto* cat_resp = std::get_if<CatResponse>(&header_response)) {
-                cat_resp->content.clear();
+                if (const auto* orig_resp = std::get_if<CatResponse>(&response)) {
+                    *cat_resp = *orig_resp;
+                    cat_resp->content.clear();
+                    cat_resp->hasContent = false;
+                }
             }
 
             // Write header frame (with metadata but no content)
@@ -1336,7 +1337,8 @@ RequestHandler::write_header(boost::asio::local::stream_protocol::socket& socket
     response_msg.payload = std::move(response);
     // Debug header write (shows message type and flush status)
     spdlog::debug("stream: write_header req_id={} type={} flush={}", request_id,
-                  static_cast<int>(getMessageType(response)), flush);
+                  static_cast<int>(getMessageType(std::get<Response>(response_msg.payload))),
+                  flush);
     if (config_.enable_multiplexing) {
         // Frame and enqueue for fair writer
         std::vector<uint8_t> frame;

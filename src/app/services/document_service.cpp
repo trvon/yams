@@ -25,6 +25,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <optional>
 #include <span>
 #include <sstream>
@@ -37,6 +38,8 @@
 namespace yams::app::services {
 
 namespace {
+
+constexpr std::size_t kCentroidPreviewLimit = 16;
 
 inline bool startsWith(const std::string& s, const std::string& prefix) {
     return s.rfind(prefix, 0) == 0;
@@ -508,24 +511,20 @@ public:
         // Resolve hash (handle partial hashes)
         if (!resolvedHash.empty() && resolvedHash.size() != 64 &&
             looksLikePartialHash(resolvedHash)) {
-            // Partial hash resolution
             if (!ctx_.metadataRepo) {
                 return Error{ErrorCode::NotInitialized,
                              "Metadata repository not available for partial hash resolution"};
             }
-            auto docsRes = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%");
-            if (!docsRes) {
+
+            auto matchResult = ctx_.metadataRepo->findDocumentsByHashPrefix(resolvedHash, 100);
+            if (!matchResult) {
                 return Error{ErrorCode::InternalError,
-                             "Failed to enumerate documents for partial hash resolution: " +
-                                 docsRes.error().message};
+                             "Failed to resolve partial hash: " + matchResult.error().message};
             }
 
             std::vector<std::string> matches;
-            for (const auto& d : docsRes.value()) {
-                if (d.sha256Hash.size() >= resolvedHash.size() &&
-                    d.sha256Hash.compare(0, resolvedHash.size(), resolvedHash) == 0) {
-                    matches.push_back(d.sha256Hash);
-                }
+            for (const auto& d : matchResult.value()) {
+                matches.push_back(d.sha256Hash);
             }
 
             if (matches.empty()) {
@@ -540,17 +539,11 @@ public:
             resolvedHash = matches[0];
         }
 
-        // Find document in metadata repository to populate metadata/path/name/size
         std::optional<metadata::DocumentInfo> foundDoc;
         if (ctx_.metadataRepo) {
-            auto docsRes = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%");
-            if (docsRes) {
-                for (const auto& d : docsRes.value()) {
-                    if (d.sha256Hash == resolvedHash) {
-                        foundDoc = d;
-                        break;
-                    }
-                }
+            auto docResult = ctx_.metadataRepo->getDocumentByHash(resolvedHash);
+            if (docResult && docResult.value()) {
+                foundDoc = docResult.value();
             }
         }
 
@@ -568,6 +561,39 @@ public:
             doc.name.clear();
             doc.size = 0;
             doc.mimeType = "application/octet-stream";
+        }
+
+        if (ctx_.metadataRepo && !doc.path.empty()) {
+            auto nodeRes = ctx_.metadataRepo->findPathTreeNodeByFullPath(doc.path);
+            if (!nodeRes) {
+                spdlog::warn("DocumentService: path tree lookup failed for {}: {}", doc.path,
+                             nodeRes.error().message);
+            } else if (nodeRes.value()) {
+                const auto& node = *nodeRes.value();
+                if (node.centroidWeight > 0)
+                    doc.centroidWeight = static_cast<uint32_t>(node.centroidWeight);
+                if (!node.centroid.empty()) {
+                    doc.centroidDims = static_cast<uint32_t>(node.centroid.size());
+                    const std::size_t previewCount =
+                        std::min<std::size_t>(node.centroid.size(), kCentroidPreviewLimit);
+                    doc.centroidPreview.assign(node.centroid.begin(),
+                                               node.centroid.begin() + previewCount);
+                    std::ostringstream oss;
+                    oss.setf(std::ios::fixed);
+                    oss << std::setprecision(4);
+                    for (std::size_t i = 0; i < previewCount; ++i) {
+                        if (i != 0)
+                            oss << ' ';
+                        oss << doc.centroidPreview[i];
+                    }
+                    if (node.centroid.size() > previewCount) {
+                        oss << " ... (dims=" << node.centroid.size() << ")";
+                    }
+                    doc.metadata.emplace("yams.centroid.preview", oss.str());
+                }
+                doc.metadata.emplace("yams.centroid.weight", std::to_string(node.centroidWeight));
+                doc.metadata.emplace("yams.centroid.dims", std::to_string(node.centroid.size()));
+            }
         }
 
         // If outputPath provided, retrieve to file
@@ -589,93 +615,24 @@ public:
             doc.uncompressedSize = doc.size;
         }
 
-        // Include content if requested (prefer hot extracted text when available)
+        // Retrieve actual content from CAS (compressed storage) - the source of truth
         if (req.includeContent) {
-            bool filled = false;
-            if (ctx_.metadataRepo && foundDoc) {
-                auto contentResult = ctx_.metadataRepo->getContent(foundDoc->id);
-                if (contentResult) {
-                    const auto& optionalContent = contentResult.value();
-                    if (optionalContent.has_value() && !optionalContent->contentText.empty() &&
-                        !req.acceptCompressed) {
-                        doc.content = optionalContent->contentText;
-                        doc.size = static_cast<uint64_t>(doc.content->size());
-                        filled = true;
-                    }
-                }
+            auto bytesResult = ctx_.store->retrieveBytes(resolvedHash);
+            if (!bytesResult) {
+                return Error{bytesResult.error().code, "Document content not found"};
             }
-            if (!filled) {
-                bool compressedAttached = false;
-                if (req.acceptCompressed) {
-                    auto rawResult = ctx_.store->retrieveRaw(resolvedHash);
-                    if (rawResult) {
-                        auto raw = std::move(rawResult.value());
-                        const auto rawSize = static_cast<uint64_t>(raw.data.size());
-                        const auto rawSpan =
-                            std::span<const std::byte>(raw.data.data(), raw.data.size());
-
-                        if (raw.header) {
-                            applyCompressionMetadata(doc, *raw.header);
-                            doc.content.emplace(reinterpret_cast<const char*>(raw.data.data()),
-                                                raw.data.size());
-                            compressedAttached = true;
-                        } else {
-                            auto compressedPayload = makeCompressedPayload(rawSpan);
-                            if (compressedPayload) {
-                                auto payload = std::move(compressedPayload.value());
-                                applyCompressionMetadata(doc, payload.header);
-                                doc.content.emplace(std::move(payload.blob));
-                                compressedAttached = true;
-                            } else {
-                                markUncompressed(doc, rawSize);
-                                doc.content.emplace(reinterpret_cast<const char*>(raw.data.data()),
-                                                    raw.data.size());
-                                compressedAttached = true;
-                            }
-                        }
-                        filled = compressedAttached;
-                    } else if (rawResult.error().code != ErrorCode::NotFound) {
-                        return Error{rawResult.error().code, "Document content retrieval failed: " +
-                                                                 rawResult.error().message};
-                    }
-                }
-
-                if (!filled) {
-                    auto bytesResult = ctx_.store->retrieveBytes(resolvedHash);
-                    if (!bytesResult) {
-                        return Error{bytesResult.error().code, "Document content not found"};
-                    }
-                    auto data = std::move(bytesResult.value());
-                    doc.content.emplace(reinterpret_cast<const char*>(data.data()), data.size());
-                    markUncompressed(doc, static_cast<uint64_t>(data.size()));
-                    filled = true;
-                }
-            }
-        } else if (req.acceptCompressed) {
-            auto rawResult = ctx_.store->retrieveRaw(resolvedHash);
-            if (rawResult) {
-                auto raw = std::move(rawResult.value());
-                if (raw.header) {
-                    applyCompressionMetadata(doc, *raw.header);
-                } else {
-                    markUncompressed(doc, doc.size);
-                }
-            } else if (rawResult.error().code != ErrorCode::NotFound) {
-                return Error{rawResult.error().code,
-                             "Document metadata retrieval failed: " + rawResult.error().message};
-            }
+            auto data = std::move(bytesResult.value());
+            doc.content.emplace(reinterpret_cast<const char*>(data.data()), data.size());
+            doc.size = static_cast<uint64_t>(data.size());
         }
 
-        // PBI-006 Phase 1: attach extracted text via MetadataRepository when requested
+        // Optionally attach extracted text as metadata (from DB, for search/grep context)
         if (req.extract && ctx_.metadataRepo && foundDoc) {
             auto contentResult = ctx_.metadataRepo->getContent(foundDoc->id);
-            if (contentResult) {
-                const auto& optionalContent = contentResult.value();
-                if (optionalContent.has_value()) {
-                    const auto& content = optionalContent.value();
-                    if (!content.contentText.empty()) {
-                        doc.extractedText = content.contentText;
-                    }
+            if (contentResult && contentResult.value().has_value()) {
+                const auto& content = contentResult.value().value();
+                if (!content.contentText.empty()) {
+                    doc.extractedText = content.contentText;
                 }
             }
         }
@@ -825,15 +782,10 @@ public:
             std::string mime;
             std::string ext;
             if (ctx_.metadataRepo) {
-                auto docsRes = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%");
-                if (docsRes) {
-                    for (const auto& d : docsRes.value()) {
-                        if (d.sha256Hash == hash) {
-                            mime = d.mimeType;
-                            ext = d.fileExtension;
-                            break;
-                        }
-                    }
+                auto docRes = ctx_.metadataRepo->getDocumentByHash(hash);
+                if (docRes && docRes.value().has_value()) {
+                    mime = docRes.value()->mimeType;
+                    ext = docRes.value()->fileExtension;
                 }
             }
             if (ext.empty() && !name.empty()) {
@@ -905,14 +857,10 @@ public:
         bool forceCold = false;
         std::optional<yams::metadata::DocumentInfo> targetDoc;
         if (ctx_.metadataRepo) {
-            auto docsRes = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%");
-            if (docsRes) {
-                for (const auto& d : docsRes.value()) {
-                    if (d.sha256Hash == hash) {
-                        targetDoc = d;
-                        break;
-                    }
-                }
+            // PERFORMANCE: Use direct hash lookup instead of scanning all documents
+            auto docRes = ctx_.metadataRepo->getDocumentByHash(hash);
+            if (docRes && docRes.value().has_value()) {
+                targetDoc = docRes.value();
             }
             if (targetDoc) {
                 auto md = ctx_.metadataRepo->getAllMetadata(targetDoc->id);
@@ -1563,27 +1511,72 @@ public:
         return resp;
     }
 
+    // Tree-aware path resolution using PathTreeNode infrastructure (PBI-053)
+    std::optional<std::string> resolvePathViaTree(const std::string& path) {
+        if (!ctx_.metadataRepo) {
+            return std::nullopt;
+        }
+
+        // Normalize path separators
+        std::string normalizedPath = path;
+        std::replace(normalizedPath.begin(), normalizedPath.end(), '\\', '/');
+
+        // Try exact path lookup in tree
+        auto treeNodeRes = ctx_.metadataRepo->findPathTreeNodeByFullPath(normalizedPath);
+        if (!treeNodeRes) {
+            spdlog::debug("[RESOLVE-TRACE] Tree lookup failed: {}", treeNodeRes.error().message);
+            return std::nullopt;
+        }
+
+        if (!treeNodeRes.value().has_value()) {
+            spdlog::debug("[RESOLVE-TRACE] Path not found in tree: '{}'", normalizedPath);
+            return std::nullopt;
+        }
+
+        const auto& node = treeNodeRes.value().value();
+        spdlog::info("[RESOLVE-TRACE] ✓ Found in tree: node_id={}, fullPath='{}'", node.id,
+                     node.fullPath);
+
+        // Get the document associated with this path node
+        auto docRes = ctx_.metadataRepo->findDocumentByExactPath(node.fullPath);
+        if (!docRes || !docRes.value().has_value()) {
+            spdlog::warn("[RESOLVE-TRACE] Tree node exists but no document found for path: '{}'",
+                         node.fullPath);
+            return std::nullopt;
+        }
+
+        return docRes.value().value().sha256Hash;
+    }
+
     // Resolve name to hash (disambiguate or error)
     Result<std::string> resolveNameToHash(const std::string& name) override {
+        spdlog::info("[RESOLVE-TRACE] === Starting resolveNameToHash for: '{}'", name);
+
         if (!ctx_.metadataRepo) {
             return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
         }
 
-        std::vector<std::string> candidatePatterns;
-        std::string basename;
-
-        // Extract basename for fallback matching
-        auto lastSlash = name.find_last_of("/\\");
-        if (lastSlash != std::string::npos) {
-            basename = name.substr(lastSlash + 1);
-        } else {
-            basename = name;
+        // Strategy 1: Tree-based lookup (highest priority, PBI-053)
+        auto treeResult = resolvePathViaTree(name);
+        if (treeResult.has_value()) {
+            spdlog::info("[RESOLVE-TRACE] ✓ Resolved via tree");
+            return treeResult.value();
         }
 
-        // Strategy 1: Exact match on full name
-        candidatePatterns.push_back(name);
+        // Strategy 2: Exact path match
+        auto exactRes = ctx_.metadataRepo->findDocumentByExactPath(name);
+        if (exactRes && exactRes.value().has_value()) {
+            spdlog::info("[RESOLVE-TRACE] ✓ Resolved via exact path");
+            return exactRes.value().value().sha256Hash;
+        }
 
-        // Strategy 2: If absolute path, try stripping cwd prefix
+        // Strategy 3: Path suffix match (e.g., "%docs/delivery/051/prd.md")
+        std::vector<std::string> candidatePatterns;
+        if (name.find('/') != std::string::npos || name.find('\\') != std::string::npos) {
+            candidatePatterns.push_back("%" + name);
+        }
+
+        // Strategy 4: Relative path from cwd
         if (!name.empty() && (name[0] == '/' || name.find(":\\") != std::string::npos)) {
             try {
                 std::filesystem::path inputPath(name);
@@ -1599,17 +1592,7 @@ public:
             }
         }
 
-        // Strategy 3: Match basename at end of any path
-        if (!basename.empty() && basename != name) {
-            candidatePatterns.push_back("%/" + basename);
-        }
-
-        // Strategy 4: Just the basename (fuzzy)
-        if (!basename.empty() && basename != name) {
-            candidatePatterns.push_back(basename);
-        }
-
-        // Try each pattern
+        // Try suffix/relative patterns
         std::vector<metadata::DocumentInfo> allMatches;
         for (const auto& pattern : candidatePatterns) {
             auto res = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, pattern);
@@ -1628,9 +1611,11 @@ public:
         }
 
         if (uniqueMatches.empty()) {
+            spdlog::warn("[RESOLVE-TRACE] ❌ No matches found for: '{}'", name);
             return Error{ErrorCode::NotFound, "Document not found: " + name};
         }
         if (uniqueMatches.size() > 1) {
+            spdlog::warn("[RESOLVE-TRACE] ⚠️ Ambiguous: {} matches", uniqueMatches.size());
             std::string msg = "Ambiguous name: " + std::to_string(uniqueMatches.size()) +
                               " matches for '" + name + "': ";
             for (size_t i = 0; i < std::min(size_t(5), uniqueMatches.size()); ++i) {
@@ -1643,6 +1628,8 @@ public:
             }
             return Error{ErrorCode::InvalidOperation, msg};
         }
+
+        spdlog::info("[RESOLVE-TRACE] ✓ Resolved via pattern matching");
         return uniqueMatches[0].sha256Hash;
     }
 

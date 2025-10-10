@@ -141,7 +141,7 @@ struct ProviderSingleton {
     ProviderCtx ctx;
     yams_model_provider_v1 vtable;
     ProviderSingleton() {
-        vtable.abi_version = YAMS_IFACE_MODEL_PROVIDER_V1_VERSION;
+        vtable.abi_version = 2; // v1.2
         vtable.self = &ctx;
 
         vtable.set_progress_callback = [](void* self, yams_model_load_progress_cb cb,

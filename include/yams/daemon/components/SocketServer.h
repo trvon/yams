@@ -33,8 +33,8 @@ public:
     struct Config {
         std::filesystem::path socketPath;
         size_t maxConnections = 1024;
-        size_t workerThreads = 4;
-        std::chrono::milliseconds connectionTimeout{30000};
+        size_t workerThreads = 1; // Default 1, tuneable via TuneAdvisor
+        std::chrono::milliseconds connectionTimeout{2000};
         std::chrono::milliseconds acceptBackoffMs{100};
     };
 
@@ -63,8 +63,9 @@ private:
     boost::asio::awaitable<void> accept_loop();
     boost::asio::awaitable<void>
     handle_connection(boost::asio::local::stream_protocol::socket socket);
-    void start_io_reconciler();
-    void stop_io_reconciler();
+
+    // Register active socket for deterministic shutdown (RAII pattern)
+    void register_socket(std::weak_ptr<boost::asio::local::stream_protocol::socket> socket);
 
     // Configuration
     Config config_;
@@ -75,20 +76,13 @@ private:
     // Boost.ASIO components
     boost::asio::io_context io_context_;
     std::unique_ptr<boost::asio::local::stream_protocol::acceptor> acceptor_;
-    struct IoWorker {
-        std::thread th;
-        std::shared_ptr<std::atomic<bool>> exit;
-    };
-    std::vector<IoWorker> workers_;
-    std::vector<
-        std::shared_ptr<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>>
-        workerGuards_;
-    std::mutex workersMutex_;
-    // Keep io_context_ alive while running to avoid race where threads exit
+
+    // Simplified worker pool (1 thread default, RAII with jthread)
+    std::vector<yams::compat::jthread> workers_;
+
+    // Keep io_context_ alive while running (RAII with optional)
     std::optional<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>
         work_guard_;
-    yams::compat::jthread ioReconThread_;
-    std::thread diagThread_;
 
     // Socket tracking
     std::filesystem::path actualSocketPath_;
@@ -102,6 +96,13 @@ private:
     // Lifecycle state
     std::atomic<bool> running_{false};
     std::atomic<bool> stopping_{false};
+
+    // Stop token source for canceling active connections during shutdown
+    yams::compat::stop_source stop_source_;
+
+    // Track active connections for deterministic shutdown
+    std::mutex activeSocketsMutex_;
+    std::vector<std::weak_ptr<boost::asio::local::stream_protocol::socket>> activeSockets_;
 };
 
 } // namespace yams::daemon

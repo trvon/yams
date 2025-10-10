@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <concepts>
+#include <cstring>
 #include <filesystem>
 #include <map>
 #include <optional>
@@ -2382,6 +2383,9 @@ struct GetResponse {
     std::optional<uint32_t> compressedCrc32;
     std::optional<uint32_t> uncompressedCrc32;
     std::vector<uint8_t> compressionHeader;
+    std::optional<uint32_t> centroidWeight;
+    std::optional<uint32_t> centroidDims;
+    std::vector<float> centroidPreview;
     // Single document result (for hash/name queries)
     std::string hash;
     std::string path;
@@ -2457,6 +2461,25 @@ struct GetResponse {
         // Time information
         ser << static_cast<int64_t>(created) << static_cast<int64_t>(modified)
             << static_cast<int64_t>(indexed);
+
+        const bool hasCentroidWeight = centroidWeight.has_value();
+        ser << hasCentroidWeight;
+        if (hasCentroidWeight) {
+            ser << static_cast<uint32_t>(*centroidWeight);
+        }
+
+        const bool hasCentroidDims = centroidDims.has_value();
+        ser << hasCentroidDims;
+        if (hasCentroidDims) {
+            ser << static_cast<uint32_t>(*centroidDims);
+        }
+
+        std::string centroidBlob;
+        centroidBlob.resize(centroidPreview.size() * sizeof(float));
+        if (!centroidBlob.empty()) {
+            std::memcpy(centroidBlob.data(), centroidPreview.data(), centroidBlob.size());
+        }
+        ser << centroidBlob;
 
         // Content
         ser << content << hasContent;
@@ -2590,6 +2613,37 @@ struct GetResponse {
         if (!indexedResult)
             return indexedResult.error();
         res.indexed = indexedResult.value();
+
+        auto hasCentroidWeightResult = deser.template read<bool>();
+        if (!hasCentroidWeightResult)
+            return hasCentroidWeightResult.error();
+        if (hasCentroidWeightResult.value()) {
+            auto valueResult = deser.template read<uint32_t>();
+            if (!valueResult)
+                return valueResult.error();
+            res.centroidWeight = valueResult.value();
+        }
+
+        auto hasCentroidDimsResult = deser.template read<bool>();
+        if (!hasCentroidDimsResult)
+            return hasCentroidDimsResult.error();
+        if (hasCentroidDimsResult.value()) {
+            auto valueResult = deser.template read<uint32_t>();
+            if (!valueResult)
+                return valueResult.error();
+            res.centroidDims = valueResult.value();
+        }
+
+        auto centroidBlobResult = deser.readString();
+        if (!centroidBlobResult)
+            return centroidBlobResult.error();
+        auto centroidStr = std::move(centroidBlobResult.value());
+        if (!centroidStr.empty()) {
+            if ((centroidStr.size() % sizeof(float)) != 0)
+                return Error{ErrorCode::DataCorruption, "Invalid centroid preview blob"};
+            res.centroidPreview.resize(centroidStr.size() / sizeof(float));
+            std::memcpy(res.centroidPreview.data(), centroidStr.data(), centroidStr.size());
+        }
 
         // Content
         auto contentResult = deser.readString();
@@ -4369,34 +4423,38 @@ struct CatResponse {
     std::string name;
     std::string content;
     uint64_t size = 0;
+    bool hasContent = false;
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
-        ser << hash << name << content << size;
+        ser << hash << name << content << size << hasContent;
     }
 
     template <typename Deserializer>
     requires IsDeserializer<Deserializer>
     static Result<CatResponse> deserialize(Deserializer& deser) {
-        CatResponse res;
+        CatResponse r{};
         auto h = deser.readString();
         if (!h)
             return h.error();
-        res.hash = std::move(h.value());
+        r.hash = std::move(h.value());
         auto n = deser.readString();
         if (!n)
             return n.error();
-        res.name = std::move(n.value());
+        r.name = std::move(n.value());
         auto c = deser.readString();
         if (!c)
             return c.error();
-        res.content = std::move(c.value());
+        r.content = std::move(c.value());
         auto s = deser.template read<uint64_t>();
         if (!s)
             return s.error();
-        res.size = s.value();
-        return res;
+        r.size = s.value();
+        auto hc = deser.template read<bool>();
+        if (hc)
+            r.hasContent = hc.value();
+        return r;
     }
 };
 

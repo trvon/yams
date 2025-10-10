@@ -1718,29 +1718,6 @@ json MCPServer::listTools() {
         tools.push_back(tool);
     }
 
-    // get_by_name
-    {
-        json tool;
-        tool["name"] = "get_by_name";
-        tool["description"] = "Retrieve document content by name";
-        json schema;
-        schema["type"] = "object";
-        json props = json::object();
-        props["name"] = makeProp("string", "Document name");
-        props["raw_content"] = makeProp("boolean", "Return raw content without text extraction");
-        props["raw_content"]["default"] = false;
-        props["extract_text"] = makeProp("boolean", "Extract text from HTML/PDF files");
-        props["extract_text"]["default"] = true;
-        props["latest"] = makeProp("boolean", "Select newest match when ambiguous");
-        props["latest"]["default"] = true;
-        props["oldest"] = makeProp("boolean", "Select oldest match when ambiguous");
-        props["oldest"]["default"] = false;
-        schema["properties"] = props;
-        schema["required"] = json::array({"name"});
-        tool["inputSchema"] = schema;
-        tools.push_back(tool);
-    }
-
     // cat
     {
         json tool;

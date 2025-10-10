@@ -4,11 +4,14 @@
 #include <regex>
 #include <yams/app/services/services.hpp>
 #include <yams/daemon/resource/abi_plugin_loader.h>
+#include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host_services.h>
 #include <yams/daemon/resource/plugin_loader.h>
 #include <yams/plugins/abi.h>
 
 namespace yams::daemon {
+
+extern void registerModelProvider(const std::string& name, ModelProviderFactory factory);
 
 // macOS provides dlopen_preflight in <dlfcn.h>; no forward decl needed
 

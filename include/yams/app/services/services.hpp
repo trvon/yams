@@ -494,6 +494,9 @@ struct RetrievedDocument {
     std::optional<uint32_t> compressedCrc32;
     std::optional<uint32_t> uncompressedCrc32;
     std::vector<uint8_t> compressionHeader;
+    std::optional<uint32_t> centroidWeight;
+    std::optional<uint32_t> centroidDims;
+    std::vector<float> centroidPreview; // truncated preview of centroid values
 
     // Metadata
     std::unordered_map<std::string, std::string> metadata;

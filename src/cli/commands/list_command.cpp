@@ -124,6 +124,10 @@ public:
         cmd->add_option("--compare-to", compareTo_,
                         "Compare file with another snapshot (requires --snapshot-id)");
 
+        // Streaming control
+        cmd->add_flag("--streaming", enableStreaming_,
+                      "Enable streaming responses from daemon (default: off for stability)");
+
         cmd->callback([this]() {
             // Handle snippet flag logic
             if (noSnippets_) {
@@ -311,7 +315,7 @@ public:
                 if (cli_->hasExplicitDataDir()) {
                     ropts.explicitDataDir = cli_->getDataPath();
                 }
-                ropts.enableStreaming = true;
+                ropts.enableStreaming = enableStreaming_;
                 ropts.progressiveOutput = false;
                 ropts.singleUseConnections = false;
                 ropts.requestTimeoutMs = 30000;
@@ -1461,6 +1465,9 @@ private:
     bool listSnapshots_ = false;
     std::string snapshotId_;
     std::string compareTo_;
+
+    // Streaming control (disabled by default for agent/automation compatibility)
+    bool enableStreaming_ = false;
 
     std::string getFileTypeIndicator(const EnhancedDocumentInfo& doc) {
         std::string indicator = "[";

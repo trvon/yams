@@ -4,10 +4,12 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <span>
 #include <sstream>
 #include <string_view>
+#include <vector>
 #include <yams/common/utf8_utils.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/knowledge_graph_store.h>
@@ -29,6 +31,34 @@ constexpr const char* kDocumentColumnListCompat =
     "created_time, modified_time, indexed_time, content_extracted, extraction_status, "
     "extraction_error, NULL as path_prefix, '' as reverse_path, '' as path_hash, '' as "
     "parent_hash, 0 as path_depth";
+
+constexpr int64_t kPathTreeNullParent = PathTreeNode::kNullParent;
+
+PathTreeNode mapPathTreeNodeRow(Statement& stmt) {
+    PathTreeNode node;
+    node.id = stmt.getInt64(0);
+    node.parentId = stmt.isNull(1) ? kPathTreeNullParent : stmt.getInt64(1);
+    node.pathSegment = stmt.getString(2);
+    node.fullPath = stmt.getString(3);
+    node.docCount = stmt.getInt64(4);
+    node.centroidWeight = stmt.getInt64(5);
+    return node;
+}
+
+std::vector<float> blobToFloatVector(const std::vector<std::byte>& blob) {
+    if (blob.empty() || (blob.size() % sizeof(float)) != 0)
+        return {};
+    std::vector<float> out(blob.size() / sizeof(float));
+    std::memcpy(out.data(), blob.data(), blob.size());
+    return out;
+}
+
+Result<void> bindParentId(Statement& stmt, int index, int64_t parentId) {
+    if (parentId == kPathTreeNullParent) {
+        return stmt.bind(index, nullptr);
+    }
+    return stmt.bind(index, parentId);
+}
 } // namespace
 
 std::optional<DocumentInfo>
@@ -257,7 +287,15 @@ Result<int64_t> MetadataRepository::insertDocument(const DocumentInfo& info) {
         if (!execResult)
             return execResult.error();
 
-        return db.lastInsertRowId();
+        int64_t docId = db.lastInsertRowId();
+
+        // Update component-owned metrics
+        cachedDocumentCount_.fetch_add(1, std::memory_order_relaxed);
+        if (info.contentExtracted) {
+            cachedExtractedCount_.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        return docId;
     });
 }
 
@@ -303,19 +341,23 @@ Result<std::optional<DocumentInfo>> MetadataRepository::getDocumentByHash(const 
             spec.table = "documents";
             spec.columns = {cols};
             spec.conditions = {"sha256_hash = ?"};
-            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
+            auto sql = yams::metadata::sql::buildSelect(spec);
+            auto stmtResult = db.prepare(sql);
 
-            if (!stmtResult)
+            if (!stmtResult) {
                 return stmtResult.error();
+            }
 
             Statement stmt = std::move(stmtResult).value();
             auto bindResult = stmt.bind(1, hash);
-            if (!bindResult)
+            if (!bindResult) {
                 return bindResult.error();
+            }
 
             auto stepResult = stmt.step();
-            if (!stepResult)
+            if (!stepResult) {
                 return stepResult.error();
+            }
 
             if (!stepResult.value()) {
                 return std::optional<DocumentInfo>{};
@@ -358,6 +400,26 @@ Result<void> MetadataRepository::updateDocument(const DocumentInfo& info) {
 
 Result<void> MetadataRepository::deleteDocument(int64_t id) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
+        // Query document flags before deletion to update counters
+        bool wasExtracted = false;
+        bool wasIndexed = false;
+        {
+            auto checkStmt = db.prepare(R"(
+                SELECT d.content_extracted, COALESCE(des.has_embedding, 0)
+                FROM documents d
+                LEFT JOIN document_embeddings_status des ON d.id = des.document_id
+                WHERE d.id = ?
+            )");
+            if (checkStmt) {
+                auto& stmt = checkStmt.value();
+                stmt.bind(1, id);
+                if (auto stepRes = stmt.step(); stepRes && stepRes.value()) {
+                    wasExtracted = stmt.getInt(0) != 0;
+                    wasIndexed = stmt.getInt(1) != 0;
+                }
+            }
+        }
+
         // Foreign key constraints will handle cascading deletes
         auto stmtResult = db.prepare("DELETE FROM documents WHERE id = ?");
         if (!stmtResult)
@@ -368,7 +430,22 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
         if (!bindResult)
             return bindResult.error();
 
-        return stmt.execute();
+        auto execResult = stmt.execute();
+        if (!execResult)
+            return execResult.error();
+
+        // Update component-owned metrics
+        if (db.changes() > 0) {
+            cachedDocumentCount_.fetch_sub(1, std::memory_order_relaxed);
+            if (wasExtracted) {
+                cachedExtractedCount_.fetch_sub(1, std::memory_order_relaxed);
+            }
+            if (wasIndexed) {
+                cachedIndexedCount_.fetch_sub(1, std::memory_order_relaxed);
+            }
+        }
+
+        return Result<void>();
     });
 }
 
@@ -406,29 +483,35 @@ Result<void> MetadataRepository::insertContent(const DocumentContent& content) {
 Result<std::optional<DocumentContent>> MetadataRepository::getContent(int64_t documentId) {
     return executeQuery<std::optional<DocumentContent>>(
         [&](Database& db) -> Result<std::optional<DocumentContent>> {
-            auto stmtResult = db.prepare(R"(
+            std::string sql = R"(
             SELECT document_id, content_text, content_length,
                    extraction_method, language
             FROM document_content WHERE document_id = ?
-        )");
+        )";
 
-            if (!stmtResult)
+            auto stmtResult = db.prepare(sql);
+
+            if (!stmtResult) {
                 return stmtResult.error();
+            }
 
             Statement stmt = std::move(stmtResult).value();
             auto bindResult = stmt.bind(1, documentId);
-            if (!bindResult)
+            if (!bindResult) {
                 return bindResult.error();
+            }
 
             auto stepResult = stmt.step();
-            if (!stepResult)
+            if (!stepResult) {
                 return stepResult.error();
+            }
 
             if (!stepResult.value()) {
                 return std::optional<DocumentContent>{};
             }
 
-            return std::optional<DocumentContent>{mapContentRow(stmt)};
+            auto content = mapContentRow(stmt);
+            return std::optional<DocumentContent>{content};
         });
 }
 
@@ -1753,6 +1836,155 @@ Result<int64_t> MetadataRepository::getDocumentCountByExtractionStatus(Extractio
     });
 }
 
+void MetadataRepository::initializeCounters() {
+    if (countersInitialized_.exchange(true, std::memory_order_acquire)) {
+        return; // Already initialized
+    }
+
+    try {
+        // Query actual counts from DB once at startup
+        if (auto totalResult = getDocumentCount(); totalResult) {
+            cachedDocumentCount_.store(static_cast<uint64_t>(totalResult.value()),
+                                       std::memory_order_release);
+        }
+        if (auto indexedResult = getIndexedDocumentCount(); indexedResult) {
+            cachedIndexedCount_.store(static_cast<uint64_t>(indexedResult.value()),
+                                      std::memory_order_release);
+        }
+        if (auto extractedResult = getContentExtractedDocumentCount(); extractedResult) {
+            cachedExtractedCount_.store(static_cast<uint64_t>(extractedResult.value()),
+                                        std::memory_order_release);
+        }
+        spdlog::info(
+            "MetadataRepository: initialized counters - total={}, indexed={}, extracted={}",
+            cachedDocumentCount_.load(), cachedIndexedCount_.load(), cachedExtractedCount_.load());
+    } catch (const std::exception& e) {
+        spdlog::warn("MetadataRepository: failed to initialize counters: {}", e.what());
+    }
+}
+
+Result<std::unordered_map<std::string, DocumentInfo>>
+MetadataRepository::batchGetDocumentsByHash(const std::vector<std::string>& hashes) {
+    if (hashes.empty()) {
+        return std::unordered_map<std::string, DocumentInfo>{};
+    }
+
+    return executeQuery<std::unordered_map<std::string, DocumentInfo>>(
+        [&](Database& db) -> Result<std::unordered_map<std::string, DocumentInfo>> {
+            std::string sql =
+                "SELECT id, file_path, file_name, file_extension, file_size, "
+                "sha256_hash, mime_type, created, modified, indexed, "
+                "content_extracted, embedding_model_id, extraction_status, extraction_error "
+                "FROM documents WHERE sha256_hash IN (";
+            for (size_t i = 0; i < hashes.size(); ++i) {
+                if (i > 0)
+                    sql += ",";
+                sql += "?";
+            }
+            sql += ")";
+
+            auto stmtResult = db.prepare(sql);
+            if (!stmtResult) {
+                return stmtResult.error();
+            }
+
+            Statement stmt = std::move(stmtResult).value();
+
+            // Bind hashes
+            for (size_t i = 0; i < hashes.size(); ++i) {
+                if (auto bindResult = stmt.bind(static_cast<int>(i + 1), hashes[i]); !bindResult) {
+                    return bindResult.error();
+                }
+            }
+
+            std::unordered_map<std::string, DocumentInfo> result;
+
+            while (true) {
+                auto stepResult = stmt.step();
+                if (!stepResult) {
+                    return stepResult.error();
+                }
+
+                if (!stepResult.value()) {
+                    break;
+                }
+
+                DocumentInfo info;
+                info.id = stmt.getInt64(0);
+                info.filePath = stmt.getString(1);
+                info.fileName = stmt.getString(2);
+                info.fileExtension = stmt.getString(3);
+                info.fileSize = stmt.getInt64(4);
+                info.sha256Hash = stmt.getString(5);
+                info.mimeType = stmt.getString(6);
+                info.setCreatedTime(stmt.getInt64(7));
+                info.setModifiedTime(stmt.getInt64(8));
+                info.setIndexedTime(stmt.getInt64(9));
+                info.contentExtracted = stmt.getInt(10) != 0;
+                info.extractionStatus = ExtractionStatusUtils::fromString(stmt.getString(12));
+                info.extractionError = stmt.getString(13);
+
+                result[info.sha256Hash] = std::move(info);
+            }
+
+            return result;
+        });
+}
+
+Result<std::unordered_map<int64_t, DocumentContent>>
+MetadataRepository::batchGetContent(const std::vector<int64_t>& documentIds) {
+    if (documentIds.empty()) {
+        return std::unordered_map<int64_t, DocumentContent>{};
+    }
+
+    return executeQuery<std::unordered_map<int64_t, DocumentContent>>(
+        [&](Database& db) -> Result<std::unordered_map<int64_t, DocumentContent>> {
+            std::string sql = "SELECT document_id, content_hash, content_text, content_mime "
+                              "FROM document_content WHERE document_id IN (";
+            for (size_t i = 0; i < documentIds.size(); ++i) {
+                if (i > 0)
+                    sql += ",";
+                sql += "?";
+            }
+            sql += ")";
+
+            auto stmtResult = db.prepare(sql);
+            if (!stmtResult) {
+                return stmtResult.error();
+            }
+
+            Statement stmt = std::move(stmtResult).value();
+
+            // Bind document IDs
+            for (size_t i = 0; i < documentIds.size(); ++i) {
+                if (auto bindResult = stmt.bind(static_cast<int>(i + 1), documentIds[i]);
+                    !bindResult) {
+                    return bindResult.error();
+                }
+            }
+
+            std::unordered_map<int64_t, DocumentContent> result;
+
+            while (true) {
+                auto stepResult = stmt.step();
+                if (!stepResult) {
+                    return stepResult.error();
+                }
+
+                if (!stepResult.value()) {
+                    break;
+                }
+
+                DocumentContent content;
+                int64_t docId = stmt.getInt64(0);
+                content.contentText = stmt.getString(2);
+                result[docId] = std::move(content);
+            }
+
+            return result;
+        });
+}
+
 Result<std::unordered_map<std::string, int64_t>>
 MetadataRepository::getDocumentCountsByExtension() {
     return executeQuery<std::unordered_map<std::string, int64_t>>(
@@ -1799,12 +2031,26 @@ Result<void> MetadataRepository::updateDocumentEmbeddingStatus(int64_t documentI
                                                                bool hasEmbedding,
                                                                const std::string& modelId) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
-        // First, ensure the document exists
-        auto checkStmt = db.prepare("SELECT 1 FROM documents WHERE id = ?");
-        if (!checkStmt)
-            return checkStmt.error();
+        // Check current embedding status to track changes
+        bool hadEmbedding = false;
+        {
+            auto checkStmt = db.prepare("SELECT COALESCE(has_embedding, 0) FROM "
+                                        "document_embeddings_status WHERE document_id = ?");
+            if (checkStmt) {
+                auto& stmt = checkStmt.value();
+                stmt.bind(1, documentId);
+                if (auto stepRes = stmt.step(); stepRes && stepRes.value()) {
+                    hadEmbedding = stmt.getInt(0) != 0;
+                }
+            }
+        }
 
-        auto& stmt = checkStmt.value();
+        // Ensure the document exists
+        auto docCheckStmt = db.prepare("SELECT 1 FROM documents WHERE id = ?");
+        if (!docCheckStmt)
+            return docCheckStmt.error();
+
+        auto& stmt = docCheckStmt.value();
         if (auto r = stmt.bind(1, documentId); !r)
             return r.error();
 
@@ -1838,6 +2084,13 @@ Result<void> MetadataRepository::updateDocumentEmbeddingStatus(int64_t documentI
         auto execResult = ustmt.execute();
         if (!execResult)
             return execResult.error();
+
+        // Update component-owned metrics
+        if (!hadEmbedding && hasEmbedding) {
+            cachedIndexedCount_.fetch_add(1, std::memory_order_relaxed);
+        } else if (hadEmbedding && !hasEmbedding) {
+            cachedIndexedCount_.fetch_sub(1, std::memory_order_relaxed);
+        }
 
         return Result<void>();
     });
@@ -1899,6 +2152,309 @@ Result<void> MetadataRepository::checkpointWal() {
         // This is what we want for tests to pass reliably.
         return db.execute("PRAGMA wal_checkpoint(TRUNCATE)");
     });
+}
+
+Result<std::optional<PathTreeNode>>
+MetadataRepository::findPathTreeNode(int64_t parentId, std::string_view pathSegment) {
+    return executeQuery<std::optional<PathTreeNode>>(
+        [&](Database& db) -> Result<std::optional<PathTreeNode>> {
+            const bool parentIsNull = parentId == kPathTreeNullParent;
+            const char* sql =
+                parentIsNull ? "SELECT node_id, parent_id, path_segment, full_path, doc_count, "
+                               "centroid_weight FROM path_tree_nodes "
+                               "WHERE parent_id IS NULL AND path_segment = ?"
+                             : "SELECT node_id, parent_id, path_segment, full_path, doc_count, "
+                               "centroid_weight FROM path_tree_nodes "
+                               "WHERE parent_id = ? AND path_segment = ?";
+
+            auto stmtResult = db.prepare(sql);
+            if (!stmtResult)
+                return stmtResult.error();
+
+            auto stmt = std::move(stmtResult).value();
+            int bindIndex = 1;
+
+            if (!parentIsNull) {
+                if (auto bindResult = stmt.bind(bindIndex++, parentId); !bindResult)
+                    return bindResult.error();
+            }
+            if (auto bindResult = stmt.bind(bindIndex, pathSegment); !bindResult)
+                return bindResult.error();
+
+            auto stepResult = stmt.step();
+            if (!stepResult)
+                return stepResult.error();
+            if (!stepResult.value())
+                return std::optional<PathTreeNode>{};
+
+            return std::optional<PathTreeNode>{mapPathTreeNodeRow(stmt)};
+        });
+}
+
+Result<PathTreeNode> MetadataRepository::insertPathTreeNode(int64_t parentId,
+                                                            std::string_view pathSegment,
+                                                            std::string_view fullPath) {
+    return executeQuery<PathTreeNode>([&](Database& db) -> Result<PathTreeNode> {
+        auto insertStmtResult = db.prepare("INSERT OR IGNORE INTO path_tree_nodes "
+                                           "(parent_id, path_segment, full_path) VALUES (?, ?, ?)");
+        if (!insertStmtResult)
+            return insertStmtResult.error();
+
+        auto insertStmt = std::move(insertStmtResult).value();
+        if (auto bindParent = bindParentId(insertStmt, 1, parentId); !bindParent)
+            return bindParent.error();
+        if (auto bindSeg = insertStmt.bind(2, pathSegment); !bindSeg)
+            return bindSeg.error();
+        if (auto bindFull = insertStmt.bind(3, fullPath); !bindFull)
+            return bindFull.error();
+
+        if (auto execResult = insertStmt.execute(); !execResult)
+            return execResult.error();
+
+        auto selectStmtResult = db.prepare(
+            "SELECT node_id, parent_id, path_segment, full_path, doc_count, centroid_weight "
+            "FROM path_tree_nodes WHERE full_path = ?");
+        if (!selectStmtResult)
+            return selectStmtResult.error();
+
+        auto selectStmt = std::move(selectStmtResult).value();
+        if (auto bindPath = selectStmt.bind(1, fullPath); !bindPath)
+            return bindPath.error();
+
+        auto stepResult = selectStmt.step();
+        if (!stepResult)
+            return stepResult.error();
+        if (!stepResult.value())
+            return Error{ErrorCode::Unknown, "Failed to fetch inserted path tree node"};
+
+        return mapPathTreeNodeRow(selectStmt);
+    });
+}
+
+Result<void> MetadataRepository::incrementPathTreeDocCount(int64_t nodeId, int64_t documentId) {
+    return executeQuery<void>([&](Database& db) -> Result<void> {
+        // Check whether the (node, document) pair already exists.
+        auto checkStmtResult = db.prepare(
+            "SELECT 1 FROM path_tree_node_documents WHERE node_id = ? AND document_id = ?");
+        if (!checkStmtResult)
+            return checkStmtResult.error();
+        auto checkStmt = std::move(checkStmtResult).value();
+        if (auto bindNode = checkStmt.bind(1, nodeId); !bindNode)
+            return bindNode.error();
+        if (auto bindDoc = checkStmt.bind(2, documentId); !bindDoc)
+            return bindDoc.error();
+
+        auto stepResult = checkStmt.step();
+        if (!stepResult)
+            return stepResult.error();
+        if (stepResult.value()) {
+            // Already associated; nothing to update.
+            return Result<void>();
+        }
+
+        // Insert relationship and increment doc count.
+        auto insertStmtResult =
+            db.prepare("INSERT INTO path_tree_node_documents (node_id, document_id) VALUES (?, ?)");
+        if (!insertStmtResult)
+            return insertStmtResult.error();
+        auto insertStmt = std::move(insertStmtResult).value();
+        if (auto bindNode = insertStmt.bind(1, nodeId); !bindNode)
+            return bindNode.error();
+        if (auto bindDoc = insertStmt.bind(2, documentId); !bindDoc)
+            return bindDoc.error();
+        if (auto execResult = insertStmt.execute(); !execResult)
+            return execResult.error();
+
+        auto updateStmtResult =
+            db.prepare("UPDATE path_tree_nodes "
+                       "SET doc_count = doc_count + 1, last_updated = unixepoch() "
+                       "WHERE node_id = ?");
+        if (!updateStmtResult)
+            return updateStmtResult.error();
+        auto updateStmt = std::move(updateStmtResult).value();
+        if (auto bindNode = updateStmt.bind(1, nodeId); !bindNode)
+            return bindNode.error();
+        return updateStmt.execute();
+    });
+}
+
+Result<void>
+MetadataRepository::accumulatePathTreeCentroid(int64_t nodeId,
+                                               std::span<const float> embeddingValues) {
+    if (embeddingValues.empty())
+        return Result<void>();
+
+    return executeQuery<void>([&](Database& db) -> Result<void> {
+        auto selectStmtResult =
+            db.prepare("SELECT centroid, centroid_weight FROM path_tree_nodes WHERE node_id = ?");
+        if (!selectStmtResult)
+            return selectStmtResult.error();
+
+        auto selectStmt = std::move(selectStmtResult).value();
+        if (auto bindNode = selectStmt.bind(1, nodeId); !bindNode)
+            return bindNode.error();
+
+        auto stepResult = selectStmt.step();
+        if (!stepResult)
+            return stepResult.error();
+        if (!stepResult.value())
+            return Error{ErrorCode::NotFound, "Path tree node not found"};
+
+        std::vector<float> centroid;
+        centroid.reserve(embeddingValues.size());
+        int64_t currentWeight = selectStmt.getInt64(1);
+
+        auto existingBlob = selectStmt.isNull(0) ? std::vector<std::byte>() : selectStmt.getBlob(0);
+        if (!existingBlob.empty() &&
+            existingBlob.size() == embeddingValues.size() * sizeof(float) && currentWeight > 0) {
+            centroid.resize(embeddingValues.size());
+            std::memcpy(centroid.data(), existingBlob.data(), existingBlob.size());
+        } else {
+            centroid.assign(embeddingValues.begin(), embeddingValues.end());
+            currentWeight = 0;
+        }
+
+        int64_t newWeight = currentWeight + 1;
+        if (currentWeight > 0) {
+            const double weightFactor = static_cast<double>(currentWeight);
+            for (std::size_t i = 0; i < embeddingValues.size(); ++i) {
+                double updated = (centroid[i] * weightFactor + embeddingValues[i]) /
+                                 static_cast<double>(newWeight);
+                centroid[i] = static_cast<float>(updated);
+            }
+        } else {
+            centroid.assign(embeddingValues.begin(), embeddingValues.end());
+        }
+
+        auto updateStmtResult =
+            db.prepare("UPDATE path_tree_nodes "
+                       "SET centroid = ?, centroid_weight = ?, last_updated = unixepoch() "
+                       "WHERE node_id = ?");
+        if (!updateStmtResult)
+            return updateStmtResult.error();
+
+        auto updateStmt = std::move(updateStmtResult).value();
+
+        std::span<const std::byte> blob(reinterpret_cast<const std::byte*>(centroid.data()),
+                                        centroid.size() * sizeof(float));
+        if (auto bindBlob = updateStmt.bind(1, blob); !bindBlob)
+            return bindBlob.error();
+        if (auto bindWeight = updateStmt.bind(2, newWeight); !bindWeight)
+            return bindWeight.error();
+        if (auto bindNode = updateStmt.bind(3, nodeId); !bindNode)
+            return bindNode.error();
+
+        return updateStmt.execute();
+    });
+}
+
+Result<std::optional<PathTreeNode>>
+MetadataRepository::findPathTreeNodeByFullPath(std::string_view fullPath) {
+    if (fullPath.empty())
+        return std::optional<PathTreeNode>{};
+
+    return executeQuery<std::optional<PathTreeNode>>(
+        [&](Database& db) -> Result<std::optional<PathTreeNode>> {
+            auto stmtResult = db.prepare("SELECT node_id, parent_id, path_segment, full_path, "
+                                         "doc_count, centroid_weight, centroid "
+                                         "FROM path_tree_nodes WHERE full_path = ?");
+            if (!stmtResult)
+                return stmtResult.error();
+
+            auto stmt = std::move(stmtResult).value();
+            if (auto bindRes = stmt.bind(1, fullPath); !bindRes)
+                return bindRes.error();
+
+            auto stepRes = stmt.step();
+            if (!stepRes)
+                return stepRes.error();
+            if (!stepRes.value())
+                return std::optional<PathTreeNode>{};
+
+            PathTreeNode node;
+            node.id = stmt.getInt64(0);
+            node.parentId = stmt.isNull(1) ? kPathTreeNullParent : stmt.getInt64(1);
+            node.pathSegment = stmt.getString(2);
+            node.fullPath = stmt.getString(3);
+            node.docCount = stmt.getInt64(4);
+            node.centroidWeight = stmt.getInt64(5);
+            if (!stmt.isNull(6)) {
+                node.centroid = blobToFloatVector(stmt.getBlob(6));
+            }
+            return std::optional<PathTreeNode>{std::move(node)};
+        });
+}
+
+namespace {
+std::vector<std::string> splitPathSegments(const std::string& normalizedPath) {
+    std::vector<std::string> segments;
+    std::string segment;
+    for (char ch : normalizedPath) {
+        if (ch == '/') {
+            if (!segment.empty()) {
+                segments.push_back(segment);
+                segment.clear();
+            }
+        } else {
+            segment.push_back(ch);
+        }
+    }
+    if (!segment.empty())
+        segments.push_back(segment);
+    return segments;
+}
+} // namespace
+
+Result<void> MetadataRepository::upsertPathTreeForDocument(const DocumentInfo& info,
+                                                           int64_t documentId, bool isNewDocument,
+                                                           std::span<const float> embeddingValues) {
+    if (info.filePath.empty())
+        return Result<void>();
+
+    auto segments = splitPathSegments(info.filePath);
+    if (segments.empty())
+        return Result<void>();
+
+    const bool isAbsolute = !info.filePath.empty() && info.filePath.front() == '/';
+
+    int64_t parentNodeId = kPathTreeNullParent;
+    std::string currentPath = isAbsolute ? std::string("/") : std::string{};
+
+    for (const auto& part : segments) {
+        if (!currentPath.empty() && currentPath.back() != '/')
+            currentPath.push_back('/');
+        currentPath += part;
+
+        auto nodeResult = findPathTreeNode(parentNodeId, part);
+        if (!nodeResult)
+            return nodeResult.error();
+
+        PathTreeNode node;
+        if (nodeResult.value()) {
+            node = *nodeResult.value();
+        } else {
+            auto insertResult = insertPathTreeNode(parentNodeId, part, currentPath);
+            if (!insertResult)
+                return insertResult.error();
+            node = insertResult.value();
+        }
+
+        if (isNewDocument) {
+            auto inc = incrementPathTreeDocCount(node.id, documentId);
+            if (!inc)
+                return inc.error();
+        }
+
+        if (!embeddingValues.empty()) {
+            auto acc = accumulatePathTreeCentroid(node.id, embeddingValues);
+            if (!acc)
+                return acc.error();
+        }
+
+        parentNodeId = node.id;
+    }
+
+    return Result<void>();
 }
 
 // -----------------------------------------------------------------------------

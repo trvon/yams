@@ -15,8 +15,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
-## [v0.7.3] - Unreleased
+## [v0.7.4] - Unreleased
 
+### Changed
+- **MetadataRepository**: Added atomic counters (`cachedDocumentCount_`, `cachedIndexedCount_`, `cachedExtractedCount_`) updated on every insert/delete/update operation. Eliminated 3 `COUNT(*)` queries from hot path (220-400ms → <1μs)
+- **VectorDatabase**: Added `cachedVectorCount_` atomic counter updated on insert/delete operations. Eliminated `COUNT(*)` query from `getVectorCount()` 
+- **ServiceManager Concurrency**: Converted `searchEngineMutex_` from `std::mutex` to `std::shared_mutex` enabling N concurrent readers with single exclusive writer. Allows parallel status requests without serialization bottleneck
+- **Status Request Optimization**: Removed blocking VectorDatabase initialization from hot path. Status handler now reports readiness accurately without attempting to "fix" uninitialized state, eliminating 1-5s blocking operations
+- **Performance**: Sequential request throughput improved to ~1960 req/s with sub-millisecond latency (avg: 0.02ms, max: 1ms). First connection latency: 2ms. Daemon readiness validation added to prevent test methodology races with initialization
+- **Document Retrieval Optimization**: Replaced O(n) full table scans with O(log n) indexed lookups in `cat`/`get` operations. Changed from `queryDocumentsByPattern('%')` → `getDocumentByHash(hash)` eliminating 120K+ document scans per retrieval (lines 850, 934 in document_service.cpp)
+- **Name Resolution Fix**: Fixed pattern generation for basename-only queries. Now generates `'%/basename'` pattern FIRST to use `containsFragment` query instead of failing `exactPath` (path_hash) match. `yams get --name` and `yams cat <name>` now work correctly
+- **Grep FTS-First**: Optimized grep to START with FTS5 index search for literal patterns before falling back to full document scan. Regex patterns still use full scan. Significantly improves grep performance on large repositories
+- **ONNX Plugin**: Upgraded the ONNX plugin to conform to the modern `model_provider_v1` (v1.2) interface specification.
+- Enhanced `ui_helpers.hpp` with 30+ new utilities: value formatters (`format_bytes`, `format_number`, `format_duration`, `format_percentage`), status indicators (`status_ok`, `status_warning`, `status_error`), table rendering (`Table`, `render_table`), progress bars, text utilities (word wrap, centering, indentation)
+- Improved `yams status` with color-coded severity indicators, human-readable formatting, and sectioned layout
+- Enhanced `yams daemon status` with humanized counter names (CAS, IPC, EMA, DB acronyms preserved), smart byte/number formatting
+- Added `yams daemon status -d` detailed view with storage overhead breakdown showing disk usage by component (CAS blocks, ref counter DB, metadata DB, vector DB, vector index) with overhead percentage relative to content
+
+### Deprecated
+- **MCP `get_by_name` tool**: Use `get` tool with `name` parameter instead. The `get` tool now smartly handles both hash and name lookups with optimized pattern matching
+
+### Fixed
+- **Streaming Protocol Bug**: Fixed critical bug where `GetResponse`/`CatResponse` sent header-only frame (empty content) followed by data frame, causing CLI to process first frame and fail. Added `force_unary_response` check in request_handler.cpp to disable streaming for these response types, forcing single complete frame transmission
+- **Protobuf Schema**: Added missing `bool has_content = 6` field to `GetResponse` message in ipc_envelope.proto. Updated serialization to explicitly set/read flag instead of recalculating, preventing desync between daemon and CLI
+- **Daemon**: Fixed a regression in the plugin loader that prevented legacy model provider plugins (like the ONNX provider) from being correctly detected and adopted. The loader now includes a fallback to detect and register providers using the legacy `getProviderName`/`createProvider` symbols, restoring embedding generation functionality.
 - **Grep Service**: Fixed critical bug where `--paths-only` mode returned all candidate documents without checking pattern matches, causing incorrect "(no results)" responses. Removed premature fast-exit optimization; grep now properly runs pattern matching and returns only files that match. (Issue: 135K docs indexed but grep returned empty, audit revealed fast-exit bypassed validation)
 - **Grep CLI**: Fixed session pattern handling bug where session include patterns were incorrectly used as document selectors instead of result filters. Session patterns now properly merged into `includePatterns` for filtering, not `paths` for selection. This prevented grep from finding any results when a session was active.
 

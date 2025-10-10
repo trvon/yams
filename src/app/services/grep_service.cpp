@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <future>
 #include <mutex>
 #include <thread>
@@ -278,9 +279,12 @@ public:
             }
             return def;
         };
-        const int max_docs_hot = getenv_int("YAMS_GREP_MAX_DOCS_HOT", 2000);
-        const int max_docs_cold = getenv_int("YAMS_GREP_MAX_DOCS_COLD", 200);
-        const int budget_ms = getenv_int("YAMS_GREP_TIME_BUDGET_MS", 15000);
+        // PERFORMANCE: Lower default limits to prevent timeouts on large repos
+        // Users can override with environment variables if needed
+        const int max_docs_hot = getenv_int("YAMS_GREP_MAX_DOCS_HOT", 500);
+        const int max_docs_cold = getenv_int("YAMS_GREP_MAX_DOCS_COLD", 50);
+        const int budget_ms = getenv_int("YAMS_GREP_TIME_BUDGET_MS", 10000);
+        const int max_total_results = getenv_int("YAMS_GREP_MAX_RESULTS", 1000);
         MetadataTelemetry metadataTelemetry;
         auto start_time = std::chrono::steady_clock::now();
 
@@ -296,34 +300,34 @@ public:
             }
         };
 
-        bool ftsPathTaken = false;
-        if (req.literalText && !req.pattern.empty()) {
-            ftsPathTaken = true;
-            auto sRes = retryMetadataOp(
-                [&]() { return ctx_.metadataRepo->search(req.pattern, max_docs_hot); }, 4,
-                std::chrono::milliseconds(25), &metadataTelemetry);
+        // Stage 1: Initial candidate selection based on tags, FTS, or all documents.
+        // PERFORMANCE OPTIMIZATION: Prefer FTS index over full document scan when possible.
+        bool usedFtsForInitialCandidates = false;
 
-            if (sRes && sRes.value().isSuccess()) {
-                std::vector<metadata::DocumentInfo> fts_candidates;
-                for (const auto& r : sRes.value().results) {
-                    fts_candidates.push_back(r.document);
-                }
-                addDocs(std::move(fts_candidates));
+        if (!req.tags.empty()) {
+            auto tRes = retryMetadataOp(
+                [&]() {
+                    return ctx_.metadataRepo->findDocumentsByTags(req.tags, req.matchAllTags);
+                },
+                4, std::chrono::milliseconds(25), &metadataTelemetry);
+            if (tRes) {
+                addDocs(std::move(tRes.value()));
             }
-        }
-
-        if (!ftsPathTaken) {
-            if (!req.tags.empty()) {
-                auto tRes = retryMetadataOp(
-                    [&]() {
-                        return ctx_.metadataRepo->findDocumentsByTags(req.tags, req.matchAllTags);
-                    },
-                    4, std::chrono::milliseconds(25), &metadataTelemetry);
-                if (tRes) {
-                    addDocs(std::move(tRes.value()));
+        } else if (req.literalText && !req.pattern.empty()) {
+            // PERFORMANCE: Start with FTS search for literal patterns instead of full scan
+            auto sRes = retryMetadataOp(
+                [&]() { return ctx_.metadataRepo->search(req.pattern, max_docs_hot * 2); }, 4,
+                std::chrono::milliseconds(25), &metadataTelemetry);
+            if (sRes && sRes.value().isSuccess() && !sRes.value().results.empty()) {
+                std::vector<metadata::DocumentInfo> ftsHits;
+                ftsHits.reserve(sRes.value().results.size());
+                for (const auto& r : sRes.value().results) {
+                    ftsHits.push_back(r.document);
                 }
+                addDocs(std::move(ftsHits));
+                usedFtsForInitialCandidates = true;
             } else {
-                // No FTS and no tags, so we have to get all docs and filter later.
+                // FTS failed or returned nothing; fall back to full scan
                 auto allDocsRes = retryMetadataOp(
                     [&]() { return metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%"); }, 4,
                     std::chrono::milliseconds(25), &metadataTelemetry);
@@ -331,6 +335,47 @@ public:
                     addDocs(std::move(allDocsRes.value()));
                 }
             }
+        } else {
+            // No tags, no literal text: must scan all documents for regex match
+            auto allDocsRes = retryMetadataOp(
+                [&]() { return metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%"); }, 4,
+                std::chrono::milliseconds(25), &metadataTelemetry);
+            if (allDocsRes) {
+                addDocs(std::move(allDocsRes.value()));
+            }
+        }
+
+        // Stage 2: Further FTS filtering if not already used for initial candidates
+        // PERFORMANCE: Skip redundant FTS search if we already used it in Stage 1
+        if (req.literalText && !req.pattern.empty() && !docs.empty() &&
+            !usedFtsForInitialCandidates) {
+            auto sRes = retryMetadataOp(
+                [&]() { return ctx_.metadataRepo->search(req.pattern, max_docs_hot); }, 4,
+                std::chrono::milliseconds(25), &metadataTelemetry);
+
+            if (sRes && sRes.value().isSuccess()) {
+                if (sRes.value().results.empty()) {
+                    // FTS found no matches, so the intersection is empty.
+                    docs.clear();
+                } else {
+                    // Filter the current document list by FTS results.
+                    std::unordered_set<int64_t> fts_doc_ids;
+                    fts_doc_ids.reserve(sRes.value().results.size());
+                    for (const auto& r : sRes.value().results) {
+                        fts_doc_ids.insert(r.document.id);
+                    }
+
+                    std::vector<metadata::DocumentInfo> filtered_docs;
+                    filtered_docs.reserve(docs.size());
+                    for (const auto& doc : docs) {
+                        if (fts_doc_ids.count(doc.id) > 0) {
+                            filtered_docs.push_back(doc);
+                        }
+                    }
+                    docs = std::move(filtered_docs);
+                }
+            }
+            // If FTS search fails, we proceed with the larger candidate list from Stage 1.
         }
 
         // If no candidates were found by any method, return empty-handed.
@@ -338,12 +383,46 @@ public:
             spdlog::debug("[GrepService] No candidate documents found after initial discovery.");
         }
 
-        // Post-filtering logic (tags, paths) applied to the candidate set `docs`
-        // ...
+        if (!req.paths.empty() || !req.includePatterns.empty()) {
+            std::vector<metadata::DocumentInfo> filtered;
+            filtered.reserve(docs.size());
 
-        // Note: pathsOnly mode used to take a fast exit here, but that returned ALL candidate
-        // docs without checking if they match the pattern. Now we let normal grep logic run
-        // and collect filesWith at the end.
+            for (auto& doc : docs) {
+                // Check paths filter
+                if (!pathFilterMatch(doc.filePath, req.paths))
+                    continue;
+
+                // Check include patterns
+                if (!req.includePatterns.empty()) {
+                    bool matches = false;
+                    const std::string docGlobPath = normalizeForGlobMatch(doc.filePath);
+                    for (const auto& pattern : req.includePatterns) {
+                        if (hasWildcard(pattern)) {
+                            if (yams::app::services::utils::matchGlob(
+                                    docGlobPath, normalizeForGlobMatch(pattern))) {
+                                matches = true;
+                                break;
+                            }
+                        } else {
+                            const auto normalizedPattern = normalizeForGlobMatch(pattern);
+                            if (!normalizedPattern.empty() &&
+                                docGlobPath.find(normalizedPattern) != std::string::npos) {
+                                matches = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!matches)
+                        continue;
+                }
+
+                filtered.push_back(std::move(doc));
+            }
+
+            docs = std::move(filtered);
+            spdlog::debug("[GrepService] After path/include filtering: {} documents remain",
+                          docs.size());
+        }
 
         // Prefer hot docs (extracted/text) then cold; cap both sets
         std::vector<metadata::DocumentInfo> hotDocs;
@@ -365,6 +444,31 @@ public:
         docs.clear();
         docs.insert(docs.end(), hotDocs.begin(), hotDocs.end());
         docs.insert(docs.end(), coldDocs.begin(), coldDocs.end());
+
+        // Stage 3: Batch-fetch metadata for all candidates (CRITICAL PERFORMANCE FIX)
+        // Use existing getMetadataForDocuments() to replace per-document getAllMetadata() calls
+        // in workers (8K-80K queries → 1 query)
+        std::unordered_map<int64_t, std::unordered_map<std::string, metadata::MetadataValue>>
+            docMetadata;
+        if (!docs.empty() && ctx_.metadataRepo) {
+            std::vector<int64_t> docIds;
+            docIds.reserve(docs.size());
+            for (const auto& d : docs) {
+                docIds.push_back(d.id);
+            }
+            auto batchResult = retryMetadataOp(
+                [&]() { return ctx_.metadataRepo->getMetadataForDocuments(docIds); }, 4,
+                std::chrono::milliseconds(25), &metadataTelemetry);
+            if (batchResult) {
+                docMetadata = std::move(batchResult.value());
+                spdlog::debug("[GrepService] Batch-fetched metadata for {} documents",
+                              docMetadata.size());
+            } else {
+                spdlog::warn("[GrepService] Failed to batch-fetch metadata: code={} msg={}",
+                             static_cast<int>(batchResult.error().code),
+                             batchResult.error().message);
+            }
+        }
 
         GrepResponse response;
         response.totalMatches = 0;
@@ -493,58 +597,19 @@ public:
                         continue;
                 }
 
-                // Respect per-document force_cold (metadata key or tag)
                 bool forceCold = false;
-                std::optional<std::unordered_map<std::string, metadata::MetadataValue>>
-                    metadataSnapshot;
-                if (ctx_.metadataRepo) {
-                    auto md =
-                        retryMetadataOp([&]() { return ctx_.metadataRepo->getAllMetadata(doc.id); },
-                                        4, std::chrono::milliseconds(25), &metadataTelemetry);
-                    if (!md) {
-                        spdlog::warn(
-                            "[GrepService] metadata fetch failed for doc {}: code={} message={}",
-                            doc.id, static_cast<int>(md.error().code), md.error().message);
-                        {
-                            std::lock_guard<std::mutex> lk(errorMutex);
-                            workerErrors.push_back(md.error());
-                        }
-                        stop.store(true, std::memory_order_relaxed);
-                        return;
-                    }
-                    metadataSnapshot = md.value();
-
-                    if (!req.tags.empty()) {
-                        size_t matchedTags = 0;
-                        for (const auto& tag : req.tags) {
-                            const std::string key = std::string("tag:") + tag;
-                            const bool present =
-                                metadataSnapshot->find(key) != metadataSnapshot->end();
-                            if (present) {
-                                ++matchedTags;
-                                if (!req.matchAllTags)
-                                    break;
-                            } else if (req.matchAllTags) {
-                                matchedTags = 0;
-                                break;
-                            }
-                        }
-                        const bool tagsSatisfied =
-                            req.matchAllTags ? (matchedTags == req.tags.size()) : (matchedTags > 0);
-                        if (!tagsSatisfied) {
-                            continue;
-                        }
-                    }
-
-                    auto it = metadataSnapshot->find("force_cold");
-                    if (it != metadataSnapshot->end()) {
+                auto metadataIt = docMetadata.find(doc.id);
+                if (metadataIt != docMetadata.end()) {
+                    const auto& metadataSnapshot = metadataIt->second;
+                    auto it = metadataSnapshot.find("force_cold");
+                    if (it != metadataSnapshot.end()) {
                         auto v = it->second.asString();
                         std::string lv = v;
                         std::transform(lv.begin(), lv.end(), lv.begin(), ::tolower);
                         forceCold = (lv == "1" || lv == "true" || lv == "yes");
                     }
                     if (!forceCold &&
-                        metadataSnapshot->find("tag:force_cold") != metadataSnapshot->end()) {
+                        metadataSnapshot.find("tag:force_cold") != metadataSnapshot.end()) {
                         forceCold = true;
                     }
                 }
@@ -767,16 +832,27 @@ public:
                     filesWith.push_back(fileResult.file);
                     if (!req.filesWithMatches && !req.pathsOnly)
                         outResults.push_back(std::move(fileResult));
+
+                    // PERFORMANCE: Stop early if we've hit the result limit
+                    if (max_total_results > 0 &&
+                        totalMatches >= static_cast<size_t>(max_total_results)) {
+                        spdlog::info("[GrepService] Hit result limit ({} matches), stopping early",
+                                     totalMatches.load());
+                        stop.store(true, std::memory_order_relaxed);
+                    }
                 } else {
                     filesWithout.push_back(doc.filePath);
                 }
             }
         };
 
+        // Wrap lambda in std::function to avoid C++20 immediate function evaluation issues
+        std::function<void()> workerFunc = worker;
+
         std::vector<std::thread> ths;
         ths.reserve(workers);
         for (size_t t = 0; t < workers; ++t)
-            ths.emplace_back(worker);
+            ths.emplace_back(workerFunc);
         for (auto& th : ths)
             th.join();
 

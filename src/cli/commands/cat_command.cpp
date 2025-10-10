@@ -126,6 +126,15 @@ public:
                 if (normalized.changed) {
                     name_ = normalized.normalized;
                 }
+
+                if (!name_.empty() && name_[0] != '/' && !looksLikeHashPrefix(name_)) {
+                    try {
+                        name_ = std::filesystem::weakly_canonical(name_).string();
+                    } catch (const std::filesystem::filesystem_error&) {
+                        // Not a path, treat as name
+                    }
+                }
+
                 dreq.name = name_;
                 dreq.byName = true;
 

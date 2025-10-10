@@ -90,8 +90,8 @@ private:
     bool pathsOnly_ = false;
     bool literalText_ = false;
     bool regexOnly_ = false;
-    // Default to streaming for quicker first results; user can opt out
-    bool disableStreaming_ = false;
+    // Streaming disabled by default for agent/automation compatibility; user can opt in
+    bool enableStreaming_ = false;
     // Force thorough (unary) mode: disables streaming and the guard
     bool cold_{false};
     size_t semanticLimit_ = 10;
@@ -179,9 +179,9 @@ public:
                         "Alias: stop after N matches per file (same as --max-count)")
             ->default_val(20);
 
-        // Streaming control
-        cmd->add_flag("--no-streaming", disableStreaming_,
-                      "Disable streaming responses from daemon");
+        // Streaming control (disabled by default for reliability)
+        cmd->add_flag("--streaming", enableStreaming_,
+                      "Enable streaming responses from daemon (off by default)");
         // Thorough (non-streaming) mode
         cmd->add_flag("--cold", cold_, "Force thorough (non-streaming) execution");
 
@@ -264,7 +264,7 @@ public:
                 sessionPatterns_.clear();
             }
             if (cold_) {
-                disableStreaming_ = true;
+                enableStreaming_ = false;
             }
             auto result = execute();
             if (!result) {
@@ -500,7 +500,7 @@ public:
                 if (cli_ && cli_->hasExplicitDataDir()) {
                     ropts.explicitDataDir = cli_->getDataPath();
                 }
-                ropts.enableStreaming = !disableStreaming_;
+                ropts.enableStreaming = enableStreaming_;
                 ropts.headerTimeoutMs = 30000;
                 ropts.bodyTimeoutMs = 120000;
                 ropts.requestTimeoutMs = 30000;

@@ -527,3 +527,59 @@ TEST_F(MetadataRepositoryTest, CountsAndModifiedSince) {
     }
     EXPECT_TRUE(foundRecent);
 }
+
+TEST_F(MetadataRepositoryTest, PathTreeUpsertCreatesNodesAndCounts) {
+    auto docInfo = makeDocumentWithPath(
+        "/src/example.txt", "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD");
+    auto docInsert = repository_->insertDocument(docInfo);
+    ASSERT_TRUE(docInsert.has_value());
+    auto docId = docInsert.value();
+    docInfo.id = docId;
+
+    auto upsert = repository_->upsertPathTreeForDocument(docInfo, docId, true, {});
+    ASSERT_TRUE(upsert.has_value());
+
+    auto lookup = repository_->findPathTreeNode(PathTreeNode::kNullParent, "src");
+    ASSERT_TRUE(lookup.has_value());
+    ASSERT_TRUE(lookup.value().has_value());
+    auto node = lookup.value().value();
+    EXPECT_EQ(node.fullPath, "/src");
+    EXPECT_EQ(node.docCount, 1);
+
+    // Re-running for an existing document should not change doc count.
+    auto repeat = repository_->upsertPathTreeForDocument(docInfo, docId, false, {});
+    ASSERT_TRUE(repeat.has_value());
+    auto afterRepeat = repository_->findPathTreeNode(PathTreeNode::kNullParent, "src");
+    ASSERT_TRUE(afterRepeat.has_value());
+    ASSERT_TRUE(afterRepeat.value().has_value());
+    EXPECT_EQ(afterRepeat.value()->docCount, 1);
+
+    auto fullLookup = repository_->findPathTreeNodeByFullPath("/src/example.txt");
+    ASSERT_TRUE(fullLookup.has_value());
+    ASSERT_TRUE(fullLookup.value().has_value());
+    EXPECT_EQ(fullLookup.value()->fullPath, "/src/example.txt");
+}
+
+TEST_F(MetadataRepositoryTest, PathTreeCentroidAccumulatesEmbeddings) {
+    auto docInfo = makeDocumentWithPath(
+        "/src/lib/foo.cpp", "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE");
+    auto docInsert = repository_->insertDocument(docInfo);
+    ASSERT_TRUE(docInsert.has_value());
+    auto docId = docInsert.value();
+    docInfo.id = docId;
+
+    // Ensure nodes exist and doc count is updated.
+    ASSERT_TRUE(repository_->upsertPathTreeForDocument(docInfo, docId, true, {}).has_value());
+
+    std::vector<float> embedding{1.0F, 2.0F, 3.0F};
+    ASSERT_TRUE(
+        repository_
+            ->upsertPathTreeForDocument(docInfo, docId, false,
+                                        std::span<const float>(embedding.data(), embedding.size()))
+            .has_value());
+
+    auto node = repository_->findPathTreeNode(PathTreeNode::kNullParent, "src");
+    ASSERT_TRUE(node.has_value());
+    ASSERT_TRUE(node.value().has_value());
+    EXPECT_EQ(node.value()->centroidWeight, 1);
+}

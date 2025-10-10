@@ -141,6 +141,9 @@ public:
     // Get list of loaded models
     std::vector<std::string> getLoadedModels() const;
 
+    // Get count of loaded models (non-blocking, cached)
+    size_t getLoadedModelCount() const { return loadedModelCount_.load(std::memory_order_relaxed); }
+
     // ========================================================================
     // Model Management
     // ========================================================================
@@ -221,6 +224,7 @@ private:
     std::atomic<size_t> totalRequests_{0};
     std::atomic<size_t> cacheHits_{0};
     std::atomic<size_t> cacheMisses_{0};
+    std::atomic<size_t> loadedModelCount_{0}; // Cached count for non-blocking status queries
 
     // ONNX Runtime environment (shared across all models)
     std::shared_ptr<Ort::Env> ortEnv_;

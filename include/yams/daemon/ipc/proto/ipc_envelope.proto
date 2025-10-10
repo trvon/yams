@@ -312,10 +312,14 @@ message GetResponse {
   optional uint32 compressed_crc32 = 14;
   optional uint32 uncompressed_crc32 = 15;
   bytes compression_header = 16;
+  optional uint32 centroid_weight = 17;
+  optional uint32 centroid_dims = 18;
+  repeated float centroid_preview = 19;
   string name = 2;
   string path = 3;
   bytes content = 4; // for small responses
   repeated KvPair metadata = 5;
+  bool has_content = 6; // indicates if content field is populated
 }
 
 message GetInitResponse {
@@ -514,6 +518,7 @@ message CatResponse {
   string name = 2;
   bytes content = 3;
   uint64 size = 4;
+  bool has_content = 5;
 }
 
 // Session management

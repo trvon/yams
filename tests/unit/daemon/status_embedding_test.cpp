@@ -38,6 +38,7 @@ public:
         return std::find(loaded_.begin(), loaded_.end(), modelName) != loaded_.end();
     }
     std::vector<std::string> getLoadedModels() const override { return loaded_; }
+    size_t getLoadedModelCount() const override { return loaded_.size(); }
     Result<ModelInfo> getModelInfo(const std::string& modelName) const override {
         if (!isModelLoaded(modelName))
             return ErrorCode::NotFound;
@@ -79,12 +80,13 @@ TEST(StatusEmbedding, SnapshotShowsEmbeddingRuntime) {
 
     DaemonMetrics metrics(nullptr, &state, &svc);
     auto snap = metrics.getSnapshot();
+    ASSERT_NE(snap, nullptr);
 
     // We allow either local or provider backend depending on environment; ensure fields are sane
     // Model name is tracked when generator initializes successfully
     // At minimum, embeddingAvailable is boolean and backend string present
-    EXPECT_TRUE(snap.embeddingBackend == "provider" || snap.embeddingBackend == "local" ||
-                snap.embeddingBackend == "unknown");
+    EXPECT_TRUE(snap->embeddingBackend == "provider" || snap->embeddingBackend == "local" ||
+                snap->embeddingBackend == "unknown");
     // embeddingDim may be 0 if generator not initialized; path may be empty without real model
     // The test primarily asserts no crashes and fields exist.
 }

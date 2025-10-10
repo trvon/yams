@@ -31,6 +31,7 @@ public:
     Result<void> unloadModel(const std::string& modelName) override;
     bool isModelLoaded(const std::string& modelName) const override;
     std::vector<std::string> getLoadedModels() const override;
+    size_t getLoadedModelCount() const override;
 
     Result<ModelInfo> getModelInfo(const std::string& modelName) const override;
     size_t getEmbeddingDim(const std::string& modelName) const override;

@@ -110,6 +110,14 @@ public:
      */
     virtual std::vector<std::string> getLoadedModels() const = 0;
 
+    /**
+     * Get count of loaded models (non-blocking, cached)
+     * This is a fast alternative to getLoadedModels().size() for status reporting.
+     * Implementations should maintain an atomic counter and update it on load/unload.
+     * @return Number of currently loaded models
+     */
+    virtual size_t getLoadedModelCount() const = 0;
+
     // ========================================================================
     // Model Information
     // ========================================================================

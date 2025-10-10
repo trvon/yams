@@ -1,6 +1,7 @@
 #pragma once
 
 #include <thread>
+#include <vector>
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
@@ -23,7 +24,7 @@ private:
 
     boost::asio::io_context io_context_;
     boost::asio::executor_work_guard<boost::asio::io_context::executor_type> work_guard_;
-    std::thread io_thread_;
+    std::vector<std::thread> io_threads_;
 };
 
 } // namespace yams::daemon

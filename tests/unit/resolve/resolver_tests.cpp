@@ -269,6 +269,26 @@ public:
 
     Result<void> checkpointWal() override { return {}; }
 
+    Result<std::optional<metadata::PathTreeNode>> findPathTreeNode(int64_t,
+                                                                   std::string_view) override {
+        return std::optional<metadata::PathTreeNode>{};
+    }
+    Result<metadata::PathTreeNode> insertPathTreeNode(int64_t, std::string_view,
+                                                      std::string_view) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+    Result<void> incrementPathTreeDocCount(int64_t, int64_t) override { return Result<void>(); }
+    Result<std::optional<metadata::PathTreeNode>>
+    findPathTreeNodeByFullPath(std::string_view) override {
+        return std::optional<metadata::PathTreeNode>{};
+    }
+    Result<void> accumulatePathTreeCentroid(int64_t, std::span<const float>) override {
+        return Result<void>();
+    }
+    Result<void> upsertPathTreeForDocument(const DocumentInfo&, int64_t, bool,
+                                           std::span<const float>) override {
+        return Result<void>();
+    }
     Result<void> upsertTreeSnapshot(const yams::metadata::TreeSnapshotRecord&) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }

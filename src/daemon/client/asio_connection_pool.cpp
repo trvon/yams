@@ -22,6 +22,7 @@
 #include <cstring>
 #include <filesystem>
 #include <optional>
+#include <shared_mutex>
 #include <system_error>
 #include <vector>
 
@@ -60,25 +61,9 @@ async_connect_with_timeout(const TransportOptions& opts) {
         if (trace) {
             spdlog::info("stream-trace: async_connect socket='{}'", opts.socketPath.string());
         }
-        if (!std::filesystem::exists(opts.socketPath)) {
-            std::string msg =
-                "Daemon not started (socket not found at '" + opts.socketPath.string() + "').";
-            spdlog::debug("AsioConnectionPool: {}", msg);
-            co_return Error{ErrorCode::NetworkError, std::move(msg)};
-        }
-#ifndef _WIN32
-        {
-            struct stat st;
-            if (::stat(opts.socketPath.c_str(), &st) == 0) {
-                if (!S_ISSOCK(st.st_mode)) {
-                    std::string msg =
-                        "Path exists but is not a socket: '" + opts.socketPath.string() + "'";
-                    spdlog::debug("AsioConnectionPool: {}", msg);
-                    co_return Error{ErrorCode::NetworkError, std::move(msg)};
-                }
-            }
-        }
-#endif
+        // Skip filesystem validation for performance - let connect() fail naturally if socket
+        // missing Connection errors are handled below and provide clear diagnostics This
+        // optimization is critical for high-concurrency scenarios (multi-agent systems)
         boost::asio::steady_timer timer(ex);
         timer.expires_after(opts.requestTimeout);
         auto connect_result = co_await (socket->async_connect(endpoint, use_awaitable) ||
@@ -129,8 +114,8 @@ async_read_exact(AsioConnection::socket_t& socket, size_t size, std::chrono::mil
 } // namespace
 
 namespace {
-std::mutex& registry_mutex() {
-    static std::mutex m;
+std::shared_mutex& registry_mutex() {
+    static std::shared_mutex m;
     return m;
 }
 
@@ -148,44 +133,112 @@ AsioConnectionPool::get_or_create(const TransportOptions& opts) {
     if (!opts.poolEnabled) {
         return std::make_shared<AsioConnectionPool>(opts, false);
     }
-    std::lock_guard<std::mutex> lk(registry_mutex());
+
     auto key = opts.socketPath.string();
-    auto& map = registry_map();
-    if (auto it = map.find(key); it != map.end()) {
-        return it->second;
+
+    // Fast path: check if pool exists with shared lock (concurrent reads)
+    {
+        std::shared_lock<std::shared_mutex> lk(registry_mutex());
+        auto& map = registry_map();
+        if (auto it = map.find(key); it != map.end()) {
+            return it->second;
+        }
     }
-    auto pool = std::make_shared<AsioConnectionPool>(opts, true);
-    map[key] = pool;
-    return pool;
+
+    // Slow path: create new pool with exclusive lock (single writer)
+    {
+        std::lock_guard<std::shared_mutex> lk(registry_mutex());
+        auto& map = registry_map();
+        // Double-check: another thread may have created it while we waited
+        if (auto it = map.find(key); it != map.end()) {
+            return it->second;
+        }
+        auto pool = std::make_shared<AsioConnectionPool>(opts, true);
+        map[key] = pool;
+        return pool;
+    }
+}
+
+void AsioConnectionPool::cleanup_stale_connections() {
+    // Remove dead/closed connections from pool (lock must be held by caller)
+    connection_pool_.erase(std::remove_if(connection_pool_.begin(), connection_pool_.end(),
+                                          [](const std::weak_ptr<AsioConnection>& weak) {
+                                              auto conn = weak.lock();
+                                              return !conn ||
+                                                     !conn->alive.load(std::memory_order_relaxed) ||
+                                                     !conn->socket || !conn->socket->is_open();
+                                          }),
+                           connection_pool_.end());
 }
 
 awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::acquire() {
     if (!shared_) {
         co_return co_await create_connection();
     }
+
+    // Try to find an available connection from the pool
     std::shared_ptr<AsioConnection> existing;
     {
         std::lock_guard<std::mutex> lk(mutex_);
-        existing = cachedStrong_;
-    }
-    if (existing && existing->alive.load(std::memory_order_relaxed) && existing->socket &&
-        existing->socket->is_open()) {
-        co_return existing;
-    }
-    if (existing) {
-        std::lock_guard<std::mutex> lk(mutex_);
-        if (cachedStrong_.get() == existing.get()) {
-            cachedStrong_.reset();
-            cached_.reset();
+        cleanup_stale_connections();
+
+        // Look for an alive, open, AND NOT IN USE connection
+        for (auto& weak : connection_pool_) {
+            if (auto conn = weak.lock()) {
+                // Atomically check and set in_use flag
+                bool expected = false;
+                if (conn->alive.load(std::memory_order_relaxed) && conn->socket &&
+                    conn->socket->is_open() &&
+                    conn->in_use.compare_exchange_strong(expected, true,
+                                                         std::memory_order_acquire)) {
+                    // Successfully checked out this connection
+                    existing = conn;
+                    break;
+                }
+            }
         }
     }
+
+    if (existing) {
+        co_return existing;
+    }
+
+    // No available connection - create a new one (outside the lock)
     auto fresh = co_await create_connection();
+
     if (shared_ && fresh && fresh->alive.load(std::memory_order_relaxed)) {
         std::lock_guard<std::mutex> lk(mutex_);
-        cachedStrong_ = fresh;
-        cached_ = fresh;
+        // Re-check for available connections that might have been released
+        // while we were creating a new one.
+        for (auto& weak : connection_pool_) {
+            if (auto conn = weak.lock()) {
+                bool expected = false;
+                if (conn->alive.load(std::memory_order_relaxed) && conn->socket &&
+                    conn->socket->is_open() &&
+                    conn->in_use.compare_exchange_strong(expected, true,
+                                                         std::memory_order_acquire)) {
+                    // A connection became available. Use it and discard the one we created.
+                    boost::system::error_code ec;
+                    fresh->socket->close(ec);
+                    fresh->alive = false;
+                    co_return conn;
+                }
+            }
+        }
+
+        // No connection became available. Use the one we created.
+        fresh->in_use.store(true, std::memory_order_relaxed);
+        if (connection_pool_.size() < kMaxPoolSize) {
+            connection_pool_.push_back(fresh);
+        }
     }
     co_return fresh;
+}
+
+void AsioConnectionPool::release(std::shared_ptr<AsioConnection> conn) {
+    if (conn) {
+        conn->in_use.store(false, std::memory_order_release);
+    }
 }
 
 awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection() {
@@ -197,6 +250,7 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
     conn->socket = std::move(socket_res.value());
     conn->alive = true;
 
+    // Start background read loop to receive responses
     if (!conn->read_started.exchange(true)) {
         co_spawn(
             GlobalIOContext::instance().get_io_context(),

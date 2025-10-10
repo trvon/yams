@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <stop_token>
 #include "IComponent.h"
 #include <boost/asio/any_io_executor.hpp>
@@ -400,6 +401,8 @@ private:
     std::shared_ptr<search::SearchEngineBuilder> searchBuilder_;
     std::shared_ptr<IModelProvider> modelProvider_;
     std::unique_ptr<boost::asio::thread_pool> initPool_;
+    std::unique_ptr<boost::asio::thread_pool>
+        modelLoadPool_; // Dedicated pool for model loading operations
     std::unique_ptr<PluginLoader> pluginLoader_;
     std::unique_ptr<AbiPluginLoader> abiPluginLoader_;
     std::unique_ptr<AbiPluginHost> abiHost_;
@@ -409,7 +412,7 @@ private:
     std::shared_ptr<WorkerPool> workerPool_;
     // Phase 6: background reconciler for PoolManager stats (logging only)
     yams::compat::jthread poolReconThread_;
-    yams::compat::jthread lifecycleReadyWatchdog_;
+    // Removed: lifecycleReadyWatchdog_ (1200ms defensive timeout eliminated)
     // Worker pool metrics
     std::atomic<std::size_t> poolActive_{0};
     std::atomic<std::size_t> poolPosted_{0};
@@ -422,7 +425,7 @@ private:
 
     std::unique_ptr<IngestService> ingestService_;
     std::shared_ptr<yams::search::HybridSearchEngine> searchEngine_;
-    mutable std::mutex searchEngineMutex_;
+    mutable std::shared_mutex searchEngineMutex_; // Allow concurrent reads
 
     InitCompleteCallback initCompleteCallback_;
     std::atomic<bool> initCompleteInvoked_{false};

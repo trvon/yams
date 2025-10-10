@@ -38,6 +38,7 @@
 #include <yams/daemon/resource/abi_content_extractor_adapter.h>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
+#include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/daemon/resource/plugin_loader.h>
 #include <yams/detection/file_type_detector.h>
@@ -110,6 +111,8 @@ std::optional<size_t> read_vector_sentinel_dim(const std::filesystem::path& data
 
 // Open the daemon namespace for all following member definitions.
 namespace yams::daemon {
+
+extern std::vector<std::string> getRegisteredProviders();
 using yams::Error;
 using yams::ErrorCode;
 using yams::Result;
@@ -387,6 +390,15 @@ yams::Result<void> ServiceManager::initialize() {
             return Error{ErrorCode::InternalError, "Failed to create init thread pool"};
         }
     }
+    // Initialize dedicated model loading pool (2 threads to avoid blocking other operations)
+    if (!modelLoadPool_) {
+        try {
+            modelLoadPool_ = std::make_unique<boost::asio::thread_pool>(2);
+            spdlog::debug("Model load pool initialized with 2 threads");
+        } catch (const std::exception& e) {
+            spdlog::warn("Failed to create model load thread pool: {}", e.what());
+        }
+    }
     initThread_ = yams::compat::jthread([this](yams::compat::stop_token token) {
         spdlog::info("Starting async resource initialization (coroutine)...");
         // Launch coroutine on system executor and wait for completion in this thread
@@ -407,14 +419,15 @@ yams::Result<void> ServiceManager::initialize() {
         }
     });
 
-    // Wait a short time for critical services to come up
-    // This ensures the daemon can at least respond to status requests
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // Removed: defensive 100ms sleep (unnecessary with proper async initialization)
 
     // Configure PoolManager defaults from TuneAdvisor for known components
     try {
         PoolManager::Config ipcCfg{};
         ipcCfg.min_size = TuneAdvisor::poolMinSizeIpc();
+        if (ipcCfg.min_size < 4) {
+            ipcCfg.min_size = 4;
+        }
         ipcCfg.max_size = TuneAdvisor::poolMaxSizeIpc();
         ipcCfg.cooldown_ms = TuneAdvisor::poolCooldownMs();
         ipcCfg.low_watermark = TuneAdvisor::poolLowWatermarkPercent();
@@ -489,13 +502,8 @@ void ServiceManager::shutdown() {
         }
     } catch (...) {
     }
-    try {
-        if (lifecycleReadyWatchdog_.joinable()) {
-            lifecycleReadyWatchdog_.request_stop();
-            lifecycleReadyWatchdog_.join();
-        }
-    } catch (...) {
-    }
+    // Removed: lifecycleReadyWatchdog_ shutdown (thread eliminated)
+
     if (initThread_.joinable()) {
         initThread_.request_stop();
         initThread_.join();
@@ -507,6 +515,14 @@ void ServiceManager::shutdown() {
         } catch (...) {
         }
         initPool_.reset();
+    }
+    if (modelLoadPool_) {
+        try {
+            modelLoadPool_->stop();
+            modelLoadPool_->join();
+        } catch (...) {
+        }
+        modelLoadPool_.reset();
     }
 
     spdlog::debug("ServiceManager: Shutting down daemon resources");
@@ -833,6 +849,11 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
             } else {
                 spdlog::info("[VectorInit] vdb->initialize() succeeded.");
                 vectorDatabase_ = std::move(vdb);
+                // Initialize component-owned metrics (sync with DB once at startup)
+                try {
+                    vectorDatabase_->initializeCounter();
+                } catch (...) {
+                }
                 spdlog::info("[VectorInit] end pid={} tid={} path={} dim={} attempts={}",
                              static_cast<long long>(::getpid()), (void*)(&tid), cfg.database_path,
                              cfg.embedding_dim, attempt + 1);
@@ -852,7 +873,7 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
                 }
                 try {
                     std::size_t rows = vectorDatabase_->getVectorCount();
-                    spdlog::debug("[VectorInit] current row count={} (initial)", rows);
+                    spdlog::debug("[VectorInit] current row count={} (initial, cached)", rows);
                 } catch (...) {
                 }
                 try {
@@ -1003,7 +1024,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     spdlog::info("[ServiceManager] Async initialization started.");
     // Vector DB initialization (single guarded attempt invoked earlier in constructor)
     // Idempotent: safe if already attempted.
-    (void)initializeVectorDatabaseOnce(config_.dataDir);
+    auto vdbInitRes = initializeVectorDatabaseOnce(config_.dataDir);
+    if (!vdbInitRes) {
+        spdlog::warn("Vector DB initialization failed: {}. Continuing without vector support.",
+                     vdbInitRes.error().message);
+    }
     spdlog::info("[ServiceManager] Phase: Vector DB Init (once).");
     spdlog::debug("ServiceManager(co): Initializing daemon resources");
     writeBootstrapStatusFile(config_, state_);
@@ -1185,6 +1210,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     metadataRepo_ =
                         std::make_shared<metadata::MetadataRepository>(*connectionPool_);
                     state_.readiness.metadataRepoReady = true;
+                    // Initialize component-owned metrics (sync with DB once at startup)
+                    metadataRepo_->initializeCounters();
                     spdlog::info("Metadata repository initialized successfully");
                     return yams::Result<void>();
                 },
@@ -1353,37 +1380,17 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                              adoptResult.error().message);
             }
             if (adoptResult && adoptResult.value()) {
-                spdlog::info("ServiceManager: Adopted model provider from plugins, starting "
-                             "background initialization.");
-                // Non-blocking initialization of embedding generator and search engine rebuild
-                auto executor = getWorkerExecutor();
-                // Initialize embedding generator now that we have a model provider
-                auto initResult = ensureEmbeddingGeneratorReady();
-                if (!initResult) {
-                    spdlog::warn(
-                        "Failed to initialize embedding generator after plugin adoption: {}",
-                        initResult.error().message);
-                } else {
-                    spdlog::info(
-                        "Embedding generator initialized successfully after plugin adoption");
-
-                    // Now rebuild search engine to enable vector search
-                    try {
-                        auto self = shared_from_this();
-                        boost::asio::co_spawn(
-                            executor,
-                            [self]() -> boost::asio::awaitable<void> {
-                                co_await self->co_enableEmbeddingsAndRebuild();
-                            },
-                            boost::asio::detached);
-                    } catch (const std::bad_weak_ptr& e) {
-                        // If shared_from_this() fails, log and continue
-                        spdlog::debug("Cannot rebuild search engine - ServiceManager not yet "
-                                      "managed by shared_ptr");
-                    }
-                }
+                spdlog::info("ServiceManager: Adopted model provider from plugins.");
+                // Model initialization and preload deferred until after daemon reaches Ready state
+                // This ensures fast startup and immediate responsiveness
+                // See daemon.cpp main loop for deferred model preload trigger
             } else {
-                spdlog::info("ServiceManager: No model provider adopted from plugins.");
+                spdlog::warn("ServiceManager: No model provider adopted from plugins.");
+                if (config_.enableModelProvider) {
+                    co_return Error{ErrorCode::NotInitialized,
+                                    "Failed to adopt a model provider from plugins. Check "
+                                    "plugin paths and trust settings."};
+                }
             }
             auto extractorResult = init::step<size_t>(
                 "adopt_extractors", [&]() { return adoptContentExtractorsFromHosts(); });
@@ -1392,31 +1399,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                              extractorResult.value());
             }
         }
-        // If autoload is disabled but model provider is enabled, initialize a provider/generator
-        // now so embedding requests and LoadModel work under mocks/local.
+        // If autoload is disabled but model provider is enabled, defer initialization
+        // until after daemon reaches Ready state (see daemon.cpp main loop)
         if (!enableAutoload && config_.enableModelProvider) {
-            spdlog::info(
-                "Model provider enabled with autoload disabled; initializing provider now");
-            auto initRes = ensureEmbeddingGeneratorReady();
-            if (!initRes) {
-                spdlog::warn("Provider/generator init (no-autoload) failed: {}",
-                             initRes.error().message);
-            } else {
-                spdlog::info("Provider/generator ready (no-autoload)");
-                // Rebuild search engine to enable vector search now that embeddings are ready
-                try {
-                    auto executor = getWorkerExecutor();
-                    auto self = shared_from_this();
-                    boost::asio::co_spawn(
-                        executor,
-                        [self]() -> boost::asio::awaitable<void> {
-                            co_await self->co_enableEmbeddingsAndRebuild();
-                        },
-                        boost::asio::detached);
-                } catch (const std::exception& e) {
-                    spdlog::debug("Deferred rebuild scheduling failed: {}", e.what());
-                }
-            }
+            spdlog::info("Model provider enabled with autoload disabled; deferring initialization "
+                         "until Ready");
         }
     } catch (const std::exception& e) {
         spdlog::warn("Plugin autoload failed: {}", e.what());
@@ -1447,7 +1434,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         }
         auto built = co_await co_buildEngine(build_timeout, token, false);
         if (built) {
-            std::lock_guard<std::mutex> lk(searchEngineMutex_);
+            std::lock_guard<std::shared_mutex> lk(searchEngineMutex_); // Exclusive write
             searchEngine_ = built;
             state_.readiness.searchEngineReady = true;
             state_.readiness.searchProgress = 100;
@@ -1471,22 +1458,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     }
     spdlog::info("[ServiceManager] Phase: Search Engine Built.");
 
-    // Watchdog: promote lifecycle if core infra is ready
-    try {
-        lifecycleReadyWatchdog_ = yams::compat::jthread([this](yams::compat::stop_token st) {
-            if (st.stop_requested())
-                return;
-            std::this_thread::sleep_for(std::chrono::milliseconds(1200));
-            if (st.stop_requested())
-                return;
-            if (state_.readiness.databaseReady.load() &&
-                state_.readiness.metadataRepoReady.load()) {
-                spdlog::info("Lifecycle Ready watchdog: promoting state based on core readiness");
-                (void)invokeInitCompleteOnce(true, "");
-            }
-        });
-    } catch (...) {
-    }
+    // Removed: lifecycleReadyWatchdog_ (1200ms sleep workaround)
+    // Proper event-driven initialization via invokeInitCompleteOnce ensures deterministic startup
 
     if (ingestService_) {
         ingestService_->start();
@@ -1773,10 +1746,10 @@ Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& pref
             };
 
             auto try_adopt = [&](const std::string& pluginName) -> bool {
-                auto ifaceRes = abiHost_->getInterface(pluginName, "model_provider_v1", 1);
+                auto ifaceRes = abiHost_->getInterface(pluginName, "model_provider_v1", 2);
                 if (!ifaceRes) {
-                    spdlog::debug("Model provider iface not found for plugin '{}' (path='{}') : {}",
-                                  pluginName, path_for(pluginName), ifaceRes.error().message);
+                    spdlog::warn("Model provider iface not found for plugin '{}' (path='{}') : {}",
+                                 pluginName, path_for(pluginName), ifaceRes.error().message);
                     try {
                         embeddingFsm_.dispatch(
                             ProviderDegradedEvent{std::string("iface not found: ") + pluginName});
@@ -1903,17 +1876,8 @@ Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& pref
                 if (try_adopt(preferredName))
                     return Result<bool>(true);
             }
-            if (try_adopt("onnx"))
-                return Result<bool>(true);
+
             for (const auto& d : loaded) {
-                bool hasIface = false;
-                for (const auto& id : d.interfaces)
-                    if (id == std::string("model_provider_v1")) {
-                        hasIface = true;
-                        break;
-                    }
-                if (!hasIface)
-                    continue;
                 spdlog::debug("Trying model provider adoption from loaded plugin {} (path='{}')",
                               d.name, d.path.string());
                 if (try_adopt(d.name))
@@ -2197,8 +2161,9 @@ Result<size_t> ServiceManager::autoloadPluginsNow() {
             spdlog::info("Plugin autoload(now): no model provider adopted");
         }
         (void)adoptContentExtractorsFromHosts();
-        // Try to preload a preferred model if configured; FSM guards idempotence
-        preloadPreferredModelIfConfigured();
+        // Skip model preload during init to avoid blocking - it will load on first use
+        // or can be triggered explicitly via daemon main loop after Ready state
+        spdlog::info("Model preload deferred until after initialization completes");
         writeBootstrapStatusFile(config_, state_);
         return Result<size_t>(loaded_count);
     } catch (const std::exception& e) {
@@ -2281,23 +2246,76 @@ void ServiceManager::preloadPreferredModelIfConfigured() {
         } catch (...) {
         }
 
-        // Use worker executor instead of raw std::thread for unified cancellation
-        auto executor = getWorkerExecutor();
+        // Use dedicated model load pool to avoid blocking worker/init executors
+        // Fallback to worker executor if model load pool is not available
+        auto executor = modelLoadPool_ ? modelLoadPool_->get_executor() : getWorkerExecutor();
+        if (modelLoadPool_) {
+            spdlog::info(
+                "Using dedicated model load pool for preload of '{}' (pool has {} threads)",
+                preferred, 2);
+        } else {
+            spdlog::warn("Model load pool not available; using worker executor (may block)");
+        }
 
         // Safely handle shared_from_this - it may not be available during early initialization
         try {
+            spdlog::info("Attempting shared_from_this() for model load task '{}'", preferred);
             auto self = shared_from_this();
-            boost::asio::co_spawn(
-                executor,
-                [self, preferred]() -> boost::asio::awaitable<void> {
-                    try {
-                        auto r = self->modelProvider_->loadModel(preferred);
-                        if (r) {
+            spdlog::info(
+                "shared_from_this() succeeded, about to post model load task to executor for '{}'",
+                preferred);
+            boost::asio::post(executor, [self, preferred]() {
+                spdlog::info("***** INSIDE POSTED LAMBDA for '{}'", preferred);
+                spdlog::info("Model preload task started for '{}'", preferred);
+                try {
+                    spdlog::info("Calling modelProvider_->loadModel('{}')...", preferred);
+                    auto r = self->modelProvider_->loadModel(preferred);
+                    spdlog::info("modelProvider_->loadModel('{}') returned: success={}", preferred,
+                                 r.has_value());
+                    if (r) {
+                        self->state_.readiness.modelProviderReady.store(true,
+                                                                        std::memory_order_relaxed);
+                        self->state_.readiness.modelLoadProgress.store(100,
+                                                                       std::memory_order_relaxed);
+                        spdlog::info("Preferred model '{}' preloaded successfully", preferred);
+                        self->clearModelProviderError();
+                        try {
+                            std::size_t dim = 0;
+                            try {
+                                if (self->embeddingGenerator_)
+                                    dim = self->embeddingGenerator_->getEmbeddingDimension();
+                            } catch (...) {
+                            }
+                            self->embeddingFsm_.dispatch(
+                                ModelLoadedEvent{self->embeddingModelName_, dim});
+                        } catch (...) {
+                        }
+                    } else {
+                        self->state_.readiness.modelLoadProgress.store(0,
+                                                                       std::memory_order_relaxed);
+                        spdlog::warn("Preferred model '{}' preload failed: {}", preferred,
+                                     r.error().message);
+                        self->lastModelError_ = std::string("preload failed: ") + r.error().message;
+                        try {
+                            self->embeddingFsm_.dispatch(
+                                ProviderDegradedEvent{self->lastModelError_});
+                        } catch (...) {
+                        }
+                        try {
+                            if (self->modelProvider_)
+                                (void)self->modelProvider_->unloadModel(preferred);
+                        } catch (...) {
+                        }
+                        // Retry once after a short delay to tolerate slow filesystems
+                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+                        auto r_retry = self->modelProvider_->loadModel(preferred);
+                        if (r_retry) {
                             self->state_.readiness.modelProviderReady.store(
                                 true, std::memory_order_relaxed);
                             self->state_.readiness.modelLoadProgress.store(
                                 100, std::memory_order_relaxed);
-                            spdlog::info("Preferred model '{}' preloaded", preferred);
+                            spdlog::info("Preferred model '{}' preloaded on retry", preferred);
                             self->clearModelProviderError();
                             try {
                                 std::size_t dim = 0;
@@ -2311,118 +2329,71 @@ void ServiceManager::preloadPreferredModelIfConfigured() {
                             } catch (...) {
                             }
                         } else {
-                            self->state_.readiness.modelLoadProgress.store(
-                                0, std::memory_order_relaxed);
-                            spdlog::warn("Preferred model '{}' preload failed: {}", preferred,
-                                         r.error().message);
-                            self->lastModelError_ =
-                                std::string("preload failed: ") + r.error().message;
+#ifndef YAMS_USE_ONNX_RUNTIME
+                            spdlog::warn("ONNX runtime disabled in this build; model "
+                                         "preloading not supported by daemon binary");
+#endif
+                            spdlog::warn("Preferred model '{}' failed twice: {}", preferred,
+                                         r_retry.error().message);
                             try {
                                 self->embeddingFsm_.dispatch(
-                                    ProviderDegradedEvent{self->lastModelError_});
+                                    LoadFailureEvent{r_retry.error().message});
                             } catch (...) {
-                            }
-                            try {
-                                if (self->modelProvider_)
-                                    (void)self->modelProvider_->unloadModel(preferred);
-                            } catch (...) {
-                            }
-                            // Retry once after a short delay to tolerate slow filesystems
-                            boost::asio::steady_timer timer(
-                                co_await boost::asio::this_coro::executor);
-                            timer.expires_after(std::chrono::milliseconds(500));
-                            co_await timer.async_wait(boost::asio::use_awaitable);
-
-                            auto r_retry = self->modelProvider_->loadModel(preferred);
-                            if (r_retry) {
-                                self->state_.readiness.modelProviderReady.store(
-                                    true, std::memory_order_relaxed);
-                                self->state_.readiness.modelLoadProgress.store(
-                                    100, std::memory_order_relaxed);
-                                spdlog::info("Preferred model '{}' preloaded on retry", preferred);
-                                self->clearModelProviderError();
-                                try {
-                                    std::size_t dim = 0;
-                                    try {
-                                        if (self->embeddingGenerator_)
-                                            dim =
-                                                self->embeddingGenerator_->getEmbeddingDimension();
-                                    } catch (...) {
-                                    }
-                                    self->embeddingFsm_.dispatch(
-                                        ModelLoadedEvent{self->embeddingModelName_, dim});
-                                } catch (...) {
-                                }
-                            } else {
-#ifndef YAMS_USE_ONNX_RUNTIME
-                                spdlog::warn("ONNX runtime disabled in this build; model "
-                                             "preloading not supported by daemon binary");
-#endif
-                                spdlog::warn("Preferred model '{}' failed twice: {}", preferred,
-                                             r_retry.error().message);
-                                try {
-                                    self->embeddingFsm_.dispatch(
-                                        LoadFailureEvent{r_retry.error().message});
-                                } catch (...) {
-                                }
                             }
                         }
-                    } catch (const std::exception& e) {
-                        spdlog::warn("preloadPreferredModelIfConfigured error: {}", e.what());
-                    } catch (...) {
-                        spdlog::warn("preloadPreferredModelIfConfigured: unknown error");
                     }
-                },
-                boost::asio::detached);
+                } catch (const std::exception& e) {
+                    spdlog::warn("preloadPreferredModelIfConfigured error: {}", e.what());
+                } catch (...) {
+                    spdlog::warn("preloadPreferredModelIfConfigured: unknown error");
+                }
+            });
         } catch (const std::bad_weak_ptr& e) {
             // Fall back to synchronous loading if shared_from_this() is not available
-            spdlog::debug(
-                "shared_from_this() not available, falling back to synchronous model load");
+            spdlog::warn("shared_from_this() not available for '{}', falling back to raw pointer "
+                         "model load: {}",
+                         preferred, e.what());
 
             // Capture necessary members by value/pointer for the lambda
             auto* provider = modelProvider_.get();
             auto* readiness = &state_.readiness;
 
-            boost::asio::co_spawn(
-                executor,
-                [this, provider, readiness, preferred]() -> boost::asio::awaitable<void> {
-                    try {
-                        auto r = provider->loadModel(preferred);
-                        if (r) {
-                            readiness->modelProviderReady.store(true, std::memory_order_relaxed);
-                            readiness->modelLoadProgress.store(100, std::memory_order_relaxed);
-                            spdlog::info("Preferred model '{}' preloaded (fallback)", preferred);
-                            try {
-                                std::size_t dim = 0;
-                                try {
-                                    if (this->embeddingGenerator_)
-                                        dim = this->embeddingGenerator_->getEmbeddingDimension();
-                                } catch (...) {
-                                }
-                                this->embeddingFsm_.dispatch(
-                                    ModelLoadedEvent{this->embeddingModelName_, dim});
-                            } catch (...) {
-                            }
-                        } else {
-                            readiness->modelLoadProgress.store(0, std::memory_order_relaxed);
-                            spdlog::warn("Preferred model '{}' preload failed: {}", preferred,
-                                         r.error().message);
-                            try {
-                                this->embeddingFsm_.dispatch(LoadFailureEvent{r.error().message});
-                            } catch (...) {
-                            }
-                        }
-                    } catch (const std::exception& fallbackEx) {
-                        spdlog::warn("preloadPreferredModelIfConfigured fallback error: {}",
-                                     fallbackEx.what());
+            boost::asio::post(executor, [this, provider, readiness, preferred]() {
+                try {
+                    auto r = provider->loadModel(preferred);
+                    if (r) {
+                        readiness->modelProviderReady.store(true, std::memory_order_relaxed);
+                        readiness->modelLoadProgress.store(100, std::memory_order_relaxed);
+                        spdlog::info("Preferred model '{}' preloaded (fallback)", preferred);
                         try {
-                            this->embeddingFsm_.dispatch(LoadFailureEvent{fallbackEx.what()});
+                            std::size_t dim = 0;
+                            try {
+                                if (this->embeddingGenerator_)
+                                    dim = this->embeddingGenerator_->getEmbeddingDimension();
+                            } catch (...) {
+                            }
+                            this->embeddingFsm_.dispatch(
+                                ModelLoadedEvent{this->embeddingModelName_, dim});
+                        } catch (...) {
+                        }
+                    } else {
+                        readiness->modelLoadProgress.store(0, std::memory_order_relaxed);
+                        spdlog::warn("Preferred model '{}' preload failed: {}", preferred,
+                                     r.error().message);
+                        try {
+                            this->embeddingFsm_.dispatch(LoadFailureEvent{r.error().message});
                         } catch (...) {
                         }
                     }
-                    co_return;
-                },
-                boost::asio::detached);
+                } catch (const std::exception& fallbackEx) {
+                    spdlog::warn("preloadPreferredModelIfConfigured fallback error: {}",
+                                 fallbackEx.what());
+                    try {
+                        this->embeddingFsm_.dispatch(LoadFailureEvent{fallbackEx.what()});
+                    } catch (...) {
+                    }
+                }
+            });
         }
     } catch (const std::exception& e) {
         spdlog::warn("preloadPreferredModelIfConfigured error: {}", e.what());
@@ -2485,7 +2456,7 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
 
             if (rebuilt) {
                 {
-                    std::lock_guard<std::mutex> lk(searchEngineMutex_);
+                    std::lock_guard<std::shared_mutex> lk(searchEngineMutex_); // Exclusive write
                     searchEngine_ = rebuilt;
                 }
 
@@ -2520,7 +2491,7 @@ std::function<void(bool)> ServiceManager::getWorkerJobSignal() {
 }
 
 std::shared_ptr<search::HybridSearchEngine> ServiceManager::getSearchEngineSnapshot() const {
-    std::lock_guard<std::mutex> lock(searchEngineMutex_);
+    std::shared_lock lock(searchEngineMutex_); // Concurrent reads - no blocking!
     return searchEngine_;
 }
 

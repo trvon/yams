@@ -39,6 +39,7 @@ struct AsioConnection {
     std::atomic<bool> read_started{false};
     std::atomic<bool> alive{false};
     std::atomic<bool> streaming_started{false};
+    std::atomic<bool> in_use{false}; // Track if connection is currently checked out
 
     struct UnaryHandler {
         std::shared_ptr<response_channel_t> channel;

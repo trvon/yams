@@ -74,7 +74,7 @@ jobs:
             suffix: macos-x86_64
             packaging: zip
             build_packages: false
-            meson_args: "" # arch via profile edit
+            meson_args: "-Db_run_tests=false" # Disable test execution for cross-compilation
             hosted: true
     runs-on: ${{ matrix.runs_on }}
     env:
@@ -84,6 +84,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          submodules: false
       - name: Skip non-linux entries under act (build)
         if: github.actor == 'nektos/act' && matrix.os != 'linux-hosted'
         shell: bash
@@ -568,7 +569,7 @@ jobs:
             export PKG_CONFIG=${PKG_CONFIG:-/usr/bin/pkg-config}
           fi
           meson setup build/release "${MESON_TOOL_ARG[@]}" \
-            -Dwerror=false -Dwarning_level=2 -Denable-lzma=auto
+            -Dwerror=false -Dwarning_level=2 -Denable-lzma=auto ${{ matrix.meson_args }}
           meson compile -C build/release
           echo "BUILD_DIR=build/release" >> $GITHUB_ENV
 
@@ -789,6 +790,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          submodules: false
           repository: ${{ github.event.workflow_run.head_repository.full_name || github.repository }}
           ref: ${{ github.event.workflow_run.head_sha || github.ref }}
 
@@ -1050,7 +1052,8 @@ jobs:
             echo "homebrew/yams.rb not found; skipping tap update" >&2
             exit 0
           fi
-          git submodule update --init --recursive
+          # Only initialize the homebrew-yams submodule, not the Ghidra plugin which needs SSH
+          git submodule update --init homebrew-yams
           mkdir -p "$TAP_PATH/Formula"
           cp homebrew/yams.rb "$TAP_PATH/Formula/yams.rb"
           pushd "$TAP_PATH" >/dev/null

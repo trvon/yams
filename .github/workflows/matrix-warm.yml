@@ -16,6 +16,11 @@ on:
         required: false
         type: string
         default: ./conan/profiles/host-macos-apple-clang
+      conan_profile_macos_x86:
+        description: Path to macOS x86 Conan host profile
+        required: false
+        type: string
+        default: ./conan/profiles/host-macos-apple-clang-x86
       build_type:
         description: Conan build type for warming (Release/Debug)
         required: false
@@ -51,7 +56,7 @@ jobs:
             needs_rosetta: false
           - suffix: macos-x86_64
             runs_on: macos-15
-            conan_host_profile: ${{ inputs.conan_profile_macos }}
+            conan_host_profile: ${{ inputs.conan_profile_macos_x86 }}
             conan_arch: x86_64
             needs_rosetta: true
     runs-on: ${{ matrix.runs_on }}

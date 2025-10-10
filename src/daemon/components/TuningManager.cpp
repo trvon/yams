@@ -60,6 +60,12 @@ void TuningManager::tick_once() {
     if (!sm_ || !state_)
         return;
 
+    // Don't perform tuning until services are at least partially ready,
+    // to avoid acting on default PoolManager configs.
+    if (!state_->readiness.metadataRepoReady.load()) {
+        return;
+    }
+
     // Gather minimal metrics
     const std::uint64_t activeConns = state_->stats.activeConnections.load();
     const std::uint64_t workerThreads = sm_->getWorkerThreads();
@@ -119,7 +125,11 @@ void TuningManager::tick_once() {
     const bool muxLow =
         muxQueuedBytes < std::max<std::uint64_t>(TuneAdvisor::maxMuxBytes() / 64ull,
                                                  1ull * 1024ull * 1024ull); // ~1/64 of cap or 1MiB
-    if (noConns && noWorkerQ && muxLow) {
+
+    // Only perform idle shrink when the daemon is fully ready.
+    bool fully_ready = state_ ? state_->readiness.searchEngineReady.load() : false;
+
+    if (fully_ready && noConns && noWorkerQ && muxLow) {
         const int baseStep = std::max(1, TuneAdvisor::poolScaleStep());
         const int step =
             std::max(1, static_cast<int>(std::lround(baseStep * TuneAdvisor::profileScale())));
@@ -208,14 +218,11 @@ void TuningManager::tick_once() {
     // Apply pool target to worker pool when changed
     try {
         auto ipcStats = pm.stats("ipc");
-        if (ipcStats.current_size > 0) {
-            // Respect hardware capacity by capping to recommendedThreads
-            std::size_t cap = TuneAdvisor::recommendedThreads();
-            std::size_t desired = std::min<std::size_t>(ipcStats.current_size, cap);
-            if (desired == 0)
-                desired = 1;
-            (void)sm_->resizeWorkerPool(desired);
-        }
+        // Always apply the pool manager's recommended size, even if starting from 0
+        std::size_t desired = ipcStats.current_size;
+        if (desired == 0)
+            desired = 1;
+        (void)sm_->resizeWorkerPool(desired);
     } catch (...) {
     }
 

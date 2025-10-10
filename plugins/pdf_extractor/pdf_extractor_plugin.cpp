@@ -88,10 +88,7 @@ void free_result(yams_extraction_result_t* result) {
 }
 
 static yams_content_extractor_v1 content_extractor_iface = {
-    .abi_version = YAMS_IFACE_CONTENT_EXTRACTOR_V1_VERSION,
-    .supports = supports,
-    .extract = extract,
-    .free_result = free_result};
+    .abi_version = 2, .supports = supports, .extract = extract, .free_result = free_result};
 
 // --- Plugin ABI Implementation ---
 
@@ -118,7 +115,7 @@ const char* yams_plugin_get_manifest_json(void) {
       "interfaces": [
         {
           "id": "content_extractor_v1",
-          "version": 1
+          "version": 2
         }
       ]
     })";
@@ -136,15 +133,17 @@ void yams_plugin_shutdown(void) {
 }
 
 int yams_plugin_get_interface(const char* iface_id, uint32_t version, void** out_iface) {
+    if (!iface_id || !out_iface) {
+        return YAMS_PLUGIN_ERR_INVALID;
+    }
+    *out_iface = nullptr;
+
     if (strcmp(iface_id, YAMS_IFACE_CONTENT_EXTRACTOR_V1_ID) == 0) {
-        if (version == YAMS_IFACE_CONTENT_EXTRACTOR_V1_VERSION) {
+        if (version == 2 || version == YAMS_IFACE_CONTENT_EXTRACTOR_V1_VERSION) {
             *out_iface = &content_extractor_iface;
             return YAMS_PLUGIN_OK;
         }
-        // Known interface id but unsupported version
-        return YAMS_PLUGIN_ERR_NOT_FOUND;
     }
-    // Unknown interface id
     return YAMS_PLUGIN_ERR_NOT_FOUND;
 }
 

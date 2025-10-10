@@ -5,6 +5,7 @@
 #include <ctime>
 #include <fcntl.h>
 #include <filesystem>
+#include <span>
 #include <thread>
 #include <tuple>
 #include <unistd.h>
@@ -803,6 +804,15 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                                 ext.erase(ext.begin());
                             if (!ext.empty())
                                 record.metadata["extension"] = std::move(ext);
+                        }
+                        auto centroidRes = metadataRepo_->upsertPathTreeForDocument(
+                            doc, doc.id, false,
+                            std::span<const float>(record.embedding.data(),
+                                                   record.embedding.size()));
+                        if (!centroidRes) {
+                            spdlog::warn("EmbeddingService: failed to update path tree centroid "
+                                         "for {}: {}",
+                                         doc.filePath, centroidRes.error().message);
                         }
                     }
                     // Track model used for embedding

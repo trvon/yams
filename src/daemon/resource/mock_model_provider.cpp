@@ -191,6 +191,11 @@ public:
         return models;
     }
 
+    size_t getLoadedModelCount() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return loadedModels_.size();
+    }
+
     // ========================================================================
     // Model Information
     // ========================================================================
@@ -306,6 +311,7 @@ public:
 
     bool isModelLoaded(const std::string&) const override { return false; }
     std::vector<std::string> getLoadedModels() const override { return {}; }
+    size_t getLoadedModelCount() const override { return 0; }
 
     Result<ModelInfo> getModelInfo(const std::string&) const override {
         return Error{ErrorCode::NotImplemented, "No model provider available"};

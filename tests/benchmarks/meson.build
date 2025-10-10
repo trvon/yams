@@ -31,6 +31,20 @@ search_bench = executable('yams_search_benchmarks', files('search_benchmarks.cpp
   install: false,
 )
 
+search_tree_bench = executable('search_tree_bench', files('search_tree_bench.cpp'),
+  include_directories: incs,
+  dependencies: [
+    dependency('yams_benchmarks'),
+    dependency('yams_app_services'),
+    dependency('yams_metadata'),
+    dependency('yams_search'),
+    dependency('spdlog'),
+    dependency('nlohmann_json'),
+  ] + tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  install: false,
+)
+
 if benchmark_dep.found()
   retrieval_bench_deps = [test_deps, dependency('yams_benchmarks')] + tracy_deps + [benchmark_dep]
 
@@ -98,3 +112,18 @@ ipc_stream_bench = executable('ipc_stream_bench', files('ipc_streaming_bench.cpp
 )
 
 alias_target('bench_ipc_stream', ipc_stream_bench)
+
+# Socket accept and metrics performance benchmark
+daemon_socket_accept_bench = executable('daemon_socket_accept_bench', files('daemon_socket_accept_bench.cpp'),
+  include_directories: incs,
+  dependencies: [
+    test_deps,  # Includes gtest
+    dependency('yams_benchmarks'),
+    dependency('yams_daemon'),
+    dependency('nlohmann_json'),
+  ] + tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  install: false,
+)
+
+alias_target('bench_socket_accept', daemon_socket_accept_bench)

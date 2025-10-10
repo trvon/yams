@@ -188,6 +188,9 @@ private:
 
     // Version 14: Chunked path indexing backfill (resumable)
     static Migration chunkedPathIndexingBackfill();
+
+    // Version 15: Path tree nodes schema (PBI-051 scaffold)
+    static Migration createPathTreeSchema();
 };
 
 /**

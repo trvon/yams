@@ -19,12 +19,20 @@ namespace yams::compat {
 // Native support present
 using jthread = std::jthread;
 using stop_token = std::stop_token;
+using stop_source = std::stop_source;
 
 #else
 
 // Fallback stop_token: always reports no stop requested
 struct stop_token {
     constexpr bool stop_requested() const noexcept { return false; }
+};
+
+// Fallback stop_source: no-op implementation
+struct stop_source {
+    stop_token get_token() const noexcept { return stop_token{}; }
+    void request_stop() noexcept { /* no-op */ }
+    bool stop_requested() const noexcept { return false; }
 };
 
 // Fallback jthread wrapper over std::thread with a no-op request_stop

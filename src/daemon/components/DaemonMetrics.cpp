@@ -215,21 +215,264 @@ DaemonMetrics::DaemonMetrics(const DaemonLifecycleFsm* lifecycle, const StateCom
     cacheMs_ = TuneAdvisor::metricsCacheMs();
 }
 
+DaemonMetrics::~DaemonMetrics() {
+    stopPolling();
+}
+
+void DaemonMetrics::startPolling() {
+    if (pollingActive_.exchange(true)) {
+        return; // Already running
+    }
+    pollingThread_ = std::thread([this]() { pollingLoop(); });
+}
+
+void DaemonMetrics::stopPolling() {
+    if (!pollingActive_.exchange(false)) {
+        return; // Not running
+    }
+    if (pollingThread_.joinable()) {
+        pollingThread_.join();
+    }
+}
+
+void DaemonMetrics::pollingLoop() {
+    spdlog::info("DaemonMetrics: polling thread started (interval={}ms)", cacheMs_);
+    while (pollingActive_.load(std::memory_order_relaxed)) {
+        try {
+            // Poll CPU and memory here, and cache the results.
+            {
+                double cpu = readCpuUsagePercent(lastProcJiffies_, lastTotalJiffies_);
+                const std::uint64_t pss_kb = readPssKb();
+                const std::uint64_t rss_kb = readRssKb();
+                double mem_mb = 0.0;
+                std::map<std::string, std::uint64_t> mem_breakdown;
+                if (pss_kb > 0) {
+                    mem_mb = static_cast<double>(pss_kb) / 1024.0;
+                    mem_breakdown["pss_bytes"] = pss_kb * 1024ull;
+                } else {
+                    mem_mb = static_cast<double>(rss_kb) / 1024.0;
+                }
+                if (rss_kb > 0)
+                    mem_breakdown["rss_bytes"] = rss_kb * 1024ull;
+
+                std::unique_lock lock(cacheMutex_);
+                cached_.cpuUsagePercent = cpu;
+                cached_.memoryUsageMb = mem_mb;
+                cached_.memoryBreakdownBytes = mem_breakdown;
+            }
+
+            // Update expensive DB counts in background (separate from snapshot cache)
+            auto now = std::chrono::steady_clock::now();
+            bool updateCounts = false;
+            {
+                std::shared_lock lk(cacheMutex_);
+                if (lastDocCountsAt_.time_since_epoch().count() == 0) {
+                    updateCounts = true; // First time
+                } else {
+                    auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   now - lastDocCountsAt_)
+                                   .count();
+                    updateCounts = (age < 0) || (static_cast<uint32_t>(age) >= docCountsTtlMs_);
+                }
+            }
+
+            if (updateCounts) {
+                try {
+                    auto mr = services_ ? services_->getMetadataRepo() : nullptr;
+                    auto vdb = services_ ? services_->getVectorDatabase() : nullptr;
+
+                    uint64_t total = 0, indexed = 0, extracted = 0, vectorRows = 0;
+
+                    // Read from component-owned metrics (no DB queries!)
+                    if (mr) {
+                        total = mr->getCachedDocumentCount();
+                        indexed = mr->getCachedIndexedCount();
+                        extracted = mr->getCachedExtractedCount();
+                    }
+
+                    if (vdb && vdb->isInitialized()) {
+                        vectorRows = vdb->getVectorCount(); // Returns cached count (no DB query)
+                    }
+
+                    std::unique_lock lock(cacheMutex_);
+                    cachedDocumentsTotal_ = total;
+                    cachedDocumentsIndexed_ = indexed;
+                    cachedDocumentsExtracted_ = extracted;
+                    cachedVectorRows_ = vectorRows;
+                    lastDocCountsAt_ = now;
+                } catch (const std::exception& e) {
+                    spdlog::debug("DaemonMetrics: failed to update document counts: {}", e.what());
+                } catch (...) {
+                    spdlog::debug("DaemonMetrics: failed to update document counts (unknown)");
+                }
+            }
+
+            // Update physical filesystem stats in background (TTL-based)
+            bool updatePhysical = false;
+            {
+                std::shared_lock lk(cacheMutex_);
+                if (lastPhysicalAt_.time_since_epoch().count() == 0) {
+                    updatePhysical = true; // First time
+                } else {
+                    auto age =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPhysicalAt_)
+                            .count();
+                    updatePhysical = (age < 0) || (static_cast<uint32_t>(age) >= physicalTtlMs_);
+                }
+            }
+
+            if (updatePhysical) {
+                try {
+                    std::uint64_t total = 0;
+                    std::uint64_t casObjectsBytes = 0;
+                    std::uint64_t refsDbBytes = 0;
+                    std::uint64_t dbBytes = 0;
+                    std::uint64_t dbWalBytes = 0;
+                    std::uint64_t dbShmBytes = 0;
+                    std::uint64_t vecDbBytes = 0;
+                    std::uint64_t vecIdxBytes = 0;
+                    std::uint64_t tmpBytes = 0;
+                    std::uint64_t indexBytes = 0;
+                    std::error_code ec;
+                    namespace fs = std::filesystem;
+                    fs::path root;
+                    try {
+                        root =
+                            services_ ? (services_->getResolvedDataDir() / "storage") : fs::path{};
+                    } catch (...) {
+                    }
+                    if (!root.empty() && fs::exists(root, ec)) {
+                        for (fs::recursive_directory_iterator
+                                 it(root, fs::directory_options::skip_permission_denied, ec),
+                             end;
+                             it != end; it.increment(ec)) {
+                            if (ec) {
+                                ec.clear();
+                                continue;
+                            }
+                            if (it->is_regular_file(ec)) {
+                                std::uint64_t add = 0;
+                                try {
+#ifdef __unix__
+                                    struct stat st;
+                                    if (::stat(it->path().c_str(), &st) == 0 && st.st_blocks > 0) {
+                                        add = static_cast<std::uint64_t>(st.st_blocks) * 512ULL;
+                                    } else {
+                                        add = static_cast<std::uint64_t>(it->file_size(ec));
+                                    }
+#else
+                                    add = static_cast<std::uint64_t>(it->file_size(ec));
+#endif
+                                } catch (...) {
+                                    add = 0;
+                                }
+                                total += add;
+                                // attribute within storage/ subdirs
+                                auto p = it->path();
+                                if (p.string().find((root / "objects").string()) == 0) {
+                                    casObjectsBytes += add;
+                                } else if (p.filename() == "refs.db") {
+                                    refsDbBytes += add;
+                                } else if (p.string().find((root / "temp").string()) == 0) {
+                                    tmpBytes += add;
+                                }
+                            }
+                        }
+                    }
+                    // Data dir (siblings to storage): yams.db (+WAL/SHM), vectors.db,
+                    // vector_index.bin
+                    try {
+                        auto dd = services_ ? services_->getResolvedDataDir() : fs::path{};
+                        if (!dd.empty()) {
+                            auto sizeOf = [&](const fs::path& p) -> std::uint64_t {
+                                std::error_code e2;
+                                return fs::exists(p, e2)
+                                           ? static_cast<std::uint64_t>(fs::file_size(p, e2))
+                                           : 0ULL;
+                            };
+                            dbBytes = sizeOf(dd / "yams.db");
+                            dbWalBytes = sizeOf(dd / "yams.db-wal");
+                            dbShmBytes = sizeOf(dd / "yams.db-shm");
+                            vecDbBytes = sizeOf(dd / "vectors.db");
+                            vecIdxBytes = sizeOf(dd / "vector_index.bin");
+                            // If search index is externalized under dataDir/search_index, attribute
+                            // here
+                            std::uint64_t extIndex = 0;
+                            std::error_code e3;
+                            fs::path idxRoot = dd / "search_index";
+                            if (fs::exists(idxRoot, e3)) {
+                                for (fs::recursive_directory_iterator it(idxRoot, e3), end;
+                                     it != end; it.increment(e3)) {
+                                    if (e3)
+                                        break;
+                                    if (it->is_regular_file(e3))
+                                        extIndex += static_cast<std::uint64_t>(
+                                            fs::file_size(it->path(), e3));
+                                }
+                            }
+                            indexBytes = extIndex;
+                        }
+                    } catch (...) {
+                    }
+                    std::uint64_t metaBytes = refsDbBytes + dbBytes + dbWalBytes + dbShmBytes;
+                    std::uint64_t vecBytes = vecDbBytes + vecIdxBytes;
+                    std::uint64_t totalComputed =
+                        casObjectsBytes + metaBytes + indexBytes + vecBytes + tmpBytes;
+
+                    std::unique_lock lock(cacheMutex_);
+                    lastPhysicalBytes_ = (totalComputed > 0) ? totalComputed : total;
+                    lastPhysicalAt_ = now;
+                    // Stash breakdown into cached_ as well for consumers using non-detailed
+                    // snapshot later
+                    cached_.casPhysicalBytes = casObjectsBytes;
+                    cached_.metadataPhysicalBytes = metaBytes;
+                    cached_.indexPhysicalBytes = indexBytes;
+                    cached_.vectorPhysicalBytes = vecBytes;
+                    cached_.logsTmpPhysicalBytes = tmpBytes;
+                    cached_.physicalTotalBytes = (totalComputed > 0) ? totalComputed : total;
+                } catch (const std::exception& e) {
+                    spdlog::debug("DaemonMetrics: failed to update physical stats: {}", e.what());
+                } catch (...) {
+                    spdlog::debug("DaemonMetrics: failed to update physical stats (unknown)");
+                }
+            }
+
+            // Refresh main snapshot cache in background - no I/O on request path
+            (void)getSnapshot(false);
+        } catch (const std::exception& e) {
+            spdlog::warn("DaemonMetrics: polling iteration failed: {}", e.what());
+        } catch (...) {
+            spdlog::warn("DaemonMetrics: polling iteration failed (unknown exception)");
+        }
+        // Sleep for cache interval
+        std::this_thread::sleep_for(std::chrono::milliseconds(cacheMs_));
+    }
+    spdlog::info("DaemonMetrics: polling thread stopped");
+}
+
 void DaemonMetrics::refresh() {
+    // Legacy API - now just returns cached snapshot since background thread keeps it hot
+    // Kept for backwards compatibility with external callers
     (void)getSnapshot(false);
 }
 
-MetricsSnapshot DaemonMetrics::getSnapshot(bool detailed) const {
-    // Return cached snapshot if fresh
+std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed) const {
+    // Phase 1: Try to read from cache with a shared lock
     if (cacheMs_ > 0) {
         auto now = std::chrono::steady_clock::now();
-        std::lock_guard<std::mutex> lk(cacheMutex_);
-        if (lastUpdate_.time_since_epoch().count() != 0) {
-            auto age =
-                std::chrono::duration_cast<std::chrono::milliseconds>(now - lastUpdate_).count();
-            if (age >= 0 && static_cast<uint32_t>(age) < cacheMs_) {
-                return cached_;
+        std::shared_ptr<const MetricsSnapshot> snap;
+        {
+            std::shared_lock lock(cacheMutex_);
+            if (lastUpdate_.time_since_epoch().count() != 0) {
+                auto age = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastUpdate_)
+                               .count();
+                if (age >= 0 && static_cast<uint32_t>(age) < cacheMs_) {
+                    snap = cachedSnapshot_;
+                }
             }
+        }
+        if (snap) {
+            return snap;
         }
     }
 
@@ -418,20 +661,11 @@ MetricsSnapshot DaemonMetrics::getSnapshot(bool detailed) const {
 
     // OS resource hints (fast probes)
     try {
-        // Base process memory footprint
-        const std::uint64_t pss_kb = readPssKb();
-        const std::uint64_t rss_kb = readRssKb();
-        if (pss_kb > 0) {
-            out.memoryUsageMb = static_cast<double>(pss_kb) / 1024.0;
-            out.memoryBreakdownBytes["pss_bytes"] = pss_kb * 1024ull;
-        } else {
-            out.memoryUsageMb = static_cast<double>(rss_kb) / 1024.0;
-        }
-        if (rss_kb > 0)
-            out.memoryBreakdownBytes["rss_bytes"] = rss_kb * 1024ull;
-
-        // CPU percent uses deltas since last snapshot; stored in DaemonMetrics instance
-        out.cpuUsagePercent = readCpuUsagePercent(lastProcJiffies_, lastTotalJiffies_);
+        // Read from cache (no I/O on hot path)
+        std::shared_lock lock(cacheMutex_);
+        out.memoryUsageMb = cached_.memoryUsageMb;
+        out.cpuUsagePercent = cached_.cpuUsagePercent;
+        out.memoryBreakdownBytes = cached_.memoryBreakdownBytes;
 #if defined(TRACY_ENABLE)
         TracyPlot("daemon.mem.mb", out.memoryUsageMb);
         TracyPlot("daemon.cpu.pct", out.cpuUsagePercent);
@@ -482,42 +716,10 @@ MetricsSnapshot DaemonMetrics::getSnapshot(bool detailed) const {
                 }
             } catch (...) {
             }
-            // Exact rows via initialized handle
-            try {
-                auto vdb = services_->getVectorDatabase();
-                if (vdb && vdb->isInitialized()) {
-                    out.vectorRowsExact = vdb->getVectorCount();
-                }
-            } catch (...) {
-            }
-            // Fallback: cheap temp handle if DB exists and rows still unknown AND
-            // the daemon has not yet finished initializing its long-lived handle.
-            // Avoid re-opening the DB on every metrics tick when the true row
-            // count is legitimately 0 (empty DB) or when the main handle is
-            // already available.
-            try {
-                if (out.vectorRowsExact == 0 && !out.vectorDbReady) {
-                    auto dd = services_->getResolvedDataDir();
-                    if (!dd.empty()) {
-                        auto vdbp = dd / "vectors.db";
-                        if (std::filesystem::exists(vdbp)) {
-                            yams::vector::VectorDatabaseConfig cfg;
-                            cfg.database_path = vdbp.string();
-                            auto tmp = std::make_unique<yams::vector::VectorDatabase>(cfg);
-                            if (tmp->initialize()) {
-                                // DB is openable; consider it ready for the purposes of status
-                                // to avoid misleading "not ready" reports when storage exists.
-                                out.vectorDbReady = true;
-                                out.vectorRowsExact = tmp->getVectorCount();
-                                if (out.vectorDbDim == 0 && tmp->getConfig().embedding_dim > 0) {
-                                    out.vectorDbDim =
-                                        static_cast<uint32_t>(tmp->getConfig().embedding_dim);
-                                }
-                            }
-                        }
-                    }
-                }
-            } catch (...) {
+            // Exact rows via cached value ONLY (updated periodically in background)
+            {
+                std::shared_lock lock(cacheMutex_);
+                out.vectorRowsExact = cachedVectorRows_;
             }
 #if defined(TRACY_ENABLE)
             // Per-subsystem plots (vector DB rows and file size bytes)
@@ -550,6 +752,12 @@ MetricsSnapshot DaemonMetrics::getSnapshot(bool detailed) const {
                 out.contentStoreError = services_->getContentStoreError();
             } catch (...) {
             }
+            {
+                std::shared_lock lock(cacheMutex_);
+                out.documentsTotal = cachedDocumentsTotal_;
+                out.documentsIndexed = cachedDocumentsIndexed_;
+                out.documentsContentExtracted = cachedDocumentsExtracted_;
+            }
             // Content store stats and sizes (logical always, deep stats when detailed)
             bool disableStoreStats = false;
             try {
@@ -576,7 +784,6 @@ MetricsSnapshot DaemonMetrics::getSnapshot(bool detailed) const {
                 } catch (...) {
                 }
             }
-            // Physical size scan (TTL cached) only when detailed
             if (detailed) {
                 try {
                     // Populate compression savings (process-wide monitor)
@@ -586,128 +793,8 @@ MetricsSnapshot DaemonMetrics::getSnapshot(bool detailed) const {
                         out.casCompressSavedBytes = g.totalSpaceSaved.load();
                     } catch (...) {
                     }
-                    auto now = std::chrono::steady_clock::now();
-                    bool expired = true;
-                    {
-                        std::lock_guard<std::mutex> lk(cacheMutex_);
-                        if (lastPhysicalAt_.time_since_epoch().count() != 0) {
-                            auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                           now - lastPhysicalAt_)
-                                           .count();
-                            expired = (age < 0) || (static_cast<uint32_t>(age) >= physicalTtlMs_);
-                        }
-                    }
-                    if (expired) {
-                        std::uint64_t total = 0;
-                        std::uint64_t casObjectsBytes = 0;
-                        std::uint64_t refsDbBytes = 0;
-                        std::uint64_t dbBytes = 0;
-                        std::uint64_t dbWalBytes = 0;
-                        std::uint64_t dbShmBytes = 0;
-                        std::uint64_t vecDbBytes = 0;
-                        std::uint64_t vecIdxBytes = 0;
-                        std::uint64_t tmpBytes = 0;
-                        std::uint64_t indexBytes = 0;
-                        std::error_code ec;
-                        namespace fs = std::filesystem;
-                        fs::path root;
-                        try {
-                            root = services_ ? (services_->getResolvedDataDir() / "storage")
-                                             : fs::path{};
-                        } catch (...) {
-                        }
-                        if (!root.empty() && fs::exists(root, ec)) {
-                            for (fs::recursive_directory_iterator
-                                     it(root, fs::directory_options::skip_permission_denied, ec),
-                                 end;
-                                 it != end; it.increment(ec)) {
-                                if (ec) {
-                                    ec.clear();
-                                    continue;
-                                }
-                                if (it->is_regular_file(ec)) {
-                                    std::uint64_t add = 0;
-                                    try {
-#ifdef __unix__
-                                        struct stat st;
-                                        if (::stat(it->path().c_str(), &st) == 0 &&
-                                            st.st_blocks > 0) {
-                                            add = static_cast<std::uint64_t>(st.st_blocks) * 512ULL;
-                                        } else {
-                                            add = static_cast<std::uint64_t>(it->file_size(ec));
-                                        }
-#else
-                                        add = static_cast<std::uint64_t>(it->file_size(ec));
-#endif
-                                    } catch (...) {
-                                        add = 0;
-                                    }
-                                    total += add;
-                                    // attribute within storage/ subdirs
-                                    auto p = it->path();
-                                    if (p.string().find((root / "objects").string()) == 0) {
-                                        casObjectsBytes += add;
-                                    } else if (p.filename() == "refs.db") {
-                                        refsDbBytes += add;
-                                    } else if (p.string().find((root / "temp").string()) == 0) {
-                                        tmpBytes += add;
-                                    }
-                                }
-                            }
-                        }
-                        // Data dir (siblings to storage): yams.db (+WAL/SHM), vectors.db,
-                        // vector_index.bin
-                        try {
-                            auto dd = services_ ? services_->getResolvedDataDir() : fs::path{};
-                            if (!dd.empty()) {
-                                auto sizeOf = [&](const fs::path& p) -> std::uint64_t {
-                                    std::error_code e2;
-                                    return fs::exists(p, e2)
-                                               ? static_cast<std::uint64_t>(fs::file_size(p, e2))
-                                               : 0ULL;
-                                };
-                                dbBytes = sizeOf(dd / "yams.db");
-                                dbWalBytes = sizeOf(dd / "yams.db-wal");
-                                dbShmBytes = sizeOf(dd / "yams.db-shm");
-                                vecDbBytes = sizeOf(dd / "vectors.db");
-                                vecIdxBytes = sizeOf(dd / "vector_index.bin");
-                                // If search index is externalized under dataDir/search_index,
-                                // attribute here
-                                std::uint64_t extIndex = 0;
-                                std::error_code e3;
-                                fs::path idxRoot = dd / "search_index";
-                                if (fs::exists(idxRoot, e3)) {
-                                    for (fs::recursive_directory_iterator it(idxRoot, e3), end;
-                                         it != end; it.increment(e3)) {
-                                        if (e3)
-                                            break;
-                                        if (it->is_regular_file(e3))
-                                            extIndex += static_cast<std::uint64_t>(
-                                                fs::file_size(it->path(), e3));
-                                    }
-                                }
-                                indexBytes = extIndex;
-                            }
-                        } catch (...) {
-                        }
-                        std::uint64_t metaBytes = refsDbBytes + dbBytes + dbWalBytes + dbShmBytes;
-                        std::uint64_t vecBytes = vecDbBytes + vecIdxBytes;
-                        std::uint64_t totalComputed =
-                            casObjectsBytes + metaBytes + indexBytes + vecBytes + tmpBytes;
-                        std::lock_guard<std::mutex> lk(cacheMutex_);
-                        lastPhysicalBytes_ = (totalComputed > 0) ? totalComputed : total;
-                        lastPhysicalAt_ = now;
-                        // Stash breakdown into cached_ as well for consumers using non-detailed
-                        // snapshot later
-                        cached_.casPhysicalBytes = casObjectsBytes;
-                        cached_.metadataPhysicalBytes = metaBytes;
-                        cached_.indexPhysicalBytes = indexBytes;
-                        cached_.vectorPhysicalBytes = vecBytes;
-                        cached_.logsTmpPhysicalBytes = tmpBytes;
-                        cached_.physicalTotalBytes = (totalComputed > 0) ? totalComputed : total;
-                    }
+                    std::shared_lock lk(cacheMutex_);
                     out.physicalBytes = lastPhysicalBytes_;
-                    // Also mirror breakdown to current output
                     out.casPhysicalBytes = cached_.casPhysicalBytes;
                     out.metadataPhysicalBytes = cached_.metadataPhysicalBytes;
                     out.indexPhysicalBytes = cached_.indexPhysicalBytes;
@@ -877,9 +964,10 @@ MetricsSnapshot DaemonMetrics::getSnapshot(bool detailed) const {
         out.retryAfterMs = 0;
     }
 
+    // Exclusive write with unique_lock - blocks readers momentarily, then they continue
     if (cacheMs_ > 0) {
-        std::lock_guard<std::mutex> lk(cacheMutex_);
-        cached_ = out;
+        std::unique_lock lock(cacheMutex_);
+        cachedSnapshot_ = std::make_shared<MetricsSnapshot>(out);
         lastUpdate_ = std::chrono::steady_clock::now();
     }
     // Publish as shared snapshot for zero-copy readers
@@ -897,7 +985,7 @@ MetricsSnapshot DaemonMetrics::getSnapshot(bool detailed) const {
     } catch (...) {
     }
 #endif
-    return out;
+    return std::make_shared<const MetricsSnapshot>(out);
 }
 
 EmbeddingServiceInfo DaemonMetrics::getEmbeddingServiceInfo() const {

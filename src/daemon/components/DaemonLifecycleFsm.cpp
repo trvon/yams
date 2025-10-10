@@ -5,14 +5,15 @@ namespace yams::daemon {
 
 void DaemonLifecycleFsm::transitionTo(LifecycleState next, std::optional<std::string> err) {
     if (snapshot_.state == next && (!err || snapshot_.lastError == *err)) {
+        spdlog::debug("Lifecycle transition no-op: already in state {}", static_cast<int>(next));
         return; // no-op
     }
+    auto prev = snapshot_.state;
     snapshot_.state = next;
     snapshot_.lastError = err.value_or("");
     snapshot_.lastTransition = std::chrono::steady_clock::now();
-    spdlog::debug("Lifecycle transition -> {}{}", static_cast<int>(next),
-                  snapshot_.lastError.empty() ? ""
-                                              : (std::string{" error="} + snapshot_.lastError));
+    spdlog::info("Lifecycle transition: {} -> {}{}", static_cast<int>(prev), static_cast<int>(next),
+                 snapshot_.lastError.empty() ? "" : (std::string{" error="} + snapshot_.lastError));
 }
 
 void DaemonLifecycleFsm::tick() {

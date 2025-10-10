@@ -118,6 +118,9 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetRequest(const GetRe
                 response.compressedCrc32 = doc.compressedCrc32;
                 response.uncompressedCrc32 = doc.uncompressedCrc32;
                 response.compressionHeader = doc.compressionHeader;
+                response.centroidWeight = doc.centroidWeight;
+                response.centroidDims = doc.centroidDims;
+                response.centroidPreview = doc.centroidPreview;
                 for (const auto& [key, value] : doc.metadata) {
                     response.metadata[key] = value;
                 }
@@ -147,6 +150,9 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetRequest(const GetRe
                 response.compressedCrc32 = doc.compressedCrc32;
                 response.uncompressedCrc32 = doc.uncompressedCrc32;
                 response.compressionHeader = doc.compressionHeader;
+                response.centroidWeight = doc.centroidWeight;
+                response.centroidDims = doc.centroidDims;
+                response.centroidPreview = doc.centroidPreview;
                 for (const auto& [key, value] : doc.metadata) {
                     response.metadata[key] = value;
                 }
@@ -531,154 +537,26 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
             // a directory ingestion with recursive=true to avoid file_size errors sent by clients
             // that didn't set the flag (common with LLM-driven clients).
             bool isDir = (!req.path.empty() && std::filesystem::is_directory(req.path));
-            if ((req.recursive || isDir) && !req.path.empty() && isDir) {
-                auto indexingService =
-                    app::services::makeIndexingService(serviceManager_->getAppContext());
-                app::services::AddDirectoryRequest serviceReq;
-                serviceReq.directoryPath = req.path;
-                serviceReq.collection = req.collection;
-                serviceReq.tags = req.tags;
-                serviceReq.includePatterns = req.includePatterns;
-                serviceReq.excludePatterns = req.excludePatterns;
-                serviceReq.recursive = true; // force recursive when directory detected
-                serviceReq.snapshotLabel = req.snapshotLabel;
-                // Prefer deferred extraction for directories. Keep fast returns and let
-                // PostIngestQueue perform FTS5 indexing. Inline extraction for directories can
-                // be very expensive; retain deferred behavior here.
-                serviceReq.deferExtraction = true;
-                for (const auto& [key, value] : req.metadata) {
-                    serviceReq.metadata[key] = value;
-                }
-                auto result = indexingService->addDirectory(serviceReq);
-                if (!result) {
-                    co_return ErrorResponse{result.error().code, result.error().message};
-                }
-                const auto& serviceResp = result.value();
+            if (req.path.empty() && (req.content.empty() || req.name.empty())) {
+                co_return ErrorResponse{ErrorCode::InvalidArgument,
+                                        "Provide either 'path' or 'content' + 'name'"};
+            }
+            auto channel = InternalEventBus::instance()
+                               .get_or_create_channel<InternalEventBus::StoreDocumentTask>(
+                                   "store_document_tasks", 4096);
+            InternalEventBus::StoreDocumentTask task{req};
+            if (channel->try_push(std::move(task))) {
                 AddDocumentResponse response;
                 response.hash = "";
-                response.path = req.path;
-                response.documentsAdded = static_cast<size_t>(serviceResp.filesIndexed);
-                response.documentsUpdated = 0; // Placeholder
-                response.documentsSkipped = static_cast<size_t>(serviceResp.filesSkipped);
-                response.snapshotId = serviceResp.snapshotId;
-                response.snapshotLabel = serviceResp.snapshotLabel;
+                response.path = req.path.empty() ? req.name : req.path;
+                response.documentsAdded = isDir ? 0 : 1;
+                response.message = "Request accepted for asynchronous processing.";
 
-                // PBI-040-4: Sync FTS5 indexing for small adds (<= 10 files by default)
-                // This eliminates the 5-10s async delay for grep on small batches.
-                // For larger batches, fall back to async queueing to avoid blocking the add
-                // operation.
-                try {
-                    if (serviceManager_ && serviceManager_->getPostIngestQueue()) {
-                        std::vector<std::string> successHashes;
-                        for (const auto& r : serviceResp.results) {
-                            if (r.success && !r.hash.empty()) {
-                                successHashes.push_back(r.hash);
-                            }
-                        }
-
-                        // Default sync_threshold is 10 (from IndexingConfig)
-                        constexpr size_t kSyncThreshold = 10;
-                        bool useSync = successHashes.size() <= kSyncThreshold;
-
-                        if (useSync) {
-                            // Sync path: index immediately (same thread)
-                            spdlog::debug("Using sync FTS5 indexing for {} documents",
-                                          successHashes.size());
-                            for (const auto& hash : successHashes) {
-                                serviceManager_->getPostIngestQueue()->indexDocumentSync(hash, "");
-                            }
-                        } else {
-                            // Async path: queue for background processing (original behavior)
-                            spdlog::debug("Using async FTS5 indexing for {} documents",
-                                          successHashes.size());
-                            for (const auto& hash : successHashes) {
-                                serviceManager_->enqueuePostIngest(hash, std::string());
-                            }
-                        }
-                    }
-                } catch (...) {
-                }
-                try {
-                    if (!req.noEmbeddings && serviceManager_ &&
-                        serviceManager_->isEmbeddingsAutoOnAdd()) {
-                        std::vector<std::string> hashes;
-                        hashes.reserve(serviceResp.results.size());
-                        for (const auto& r : serviceResp.results) {
-                            if (r.success && !r.hash.empty())
-                                hashes.push_back(r.hash);
-                        }
-                        if (!hashes.empty()) {
-                            auto shouldAuto = []() -> bool {
-                                using TA = yams::daemon::TuneAdvisor;
-                                try {
-                                    auto pol = TA::autoEmbedPolicy();
-                                    if (pol == TA::AutoEmbedPolicy::Always)
-                                        return true;
-                                } catch (...) {
-                                }
-                                return false;
-                            }();
-                            if (!shouldAuto) {
-                                if (daemon_) {
-                                    for (const auto& h : hashes) {
-                                        daemon_->onDocumentAdded(h, "");
-                                    }
-                                }
-                            } else {
-                                auto ex = getWorkerExecutor();
-                                auto signal = getWorkerJobSignal();
-                                if (signal)
-                                    signal(true);
-                                auto* sm = this->serviceManager_;
-                                boost::asio::dispatch(
-                                    ex, [sm, hs = std::move(hashes), signal]() mutable {
-                                        try {
-                                            if (sm) {
-                                                auto store = sm->getContentStore();
-                                                auto meta = sm->getMetadataRepo();
-                                                auto dataDir = sm->getConfig().dataDir;
-                                                yams::vector::EmbeddingService esvc(store, meta,
-                                                                                    dataDir);
-                                                (void)esvc.generateEmbeddingsForDocuments(hs);
-                                            }
-                                        } catch (...) {
-                                        }
-                                        if (signal)
-                                            signal(false);
-                                    });
-                            }
-                        }
-                    }
-                } catch (...) {
-                }
-                co_return response;
-            } else {
-                // Validate single-file add request before enqueuing for async processing.
-                // Must provide either a valid path, or (content + name).
-                if (req.path.empty() && (req.content.empty() || req.name.empty())) {
-                    co_return ErrorResponse{ErrorCode::InvalidArgument,
-                                            "Provide either 'path' or 'content' + 'name'"};
-                }
-                auto channel = InternalEventBus::instance()
-                                   .get_or_create_channel<InternalEventBus::StoreDocumentTask>(
-                                       "store_document_tasks", 4096);
-                InternalEventBus::StoreDocumentTask task{req};
-                if (channel->try_push(std::move(task))) {
-                    AddDocumentResponse response;
-                    response.hash = ""; // compute best-effort hash for single-file adds
-                    response.path = req.path.empty() ? req.name : req.path;
-                    response.documentsAdded = 1;
-                    response.message = "Document accepted for asynchronous processing.";
-
-                    // Best-effort: when adding a single file (non-directory), compute
-                    // the expected content hash up-front so clients can verify immediately.
-                    // This keeps the fast return (asynchronous processing) while providing
-                    // a stable identifier for follow-up operations.
+                if (!isDir) {
                     try {
                         std::unique_ptr<yams::crypto::IContentHasher> hasher;
                         hasher = yams::crypto::createSHA256Hasher();
                         if (!req.content.empty()) {
-                            // Hash provided content
                             hasher->init();
                             auto data = std::span<const std::byte>(
                                 reinterpret_cast<const std::byte*>(req.content.data()),
@@ -697,13 +575,12 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                             }
                         }
                     } catch (...) {
-                        // Non-fatal: leave hash/size defaults when hashing fails
                     }
-                    co_return response;
-                } else {
-                    co_return ErrorResponse{ErrorCode::ResourceExhausted,
-                                            "Ingestion queue is full. Please try again later."};
                 }
+                co_return response;
+            } else {
+                co_return ErrorResponse{ErrorCode::ResourceExhausted,
+                                        "Ingestion queue is full. Please try again later."};
             }
         });
 }

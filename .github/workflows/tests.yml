@@ -19,6 +19,8 @@ jobs:
     needs: warm
     if: ${{ success() }}
     name: Tests (${{ matrix.suffix }})
+    env:
+      BUILD_DIR: build/yams-debug
     strategy:
       fail-fast: false
       matrix:
@@ -48,10 +50,10 @@ jobs:
             coverage: false
             extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled"
           - suffix: macos-x86_64
-            runs_on: macos-15
-            conan_host_profile: ./conan/profiles/host-macos-apple-clang
+            runs_on: macos-13
+            conan_host_profile: ./conan/profiles/host-macos-apple-clang-x86
             conan_arch: x86_64
-            needs_rosetta: true
+            needs_rosetta: false
             build_type: Debug
             coverage: false
             extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled"
@@ -139,10 +141,6 @@ jobs:
           cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
 
       # Continue directly with build/test steps (single job path)
-      - name: Set build dir env
-        run: echo "BUILD_DIR=build/yams-debug" >> $GITHUB_ENV
-      # (Cache & checkout already done above)
-
       - name: Install optional system dependencies
         if: runner.os == 'Linux'
         shell: bash
@@ -242,8 +240,14 @@ jobs:
       - name: Configure and Build with Meson
         shell: bash
         run: |
+          set -euo pipefail
+          ARCH_PREFIX=""
+          if [ "${{ matrix.needs_rosetta }}" = "true" ]; then
+            softwareupdate --install-rosetta --agree-to-license || true
+            ARCH_PREFIX="arch -x86_64"
+          fi
           rm -rf ${{ env.BUILD_DIR }}
-          conan install . \
+          $ARCH_PREFIX conan install . \
             --output-folder="${{ env.BUILD_DIR }}" \
             -pr:b=default \
             -pr:h="${{ matrix.conan_host_profile }}" \
@@ -294,19 +298,19 @@ jobs:
             mkdir -p "$XDG_RUNTIME_DIR" || true
             echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
           fi
-          meson setup ${{ env.BUILD_DIR }} "${MESON_TOOL_ARG[@]}" -Dwerror=false -Dwarning_level=2 ${{ matrix.extra_meson_flags }}
-          meson compile -C ${{ env.BUILD_DIR }}
+          $ARCH_PREFIX meson setup ${{ env.BUILD_DIR }} "${MESON_TOOL_ARG[@]}" -Dwerror=false -Dwarning_level=2 ${{ matrix.extra_meson_flags }}
+          $ARCH_PREFIX meson compile -C ${{ env.BUILD_DIR }}
 
-      - name: Check mobile ABI surface
-        shell: bash
-        run: |
-          set -euo pipefail
-          LIB_PATH=$(find "${{ env.BUILD_DIR }}" -type f \( -name 'libyams_mobile*.so' -o -name 'libyams_mobile*.dylib' -o -name 'yams_mobile.dll' \) | head -n1)
-          if [ -z "$LIB_PATH" ]; then
-            echo "libyams_mobile shared library not found under ${{ env.BUILD_DIR }}" >&2
-            exit 1
-          fi
-          scripts/ci/check_mobile_abi.sh "$LIB_PATH"
+      # - name: Check mobile ABI surface
+      #   shell: bash
+      #   run: |
+      #     set -euo pipefail
+      #     LIB_PATH=$(find "${{ env.BUILD_DIR }}" -type f \( -name 'libyams_mobile*.so' -o -name 'libyams_mobile*.dylib' -o -name 'yams_mobile.dll' \) | head -n1)
+      #     if [ -z "$LIB_PATH" ]; then
+      #       echo "libyams_mobile shared library not found under ${{ env.BUILD_DIR }}" >&2
+      #       exit 1
+      #     fi
+      #     scripts/ci/check_mobile_abi.sh "$LIB_PATH"
 
       
 

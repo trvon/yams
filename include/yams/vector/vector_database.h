@@ -102,12 +102,13 @@ public:
     bool initialize();
     bool isInitialized() const;
     void close();
+    void initializeCounter(); // Initialize component-owned metrics (call after initialize())
 
     // Table management
     bool createTable();
     bool tableExists() const;
     void dropTable();
-    size_t getVectorCount() const;
+    size_t getVectorCount() const; // Returns cached count (no DB query)
 
     // Vector operations
     bool insertVector(const VectorRecord& record);

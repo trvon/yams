@@ -227,9 +227,21 @@ public:
     }
 
     size_t getVectorCount() const {
+        // Return cached count (no DB query)
+        return cachedVectorCount_.load(std::memory_order_relaxed);
+    }
+
+    void initializeCounter() {
+        if (counterInitialized_.exchange(true, std::memory_order_acquire)) {
+            return; // Already initialized
+        }
+
+        // Query actual count from DB once at startup
         std::lock_guard<std::mutex> lock(mutex_);
-        auto result = backend_->getVectorCount();
-        return result ? result.value() : 0;
+        if (auto result = backend_->getVectorCount(); result) {
+            cachedVectorCount_.store(result.value(), std::memory_order_release);
+            spdlog::info("VectorDatabase: initialized counter - total_vectors={}", result.value());
+        }
     }
 
     bool insertVector(const VectorRecord& record) {
@@ -251,6 +263,9 @@ public:
                 setError("Insert failed: " + result.error().message);
                 return false;
             }
+
+            // Update component-owned metrics
+            cachedVectorCount_.fetch_add(1, std::memory_order_relaxed);
 
             has_error_ = false;
             return true;
@@ -338,6 +353,9 @@ public:
                 return false;
             }
 
+            // Update component-owned metrics
+            cachedVectorCount_.fetch_add(records.size(), std::memory_order_relaxed);
+
             std::lock_guard<std::mutex> lock(mutex_);
             has_error_ = false;
             return true;
@@ -393,6 +411,11 @@ public:
                 return false;
             }
 
+            // Update component-owned metrics (assume 1 deleted if successful)
+            if (cachedVectorCount_.load(std::memory_order_relaxed) > 0) {
+                cachedVectorCount_.fetch_sub(1, std::memory_order_relaxed);
+            }
+
             has_error_ = false;
             return true;
 
@@ -411,10 +434,26 @@ public:
         }
 
         try {
+            // Count vectors before deletion to update metrics
+            size_t countToDelete = 0;
+            if (auto vectors = backend_->getVectorsByDocument(document_hash); vectors) {
+                countToDelete = vectors.value().size();
+            }
+
             auto result = backend_->deleteVectorsByDocument(document_hash);
             if (!result) {
                 setError("Batch delete failed: " + result.error().message);
                 return false;
+            }
+
+            // Update component-owned metrics
+            if (countToDelete > 0) {
+                size_t current = cachedVectorCount_.load(std::memory_order_relaxed);
+                if (current >= countToDelete) {
+                    cachedVectorCount_.fetch_sub(countToDelete, std::memory_order_relaxed);
+                } else {
+                    cachedVectorCount_.store(0, std::memory_order_relaxed);
+                }
             }
 
             has_error_ = false;
@@ -595,6 +634,10 @@ private:
     mutable bool has_error_;
     mutable std::string last_error_;
     mutable std::mutex mutex_;
+
+    // Component-owned metrics (updated on insert/delete, read by DaemonMetrics)
+    mutable std::atomic<size_t> cachedVectorCount_{0};
+    mutable std::atomic<bool> counterInitialized_{false};
 };
 
 // VectorDatabase implementation
@@ -613,6 +656,10 @@ bool VectorDatabase::initialize() {
 
 bool VectorDatabase::isInitialized() const {
     return pImpl->isInitialized();
+}
+
+void VectorDatabase::initializeCounter() {
+    pImpl->initializeCounter();
 }
 
 void VectorDatabase::close() {

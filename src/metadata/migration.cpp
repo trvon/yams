@@ -314,7 +314,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             createKnowledgeGraphSchema(), createBinarySignatureSchema(),
             createVectorSearchSchema(),   upgradeFTS5Tokenization(),
             createTreeSnapshotsSchema(),  createTreeDiffsSchema(),
-            addPathIndexingSchema(),      chunkedPathIndexingBackfill()};
+            addPathIndexingSchema(),      chunkedPathIndexingBackfill(),
+            createPathTreeSchema()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -1602,6 +1603,50 @@ Migration YamsMetadataMigrations::chunkedPathIndexingBackfill() {
     });
 
     // No-op down migration (data transform)
+    return builder.build();
+}
+
+Migration YamsMetadataMigrations::createPathTreeSchema() {
+    MigrationBuilder builder(15, "Create path tree schema");
+
+    builder.up(R"(
+        CREATE TABLE IF NOT EXISTS path_tree_nodes (
+            node_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            parent_id INTEGER REFERENCES path_tree_nodes(node_id) ON DELETE CASCADE,
+            path_segment TEXT NOT NULL,
+            full_path TEXT NOT NULL UNIQUE,
+            doc_count INTEGER NOT NULL DEFAULT 0,
+            centroid BLOB,
+            centroid_weight INTEGER NOT NULL DEFAULT 0,
+            fts_score REAL,
+            diff_stats BLOB,
+            last_updated INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+    )");
+
+    builder.up(R"(
+        CREATE INDEX IF NOT EXISTS idx_path_tree_nodes_parent
+            ON path_tree_nodes(parent_id);
+    )");
+
+    builder.up(R"(
+        CREATE INDEX IF NOT EXISTS idx_path_tree_nodes_segment
+            ON path_tree_nodes(path_segment);
+    )");
+
+    builder.up(R"(
+        CREATE TABLE IF NOT EXISTS path_tree_node_documents (
+            node_id INTEGER NOT NULL REFERENCES path_tree_nodes(node_id) ON DELETE CASCADE,
+            document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+            PRIMARY KEY (node_id, document_id)
+        );
+    )");
+
+    builder.down(R"(DROP TABLE IF EXISTS path_tree_node_documents;)");
+    builder.down(R"(DROP INDEX IF EXISTS idx_path_tree_nodes_segment;)");
+    builder.down(R"(DROP INDEX IF EXISTS idx_path_tree_nodes_parent;)");
+    builder.down(R"(DROP TABLE IF EXISTS path_tree_nodes;)");
+
     return builder.build();
 }
 

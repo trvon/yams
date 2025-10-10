@@ -16,13 +16,15 @@ namespace detail {
 template <typename T>
 inline yams::Result<T> run_with_timeout(boost::asio::awaitable<yams::Result<T>> aw,
                                         std::chrono::milliseconds timeout) {
-    std::promise<yams::Result<T>> prom;
-    auto fut = prom.get_future();
+    // Use shared_ptr to keep promise alive even if this function returns early (timeout)
+    // Fixes race where coroutine completes after timeout and tries to access destroyed promise
+    auto prom = std::make_shared<std::promise<yams::Result<T>>>();
+    auto fut = prom->get_future();
     boost::asio::co_spawn(
         yams::daemon::GlobalIOContext::global_executor(),
-        [a = std::move(aw), &prom]() mutable -> boost::asio::awaitable<void> {
+        [a = std::move(aw), prom]() mutable -> boost::asio::awaitable<void> {
             auto r = co_await std::move(a);
-            prom.set_value(std::move(r));
+            prom->set_value(std::move(r));
             co_return;
         },
         boost::asio::detached);

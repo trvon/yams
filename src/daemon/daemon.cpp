@@ -248,11 +248,24 @@ Result<void> YamsDaemon::start() {
     // Set callback to transition to Ready state when initialization completes
     spdlog::info("[Startup] Phase: ServiceManager Set Callback");
     serviceManager_->setInitCompleteCallback([this](bool success, const std::string& error) {
+        spdlog::info("Init complete callback invoked: success={}, error={}", success, error);
         if (success) {
+            spdlog::info("Dispatching HealthyEvent to lifecycleFsm_");
             lifecycleFsm_.dispatch(HealthyEvent{});
+            spdlog::info("HealthyEvent dispatched, lifecycle should now be Ready");
+            // Start background metrics polling to keep cache hot for fast status responses
+            try {
+                if (metrics_) {
+                    metrics_->startPolling();
+                    spdlog::info("DaemonMetrics background polling started");
+                }
+            } catch (const std::exception& e) {
+                spdlog::warn("Failed to start metrics polling: {}", e.what());
+            }
             // Note: Actual RepairCoordinator start is deferred to daemon loop once
             // searchEngineReady is true to avoid competing with search/vectors initialization.
         } else {
+            spdlog::error("Init failed, dispatching FailureEvent: {}", error);
             lifecycleFsm_.dispatch(FailureEvent{error});
         }
     });
@@ -315,11 +328,11 @@ Result<void> YamsDaemon::start() {
                 }
                 reloadRequested_.store(false, std::memory_order_relaxed);
             }
-            // Deferred RepairCoordinator start: require FSM Ready and searchEngineReady
-            if (config_.enableAutoRepair && !repairCoordinator_) {
-                auto snap = lifecycleFsm_.snapshot();
-                if (snap.state == LifecycleState::Ready &&
-                    state_.readiness.searchEngineReady.load()) {
+            // Deferred background tasks: require FSM Ready and searchEngineReady
+            auto snap = lifecycleFsm_.snapshot();
+            if (snap.state == LifecycleState::Ready && state_.readiness.searchEngineReady.load()) {
+                // Start RepairCoordinator if enabled
+                if (config_.enableAutoRepair && !repairCoordinator_) {
                     try {
                         RepairCoordinator::Config rcfg;
                         rcfg.enable = true;
@@ -334,6 +347,15 @@ Result<void> YamsDaemon::start() {
                     } catch (const std::exception& e) {
                         spdlog::warn("Failed to start RepairCoordinator: {}", e.what());
                     }
+                }
+
+                // Model preload disabled - models will load on-demand when first embedding is
+                // requested This avoids complexity with thread pool executors and ensures fast
+                // daemon startup
+                static bool modelPreloadSkipped = false;
+                if (!modelPreloadSkipped) {
+                    modelPreloadSkipped = true;
+                    spdlog::info("Model preload disabled - models will load on first use");
                 }
             }
             // RepairCoordinator tokens are tuned by TuningManager. Keep FSM signaling only.

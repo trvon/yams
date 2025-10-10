@@ -490,29 +490,6 @@ public:
             } else if (ctx_.hybridEngine) {
                 result = hybridSearch(normalizedReq, parsed.scope, &metadataTelemetry,
                                       normalizedReq.pathPattern);
-                if (result && !req.pathPattern.empty()) {
-                    auto resp = std::move(result).value();
-                    std::vector<SearchItem> filtered;
-                    for (const auto& item : resp.results) {
-                        bool pathOk = true;
-                        if (hasWildcard(req.pathPattern)) {
-                            std::string pattern = req.pathPattern;
-                            if (!pattern.empty() && pattern.front() != '*' &&
-                                pattern.front() != '/' && pattern.find(":/") == std::string::npos) {
-                                pattern = "*" + pattern;
-                            }
-                            pathOk = wildcardMatch(item.path, pattern);
-                        } else {
-                            pathOk = item.path.find(req.pathPattern) != std::string::npos;
-                        }
-                        if (pathOk) {
-                            filtered.push_back(item);
-                        }
-                    }
-                    resp.results = std::move(filtered);
-                    resp.total = resp.results.size();
-                    result = Result<SearchResponse>(std::move(resp));
-                }
             } else {
                 spdlog::warn("Hybrid engine unavailable, using metadata fallback");
                 result = metadataSearch(normalizedReq, &metadataTelemetry);
@@ -526,6 +503,30 @@ public:
             }
         } else {
             result = metadataSearch(normalizedReq, &metadataTelemetry);
+        }
+
+        if (result && !req.pathPattern.empty()) {
+            auto resp = std::move(result).value();
+            std::vector<SearchItem> filtered;
+            for (const auto& item : resp.results) {
+                bool pathOk = true;
+                if (hasWildcard(req.pathPattern)) {
+                    std::string pattern = req.pathPattern;
+                    if (!pattern.empty() && pattern.front() != '*' && pattern.front() != '/' &&
+                        pattern.find(":/") == std::string::npos) {
+                        pattern = "*" + pattern;
+                    }
+                    pathOk = wildcardMatch(item.path, pattern);
+                } else {
+                    pathOk = item.path.find(req.pathPattern) != std::string::npos;
+                }
+                if (pathOk) {
+                    filtered.push_back(item);
+                }
+            }
+            resp.results = std::move(filtered);
+            resp.total = resp.results.size();
+            result = Result<SearchResponse>(std::move(resp));
         }
 
         setExecTime(result, t0);
@@ -741,49 +742,84 @@ private:
             co_return;
         }
 
-        std::vector<size_t> todo;
-        todo.reserve(resp.results.size());
+        // Collect all hashes and paths that need hydration
+        std::vector<std::string> hashes;
+        std::unordered_map<std::string, std::vector<size_t>> hashToIndices;
+        std::unordered_map<std::string, std::vector<size_t>> pathToIndices;
+
         for (size_t i = 0; i < resp.results.size(); ++i) {
             const auto& it = resp.results[i];
-            if (it.snippet.empty() && (!it.hash.empty() || !it.path.empty())) {
-                todo.push_back(i);
+            if (it.snippet.empty()) {
+                if (!it.hash.empty()) {
+                    if (hashToIndices[it.hash].empty()) {
+                        hashes.push_back(it.hash);
+                    }
+                    hashToIndices[it.hash].push_back(i);
+                } else if (!it.path.empty()) {
+                    pathToIndices[it.path].push_back(i);
+                }
             }
         }
 
-        if (todo.empty()) {
+        if (hashes.empty() && pathToIndices.empty()) {
             co_return;
         }
 
-        for (size_t i = 0; i < todo.size(); ++i) {
-            size_t idx = todo[i];
-            auto& out = resp.results[idx];
-            std::string hash = out.hash;
-            int64_t docId = -1;
-
-            if (!hash.empty()) {
-                auto d = co_await retryMetadataOp(
-                    [&]() { return ctx_.metadataRepo->getDocumentByHash(hash); }, 4,
-                    std::chrono::milliseconds(25), telemetry);
-                if (d && d.value().has_value())
-                    docId = d.value()->id;
-            } else if (!out.path.empty()) {
-                auto v = co_await retryMetadataOp(
-                    [&]() {
-                        return metadata::queryDocumentsByPattern(*ctx_.metadataRepo, out.path);
-                    },
-                    4, std::chrono::milliseconds(25), telemetry);
-                if (v && !v.value().empty())
-                    docId = v.value().front().id;
+        // Batch fetch documents by hash (1 query instead of N)
+        std::unordered_map<std::string, metadata::DocumentInfo> docsMap;
+        if (!hashes.empty()) {
+            auto docsResult = co_await retryMetadataOp(
+                [&]() { return ctx_.metadataRepo->batchGetDocumentsByHash(hashes); }, 4,
+                std::chrono::milliseconds(25), telemetry);
+            if (docsResult) {
+                docsMap = std::move(docsResult.value());
             }
+        }
 
-            if (docId >= 0) {
-                auto contentResult =
-                    co_await retryMetadataOp([&]() { return ctx_.metadataRepo->getContent(docId); },
-                                             4, std::chrono::milliseconds(25), telemetry);
-                if (contentResult && contentResult.value().has_value()) {
-                    const auto& content = contentResult.value().value();
+        // Handle path-based lookups (still need individual queries for these)
+        for (const auto& [path, indices] : pathToIndices) {
+            auto v = co_await retryMetadataOp(
+                [&]() { return metadata::queryDocumentsByPattern(*ctx_.metadataRepo, path); }, 4,
+                std::chrono::milliseconds(25), telemetry);
+            if (v && !v.value().empty()) {
+                const auto& doc = v.value().front();
+                docsMap[doc.sha256Hash] = doc;
+                // Map path results to hash
+                for (size_t idx : indices) {
+                    resp.results[idx].hash = doc.sha256Hash;
+                }
+            }
+        }
+
+        // Collect all document IDs for content fetch
+        std::vector<int64_t> docIds;
+        std::unordered_map<int64_t, std::vector<size_t>> docIdToIndices;
+
+        for (const auto& [hash, doc] : docsMap) {
+            docIds.push_back(doc.id);
+            if (auto it = hashToIndices.find(hash); it != hashToIndices.end()) {
+                docIdToIndices[doc.id] = it->second;
+            }
+        }
+
+        // Batch fetch content for all documents (1 query instead of N)
+        if (!docIds.empty()) {
+            auto contentResult = co_await retryMetadataOp(
+                [&]() { return ctx_.metadataRepo->batchGetContent(docIds); }, 4,
+                std::chrono::milliseconds(25), telemetry);
+
+            if (contentResult) {
+                const auto& contentMap = contentResult.value();
+
+                // Hydrate snippets from in-memory maps (no DB queries!)
+                for (const auto& [docId, content] : contentMap) {
                     if (!content.contentText.empty()) {
-                        out.snippet = utils::createSnippet(content.contentText, 200, true);
+                        auto snippet = utils::createSnippet(content.contentText, 200, true);
+                        if (auto it = docIdToIndices.find(docId); it != docIdToIndices.end()) {
+                            for (size_t idx : it->second) {
+                                resp.results[idx].snippet = snippet;
+                            }
+                        }
                     }
                 }
             }
@@ -793,8 +829,8 @@ private:
     boost::asio::awaitable<void>
     hydrateSnippetsAsync_worker(const SearchRequest& req, SearchResponse& resp,
                                 MetadataTelemetry* telemetry = nullptr) {
-        if (!ctx_.metadataRepo || !ctx_.workerExecutor)
-            co_return;
+        // Use batch-optimized version instead
+        co_return co_await hydrateSnippetsAsync(req, resp, telemetry);
 
         std::vector<size_t> todo;
         for (size_t i = 0; i < resp.results.size(); ++i) {
