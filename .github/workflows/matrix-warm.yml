@@ -128,7 +128,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          export CONAN_CPU_COUNT=$(nproc || getconf _NPROCESSORS_ONLN || echo 4)
+          if command -v nproc >/dev/null 2>&1; then
+            export CONAN_CPU_COUNT=$(nproc)
+          elif command -v sysctl >/dev/null 2>&1; then
+            export CONAN_CPU_COUNT=$(sysctl -n hw.ncpu)
+          elif command -v getconf >/dev/null 2>&1; then
+            export CONAN_CPU_COUNT=$(getconf _NPROCESSORS_ONLN)
+          else
+            export CONAN_CPU_COUNT=4
+          fi
           ONNX=$([ "${{ inputs.enable_onnx }}" = 'true' ] && echo True || echo False)
             conan install . \
               -of build/warm-${{ inputs.build_type }} \
