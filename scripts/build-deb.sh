@@ -379,10 +379,18 @@ package_rpm() {
   rm -rf "${rpm_root}"
   mkdir -p "${rpm_root}/"{BUILD,RPMS,SOURCES,SPECS,SRPMS}
 
-  local source_dir="${rpm_root}/SOURCES/yams-${version}"
+  # Compute rpm_version early to use for tarball name
+  local rpm_version rpm_release
+  local rpm_output
+  rpm_output="$(compute_rpm_nv "$version")"
+  rpm_version="$(echo "$rpm_output" | sed -n '1p')"
+  rpm_release="$(echo "$rpm_output" | sed -n '2p')"
+  rpm_release="${rpm_release:-1}"
+
+  local source_dir="${rpm_root}/SOURCES/yams-${rpm_version}"
   mkdir -p "${source_dir}"
   cp -a "${stage_root}/." "${source_dir}/"
-  tar -C "${rpm_root}/SOURCES" -czf "${rpm_root}/SOURCES/yams-${version}.tar.gz" "yams-${version}"
+  tar -C "${rpm_root}/SOURCES" -czf "${rpm_root}/SOURCES/yams-${rpm_version}.tar.gz" "yams-${rpm_version}"
   rm -rf "${source_dir}"
 
   local rpm_filelist="${rpm_root}/SOURCES/filelist"
@@ -428,13 +436,6 @@ cp -a %{_builddir}/%{name}-%{version}/. %{buildroot}/
 %files -f %{_sourcedir}/filelist
 %defattr(-,root,root,-)
 __RPM_SPEC__
-  local rpm_version rpm_release
-  local rpm_output
-  rpm_output="$(compute_rpm_nv "$version")"
-  rpm_version="$(echo "$rpm_output" | sed -n '1p')"
-  rpm_release="$(echo "$rpm_output" | sed -n '2p')"
-  # Ensure rpm_release has a default value if empty
-  rpm_release="${rpm_release:-1}"
   echo "DEBUG: version=$version, rpm_version=$rpm_version, rpm_release=$rpm_release" >&2
   sed -i "s|__VERSION__|${rpm_version}|" "${spec}"
   sed -i "s|__RELEASE__|${rpm_release}|" "${spec}"

@@ -262,7 +262,10 @@ jobs:
           if [ -n "$CONAN_RUN_SCRIPT" ]; then
             echo "Sourcing Conan environment from $CONAN_RUN_SCRIPT"
             # shellcheck disable=SC1090
+            # Temporarily disable set -u as Conan scripts may reference unset variables
+            set +u
             source "$CONAN_RUN_SCRIPT"
+            set -u
           else
             echo "::warning:: Conan run environment script not found under ${{ env.BUILD_DIR }}; relying on system toolchain" >&2
           fi

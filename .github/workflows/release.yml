@@ -74,7 +74,7 @@ jobs:
             suffix: macos-x86_64
             packaging: zip
             build_packages: false
-            meson_args: "-Db_run_tests=false" # Disable test execution for cross-compilation
+            meson_args: ""
             hosted: true
     runs-on: ${{ matrix.runs_on }}
     env:
