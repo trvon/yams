@@ -123,14 +123,14 @@ yams grep "MyNewFunction" --include="**/*.cpp,**/*.hpp" --paths-only
 ### 2.3 Sessions (Hot Data)
 
 ```bash
-# Pin & warm frequently used paths
-yams session pin --path "src/**/*.{cpp,hpp,h}" --tag pinned --tag hot --meta sprint=Q4
+# Add & warm frequently used paths
+yams session add --path "src/**/*.{cpp,hpp,h}" --tag pinned --tag hot --meta sprint=Q4
 yams session warm
 yams session list
-yams session unpin --path "src/**/experimental/*"
+yams session rm-path --path "src/**/experimental/*"
 ```
 
-> Note: `grep/list` respect session pins by default; use `--no-session` to widen scope. **RESTORED note**
+> Note: `grep/list` respect session scope by default; use `--no-session` to widen scope. **RESTORED note**
 
 ### 2.4 Modes & Keepalive
 
