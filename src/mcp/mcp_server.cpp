@@ -1666,6 +1666,34 @@ json MCPServer::listTools() {
         tools.push_back(tool);
     }
 
+    // get_by_name
+    {
+        json tool;
+        tool["name"] = "get_by_name";
+        tool["description"] =
+            "Retrieve document content by name or path, optionally returning raw bytes";
+        json schema;
+        schema["type"] = "object";
+        json props = json::object();
+        props["name"] = makeProp("string", "Document name (basename or subpath)");
+        props["path"] = makeProp("string", "Explicit path for exact match");
+        props["subpath"] = makeProp("boolean", "Allow suffix match when exact path not found");
+        props["subpath"]["default"] = true;
+        props["raw_content"] =
+            makeProp("boolean", "Return raw content without text extraction (binary friendly)");
+        props["raw_content"]["default"] = false;
+        props["extract_text"] =
+            makeProp("boolean", "Extract text from rich formats (HTML/PDF) when available");
+        props["extract_text"]["default"] = true;
+        props["latest"] = makeProp("boolean", "Select newest match when multiple candidates exist");
+        props["latest"]["default"] = true;
+        props["oldest"] = makeProp("boolean", "Select oldest match when multiple candidates exist");
+        props["oldest"]["default"] = false;
+        schema["properties"] = props;
+        tool["inputSchema"] = schema;
+        tools.push_back(tool);
+    }
+
     // delete_by_name
     {
         json tool;

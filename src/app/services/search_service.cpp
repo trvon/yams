@@ -767,7 +767,7 @@ private:
     boost::asio::awaitable<void> hydrateSnippetsAsync(const SearchRequest& req,
                                                       SearchResponse& resp,
                                                       MetadataTelemetry* telemetry = nullptr) {
-        if (!ctx_.metadataRepo || !ctx_.workerExecutor) {
+        if (!ctx_.metadataRepo) {
             co_return;
         }
 
@@ -824,6 +824,30 @@ private:
         std::vector<int64_t> docIds;
         std::unordered_map<int64_t, std::vector<size_t>> docIdToIndices;
 
+        const auto snippetBudget =
+            std::chrono::milliseconds(std::max<int>(0, req.snippetHydrationTimeoutMs));
+        const bool budgetEnabled = snippetBudget.count() > 0;
+        const auto snippetStart = std::chrono::steady_clock::now();
+        bool snippetTimeoutRecorded = false;
+        auto markSnippetTimeout = [&]() {
+            if (!snippetTimeoutRecorded && budgetEnabled) {
+                resp.searchStats["snippet_timeout_hit"] = "true";
+                resp.searchStats["snippet_budget_ms"] = std::to_string(snippetBudget.count());
+                snippetTimeoutRecorded = true;
+            }
+        };
+        auto budgetExceeded = [&]() {
+            if (!budgetEnabled || snippetTimeoutRecorded)
+                return false;
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - snippetStart);
+            if (elapsed >= snippetBudget) {
+                markSnippetTimeout();
+                return true;
+            }
+            return false;
+        };
+
         for (const auto& [hash, doc] : docsMap) {
             docIds.push_back(doc.id);
             if (auto it = hashToIndices.find(hash); it != hashToIndices.end()) {
@@ -837,11 +861,16 @@ private:
                 [&]() { return ctx_.metadataRepo->batchGetContent(docIds); }, 4,
                 std::chrono::milliseconds(25), telemetry);
 
+            if (budgetExceeded())
+                co_return;
+
             if (contentResult) {
                 const auto& contentMap = contentResult.value();
 
                 // Hydrate snippets from in-memory maps (no DB queries!)
                 for (const auto& [docId, content] : contentMap) {
+                    if (budgetExceeded())
+                        break;
                     if (!content.contentText.empty()) {
                         auto snippet = utils::createSnippet(content.contentText, 200, true);
                         if (auto it = docIdToIndices.find(docId); it != docIdToIndices.end()) {
@@ -851,6 +880,17 @@ private:
                         }
                     }
                 }
+
+                if (budgetExceeded())
+                    co_return;
+            }
+        }
+
+        if (budgetEnabled && !snippetTimeoutRecorded) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - snippetStart);
+            if (elapsed >= snippetBudget) {
+                markSnippetTimeout();
             }
         }
     }
@@ -860,80 +900,6 @@ private:
                                 MetadataTelemetry* telemetry = nullptr) {
         // Use batch-optimized version instead
         co_return co_await hydrateSnippetsAsync(req, resp, telemetry);
-
-        std::vector<size_t> todo;
-        for (size_t i = 0; i < resp.results.size(); ++i) {
-            if (resp.results[i].snippet.empty() &&
-                (!resp.results[i].hash.empty() || !resp.results[i].path.empty())) {
-                todo.push_back(i);
-            }
-        }
-        if (todo.empty())
-            co_return;
-
-        auto outstanding = std::make_shared<std::atomic<size_t>>(todo.size());
-        auto timer =
-            std::make_shared<boost::asio::steady_timer>(co_await boost::asio::this_coro::executor);
-
-        for (size_t i = 0; i < todo.size(); ++i) {
-            boost::asio::co_spawn(
-                ctx_.workerExecutor,
-                [&, idx = todo[i], outstanding, timer,
-                 telemetry]() -> boost::asio::awaitable<void> {
-                    auto& out = resp.results[idx];
-                    int64_t docId = -1;
-                    if (!out.hash.empty()) {
-                        if (auto d = co_await retryMetadataOp(
-                                [&]() { return ctx_.metadataRepo->getDocumentByHash(out.hash); }, 4,
-                                std::chrono::milliseconds(25), telemetry);
-                            d && d.value())
-                            docId = d.value()->id;
-                    } else if (!out.path.empty()) {
-                        if (auto v = co_await retryMetadataOp(
-                                [&]() {
-                                    return metadata::queryDocumentsByPattern(*ctx_.metadataRepo,
-                                                                             out.path);
-                                },
-                                4, std::chrono::milliseconds(25), telemetry);
-                            v && !v.value().empty())
-                            docId = v.value().front().id;
-                    }
-                    if (docId >= 0) {
-                        if (auto contentResult = co_await retryMetadataOp(
-                                [&]() { return ctx_.metadataRepo->getContent(docId); }, 4,
-                                std::chrono::milliseconds(25), telemetry);
-                            contentResult && contentResult.value()) {
-                            if (!contentResult.value()->contentText.empty()) {
-                                out.snippet = utils::createSnippet(
-                                    contentResult.value()->contentText, 200, true);
-                            }
-                        }
-                    }
-
-                    if (--(*outstanding) == 0) {
-                        timer->cancel();
-                    }
-                    co_return;
-                },
-                boost::asio::detached);
-        }
-
-        std::chrono::milliseconds snippetBudget{req.snippetHydrationTimeoutMs};
-        if (snippetBudget.count() > 0) {
-            timer->expires_after(snippetBudget);
-        } else {
-            timer->expires_at(std::chrono::steady_clock::time_point::max());
-        }
-
-        boost::system::error_code waitEc;
-        co_await timer->async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, waitEc));
-        if (waitEc && waitEc != boost::asio::error::operation_aborted) {
-            throw boost::system::system_error(waitEc);
-        }
-        if (!waitEc && snippetBudget.count() > 0) {
-            resp.searchStats["snippet_timeout_hit"] = "true";
-            resp.searchStats["snippet_budget_ms"] = std::to_string(snippetBudget.count());
-        }
     }
 
     boost::asio::awaitable<void> ensurePathsFallbackAsync(const SearchRequest& req,

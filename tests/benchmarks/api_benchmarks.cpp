@@ -124,11 +124,18 @@ protected:
     }
 
     void createTestDocuments() {
+        // Generate unique hashes to avoid constraint violations
+        std::random_device rd;
+        std::mt19937_64 gen(rd());
+        std::uniform_int_distribution<uint64_t> dist;
+
         for (size_t i = 0; i < 1000; ++i) {
             metadata::DocumentInfo doc;
             doc.fileName = "file_" + std::to_string(i) + ".txt";
             doc.filePath = (tempDir_ / doc.fileName).string();
-            doc.sha256Hash = "hash_" + std::to_string(i);
+            // Generate unique hash with random suffix to avoid duplicates across benchmark runs
+            uint64_t random_suffix = dist(gen);
+            doc.sha256Hash = "hash_" + std::to_string(i) + "_" + std::to_string(random_suffix);
             doc.fileSize = 1024 * (i % 100 + 1);
             doc.createdTime =
                 std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());

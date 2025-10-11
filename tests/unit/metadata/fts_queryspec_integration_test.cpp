@@ -9,14 +9,16 @@ using namespace yams::metadata;
 TEST(FtsSearchQuerySpecIntegration, BasicFtsWhenAvailable) {
     // Skip if FTS5 not available
     Database db;
-    auto path = (std::filesystem::temp_directory_path() / "fts_qs_basic.db").string();
-    ASSERT_TRUE(db.open(path, ConnectionMode::Create));
+    auto dbFile = std::filesystem::temp_directory_path() / "fts_qs_basic.db";
+    std::error_code ec;
+    std::filesystem::remove(dbFile, ec); // best effort cleanup between runs
+    ASSERT_TRUE(db.open(dbFile.string(), ConnectionMode::Create));
     auto f = db.hasFTS5();
     if (!f || !f.value()) {
         GTEST_SKIP() << "FTS5 not available";
     }
 
-    ConnectionPool pool(path);
+    ConnectionPool pool(dbFile.string());
     ASSERT_TRUE(pool.initialize());
     MetadataRepository repo(pool);
 

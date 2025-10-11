@@ -452,6 +452,7 @@ TEST_F(ServicesRetrievalIngestionIT, AddDirectoryWithPatternsAndTags) {
         EXPECT_FALSE(second.hash.empty());
         EXPECT_EQ(second.documentsAdded, static_cast<size_t>(0));
         EXPECT_GE(second.documentsUpdated, static_cast<size_t>(1));
+        EXPECT_NE(second.hash, firstResp.hash);
     }
 
     ASSERT_FALSE(keepMdEntry.hash.empty());

@@ -489,6 +489,8 @@ public:
 
         // Stage 2: Further FTS filtering if not already used for initial candidates
         // PERFORMANCE: Skip redundant FTS search if we already used it in Stage 1
+        bool literalFtsFallback = false;
+
         if (req.literalText && !req.pattern.empty() && !docs.empty() &&
             !usedFtsForInitialCandidates) {
             auto sRes = retryMetadataOp(
@@ -496,10 +498,7 @@ public:
                 std::chrono::milliseconds(25), &metadataTelemetry);
 
             if (sRes && sRes.value().isSuccess()) {
-                if (sRes.value().results.empty()) {
-                    // FTS found no matches, so the intersection is empty.
-                    docs.clear();
-                } else {
+                if (!sRes.value().results.empty()) {
                     // Filter the current document list by FTS results.
                     std::unordered_set<int64_t> fts_doc_ids;
                     fts_doc_ids.reserve(sRes.value().results.size());
@@ -515,6 +514,8 @@ public:
                         }
                     }
                     docs = std::move(filtered_docs);
+                } else {
+                    literalFtsFallback = true;
                 }
             }
             // If FTS search fails, we proceed with the larger candidate list from Stage 1.
@@ -624,6 +625,9 @@ public:
         }
 
         GrepResponse response;
+        if (literalFtsFallback) {
+            response.searchStats["fts_literal_fallback"] = "true";
+        }
         response.totalMatches = 0;
         response.regexMatches = 0;
         response.semanticMatches = 0;

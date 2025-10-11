@@ -3,6 +3,7 @@
 #include <string>
 #include <string_view>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/path_utils.h>
 #include <yams/metadata/query_helpers.h>
 
 namespace yams::metadata::sql {
@@ -98,11 +99,20 @@ namespace yams::metadata {
 
 Result<std::vector<DocumentInfo>>
 queryDocumentsByPattern(IMetadataRepository& repo, const std::string& likePattern, int limit) {
-    DocumentQueryOptions opts;
-    opts.likePattern = likePattern;
+    auto opts = buildQueryOptionsForSqlLikePattern(likePattern);
     if (limit > 0)
         opts.limit = limit;
-    return repo.queryDocuments(opts);
+    auto result = repo.queryDocuments(opts);
+    if (result && result.value().empty() && !likePattern.empty() &&
+        likePattern.find('%') == std::string::npos && likePattern.find('_') == std::string::npos) {
+        DocumentQueryOptions fallback;
+        auto derived = computePathDerivedValues(likePattern);
+        fallback.likePattern = derived.normalizedPath;
+        if (limit > 0)
+            fallback.limit = limit;
+        result = repo.queryDocuments(fallback);
+    }
+    return result;
 }
 
 Result<std::vector<DocumentInfo>>
@@ -115,8 +125,10 @@ DocumentQueryOptions buildQueryOptionsForSqlLikePattern(const std::string& patte
     auto has_wildcard =
         pattern.find('%') != std::string::npos || pattern.find('_') != std::string::npos;
     if (!has_wildcard) {
-        opts.exactPath = pattern;
-        return opts;
+        auto derived = computePathDerivedValues(pattern);
+        DocumentQueryOptions direct;
+        direct.exactPath = derived.normalizedPath;
+        return direct;
     }
     if (pattern.size() >= 2 && pattern.rfind("/%") == pattern.size() - 2) {
         std::string prefix = pattern.substr(0, pattern.size() - 2);

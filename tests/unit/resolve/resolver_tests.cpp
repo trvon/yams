@@ -259,6 +259,16 @@ public:
         return Error{ErrorCode::NotImplemented, "NI"};
     }
 
+    Result<std::unordered_map<std::string, DocumentInfo>>
+    batchGetDocumentsByHash(const std::vector<std::string>&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+
+    Result<std::unordered_map<int64_t, yams::metadata::DocumentContent>>
+    batchGetContent(const std::vector<int64_t>&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+
     // Embedding status operations
     Result<void> updateDocumentEmbeddingStatus(int64_t, bool, const std::string&) override {
         return Error{ErrorCode::NotImplemented, "NI"};

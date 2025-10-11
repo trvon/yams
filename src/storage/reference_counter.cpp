@@ -537,6 +537,36 @@ Result<RefCountStats> ReferenceCounter::getStats() const {
             stats.rollbacks = static_cast<uint64_t>(stmt.getInt64(6));
         }
 
+        // Defensive recomputation: if triggers drift or stats table falls behind, reconcile
+        // with authoritative values from block_references.
+        auto recalcStmt = pImpl->db->prepare(R"(
+            SELECT
+              COUNT(*) AS total_blocks,
+              IFNULL(SUM(ref_count), 0) AS total_references,
+              IFNULL(SUM(block_size), 0) AS total_bytes,
+              COUNT(CASE WHEN ref_count = 0 THEN 1 END) AS unreferenced_blocks,
+              IFNULL(SUM(CASE WHEN ref_count = 0 THEN block_size ELSE 0 END), 0) AS unreferenced_bytes
+            FROM block_references
+        )");
+
+        if (recalcStmt.step()) {
+            const auto tableBlocks = static_cast<uint64_t>(recalcStmt.getInt64(0));
+            const auto tableRefs = static_cast<uint64_t>(recalcStmt.getInt64(1));
+            const auto tableBytes = static_cast<uint64_t>(recalcStmt.getInt64(2));
+            const auto tableUnref = static_cast<uint64_t>(recalcStmt.getInt64(3));
+            const auto tableUnrefBytes = static_cast<uint64_t>(recalcStmt.getInt64(4));
+
+            if (stats.totalBlocks != tableBlocks || stats.totalReferences != tableRefs ||
+                stats.totalBytes != tableBytes || stats.unreferencedBlocks != tableUnref ||
+                stats.unreferencedBytes != tableUnrefBytes) {
+                stats.totalBlocks = tableBlocks;
+                stats.totalReferences = tableRefs;
+                stats.totalBytes = tableBytes;
+                stats.unreferencedBlocks = tableUnref;
+                stats.unreferencedBytes = tableUnrefBytes;
+            }
+        }
+
         return stats;
     } catch (const std::exception& e) {
         spdlog::error("Failed to get statistics: {}", e.what());

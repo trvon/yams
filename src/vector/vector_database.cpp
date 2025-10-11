@@ -76,7 +76,8 @@ public:
             }
 
             // Respect test/CI bypass: when sqlite-vec init is skipped, do not attempt to create
-            // virtual tables (avoids 'no such module: vec0').
+            // virtual tables (avoids 'no such module: vec0'). Allow test harnesses to override so
+            // unit tests can exercise vector flows even with YAMS_DISABLE_VECTORS.
             bool vec_bypass = false;
             try {
                 if (const char* env = std::getenv("YAMS_DISABLE_VECTORS")) {
@@ -89,6 +90,17 @@ public:
                         std::string v(env);
                         std::transform(v.begin(), v.end(), v.begin(), ::tolower);
                         vec_bypass = (v == "1" || v == "true" || v == "yes" || v == "on");
+                    }
+                }
+                if (vec_bypass) {
+                    if (const char* testEnv = std::getenv("YAMS_TESTING")) {
+                        std::string v(testEnv);
+                        std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                        if (v == "1" || v == "true" || v == "yes" || v == "on") {
+                            spdlog::debug(
+                                "[VectorDB] override disable flag during testing; creating tables");
+                            vec_bypass = false;
+                        }
                     }
                 }
             } catch (...) {

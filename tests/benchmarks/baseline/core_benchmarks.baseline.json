@@ -1,0 +1,58 @@
+{
+  "history": {
+    "Chunking_Rabin_1MB": [
+      {
+        "environment": {},
+        "metrics": {},
+        "name": "Chunking_Rabin_1MB",
+        "timestamp": 1760201298620,
+        "unit": "ms",
+        "value": 19.0242
+      }
+    ],
+    "Compression_Zstd_10KB_Text_L3": [
+      {
+        "environment": {},
+        "metrics": {},
+        "name": "Compression_Zstd_10KB_Text_L3",
+        "timestamp": 1760201298622,
+        "unit": "ms",
+        "value": 0.09579999999999998
+      }
+    ],
+    "Compression_Zstd_1MB_Text_L9": [
+      {
+        "environment": {},
+        "metrics": {},
+        "name": "Compression_Zstd_1MB_Text_L9",
+        "timestamp": 1760201298735,
+        "unit": "ms",
+        "value": 8.689800000000002
+      }
+    ],
+    "Hashing_SHA256_1KB": [
+      {
+        "environment": {},
+        "metrics": {
+          "bytes_processed": 1024.0
+        },
+        "name": "Hashing_SHA256_1KB",
+        "timestamp": 1760201298367,
+        "unit": "ms",
+        "value": 0.011199999999999998
+      }
+    ],
+    "Hashing_SHA256_1MB": [
+      {
+        "environment": {},
+        "metrics": {
+          "bytes_processed": 1048576.0
+        },
+        "name": "Hashing_SHA256_1MB",
+        "timestamp": 1760201298372,
+        "unit": "ms",
+        "value": 0.39860000000000007
+      }
+    ]
+  }
+}

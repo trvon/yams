@@ -21,14 +21,19 @@ onnx_opt = get_option('enable-onnx')
 require_fts5 = get_option('require-fts5')
 sqlite_dep = dependency('sqlite3', required: true)
 cpp = meson.get_compiler('cpp')
-fts5_prog = cpp.run(files('meson/fts5_check.cpp'), dependencies: sqlite_dep, name: 'sqlite3 FTS5 check')
-if fts5_prog.returncode() != 0
-  msg = 'SQLite3 built without FTS5 support. Enable FTS5 in your package manager or Conan (e.g., -o "sqlite3/*:fts5=True").'
-  if require_fts5
-    error(msg)
-  else
-    warning(msg)
+# Skip FTS5 runtime check when cross-compiling (can't execute target binaries on host)
+if not meson.is_cross_build()
+  fts5_prog = cpp.run(files('meson/fts5_check.cpp'), dependencies: sqlite_dep, name: 'sqlite3 FTS5 check')
+  if fts5_prog.returncode() != 0
+    msg = 'SQLite3 built without FTS5 support. Enable FTS5 in your package manager or Conan (e.g., -o "sqlite3/*:fts5=True").'
+    if require_fts5
+      error(msg)
+    else
+      warning(msg)
+    endif
   endif
+else
+  message('Cross-compiling: skipping SQLite3 FTS5 runtime check (assuming Conan configured correctly)')
 endif
 
 # Boost is a core requirement (e.g., Boost.Asio for daemon communication).

@@ -308,8 +308,8 @@ MetadataRepository::MetadataRepository(ConnectionPool& pool) : pool_(pool) {
         spdlog::warn("MetadataRepository: failed to detect path indexing features: {}",
                      featureResult.error().message);
     }
-    spdlog::debug("MetadataRepository: hasPathIndexing={} pathFtsAvailable={}", hasPathIndexing_,
-                  pathFtsAvailable_);
+    spdlog::info("MetadataRepository: hasPathIndexing={} pathFtsAvailable={}", hasPathIndexing_,
+                 pathFtsAvailable_);
 }
 
 // Legacy makeSelect removed; use sql::QuerySpec in callers.
@@ -1520,8 +1520,30 @@ MetadataRepository::queryDocuments(const DocumentQueryOptions& options) {
 
             if (options.exactPath) {
                 auto derived = computePathDerivedValues(*options.exactPath);
-                conditions.emplace_back("path_hash = ?");
-                addText(derived.pathHash);
+                const bool pathsDiffer = derived.normalizedPath != *options.exactPath;
+                if (hasPathIndexing_) {
+                    std::string clause = "(path_hash = ? OR file_path = ?";
+                    addText(derived.pathHash);
+                    addText(derived.normalizedPath);
+                    if (pathsDiffer) {
+                        clause += " OR file_path = ?";
+                        addText(*options.exactPath);
+                    }
+                    clause += ')';
+                    conditions.emplace_back(std::move(clause));
+                } else {
+                    if (pathsDiffer) {
+                        conditions.emplace_back("(file_path = ? OR file_path = ?)");
+                        addText(derived.normalizedPath);
+                        addText(*options.exactPath);
+                    } else {
+                        conditions.emplace_back("file_path = ?");
+                        addText(derived.normalizedPath);
+                    }
+                }
+                spdlog::info(
+                    "[MetadataRepository] exactPath query path='{}' normalized='{}' hash={}",
+                    *options.exactPath, derived.normalizedPath, derived.pathHash);
             }
 
             if (options.pathPrefix && !options.pathPrefix->empty()) {

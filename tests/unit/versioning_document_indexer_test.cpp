@@ -72,6 +72,7 @@ TEST_F(VersioningIndexerTest, PathSeries_NewThenUpdate_CreatesVersionEdgeAndFlag
     // Exactly one latest=true at this path and it's id2
     auto samePathDocs = metadata::queryDocumentsByPattern(*repo, filePath.string());
     ASSERT_TRUE(samePathDocs);
+    std::cout << "samePathDocs size=" << samePathDocs.value().size() << std::endl;
     size_t latestCount = 0;
     for (const auto& d : samePathDocs.value()) {
         auto l = repo->getMetadata(d.id, "is_latest");

@@ -179,6 +179,13 @@ public:
     virtual Result<std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>>>
     getMetadataForDocuments(std::span<const int64_t> documentIds) = 0;
 
+    // Batch operations for search/grep performance (eliminates N queries → 1 query)
+    virtual Result<std::unordered_map<std::string, DocumentInfo>>
+    batchGetDocumentsByHash(const std::vector<std::string>& hashes) = 0;
+
+    virtual Result<std::unordered_map<int64_t, DocumentContent>>
+    batchGetContent(const std::vector<int64_t>& documentIds) = 0;
+
     // Collection and snapshot operations
     virtual Result<std::vector<DocumentInfo>>
     findDocumentsByCollection(const std::string& collection) = 0;
@@ -364,10 +371,10 @@ public:
 
     // Batch operations for search/grep performance (eliminates N queries → 1 query)
     Result<std::unordered_map<std::string, DocumentInfo>>
-    batchGetDocumentsByHash(const std::vector<std::string>& hashes);
+    batchGetDocumentsByHash(const std::vector<std::string>& hashes) override;
 
     Result<std::unordered_map<int64_t, DocumentContent>>
-    batchGetContent(const std::vector<int64_t>& documentIds);
+    batchGetContent(const std::vector<int64_t>& documentIds) override;
 
     // Embedding status operations
     Result<void> updateDocumentEmbeddingStatus(int64_t documentId, bool hasEmbedding,

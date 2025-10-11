@@ -156,6 +156,7 @@ public:
                 docInfo.pathHash = derived.pathHash;
                 docInfo.parentHash = derived.parentHash;
                 docInfo.pathDepth = derived.pathDepth;
+                spdlog::info("[DocumentIndexer] normalized path='{}'", docInfo.filePath);
             }
             // Convert filesystem time to system_clock time
             auto fsTime = std::filesystem::last_write_time(path);
@@ -189,25 +190,140 @@ public:
             bool contentChanged = true;
             bool isNewDocument = false;
 
+            const bool versioningEnabled = []() {
+                if (const char* env = std::getenv("YAMS_ENABLE_VERSIONING")) {
+                    std::string_view v(env);
+                    return !(v == "0" || v == "false" || v == "FALSE");
+                }
+                return true;
+            }();
+
+            auto applyPathSeriesVersioning = [&](int64_t newDocumentId,
+                                                 std::optional<metadata::DocumentInfo> prevLatest) {
+                if (!versioningEnabled)
+                    return;
+
+                int64_t maxVersion = 0;
+                auto updateVersionFromDoc = [&](const metadata::DocumentInfo& doc) {
+                    auto verRes = metadataRepo_->getMetadata(doc.id, "version");
+                    if (verRes && verRes.value().has_value()) {
+                        try {
+                            const int64_t v = verRes.value().value().asInteger();
+                            if (v > maxVersion || !prevLatest.has_value()) {
+                                maxVersion = v;
+                                prevLatest = doc;
+                            }
+                        } catch (...) {
+                        }
+                    }
+                };
+
+                if (prevLatest.has_value()) {
+                    updateVersionFromDoc(*prevLatest);
+                }
+
+                try {
+                    const auto seriesKey = path.string();
+                    auto prevListRes = metadata::queryDocumentsByPattern(*metadataRepo_, seriesKey);
+                    if (!prevListRes) {
+                        spdlog::warn("Versioning: queryDocumentsByPattern failed for '{}': {}",
+                                     path.string(), prevListRes.error().message);
+                        return;
+                    }
+
+                    const auto& prevList = prevListRes.value();
+                    for (const auto& d : prevList) {
+                        if (d.id == newDocumentId)
+                            continue;
+                        if (prevLatest.has_value() && d.id == prevLatest->id)
+                            continue;
+                        spdlog::info("Versioning: existing candidate id={} path={}", d.id,
+                                     d.filePath);
+
+                        auto isLatestRes = metadataRepo_->getMetadata(d.id, "is_latest");
+                        if (isLatestRes && isLatestRes.value().has_value() &&
+                            isLatestRes.value().value().asBoolean()) {
+                            prevLatest = d;
+                            updateVersionFromDoc(d);
+                            break;
+                        }
+
+                        updateVersionFromDoc(d);
+                    }
+
+                    int64_t newVersion = 1;
+                    if (prevLatest.has_value()) {
+                        (void)metadataRepo_->setMetadata(prevLatest->id, "is_latest",
+                                                         metadata::MetadataValue(false));
+
+                        metadata::DocumentRelationship rel;
+                        rel.parentId = prevLatest->id;
+                        rel.childId = newDocumentId;
+                        rel.relationshipType = metadata::RelationshipType::VersionOf;
+                        rel.createdTime = std::chrono::floor<std::chrono::seconds>(
+                            std::chrono::system_clock::now());
+                        (void)metadataRepo_->insertRelationship(rel);
+
+                        newVersion = (maxVersion > 0 ? maxVersion : 1) + 1;
+                    }
+
+                    (void)metadataRepo_->setMetadata(newDocumentId, "version",
+                                                     metadata::MetadataValue(newVersion));
+                    (void)metadataRepo_->setMetadata(newDocumentId, "is_latest",
+                                                     metadata::MetadataValue(true));
+                    (void)metadataRepo_->setMetadata(newDocumentId, "series_key",
+                                                     metadata::MetadataValue(seriesKey));
+
+                    if (auto latestRes = metadataRepo_->getMetadata(newDocumentId, "is_latest");
+                        latestRes && latestRes.value().has_value()) {
+                        spdlog::info("Versioning: verification new_id={} latest={}", newDocumentId,
+                                     latestRes.value()->asBoolean());
+                    }
+
+                    if (prevLatest.has_value()) {
+                        if (auto prevRes = metadataRepo_->getMetadata(prevLatest->id, "is_latest");
+                            prevRes && prevRes.value().has_value()) {
+                            spdlog::info("Versioning: verification prev_id={} latest={}",
+                                         prevLatest->id, prevRes.value()->asBoolean());
+                        }
+                    }
+
+                    spdlog::info("Versioning: path='{}' new_id={} version={} prev_latest={}",
+                                 seriesKey, newDocumentId, newVersion,
+                                 prevLatest.has_value() ? prevLatest->id : 0);
+                } catch (const std::exception& ex) {
+                    spdlog::warn("Versioning: exception while updating lineage for '{}': {}",
+                                 path.string(), ex.what());
+                }
+            };
+
             if (existingDocByPath.value().has_value()) {
-                // Update existing document
-                isNewDocument = false;
-                auto& existingDoc = existingDocByPath.value().value();
+                auto existingDoc = existingDocByPath.value().value();
                 documentId = existingDoc.id;
                 docInfo.id = documentId;
 
                 if (existingDoc.sha256Hash == docInfo.sha256Hash) {
                     contentChanged = false;
-                }
-
-                auto updateResult = metadataRepo_->updateDocument(docInfo);
-                if (!updateResult) {
-                    result.status = IndexingStatus::Failed;
-                    result.error = updateResult.error().message;
-                    return result;
+                    isNewDocument = false;
+                    auto updateResult = metadataRepo_->updateDocument(docInfo);
+                    if (!updateResult) {
+                        result.status = IndexingStatus::Failed;
+                        result.error = updateResult.error().message;
+                        return result;
+                    }
+                } else {
+                    isNewDocument = true;
+                    auto insertResult = metadataRepo_->insertDocument(docInfo);
+                    if (!insertResult) {
+                        result.status = IndexingStatus::Failed;
+                        result.error = insertResult.error().message;
+                        return result;
+                    }
+                    documentId = insertResult.value();
+                    docInfo.id = documentId;
+                    applyPathSeriesVersioning(documentId, existingDoc);
                 }
             } else {
-                // Insert new document
                 isNewDocument = true;
                 auto insertResult = metadataRepo_->insertDocument(docInfo);
                 if (!insertResult) {
@@ -216,104 +332,8 @@ public:
                     return result;
                 }
                 documentId = insertResult.value();
-
-                // Feature-flagged versioning (Phase 1: path-series only)
-                auto isVersioningEnabled = []() {
-                    if (const char* env = std::getenv("YAMS_ENABLE_VERSIONING")) {
-                        std::string_view v(env);
-                        return !(v == "0" || v == "false" || v == "FALSE");
-                    }
-                    // default ON
-                    return true;
-                }();
-
-                if (isVersioningEnabled) {
-                    try {
-                        const auto seriesKey = path.string();
-                        // Find all docs with the exact same path (LIKE without wildcards acts as
-                        // exact)
-                        auto prevListRes =
-                            metadata::queryDocumentsByPattern(*metadataRepo_, seriesKey);
-                        if (prevListRes) {
-                            const auto& prevList = prevListRes.value();
-                            std::optional<metadata::DocumentInfo> prevLatest;
-                            int64_t maxVersion = 0;
-                            for (const auto& d : prevList) {
-                                if (d.id == documentId)
-                                    continue; // skip the newly inserted
-                                auto isLatestRes = metadataRepo_->getMetadata(d.id, "is_latest");
-                                if (isLatestRes && isLatestRes.value().has_value() &&
-                                    isLatestRes.value().value().asBoolean()) {
-                                    prevLatest = d;
-                                    break;
-                                }
-                                // Fallback: remember highest version if present
-                                auto verRes = metadataRepo_->getMetadata(d.id, "version");
-                                if (verRes && verRes.value().has_value()) {
-                                    int64_t v = 0;
-                                    try {
-                                        v = verRes.value().value().asInteger();
-                                    } catch (...) {
-                                        v = 0;
-                                    }
-                                    if (v > maxVersion) {
-                                        maxVersion = v;
-                                        prevLatest = d;
-                                    }
-                                }
-                            }
-
-                            // Prepare version metadata
-                            int64_t newVersion = 1;
-                            if (prevLatest.has_value()) {
-                                // Flip previous latest off
-                                auto _ = metadataRepo_->setMetadata(prevLatest->id, "is_latest",
-                                                                    metadata::MetadataValue(false));
-                                // Link lineage parent->child
-                                metadata::DocumentRelationship rel;
-                                rel.parentId = prevLatest->id;
-                                rel.childId = documentId;
-                                rel.relationshipType = metadata::RelationshipType::VersionOf;
-                                rel.createdTime = std::chrono::floor<std::chrono::seconds>(
-                                    std::chrono::system_clock::now());
-                                (void)metadataRepo_->insertRelationship(rel);
-
-                                // Compute incremented version
-                                auto pv = metadataRepo_->getMetadata(prevLatest->id, "version");
-                                if (pv && pv.value().has_value()) {
-                                    try {
-                                        newVersion = pv.value().value().asInteger() + 1;
-                                    } catch (...) {
-                                        newVersion = maxVersion > 0 ? maxVersion + 1 : 2;
-                                    }
-                                } else {
-                                    newVersion = maxVersion > 0 ? maxVersion + 1 : 2;
-                                }
-                            } else {
-                                newVersion = 1;
-                            }
-
-                            // Set new doc flags
-                            (void)metadataRepo_->setMetadata(documentId, "version",
-                                                             metadata::MetadataValue(newVersion));
-                            (void)metadataRepo_->setMetadata(documentId, "is_latest",
-                                                             metadata::MetadataValue(true));
-                            (void)metadataRepo_->setMetadata(documentId, "series_key",
-                                                             metadata::MetadataValue(seriesKey));
-
-                            spdlog::info(
-                                "Versioning: path='{}' new_id={} version={} prev_latest={}",
-                                seriesKey, documentId, newVersion,
-                                prevLatest.has_value() ? prevLatest->id : 0);
-                        } else {
-                            spdlog::warn("Versioning: queryDocumentsByPattern failed for '{}': {}",
-                                         path.string(), prevListRes.error().message);
-                        }
-                    } catch (const std::exception& ex) {
-                        spdlog::warn("Versioning: exception while updating lineage for '{}': {}",
-                                     path.string(), ex.what());
-                    }
-                }
+                docInfo.id = documentId;
+                applyPathSeriesVersioning(documentId, std::nullopt);
             }
 
             if (metadataRepo_) {

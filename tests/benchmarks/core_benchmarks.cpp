@@ -143,7 +143,7 @@ int main(int argc, char** argv) {
         config.output_file = (outDir / "core_benchmarks.json").string();
     }
 
-    test::BenchmarkTracker tracker(outDir / "core_benchmarks.json");
+    test::BenchmarkTracker tracker(config.output_file);
     std::vector<std::unique_ptr<BenchmarkBase>> benchmarks;
 
     // Hashing benchmarks
@@ -183,3 +183,8 @@ int main(int argc, char** argv) {
 }
 
 } // namespace yams::benchmark
+
+// Entry point outside namespace
+int main(int argc, char** argv) {
+    return yams::benchmark::main(argc, argv);
+}

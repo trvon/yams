@@ -66,6 +66,12 @@ public:
         return MetadataRepository::getContent(documentId);
     }
 
+    Result<std::unordered_map<int64_t, DocumentContent>>
+    batchGetContent(const std::vector<int64_t>& documentIds) override {
+        std::this_thread::sleep_for(delay_);
+        return MetadataRepository::batchGetContent(documentIds);
+    }
+
     Result<yams::metadata::SearchResults>
     search(const std::string& query, int limit = 50, int offset = 0,
            const std::optional<std::vector<int64_t>>& docIds = std::nullopt) override {

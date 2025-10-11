@@ -273,7 +273,7 @@ jobs:
             find "${{ env.BUILD_DIR }}" -maxdepth 5 -type f -name "*.sh" >&2 || true
           fi
           # Relax noisy third-party warnings observed in CI (e.g., sign-compare from gtest)
-          export CXXFLAGS="$CXXFLAGS -Wno-sign-compare -Wno-unused-result"
+          export CXXFLAGS="${CXXFLAGS:-} -Wno-sign-compare -Wno-unused-result"
           # Find Conan-generated Meson toolchain file
           # Conan 2.x generates files in: <output-folder>/build-<build_type>/conan/
           TOOLCHAIN_DIR="${{ env.BUILD_DIR }}/build-debug/conan"
