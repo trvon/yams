@@ -3,8 +3,8 @@ site_description: Yet Another Memory System — persistent memory for LLMs and a
 site_url: https://trvon.github.io/yams
 repo_url: https://sr.ht/~trvon/yams/
 repo_name: sr.ht/~trvon/yams
-docs_dir: docs/site
-site_dir: public
+docs_dir: docs
+site_dir: site
 use_directory_urls: true
 
 nav:
@@ -13,20 +13,17 @@ nav:
       - Installation: user_guide/installation.md
       - CLI: user_guide/cli.md
       - Self-hosting: hosting/self_hosting.md
+      - User Guide: user_guide/README.md
       - Prompts:
           - CLI usage: PROMPT.md
           - Engineering: PROMPT-eng.md
   - Docs:
       - Guides:
-          - Search: user_guide/search_guide.md
-          - Vector Search: user_guide/vector_search_guide.md
           - Tutorials: user_guide/tutorials/README.md
-      - Troubleshooting: troubleshooting/search_issues.md
+          - Embeddings: user_guide/embeddings.md
+          - MCP: user_guide/mcp.md
       - API:
           - Overview: api/README.md
-          - Search API: api/search_api.md
-          - Vector Search API: api/vector_search_api.md
-          - OpenAPI (YAML): api/openapi.yaml
           - MCP Tools: api/mcp_tools.md
       - Cloud:
           - Hosting: hosting/README.md
@@ -35,10 +32,12 @@ nav:
           - Services: services/README.md
           - Support Plans: services/support_plans.md
           - Contact: services/contact.md
+      - Admin:
+          - Configuration: admin/configuration.md
+          - Performance Tuning: admin/performance_tuning.md
+          - Tuning Profiles: admin/tuning_profiles.md
       - Roadmap: roadmap.md
       - Architecture:
-          - Search System: architecture/search_system.md
-          - Vector Search Architecture: architecture/vector_search_architecture.md
           - Daemon and Services: architecture/daemon_architecture.md
           - Plugin and Content Extraction: architecture/plugin_architecture.md
       - Reference:
@@ -47,14 +46,16 @@ nav:
               - Build System: developer/build_system.md
               - Contributing: developer/contributing.md
               - Architecture Notes: developer/architecture/README.md
-          - Admin:
-              - Configuration: admin/configuration.md
-              - Performance Tuning: admin/performance_tuning.md
-              - Vector Search Tuning: admin/vector_search_tuning.md
+              - Mobile Bindings: developer/mobile-bindings.md
           - Operations:
-              - Deployment: operations/deployment.md
-              - Monitoring: operations/monitoring.md
-              - Backup: operations/backup.md
+              - Deployment: pbi/operations/deployment.md
+              - Monitoring: pbi/operations/monitoring.md
+              - Backup: pbi/operations/backup.md
+          - Build:
+              - GCC Build: BUILD-GCC.md
+          - Plugins: PLUGINS.md
+          - Testing:
+              - Coverage Report: testing/coverage_report.md
           - Benchmarks: benchmarks/performance_report.md
 
 theme:

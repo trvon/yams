@@ -557,7 +557,7 @@ void StdioTransport::resetErrorCount() noexcept {
 // MCPServer implementation
 MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* externalShutdown)
     : transport_(std::move(transport)), externalShutdown_(externalShutdown),
-      eagerReadyEnabled_(false), autoReadyEnabled_(false), strictProtocol_(true),
+      eagerReadyEnabled_(false), autoReadyEnabled_(false), strictProtocol_(false),
       limitToolResultDup_(false) {
     // Ensure logging goes to stderr to keep stdout clean for MCP framing
     if (auto existing = spdlog::get("yams-mcp")) {
@@ -1252,7 +1252,13 @@ MessageResult MCPServer::handleRequest(const json& request) {
 
 json MCPServer::initialize(const json& params) {
     // Supported protocol versions (latest first)
-    static const std::vector<std::string> kSupported = {"2025-03-26", "2024-11-05"};
+    // MCP spec versions: https://spec.modelcontextprotocol.io/specification/2024-11-05/
+    static const std::vector<std::string> kSupported = {
+        "2025-03-26", // March 2025 update
+        "2025-01-15", // January 2025 update
+        "2024-12-05", // December 2024 update
+        "2024-11-05"  // Original MCP spec
+    };
     const std::string latest = "2025-03-26"; // Align with latest published MCP stdio spec
 
     // Extract requested version (optional)
