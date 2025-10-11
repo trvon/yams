@@ -61,6 +61,8 @@ MessageType getMessageType(const Request& req) {
                 return MessageType::AddPathSelectorRequest;
             } else if constexpr (std::is_same_v<T, RemovePathSelectorRequest>) {
                 return MessageType::RemovePathSelectorRequest;
+            } else if constexpr (std::is_same_v<T, FileHistoryRequest>) {
+                return MessageType::FileHistoryRequest;
             }
             return MessageType::StatusRequest; // Default
         },
@@ -122,6 +124,8 @@ MessageType getMessageType(const Response& res) {
                 return MessageType::CatResponse;
             } else if constexpr (std::is_same_v<T, ListSessionsResponse>) {
                 return MessageType::ListSessionsResponse;
+            } else if constexpr (std::is_same_v<T, FileHistoryResponse>) {
+                return MessageType::FileHistoryResponse;
             }
             return MessageType::ErrorResponse; // Default
         },

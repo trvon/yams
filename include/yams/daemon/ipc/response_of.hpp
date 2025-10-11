@@ -59,6 +59,9 @@ template <> struct ResponseOf<AddDocumentRequest> {
 template <> struct ResponseOf<GrepRequest> {
     using type = GrepResponse;
 };
+template <> struct ResponseOf<FileHistoryRequest> {
+    using type = FileHistoryResponse;
+};
 template <> struct ResponseOf<UpdateDocumentRequest> {
     using type = UpdateDocumentResponse;
 };

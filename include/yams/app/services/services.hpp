@@ -178,9 +178,10 @@ struct SearchRequest {
     std::string colorMode{"never"}; // "always" | "never" | "auto"
 
     // Filtering
-    std::string pathPattern;       // glob-like filename/path filter
-    std::vector<std::string> tags; // filter by tags (presence-based)
-    bool matchAllTags{false};      // require all specified tags
+    std::string pathPattern;               // glob-like filename/path filter (legacy)
+    std::vector<std::string> pathPatterns; // multiple glob patterns (preferred)
+    std::vector<std::string> tags;         // filter by tags (presence-based)
+    bool matchAllTags{false};              // require all specified tags
 
     // File type filters
     std::string fileType;  // "image", "document", "text", etc.

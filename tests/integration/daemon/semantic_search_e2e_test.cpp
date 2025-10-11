@@ -109,7 +109,7 @@ TEST(SemanticSearchE2E, AddEmbedSearch) {
     sr.fuzzy = false;
     auto sres = yams::cli::run_sync(client.search(sr), 10s);
     ASSERT_TRUE(sres) << "Search failed: " << sres.error().message;
-    EXPECT_GE(sres.value().totalCount, 1);
+    EXPECT_GE(sres.value().totalCount, 1UL);
 
     cleanup();
 }

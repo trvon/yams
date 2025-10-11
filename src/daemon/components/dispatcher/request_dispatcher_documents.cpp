@@ -341,10 +341,9 @@ boost::asio::awaitable<Response> RequestDispatcher::handleListRequest(const List
             serviceReq.matchAllTags = req.matchAllTags;
 
             // Name pattern filtering
+            // For wildcard patterns used in prefix matching, don't normalize paths
+            // since we're doing string matching against stored (possibly non-canonical) paths
             if (!req.namePattern.empty()) {
-                auto normalized = yams::app::services::utils::normalizeLookupPath(req.namePattern);
-                serviceReq.pattern = normalized.normalized;
-            } else {
                 serviceReq.pattern = req.namePattern;
             }
 
@@ -777,6 +776,110 @@ boost::asio::awaitable<Response> RequestDispatcher::handleCancelRequest(const Ca
                 co_return SuccessResponse{"Cancel accepted"};
             co_return ErrorResponse{ErrorCode::NotFound,
                                     "RequestId not found or already completed"};
+        });
+}
+
+boost::asio::awaitable<Response>
+RequestDispatcher::handleFileHistoryRequest(const FileHistoryRequest& req) {
+    spdlog::info("[FileHistory] Handler entered, filepath={}", req.filepath);
+    co_return co_await yams::daemon::dispatch::guard_await(
+        "fileHistory", [this, req]() -> boost::asio::awaitable<Response> {
+            spdlog::info("[FileHistory] Inside guard_await lambda");
+            auto appContext = serviceManager_->getAppContext();
+            if (!appContext.metadataRepo) {
+                co_return ErrorResponse{ErrorCode::NotInitialized,
+                                        "Metadata repository not available"};
+            }
+
+            // Normalize filepath to absolute path
+            std::filesystem::path absPath;
+            try {
+                absPath = std::filesystem::absolute(req.filepath);
+                absPath = absPath.lexically_normal();
+            } catch (const std::exception& e) {
+                co_return ErrorResponse{ErrorCode::InvalidArgument,
+                                        "Invalid filepath: " + std::string(e.what())};
+            }
+            std::string normalizedPath = absPath.string();
+
+            FileHistoryResponse response;
+            response.filepath = normalizedPath;
+
+            // Try finding by exact path first (works for both absolute and relative)
+            spdlog::info("[FileHistory] Querying by exact path: {}", normalizedPath);
+            auto docRes = appContext.metadataRepo->findDocumentByExactPath(normalizedPath);
+
+            std::vector<metadata::DocumentInfo> matchingDocs;
+
+            if (docRes && docRes.value().has_value()) {
+                // Found by exact path
+                spdlog::info("[FileHistory] Found document by exact path");
+                matchingDocs.push_back(docRes.value().value());
+            } else {
+                // Try with just the filename
+                std::filesystem::path p(normalizedPath);
+                auto filename = p.filename().string();
+                spdlog::info("[FileHistory] Not found by exact path, trying filename: {}",
+                             filename);
+
+                metadata::DocumentQueryOptions opts;
+                // Use LIKE pattern to match filename anywhere in path
+                opts.likePattern = "%" + filename;
+                auto docsRes = appContext.metadataRepo->queryDocuments(opts);
+
+                if (!docsRes || docsRes.value().empty()) {
+                    spdlog::info("[FileHistory] No documents found with filename: {}", filename);
+                    response.found = false;
+                    response.message = "File not found in index";
+                    co_return response;
+                }
+
+                spdlog::info("[FileHistory] Found {} document(s) with filename: {}",
+                             docsRes.value().size(), filename);
+                matchingDocs = std::move(docsRes.value());
+            }
+
+            // For each matching document, check for snapshot_id metadata
+            for (const auto& doc : matchingDocs) {
+                auto metadataRes = appContext.metadataRepo->getAllMetadata(doc.id);
+                if (!metadataRes)
+                    continue;
+
+                auto it = metadataRes.value().find("snapshot_id");
+                if (it != metadataRes.value().end() &&
+                    it->second.type == metadata::MetadataValueType::String) {
+                    FileVersion fv;
+                    fv.snapshotId = it->second.asString();
+                    fv.hash = doc.sha256Hash;
+                    fv.size = doc.fileSize;
+
+                    // Convert indexedTime to Unix timestamp
+                    auto tp = doc.indexedTime;
+                    auto duration = tp.time_since_epoch();
+                    auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration);
+                    fv.indexedTimestamp = seconds.count();
+
+                    response.versions.push_back(std::move(fv));
+                }
+            }
+
+            response.found = !response.versions.empty();
+            response.totalVersions = static_cast<uint32_t>(response.versions.size());
+
+            if (response.found) {
+                // Sort by timestamp descending (most recent first)
+                std::sort(response.versions.begin(), response.versions.end(),
+                          [](const FileVersion& a, const FileVersion& b) {
+                              return a.indexedTimestamp > b.indexedTimestamp;
+                          });
+                response.message = "Found " + std::to_string(response.totalVersions) +
+                                   " version(s) across snapshots";
+            } else {
+                response.message = "File found in index but not in any snapshot";
+            }
+
+            spdlog::info("[FileHistory] Returning {} versions", response.totalVersions);
+            co_return response;
         });
 }
 

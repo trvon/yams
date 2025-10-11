@@ -2,7 +2,7 @@
   "plugin_abi": "1",
   "object_storage_v1": "1.0.0",
   "dr_provider_v1": "1.0.0",
-  "model_provider_v1": "1.0.0",
+  "model_provider_v1": "1.2.0",
   "ghidra_analysis_v1": "0.1.0",
   "graph_adapter_v1": "1.0.0",
   "graphjson_v1": "1.0.0",

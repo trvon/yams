@@ -1,5 +1,7 @@
 #include <spdlog/spdlog.h>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -104,6 +106,119 @@ private:
     bool noSession_{false};
     std::vector<std::string> sessionPatterns_;
 
+    // Experimental path-tree traversal controls
+    bool pathTreeFlagEnable_{false};
+    bool pathTreeFlagDisable_{false};
+    std::optional<std::string> pathTreeModeOverride_;
+    bool pathTreeDefaultEnable_{false};
+    std::string pathTreeDefaultMode_{"fallback"};
+    bool pathTreeActive_{false};
+    std::string pathTreeModeEffective_{"fallback"};
+
+    // Helpers for configuration discovery
+    std::map<std::string, std::string> parseSimpleToml(const std::filesystem::path& path) const {
+        std::map<std::string, std::string> config;
+        std::ifstream file(path);
+        if (!file)
+            return config;
+
+        std::string line;
+        std::string currentSection;
+
+        auto trim = [](std::string s) {
+            auto issp = [](unsigned char c) { return std::isspace(c) != 0; };
+            while (!s.empty() && issp(static_cast<unsigned char>(s.front())))
+                s.erase(s.begin());
+            while (!s.empty() && issp(static_cast<unsigned char>(s.back())))
+                s.pop_back();
+            return s;
+        };
+
+        while (std::getline(file, line)) {
+            auto hashPos = line.find('#');
+            if (hashPos != std::string::npos)
+                line = line.substr(0, hashPos);
+            line = trim(line);
+            if (line.empty())
+                continue;
+
+            if (line.front() == '[' && line.back() == ']') {
+                currentSection = line.substr(1, line.size() - 2);
+                continue;
+            }
+
+            auto eq = line.find('=');
+            if (eq == std::string::npos)
+                continue;
+            std::string key = trim(line.substr(0, eq));
+            std::string value = trim(line.substr(eq + 1));
+            if (!value.empty() && value.front() == '"' && value.back() == '"') {
+                value = value.substr(1, value.size() - 2);
+            }
+            if (!currentSection.empty()) {
+                config[currentSection + "." + key] = value;
+            } else {
+                config[key] = value;
+            }
+        }
+        return config;
+    }
+
+    std::filesystem::path resolveConfigPath() const {
+        if (const char* explicitPath = std::getenv("YAMS_CONFIG_PATH")) {
+            std::filesystem::path p{explicitPath};
+            if (std::filesystem::exists(p))
+                return p;
+        }
+        const char* xdgConfig = std::getenv("XDG_CONFIG_HOME");
+        const char* homeEnv = std::getenv("HOME");
+        if (xdgConfig) {
+            std::filesystem::path p = std::filesystem::path(xdgConfig) / "yams" / "config.toml";
+            if (std::filesystem::exists(p))
+                return p;
+        }
+        if (homeEnv) {
+            std::filesystem::path p =
+                std::filesystem::path(homeEnv) / ".config" / "yams" / "config.toml";
+            if (std::filesystem::exists(p))
+                return p;
+        }
+        return {};
+    }
+
+    std::string normalizePathTreeMode(const std::string& value, const std::string& fallback) const {
+        if (value.empty())
+            return fallback;
+        std::string mode = value;
+        std::transform(mode.begin(), mode.end(), mode.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (mode == "preferred" || mode == "fallback")
+            return mode;
+        return fallback;
+    }
+
+    void loadPathTreeDefaults() {
+        pathTreeDefaultEnable_ = false;
+        pathTreeDefaultMode_ = "fallback";
+        auto cfgPath = resolveConfigPath();
+        if (cfgPath.empty())
+            return;
+        auto cfg = parseSimpleToml(cfgPath);
+        auto toLower = [](std::string v) {
+            std::transform(v.begin(), v.end(), v.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return v;
+        };
+        if (auto it = cfg.find("search.path_tree.enable"); it != cfg.end()) {
+            auto value = toLower(it->second);
+            pathTreeDefaultEnable_ =
+                (value == "1" || value == "true" || value == "yes" || value == "on");
+        }
+        if (auto it = cfg.find("search.path_tree.mode"); it != cfg.end()) {
+            pathTreeDefaultMode_ = normalizePathTreeMode(toLower(it->second), pathTreeDefaultMode_);
+        }
+    }
+
 public:
     std::string getName() const override { return "grep"; }
 
@@ -189,15 +304,43 @@ public:
         cmd->add_option("--session", sessionOverride_, "Use this session for scoping");
         cmd->add_flag("--no-session", noSession_, "Bypass session scoping");
 
+        loadPathTreeDefaults();
+
         cmd->callback([this]() {
-            // Validate presence of a pattern with helpful guidance
+            if (pattern_.empty() && !paths_.empty()) {
+                pattern_ = paths_.front();
+                paths_.erase(paths_.begin());
+            }
+
+            if (pathTreeFlagEnable_ && pathTreeFlagDisable_) {
+                throw CLI::ValidationError("path-tree",
+                                           "Cannot use --path-tree and --no-path-tree together");
+            }
+            pathTreeActive_ = pathTreeDefaultEnable_;
+            if (pathTreeFlagEnable_)
+                pathTreeActive_ = true;
+            if (pathTreeFlagDisable_)
+                pathTreeActive_ = false;
+            pathTreeModeEffective_ = normalizePathTreeMode(
+                pathTreeModeOverride_.value_or(pathTreeDefaultMode_), pathTreeDefaultMode_);
+            if (!pathTreeActive_)
+                pathTreeModeEffective_ = normalizePathTreeMode(pathTreeModeEffective_, "fallback");
+
             if (pattern_.empty()) {
-                throw CLI::ValidationError(
-                    "pattern",
-                    "Pattern not provided. Tip: if your pattern starts with '-' (e.g., "
-                    "'--tags|foo'), use -- to end options: \n  yams grep -- \"--tags|knowledge "
-                    "graph|kg\" --include=\"docs/**/*.md\"\nOr use the explicit option: \n  yams "
-                    "grep -e \"--tags|knowledge graph|kg\" --include=\"docs/**/*.md\"");
+                bool hasFilters = !filterTags_.empty() || !paths_.empty() ||
+                                  !includePatterns_.empty() || pathTreeActive_;
+                if (hasFilters) {
+                    pattern_ = ".*";
+                    regexOnly_ = true;
+                } else {
+                    throw CLI::ValidationError(
+                        "pattern",
+                        "Pattern not provided. Tip: if your pattern starts with '-' (e.g., "
+                        "'--tags|foo'), use -- to end options: \n  yams grep -- "
+                        "\"--tags|knowledge graph|kg\" --include=\"docs/**/*.md\"\nOr use the "
+                        "explicit option: \n  yams grep -e \"--tags|knowledge graph|kg\" "
+                        "--include=\"docs/**/*.md\"");
+                }
             }
 
             // Auto-detect literal strings to enable FTS fast path unless user specified regex
@@ -266,6 +409,9 @@ public:
             if (cold_) {
                 enableStreaming_ = false;
             }
+            pathTreeFlagEnable_ = false;
+            pathTreeFlagDisable_ = false;
+            pathTreeModeOverride_.reset();
             auto result = execute();
             if (!result) {
                 spdlog::error("Grep failed: {}", result.error().message);

@@ -53,6 +53,8 @@
 // Platform-specific includes for non-blocking I/O
 #ifdef _WIN32
 #include <conio.h>
+#include <fcntl.h>
+#include <io.h>
 #include <windows.h>
 #else
 #include <poll.h>
@@ -61,6 +63,25 @@
 
 namespace yams::mcp {
 namespace {
+bool isInteractiveStream(FILE* stream) noexcept {
+    if (!stream) {
+        return false;
+    }
+#ifdef _WIN32
+    int fd = _fileno(stream);
+    if (fd == -1) {
+        return false;
+    }
+    return _isatty(fd) != 0;
+#else
+    int fd = fileno(stream);
+    if (fd == -1) {
+        return false;
+    }
+    return ::isatty(fd) != 0;
+#endif
+}
+
 // Synchronous pooled_execute is deprecated and returns NotImplemented
 // This is kept only for toolRegistry compatibility until it's migrated to async
 template <typename Manager, typename TRequest, typename Render>
@@ -208,11 +229,19 @@ StdioTransport::StdioTransport() {
 
     // Set stdin/stdout to binary mode on Windows to prevent CRLF translation
 #ifdef _WIN32
-#include <fcntl.h>
-#include <io.h>
     _setmode(_fileno(stdin), _O_BINARY);
     _setmode(_fileno(stdout), _O_BINARY);
 #endif
+
+    // POSIX Issue 8: configure stdout buffering based on interactivity and keep stderr unbuffered.
+    const bool stdoutInteractive = isInteractiveStream(stdout);
+    if (stdoutInteractive) {
+        std::cout << std::unitbuf;
+    } else {
+        std::cout << std::nounitbuf;
+    }
+    std::cerr << std::unitbuf;
+
     // Configure receive timeout from environment, enforce a sane minimum
     if (const char* env = std::getenv("YAMS_MCP_RECV_TIMEOUT_MS"); env && *env) {
         try {
@@ -417,7 +446,7 @@ MessageResult StdioTransport::receive() {
         spdlog::debug("StdioTransport: Read line: '{}'", line);
 
         // NDJSON (newline-delimited JSON) - MCP stdio standard format
-        if (!line.empty() && line.front() == '{') {
+        if (!line.empty() && (line.front() == '{' || line.front() == '[')) {
             spdlog::debug("StdioTransport: Received NDJSON message (MCP stdio standard)");
             auto parsed = json_utils::parse_json(line);
             if (!parsed) {
@@ -752,93 +781,98 @@ void MCPServer::start() {
                 continue;
             }
 
-            // Process valid message
-            auto request = messageResult.value();
-            spdlog::debug("MCP server received message: {}", request.dump());
-            if (handshakeTrace_) {
-                // handshakeTrace is a YAMS extension
-                try {
-                    std::string meth = request.value("method", "");
-                    std::string id = request.contains("id") ? request["id"].dump() : "null";
-                    // Log to local logger instead of sending non-standard notification
-                    spdlog::trace("MCP handshake trace: recv method={} id={}", meth, id);
-                } catch (...) {
+            // Process valid message (object or array batch)
+            auto message = messageResult.value();
+            auto processRequest = [this](const json& request) {
+                if (!request.is_object()) {
+                    spdlog::warn("MCP server received non-object entry in JSON-RPC batch");
+                    this->sendResponse(createError(json(nullptr), protocol::INVALID_REQUEST,
+                                                   "Batch entries must be JSON objects"));
+                    return;
                 }
-            }
-            // Detect JSON‑RPC notification (no "id" field per spec)
-            const bool isNotification = !request.contains("id");
 
-            auto id_val = request.value("id", json{});
-            if (!isNotification && isCanceled(id_val)) {
-                spdlog::debug("Dropping response for cancelled request id={}", id_val.dump());
-                continue; // do not send a response (required by spec)
-            }
-
-            // Extract method/params for routing
-            std::string method = request.value("method", "");
-            json params = request.value("params", json::object());
-
-            // Dispatch request handling to the MCP worker pool to keep the main loop responsive.
-            // Notifications are handled inline without a response.
-            if (isNotification) {
-                (void)handleRequest(request); // best-effort side-effects
-            } else if (method == "tools/call") {
-                // Fully async tools/call path: avoid promise/future bridge
-                const auto toolName = params.value("name", "");
-                const auto toolArgs = params.value("arguments", json::object());
-                auto id_copy = request.value("id", json{});
-                // Extract spec progress token if provided via params._meta.progressToken
-                std::optional<json> progressToken;
-                try {
-                    if (params.contains("_meta") && params["_meta"].is_object()) {
-                        const auto& meta = params["_meta"];
-                        if (meta.contains("progressToken")) {
-                            progressToken = meta["progressToken"];
-                        }
+                spdlog::debug("MCP server received message: {}", request.dump());
+                if (this->handshakeTrace_) {
+                    try {
+                        std::string meth = request.value("method", "");
+                        std::string id = request.contains("id") ? request["id"].dump() : "null";
+                        spdlog::trace("MCP handshake trace: recv method={} id={}", meth, id);
+                    } catch (...) {
                     }
-                } catch (...) {
-                    // ignore malformed _meta
                 }
-                // Emit start progress (spec-compliant when token present)
-                sendProgress("tool", 0.0, std::string("calling ") + toolName, progressToken);
-                boost::asio::co_spawn(
-                    yams::daemon::GlobalIOContext::global_executor(),
-                    [this, toolName, toolArgs, id_copy,
-                     progressToken]() -> boost::asio::awaitable<void> {
-                        if (progressToken)
-                            MCPServer::tlsProgressToken_ = *progressToken;
-                        try {
-                            json raw = co_await callToolAsync(toolName, toolArgs);
-                            if (raw.is_object() && raw.contains("error")) {
-                                json err = raw["error"];
-                                sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
-                                              {"error", err},
-                                              {"id", id_copy}});
-                            } else {
-                                sendResponse(createResponse(id_copy, raw));
+
+                const bool isNotification = !request.contains("id");
+                auto id_val = request.value("id", json{});
+                if (!isNotification && this->isCanceled(id_val)) {
+                    spdlog::debug("Dropping response for cancelled request id={}", id_val.dump());
+                    return;
+                }
+
+                std::string method = request.value("method", "");
+                json params = request.value("params", json::object());
+
+                if (isNotification) {
+                    (void)this->handleRequest(request);
+                    return;
+                }
+
+                if (method == "tools/call") {
+                    const auto toolName = params.value("name", "");
+                    const auto toolArgs = params.value("arguments", json::object());
+                    auto id_copy = request.value("id", json{});
+                    std::optional<json> progressToken;
+                    try {
+                        if (params.contains("_meta") && params["_meta"].is_object()) {
+                            const auto& meta = params["_meta"];
+                            if (meta.contains("progressToken")) {
+                                progressToken = meta["progressToken"];
                             }
-                            sendProgress("tool", 100.0, std::string("completed ") + toolName,
-                                         progressToken);
-                        } catch (const std::exception& e) {
-                            json err = {{"code", -32603}, {"message", e.what()}};
-                            sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
-                                          {"error", err},
-                                          {"id", id_copy}});
-                        } catch (...) {
-                            json err = {{"code", -32603}, {"message", "Tool call failed"}};
-                            sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
-                                          {"error", err},
-                                          {"id", id_copy}});
                         }
-                        MCPServer::tlsProgressToken_ = nullptr;
-                        co_return;
-                    },
-                    boost::asio::detached);
-            } else {
-                enqueueTask([this, req = request]() mutable {
-                    auto response = handleRequest(req);
+                    } catch (...) {
+                    }
+                    this->sendProgress("tool", 0.0, std::string("calling ") + toolName,
+                                       progressToken);
+                    boost::asio::co_spawn(
+                        yams::daemon::GlobalIOContext::global_executor(),
+                        [this, toolName, toolArgs, id_copy,
+                         progressToken]() -> boost::asio::awaitable<void> {
+                            if (progressToken)
+                                MCPServer::tlsProgressToken_ = *progressToken;
+                            try {
+                                json raw = co_await this->callToolAsync(toolName, toolArgs);
+                                if (raw.is_object() && raw.contains("error")) {
+                                    json err = raw["error"];
+                                    this->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
+                                                        {"error", err},
+                                                        {"id", id_copy}});
+                                } else {
+                                    this->sendResponse(this->createResponse(id_copy, raw));
+                                }
+                                this->sendProgress("tool", 100.0,
+                                                   std::string("completed ") + toolName,
+                                                   progressToken);
+                            } catch (const std::exception& e) {
+                                json err = {{"code", -32603}, {"message", e.what()}};
+                                this->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
+                                                    {"error", err},
+                                                    {"id", id_copy}});
+                            } catch (...) {
+                                json err = {{"code", -32603}, {"message", "Tool call failed"}};
+                                this->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
+                                                    {"error", err},
+                                                    {"id", id_copy}});
+                            }
+                            MCPServer::tlsProgressToken_ = nullptr;
+                            co_return;
+                        },
+                        boost::asio::detached);
+                    return;
+                }
+
+                this->enqueueTask([this, req = request]() mutable {
+                    auto response = this->handleRequest(req);
                     if (response) {
-                        sendResponse(response.value());
+                        this->sendResponse(response.value());
                     } else {
                         const auto& error = response.error();
                         json errorResponse = {
@@ -846,9 +880,18 @@ void MCPServer::start() {
                             {"error",
                              {{"code", protocol::INVALID_REQUEST}, {"message", error.message}}},
                             {"id", req.value("id", nullptr)}};
-                        sendResponse(errorResponse);
+                        this->sendResponse(errorResponse);
                     }
                 });
+            };
+
+            if (message.is_array()) {
+                spdlog::debug("MCP server received JSON-RPC batch with {} entries", message.size());
+                for (const auto& entry : message) {
+                    processRequest(entry);
+                }
+            } else {
+                processRequest(message);
             }
         }
     } catch (const std::exception& e) {
@@ -1209,8 +1252,8 @@ MessageResult MCPServer::handleRequest(const json& request) {
 
 json MCPServer::initialize(const json& params) {
     // Supported protocol versions (latest first)
-    static const std::vector<std::string> kSupported = {"2024-11-05", "2025-06-18", "2025-03-26"};
-    const std::string latest = "2025-06-18"; // Use current MCP spec version as default
+    static const std::vector<std::string> kSupported = {"2025-03-26", "2024-11-05"};
+    const std::string latest = "2025-03-26"; // Align with latest published MCP stdio spec
 
     // Extract requested version (optional)
     std::string requested = latest;
@@ -2205,6 +2248,14 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         }
     }
     dreq.pathPattern = pathPattern;
+
+    // Populate pathPatterns for multi-pattern server-side filtering
+    if (!req.includePatterns.empty()) {
+        dreq.pathPatterns = req.includePatterns;
+    } else if (!pathPattern.empty()) {
+        dreq.pathPatterns.push_back(pathPattern);
+    }
+
     dreq.tags = req.tags;
     dreq.matchAllTags = req.matchAllTags;
     dreq.limit = req.limit;
@@ -4429,6 +4480,14 @@ void MCPServer::initializeToolRegistry() {
               {"type", {{"type", "string"}, {"description", "Search type"}, {"default", "hybrid"}}},
               {"paths_only",
                {{"type", "boolean"}, {"description", "Return only paths"}, {"default", false}}},
+              {"path_pattern",
+               {{"type", "string"},
+                {"description", "Single path pattern (glob) to filter results"}}},
+              {"include_patterns",
+               {{"type", "array"},
+                {"items", {{"type", "string"}}},
+                {"description", "Multiple path patterns (glob) to filter results (OR logic). "
+                                "Preferred over path_pattern for multiple patterns."}}},
               {"tags",
                {{"type", "array"},
                 {"items", {{"type", "string"}}},

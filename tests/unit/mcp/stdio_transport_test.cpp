@@ -373,3 +373,48 @@ TEST_F(StdioTransportTest, NDJSONInputAndOutput) {
     auto parsed = json::parse(output.substr(0, output.size() - 1));
     EXPECT_EQ(parsed["method"], "test");
 }
+
+TEST_F(StdioTransportTest, ReceiveJsonRpcBatch) {
+    json batch = json::array({{{"jsonrpc", "2.0"}, {"id", 1}, {"method", "batch.one"}},
+                              {{"jsonrpc", "2.0"}, {"id", 2}, {"method", "batch.two"}}});
+    setInput(frameRaw(batch.dump()));
+
+    auto result = transport->receive();
+    ASSERT_TRUE(result);
+    const json& received = result.value();
+    ASSERT_TRUE(received.is_array());
+    EXPECT_EQ(received.size(), 2);
+    EXPECT_EQ(received[0].at("id"), 1);
+    EXPECT_EQ(received[1].at("method"), "batch.two");
+}
+
+TEST_F(StdioTransportTest, ReceivesFramedMessageWithContentLength) {
+    json framedMessage = {{"jsonrpc", "2.0"}, {"id", 7}, {"method", "framed"}};
+
+    setInput(frameLSP(framedMessage));
+
+    auto result = transport->receive();
+    ASSERT_TRUE(result);
+    const auto& message = result.value();
+    EXPECT_EQ(message.at("id"), 7);
+    EXPECT_EQ(message.at("method"), "framed");
+}
+
+TEST_F(StdioTransportTest, MalformedHeadersExhaustRetryBudget) {
+    // Five malformed header attempts should push the transport into an error state.
+    const std::string malformed = "Content-Bad: nope\n\n";
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        setInput(malformed);
+        auto result = transport->receive();
+        ASSERT_FALSE(result);
+        EXPECT_EQ(result.error().code, yams::ErrorCode::InvalidData);
+    }
+
+    // Once the retry budget is exhausted, transport should refuse further reads.
+    json validMessage = {{"jsonrpc", "2.0"}, {"id", 99}, {"method", "still-running"}};
+    setInput(frameMessage(validMessage));
+
+    auto finalResult = transport->receive();
+    ASSERT_FALSE(finalResult);
+    EXPECT_EQ(finalResult.error().code, yams::ErrorCode::NetworkError);
+}

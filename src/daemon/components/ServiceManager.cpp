@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <map>
 #include <optional>
 #include <thread>
 #include <unistd.h>
@@ -106,6 +107,72 @@ std::optional<size_t> read_vector_sentinel_dim(const std::filesystem::path& data
     } catch (...) {
     }
     return std::nullopt;
+}
+
+std::filesystem::path resolveDefaultConfigPath() {
+    if (const char* explicitPath = std::getenv("YAMS_CONFIG_PATH")) {
+        std::filesystem::path p{explicitPath};
+        if (std::filesystem::exists(p))
+            return p;
+    }
+    if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
+        std::filesystem::path p = std::filesystem::path(xdg) / "yams" / "config.toml";
+        if (std::filesystem::exists(p))
+            return p;
+    }
+    if (const char* home = std::getenv("HOME")) {
+        std::filesystem::path p = std::filesystem::path(home) / ".config" / "yams" / "config.toml";
+        if (std::filesystem::exists(p))
+            return p;
+    }
+    return {};
+}
+
+std::map<std::string, std::string> parseSimpleTomlFlat(const std::filesystem::path& path) {
+    std::map<std::string, std::string> config;
+    std::ifstream file(path);
+    if (!file)
+        return config;
+
+    std::string line;
+    std::string currentSection;
+    auto trim = [](std::string s) {
+        auto issp = [](unsigned char c) { return std::isspace(c) != 0; };
+        while (!s.empty() && issp(static_cast<unsigned char>(s.front())))
+            s.erase(s.begin());
+        while (!s.empty() && issp(static_cast<unsigned char>(s.back())))
+            s.pop_back();
+        return s;
+    };
+
+    while (std::getline(file, line)) {
+        auto comment = line.find('#');
+        if (comment != std::string::npos)
+            line = line.substr(0, comment);
+        line = trim(line);
+        if (line.empty())
+            continue;
+
+        if (line.front() == '[' && line.back() == ']') {
+            currentSection = line.substr(1, line.size() - 2);
+            continue;
+        }
+
+        auto eq = line.find('=');
+        if (eq == std::string::npos)
+            continue;
+        std::string key = trim(line.substr(0, eq));
+        std::string value = trim(line.substr(eq + 1));
+        if (!value.empty() && value.front() == '"' && value.back() == '"') {
+            value = value.substr(1, value.size() - 2);
+        }
+        if (!currentSection.empty()) {
+            config[currentSection + "." + key] = value;
+        } else {
+            config[key] = value;
+        }
+    }
+    return config;
 }
 } // namespace
 
@@ -1409,6 +1476,12 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         spdlog::warn("Plugin autoload failed: {}", e.what());
     }
     spdlog::info("[ServiceManager] Phase: Plugins Autoloaded.");
+
+    embeddingPreloadOnStartup_ = detectEmbeddingPreloadFlag();
+    if (embeddingPreloadOnStartup_) {
+        spdlog::info("[Warmup] embeddings.preload_on_startup detected -> background warmup will "
+                     "run after Ready");
+    }
 
     // Build HybridSearchEngine with timeout
     try {
@@ -2834,6 +2907,64 @@ Result<void> ServiceManager::ensureEmbeddingGeneratorReady() {
     } catch (const std::exception& e) {
         return Error{ErrorCode::InternalError, e.what()};
     }
+}
+
+bool ServiceManager::detectEmbeddingPreloadFlag() const {
+    bool flag = false;
+
+    // Config file precedence
+    std::filesystem::path cfgPath = config_.configFilePath;
+    if (cfgPath.empty())
+        cfgPath = resolveDefaultConfigPath();
+    if (!cfgPath.empty()) {
+        try {
+            auto kv = parseSimpleTomlFlat(cfgPath);
+            auto it = kv.find("embeddings.preload_on_startup");
+            if (it != kv.end()) {
+                std::string lower = it->second;
+                std::transform(lower.begin(), lower.end(), lower.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                flag = (lower == "1" || lower == "true" || lower == "yes" || lower == "on");
+            }
+        } catch (const std::exception& e) {
+            spdlog::debug("[Warmup] failed to read config for preload flag: {}", e.what());
+        }
+    }
+
+    // Environment override wins
+    if (const char* env = std::getenv("YAMS_EMBED_PRELOAD_ON_STARTUP")) {
+        flag = env_truthy(env);
+    }
+
+    return flag;
+}
+
+void ServiceManager::scheduleEmbeddingWarmup() {
+    if (!embeddingPreloadOnStartup_)
+        return;
+    if (embeddingWarmupScheduled_.exchange(true))
+        return;
+
+    spdlog::info("[Warmup] scheduling embedding preload task");
+    auto exec = getWorkerExecutor();
+    ServiceManager* raw = this;
+    boost::asio::co_spawn(
+        exec,
+        [raw]() -> boost::asio::awaitable<void> {
+            try {
+                co_await raw->co_enableEmbeddingsAndRebuild();
+            } catch (const std::exception& e) {
+                spdlog::warn("[Warmup] embedding preload coroutine failed: {}", e.what());
+            } catch (...) {
+                spdlog::warn("[Warmup] embedding preload coroutine failed with unknown error");
+            }
+            co_return;
+        },
+        boost::asio::detached);
+}
+
+bool ServiceManager::shouldPreloadEmbeddings() const {
+    return embeddingPreloadOnStartup_;
 }
 
 Result<void> ServiceManager::ensureEmbeddingGeneratorFor(const std::string& modelName) {

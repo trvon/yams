@@ -31,6 +31,7 @@ message SearchRequest {
   string hash_query = 16;
   // Engine-level filtering parity with CLI/local service
   string path_pattern = 17;
+  repeated string path_patterns = 34;  // Multiple glob patterns for server-side filtering
   repeated string tags = 18;
   bool match_all_tags = 19;
   string extension = 20;
@@ -504,6 +505,21 @@ message GetStatsResponse {
 message DeleteResponse { bool success = 1; uint64 count = 2; }
 message PrepareSessionResponse { uint64 warmed_count = 1; string message = 2; }
 
+// File history (PBI-043)
+message FileVersion {
+  string snapshot_id = 1;
+  string hash = 2;
+  uint64 size = 3;
+  int64 indexed_timestamp = 4;
+}
+message FileHistoryResponse {
+  string filepath = 1;
+  repeated FileVersion versions = 2;
+  uint32 total_versions = 3;
+  bool found = 4;
+  string message = 5;
+}
+
 message CancelRequest {
   uint64 target_request_id = 1;
 }
@@ -570,6 +586,10 @@ message ListTreeDiffResponse {
   uint64 total_count = 2;
 }
 
+message FileHistoryRequest {
+  string filepath = 1;
+}
+
 // ENVELOPE
 message Envelope {
   uint32 version = 1;
@@ -617,6 +637,7 @@ message Envelope {
     RemovePathSelectorRequest remove_path_selector_request = 44;
     // Tree diff requests (PBI-043)
     ListTreeDiffRequest list_tree_diff_request = 45;
+    FileHistoryRequest file_history_request = 46;
 
     // Responses
     SuccessResponse success_response = 100;
@@ -652,5 +673,6 @@ message Envelope {
     ListSessionsResponse list_sessions_response = 128;
     // Tree diff responses (PBI-043)
     ListTreeDiffResponse list_tree_diff_response = 129;
+    FileHistoryResponse file_history_response = 130;
   }
 }

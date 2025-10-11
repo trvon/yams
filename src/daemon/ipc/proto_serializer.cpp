@@ -211,6 +211,7 @@ template <> struct ProtoBinding<SearchRequest> {
         o->set_context(r.context);
         o->set_hash_query(r.hashQuery);
         o->set_path_pattern(r.pathPattern);
+        set_string_list(r.pathPatterns, o->mutable_path_patterns());
         set_string_list(r.tags, o->mutable_tags());
         o->set_match_all_tags(r.matchAllTags);
         o->set_extension(r.extension);
@@ -248,6 +249,7 @@ template <> struct ProtoBinding<SearchRequest> {
         r.context = i.context();
         r.hashQuery = i.hash_query();
         r.pathPattern = i.path_pattern();
+        r.pathPatterns = get_string_list(i.path_patterns());
         r.tags = get_string_list(i.tags());
         r.matchAllTags = i.match_all_tags();
         r.extension = i.extension();
@@ -1604,13 +1606,13 @@ template <> struct ProtoBinding<GrepResponse> {
             GrepMatch match{};
             match.file = m.file();
             match.lineNumber = m.line_number();
-            // Construct string from bytes (handles both UTF-8 and binary)
-            match.line = yams::common::sanitizeUtf8(m.line());
+            // Preserve raw bytes for binary-safe output
+            match.line.assign(m.line().data(), m.line().size());
             for (const auto& before : m.context_before()) {
-                match.contextBefore.push_back(yams::common::sanitizeUtf8(before));
+                match.contextBefore.emplace_back(before.data(), before.size());
             }
             for (const auto& after : m.context_after()) {
-                match.contextAfter.push_back(yams::common::sanitizeUtf8(after));
+                match.contextAfter.emplace_back(after.data(), after.size());
             }
             match.matchType = m.match_type();
             match.confidence = m.confidence();
@@ -1992,6 +1994,56 @@ template <> struct ProtoBinding<ListTreeDiffResponse> {
     }
 };
 
+template <> struct ProtoBinding<FileHistoryRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kFileHistoryRequest;
+    static void set(Envelope& env, const FileHistoryRequest& r) {
+        auto* o = env.mutable_file_history_request();
+        o->set_filepath(r.filepath);
+    }
+    static FileHistoryRequest get(const Envelope& env) {
+        const auto& i = env.file_history_request();
+        FileHistoryRequest r{};
+        r.filepath = i.filepath();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<FileHistoryResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kFileHistoryResponse;
+    static void set(Envelope& env, const FileHistoryResponse& r) {
+        auto* o = env.mutable_file_history_response();
+        o->set_filepath(r.filepath);
+        for (const auto& version : r.versions) {
+            auto* v = o->add_versions();
+            v->set_snapshot_id(version.snapshotId);
+            v->set_hash(version.hash);
+            v->set_size(version.size);
+            v->set_indexed_timestamp(version.indexedTimestamp);
+        }
+        o->set_total_versions(r.totalVersions);
+        o->set_found(r.found);
+        o->set_message(r.message);
+    }
+    static FileHistoryResponse get(const Envelope& env) {
+        const auto& i = env.file_history_response();
+        FileHistoryResponse r{};
+        r.filepath = i.filepath();
+        r.versions.reserve(static_cast<size_t>(i.versions_size()));
+        for (const auto& v : i.versions()) {
+            FileVersion fv;
+            fv.snapshotId = v.snapshot_id();
+            fv.hash = v.hash();
+            fv.size = v.size();
+            fv.indexedTimestamp = v.indexed_timestamp();
+            r.versions.push_back(std::move(fv));
+        }
+        r.totalVersions = i.total_versions();
+        r.found = i.found();
+        r.message = i.message();
+        return r;
+    }
+};
+
 // Helper to encode Request/Response variants using bindings
 template <typename Variant>
 static Result<void> encode_variant_into(Envelope& env, const Variant& v) {
@@ -2281,6 +2333,11 @@ Result<Message> ProtoSerializer::decode_payload(const std::vector<uint8_t>& byte
             m.payload = Request{std::move(v)};
             break;
         }
+        case Envelope::kFileHistoryRequest: {
+            auto v = ProtoBinding<FileHistoryRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
 
         // Additional responses
         case Envelope::kSuccessResponse: {
@@ -2406,6 +2463,11 @@ Result<Message> ProtoSerializer::decode_payload(const std::vector<uint8_t>& byte
         case Envelope::kListSessionsResponse: {
             auto v = ProtoBinding<ListSessionsResponse>::get(env);
             m.payload = Response{std::in_place_type<ListSessionsResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kFileHistoryResponse: {
+            auto v = ProtoBinding<FileHistoryResponse>::get(env);
+            m.payload = Response{std::in_place_type<FileHistoryResponse>, std::move(v)};
             break;
         }
         case Envelope::kEmbedEvent: {

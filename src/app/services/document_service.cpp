@@ -491,9 +491,8 @@ public:
             if (normalized.size() < 8 ||
                 !std::all_of(normalized.begin(), normalized.end(),
                              [](char c) { return std::isxdigit(static_cast<unsigned char>(c)); })) {
-                return Error{ErrorCode::InvalidArgument,
-                             "Invalid hash format: expected hex string (min 8 chars), got '" +
-                                 req.hash + "'. Use --name for file paths."};
+                return Error{ErrorCode::NotFound,
+                             "Document not found for hash: '" + req.hash + "'"};
             }
         }
 
@@ -544,6 +543,9 @@ public:
             auto docResult = ctx_.metadataRepo->getDocumentByHash(resolvedHash);
             if (docResult && docResult.value()) {
                 foundDoc = docResult.value();
+            }
+            if (!foundDoc) {
+                return Error{ErrorCode::NotFound, "Document not found"};
             }
         }
 
@@ -610,6 +612,16 @@ public:
             }
         }
 
+        if (req.outputPath.empty() && !req.includeContent) {
+            auto existsResult = ctx_.store->exists(resolvedHash);
+            if (!existsResult) {
+                return existsResult.error();
+            }
+            if (!existsResult.value()) {
+                return Error{ErrorCode::NotFound, "Document not found"};
+            }
+        }
+
         resetCompressionMetadata(doc);
         if (doc.size > 0) {
             doc.uncompressedSize = doc.size;
@@ -617,13 +629,29 @@ public:
 
         // Retrieve actual content from CAS (compressed storage) - the source of truth
         if (req.includeContent) {
-            auto bytesResult = ctx_.store->retrieveBytes(resolvedHash);
-            if (!bytesResult) {
-                return Error{bytesResult.error().code, "Document content not found"};
+            if (req.acceptCompressed) {
+                auto bytesResult = ctx_.store->retrieveBytes(resolvedHash);
+                if (!bytesResult) {
+                    return Error{bytesResult.error().code, "Document content not found"};
+                }
+                auto data = std::move(bytesResult.value());
+                auto payloadResult =
+                    makeCompressedPayload(std::span<const std::byte>(data.data(), data.size()));
+                if (!payloadResult) {
+                    return payloadResult.error();
+                }
+                auto payload = std::move(payloadResult.value());
+                doc.content.emplace(std::move(payload.blob));
+                applyCompressionMetadata(doc, payload.header);
+            } else {
+                auto bytesResult = ctx_.store->retrieveBytes(resolvedHash);
+                if (!bytesResult) {
+                    return Error{bytesResult.error().code, "Document content not found"};
+                }
+                auto data = std::move(bytesResult.value());
+                doc.content.emplace(reinterpret_cast<const char*>(data.data()), data.size());
+                markUncompressed(doc, static_cast<uint64_t>(data.size()));
             }
-            auto data = std::move(bytesResult.value());
-            doc.content.emplace(reinterpret_cast<const char*>(data.data()), data.size());
-            doc.size = static_cast<uint64_t>(data.size());
         }
 
         // Optionally attach extracted text as metadata (from DB, for search/grep context)
@@ -971,6 +999,9 @@ public:
         }
 
         bool useFallback = false;
+        bool useTree = false;
+        std::string treePrefix;
+
         if (!req.pattern.empty()) {
             const auto& pattern = req.pattern;
             auto wildcardPos = pattern.find_first_of("*?");
@@ -978,17 +1009,31 @@ public:
 
             if (!hasWildcard) {
                 queryOpts.exactPath = pattern;
-            } else if (pattern.back() == '*' &&
-                       pattern.find_first_of("*?", wildcardPos + 1) == pattern.size() - 1) {
-                std::string prefix = pattern.substr(0, pattern.size() - 1);
+            } else if (pattern.back() == '*') {
+                // Handle patterns ending with wildcards: /path/* or /path/**
+                // Strip trailing wildcards to get the prefix
+                std::string prefix = pattern;
                 while (!prefix.empty() && (prefix.back() == '*' || prefix.back() == '?'))
                     prefix.pop_back();
-                queryOpts.pathPrefix = prefix;
+
+                // Also strip trailing slashes
+                while (!prefix.empty() && (prefix.back() == '/' || prefix.back() == '\\'))
+                    prefix.pop_back();
+
+                // Use tree-based query for path prefixes (PBI-043)
+                // Tree query now supports all filters via queryDocuments
                 if (!prefix.empty()) {
-                    char tail = prefix.back();
-                    if (tail == '/' || tail == '\\')
-                        queryOpts.prefixIsDirectory = true;
+                    useTree = true;
+                    treePrefix = prefix;
+                    spdlog::info("[LIST] Using tree-based query for prefix: '{}' (with filters: "
+                                 "tags={} mime={} ext={})",
+                                 treePrefix, !req.tags.empty(), !req.mime.empty(),
+                                 !req.extension.empty());
                 }
+
+                // Also set queryOpts for the tree path to use
+                queryOpts.pathPrefix = prefix;
+                queryOpts.prefixIsDirectory = true; // Patterns with * imply directory recursion
             } else if (pattern.front() == '*' &&
                        pattern.find_first_of("*?", wildcardPos + 1) == std::string::npos) {
                 queryOpts.containsFragment = pattern.substr(1);
@@ -998,7 +1043,25 @@ public:
             }
         }
 
-        if (!useFallback) {
+        // Try tree-based query for path prefix patterns with full filter support
+        if (useTree && !treePrefix.empty()) {
+            // Pass full queryOpts to support tags, mime, extension, etc.
+            auto treeDocsRes = ctx_.metadataRepo->queryDocuments(queryOpts);
+            if (treeDocsRes) {
+                docs = std::move(treeDocsRes.value());
+                usedQuery = true;
+                totalFoundApprox = docs.size();
+                spdlog::info("[LIST] Tree-based query (via queryDocuments) returned {} documents",
+                             docs.size());
+            } else {
+                // Tree query failed, fall back to SQL glob matching
+                spdlog::warn("[LIST] Tree-based query failed: {}, falling back to SQL glob",
+                             treeDocsRes.error().message);
+                useTree = false;
+            }
+        }
+
+        if (!useFallback && !useTree) {
             auto docsRes = ctx_.metadataRepo->queryDocuments(queryOpts);
             if (!docsRes) {
                 return Error{ErrorCode::InternalError,
@@ -1570,7 +1633,7 @@ public:
             return exactRes.value().value().sha256Hash;
         }
 
-        // Strategy 3: Path suffix match (e.g., "%docs/delivery/051/prd.md")
+        // Strategy 3: Path suffix or filename match
         std::vector<std::string> candidatePatterns;
         if (name.find('/') != std::string::npos || name.find('\\') != std::string::npos) {
             candidatePatterns.push_back("%" + name);

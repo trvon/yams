@@ -439,6 +439,21 @@ bool IndexingPipeline::indexContent(IndexingTask& task) {
 
             documentId = result.value();
             task.documentInfo->id = documentId;
+
+            // Create automatic time-based snapshot for new documents
+            auto timestamp = std::chrono::system_clock::now();
+            auto snapshotId =
+                "auto_" + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
+                                             timestamp.time_since_epoch())
+                                             .count());
+
+            metadataRepo_->setMetadata(documentId, "snapshot_id",
+                                       metadata::MetadataValue(snapshotId));
+            metadataRepo_->setMetadata(documentId, "snapshot_time",
+                                       metadata::MetadataValue(static_cast<int64_t>(
+                                           timestamp.time_since_epoch().count())));
+
+            spdlog::debug("Created automatic snapshot {} for new document", snapshotId);
         }
 
         // Chunk and index content (only for new documents)

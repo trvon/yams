@@ -85,6 +85,9 @@ private:
     // Tree diff handlers (PBI-043)
     boost::asio::awaitable<Response> handleListTreeDiffRequest(const ListTreeDiffRequest& req);
 
+    // File history handler (PBI-043)
+    boost::asio::awaitable<Response> handleFileHistoryRequest(const FileHistoryRequest& req);
+
     // Plugin management handlers
     boost::asio::awaitable<Response> handlePluginScanRequest(const PluginScanRequest& req);
     boost::asio::awaitable<Response> handlePluginLoadRequest(const PluginLoadRequest& req);

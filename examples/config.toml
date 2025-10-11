@@ -1,0 +1,700 @@
+# YAMS Configuration Template
+# This file contains all available configuration options with their default values.
+# Copy this file to ~/.config/yams/config.toml and modify as needed.
+#
+# File Location Strategy:
+# - All data files (databases, indexes, WAL, objects) are nested under data_dir by default
+# - Paths can be absolute or relative; relative paths are resolved from data_dir
+# - Use ~ for home directory expansion (e.g., ~/.yams/data)
+
+[version]
+config_version = 2
+migrated_from = 0
+migration_date = "2025-01-16"
+
+[core]
+# Data storage directory - all other data files nest under this by default
+# ~ will be expanded to home directory
+data_dir = "~/.yams/data"
+# Storage engine: "local" or "distributed" (future)
+storage_engine = "local"
+# Enable Write-Ahead Logging for crash recovery
+enable_wal = true
+# Enable telemetry (anonymous usage statistics)
+enable_telemetry = false
+# Log level: "trace", "debug", "info", "warn", "error"
+log_level = "info"
+
+[auth]
+# Path to Ed25519 private key for signing
+private_key_path = "~/.config/yams/keys/ed25519.pem"
+# Path to Ed25519 public key for verification
+public_key_path = "~/.config/yams/keys/ed25519.pub"
+# API keys for authentication (optional)
+api_keys = []
+
+[performance]
+# Number of worker threads for parallel operations
+num_worker_threads = 4
+# Size of I/O thread pool
+io_thread_pool_size = 2
+# Maximum concurrent operations
+max_concurrent_operations = 100
+# Enable memory-mapped file access
+enable_memory_mapping = false
+# Total cache size in MB
+cache_size_mb = 512
+
+[storage]
+# Storage engine type
+engine = "local"
+# Base path for storage (defaults to core.data_dir)
+base_path = "~/.yams/data"
+# Enable transparent compression
+enable_compression = true
+# Enable content deduplication
+enable_deduplication = true
+# Enable content-defined chunking
+enable_chunking = true
+# CAS object storage directories (relative to base_path/data_dir)
+objects_dir = "objects"
+staging_dir = "staging"
+
+[storage.s3]
+# S3 Engine Settings (used if storage.engine = "s3")
+url = ""
+region = "us-east-1"
+endpoint = ""
+access_key = ""
+secret_key = ""
+use_path_style = false
+
+[chunking]
+# Rolling hash window size
+window_size = 48
+# Minimum chunk size in bytes
+min_chunk_size = 1024
+# Maximum chunk size in bytes
+max_chunk_size = 16384
+# Target average chunk size
+average_chunk_size = 8192
+# Hash algorithm for chunk identification
+hash_algorithm = "sha256"
+
+[compression]
+# Enable compression for new content
+enable = true
+# Compression algorithm: "zstd" or "lzma"
+algorithm = "zstd"
+# ZSTD compression level (1-22)
+zstd_level = 9
+# LZMA compression level (0-9)
+lzma_level = 6
+# Minimum size to consider for compression
+chunk_threshold = 1024
+# Always compress files larger than this
+always_compress_above = 10485760 # 10MB
+# Never compress files smaller than this
+never_compress_below = 1024 # 1KB
+# Compress content older than N days
+compress_after_days = 1
+# Use LZMA for content older than N days
+archive_after_days = 30
+# Maximum parallel compression operations
+max_concurrent_compressions = 4
+# Use background compression
+async_compression = true
+# Decompression cache entries
+decompression_cache_size = 100
+# Decompression cache size in bytes
+decompression_cache_size_bytes = 536870912 # 512MB
+
+[wal]
+# Enable Write-Ahead Logging
+enable = true
+# Directory for WAL files (relative to data_dir if not absolute)
+wal_directory = "wal"
+# Maximum size per log file
+max_log_size = 104857600 # 100MB
+# Sync to disk every N entries
+sync_interval = 1000
+# Maximum time between syncs (ms)
+sync_timeout_ms = 100
+# Compress rotated log files
+compress_old_logs = true
+# Maximum open log files
+max_open_files = 10
+# Batch commits for performance
+enable_group_commit = true
+
+[vector_database]
+# Enable vector database for embeddings
+enable = true
+# SQLite database path for vectors (relative to data_dir if not absolute)
+database_path = "vectors.db"
+# Table name for embeddings
+table_name = "document_embeddings"
+# Embedding dimension (model-dependent)
+embedding_dim = 768
+# Index type: "FLAT", "IVF_PQ", "HNSW"
+index_type = "IVF_PQ"
+# Number of partitions for IVF index
+num_partitions = 256
+# Number of sub-quantizers for PQ
+num_sub_quantizers = 96
+# Enable periodic checkpoints
+enable_checkpoints = true
+# Operations between checkpoints
+checkpoint_frequency = 1000
+# Maximum batch size for operations
+max_batch_size = 1000
+# Default similarity threshold for search
+default_similarity_threshold = 0.7
+# Use in-memory database (for testing)
+use_in_memory = false
+# Auto-create database if missing
+auto_create = true
+# Auto-repair on corruption
+auto_repair = true
+
+[embeddings]
+# Enable embedding generation
+enable = true
+# Automatically generate for new documents
+auto_generate = false
+# Automatically trigger embeddings after AddDocument
+auto_on_add = false
+# Preferred embedding model
+preferred_model = "all-MiniLM-L6-v2"
+# Path to model files
+model_path = "~/.yams/models"
+# Path to tokenizer
+tokenizer_path = "models/tokenizer.json"
+# Maximum sequence length
+max_sequence_length = 512
+# Embedding dimension (must match model)
+embedding_dim = 768
+# Batch size for generation
+batch_size = 32
+# Normalize embedding vectors
+normalize_embeddings = true
+# Use GPU acceleration if available
+enable_gpu = false
+# Number of threads (-1 for auto)
+num_threads = -1
+# Delay between generation batches (ms)
+generation_delay_ms = 1000
+# Track content hash for staleness detection
+track_content_hash = true
+# Model version identifier
+model_version = "1.0.0"
+# Embedding schema version
+embedding_schema_version = 1
+# Keep model loaded in memory (hot) for better performance
+keep_model_hot = true
+# Model unload timeout in seconds (0 = never unload)
+model_idle_timeout = 300
+# Preload model on startup
+preload_on_startup = false
+# Maximum memory for model cache (MB)
+max_model_memory_mb = 1024
+
+# Daemon service and plugins
+[daemon]
+# Enable daemon-managed model provider and plugin auto-loading
+enable = true
+# Auto-load plugins from standard directories (and YAMS_PLUGIN_DIR if set)
+auto_load_plugins = true
+# Optional explicit plugin directory (comment out to use defaults and YAMS_PLUGIN_DIR)
+# plugin_dir = "/usr/local/lib/yams/plugins"
+# Enforce plugin naming policy: "relaxed" (accept yams_*_plugin.* or libyams_*_plugin.*)
+# or "spec" (require libyams_*_plugin.*). Environment override: YAMS_PLUGIN_NAME_POLICY.
+plugin_name_policy = "relaxed"
+# Worker threads for daemon (0 = auto)
+worker_threads = 0
+# Max memory in GB the daemon will attempt to use (0 = unlimited)
+max_memory_gb = 0
+# Log level for daemon background service (trace|debug|info|warn|error)
+log_level = "info"
+# Prefer centralized tuning (TuningManager); set to true only if you need legacy in-loop tuner
+# use_legacy_tuner = false
+
+# Centralized tuning knobs (advanced): defaults are safe; uncomment to override
+[tuning]
+# Default tuning preset applied by the daemon. Options: "efficient", "balanced", "aggressive".
+profile = "balanced"
+# backpressure_read_pause_ms = 5
+# worker_poll_ms = 150
+# idle_cpu_pct = 10.0
+# idle_mux_low_bytes = 4194304
+# idle_shrink_hold_ms = 5000
+# aggressive_idle_shrink = false
+# pool_cooldown_ms = 500
+# pool_scale_step = 1
+# pool_ipc_min = 1
+# pool_ipc_max = 32
+# pool_io_min = 1
+# pool_io_max = 32
+# io_conn_per_thread = 8          # grow IO pool only when activeConn > ioThreads * value
+# post_ingest_threads = 0         # 0 = auto (recommend ~12.5% CPU budget, hard max 4)
+# post_ingest_queue_max = 1000    # bounded queue; producers block when full (backpressure)
+# use_internal_bus_for_repair = false      # when true, queue repair embed jobs to internal bus
+# use_internal_bus_for_post_ingest = false # when true, queue post-ingest tasks to internal bus
+# stream_mux_very_high_bytes = 268435456   # 256 MiB
+# stream_mux_high_bytes = 134217728        # 128 MiB
+# stream_mux_light1_bytes = 8388608        # 8 MiB
+# stream_mux_light2_bytes = 33554432       # 32 MiB
+# stream_mux_light3_bytes = 67108864       # 64 MiB
+
+# Notes:
+# - When [embeddings].enable = false, the daemon automatically disables the model provider
+#   and plugin auto-load to reduce startup overhead.
+# - You can override plugin discovery with environment variables:
+#   * YAMS_PLUGIN_DIR: an exclusive directory to scan for plugins
+#   * XDG_CONFIG_HOME or HOME: determines plugins_trust.txt location for trust policy
+# - To control client/daemon timeouts at runtime, you can set:
+#   * YAMS_REQUEST_TIMEOUT_MS (sets both header/body timeouts in client)
+#   * YAMS_HEADER_TIMEOUT_MS / YAMS_BODY_TIMEOUT_MS (client-specific)
+
+[embeddings.cache]
+# Enable embedding cache for queries
+enable_query_cache = true
+# Cache size (number of queries)
+cache_size = 1000
+# Cache TTL in seconds
+cache_ttl_seconds = 3600
+# Use LRU eviction
+lru_eviction = true
+
+
+[vector_index]
+# Index type: "FLAT", "HNSW", "IVF_FLAT", "IVF_PQ", "LSH", "ANNOY"
+type = "HNSW"
+# Vector dimension
+dimension = 768
+# Distance metric: "COSINE", "L2", "INNER_PRODUCT"
+distance_metric = "COSINE"
+# HNSW: connections per node
+hnsw_m = 16
+# HNSW: construction accuracy
+hnsw_ef_construction = 200
+# HNSW: search accuracy
+hnsw_ef_search = 50
+# Normalize vectors before indexing
+normalize_vectors = true
+# Maximum number of vectors
+max_elements = 1000000
+# Save/load index from disk
+enable_persistence = true
+# Index file path
+index_path = "vector_index.bin"
+# Batch size for operations
+batch_size = 1000
+# Use SIMD instructions
+use_simd = true
+# Number of threads (0 for auto)
+num_threads = 0
+# Use delta index for updates
+enable_delta_index = true
+# Merge delta when it reaches this size
+delta_threshold = 1000
+
+[search]
+# Default result limit
+default_limit = 10
+# Maximum allowed limit
+max_limit = 100
+# Enable search result caching
+enable_cache = true
+# Cache size (number of queries)
+cache_size = 1000
+# Cache TTL in minutes
+cache_ttl_minutes = 60
+
+[search.path_tree]
+# Enable path-tree traversal to serve hierarchical workloads (prefix/semantic/diff)
+enable = false
+# Mode when enabled: "fallback" keeps baseline scans as a safety net, "preferred" makes the tree the default
+mode = "fallback"
+
+[search.hybrid]
+# Enable hybrid search
+enable = true
+# Enable knowledge graph scoring
+enable_kg = true
+# Weight for vector similarity
+vector_weight = 0.50
+# Weight for keyword relevance
+keyword_weight = 0.30
+# Weight for KG entity similarity
+kg_entity_weight = 0.10
+# Weight for structural prior
+structural_weight = 0.05
+# Weight for BART classification similarity (when enhanced search enabled)
+classification_weight = 0.05
+# Number of vector results to retrieve
+vector_top_k = 50
+# Number of keyword results to retrieve
+keyword_top_k = 50
+# Final number of results
+final_top_k = 10
+# Fusion strategy: "LINEAR_COMBINATION", "RECIPROCAL_RANK", "CASCADE"
+fusion_strategy = "LINEAR_COMBINATION"
+# RRF constant (for RECIPROCAL_RANK)
+rrf_k = 60.0
+# Enable result reranking
+enable_reranking = true
+# Number of results to rerank
+rerank_top_k = 20
+# Minimum score for reranking
+rerank_threshold = 0.0
+# Enable query expansion
+enable_query_expansion = false
+# Number of expansion terms
+expansion_terms = 5
+# Weight for expansion terms
+expansion_weight = 0.3
+# Maximum KG neighbors to consider
+kg_max_neighbors = 32
+# Maximum KG hops
+kg_max_hops = 1
+# Time budget for KG scoring (ms)
+kg_budget_ms = 20
+# Normalize scores to [0,1]
+normalize_scores = true
+# Generate search explanations
+generate_explanations = true
+# Include debug scores
+include_debug_scores = false
+# Run searches in parallel
+parallel_search = true
+
+[knowledge_graph]
+# Database path for KG (relative to data_dir if not absolute)
+# Defaults to {data_dir}/yams.db
+db_path = "yams.db"
+# Enable full-text search for aliases
+enable_alias_fts = true
+# Enable WAL mode
+enable_wal = true
+# Prefer exact alias matches
+prefer_exact_alias_first = true
+# Default query limit
+default_limit = 1000
+# Node cache capacity
+node_cache_capacity = 10000
+# Alias cache capacity
+alias_cache_capacity = 50000
+# Embedding cache capacity
+embedding_cache_capacity = 10000
+# Neighbor cache capacity
+neighbor_cache_capacity = 10000
+
+# External knowledge graph endpoints for taxonomy/ontology retrieval
+endpoints = ["http://localhost:7200/repositories/yams"]
+# Default taxonomy domains for classification
+default_domains = ["computer_science", "business", "research"]
+# Cache taxonomy for N minutes
+taxonomy_cache_minutes = 60
+# Maximum related concepts to fetch per query
+max_related_concepts = 20
+# Maximum concept relationship depth to explore
+max_concept_depth = 2
+# HTTP timeout for KG requests (milliseconds)
+request_timeout_ms = 3000
+# Enable automatic domain detection from document content
+enable_domain_detection = true
+# SPARQL endpoint authentication (if required)
+auth_username = ""
+auth_password = ""
+# Enable concept relationship caching
+enable_relationship_cache = true
+# Relationship cache TTL (minutes)
+relationship_cache_ttl_minutes = 120
+
+[file_detection]
+# Use libmagic if available
+use_lib_magic = true
+# Use built-in patterns
+use_builtin_patterns = true
+# Use custom patterns
+use_custom_patterns = true
+# Path to custom patterns file
+patterns_file = ""
+# Maximum bytes to read for detection
+max_bytes_to_read = 512
+# Cache detection results
+cache_results = true
+# Cache size
+cache_size = 1000
+
+[mcp_server]
+# Enable MCP server
+enable = false
+# Transport: "stdio", "websocket"
+transport = "stdio"
+# WebSocket host
+host = "localhost"
+# WebSocket port
+port = 8080
+# WebSocket path
+path = "/mcp"
+# Use SSL/TLS
+use_ssl = false
+# Connection timeout (ms)
+connect_timeout_ms = 5000
+# Receive timeout (ms)
+receive_timeout_ms = 30000
+# Maximum message size
+max_message_size = 1048576 # 1MB
+# Enable WebSocket ping/pong
+enable_ping_pong = true
+# Ping interval (seconds)
+ping_interval_s = 30
+
+# Optional: directory for file-backed prompt templates (Markdown).
+# Files named PROMPT-*.md will be exposed via `prompts/list` and `prompts/get`.
+# Examples: PROMPT-search-codebase.md -> name: "search_codebase"
+# If not set, defaults to XDG_DATA_HOME/yams/prompts or ~/.local/share/yams/prompts,
+# and as a last resort uses ./docs/prompts when running from the repo root.
+# prompts_dir = "/home/user/.local/share/yams/prompts"
+
+[daemon]
+# Enable daemon for background embedding generation
+# This eliminates ONNX model loading overhead on every command
+enable = true
+# Auto-start daemon if not running when needed
+auto_start = true
+# Unix domain socket path for IPC
+socket_path = "/tmp/yams-daemon.sock"
+# PID file for daemon process management
+pid_file = "/tmp/yams-daemon.pid"
+# Number of worker threads for request handling
+worker_threads = 4
+# Maximum memory usage in GB
+max_memory_gb = 4
+# Daemon log level: "trace", "debug", "info", "warn", "error"
+log_level = "info"
+# Connection timeout in milliseconds
+connect_timeout_ms = 1000
+# Request timeout in milliseconds
+request_timeout_ms = 5000
+
+[daemon.models]
+# Maximum number of models to keep loaded in memory
+max_loaded_models = 4
+# Number of models to keep always loaded (hot pool)
+hot_pool_size = 2
+# Models to preload on daemon startup
+preload_models = ["all-MiniLM-L6-v2", "bart-large-mnli"]
+# Load models only when first requested
+lazy_loading = false
+# Unload models after being idle for N seconds
+model_idle_timeout_s = 300
+# Enable GPU acceleration if available
+enable_gpu = false
+# Number of threads for ONNX inference
+num_threads = 4
+# Model eviction policy: "lru" (least recently used), "lfu", "fifo"
+eviction_policy = "lru"
+
+[daemon.resource_pool]
+# Minimum ONNX sessions per model
+min_sessions = 1
+# Maximum ONNX sessions per model
+max_sessions = 3
+# Session idle timeout in seconds
+idle_timeout_s = 300
+# Validate session health before use
+validate_on_acquire = true
+
+[daemon.client]
+# Use daemon for embedding generation
+use_daemon = true
+# Fall back to local generation if daemon fails
+fallback_to_local = true
+# Maximum retry attempts
+max_retries = 3
+# Batch size for embedding requests
+batch_size = 32
+
+[experimental]
+# Enable experimental features
+enable = false
+
+[experimental.enhanced_search]
+# Alias for PBI-003 bring-up; mirrors [search.enhanced]. Prefer [search.enhanced] for stable use.
+enable = false
+classification_weight = 0.15
+kg_expansion_weight = 0.10
+hotzone_weight = 0.05
+enhanced_search_timeout_ms = 2000
+
+[experimental.hotzones]
+# Alias for PBI-003 bring-up; mirrors [search.hotzones]. Prefer [search.hotzones] for stable use.
+decay_interval_hours = 24
+max_boost_factor = 2.0
+enable_persistence = true
+data_file = "hotzones.db"
+
+[experimental.bert_ner]
+# Enable BERT Named Entity Recognition
+enable = false
+# Path to BERT model
+model_path = ""
+# Model name
+model_name = "bert-base-NER"
+# Batch size for processing
+batch_size = 16
+# Minimum confidence threshold
+confidence_threshold = 0.8
+# Automatically tag documents
+auto_tag = false
+# Update knowledge graph with entities
+update_knowledge_graph = false
+# Entity types to extract
+entity_types = ["PERSON", "ORG", "LOC", "MISC"]
+
+[experimental.auto_tagging]
+# Enable automatic tagging
+enable = false
+# Use BERT NER for tagging
+use_bert_ner = false
+# Use keyword extraction
+use_keyword_extraction = true
+# Use topic modeling
+use_topic_modeling = false
+# Minimum tag confidence
+min_tag_confidence = 0.7
+# Maximum tags per document
+max_tags_per_document = 10
+# Update frequency (hours)
+tag_update_frequency_hours = 24
+
+[experimental.smart_chunking]
+# Enable smart chunking
+enable = false
+# Use semantic boundaries
+use_semantic_boundaries = false
+# Use sentence detection
+use_sentence_detection = true
+# Preserve code blocks
+preserve_code_blocks = true
+# Preserve markdown sections
+preserve_markdown_sections = true
+
+[classification]
+# Enable BART-based document classification for intelligent tagging
+enable = false
+# Path to BART-MNLI model
+model_path = "~/.yams/models/bart-large-mnli"
+# Confidence threshold for tag assignment
+confidence_threshold = 0.7
+# Maximum tags per document
+max_tags_per_document = 5
+# Maximum sequence length for classification
+max_sequence_length = 1024
+# Enable batch processing for efficiency
+enable_batch_processing = true
+# Batch size for classification
+batch_size = 16
+# Model inference timeout (milliseconds)
+inference_timeout_ms = 5000
+# Automatically classify documents during indexing
+auto_classify_on_index = true
+# Enable real-time classification during search
+enable_search_time_classification = false
+
+[search.hotzones]
+# Enable hotzone-based result boosting
+enable = false
+# Decay factor for hotzone relevance over time (0.0-1.0)
+decay_factor = 0.95
+# Minimum access frequency to maintain hotzone
+min_frequency = 3
+# Hotzone decay interval (hours)
+decay_interval_hours = 24
+# Maximum boost factor for hot concepts
+max_boost_factor = 2.0
+# Enable persistence of hotzone data across restarts
+enable_persistence = true
+# Hotzone data file path (relative to data_dir if not absolute)
+data_file = "hotzones.db"
+# Background decay processing interval (minutes)
+decay_processing_interval_minutes = 60
+# Enable cross-user hotzone sharing
+enable_shared_hotzones = false
+
+[search.enhanced]
+# Enable enhanced search pipeline with classification and KG
+enable = false
+# Weight for BART classification scoring in final results
+classification_weight = 0.15
+# Weight for knowledge graph expansion in final results
+kg_expansion_weight = 0.10
+# Weight for hotzone boosting in final results
+hotzone_weight = 0.05
+# Enable cross-domain concept discovery
+enable_cross_domain = true
+# Maximum concepts for expansion per search result
+max_expansion_concepts = 10
+# Enable search result re-ranking based on concept similarity
+enable_concept_reranking = true
+# Timeout for enhanced search pipeline (milliseconds)
+enhanced_search_timeout_ms = 2000
+
+[migrations]
+# Automatically migrate on version change
+auto_migrate = true
+# Create backup before migration
+backup_before_migrate = true
+# Migration log file path
+migration_log_path = "migrations.log"
+
+[indexing]
+# PBI-040: Synchronous FTS5 indexing threshold
+# When adding <= sync_threshold documents, perform FTS5 indexing synchronously
+# instead of queueing to PostIngestQueue. This eliminates the 5-10s async delay
+# for grep on small batches, making results immediately available.
+# Set to 0 to always use async indexing (original behavior).
+# Default: 10 files
+sync_threshold = 10
+
+[downloader]
+# Default concurrency for parallel connections
+default_concurrency = 4
+# Default chunk size in bytes
+default_chunk_size_bytes = 8388608
+# Per-connection timeout in ms
+default_timeout_ms = 60000
+# Follow HTTP redirects
+follow_redirects = true
+# Enable resume using HTTP Range/If-Range
+resume = true
+# Global rate limit (bytes/sec, 0 = unlimited)
+rate_limit_global_bps = 0
+# Per-connection rate limit (bytes/sec, 0 = unlimited)
+rate_limit_per_conn_bps = 0
+# Retry/backoff policy
+max_retry_attempts = 5
+retry_backoff_ms = 500
+retry_backoff_multiplier = 2.0
+retry_max_backoff_ms = 15000
+# Default checksum algorithm when provided
+checksum_algo = "sha256"
+# Temporary file extension for staging
+temp_extension = ".part"
+# Store directly into CAS by default; no user path writes unless export requested
+store_only = true
+# Maximum allowed file size in bytes (0 = unlimited)
+max_file_bytes = 0
+
+[downloader.tls]
+# Verify TLS certificates (recommended)
+verify = true
+# Path to CA bundle (empty = system default)
+ca_path = ""
+
+[downloader.proxy]
+# Proxy URL (e.g., http://user:pass@host:port) or empty
+url = ""

@@ -406,6 +406,52 @@ yams list --format minimal --offset 20
 yams list --no-snippets --show-metadata  # No previews, full metadata
 ```
 
+#### Tree-Based Query Optimization (v0.7.5+)
+
+The `list` command uses tree-based path indexing for efficient queries on large repositories. Path patterns with wildcards (`*`, `**`) automatically leverage tree structures for O(log n) performance:
+
+**Pattern-based queries** (tree-optimized):
+```bash
+# List all documents under docs/ directory (recursive)
+yams list --name "docs/**"
+
+# List all markdown files in src/
+yams list --name "src/**/*.md"
+
+# List all files in a specific directory (non-recursive)
+yams list --name "project/bin/*"
+```
+
+**Combining patterns with filters** (tree query + filtering):
+```bash
+# Documents under docs/ with specific tag
+yams list --name "docs/**" --tags "api"
+
+# C++ source files under src/ with multiple tags
+yams list --name "src/**/*.cpp" --tags "code,reviewed"
+
+# All text files under project/ by MIME type
+yams list --name "project/**" --mime "text/plain"
+
+# Files by extension under specific path
+yams list --name "examples/**" --extension ".json"
+
+# Combined filters for precise results
+yams list --name "src/**" --tags "test" --extension ".cpp" --mime "text/x-c++"
+```
+
+**Performance notes:**
+- Tree queries with path prefixes: ~160 μs per query (6.25k queries/sec)
+- Tree queries with filters: 100-126 μs per query (up to 10k queries/sec)
+- Filters can improve performance by reducing result set size
+- Use `/**` for recursive directory matching, `/*` for single-level
+- Patterns are automatically canonicalized on macOS to handle `/var` → `/private/var` symlinks
+
+**Best practices:**
+- Prefer tree-based patterns (`path/**`) over substring matches for better performance
+- Combine multiple filters to narrow results efficiently
+- Use `--format json` with tree queries for programmatic processing
+
 ### Snapshot Operations (Enhanced in PBI-043)
 
 The `list` command has been enhanced with smart snapshot and file history capabilities:

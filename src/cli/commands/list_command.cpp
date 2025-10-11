@@ -6,6 +6,7 @@
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/time_parser.h>
+#include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/detection/file_type_detector.h>
@@ -437,16 +438,98 @@ private:
     }
 
     /**
-     * Show file history across all snapshots
+     * Show file history across all snapshots using daemon protocol
      */
     Result<void> showFileHistory(const std::string& filepath) {
         spdlog::info("Showing file history for: {}", filepath);
-        // TODO: Query which snapshots contain this file
-        // For now, show a helpful message
-        std::cout << "File history feature coming soon!\n";
-        std::cout << "This will show all snapshots containing: " << filepath << "\n";
-        std::cout << "Suggestion: Use 'yams list --snapshots' to see available snapshots\n";
-        return Result<void>();
+
+        try {
+            // Create daemon client
+            daemon::ClientConfig config;
+            if (cli_ && cli_->hasExplicitDataDir()) {
+                config.dataDir = cli_->getDataPath();
+            }
+            daemon::DaemonClient client(config);
+
+            // Prepare request
+            daemon::FileHistoryRequest req;
+            req.filepath = filepath;
+
+            // Execute via co_spawn with promise/future
+            std::promise<Result<daemon::FileHistoryResponse>> promise;
+            auto future = promise.get_future();
+
+            boost::asio::co_spawn(
+                daemon::GlobalIOContext::global_executor(),
+                [&client, req,
+                 promise = std::move(promise)]() mutable -> boost::asio::awaitable<void> {
+                    auto result = co_await client.fileHistory(req);
+                    promise.set_value(std::move(result));
+                    co_return;
+                },
+                boost::asio::detached);
+
+            // Wait for result with timeout
+            if (future.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+                return Error{ErrorCode::Timeout, "File history request timed out"};
+            }
+
+            auto response = future.get();
+            if (!response) {
+                return Error{response.error().code,
+                             "File history failed: " + response.error().message};
+            }
+
+            const auto& history = response.value();
+
+            // Display results
+            std::cout << "File history for: " << history.filepath << "\n\n";
+
+            if (!history.found || history.versions.empty()) {
+                std::cout << (history.message.empty() ? "File not found in any snapshot."
+                                                      : history.message)
+                          << "\n";
+                std::cout << "\nTip: Add file to a snapshot with:\n";
+                std::cout << "  yams add --snapshot-id <id> " << filepath << "\n";
+                return Result<void>();
+            }
+
+            std::cout << "Found " << history.totalVersions << " version(s) across snapshots:\n\n";
+
+            // Table output
+            std::cout << std::left << std::setw(25) << "SNAPSHOT" << std::setw(18) << "HASH"
+                      << std::setw(12) << "SIZE"
+                      << "INDEXED AT\n";
+            std::cout << std::string(100, '-') << "\n";
+
+            for (const auto& version : history.versions) {
+                // Truncate hash for display
+                std::string hashDisplay =
+                    version.hash.length() > 16 ? version.hash.substr(0, 16) + "..." : version.hash;
+
+                // Format size
+                std::string sizeStr = ui::format_bytes(version.size);
+
+                // Format timestamp
+                std::time_t tt = version.indexedTimestamp;
+                std::tm* tm = std::localtime(&tt);
+                char timeBuffer[32];
+                std::strftime(timeBuffer, sizeof(timeBuffer), "%Y-%m-%d %H:%M:%S", tm);
+
+                std::cout << std::left << std::setw(25) << version.snapshotId.substr(0, 24)
+                          << std::setw(18) << hashDisplay << std::setw(12) << sizeStr << timeBuffer
+                          << "\n";
+            }
+
+            std::cout << "\nTip: Retrieve a specific version with:\n";
+            std::cout << "  yams get --hash <hash>\n";
+
+            return Result<void>();
+
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::InternalError,
+                         "Failed to get file history: " + std::string(e.what())};
+        }
     }
 
     /**

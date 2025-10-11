@@ -64,6 +64,16 @@ if benchmark_dep.found()
     cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
     install: false,
   )
+
+  # Tree-based list with filters benchmark (v0.7.5)
+  tree_list_filter_bench = executable('tree_list_filter_bench', files('tree_list_filter_bench.cpp'),
+    include_directories: incs,
+    dependencies: metadata_query_bench_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    install: false,
+  )
+
+  alias_target('bench_tree_list_filter', tree_list_filter_bench)
 else
   message('Google Benchmark not found; skipping service and metadata benchmark executables')
 endif

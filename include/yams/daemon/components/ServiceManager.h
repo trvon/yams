@@ -282,6 +282,8 @@ public:
     // environment (YAMS_PREFERRED_MODEL), with a fallback to the first installed
     // local model under ~/.yams/models.
     Result<void> ensureEmbeddingGeneratorReady();
+    bool shouldPreloadEmbeddings() const;
+    void scheduleEmbeddingWarmup();
 
     // Explicit, on-demand plugin autoload: scans trusted roots and default directories,
     // loads plugins via ABI hosts, and attempts to adopt model providers and content extractors.
@@ -383,6 +385,7 @@ private:
     boost::asio::awaitable<std::shared_ptr<yams::search::HybridSearchEngine>>
     co_buildEngine(int timeout_ms, yams::compat::stop_token token,
                    bool includeEmbeddingGenerator = true);
+    bool detectEmbeddingPreloadFlag() const;
 
     const DaemonConfig& config_;
     StateComponent& state_;
@@ -422,6 +425,9 @@ private:
     std::atomic<std::size_t> ingestQueued_{0};
     std::atomic<std::size_t> ingestActive_{0};
     std::atomic<std::size_t> ingestWorkerTarget_{1};
+
+    std::atomic<bool> embeddingWarmupScheduled_{false};
+    bool embeddingPreloadOnStartup_{false};
 
     std::unique_ptr<IngestService> ingestService_;
     std::shared_ptr<yams::search::HybridSearchEngine> searchEngine_;

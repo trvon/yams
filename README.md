@@ -17,6 +17,9 @@
 - WAL‑backed durability, high‑throughput I/O, thread‑safe
 - Portable CLI and MCP server
 - Extensible with Plugin Support
+- Experimental path-tree traversal for prefix/semantic/diff workloads (see `[search.path_tree]`
+  in the config template) enabling ~62–66% faster scans vs. baseline grep queries when coupled
+  with the new hierarchical benchmarks. citedocs/delivery/051/benchmark_plan.md:160
 
 ## Links
 - SourceHut: https://sr.ht/~trvon/yams/
@@ -84,6 +87,23 @@ yams search hello --limit 5
 # get
 yams list --format minimal --limit 1 
 ```
+
+### Path-Tree Search (Experimental)
+
+The CLI and daemon can bias path-aware traversals when `[search.path_tree]` is enabled in
+`config.toml`. This instructs the metadata layer to reuse the hierarchical index that powers the
+PBI-051 benchmarks, yielding significantly faster prefix and diff scans. Toggle it by adding:
+
+```toml
+[search.path_tree]
+enable = true
+mode = "preferred" # or "fallback" to keep legacy scans as backup
+```
+
+When enabled, `yams grep` accepts tag or path filters (it defaults the pattern to `.*` for pure
+filters) and, when you specify explicit path prefixes, the service seeds candidates through
+`MetadataRepository::listPathTreeChildren`—the same engine exercised by
+`tests/benchmarks/search_tree_bench.cpp`. citetests/benchmarks/search_tree_bench.cpp:188src/app/services/grep_service.cpp:247
 
 ## CLI Cheat Sheet
 ```bash

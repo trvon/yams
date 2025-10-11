@@ -32,6 +32,7 @@ using yams::common::resolve::Target;
 
 using yams::metadata::DocumentInfo;
 using yams::metadata::IMetadataRepository;
+using yams::metadata::PathTreeNode;
 
 // Minimal mock for IMetadataRepository (override only what we call)
 class MockRepo : public IMetadataRepository {
@@ -285,6 +286,14 @@ public:
     Result<void> accumulatePathTreeCentroid(int64_t, std::span<const float>) override {
         return Result<void>();
     }
+
+    Result<std::vector<DocumentInfo>> findDocumentsByPathTreePrefix(std::string_view, bool,
+                                                                    int) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+    Result<std::vector<PathTreeNode>> listPathTreeChildren(std::string_view, std::size_t) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
     Result<void> upsertPathTreeForDocument(const DocumentInfo&, int64_t, bool,
                                            std::span<const float>) override {
         return Result<void>();
@@ -336,7 +345,7 @@ TEST(ResolverFilesystemBackend, ResolveNameToAbsoluteFilePath) {
     fs::current_path(oldCwd); // restore cwd
 
     ASSERT_TRUE(res);
-    ASSERT_EQ(res.value().size(), 1);
+    ASSERT_EQ(res.value().size(), 1UL);
     EXPECT_EQ(res.value()[0].id, fs::absolute(file).string());
     EXPECT_EQ(res.value()[0].display, fs::absolute(file).string());
 

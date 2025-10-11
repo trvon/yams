@@ -1,4 +1,5 @@
 # YAMS MCP Server Guide
+ # YAMS MCP Server Guide
 
 A comprehensive guide for using YAMS as a Model Context Protocol (MCP) server with AI assistants.
 
@@ -20,102 +21,6 @@ yams serve
 
 # Docker (stdio transport)
 docker run -i ghcr.io/trvon/yams:latest serve
-```
-
-## Transport Options
-
-### Stdio Transport
-
-The stdio transport uses standard input/output for JSON-RPC communication. This is the standard for local MCP integrations.
-
-**Message Format:**
-YAMS follows the [Model Context Protocol stdio specification](https://spec.modelcontextprotocol.io/specification/2025-03-26/basic/transports/#stdio) using **newline-delimited JSON (NDJSON)**:
-- Each message is a single line of JSON followed by a newline character (`\n`)
-- Messages MUST NOT contain embedded newlines in the JSON
-- Simple format: `{"jsonrpc":"2.0",...}\n`
-
-**Backwards Compatibility:**
-For compatibility with legacy clients, YAMS can read LSP-style Content-Length framing on input, but always outputs standard NDJSON per the MCP specification.
-
-**When to use:**
-- Claude Desktop integration
-- Local AI assistants
-- Direct process communication
-
-**Characteristics:**
-- No network exposure
-- Secure by default
-- Simple configuration
-
-### HTTP + SSE Transport (Default)
-
-The HTTP + SSE transport provides a network-accessible interface for the MCP server, enabling web-based or remote clients.
-
-**When to use:**
-- Web-based AI applications
-- Remote AI assistants
-- Cross-language integrations
-
-**Characteristics:**
-- Network accessible
-- Supports Server-Sent Events for notifications
-- Configurable bind address and port
-
-**Configuration:**
-- Default bind address: `127.0.0.1:8757`
-- JSON-RPC endpoint: `POST /mcp/jsonrpc`
-- SSE endpoint: `GET /mcp/events?session=<sessionId>`
-- To change the bind address, set the environment variable: `YAMS_MCP_HTTP_BIND=your_address:your_port`
-
-**Session Management:**
-- Initialize via `POST /mcp/jsonrpc`; the result of the `initialize` method will include a `sessionId`.
-- Open an SSE connection at `GET /mcp/events?session=<sessionId>` using the obtained `sessionId` to receive `notifications/ready`, logs, and progress updates.
-- Send the `initialized` notification via `POST /mcp/jsonrpc` using the same session to trigger the server's readiness.
-
-
-
-## Claude Desktop Integration
-
-### Configuration
-
-Add YAMS to your Claude Desktop configuration file:
-
-**macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-**Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
-
-```json
-{
-  "mcpServers": {
-    "yams": {
-      "command": "yams",
-      "args": ["serve"],
-      "env": {
-        "YAMS_STORAGE": "/path/to/your/yams/storage"
-      }
-    }
-  }
-}
-```
-
-### Docker Configuration for Claude Desktop
-
-```json
-{
-  "mcpServers": {
-    "yams": {
-      "command": "docker",
-      "args": [
-        "run",
-        "-i",
-        "--rm",
-        "-v", "/path/to/yams/storage:/data",
-        "-e", "YAMS_STORAGE=/data",
-        "ghcr.io/trvon/yams:latest",
-        "serve"
-      ]
-    }
-  }
-}
 ```
 
 After updating the configuration, restart Claude Desktop to load the MCP server.

@@ -40,6 +40,14 @@ public:
         return MetadataRepository::queryDocuments(options);
     }
 
+    Result<std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>>>
+    getMetadataForDocuments(std::span<const int64_t> documentIds) override {
+        if (consume(getAllMetadataFailures_)) {
+            return Error{ErrorCode::NotInitialized, "metadata warming up"};
+        }
+        return MetadataRepository::getMetadataForDocuments(documentIds);
+    }
+
     Result<std::optional<DocumentInfo>> findDocumentByExactPath(const std::string& path) override {
         return MetadataRepository::findDocumentByExactPath(path);
     }

@@ -57,14 +57,15 @@ struct SearchRequest {
     std::string hashQuery;              // Search by file hash
 
     // Engine-level filtering (parity with app::services::SearchRequest)
-    std::string pathPattern;       // Glob-like filename/path filter
-    std::vector<std::string> tags; // Filter by tags (presence-based)
-    bool matchAllTags = false;     // Require all specified tags
-    std::string extension;         // File extension filter
-    std::string mimeType;          // MIME type filter
-    std::string fileType;          // High-level file type
-    bool textOnly{false};          // Text-only filter
-    bool binaryOnly{false};        // Binary-only filter
+    std::string pathPattern; // Glob-like filename/path filter (legacy, single pattern)
+    std::vector<std::string> pathPatterns; // Multiple glob patterns (preferred over pathPattern)
+    std::vector<std::string> tags;         // Filter by tags (presence-based)
+    bool matchAllTags = false;             // Require all specified tags
+    std::string extension;                 // File extension filter
+    std::string mimeType;                  // MIME type filter
+    std::string fileType;                  // High-level file type
+    bool textOnly{false};                  // Text-only filter
+    bool binaryOnly{false};                // Binary-only filter
     // Time filters
     std::string createdAfter;
     std::string createdBefore;
@@ -84,9 +85,10 @@ struct SearchRequest {
             << timeout << searchType << pathsOnly << showHash << verbose << jsonOutput
             << showLineNumbers << static_cast<int32_t>(afterContext)
             << static_cast<int32_t>(beforeContext) << static_cast<int32_t>(context) << hashQuery
-            << pathPattern << tags << matchAllTags << extension << mimeType << fileType << textOnly
-            << binaryOnly << createdAfter << createdBefore << modifiedAfter << modifiedBefore
-            << indexedAfter << indexedBefore << static_cast<int32_t>(vectorStageTimeoutMs)
+            << pathPattern << pathPatterns << tags << matchAllTags << extension << mimeType
+            << fileType << textOnly << binaryOnly << createdAfter << createdBefore << modifiedAfter
+            << modifiedBefore << indexedAfter << indexedBefore
+            << static_cast<int32_t>(vectorStageTimeoutMs)
             << static_cast<int32_t>(keywordStageTimeoutMs)
             << static_cast<int32_t>(snippetHydrationTimeoutMs);
     }
@@ -182,6 +184,11 @@ struct SearchRequest {
             req.pathPattern = std::move(pp.value());
         } else {
             return pp.error();
+        }
+        if (auto pps = deser.readStringVector(); pps) {
+            req.pathPatterns = std::move(pps.value());
+        } else {
+            return pps.error();
         }
         if (auto tg = deser.readStringVector(); tg) {
             req.tags = std::move(tg.value());
@@ -2028,6 +2035,28 @@ struct PrepareSessionRequest {
     }
 };
 
+// File history request (PBI-043 enhancement)
+struct FileHistoryRequest {
+    std::string filepath; // Absolute path to query history for
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << filepath;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<FileHistoryRequest> deserialize(Deserializer& deser) {
+        FileHistoryRequest req;
+        auto fp = deser.readString();
+        if (!fp)
+            return fp.error();
+        req.filepath = std::move(fp.value());
+        return req;
+    }
+};
+
 // Plugin management requests
 struct PluginScanRequest {
     std::string dir;    // optional
@@ -2163,16 +2192,15 @@ struct RemovePathSelectorRequest;
 struct ListTreeDiffRequest;
 
 // Variant type for all requests
-using Request =
-    std::variant<SearchRequest, GetRequest, GetInitRequest, GetChunkRequest, GetEndRequest,
-                 DeleteRequest, ListRequest, ShutdownRequest, StatusRequest, PingRequest,
-                 GenerateEmbeddingRequest, BatchEmbeddingRequest, LoadModelRequest,
-                 UnloadModelRequest, ModelStatusRequest, AddDocumentRequest, GrepRequest,
-                 UpdateDocumentRequest, DownloadRequest, GetStatsRequest, PrepareSessionRequest,
-                 EmbedDocumentsRequest, PluginScanRequest, PluginLoadRequest, PluginUnloadRequest,
-                 PluginTrustListRequest, PluginTrustAddRequest, PluginTrustRemoveRequest,
-                 CancelRequest, CatRequest, ListSessionsRequest, UseSessionRequest,
-                 AddPathSelectorRequest, RemovePathSelectorRequest, ListTreeDiffRequest>;
+using Request = std::variant<
+    SearchRequest, GetRequest, GetInitRequest, GetChunkRequest, GetEndRequest, DeleteRequest,
+    ListRequest, ShutdownRequest, StatusRequest, PingRequest, GenerateEmbeddingRequest,
+    BatchEmbeddingRequest, LoadModelRequest, UnloadModelRequest, ModelStatusRequest,
+    AddDocumentRequest, GrepRequest, UpdateDocumentRequest, DownloadRequest, GetStatsRequest,
+    PrepareSessionRequest, EmbedDocumentsRequest, PluginScanRequest, PluginLoadRequest,
+    PluginUnloadRequest, PluginTrustListRequest, PluginTrustAddRequest, PluginTrustRemoveRequest,
+    CancelRequest, CatRequest, ListSessionsRequest, UseSessionRequest, AddPathSelectorRequest,
+    RemovePathSelectorRequest, ListTreeDiffRequest, FileHistoryRequest>;
 
 // ============================================================================
 // Response Types
@@ -4197,6 +4225,103 @@ struct GetStatsResponse {
     }
 };
 
+// File history response (PBI-043 enhancement)
+struct FileVersion {
+    std::string snapshotId;
+    std::string hash;
+    uint64_t size = 0;
+    int64_t indexedTimestamp = 0; // Unix timestamp in seconds
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << snapshotId << hash << size << indexedTimestamp;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<FileVersion> deserialize(Deserializer& deser) {
+        FileVersion fv;
+        auto sid = deser.readString();
+        if (!sid)
+            return sid.error();
+        fv.snapshotId = std::move(sid.value());
+
+        auto h = deser.readString();
+        if (!h)
+            return h.error();
+        fv.hash = std::move(h.value());
+
+        auto s = deser.template read<uint64_t>();
+        if (!s)
+            return s.error();
+        fv.size = s.value();
+
+        auto ts = deser.template read<int64_t>();
+        if (!ts)
+            return ts.error();
+        fv.indexedTimestamp = ts.value();
+
+        return fv;
+    }
+};
+
+struct FileHistoryResponse {
+    std::string filepath;
+    std::vector<FileVersion> versions;
+    uint32_t totalVersions = 0;
+    bool found = false;
+    std::string message; // User-friendly message (e.g., "File not found in any snapshot")
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << filepath << static_cast<uint32_t>(versions.size());
+        for (const auto& v : versions)
+            v.serialize(ser);
+        ser << totalVersions << found << message;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<FileHistoryResponse> deserialize(Deserializer& deser) {
+        FileHistoryResponse res;
+
+        auto fp = deser.readString();
+        if (!fp)
+            return fp.error();
+        res.filepath = std::move(fp.value());
+
+        auto cnt = deser.template read<uint32_t>();
+        if (!cnt)
+            return cnt.error();
+        res.versions.reserve(cnt.value());
+        for (uint32_t i = 0; i < cnt.value(); ++i) {
+            auto fv = FileVersion::deserialize(deser);
+            if (!fv)
+                return fv.error();
+            res.versions.push_back(std::move(fv.value()));
+        }
+
+        auto tv = deser.template read<uint32_t>();
+        if (!tv)
+            return tv.error();
+        res.totalVersions = tv.value();
+
+        auto f = deser.template read<bool>();
+        if (!f)
+            return f.error();
+        res.found = f.value();
+
+        auto msg = deser.readString();
+        if (!msg)
+            return msg.error();
+        res.message = std::move(msg.value());
+
+        return res;
+    }
+};
+
 // Plugin responses
 struct PluginRecord {
     std::string name;
@@ -4748,7 +4873,7 @@ using Response =
                  AddDocumentResponse, GrepResponse, UpdateDocumentResponse, GetStatsResponse,
                  DownloadResponse, DeleteResponse, PrepareSessionResponse, EmbedDocumentsResponse,
                  PluginScanResponse, PluginLoadResponse, PluginTrustListResponse, CatResponse,
-                 ListSessionsResponse, ListTreeDiffResponse,
+                 ListSessionsResponse, ListTreeDiffResponse, FileHistoryResponse,
                  // Streaming events (progress/heartbeats)
                  EmbeddingEvent, ModelLoadEvent>;
 
@@ -4816,6 +4941,8 @@ enum class MessageType : uint8_t {
     RemovePathSelectorRequest = 29,
     // Tree diff requests (PBI-043)
     ListTreeDiffRequest = 30,
+    // File history request (PBI-043 enhancement)
+    FileHistoryRequest = 31,
 
     // Responses
     SearchResponse = 128,
@@ -4843,6 +4970,8 @@ enum class MessageType : uint8_t {
     ListSessionsResponse = 153,
     // Tree diff responses (PBI-043)
     ListTreeDiffResponse = 154,
+    // File history response (PBI-043 enhancement)
+    FileHistoryResponse = 155,
     // Events
     EmbeddingEvent = 149,
     ModelLoadEvent = 150,

@@ -62,8 +62,21 @@ TEST_F(ServiceManagerTest, GetName) {
 TEST_F(ServiceManagerTest, ServiceAccessorsAfterConstruction) {
     ServiceManager sm(config_, state_);
 
-    // VectorDatabase is initialized in constructor
-    EXPECT_NE(sm.getVectorDatabase(), nullptr);
+    auto envTruthy = [](const char* v) {
+        if (!v)
+            return false;
+        std::string s(v);
+        std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+        return s == "1" || s == "true" || s == "yes" || s == "on";
+    };
+    const bool vectorsDisabled = envTruthy(std::getenv("YAMS_DISABLE_VECTORS")) ||
+                                 envTruthy(std::getenv("YAMS_DISABLE_VECTOR_DB"));
+
+    if (vectorsDisabled) {
+        EXPECT_EQ(sm.getVectorDatabase(), nullptr);
+    } else {
+        EXPECT_NE(sm.getVectorDatabase(), nullptr);
+    }
 
     // Other services are initialized during initialize(), not in constructor
     EXPECT_EQ(sm.getContentStore(), nullptr);

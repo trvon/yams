@@ -190,7 +190,8 @@ private:
      * @return Tree hash or error
      */
     Result<std::string> buildTreeRecursive(const std::string& dirPath,
-                                           const std::vector<std::string>& excludePatterns);
+                                           const std::vector<std::string>& excludePatterns,
+                                           const std::string& rootPath);
 
     /**
      * @brief Store tree node in CAS
@@ -205,7 +206,8 @@ private:
      * @param patterns Glob patterns
      * @return True if path should be excluded
      */
-    bool shouldExclude(std::string_view path, const std::vector<std::string>& patterns) const;
+    bool shouldExclude(std::string_view path, std::string_view root,
+                       const std::vector<std::string>& patterns, bool isDirectory) const;
 
     std::shared_ptr<::yams::storage::IStorageEngine> storageEngine_;
 };

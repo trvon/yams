@@ -445,10 +445,10 @@ public:
         const std::string type = req.type.empty() ? "hybrid" : req.type;
 
         spdlog::info("SearchService: type='{}' fuzzy={} sim={} pathsOnly={} literal={} limit={} "
-                     "filters: ext='{}' mime='{}' path='{}' tags={} allTags={}",
+                     "filters: ext='{}' mime='{}' path='{}' pathPatterns={} tags={} allTags={}",
                      type, req.fuzzy, req.similarity, req.pathsOnly, req.literalText, req.limit,
-                     req.extension, req.mimeType, req.pathPattern, req.tags.size(),
-                     req.matchAllTags);
+                     req.extension, req.mimeType, req.pathPattern, req.pathPatterns.size(),
+                     req.tags.size(), req.matchAllTags);
 
         Result<SearchResponse> result(Error{ErrorCode::Unknown, "Search path not taken"});
 
@@ -505,20 +505,49 @@ public:
             result = metadataSearch(normalizedReq, &metadataTelemetry);
         }
 
-        if (result && !req.pathPattern.empty()) {
+        // Path filtering: prefer pathPatterns (multiple patterns) over legacy pathPattern
+        const auto& patterns =
+            !req.pathPatterns.empty()
+                ? req.pathPatterns
+                : (!req.pathPattern.empty() ? std::vector<std::string>{req.pathPattern}
+                                            : std::vector<std::string>{});
+
+        if (result && !patterns.empty()) {
             auto resp = std::move(result).value();
             std::vector<SearchItem> filtered;
             for (const auto& item : resp.results) {
-                bool pathOk = true;
-                if (hasWildcard(req.pathPattern)) {
-                    std::string pattern = req.pathPattern;
-                    if (!pattern.empty() && pattern.front() != '*' && pattern.front() != '/' &&
-                        pattern.find(":/") == std::string::npos) {
-                        pattern = "*" + pattern;
+                bool pathOk = false;
+                // Match ANY pattern (OR logic)
+                for (const auto& pattern : patterns) {
+                    if (hasWildcard(pattern)) {
+                        std::string normalized = pattern;
+                        // Normalize glob patterns for path matching:
+                        // - "*.ext" should match any path ending in .ext (prepend **/)
+                        // - "dir/*.ext" should match dir/*.ext (prepend **)
+                        // - "**/pattern" and "/pattern" are already absolute
+                        if (!normalized.empty() && normalized.front() == '*' &&
+                            (normalized.size() == 1 || normalized[1] != '*')) {
+                            // Single * at start (e.g., "*.md") - match anywhere in path
+                            normalized = "**/" + normalized;
+                        } else if (!normalized.empty() && normalized.front() != '*' &&
+                                   normalized.front() != '/' &&
+                                   normalized.find(":/") == std::string::npos &&
+                                   normalized.find("**/") != 0) {
+                            // Relative pattern without leading ** (e.g., "src/*.cpp") - match
+                            // anywhere
+                            normalized = "**/" + normalized;
+                        }
+                        if (wildcardMatch(item.path, normalized)) {
+                            pathOk = true;
+                            break;
+                        }
+                    } else {
+                        // Non-wildcard pattern: substring match
+                        if (item.path.find(pattern) != std::string::npos) {
+                            pathOk = true;
+                            break;
+                        }
                     }
-                    pathOk = wildcardMatch(item.path, pattern);
-                } else {
-                    pathOk = item.path.find(req.pathPattern) != std::string::npos;
                 }
                 if (pathOk) {
                     filtered.push_back(item);
@@ -1327,6 +1356,46 @@ private:
                     ids.push_back(doc.id);
                 }
                 docIds = std::move(ids);
+            }
+        }
+
+        // Pre-filter by pathPatterns using SQL-level glob matching (like grep does)
+        // This significantly improves performance by reducing the FTS search scope
+        if (!req.pathPatterns.empty() && !docIds.has_value()) {
+            spdlog::debug("[SearchService] Pre-filtering by {} path patterns before FTS",
+                          req.pathPatterns.size());
+            auto patternDocsRes =
+                metadata::queryDocumentsByGlobPatterns(*ctx_.metadataRepo, req.pathPatterns, 0);
+            if (patternDocsRes) {
+                std::vector<int64_t> ids;
+                ids.reserve(patternDocsRes.value().size());
+                for (const auto& doc : patternDocsRes.value()) {
+                    ids.push_back(doc.id);
+                }
+                spdlog::debug("[SearchService] Path pattern filter matched {} documents",
+                              ids.size());
+                docIds = std::move(ids);
+            }
+        } else if (!req.pathPatterns.empty() && docIds.has_value()) {
+            // If we already have docIds from tags, intersect with path-filtered docs
+            spdlog::debug("[SearchService] Intersecting tag filter with {} path patterns",
+                          req.pathPatterns.size());
+            auto patternDocsRes =
+                metadata::queryDocumentsByGlobPatterns(*ctx_.metadataRepo, req.pathPatterns, 0);
+            if (patternDocsRes) {
+                std::unordered_set<int64_t> pathDocIds;
+                for (const auto& doc : patternDocsRes.value()) {
+                    pathDocIds.insert(doc.id);
+                }
+                std::vector<int64_t> intersected;
+                for (int64_t id : docIds.value()) {
+                    if (pathDocIds.count(id) > 0) {
+                        intersected.push_back(id);
+                    }
+                }
+                spdlog::debug("[SearchService] After intersection: {} documents remain",
+                              intersected.size());
+                docIds = std::move(intersected);
             }
         }
 

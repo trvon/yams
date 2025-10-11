@@ -9,6 +9,7 @@
 #include <span>
 #include <sstream>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 #include <yams/common/utf8_utils.h>
 #include <yams/metadata/document_metadata.h>
@@ -31,6 +32,20 @@ constexpr const char* kDocumentColumnListCompat =
     "created_time, modified_time, indexed_time, content_extracted, extraction_status, "
     "extraction_error, NULL as path_prefix, '' as reverse_path, '' as path_hash, '' as "
     "parent_hash, 0 as path_depth";
+
+constexpr const char* kDocumentColumnListNewQualified =
+    "documents.id, documents.file_path, documents.file_name, documents.file_extension, "
+    "documents.file_size, documents.sha256_hash, documents.mime_type, documents.created_time, "
+    "documents.modified_time, documents.indexed_time, documents.content_extracted, "
+    "documents.extraction_status, documents.extraction_error, documents.path_prefix, "
+    "documents.reverse_path, documents.path_hash, documents.parent_hash, documents.path_depth";
+
+constexpr const char* kDocumentColumnListCompatQualified =
+    "documents.id, documents.file_path, documents.file_name, documents.file_extension, "
+    "documents.file_size, documents.sha256_hash, documents.mime_type, documents.created_time, "
+    "documents.modified_time, documents.indexed_time, documents.content_extracted, "
+    "documents.extraction_status, documents.extraction_error, NULL as path_prefix, '' as "
+    "reverse_path, '' as path_hash, '' as parent_hash, 0 as path_depth";
 
 constexpr int64_t kPathTreeNullParent = PathTreeNode::kNullParent;
 
@@ -253,6 +268,48 @@ MetadataRepository::MetadataRepository(ConnectionPool& pool) : pool_(pool) {
         spdlog::warn("Failed to initialize database schema: {}", initResult.error().message);
         // Continue anyway - the error will be caught when operations are attempted
     }
+
+    auto featureResult = pool_.withConnection([this](Database& db) -> Result<void> {
+        std::unordered_set<std::string> columns;
+        if (auto tableInfo = db.prepare("PRAGMA table_info(documents)"); tableInfo) {
+            Statement stmt = std::move(tableInfo).value();
+            while (true) {
+                auto step = stmt.step();
+                if (!step)
+                    return step.error();
+                if (!step.value())
+                    break;
+                columns.insert(stmt.getString(1));
+            }
+        } else {
+            return tableInfo.error();
+        }
+
+        const bool hasPrefix = columns.count("path_prefix") > 0;
+        const bool hasReverse = columns.count("reverse_path") > 0;
+        const bool hasHash = columns.count("path_hash") > 0;
+        const bool hasParent = columns.count("parent_hash") > 0;
+        const bool hasDepth = columns.count("path_depth") > 0;
+        hasPathIndexing_ = hasPrefix && hasReverse && hasHash && hasParent && hasDepth;
+
+        auto ftsResult = db.tableExists("documents_path_fts");
+        if (ftsResult) {
+            pathFtsAvailable_ = ftsResult.value();
+        } else {
+            pathFtsAvailable_ = false;
+            spdlog::debug("MetadataRepository: failed to detect documents_path_fts table: {}",
+                          ftsResult.error().message);
+        }
+
+        return Result<void>();
+    });
+
+    if (!featureResult) {
+        spdlog::warn("MetadataRepository: failed to detect path indexing features: {}",
+                     featureResult.error().message);
+    }
+    spdlog::debug("MetadataRepository: hasPathIndexing={} pathFtsAvailable={}", hasPathIndexing_,
+                  pathFtsAvailable_);
 }
 
 // Legacy makeSelect removed; use sql::QuerySpec in callers.
@@ -260,28 +317,52 @@ MetadataRepository::MetadataRepository(ConnectionPool& pool) : pool_(pool) {
 // Document operations
 Result<int64_t> MetadataRepository::insertDocument(const DocumentInfo& info) {
     return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
-        auto stmtResult = db.prepare(R"(
-            INSERT INTO documents (
-                file_path, file_name, file_extension, file_size, sha256_hash,
-                mime_type, created_time, modified_time, indexed_time,
-                content_extracted, extraction_status, extraction_error,
-                path_prefix, reverse_path, path_hash, parent_hash, path_depth
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        )");
+        // Build INSERT SQL based on whether path indexing columns exist
+        std::string sql = "INSERT INTO documents (file_path, file_name, file_extension, "
+                          "file_size, sha256_hash, mime_type, created_time, modified_time, "
+                          "indexed_time, content_extracted, extraction_status, extraction_error";
+
+        if (hasPathIndexing_) {
+            sql += ", path_prefix, reverse_path, path_hash, parent_hash, path_depth";
+        }
+
+        sql += ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
+
+        if (hasPathIndexing_) {
+            sql += ", ?, ?, ?, ?, ?";
+        }
+
+        sql += ")";
+
+        auto stmtResult = db.prepare(sql);
 
         if (!stmtResult)
             return stmtResult.error();
 
         Statement stmt = std::move(stmtResult).value();
-        auto bindResult = stmt.bindAll(
-            info.filePath, info.fileName, info.fileExtension, info.fileSize, info.sha256Hash,
-            info.mimeType, info.createdTime, info.modifiedTime, info.indexedTime,
-            info.contentExtracted ? 1 : 0, ExtractionStatusUtils::toString(info.extractionStatus),
-            info.extractionError, info.pathPrefix, info.reversePath, info.pathHash, info.parentHash,
-            info.pathDepth);
 
-        if (!bindResult)
-            return bindResult.error();
+        // Bind common columns first
+        if (hasPathIndexing_) {
+            auto bindResult = stmt.bindAll(
+                info.filePath, info.fileName, info.fileExtension, info.fileSize, info.sha256Hash,
+                info.mimeType, info.createdTime, info.modifiedTime, info.indexedTime,
+                info.contentExtracted ? 1 : 0,
+                ExtractionStatusUtils::toString(info.extractionStatus), info.extractionError,
+                info.pathPrefix, info.reversePath, info.pathHash, info.parentHash, info.pathDepth);
+
+            if (!bindResult)
+                return bindResult.error();
+        } else {
+            // Compat mode: only bind the 12 columns that exist
+            auto bindResult = stmt.bindAll(
+                info.filePath, info.fileName, info.fileExtension, info.fileSize, info.sha256Hash,
+                info.mimeType, info.createdTime, info.modifiedTime, info.indexedTime,
+                info.contentExtracted ? 1 : 0,
+                ExtractionStatusUtils::toString(info.extractionStatus), info.extractionError);
+
+            if (!bindResult)
+                return bindResult.error();
+        }
 
         auto execResult = stmt.execute();
         if (!execResult)
@@ -1409,10 +1490,15 @@ MetadataRepository::queryDocuments(const DocumentQueryOptions& options) {
     return executeQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
             const bool joinFtsForContains = options.containsFragment && options.containsUsesFts &&
-                                            !options.containsFragment->empty();
+                                            !options.containsFragment->empty() && pathFtsAvailable_;
 
             std::string sql = "SELECT ";
-            sql += hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
+            if (joinFtsForContains) {
+                sql += hasPathIndexing_ ? kDocumentColumnListNewQualified
+                                        : kDocumentColumnListCompatQualified;
+            } else {
+                sql += hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
+            }
             sql += " FROM documents";
             if (joinFtsForContains)
                 sql += " JOIN documents_path_fts ON documents.id = documents_path_fts.rowid";
@@ -1596,8 +1682,19 @@ MetadataRepository::queryDocuments(const DocumentQueryOptions& options) {
             }
 
             auto stmtResult = db.prepare(sql);
-            if (!stmtResult)
+            if (!stmtResult) {
+                if (joinFtsForContains && options.containsUsesFts) {
+                    spdlog::debug("MetadataRepository::queryDocuments prepare failed (falling back "
+                                  "to without FTS): {}\nSQL: {}",
+                                  stmtResult.error().message, sql);
+                    auto fallbackOpts = options;
+                    fallbackOpts.containsUsesFts = false;
+                    return queryDocuments(fallbackOpts);
+                }
+                spdlog::error("MetadataRepository::queryDocuments prepare failed: {}\nSQL: {}",
+                              stmtResult.error().message, sql);
                 return stmtResult.error();
+            }
 
             Statement stmt = std::move(stmtResult).value();
             int index = 1;
@@ -1608,16 +1705,31 @@ MetadataRepository::queryDocuments(const DocumentQueryOptions& options) {
                 } else {
                     bindResult = stmt.bind(index, param.integer);
                 }
-                if (!bindResult)
+                if (!bindResult) {
+                    spdlog::error(
+                        "MetadataRepository::queryDocuments bind failed (index={}): {}\nSQL: {}",
+                        index, bindResult.error().message, sql);
                     return bindResult.error();
+                }
                 ++index;
             }
 
             std::vector<DocumentInfo> docs;
             while (true) {
                 auto stepResult = stmt.step();
-                if (!stepResult)
+                if (!stepResult) {
+                    if (joinFtsForContains && options.containsUsesFts) {
+                        spdlog::debug("MetadataRepository::queryDocuments step failed (falling "
+                                      "back to without FTS): {}\nSQL: {}",
+                                      stepResult.error().message, sql);
+                        auto fallbackOpts = options;
+                        fallbackOpts.containsUsesFts = false;
+                        return queryDocuments(fallbackOpts);
+                    }
+                    spdlog::error("MetadataRepository::queryDocuments step failed: {}\nSQL: {}",
+                                  stepResult.error().message, sql);
                     return stepResult.error();
+                }
                 if (!stepResult.value())
                     break;
 
@@ -1871,11 +1983,10 @@ MetadataRepository::batchGetDocumentsByHash(const std::vector<std::string>& hash
 
     return executeQuery<std::unordered_map<std::string, DocumentInfo>>(
         [&](Database& db) -> Result<std::unordered_map<std::string, DocumentInfo>> {
-            std::string sql =
-                "SELECT id, file_path, file_name, file_extension, file_size, "
-                "sha256_hash, mime_type, created, modified, indexed, "
-                "content_extracted, embedding_model_id, extraction_status, extraction_error "
-                "FROM documents WHERE sha256_hash IN (";
+            std::string sql = "SELECT id, file_path, file_name, file_extension, file_size, "
+                              "sha256_hash, mime_type, created_time, modified_time, indexed_time, "
+                              "content_extracted, extraction_status, extraction_error "
+                              "FROM documents WHERE sha256_hash IN (";
             for (size_t i = 0; i < hashes.size(); ++i) {
                 if (i > 0)
                     sql += ",";
@@ -1921,8 +2032,8 @@ MetadataRepository::batchGetDocumentsByHash(const std::vector<std::string>& hash
                 info.setModifiedTime(stmt.getInt64(8));
                 info.setIndexedTime(stmt.getInt64(9));
                 info.contentExtracted = stmt.getInt(10) != 0;
-                info.extractionStatus = ExtractionStatusUtils::fromString(stmt.getString(12));
-                info.extractionError = stmt.getString(13);
+                info.extractionStatus = ExtractionStatusUtils::fromString(stmt.getString(11));
+                info.extractionError = stmt.getString(12);
 
                 result[info.sha256Hash] = std::move(info);
             }
@@ -1939,8 +2050,9 @@ MetadataRepository::batchGetContent(const std::vector<int64_t>& documentIds) {
 
     return executeQuery<std::unordered_map<int64_t, DocumentContent>>(
         [&](Database& db) -> Result<std::unordered_map<int64_t, DocumentContent>> {
-            std::string sql = "SELECT document_id, content_hash, content_text, content_mime "
-                              "FROM document_content WHERE document_id IN (";
+            std::string sql =
+                "SELECT document_id, content_text, content_length, extraction_method, language "
+                "FROM document_content WHERE document_id IN (";
             for (size_t i = 0; i < documentIds.size(); ++i) {
                 if (i > 0)
                     sql += ",";
@@ -1977,7 +2089,11 @@ MetadataRepository::batchGetContent(const std::vector<int64_t>& documentIds) {
 
                 DocumentContent content;
                 int64_t docId = stmt.getInt64(0);
-                content.contentText = stmt.getString(2);
+                content.documentId = docId;
+                content.contentText = stmt.getString(1);
+                content.contentLength = stmt.getInt64(2);
+                content.extractionMethod = stmt.getString(3);
+                content.language = stmt.getString(4);
                 result[docId] = std::move(content);
             }
 
@@ -2385,6 +2501,63 @@ MetadataRepository::findPathTreeNodeByFullPath(std::string_view fullPath) {
         });
 }
 
+Result<std::vector<PathTreeNode>>
+MetadataRepository::listPathTreeChildren(std::string_view fullPath, std::size_t limit) {
+    return executeQuery<std::vector<PathTreeNode>>(
+        [&](Database& db) -> Result<std::vector<PathTreeNode>> {
+            bool isRoot = fullPath.empty() || fullPath == "/";
+            int64_t parentId = kPathTreeNullParent;
+
+            if (!isRoot) {
+                auto parentRes = findPathTreeNodeByFullPath(fullPath);
+                if (!parentRes)
+                    return parentRes.error();
+                const auto& parentOpt = parentRes.value();
+                if (!parentOpt)
+                    return std::vector<PathTreeNode>{};
+                parentId = parentOpt->id;
+            }
+
+            std::string sql = "SELECT node_id, parent_id, path_segment, full_path, doc_count, "
+                              "centroid_weight, centroid "
+                              "FROM path_tree_nodes ";
+            if (isRoot) {
+                sql += "WHERE parent_id IS NULL ";
+            } else {
+                sql += "WHERE parent_id = ? ";
+            }
+            sql += "ORDER BY doc_count DESC, path_segment ASC ";
+            if (limit > 0)
+                sql += "LIMIT ?";
+
+            auto stmtResult = db.prepare(sql);
+            if (!stmtResult)
+                return stmtResult.error();
+
+            auto stmt = std::move(stmtResult).value();
+            int bindIndex = 1;
+            if (!isRoot) {
+                if (auto bindParent = stmt.bind(bindIndex++, parentId); !bindParent)
+                    return bindParent.error();
+            }
+            if (limit > 0) {
+                if (auto bindLimit = stmt.bind(bindIndex, static_cast<int64_t>(limit)); !bindLimit)
+                    return bindLimit.error();
+            }
+
+            std::vector<PathTreeNode> children;
+            while (true) {
+                auto step = stmt.step();
+                if (!step)
+                    return step.error();
+                if (!step.value())
+                    break;
+                children.push_back(mapPathTreeNodeRow(stmt));
+            }
+            return children;
+        });
+}
+
 namespace {
 std::vector<std::string> splitPathSegments(const std::string& normalizedPath) {
     std::vector<std::string> segments;
@@ -2455,6 +2628,21 @@ Result<void> MetadataRepository::upsertPathTreeForDocument(const DocumentInfo& i
     }
 
     return Result<void>();
+}
+
+// -----------------------------------------------------------------------------
+// Tree-based document queries (PBI-043 integration)
+// -----------------------------------------------------------------------------
+
+Result<std::vector<DocumentInfo>>
+MetadataRepository::findDocumentsByPathTreePrefix(std::string_view pathPrefix,
+                                                  bool includeSubdirectories, int limit) {
+    DocumentQueryOptions opts;
+    if (!pathPrefix.empty())
+        opts.pathPrefix = std::string(pathPrefix);
+    opts.includeSubdirectories = includeSubdirectories;
+    opts.limit = limit;
+    return queryDocuments(opts);
 }
 
 // -----------------------------------------------------------------------------

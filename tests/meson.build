@@ -159,6 +159,7 @@ subdir('unit')
 
 if get_option('enable-integration-tests')
   subdir('integration/smoke')
+  subdir('integration/daemon')
 endif
 if get_option('enable-mobile-tests')
   subdir('mobile')

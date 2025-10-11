@@ -349,6 +349,10 @@ Result<void> YamsDaemon::start() {
                     }
                 }
 
+                if (serviceManager_ && serviceManager_->shouldPreloadEmbeddings()) {
+                    serviceManager_->scheduleEmbeddingWarmup();
+                }
+
                 // Model preload disabled - models will load on-demand when first embedding is
                 // requested This avoids complexity with thread pool executors and ensures fast
                 // daemon startup

@@ -123,6 +123,7 @@ struct MCPSearchRequest {
     int context = 0;
     std::string colorMode = "never";
     std::string pathPattern;
+    std::vector<std::string> includePatterns; // Multiple include patterns (OR logic)
     std::vector<std::string> tags;
     bool matchAllTags = false;
     bool includeDiff = false; // include structured diff when pathPattern refers to a local file

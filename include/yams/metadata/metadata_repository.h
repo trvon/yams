@@ -1,5 +1,6 @@
 #pragma once
 
+#include <spdlog/spdlog.h>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -225,9 +226,16 @@ public:
                                                     std::span<const float> embeddingValues) = 0;
     virtual Result<std::optional<PathTreeNode>>
     findPathTreeNodeByFullPath(std::string_view fullPath) = 0;
+    virtual Result<std::vector<PathTreeNode>> listPathTreeChildren(std::string_view fullPath,
+                                                                   std::size_t limit = 25) = 0;
     virtual Result<void> upsertPathTreeForDocument(const DocumentInfo& info, int64_t documentId,
                                                    bool isNewDocument,
                                                    std::span<const float> embeddingValues) = 0;
+
+    // Tree-based document queries (PBI-043 integration)
+    virtual Result<std::vector<DocumentInfo>>
+    findDocumentsByPathTreePrefix(std::string_view pathPrefix, bool includeSubdirectories = true,
+                                  int limit = 0) = 0;
 
     // Tree diff persistence (PBI-043)
     virtual Result<void> upsertTreeSnapshot(const TreeSnapshotRecord& record) = 0;
@@ -379,9 +387,16 @@ public:
                                             std::span<const float> embeddingValues) override;
     Result<std::optional<PathTreeNode>>
     findPathTreeNodeByFullPath(std::string_view fullPath) override;
+    Result<std::vector<PathTreeNode>> listPathTreeChildren(std::string_view fullPath,
+                                                           std::size_t limit = 25) override;
     Result<void> upsertPathTreeForDocument(const DocumentInfo& info, int64_t documentId,
                                            bool isNewDocument,
                                            std::span<const float> embeddingValues) override;
+
+    // Tree-based document queries (PBI-043 integration)
+    Result<std::vector<DocumentInfo>>
+    findDocumentsByPathTreePrefix(std::string_view pathPrefix, bool includeSubdirectories = true,
+                                  int limit = 0) override;
 
     // Tree diff persistence
     Result<void> upsertTreeSnapshot(const TreeSnapshotRecord& record) override;
@@ -402,6 +417,7 @@ public:
 private:
     ConnectionPool& pool_;
     bool hasPathIndexing_{false};
+    bool pathFtsAvailable_{false};
     std::shared_ptr<KnowledgeGraphStore> kgStore_; // PBI-043: tree diff KG integration
 
     // Component-owned metrics (updated on insert/delete, read by DaemonMetrics)
@@ -482,6 +498,8 @@ private:
     template <typename T> Result<T> executeQuery(std::function<Result<T>(Database&)> func) {
         auto result = pool_.withConnection(func);
         if (!result.has_value()) {
+            spdlog::error("MetadataRepository::executeQuery connection error: {}",
+                          result.error().message);
             return Error{result.error()};
         }
         if constexpr (std::is_void_v<T>) {

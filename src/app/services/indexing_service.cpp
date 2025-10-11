@@ -135,6 +135,10 @@ public:
             spdlog::info("[IndexingService] addDirectory: collected {} candidate files under '{}'",
                          entries.size(), req.directoryPath);
 
+            // Generate automatic snapshot ID BEFORE processing files so each file gets tagged
+            std::string snapshotId = generateSnapshotId();
+            spdlog::info("[IndexingService] Generated snapshot ID: {}", snapshotId);
+
             const std::size_t backlog = entries.size();
             if (backlog == 0) {
                 publishIngestMetrics(0, 0);
@@ -158,7 +162,7 @@ public:
                                               req.includePatterns, req.excludePatterns);
                         spdlog::info("[IndexingService] candidate: '{}' -> {}", ent.path().string(),
                                      willInclude ? "include" : "skip");
-                        processDirectoryEntry(ent, req, localResp);
+                        processDirectoryEntry(ent, req, localResp, snapshotId);
                         auto leftBefore = remaining.fetch_sub(1, std::memory_order_relaxed);
                         if (leftBefore > 0)
                             publishIngestQueued(leftBefore - 1);
@@ -185,8 +189,8 @@ public:
                          response.filesProcessed, response.filesIndexed, response.filesSkipped,
                          response.filesFailed);
 
-            // Generate automatic snapshot for directory operations
-            response.snapshotId = generateSnapshotId();
+            // Use the pre-generated snapshot ID
+            response.snapshotId = snapshotId;
             response.snapshotLabel = req.snapshotLabel;
 
             // Detect git metadata
@@ -431,7 +435,8 @@ private:
     }
 
     void processDirectoryEntry(const std::filesystem::directory_entry& entry,
-                               const AddDirectoryRequest& req, AddDirectoryResponse& response) {
+                               const AddDirectoryRequest& req, AddDirectoryResponse& response,
+                               const std::string& snapshotId) {
         if (!entry.is_regular_file()) {
             return;
         }
@@ -459,6 +464,8 @@ private:
             // Propagate collection and tags to each stored file
             storeReq.collection = req.collection;
             storeReq.tags = req.tags;
+            // Set automatic snapshot ID for versioning
+            storeReq.snapshotId = snapshotId;
             if (!req.collection.empty()) {
                 storeReq.metadata["collection"] = req.collection;
             }

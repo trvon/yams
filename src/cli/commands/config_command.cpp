@@ -145,6 +145,59 @@ public:
             }
         });
 
+        // Search subcommands (path-tree traversal controls)
+        auto* searchCmd = cmd->add_subcommand("search", "Manage search configuration");
+        searchCmd->require_subcommand();
+
+        auto* pathTreeCmd =
+            searchCmd->add_subcommand("path-tree", "Configure hierarchical path-tree traversal");
+        pathTreeCmd->require_subcommand();
+
+        auto* pathTreeEnableCmd =
+            pathTreeCmd->add_subcommand("enable", "Enable path-tree traversal");
+        pathTreeEnableCmd
+            ->add_option("--mode", pathTreeMode_, "Mode when enabled (fallback|preferred)")
+            ->check(CLI::IsMember({"fallback", "preferred"}));
+        pathTreeEnableCmd->callback([this]() {
+            auto result = executePathTreeEnable();
+            if (!result) {
+                spdlog::error("Enable path-tree failed: {}", result.error().message);
+                std::exit(1);
+            }
+        });
+
+        auto* pathTreeDisableCmd =
+            pathTreeCmd->add_subcommand("disable", "Disable path-tree traversal");
+        pathTreeDisableCmd->callback([this]() {
+            auto result = executePathTreeDisable();
+            if (!result) {
+                spdlog::error("Disable path-tree failed: {}", result.error().message);
+                std::exit(1);
+            }
+        });
+
+        auto* pathTreeModeCmd = pathTreeCmd->add_subcommand("mode", "Set path-tree traversal mode");
+        pathTreeModeCmd->add_option("mode", pathTreeMode_, "fallback|preferred")
+            ->required()
+            ->check(CLI::IsMember({"fallback", "preferred"}));
+        pathTreeModeCmd->callback([this]() {
+            auto result = executePathTreeMode();
+            if (!result) {
+                spdlog::error("Set path-tree mode failed: {}", result.error().message);
+                std::exit(1);
+            }
+        });
+
+        auto* pathTreeStatusCmd =
+            pathTreeCmd->add_subcommand("status", "Show path-tree configuration");
+        pathTreeStatusCmd->callback([this]() {
+            auto result = executePathTreeStatus();
+            if (!result) {
+                spdlog::error("Path-tree status failed: {}", result.error().message);
+                std::exit(1);
+            }
+        });
+
         // Migration subcommand
         auto* migrateCmd = cmd->add_subcommand("migrate", "Migrate configuration to v2");
         migrateCmd->add_option("--config-path", configPath_, "Path to config file");
@@ -242,6 +295,7 @@ private:
     std::string embeddingModel_;
     std::string embeddingPreset_;
     std::string tuningProfile_;
+    std::string pathTreeMode_;
     bool noBackup_ = false;
     bool dryRun_ = false;
 
@@ -903,6 +957,138 @@ private:
                 std::cout << "  - Medium batch size (16)\n";
                 std::cout << "  - Moderate processing (1000ms delay)\n";
                 std::cout << "  - Efficient model (MiniLM)\n";
+            }
+
+            return Result<void>();
+
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string(e.what())};
+        }
+    }
+
+    std::string normalizePathTreeMode(const std::string& value, const std::string& fallback) const {
+        if (value.empty())
+            return fallback;
+        std::string mode = value;
+        std::transform(mode.begin(), mode.end(), mode.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (mode == "fallback" || mode == "preferred")
+            return mode;
+        return fallback;
+    }
+
+    Result<void> executePathTreeEnable() {
+        try {
+            auto mode = normalizePathTreeMode(pathTreeMode_, "preferred");
+
+            auto result = writeConfigValue("search.path_tree.enable", "true");
+            if (!result)
+                return result;
+
+            result = writeConfigValue("search.path_tree.mode", mode);
+            if (!result)
+                return result;
+
+            std::cout << "✓ Path-tree traversal enabled\n";
+            std::cout << "  Mode: " << mode << "\n";
+            if (mode == "fallback") {
+                std::cout
+                    << "  Baseline scans remain as a safety net when tree nodes are missing.\n";
+            } else {
+                std::cout << "  Path-tree results will be preferred for eligible workloads.\n";
+            }
+
+            pathTreeMode_.clear();
+            return Result<void>();
+
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string(e.what())};
+        }
+    }
+
+    Result<void> executePathTreeDisable() {
+        try {
+            auto result = writeConfigValue("search.path_tree.enable", "false");
+            if (!result)
+                return result;
+
+            std::cout << "✓ Path-tree traversal disabled\n";
+            std::cout << "  Workloads will continue to use the legacy scan engine.\n";
+
+            pathTreeMode_.clear();
+            return Result<void>();
+
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string(e.what())};
+        }
+    }
+
+    Result<void> executePathTreeMode() {
+        try {
+            auto mode = normalizePathTreeMode(pathTreeMode_, "");
+            if (mode.empty()) {
+                return Error{ErrorCode::InvalidArgument,
+                             "Mode must be either 'fallback' or 'preferred'"};
+            }
+
+            auto result = writeConfigValue("search.path_tree.mode", mode);
+            if (!result)
+                return result;
+
+            std::cout << "✓ Path-tree mode set to: " << mode << "\n";
+            if (mode == "fallback") {
+                std::cout
+                    << "  Baseline scans will still be used when tree coverage is incomplete.\n";
+            } else {
+                std::cout << "  Path-tree will be preferred whenever the index is available.\n";
+            }
+
+            pathTreeMode_.clear();
+            return Result<void>();
+
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string(e.what())};
+        }
+    }
+
+    Result<void> executePathTreeStatus() {
+        try {
+            auto configPath = getConfigPath();
+            bool hasConfig = fs::exists(configPath);
+            auto config = parseSimpleToml(configPath);
+
+            auto toLower = [](std::string v) {
+                std::transform(v.begin(), v.end(), v.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                return v;
+            };
+
+            bool enabled = false;
+            if (auto it = config.find("search.path_tree.enable"); it != config.end()) {
+                auto lowered = toLower(it->second);
+                enabled = (lowered == "true" || lowered == "1" || lowered == "yes");
+            }
+
+            std::string mode = "fallback";
+            if (auto it = config.find("search.path_tree.mode");
+                it != config.end() && !it->second.empty()) {
+                mode = normalizePathTreeMode(it->second, mode);
+            }
+
+            std::cout << "Path-tree traversal configuration\n";
+            std::cout << "---------------------------------\n";
+            std::cout << "Config file: " << configPath
+                      << (hasConfig ? "" : " (not found, showing defaults)") << "\n";
+            std::cout << "Enabled    : " << (enabled ? "✓ yes" : "✗ no") << "\n";
+            std::cout << "Mode       : " << mode << "\n";
+
+            if (!enabled) {
+                std::cout << "\nEnable with: yams config search path-tree enable\n";
+            } else if (mode == "fallback") {
+                std::cout << "\nMode note: fallback keeps baseline scans as a safety net.\n";
+            } else {
+                std::cout
+                    << "\nMode note: preferred routes eligible workloads through the tree first.\n";
             }
 
             return Result<void>();

@@ -50,7 +50,7 @@ if tests_has_cli
   if get_option('enable-tui')
     unit_cli += files(
       'cli/highlight_utils_test.cpp',
-      'cli/test_tui_services.cpp',
+      # Excluded: test_tui_services.cpp has its own main() - it's a standalone test
     )
   endif
 endif

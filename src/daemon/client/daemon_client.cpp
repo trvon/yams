@@ -530,6 +530,12 @@ boost::asio::awaitable<Result<GrepResponse>> DaemonClient::grep(const GrepReques
     co_return co_await streamingGrep(req);
 }
 
+boost::asio::awaitable<Result<FileHistoryResponse>>
+DaemonClient::fileHistory(const FileHistoryRequest& req) {
+    spdlog::debug("DaemonClient::fileHistory: filepath={}", req.filepath);
+    co_return co_await call<FileHistoryRequest>(req);
+}
+
 boost::asio::awaitable<Result<StatusResponse>> DaemonClient::status() {
     StatusRequest req;
     req.detailed = false; // avoid heavy daemon-side scans by default

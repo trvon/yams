@@ -75,6 +75,7 @@ public:
     }
     boost::asio::awaitable<Result<ListResponse>> list(const ListRequest& req);
     boost::asio::awaitable<Result<GrepResponse>> grep(const GrepRequest& req);
+    boost::asio::awaitable<Result<FileHistoryResponse>> fileHistory(const FileHistoryRequest& req);
     // Streaming path for AddDocument (header-first, final-only chunk)
     boost::asio::awaitable<Result<AddDocumentResponse>>
     streamingAddDocument(const AddDocumentRequest& req);
@@ -375,9 +376,10 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
             std::is_same<Req, GenerateEmbeddingRequest>, std::is_same<Req, BatchEmbeddingRequest>,
             std::is_same<Req, LoadModelRequest>, std::is_same<Req, UnloadModelRequest>,
             std::is_same<Req, ModelStatusRequest>, std::is_same<Req, AddDocumentRequest>,
-            std::is_same<Req, GrepRequest>, std::is_same<Req, UpdateDocumentRequest>,
-            std::is_same<Req, DownloadRequest>, std::is_same<Req, GetStatsRequest>,
-            std::is_same<Req, PrepareSessionRequest>, std::is_same<Req, EmbedDocumentsRequest>,
+            std::is_same<Req, GrepRequest>, std::is_same<Req, FileHistoryRequest>,
+            std::is_same<Req, UpdateDocumentRequest>, std::is_same<Req, DownloadRequest>,
+            std::is_same<Req, GetStatsRequest>, std::is_same<Req, PrepareSessionRequest>,
+            std::is_same<Req, EmbedDocumentsRequest>,
             // Plugin management requests
             std::is_same<Req, PluginScanRequest>, std::is_same<Req, PluginLoadRequest>,
             std::is_same<Req, PluginUnloadRequest>, std::is_same<Req, PluginTrustListRequest>,

@@ -1,6 +1,6 @@
 # Mobile Bindings Overview
 
-_Status: in progress_
+_Status: ready for SDK consumers_
 
 ## Goals
 - Provide a minimal C ABI that exposes search and grep capabilities without leaking internal C++ types.
@@ -46,11 +46,45 @@ _Status: in progress_
 | Vector status         | `yams_mobile_get_vector_status`, `yams_mobile_vector_status_result_json` | Returns document counts/storage stats; warmup/model control APIs remain TODO. |
 
 ## Compatibility Strategy
-- ABI version encoded in `yams_mobile_version_info` (major/minor/patch).
-- Breaking changes create new symbol set (`yams_mobile_v2_*`) while keeping v1 exported.
-- Headers guarded via `YAMS_MOBILE_API_VERSION` macros.
+- ABI version encoded in `yams_mobile_version_info` (major/minor/patch) and mirrored in
+  the header macros `YAMS_MOBILE_API_VERSION_{MAJOR,MINOR,PATCH}`.
+- Every request struct now embeds a `struct_size`/`version` header so older clients continue to
+  function when fields are appended. Callers should initialize structs via the
+  `yams_mobile_context_config_default()` / `yams_mobile_request_header_default()` helpers before
+  setting additional fields.
+- Breaking changes must bump `YAMS_MOBILE_API_VERSION_MAJOR` and ship a parallel symbol surface
+  (`yams_mobile_v2_*`) while preserving the previous version for at least one minor release.
+- CI enforces symbol compatibility with `scripts/ci/check_mobile_abi.sh`, comparing the exported
+  surface against `public/mobile/abi/yams_mobile_v1.symbols` on every PR.
 
-## Next Steps
-1. Add vector warmup/model management entrypoints before the public SDK release.
-2. Implement Swift Package / Android AAR wrappers that offer async APIs and lifecycle helpers.
-3. Document fixture selection and mobile smoke workflow once dedicated corpora land in FixtureManager.
+## Fixtures & Test Corpora
+- `tests/common/search_corpus_presets.h` exposes `mobileSearchCorpusSpec()` which captures the
+  curated mobile dataset (sync deltas, path sensitivity, semantic warm-up, case toggles). Use this in
+  unit/integration tests to align with the demo apps and smoke suites.
+- `tests/mobile/mobile_abi_smoke_test.cpp` validates the round-trip ingest/list/search flow against
+  the new corpus and guards the struct header defaults.
+
+## Swift Package Demo
+- The Swift reference package lives under `examples/mobile/swift/YamsMobileDemo`.
+- It provides a `CYamsMobile` system library target (via the generated `yams_mobile.pc`) and a
+  minimal executable harness that calls `yams_mobile_get_version()` and dispatches grep/search flows.
+- To build locally:
+  1. Install YAMS (or build `libyams_mobile`) and expose it via `PKG_CONFIG_PATH`.
+  2. Run `swift build` inside the package; the manifest references `CYamsMobile` through pkg-config.
+  3. Run `swift test` to execute the smoke test that mirrors the C++ round-trip harness.
+
+## Android Demo
+- The Android reference lives under `examples/mobile/android/YamsMobileDemo` with a Gradle library
+  module that wraps `libyams_mobile` via JNI.
+- `src/main/cpp/yams_mobile_jni.cpp` translates Kotlin calls to the C ABI; instrumentation tests in
+  `src/androidTest` ensure `yams_mobile_get_version()` and a basic search flow succeed against the
+  mobile corpus fixtures.
+- Build steps:
+  1. Place the compiled `libyams_mobile.so` for each ABI under `app/src/main/jniLibs/<abi>/`.
+  2. Run `./gradlew connectedAndroidTest` to execute the smoke tests on a device/emulator.
+
+## Developer Workflow
+1. Initialize the fixtures using `FixtureManager` (see smoke test for a template) or reuse the
+   packaged corpora in CI.
+2. Link against `yams_mobile` using pkg-config (Swift) or JNI (Android).
+3. Run the platform demo harnesses to validate bindings before shipping downstream SDK updates.

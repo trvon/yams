@@ -11,14 +11,24 @@ namespace {
 std::string normalizeSlashes(const std::string& path) {
     std::string result = path;
     std::replace(result.begin(), result.end(), '\\', '/');
-    // Remove redundant './' segments using filesystem lexically_normal when available.
+    // Remove redundant './' segments and resolve symlinks using weakly_canonical.
+    // This ensures paths under symlinked directories (e.g., /var -> /private/var on macOS)
+    // are stored consistently in canonical form.
     try {
         std::filesystem::path p(result);
-        auto norm = p.lexically_normal().generic_string();
-        if (!norm.empty())
-            result = norm;
+        auto norm = p.lexically_normal();
+        if (!norm.empty()) {
+            // Try to canonicalize (resolve symlinks)
+            std::error_code ec;
+            auto canonical = std::filesystem::weakly_canonical(norm, ec);
+            if (!ec && !canonical.empty()) {
+                result = canonical.generic_string();
+            } else {
+                result = norm.generic_string();
+            }
+        }
     } catch (...) {
-        // Fall back to slash normalized string if lexically_normal fails (e.g., on non-UTF8).
+        // Fall back to slash normalized string if lexically_normal/canon fails (e.g., on non-UTF8).
     }
     return result;
 }

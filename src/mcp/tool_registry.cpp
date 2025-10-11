@@ -108,6 +108,7 @@ MCPSearchRequest MCPSearchRequest::fromJson(const json& j) {
     req.colorMode = j.value("color", std::string{"never"});
     req.pathPattern = j.value("path_pattern", j.value("path", std::string{}));
 
+    detail::readStringArray(j, "include_patterns", req.includePatterns);
     detail::readStringArray(j, "tags", req.tags);
     req.matchAllTags = j.value("match_all_tags", false);
     req.includeDiff = j.value("include_diff", false);
@@ -132,6 +133,7 @@ json MCPSearchRequest::toJson() const {
                 {"context", context},
                 {"color", colorMode},
                 {"path_pattern", pathPattern},
+                {"include_patterns", includePatterns},
                 {"tags", tags},
                 {"match_all_tags", matchAllTags},
                 {"include_diff", includeDiff}};

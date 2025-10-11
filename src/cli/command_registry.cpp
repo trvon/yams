@@ -34,6 +34,7 @@ std::unique_ptr<ICommand> createDrCommand();
 std::unique_ptr<ICommand> createDoctorCommand();
 std::unique_ptr<ICommand> createGraphCommand();
 std::unique_ptr<ICommand> createDiffCommand();
+std::unique_ptr<ICommand> createTreeCommand();
 #ifdef YAMS_BUILD_MCP_SERVER
 std::unique_ptr<ICommand> createServeCommand();
 #endif
@@ -46,6 +47,7 @@ void CommandRegistry::registerAllCommands(YamsCLI* cli) {
     cli->registerCommand(CommandRegistry::createCatCommand());
     cli->registerCommand(CommandRegistry::createDeleteCommand());
     cli->registerCommand(CommandRegistry::createListCommand());
+    cli->registerCommand(CommandRegistry::createTreeCommand());
     cli->registerCommand(CommandRegistry::createSearchCommand());
     cli->registerCommand(CommandRegistry::createGrepCommand());
     cli->registerCommand(CommandRegistry::createConfigCommand());
@@ -107,6 +109,10 @@ std::unique_ptr<ICommand> CommandRegistry::createDeleteCommand() {
 
 std::unique_ptr<ICommand> CommandRegistry::createListCommand() {
     return ::yams::cli::createListCommand();
+}
+
+std::unique_ptr<ICommand> CommandRegistry::createTreeCommand() {
+    return ::yams::cli::createTreeCommand();
 }
 
 std::unique_ptr<ICommand> CommandRegistry::createSearchCommand() {

@@ -166,7 +166,17 @@ TreeBuilder::buildFromDirectory(std::string_view directoryPath,
                      fmt::format("Path is not a directory: {}", directoryPath));
     }
 
-    return buildTreeRecursive(std::string(directoryPath), excludePatterns);
+    std::error_code ec;
+    fs::path rootPath = fs::weakly_canonical(fs::path(directoryPath), ec);
+    if (ec) {
+        rootPath = fs::absolute(fs::path(directoryPath), ec);
+        if (ec) {
+            rootPath = fs::path(directoryPath);
+        }
+    }
+    std::string normalizedRoot = computePathDerivedValues(rootPath.generic_string()).normalizedPath;
+
+    return buildTreeRecursive(rootPath.generic_string(), excludePatterns, normalizedRoot);
 }
 
 Result<std::string> TreeBuilder::buildFromEntries(const std::vector<TreeEntry>& entries) {
@@ -194,9 +204,9 @@ Result<bool> TreeBuilder::hasTree(std::string_view treeHash) {
     return storageEngine_->exists(treeHash);
 }
 
-Result<std::string>
-TreeBuilder::buildTreeRecursive(const std::string& dirPath,
-                                const std::vector<std::string>& excludePatterns) {
+Result<std::string> TreeBuilder::buildTreeRecursive(const std::string& dirPath,
+                                                    const std::vector<std::string>& excludePatterns,
+                                                    const std::string& rootPath) {
     TreeNode node;
 
     try {
@@ -205,7 +215,8 @@ TreeBuilder::buildTreeRecursive(const std::string& dirPath,
             std::string pathStr = path.string();
 
             // Check exclude patterns
-            if (shouldExclude(pathStr, excludePatterns)) {
+            const bool isDirectory = dirEntry.is_directory();
+            if (shouldExclude(pathStr, rootPath, excludePatterns, isDirectory)) {
                 spdlog::debug("TreeBuilder: excluding {}", pathStr);
                 continue;
             }
@@ -213,9 +224,9 @@ TreeBuilder::buildTreeRecursive(const std::string& dirPath,
             TreeEntry entry;
             entry.name = path.filename().string();
 
-            if (dirEntry.is_directory()) {
+            if (isDirectory) {
                 // Recurse into subdirectory
-                auto subtreeResult = buildTreeRecursive(pathStr, excludePatterns);
+                auto subtreeResult = buildTreeRecursive(pathStr, excludePatterns, rootPath);
                 if (!subtreeResult) {
                     return subtreeResult; // Propagate error
                 }
@@ -376,29 +387,103 @@ inline bool simpleGlob(const char* pat, const char* str) {
 #endif
 } // namespace
 
-bool TreeBuilder::shouldExclude(std::string_view path,
-                                const std::vector<std::string>& patterns) const {
-    // Normalize path to forward slashes and canonical form used elsewhere
+bool TreeBuilder::shouldExclude(std::string_view path, std::string_view root,
+                                const std::vector<std::string>& patterns, bool isDirectory) const {
     auto derived = computePathDerivedValues(std::string(path));
-    const std::string& norm = derived.normalizedPath;
+    const std::string normPath = derived.normalizedPath;
 
-    for (const auto& pattern : patterns) {
-        if (pattern.empty())
+    std::string relativePath;
+    if (!root.empty()) {
+        std::error_code ec;
+        fs::path normFs(normPath);
+        fs::path rootFs{std::string(root)};
+        auto rel = normFs.lexically_relative(rootFs);
+        if (!ec && !rel.empty() && rel.native() != ".") {
+            relativePath = rel.generic_string();
+        } else if (!rel.empty() && rel.native() == ".") {
+            relativePath.clear();
+        } else {
+            const std::string rootString = rootFs.generic_string();
+            if (normPath.rfind(rootString, 0) == 0) {
+                relativePath = normPath.substr(rootString.size());
+                if (!relativePath.empty() &&
+                    (relativePath.front() == '/' || relativePath.front() == '\\')) {
+                    relativePath.erase(relativePath.begin());
+                }
+            } else {
+                relativePath = normPath;
+            }
+        }
+    } else {
+        relativePath = normPath;
+    }
+
+    auto normalizeSlashes = [](std::string s) {
+        std::replace(s.begin(), s.end(), '\\', '/');
+        return s;
+    };
+    auto trimLeadingDot = [](std::string& s) {
+        while (s.rfind("./", 0) == 0) {
+            s.erase(0, 2);
+        }
+        if (s == ".") {
+            s.clear();
+        }
+    };
+
+    std::vector<std::string> candidates;
+    std::string relNormalized = normalizeSlashes(relativePath);
+    trimLeadingDot(relNormalized);
+    if (!relNormalized.empty()) {
+        candidates.push_back(relNormalized);
+    }
+
+    std::string absNormalized = normalizeSlashes(normPath);
+    if (candidates.empty() ||
+        std::find(candidates.begin(), candidates.end(), absNormalized) == candidates.end()) {
+        candidates.push_back(absNormalized);
+    }
+
+    if (isDirectory) {
+        const std::size_t original = candidates.size();
+        for (std::size_t i = 0; i < original; ++i) {
+            std::string withSlash = candidates[i];
+            if (!withSlash.empty() && withSlash.back() != '/') {
+                withSlash.push_back('/');
+                if (std::find(candidates.begin(), candidates.end(), withSlash) ==
+                    candidates.end()) {
+                    candidates.push_back(std::move(withSlash));
+                }
+            }
+        }
+    }
+
+    for (const auto& rawPattern : patterns) {
+        if (rawPattern.empty())
             continue;
-        // Backward-compatibility: if no glob meta, treat as substring containment
-        if (!hasGlobMeta(pattern)) {
-            if (norm.find(pattern) != std::string::npos)
-                return true;
+        std::string pattern = normalizeSlashes(rawPattern);
+        const bool hasMeta = hasGlobMeta(pattern);
+        if (!hasMeta) {
+            for (const auto& candidate : candidates) {
+                if (candidate.find(pattern) != std::string::npos)
+                    return true;
+            }
             continue;
         }
+
+        for (const auto& candidate : candidates) {
+            if (candidate.empty())
+                continue;
 #if !defined(_WIN32)
-        if (fnmatchWrap(pattern, norm))
-            return true;
+            if (fnmatchWrap(pattern, candidate))
+                return true;
 #else
-        if (simpleGlob(pattern.c_str(), norm.c_str()))
-            return true;
+            if (simpleGlob(pattern.c_str(), candidate.c_str()))
+                return true;
 #endif
+        }
     }
+
     return false;
 }
 

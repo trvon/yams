@@ -142,4 +142,93 @@ DocumentQueryOptions buildQueryOptionsForSqlLikePattern(const std::string& patte
     return opts;
 }
 
+namespace {
+// Convert glob pattern to SQL LIKE pattern
+// Examples:
+//   "*.cpp" -> "%.cpp"
+//   "tests/**/*.h" -> "tests/%.h"
+//   "src/core/*.cpp" -> "src/core/%.cpp"
+std::string globToSqlLike(const std::string& glob) {
+    std::string result;
+    result.reserve(glob.size());
+
+    for (size_t i = 0; i < glob.size(); ++i) {
+        char c = glob[i];
+        if (c == '*') {
+            // Check for ** (match any directory depth)
+            if (i + 1 < glob.size() && glob[i + 1] == '*') {
+                result += '%';
+                i++; // Skip the second *
+                // Skip following '/' if present
+                if (i + 1 < glob.size() && glob[i + 1] == '/') {
+                    i++;
+                }
+            } else {
+                // Single * matches within a path component
+                result += '%';
+            }
+        } else if (c == '?') {
+            // ? in glob = _ in SQL LIKE (single character)
+            result += '_';
+        } else if (c == '%' || c == '_') {
+            // Escape SQL LIKE wildcards if they appear literally in glob
+            result += '\\';
+            result += c;
+        } else {
+            result += c;
+        }
+    }
+
+    return result;
+}
+} // namespace
+
+Result<std::vector<DocumentInfo>>
+queryDocumentsByGlobPatterns(IMetadataRepository& repo,
+                             const std::vector<std::string>& globPatterns, int limit) {
+    if (globPatterns.empty()) {
+        // No patterns = match all
+        return queryDocumentsByPattern(repo, "%", limit);
+    }
+
+    if (globPatterns.size() == 1) {
+        // Single pattern - use existing optimized path
+        std::string sqlPattern = globToSqlLike(globPatterns[0]);
+        return queryDocumentsByPattern(repo, sqlPattern, limit);
+    }
+
+    // Multiple patterns - need to OR them together
+    // Build a custom query with OR conditions
+    std::vector<DocumentInfo> allResults;
+    allResults.reserve(limit > 0 ? limit : 100);
+
+    for (const auto& globPattern : globPatterns) {
+        std::string sqlPattern = globToSqlLike(globPattern);
+        auto result = queryDocumentsByPattern(repo, sqlPattern, 0); // No limit per pattern
+        if (!result) {
+            return result.error();
+        }
+
+        // Merge results, avoiding duplicates
+        for (auto& doc : result.value()) {
+            // Check if already in results (by id or path)
+            bool isDuplicate = false;
+            for (const auto& existing : allResults) {
+                if (existing.id == doc.id) {
+                    isDuplicate = true;
+                    break;
+                }
+            }
+            if (!isDuplicate) {
+                allResults.push_back(std::move(doc));
+                if (limit > 0 && allResults.size() >= static_cast<size_t>(limit)) {
+                    return allResults;
+                }
+            }
+        }
+    }
+
+    return allResults;
+}
+
 } // namespace yams::metadata

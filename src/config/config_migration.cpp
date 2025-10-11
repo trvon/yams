@@ -166,6 +166,7 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2A
                  {"reconnect_backoff_max_ms", "5000"},
                  {"reconnect_backoff_jitter_pct", "0.2"},
              }},
+            {"search.path_tree", {{"enable", "false"}, {"mode", "fallback"}}},
             {"repair",
              {{"enable_online_repair", "false"},
               {"max_repair_concurrency", "1"},
@@ -374,6 +375,8 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
               {"enable_cache", "true"},
               {"cache_size", "1000"},
               {"cache_ttl_minutes", "60"}}},
+
+            {"search.path_tree", {{"enable", "false"}, {"mode", "fallback"}}},
 
             // Daemon service defaults: enable model provider + plugin autoload by default
             {"daemon",
@@ -687,6 +690,7 @@ Result<void> ConfigMigrator::writeTomlConfig(
                                              "embeddings.cache",
                                              "vector_index",
                                              "search",
+                                             "search.path_tree",
                                              "search.hybrid",
                                              "knowledge_graph",
                                              "file_detection",

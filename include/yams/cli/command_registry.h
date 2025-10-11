@@ -141,6 +141,11 @@ public:
      */
     static std::unique_ptr<ICommand> createPluginCommand();
 
+    /**
+     * Create tree command (path tree inspection)
+     */
+    static std::unique_ptr<ICommand> createTreeCommand();
+
     // Dr command factory is a free function; CommandRegistry calls it directly
 };
 

@@ -40,4 +40,11 @@ queryDocumentsByPattern(MetadataRepository& repo, const std::string& likePattern
 // Build DocumentQueryOptions heuristically from a SQL LIKE pattern used in the CLI/tests.
 DocumentQueryOptions buildQueryOptionsForSqlLikePattern(const std::string& pattern);
 
+// Query documents matching any of the provided glob patterns (e.g., "*.cpp", "tests/**/*.h")
+// This converts glob patterns to SQL LIKE patterns and performs an OR query.
+// Used by grep/search to avoid loading all documents into memory before filtering.
+Result<std::vector<DocumentInfo>>
+queryDocumentsByGlobPatterns(IMetadataRepository& repo,
+                             const std::vector<std::string>& globPatterns, int limit = 0);
+
 } // namespace yams::metadata

@@ -14,7 +14,9 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <future>
 #include <mutex>
@@ -22,6 +24,7 @@
 #ifndef _WIN32
 #include <unistd.h>
 #endif
+#include <map>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -45,6 +48,117 @@ static std::string escapeRegex(const std::string& text) {
         escaped += c;
     }
     return escaped;
+}
+
+struct PathTreeConfigSettings {
+    bool enabled{false};
+    std::string mode{"fallback"};
+};
+
+static std::string toLowerCopy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+static std::filesystem::path resolveConfigPath() {
+    if (const char* explicitPath = std::getenv("YAMS_CONFIG_PATH")) {
+        std::filesystem::path p{explicitPath};
+        if (std::filesystem::exists(p))
+            return p;
+    }
+    if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
+        std::filesystem::path p = std::filesystem::path(xdg) / "yams" / "config.toml";
+        if (std::filesystem::exists(p))
+            return p;
+    }
+    if (const char* home = std::getenv("HOME")) {
+        std::filesystem::path p = std::filesystem::path(home) / ".config" / "yams" / "config.toml";
+        if (std::filesystem::exists(p))
+            return p;
+    }
+    return {};
+}
+
+static std::map<std::string, std::string> parseConfigForKeys(const std::filesystem::path& path) {
+    std::map<std::string, std::string> out;
+    std::ifstream file(path);
+    if (!file)
+        return out;
+
+    std::string line;
+    std::string currentSection;
+
+    auto trim = [](std::string s) {
+        auto issp = [](unsigned char c) { return std::isspace(c) != 0; };
+        while (!s.empty() && issp(static_cast<unsigned char>(s.front())))
+            s.erase(s.begin());
+        while (!s.empty() && issp(static_cast<unsigned char>(s.back())))
+            s.pop_back();
+        return s;
+    };
+
+    while (std::getline(file, line)) {
+        auto comment = line.find('#');
+        if (comment != std::string::npos)
+            line = line.substr(0, comment);
+        line = trim(line);
+        if (line.empty())
+            continue;
+
+        if (line.front() == '[' && line.back() == ']') {
+            currentSection = line.substr(1, line.size() - 2);
+            continue;
+        }
+
+        auto eq = line.find('=');
+        if (eq == std::string::npos)
+            continue;
+        std::string key = trim(line.substr(0, eq));
+        std::string value = trim(line.substr(eq + 1));
+        if (!value.empty() && value.front() == '"' && value.back() == '"') {
+            value = value.substr(1, value.size() - 2);
+        }
+        if (!currentSection.empty()) {
+            out[currentSection + "." + key] = value;
+        } else {
+            out[key] = value;
+        }
+    }
+    return out;
+}
+
+static PathTreeConfigSettings loadPathTreeConfigSettings() {
+    PathTreeConfigSettings cfg;
+    if (auto cfgPath = resolveConfigPath(); !cfgPath.empty()) {
+        auto values = parseConfigForKeys(cfgPath);
+        if (auto it = values.find("search.path_tree.enable"); it != values.end()) {
+            auto v = toLowerCopy(it->second);
+            cfg.enabled = (v == "1" || v == "true" || v == "yes" || v == "on");
+        }
+        if (auto it = values.find("search.path_tree.mode"); it != values.end()) {
+            auto v = toLowerCopy(it->second);
+            if (v == "preferred" || v == "fallback")
+                cfg.mode = v;
+        }
+    }
+
+    if (const char* envEnable = std::getenv("YAMS_GREP_PATH_TREE")) {
+        auto v = toLowerCopy(envEnable);
+        if (v == "0" || v == "false" || v == "off" || v == "no") {
+            cfg.enabled = false;
+        } else {
+            cfg.enabled = true;
+            if (v == "preferred" || v == "fallback")
+                cfg.mode = v;
+        }
+    }
+    if (const char* envMode = std::getenv("YAMS_GREP_PATH_TREE_MODE")) {
+        auto v = toLowerCopy(envMode);
+        if (v == "preferred" || v == "fallback")
+            cfg.mode = v;
+    }
+    return cfg;
 }
 
 static bool hasWildcard(const std::string& s) {
@@ -83,16 +197,6 @@ static std::string normalizePathForCompare(const std::string& path) {
 #if defined(_WIN32) || defined(__APPLE__)
     std::transform(out.begin(), out.end(), out.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-#endif
-    return out;
-}
-
-// Normalize path minimally for SQL LIKE against stored file_path.
-// Do not alter macOS /var vs /private/var or case; only unify separators on Windows.
-static std::string normalizePathForSqlLike(const std::string& path) {
-    std::string out = path;
-#if defined(_WIN32)
-    std::replace(out.begin(), out.end(), '\\', '/');
 #endif
     return out;
 }
@@ -227,7 +331,14 @@ static bool pathFilterMatch(const std::string& filePath, const std::vector<std::
 
 class GrepServiceImpl final : public IGrepService {
 public:
-    explicit GrepServiceImpl(const AppContext& ctx) : ctx_(ctx) {}
+    explicit GrepServiceImpl(const AppContext& ctx) : ctx_(ctx) {
+        auto cfg = loadPathTreeConfigSettings();
+        pathTreeEnabled_ = cfg.enabled;
+        pathTreeMode_ = cfg.mode;
+        pathTreePreferred_ = pathTreeEnabled_ && pathTreeMode_ == "preferred";
+        spdlog::debug("[GrepService] path-tree config: enabled={} mode={}", pathTreeEnabled_,
+                      pathTreeMode_);
+    }
 
     Result<GrepResponse> grep(const GrepRequest& req) override {
         auto grep_start_time = std::chrono::steady_clock::now();
@@ -327,21 +438,52 @@ public:
                 addDocs(std::move(ftsHits));
                 usedFtsForInitialCandidates = true;
             } else {
-                // FTS failed or returned nothing; fall back to full scan
+                // FTS failed or returned nothing; fall back to pattern-filtered or full scan
+                if (!req.includePatterns.empty()) {
+                    auto patternDocsRes = retryMetadataOp(
+                        [&]() {
+                            return metadata::queryDocumentsByGlobPatterns(*ctx_.metadataRepo,
+                                                                          req.includePatterns, 0);
+                        },
+                        4, std::chrono::milliseconds(25), &metadataTelemetry);
+                    if (patternDocsRes) {
+                        addDocs(std::move(patternDocsRes.value()));
+                    }
+                } else {
+                    auto allDocsRes = retryMetadataOp(
+                        [&]() {
+                            return metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%");
+                        },
+                        4, std::chrono::milliseconds(25), &metadataTelemetry);
+                    if (allDocsRes) {
+                        addDocs(std::move(allDocsRes.value()));
+                    }
+                }
+            }
+        } else {
+            // No tags, no literal text: must scan documents for regex match
+            // PERFORMANCE: If includePatterns provided, query only matching documents
+            if (!req.includePatterns.empty()) {
+                auto patternDocsRes = retryMetadataOp(
+                    [&]() {
+                        return metadata::queryDocumentsByGlobPatterns(*ctx_.metadataRepo,
+                                                                      req.includePatterns, 0);
+                    },
+                    4, std::chrono::milliseconds(25), &metadataTelemetry);
+                if (patternDocsRes) {
+                    addDocs(std::move(patternDocsRes.value()));
+                    spdlog::debug(
+                        "[GrepService] Filtered at SQL level by {} include patterns: {} docs",
+                        req.includePatterns.size(), docs.size());
+                }
+            } else {
+                // No filters at all - scan all documents
                 auto allDocsRes = retryMetadataOp(
                     [&]() { return metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%"); }, 4,
                     std::chrono::milliseconds(25), &metadataTelemetry);
                 if (allDocsRes) {
                     addDocs(std::move(allDocsRes.value()));
                 }
-            }
-        } else {
-            // No tags, no literal text: must scan all documents for regex match
-            auto allDocsRes = retryMetadataOp(
-                [&]() { return metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%"); }, 4,
-                std::chrono::milliseconds(25), &metadataTelemetry);
-            if (allDocsRes) {
-                addDocs(std::move(allDocsRes.value()));
             }
         }
 
@@ -424,6 +566,14 @@ public:
                           docs.size());
         }
 
+        if (docs.empty() && pathTreeEnabled_ && !req.paths.empty()) {
+            collectDocsFromPathTree(req, addDocs, metadataTelemetry);
+            if (!docs.empty()) {
+                spdlog::debug("[GrepService] Path-tree traversal supplied {} candidate docs",
+                              docs.size());
+            }
+        }
+
         // Prefer hot docs (extracted/text) then cold; cap both sets
         std::vector<metadata::DocumentInfo> hotDocs;
         std::vector<metadata::DocumentInfo> coldDocs;
@@ -467,6 +617,9 @@ public:
                 spdlog::warn("[GrepService] Failed to batch-fetch metadata: code={} msg={}",
                              static_cast<int>(batchResult.error().code),
                              batchResult.error().message);
+                if (!req.tags.empty()) {
+                    return batchResult.error();
+                }
             }
         }
 
@@ -1025,6 +1178,99 @@ public:
 
 private:
     AppContext ctx_;
+    bool pathTreeEnabled_{false};
+    std::string pathTreeMode_{"fallback"};
+    bool pathTreePreferred_{false};
+
+    template <typename AddFn>
+    void collectDocsFromPathTree(const GrepRequest& req, AddFn&& addFn,
+                                 MetadataTelemetry& telemetry) {
+        if (!pathTreeEnabled_ || !ctx_.metadataRepo)
+            return;
+
+        constexpr std::size_t kRootFanout = 32;
+        auto repo = ctx_.metadataRepo;
+
+        auto canonicalize = [](std::string path) -> std::string {
+            if (path.empty())
+                return path;
+            try {
+                std::filesystem::path p(path);
+                if (!p.is_absolute())
+                    p = std::filesystem::path("/") / p;
+                p = p.lexically_normal();
+                std::string norm = p.generic_string();
+                if (norm.empty())
+                    norm = "/";
+                if (norm.size() > 1 && norm.back() == '/')
+                    norm.pop_back();
+                return norm;
+            } catch (...) {
+                if (path.front() != '/')
+                    path.insert(path.begin(), '/');
+                if (path.size() > 1 && path.back() == '/')
+                    path.pop_back();
+                return path;
+            }
+        };
+
+        auto fetchPrefix = [&](const std::string& prefix) {
+            if (prefix.empty() || prefix == "/") {
+                auto res =
+                    retryMetadataOp([&]() { return metadata::queryDocumentsByPattern(*repo, "%"); },
+                                    4, std::chrono::milliseconds(25), &telemetry);
+                if (res)
+                    addFn(std::move(res.value()));
+                return;
+            }
+            metadata::DocumentQueryOptions opts;
+            opts.pathPrefix = prefix;
+            opts.prefixIsDirectory = true;
+            opts.includeSubdirectories = true;
+            opts.orderByNameAsc = true;
+            auto res = retryMetadataOp([&]() { return repo->queryDocuments(opts); }, 4,
+                                       std::chrono::milliseconds(25), &telemetry);
+            if (res)
+                addFn(std::move(res.value()));
+        };
+
+        std::vector<std::string> prefixes;
+        for (const auto& raw : req.paths) {
+            if (hasWildcard(raw))
+                continue;
+            auto norm = canonicalize(raw);
+            if (!norm.empty())
+                prefixes.push_back(norm);
+        }
+
+        if (!prefixes.empty()) {
+            for (const auto& prefix : prefixes) {
+                auto nodeRes = repo->findPathTreeNodeByFullPath(prefix);
+                if (nodeRes && nodeRes.value()) {
+                    fetchPrefix(prefix);
+                } else if (pathTreePreferred_) {
+                    fetchPrefix(prefix);
+                }
+            }
+            return;
+        }
+
+        auto childrenRes = repo->listPathTreeChildren("/", kRootFanout);
+        if (!childrenRes) {
+            if (pathTreePreferred_)
+                fetchPrefix("/");
+            return;
+        }
+        const auto& children = childrenRes.value();
+        if (children.empty()) {
+            if (pathTreePreferred_)
+                fetchPrefix("/");
+            return;
+        }
+        for (const auto& child : children) {
+            fetchPrefix(child.fullPath);
+        }
+    }
 };
 
 // Optional separate factory for direct construction (callers may wire this in a factory unit).

@@ -619,14 +619,14 @@ public:
             dreq.showLineNumbers = showLineNumbers_;
             // Engine-level filters
             if (!includeGlobsExpanded.empty()) {
-                dreq.pathPattern = includeGlobsExpanded[0];
-                if (includeGlobsExpanded.size() > 1) {
-                    spdlog::warn("Multiple include patterns provided; only the first one ('{}') "
-                                 "will be used for server-side filtering.",
-                                 dreq.pathPattern);
-                }
-            } else {
-                dreq.pathPattern = pathFilter_;
+                dreq.pathPatterns =
+                    includeGlobsExpanded; // Send all patterns for server-side filtering
+                spdlog::debug("[CLI] Setting {} path patterns for search",
+                              includeGlobsExpanded.size());
+            } else if (!pathFilter_.empty()) {
+                dreq.pathPattern = pathFilter_;           // Legacy single pattern fallback
+                dreq.pathPatterns.push_back(pathFilter_); // ALSO populate the vector
+                spdlog::debug("[CLI] Using pathFilter fallback, set pathPatterns with 1 element");
             }
             if (!filterTags_.empty()) {
                 std::stringstream ss(filterTags_);
@@ -650,25 +650,10 @@ public:
             dreq.modifiedBefore = modifiedBefore_;
             dreq.indexedAfter = indexedAfter_;
             dreq.indexedBefore = indexedBefore_;
-            // Note: daemon protocol currently lacks includeGlobs; apply client-side filtering below
 
             auto render = [&](const yams::daemon::SearchResponse& resp) -> Result<void> {
-                // Apply client-side filtering if include globs present
-                std::vector<yams::daemon::SearchResult> items;
-                items.reserve(resp.results.size());
-                if (!includeGlobsExpanded.empty()) {
-                    for (const auto& r : resp.results) {
-                        std::string path = !r.path.empty()
-                                               ? r.path
-                                               : (r.metadata.count("path") ? r.metadata.at("path")
-                                                                           : std::string());
-                        if (matchAnyGlob(path, includeGlobsExpanded)) {
-                            items.push_back(r);
-                        }
-                    }
-                } else {
-                    items = resp.results;
-                }
+                // No client-side filtering needed - daemon now handles multiple path patterns
+                const auto& items = resp.results;
 
                 if (pathsOnly_) {
                     const bool enableStreamEffective = clientConfig.enableChunkedResponses;
@@ -1348,6 +1333,11 @@ public:
         dreq.showLineNumbers = showLineNumbers_;
         // Engine-level filters
         dreq.pathPattern = pathFilter_;
+        if (!includeGlobsExpanded.empty()) {
+            dreq.pathPatterns = includeGlobsExpanded; // Send all patterns for server-side filtering
+        } else if (!pathFilter_.empty()) {
+            dreq.pathPatterns.push_back(pathFilter_); // Fallback for single pattern
+        }
         if (!filterTags_.empty()) {
             std::stringstream ss(filterTags_);
             std::string tag;

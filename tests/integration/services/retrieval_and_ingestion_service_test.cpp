@@ -365,8 +365,12 @@ TEST_F(ServicesRetrievalIngestionIT, AddDirectoryWithPatternsAndTags) {
     opts.timeoutMs = kRequestTimeoutMs;
     auto addRes = ing.addViaDaemon(opts);
     ASSERT_TRUE(addRes) << (addRes ? "" : addRes.error().message);
+    const auto& firstResp = addRes.value();
     // When recursive, documentsAdded should be >= 2 (keep.cpp, keep.md)
-    EXPECT_GE(addRes.value().documentsAdded, static_cast<size_t>(2));
+    EXPECT_GE(firstResp.documentsAdded, static_cast<size_t>(2));
+    EXPECT_EQ(firstResp.documentsUpdated, static_cast<size_t>(0));
+    EXPECT_EQ(firstResp.documentsSkipped, static_cast<size_t>(0));
+    EXPECT_FALSE(firstResp.hash.empty());
 
     // Wait for background post-ingest to finish so grep sees content
     waitForPostIngestQuiescent(socketPath_, storageDir_, std::chrono::milliseconds(7000));
@@ -437,6 +441,18 @@ TEST_F(ServicesRetrievalIngestionIT, AddDirectoryWithPatternsAndTags) {
     ASSERT_TRUE(keepCppDoc) << (keepCppDoc ? "" : keepCppDoc.error().message);
     EXPECT_EQ(keepCppDoc.value().name, keepCppEntry.name);
     EXPECT_NE(keepCppDoc.value().content.find("int main"), std::string::npos);
+
+    // Modify a file and re-run ingestion to ensure updates report correctly
+    {
+        std::ofstream(dirRoot / "keep.cpp") << "int main() { return 42; }\n";
+        waitForPostIngestQuiescent(socketPath_, storageDir_, std::chrono::milliseconds(1000));
+        auto secondRes = ing.addViaDaemon(opts);
+        ASSERT_TRUE(secondRes) << (secondRes ? "" : secondRes.error().message);
+        const auto& second = secondRes.value();
+        EXPECT_FALSE(second.hash.empty());
+        EXPECT_EQ(second.documentsAdded, static_cast<size_t>(0));
+        EXPECT_GE(second.documentsUpdated, static_cast<size_t>(1));
+    }
 
     ASSERT_FALSE(keepMdEntry.hash.empty());
     yams::app::services::GetOptions mdGet;

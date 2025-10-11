@@ -13,6 +13,10 @@ namespace yams::daemon {
 
 boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const SearchRequest& req) {
     try {
+        spdlog::debug("[RequestDispatcher] Received SearchRequest with {} pathPatterns: {}",
+                      req.pathPatterns.size(),
+                      fmt::format("{}", fmt::join(req.pathPatterns, ", ")));
+
         auto appContext = serviceManager_->getAppContext();
         appContext.workerExecutor = getWorkerExecutor();
         auto searchService = app::services::makeSearchService(appContext);
@@ -34,6 +38,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
         serviceReq.afterContext = req.afterContext;
         serviceReq.context = req.context;
         serviceReq.pathPattern = req.pathPattern;
+        serviceReq.pathPatterns = req.pathPatterns;
         serviceReq.tags = req.tags;
         serviceReq.matchAllTags = req.matchAllTags;
         serviceReq.extension = req.extension;
