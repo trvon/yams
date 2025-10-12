@@ -717,6 +717,9 @@ jobs:
           BASE_VERSION: ${{ steps.meta.outputs.base_version }}
         shell: bash
         run: |
+          # Install packaging tools (dpkg-deb for .deb, rpmbuild for .rpm)
+          sudo apt-get update -qq
+          sudo apt-get install -y dpkg rpm
           # Package-only: reuse staged install without triggering a rebuild
           # Use BASE_VERSION to generate Debian/RPM policy-compliant versions for nightly/weekly
           chmod +x scripts/build-deb.sh
