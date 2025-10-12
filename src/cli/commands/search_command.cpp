@@ -366,8 +366,10 @@ public:
         cmd->add_option("--chunk-size", chunkSize_,
                         "Size of chunks for streaming responses (bytes)")
             ->default_val(64 * 1024);
-        cmd->add_flag("--literal-text", literalText_,
-                      "Treat query as literal text, not regex (escapes special characters)");
+        cmd->add_flag("-F,-Q,--fixed-strings,--literal-text", literalText_,
+                      "Treat query as literal text, not regex (escapes special characters). "
+                      "Use this for queries with special characters like ()[]{}.*+?. "
+                      "Example: yams search -F \"MyClass::method()\" --include=\"src/**/*.cpp\"");
         cmd->add_flag("--show-hash", showHash_, "Show document hashes in results");
         cmd->add_flag("-v,--verbose", verbose_, "Show detailed information including full hashes");
         cmd->add_flag("--json", jsonOutput_, "Output results in JSON format");

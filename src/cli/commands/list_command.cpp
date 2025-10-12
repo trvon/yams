@@ -49,9 +49,10 @@ public:
         auto* cmd = app.add_subcommand("list", getDescription());
         cmd->alias("ls"); // Add ls as alias for list
 
-        cmd->add_option("--name", namePattern_,
-                        "Filter by name pattern (supports wildcards: * and ?)");
-        auto* positional = cmd->add_option("pattern", positionalName_,
+        cmd->add_option("--name,-p,--pattern", namePattern_,
+                        "Filter by name/path pattern (supports wildcards: * and ?)");
+        // Positional pattern argument (uses same variable as --name/--pattern)
+        auto* positional = cmd->add_option("positional_pattern", positionalName_,
                                            "Name or path pattern (positional argument)");
         positional->type_name("PATTERN");
 

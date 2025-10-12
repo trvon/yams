@@ -3,6 +3,14 @@
 gtest_dep = dependency('gtest', required: true)
 gmock_dep = dependency('gmock', required: false)
 
+gtest_compile_dep = gtest_dep.partial_dependency(compile_args: true, includes: true)
+gmock_compile_deps = []
+gmock_link_deps = []
+if gmock_dep.found()
+  gmock_compile_deps += [gmock_dep.partial_dependency(compile_args: true, includes: true)]
+  gmock_link_deps += [gmock_dep]
+endif
+
 # Normalize CLI11 discovery across environments (pkg-config -> Conan/CMake)
 # (touch) reconfigure to drop/accept test file changes [2]
 fs = import('fs')
@@ -77,6 +85,7 @@ test_deps = [
   dependency('nlohmann_json'),
   dependency('sqlite3'),
   dependency('OpenSSL'),
+  dependency('tbb', required: true),
   cli11_dep,
   dependency('boost', required: true),
   dependency('libcurl', required: false),
@@ -106,10 +115,6 @@ test_deps = [
   dependency('yams_daemon'),
   dependency('yams_mcp'),
 ]
-
-if gmock_dep.found()
-  test_deps += gmock_dep
-endif
 
 tests_has_cli = false
 tests_has_cli11 = cli11_dep.found()
@@ -213,7 +218,7 @@ unit_exclude = '*-' + ':'.join(heavy_tests)
 
 unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
   include_directories: incs,
-  dependencies: [gtest_dep, test_deps],
+  dependencies: [gtest_dep] + gmock_link_deps + test_deps,
   cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
   link_whole: yams_unit_objs,
   install: false,

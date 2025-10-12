@@ -1,8 +1,8 @@
 project('yams', ['cpp', 'c'],
-  version: '0.0.0',
+  version: '0.8.0',
   default_options: [
     'buildtype=release',
-    'warning_level=2',
+    'warning_level=3',
     'cpp_std=c++20',
     'c_std=c11',
   ],

@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [v0.7.5] - Unreleased
 ### Added
+- **CLI Pattern Ergonomics**: Added `--pattern/-p` flag to `list` command as an alias for `--name`, improving consistency with other commands. The flag supports glob wildcards (`*`, `?`, `**`) and auto-normalizes relative paths to absolute when no wildcards are present. (`src/cli/commands/list_command.cpp`)
+- **Grep Literal Text Hints**: Added smart error detection and helpful hints when grep patterns contain regex special characters. When a pattern fails regex compilation or returns no results, grep now suggests using the `-F` flag with the exact command to run. Added `-Q` as a short alias for `-F/--fixed-strings/--literal-text` to match git grep convention. (`src/cli/commands/grep_command.cpp`)
+- **Search Literal Text Aliases**: Added `-F/-Q/--fixed-strings` aliases to `search` command for consistency with `grep`. These short flags make it easier to search for literal text containing special characters like `()[]{}.*+?`. Updated help text with concrete examples. (`src/cli/commands/search_command.cpp`)
+- **Pattern Ergonomics Audit**: Created comprehensive audit of all 9 CLI commands that use patterns (grep, search, list, get, delete, add, restore, diff, cat), identifying inconsistencies and proposing 3-phase improvement plan. Document includes analysis of shared vs custom pattern utilities and roadmap for smart auto-detection. (`docs/delivery/pattern-ergonomics-audit.md`)
 - Grep: enabling `[search.path_tree]` now lets explicit path filters reuse the metadata-backed
   path-tree engine, and tag-only invocations default the pattern to `.*`, removing the need for
   placeholder expressions. citesrc/app/services/grep_service.cpp:240src/cli/commands/grep_command.cpp:305
@@ -36,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Integration Test Stability**: Improved `TreeBasedListE2E` test reliability by replacing fixed sleep with polling-based wait for document indexing completion. Test pass rate improved from ~60% to 100%.
 - **Grep Performance**: Grep service now uses SQL-level pattern filtering when `--include` patterns are provided, fetching only matching documents from the database instead of loading all documents and filtering in memory. Converts glob patterns to SQL LIKE patterns (e.g., `*.cpp` → `%.cpp`, `tests/**/*.h` → `tests/%.h`). This eliminates hangs on large repositories (10K+ documents).
 - **Search Service**: Updated to handle multiple path patterns via `pathPatterns` vector field, iterating through all patterns with OR logic for server-side filtering. Removed client-side filtering that previously caused timeouts with multiple `--include` patterns.
+- **Build System**: Fixed VS Code task definitions with correct Conan 2.x output paths. Meson native file paths updated from `builddir/conan_meson_native.ini` to `builddir/build-debug/conan/conan_meson_native.ini` and `build/release/build-release/conan/conan_meson_native.ini` to match actual Conan 2 directory structure. (`.vscode/tasks.json`)
 
 ### Fixed
 - **Document Service**: Improved `resolveNameToHash` to correctly handle filename-only lookups by searching for paths ending with the given name, ensuring that commands like `cat` with a simple filename succeed.

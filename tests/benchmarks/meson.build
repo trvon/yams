@@ -93,6 +93,7 @@ ingestion_bench = executable('ingestion_throughput_bench', files('ingestion_thro
     dependency('yams_app_services'),
     dependency('yams_metadata'),
     dependency('yams_storage_engine'),
+    dependency('boost'),
     dependency('nlohmann_json'),
     dependency('spdlog'),
   ] + tracy_deps,
@@ -134,7 +135,8 @@ alias_target('bench_ipc_stream', ipc_stream_bench)
 daemon_socket_accept_bench = executable('daemon_socket_accept_bench', files('daemon_socket_accept_bench.cpp'),
   include_directories: incs,
   dependencies: [
-    test_deps,  # Includes gtest
+    gtest_dep,
+    test_deps,
     dependency('yams_benchmarks'),
     dependency('yams_daemon'),
     dependency('nlohmann_json'),

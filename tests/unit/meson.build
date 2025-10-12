@@ -241,7 +241,7 @@ unit_srcs += unit_wal
 
 yams_unit_objs = static_library('yams_unit_objs', unit_srcs,
   include_directories: incs,
-  dependencies: [gtest_dep, test_deps],
+  dependencies: [gtest_compile_dep] + gmock_compile_deps + test_deps,
   cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
   install: false,
   pic: true,

@@ -268,8 +268,10 @@ public:
         cmd->add_flag("-L,--files-without-match", filesWithoutMatch_,
                       "Show only filenames without matches");
         cmd->add_flag("--paths-only", pathsOnly_, "Show only file paths (no content)");
-        cmd->add_flag("-F,--fixed-strings,--literal-text", literalText_,
-                      "Treat pattern as literal text, not regex (escapes special characters)");
+        cmd->add_flag("-F,--fixed-strings,--literal-text,-Q", literalText_,
+                      "Treat pattern as literal text, not regex (escapes special characters). "
+                      "Use this for patterns with ()[]{}.*+? characters. "
+                      "Example: yams grep -F \"dependency('tbb'\" --include=\"**/meson.build\"");
 
         // Hybrid search options
         cmd->add_flag("--regex-only", regexOnly_, "Disable semantic search, use regex only");
@@ -523,6 +525,7 @@ public:
 
                         if (files.empty()) {
                             std::cout << "(no results)" << std::endl;
+                            printLiteralTextHint();
                         } else {
                             for (const auto& file : files) {
                                 auto itR = hasRegex.find(file);
@@ -562,6 +565,7 @@ public:
 
                         if (fileCounts.empty() && semanticOnly.empty()) {
                             std::cout << "(no results)" << std::endl;
+                            printLiteralTextHint();
                         } else {
                             for (const auto& [file, count] : fileCounts) {
                                 if (showFilename_ || fileCounts.size() > 1) {
@@ -580,6 +584,7 @@ public:
                     } else {
                         if (resp.matches.empty()) {
                             std::cout << "(no results)" << std::endl;
+                            printLiteralTextHint();
                             return Result<void>();
                         }
                         // Full match output with match type indicators
@@ -657,6 +662,13 @@ public:
                             "grep: daemon call timed out; falling back to local execution");
                         return executeLocal();
                     }
+                    // Check if it's a regex error and provide helpful hint
+                    std::string errMsg = gres.error().message;
+                    if (errMsg.find("regex") != std::string::npos ||
+                        errMsg.find("Mismatched") != std::string::npos) {
+                        std::cerr << "\nError: " << errMsg << "\n";
+                        printLiteralTextHint();
+                    }
                     return gres.error();
                 }
                 auto rr = render(gres.value());
@@ -674,6 +686,31 @@ public:
     }
 
 private:
+    // Helper to suggest -F flag when pattern has regex special chars
+    void printLiteralTextHint() const {
+        // Check if pattern contains common regex special characters
+        if (!literalText_ && !pattern_.empty()) {
+            const std::string regexSpecialChars = "()[]{}.*+?\\^$|";
+            bool hasSpecialChars = false;
+            for (char c : pattern_) {
+                if (regexSpecialChars.find(c) != std::string::npos) {
+                    hasSpecialChars = true;
+                    break;
+                }
+            }
+
+            if (hasSpecialChars) {
+                std::cerr << "\nTip: Your pattern contains regex special characters.\n"
+                          << "     If you want to search for the literal text, use the -F flag:\n"
+                          << "     yams grep -F \"" << pattern_ << "\"";
+                if (!includePatterns_.empty()) {
+                    std::cerr << " --include=\"" << includePatterns_ << "\"";
+                }
+                std::cerr << "\n";
+            }
+        }
+    }
+
     // Helper function to parse comma-separated strings into vector
     std::vector<std::string> parseCommaSeparated(const std::string& input) {
         std::vector<std::string> result;
@@ -1038,6 +1075,7 @@ private:
 
             if (files.empty()) {
                 std::cout << "(no results)" << std::endl;
+                printLiteralTextHint();
             } else {
                 for (const auto& file : files) {
                     auto itc = semOnlyConf.find(file);
