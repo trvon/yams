@@ -101,9 +101,9 @@ cmake --build --preset yams-debug
 - Report vulnerabilities privately (GitHub Security Advisories or support@yamsmemory.ai).
 
 ## Licensing
-- YAMS is Apache-2.0. Ensure new files include an SPDX header when applicable:
+- YAMS is GPL-3.0-or-later. Ensure new files include an SPDX header when applicable:
 ```text
-SPDX-License-Identifier: Apache-2.0
+SPDX-License-Identifier: GPL-3.0-or-later
 ```
 - Only contribute code you are authorized to submit under the project license.
 

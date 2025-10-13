@@ -343,13 +343,15 @@ public:
         if (ctx_.metadataRepo) {
             metadata::DocumentInfo info;
             std::filesystem::path p = usePath;
-            info.filePath = p.string();
-            // If we created a temporary file from content+name, prefer the logical name
+            // When content is provided directly, use the logical name as the canonical path so
+            // tree indexing and session diffs work for raw-text documents too.
             if (!req.path.empty()) {
+                info.filePath = p.string();
                 info.fileName = p.filename().string();
                 info.fileExtension = p.extension().string();
             } else {
-                // Use the provided document name for metadata visibility and queries
+                // Prefer the provided document name as both filePath and fileName
+                info.filePath = req.name;
                 info.fileName = req.name;
                 std::filesystem::path np = req.name;
                 info.fileExtension = np.extension().string();
@@ -1635,19 +1637,34 @@ public:
 
         // Strategy 3: Path suffix or filename match
         std::vector<std::string> candidatePatterns;
+
+        // Always try basename (filename only) match
+        std::filesystem::path inputPath(name);
+        std::string basename = inputPath.filename().string();
+        if (!basename.empty() && basename != name) {
+            candidatePatterns.push_back(basename);
+        }
+
+        // Try full path suffix match
         if (name.find('/') != std::string::npos || name.find('\\') != std::string::npos) {
             candidatePatterns.push_back("%" + name);
         }
 
-        // Strategy 4: Relative path from cwd
+        // Strategy 4: For absolute paths, try without the directory component mismatch
+        // e.g., if indexed from /path/a/file.txt but queried from /path/b/file.txt
         if (!name.empty() && (name[0] == '/' || name.find(":\\") != std::string::npos)) {
             try {
-                std::filesystem::path inputPath(name);
-                std::filesystem::path cwd = std::filesystem::current_path();
-                if (inputPath.string().find(cwd.string()) == 0) {
-                    auto rel = std::filesystem::relative(inputPath, cwd).string();
-                    if (!rel.empty() && rel != name) {
-                        candidatePatterns.push_back(rel);
+                std::filesystem::path absPath(name);
+                // Try suffix patterns of increasing specificity
+                // E.g., for /home/user/Downloads/docs/file.txt try:
+                //   - docs/file.txt
+                //   - Downloads/docs/file.txt
+                std::string pathStr = absPath.string();
+                size_t pos = 0;
+                while ((pos = pathStr.find('/', pos + 1)) != std::string::npos) {
+                    std::string suffix = pathStr.substr(pos + 1);
+                    if (!suffix.empty() && suffix != basename) {
+                        candidatePatterns.push_back("%" + suffix);
                     }
                 }
             } catch (...) {

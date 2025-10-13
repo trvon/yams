@@ -1005,13 +1005,12 @@ int ensure_vector_match(sqlite3_value *aValue, sqlite3_value *bValue, void **a,
                         void **b, enum VectorElementType *element_type,
                         size_t *dimensions, vector_cleanup *outACleanup,
                         vector_cleanup *outBCleanup, char **outError) {
-  int rc;
-  enum VectorElementType aType, bType;
+    enum VectorElementType aType, bType;
   size_t aDims, bDims;
   char *error = NULL;
   vector_cleanup aCleanup, bCleanup;
 
-  rc = vector_from_value(aValue, a, &aDims, &aType, &aCleanup, &error);
+  int rc = vector_from_value(aValue, a, &aDims, &aType, &aCleanup, &error);
   if (rc != SQLITE_OK) {
     *outError = sqlite3_mprintf("Error reading 1st vector: %s", error);
     sqlite3_free(error);
@@ -1064,10 +1063,9 @@ static void vec_npy_file(sqlite3_context *context, int argc,
                          sqlite3_value **argv) {
   assert(argc == 1);
   char *path = (char *)sqlite3_value_text(argv[0]);
-  size_t pathLength = sqlite3_value_bytes(argv[0]);
-  struct VecNpyFile *f;
+  const size_t pathLength = sqlite3_value_bytes(argv[0]);
 
-  f = sqlite3_malloc(sizeof(*f));
+  struct VecNpyFile* f = sqlite3_malloc(sizeof(*f));
   if (!f) {
     sqlite3_result_error_nomem(context);
     return;
@@ -1083,12 +1081,11 @@ static void vec_npy_file(sqlite3_context *context, int argc,
 #pragma region scalar functions
 static void vec_f32(sqlite3_context *context, int argc, sqlite3_value **argv) {
   assert(argc == 1);
-  int rc;
-  f32 *vector = NULL;
+    f32 *vector = NULL;
   size_t dimensions;
   fvec_cleanup cleanup;
   char *errmsg;
-  rc = fvec_from_value(argv[0], &vector, &dimensions, &cleanup, &errmsg);
+  const int rc = fvec_from_value(argv[0], &vector, &dimensions, &cleanup, &errmsg);
   if (rc != SQLITE_OK) {
     sqlite3_result_error(context, errmsg, -1);
     sqlite3_free(errmsg);
@@ -1101,12 +1098,11 @@ static void vec_f32(sqlite3_context *context, int argc, sqlite3_value **argv) {
 
 static void vec_bit(sqlite3_context *context, int argc, sqlite3_value **argv) {
   assert(argc == 1);
-  int rc;
-  u8 *vector;
+    u8 *vector;
   size_t dimensions;
   vector_cleanup cleanup;
   char *errmsg;
-  rc = bitvec_from_value(argv[0], &vector, &dimensions, &cleanup, &errmsg);
+  const int rc = bitvec_from_value(argv[0], &vector, &dimensions, &cleanup, &errmsg);
   if (rc != SQLITE_OK) {
     sqlite3_result_error(context, errmsg, -1);
     sqlite3_free(errmsg);
@@ -1116,14 +1112,13 @@ static void vec_bit(sqlite3_context *context, int argc, sqlite3_value **argv) {
   sqlite3_result_subtype(context, SQLITE_VEC_ELEMENT_TYPE_BIT);
   cleanup(vector);
 }
-static void vec_int8(sqlite3_context *context, int argc, sqlite3_value **argv) {
+static void vec_int8(sqlite3_context *context, const int argc, sqlite3_value **argv) {
   assert(argc == 1);
-  int rc;
-  i8 *vector;
+    i8 *vector;
   size_t dimensions;
   vector_cleanup cleanup;
   char *errmsg;
-  rc = int8_vec_from_value(argv[0], &vector, &dimensions, &cleanup, &errmsg);
+  const int rc = int8_vec_from_value(argv[0], &vector, &dimensions, &cleanup, &errmsg);
   if (rc != SQLITE_OK) {
     sqlite3_result_error(context, errmsg, -1);
     sqlite3_free(errmsg);
@@ -1134,17 +1129,15 @@ static void vec_int8(sqlite3_context *context, int argc, sqlite3_value **argv) {
   cleanup(vector);
 }
 
-static void vec_length(sqlite3_context *context, int argc,
+static void vec_length(sqlite3_context *context, const int argc,
                        sqlite3_value **argv) {
   assert(argc == 1);
-  int rc;
-  void *vector;
+    void *vector;
   size_t dimensions;
   vector_cleanup cleanup;
   char *errmsg;
   enum VectorElementType elementType;
-  rc = vector_from_value(argv[0], &vector, &dimensions, &elementType, &cleanup,
-                         &errmsg);
+  const int rc = vector_from_value(argv[0], &vector, &dimensions, &elementType, &cleanup, &errmsg);
   if (rc != SQLITE_OK) {
     sqlite3_result_error(context, errmsg, -1);
     sqlite3_free(errmsg);
@@ -1157,14 +1150,13 @@ static void vec_length(sqlite3_context *context, int argc,
 static void vec_distance_cosine(sqlite3_context *context, int argc,
                                 sqlite3_value **argv) {
   assert(argc == 2);
-  int rc;
-  void *a = NULL, *b = NULL;
+    void *a = NULL, *b = NULL;
   size_t dimensions;
   vector_cleanup aCleanup, bCleanup;
   char *error;
   enum VectorElementType elementType;
-  rc = ensure_vector_match(argv[0], argv[1], &a, &b, &elementType, &dimensions,
-                           &aCleanup, &bCleanup, &error);
+  const int rc = ensure_vector_match(argv[0], argv[1], &a, &b, &elementType, &dimensions, &aCleanup,
+                                 &bCleanup, &error);
   if (rc != SQLITE_OK) {
     sqlite3_result_error(context, error, -1);
     sqlite3_free(error);
@@ -1179,12 +1171,12 @@ static void vec_distance_cosine(sqlite3_context *context, int argc,
     goto finish;
   }
   case SQLITE_VEC_ELEMENT_TYPE_FLOAT32: {
-    f32 result = distance_cosine_float(a, b, &dimensions);
+      const f32 result = distance_cosine_float(a, b, &dimensions);
     sqlite3_result_double(context, result);
     goto finish;
   }
   case SQLITE_VEC_ELEMENT_TYPE_INT8: {
-    f32 result = distance_cosine_int8(a, b, &dimensions);
+      const f32 result = distance_cosine_int8(a, b, &dimensions);
     sqlite3_result_double(context, result);
     goto finish;
   }
@@ -1199,14 +1191,13 @@ finish:
 static void vec_distance_l2(sqlite3_context *context, int argc,
                             sqlite3_value **argv) {
   assert(argc == 2);
-  int rc;
-  void *a = NULL, *b = NULL;
+    void *a = NULL, *b = NULL;
   size_t dimensions;
   vector_cleanup aCleanup, bCleanup;
   char *error;
   enum VectorElementType elementType;
-  rc = ensure_vector_match(argv[0], argv[1], &a, &b, &elementType, &dimensions,
-                           &aCleanup, &bCleanup, &error);
+  const int rc = ensure_vector_match(argv[0], argv[1], &a, &b, &elementType, &dimensions, &aCleanup,
+                                 &bCleanup, &error);
   if (rc != SQLITE_OK) {
     sqlite3_result_error(context, error, -1);
     sqlite3_free(error);
@@ -1220,12 +1211,12 @@ static void vec_distance_l2(sqlite3_context *context, int argc,
     goto finish;
   }
   case SQLITE_VEC_ELEMENT_TYPE_FLOAT32: {
-    f32 result = distance_l2_sqr_float(a, b, &dimensions);
+      const f32 result = distance_l2_sqr_float(a, b, &dimensions);
     sqlite3_result_double(context, result);
     goto finish;
   }
   case SQLITE_VEC_ELEMENT_TYPE_INT8: {
-    f32 result = distance_l2_sqr_int8(a, b, &dimensions);
+      const f32 result = distance_l2_sqr_int8(a, b, &dimensions);
     sqlite3_result_double(context, result);
     goto finish;
   }
@@ -1240,14 +1231,13 @@ finish:
 static void vec_distance_l1(sqlite3_context *context, int argc,
                             sqlite3_value **argv) {
   assert(argc == 2);
-  int rc;
-  void *a, *b;
+    void *a, *b;
   size_t dimensions;
   vector_cleanup aCleanup, bCleanup;
   char *error;
   enum VectorElementType elementType;
-  rc = ensure_vector_match(argv[0], argv[1], &a, &b, &elementType, &dimensions,
-                           &aCleanup, &bCleanup, &error);
+  const int rc = ensure_vector_match(argv[0], argv[1], &a, &b, &elementType, &dimensions, &aCleanup,
+                                 &bCleanup, &error);
   if (rc != SQLITE_OK) {
     sqlite3_result_error(context, error, -1);
     sqlite3_free(error);
@@ -1266,7 +1256,7 @@ static void vec_distance_l1(sqlite3_context *context, int argc,
     goto finish;
   }
   case SQLITE_VEC_ELEMENT_TYPE_INT8: {
-    i64 result = distance_l1_int8(a, b, &dimensions);
+      const i64 result = distance_l1_int8(a, b, &dimensions);
     sqlite3_result_int(context, result);
     goto finish;
   }
@@ -1278,17 +1268,16 @@ finish:
   return;
 }
 
-static void vec_distance_hamming(sqlite3_context *context, int argc,
+static void vec_distance_hamming(sqlite3_context *context, const int argc,
                                  sqlite3_value **argv) {
   assert(argc == 2);
-  int rc;
-  void *a = NULL, *b = NULL;
+    void *a = NULL, *b = NULL;
   size_t dimensions;
   vector_cleanup aCleanup, bCleanup;
   char *error;
   enum VectorElementType elementType;
-  rc = ensure_vector_match(argv[0], argv[1], &a, &b, &elementType, &dimensions,
-                           &aCleanup, &bCleanup, &error);
+  const int rc = ensure_vector_match(argv[0], argv[1], &a, &b, &elementType, &dimensions, &aCleanup,
+                                 &bCleanup, &error);
   if (rc != SQLITE_OK) {
     sqlite3_result_error(context, error, -1);
     sqlite3_free(error);
@@ -1332,14 +1321,14 @@ char *vec_type_name(enum VectorElementType elementType) {
   return "";
 }
 
-static void vec_type(sqlite3_context *context, int argc, sqlite3_value **argv) {
+static void vec_type(sqlite3_context *context, const int argc, sqlite3_value **argv) {
   assert(argc == 1);
   void *vector;
   size_t dimensions;
   vector_cleanup cleanup;
   char *pzError;
   enum VectorElementType elementType;
-  int rc = vector_from_value(argv[0], &vector, &dimensions, &elementType,
+  const int rc = vector_from_value(argv[0], &vector, &dimensions, &elementType,
                              &cleanup, &pzError);
   if (rc != SQLITE_OK) {
     sqlite3_result_error(context, pzError, -1);
@@ -1349,7 +1338,7 @@ static void vec_type(sqlite3_context *context, int argc, sqlite3_value **argv) {
   sqlite3_result_text(context, vec_type_name(elementType), -1, SQLITE_STATIC);
   cleanup(vector);
 }
-static void vec_quantize_binary(sqlite3_context *context, int argc,
+static void vec_quantize_binary(sqlite3_context *context, const int argc,
                                 sqlite3_value **argv) {
   assert(argc == 1);
   void *vector;
@@ -1357,7 +1346,7 @@ static void vec_quantize_binary(sqlite3_context *context, int argc,
   vector_cleanup vectorCleanup;
   char *pzError;
   enum VectorElementType elementType;
-  int rc = vector_from_value(argv[0], &vector, &dimensions, &elementType,
+  const int rc = vector_from_value(argv[0], &vector, &dimensions, &elementType,
                              &vectorCleanup, &pzError);
   if (rc != SQLITE_OK) {
     sqlite3_result_error(context, pzError, -1);
@@ -1379,7 +1368,7 @@ static void vec_quantize_binary(sqlite3_context *context, int argc,
     return;
   }
 
-  int sz = dimensions / CHAR_BIT;
+  const int sz = dimensions / CHAR_BIT;
   u8 *out = sqlite3_malloc(sz);
   if (!out) {
     sqlite3_result_error_code(context, SQLITE_NOMEM);
@@ -1399,7 +1388,7 @@ static void vec_quantize_binary(sqlite3_context *context, int argc,
   }
   case SQLITE_VEC_ELEMENT_TYPE_INT8: {
     for (size_t i = 0; i < dimensions; i++) {
-      int res = ((i8 *)vector)[i] > 0;
+          const int res = ((i8 *)vector)[i] > 0;
       out[i / 8] |= (res << (i % 8));
     }
     break;
@@ -1426,14 +1415,14 @@ static void vec_quantize_int8(sqlite3_context *context, int argc,
   fvec_cleanup srcCleanup;
   char *err;
   i8 *out = NULL;
-  int rc = fvec_from_value(argv[0], &srcVector, &dimensions, &srcCleanup, &err);
+  const int rc = fvec_from_value(argv[0], &srcVector, &dimensions, &srcCleanup, &err);
   if (rc != SQLITE_OK) {
     sqlite3_result_error(context, err, -1);
     sqlite3_free(err);
     return;
   }
 
-  int sz = dimensions * sizeof(i8);
+  const int sz = dimensions * sizeof(i8);
   out = sqlite3_malloc(sz);
   if (!out) {
     sqlite3_result_error_nomem(context);
@@ -1450,7 +1439,7 @@ static void vec_quantize_int8(sqlite3_context *context, int argc,
     sqlite3_free(out);
     goto cleanup;
   }
-  f32 step = (1.0 - (-1.0)) / 255;
+  const f32 step = (1.0 - (-1.0)) / 255;
   for (size_t i = 0; i < dimensions; i++) {
     out[i] = ((srcVector[i] - (-1.0)) / step) - 128;
   }
@@ -1464,14 +1453,13 @@ cleanup:
 
 static void vec_add(sqlite3_context *context, int argc, sqlite3_value **argv) {
   assert(argc == 2);
-  int rc;
-  void *a = NULL, *b = NULL;
+    void *a = NULL, *b = NULL;
   size_t dimensions;
   vector_cleanup aCleanup, bCleanup;
   char *error;
   enum VectorElementType elementType;
-  rc = ensure_vector_match(argv[0], argv[1], &a, &b, &elementType, &dimensions,
-                           &aCleanup, &bCleanup, &error);
+  const int rc = ensure_vector_match(argv[0], argv[1], &a, &b, &elementType, &dimensions, &aCleanup,
+                                 &bCleanup, &error);
   if (rc != SQLITE_OK) {
     sqlite3_result_error(context, error, -1);
     sqlite3_free(error);
@@ -1484,7 +1472,7 @@ static void vec_add(sqlite3_context *context, int argc, sqlite3_value **argv) {
     goto finish;
   }
   case SQLITE_VEC_ELEMENT_TYPE_FLOAT32: {
-    size_t outSize = dimensions * sizeof(f32);
+      const size_t outSize = dimensions * sizeof(f32);
     f32 *out = sqlite3_malloc(outSize);
     if (!out) {
       sqlite3_result_error_nomem(context);
@@ -1499,7 +1487,7 @@ static void vec_add(sqlite3_context *context, int argc, sqlite3_value **argv) {
     goto finish;
   }
   case SQLITE_VEC_ELEMENT_TYPE_INT8: {
-    size_t outSize = dimensions * sizeof(i8);
+      const size_t outSize = dimensions * sizeof(i8);
     i8 *out = sqlite3_malloc(outSize);
     if (!out) {
       sqlite3_result_error_nomem(context);
@@ -1521,14 +1509,13 @@ finish:
 }
 static void vec_sub(sqlite3_context *context, int argc, sqlite3_value **argv) {
   assert(argc == 2);
-  int rc;
-  void *a = NULL, *b = NULL;
+    void *a = NULL, *b = NULL;
   size_t dimensions;
   vector_cleanup aCleanup, bCleanup;
   char *error;
   enum VectorElementType elementType;
-  rc = ensure_vector_match(argv[0], argv[1], &a, &b, &elementType, &dimensions,
-                           &aCleanup, &bCleanup, &error);
+  int rc = ensure_vector_match(argv[0], argv[1], &a, &b, &elementType, &dimensions, &aCleanup,
+                                 &bCleanup, &error);
   if (rc != SQLITE_OK) {
     sqlite3_result_error(context, error, -1);
     sqlite3_free(error);
@@ -1542,7 +1529,7 @@ static void vec_sub(sqlite3_context *context, int argc, sqlite3_value **argv) {
     goto finish;
   }
   case SQLITE_VEC_ELEMENT_TYPE_FLOAT32: {
-    size_t outSize = dimensions * sizeof(f32);
+      const size_t outSize = dimensions * sizeof(f32);
     f32 *out = sqlite3_malloc(outSize);
     if (!out) {
       sqlite3_result_error_nomem(context);
@@ -1557,7 +1544,7 @@ static void vec_sub(sqlite3_context *context, int argc, sqlite3_value **argv) {
     goto finish;
   }
   case SQLITE_VEC_ELEMENT_TYPE_INT8: {
-    size_t outSize = dimensions * sizeof(i8);
+      const size_t outSize = dimensions * sizeof(i8);
     i8 *out = sqlite3_malloc(outSize);
     if (!out) {
       sqlite3_result_error_nomem(context);
@@ -1587,7 +1574,7 @@ static void vec_slice(sqlite3_context *context, int argc,
   char *err;
   enum VectorElementType elementType;
 
-  int rc = vector_from_value(argv[0], &vector, &dimensions, &elementType,
+  const int rc = vector_from_value(argv[0], &vector, &dimensions, &elementType,
                              &cleanup, &err);
   if (rc != SQLITE_OK) {
     sqlite3_result_error(context, err, -1);
@@ -1595,8 +1582,8 @@ static void vec_slice(sqlite3_context *context, int argc,
     return;
   }
 
-  int start = sqlite3_value_int(argv[1]);
-  int end = sqlite3_value_int(argv[2]);
+  const int start = sqlite3_value_int(argv[1]);
+  const int end = sqlite3_value_int(argv[2]);
 
   if (start < 0) {
     sqlite3_result_error(context,
@@ -1632,11 +1619,11 @@ static void vec_slice(sqlite3_context *context, int argc,
                          -1);
     goto done;
   }
-  size_t n = end - start;
+  const size_t n = end - start;
 
   switch (elementType) {
   case SQLITE_VEC_ELEMENT_TYPE_FLOAT32: {
-    int outSize = n * sizeof(f32);
+    const int outSize = n * sizeof(f32);
     f32 *out = sqlite3_malloc(outSize);
     if (!out) {
       sqlite3_result_error_nomem(context);
@@ -1651,7 +1638,7 @@ static void vec_slice(sqlite3_context *context, int argc,
     goto done;
   }
   case SQLITE_VEC_ELEMENT_TYPE_INT8: {
-    int outSize = n * sizeof(i8);
+    const int outSize = n * sizeof(i8);
     i8 *out = sqlite3_malloc(outSize);
     if (!out) {
       sqlite3_result_error_nomem(context);
@@ -1674,7 +1661,7 @@ static void vec_slice(sqlite3_context *context, int argc,
       sqlite3_result_error(context, "end index must be divisible by 8.", -1);
       goto done;
     }
-    int outSize = n / CHAR_BIT;
+    const int outSize = n / CHAR_BIT;
     u8 *out = sqlite3_malloc(outSize);
     if (!out) {
       sqlite3_result_error_nomem(context);
@@ -1702,7 +1689,7 @@ static void vec_to_json(sqlite3_context *context, int argc,
   char *err;
   enum VectorElementType elementType;
 
-  int rc = vector_from_value(argv[0], &vector, &dimensions, &elementType,
+  const int rc = vector_from_value(argv[0], &vector, &dimensions, &elementType,
                              &cleanup, &err);
   if (rc != SQLITE_OK) {
     sqlite3_result_error(context, err, -1);
@@ -1717,7 +1704,7 @@ static void vec_to_json(sqlite3_context *context, int argc,
       sqlite3_str_appendall(str, ",");
     }
     if (elementType == SQLITE_VEC_ELEMENT_TYPE_FLOAT32) {
-      f32 value = ((f32 *)vector)[i];
+        const f32 value = ((f32 *)vector)[i];
       if (isnan(value)) {
         sqlite3_str_appendall(str, "null");
       } else {
@@ -1732,8 +1719,8 @@ static void vec_to_json(sqlite3_context *context, int argc,
     }
   }
   sqlite3_str_appendall(str, "]");
-  int len = sqlite3_str_length(str);
-  char *s = sqlite3_str_finish(str);
+  const int len = sqlite3_str_length(str);
+  const char *s = sqlite3_str_finish(str);
   if (s) {
     sqlite3_result_text(context, s, len, sqlite3_free);
     sqlite3_result_subtype(context, JSON_SUBTYPE);
@@ -1752,7 +1739,7 @@ static void vec_normalize(sqlite3_context *context, int argc,
   char *err;
   enum VectorElementType elementType;
 
-  int rc = vector_from_value(argv[0], &vector, &dimensions, &elementType,
+  const int rc = vector_from_value(argv[0], &vector, &dimensions, &elementType,
                              &cleanup, &err);
   if (rc != SQLITE_OK) {
     sqlite3_result_error(context, err, -1);
@@ -1767,7 +1754,7 @@ static void vec_normalize(sqlite3_context *context, int argc,
     return;
   }
 
-  int outSize = dimensions * sizeof(f32);
+  const int outSize = dimensions * sizeof(f32);
   f32 *out = sqlite3_malloc(outSize);
   if (!out) {
     cleanup(vector);

@@ -1,5 +1,29 @@
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <gtest/gtest.h>
+#include <yams/app/services/services.hpp>
+#include <yams/app/services/session_service.hpp>
+
+using namespace yams::app::services;
+
+TEST(SessionService, WatchConfigRoundtrip) {
+    // Isolated state root under tmp
+    auto root = std::filesystem::temp_directory_path() / "yams_watch_rt";
+    setenv("XDG_STATE_HOME", root.string().c_str(), 1);
+    AppContext ctx;
+    auto svc = makeSessionService(&ctx);
+    svc->init("watchme", "");
+    // Disabled by default
+    EXPECT_FALSE(svc->watchEnabled());
+    // Enable and set interval
+    svc->enableWatch(true);
+    svc->setWatchIntervalMs(1500);
+    EXPECT_TRUE(svc->watchEnabled());
+    EXPECT_GE(svc->watchIntervalMs(), 1000u);
+}
+
+#include <filesystem>
 #include <gtest/gtest.h>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>

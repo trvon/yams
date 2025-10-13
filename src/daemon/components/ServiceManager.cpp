@@ -24,6 +24,7 @@
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_future.hpp>
 #include <yams/api/content_store_builder.h>
+#include <yams/app/services/session_service.hpp>
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/core/types.h>
 #include <yams/daemon/components/DaemonMetrics.h>
@@ -349,6 +350,44 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             spdlog::warn("Exception trusting configured pluginDir: {}", e.what());
         }
 
+        // Auto-trust system install location for plugins
+#ifdef YAMS_INSTALL_PREFIX
+        try {
+            namespace fs = std::filesystem;
+            fs::path system_plugins = fs::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins";
+            if (fs::exists(system_plugins) && fs::is_directory(system_plugins)) {
+                spdlog::debug("Found system plugin directory: {}", system_plugins.string());
+                if (abiHost_) {
+                    if (auto trc = abiHost_->trustAdd(system_plugins)) {
+                        spdlog::info("Auto-trusted system plugin directory: {}",
+                                     system_plugins.string());
+                        try {
+                            pluginHostFsm_.dispatch(PluginTrustVerifiedEvent{});
+                        } catch (...) {
+                        }
+                    } else {
+                        spdlog::warn("Failed to auto-trust system plugins: {}",
+                                     trc.error().message);
+                    }
+                }
+                if (abiPluginLoader_) {
+                    if (auto trc2 = abiPluginLoader_->trustAdd(system_plugins)) {
+                        spdlog::debug("Auto-trusted system plugins for legacy loader");
+                    } else {
+                        spdlog::warn("Failed to auto-trust system plugins for legacy loader: {}",
+                                     trc2.error().message);
+                    }
+                }
+            } else {
+                spdlog::debug("System plugin directory not found: {}", system_plugins.string());
+            }
+        } catch (const std::exception& e) {
+            spdlog::warn("Exception auto-trusting system plugins: {}", e.what());
+        }
+#else
+        spdlog::debug("YAMS_INSTALL_PREFIX not defined; skipping system plugin auto-trust");
+#endif
+
         try {
             if (!ingestService_) {
                 std::size_t ingestThreads = 1;
@@ -654,6 +693,12 @@ void ServiceManager::shutdown() {
         }
         modelProvider_->shutdown();
         modelProvider_.reset();
+    }
+
+    // Stop session watcher loop
+    try {
+        sessionWatchStop_.store(true, std::memory_order_relaxed);
+    } catch (...) {
     }
 
     // Shutdown search engine
@@ -1292,6 +1337,79 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     spdlog::info("[ServiceManager] Phase: DB Pool and Repo Initialized.");
 
     // Executors and sessions
+    // Lightweight session directory watcher (polling), reacts to SessionService config.
+    try {
+        auto exec = getWorkerExecutor();
+        boost::asio::post(exec, [this]() {
+            // Poll every 2s by default; allow env override for tests
+            auto read_ms = [](const char* env, int def) {
+                try {
+                    if (const char* v = std::getenv(env))
+                        return std::max(100, std::stoi(v));
+                } catch (...) {
+                }
+                return def;
+            };
+            const int interval_ms = read_ms("YAMS_SESSION_WATCH_INTERVAL_MS", 2000);
+            while (!sessionWatchStop_.load(std::memory_order_relaxed)) {
+                try {
+                    // Consult SessionService JSON directly (same storage as CLI)
+                    yams::app::services::AppContext appCtx = getAppContext();
+                    auto sess = yams::app::services::makeSessionService(&appCtx);
+                    auto current = sess->current();
+                    if (current && sess->watchEnabled(*current)) {
+                        auto patterns = sess->getPinnedPatterns(*current);
+                        for (const auto& pat : patterns) {
+                            std::error_code ec;
+                            std::filesystem::path p(pat);
+                            if (!p.empty() && std::filesystem::is_directory(p, ec)) {
+                                // Scan directory: record mtime/size; enqueue changes
+                                auto& dirMap = sessionWatch_.dirFiles[p.string()];
+                                std::unordered_map<std::string,
+                                                   std::pair<std::uint64_t, std::uint64_t>>
+                                    cur;
+                                for (auto it = std::filesystem::recursive_directory_iterator(p, ec);
+                                     !ec && it != std::filesystem::recursive_directory_iterator();
+                                     ++it) {
+                                    if (!it->is_regular_file())
+                                        continue;
+                                    auto fp = it->path().string();
+                                    auto fsz = (std::uint64_t)it->file_size(ec);
+                                    auto fmt = (std::uint64_t)
+                                                   std::chrono::duration_cast<std::chrono::seconds>(
+                                                       it->last_write_time().time_since_epoch())
+                                                       .count();
+                                    cur[fp] = {fmt, fsz};
+                                    auto old = dirMap.find(fp);
+                                    if (old == dirMap.end() || old->second != cur[fp]) {
+                                        // New or modified file -> enqueue add/store
+                                        InternalEventBus::StoreDocumentTask t;
+                                        t.request.path = fp;
+                                        t.request.recursive = false;
+                                        t.request.noEmbeddings = true;
+                                        static std::shared_ptr<
+                                            SpscQueue<InternalEventBus::StoreDocumentTask>>
+                                            q = InternalEventBus::instance()
+                                                    .get_or_create_channel<
+                                                        InternalEventBus::StoreDocumentTask>(
+                                                        "store_document_tasks", 4096);
+                                        if (q)
+                                            (void)q->try_push(std::move(t));
+                                    }
+                                }
+                                // Detect deletions (optional): if desired, could record and handle
+                                dirMap.swap(cur);
+                            }
+                        }
+                    }
+                } catch (...) {
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+            }
+        });
+    } catch (...) {
+    }
+
     if (database_ && metadataRepo_)
         searchExecutor_ = std::make_shared<search::SearchExecutor>(database_, metadataRepo_);
     retrievalSessions_ = std::make_unique<RetrievalSessionManager>();
@@ -2284,33 +2402,12 @@ void ServiceManager::preloadPreferredModelIfConfigured() {
             spdlog::debug("preloadPreferredModelIfConfigured: no model provider available");
             return;
         }
-        // Resolve preferred model via env or disk
-        std::string preferred;
-        if (const char* env = std::getenv("YAMS_PREFERRED_MODEL")) {
-            preferred = env;
-        }
-        if (preferred.empty()) {
-            // Best-effort scan: ~/.yams/models/*/model.onnx
-            const char* home = std::getenv("HOME");
-            if (home) {
-                namespace fs = std::filesystem;
-                fs::path base = fs::path(home) / ".yams" / "models";
-                std::error_code ec;
-                if (fs::exists(base, ec) && fs::is_directory(base, ec)) {
-                    for (const auto& e : fs::directory_iterator(base, ec)) {
-                        if (!e.is_directory())
-                            continue;
-                        if (fs::exists(e.path() / "model.onnx", ec)) {
-                            preferred = e.path().filename().string();
-                            break;
-                        }
-                    }
-                }
-            }
-        }
+        // Resolve preferred model via config/env (fallback scans will still handle install
+        // presence)
+        std::string preferred = resolvePreferredModel();
         if (preferred.empty()) {
             spdlog::info("Model preload skipped: no preferred model configured (set "
-                         "YAMS_PREFERRED_MODEL or install a model)");
+                         "embeddings.preferred_model in config or install a model)");
             return;
         }
         spdlog::info("Preloading preferred model: {}", preferred);
@@ -3057,6 +3154,17 @@ std::string ServiceManager::resolvePreferredModel() const {
 
         fs::path cfgPath = cfgHome / "yams" / "config.toml";
         if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            // Fast path: flat TOML for explicit key
+            try {
+                auto kv = parseSimpleTomlFlat(cfgPath);
+                auto it = kv.find("embeddings.preferred_model");
+                if (it != kv.end() && !it->second.empty()) {
+                    preferred = it->second;
+                    spdlog::debug("Preferred model from config: {}", preferred);
+                    return preferred;
+                }
+            } catch (...) {
+            }
             std::ifstream in(cfgPath);
             std::string line;
             auto trim = [&](std::string& t) {

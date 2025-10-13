@@ -382,7 +382,7 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
             {"daemon",
              {{"enable", "true"},
               {"auto_load_plugins", "true"},
-              {"plugin_dir", ""},
+              {"plugin_dir", "/usr/local/lib/yams/plugins"}, // System install location
               {"plugin_name_policy", "relaxed"},
               {"use_legacy_tuner", "false"},
               {"auto_repair_batch_size", "16"},
@@ -725,10 +725,10 @@ Result<void> ConfigMigrator::writeTomlConfig(
                     // Array value
                     file << key << " = " << value << "\n";
                 } else if (value == "true" || value == "false" ||
-                           std::all_of(value.begin(), value.end(), ::isdigit) ||
+                           std::ranges::all_of(value, ::isdigit) ||
                            (value.find('.') != std::string::npos &&
-                            std::all_of(value.begin(), value.end(),
-                                        [](char c) { return ::isdigit(c) || c == '.'; }))) {
+                            std::ranges::all_of(value,
+                                                [](char c) { return ::isdigit(c) || c == '.'; }))) {
                     // Boolean or numeric value
                     file << key << " = " << value << "\n";
                 } else {
@@ -752,7 +752,7 @@ Result<void> ConfigMigrator::writeTomlConfig(
             } else if (!value.empty() && value[0] == '[') {
                 file << key << " = " << value << "\n";
             } else if (value == "true" || value == "false" ||
-                       std::all_of(value.begin(), value.end(), ::isdigit) ||
+                       std::ranges::all_of(value, ::isdigit) ||
                        (value.find('.') != std::string::npos &&
                         std::all_of(value.begin(), value.end(),
                                     [](char c) { return ::isdigit(c) || c == '.'; }))) {

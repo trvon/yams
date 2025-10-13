@@ -1662,8 +1662,42 @@ private:
         const char* home = std::getenv("HOME");
         if (!home)
             return;
-        fs::path base = fs::path(home) / ".yams" / "models";
+
+        // Check for models in OLD location (pre-unification)
+        fs::path old_base = fs::path(home) / ".yams" / "models";
+
+        // Check for models in NEW unified location
+        const char* xdg_data = std::getenv("XDG_DATA_HOME");
+        fs::path new_base = xdg_data ? fs::path(xdg_data) / "yams" / "models"
+                                     : fs::path(home) / ".local" / "share" / "yams" / "models";
+
         std::error_code ec;
+
+        // Check if old location has models
+        size_t old_model_count = 0;
+        if (fs::exists(old_base, ec) && fs::is_directory(old_base, ec)) {
+            for (const auto& entry : fs::directory_iterator(old_base, ec)) {
+                if (entry.is_directory() && fs::exists(entry.path() / "model.onnx", ec)) {
+                    old_model_count++;
+                }
+            }
+        }
+
+        // Warn about old location if models found there
+        if (old_model_count > 0) {
+            std::cout << "\n";
+            printWarn("Found " + std::to_string(old_model_count) +
+                      " model(s) in OLD location: " + old_base.string());
+            printWarn("Models should be in unified storage: " + new_base.string());
+            std::cout << "\nMigration command:\n";
+            std::cout << "  mkdir -p " << new_base.string() << "\n";
+            std::cout << "  mv " << old_base.string() << "/* " << new_base.string() << "/\n";
+            std::cout << "  yams daemon restart\n\n";
+        }
+
+        // Use the new unified location for checking models
+        fs::path base = new_base;
+
         if (!fs::exists(base, ec) || !fs::is_directory(base, ec))
             return;
 

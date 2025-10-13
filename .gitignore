@@ -72,12 +72,8 @@ site/
 public/*
 !public/.gitkeep
 conan.lock
-AGENTS.md
 .yams*
 CMakeUserPresets.json
-CRUSH.md
-OPENCODE.md
-AGENTS.md
 gitlab-ci.yml
 .project
 .cproject

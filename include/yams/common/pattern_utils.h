@@ -334,21 +334,21 @@ requires StringLike<std::ranges::range_value_t<Range>>
 /**
  * Trim helpers for std::string_view (no allocation).
  */
-[[nodiscard]] inline std::string_view ltrim(std::string_view s) noexcept {
+[[nodiscard]] constexpr std::string_view ltrim(std::string_view s) noexcept {
     size_t i = 0;
     while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r'))
         ++i;
     return s.substr(i);
 }
 
-[[nodiscard]] inline std::string_view rtrim(std::string_view s) noexcept {
+[[nodiscard]] constexpr std::string_view rtrim(std::string_view s) noexcept {
     size_t i = s.size();
     while (i > 0 && (s[i - 1] == ' ' || s[i - 1] == '\t' || s[i - 1] == '\n' || s[i - 1] == '\r'))
         --i;
     return s.substr(0, i);
 }
 
-[[nodiscard]] inline std::string_view trim(std::string_view s) noexcept {
+[[nodiscard]] constexpr std::string_view trim(std::string_view s) noexcept {
     return rtrim(ltrim(s));
 }
 

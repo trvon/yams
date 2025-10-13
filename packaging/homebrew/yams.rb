@@ -4,7 +4,7 @@ class Yams < Formula
   version "0.0.0" # placeholder; release workflow will update
   url "https://github.com/trvon/yams/archive/refs/tags/v#{version}.tar.gz"
   sha256 "SHA256_PLACEHOLDER" # replaced in release workflow
-  license "MIT"
+  license "GPL-3.0-or-later"
   head "https://github.com/trvon/yams.git", branch: "main"
 
   depends_on "cmake" => :build

@@ -825,7 +825,8 @@ private:
             if (!home) {
                 return Error{ErrorCode::InvalidPath, "Cannot determine home directory"};
             }
-            output_path = fs::path(home) / ".yams" / "models" / model.name;
+            // Use unified storage location instead of ~/.yams/models
+            output_path = cli_->getDataPath() / "models" / model.name;
         }
 
         // Create directory if needed
@@ -1272,7 +1273,8 @@ private:
         }
         auto locals = discoverLocalModels();
         if (locals.empty()) {
-            std::cout << "No installed models found in ~/.yams/models\n";
+            std::cout << "No installed models found in "
+                      << (cli_->getDataPath() / "models").string() << "\n";
         } else {
             std::cout << "Installed models:\n";
             for (const auto& m : locals) {
@@ -1318,7 +1320,10 @@ Available Models:
   - all-mpnet-base-v2: High-quality 768-dim embeddings (420MB)
   - nomic-embed-text-v1.5: Nomic embedding model (URL override supported)
 
-Default download location: ~/.yams/models/<model-name>/
+Default download location: <data-dir>/models/<model-name>/
+  (typically ~/.local/share/yams/models/ or $XDG_DATA_HOME/yams/models/)
+
+Note: Models are stored in the unified YAMS data directory for consistency.
 )";
     }
 

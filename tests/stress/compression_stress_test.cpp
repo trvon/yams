@@ -55,7 +55,7 @@ protected:
     std::filesystem::path testDir_;
 };
 
-// Test handling extremely large files
+// Test handling extremely large files - enhanced with multiple compression levels
 TEST_F(CompressionStressTest, ExtremelyLargeFiles) {
     auto& registry = CompressionRegistry::instance();
     auto compressor = registry.createCompressor(CompressionAlgorithm::Zstandard);
@@ -71,105 +71,164 @@ TEST_F(CompressionStressTest, ExtremelyLargeFiles) {
         100 * 1024 * 1024 // 100MB
     };
 
-    for (size_t size : sizes) {
-        std::cout << "Testing with " << (size / (1024 * 1024)) << "MB file..." << std::endl;
+    // Test multiple compression levels
+    std::vector<int> compressionLevels = {1, 3, 6, 9};
 
-        auto data = generateRandomData(size);
+    for (int level : compressionLevels) {
+        std::cout << "\nTesting compression level " << level << ":" << std::endl;
 
-        auto start = std::chrono::steady_clock::now();
-        auto compressed = compressor->compress(data);
-        auto compressTime = std::chrono::steady_clock::now() - start;
+        for (size_t size : sizes) {
+            std::cout << "  Testing with " << (size / (1024 * 1024)) << "MB file..." << std::endl;
 
-        ASSERT_TRUE(compressed.has_value()) << "Failed to compress " << size << " bytes";
+            auto data = generateRandomData(size);
 
-        start = std::chrono::steady_clock::now();
-        auto decompressed = compressor->decompress(compressed.value().data);
-        auto decompressTime = std::chrono::steady_clock::now() - start;
+            auto start = std::chrono::steady_clock::now();
+            auto compressed = compressor->compress(data, level);
+            auto compressTime = std::chrono::steady_clock::now() - start;
 
-        ASSERT_TRUE(decompressed.has_value()) << "Failed to decompress " << size << " bytes";
-        EXPECT_EQ(decompressed.value().size(), size);
+            ASSERT_TRUE(compressed.has_value())
+                << "Failed to compress " << size << " bytes at level " << level;
 
-        auto compressMs =
-            std::chrono::duration_cast<std::chrono::milliseconds>(compressTime).count();
-        auto decompressMs =
-            std::chrono::duration_cast<std::chrono::milliseconds>(decompressTime).count();
+            start = std::chrono::steady_clock::now();
+            auto decompressed = compressor->decompress(compressed.value().data);
+            auto decompressTime = std::chrono::steady_clock::now() - start;
 
-        std::cout << "  Compress: " << compressMs << "ms, Decompress: " << decompressMs << "ms"
-                  << std::endl;
-        std::cout << "  Ratio: " << (static_cast<double>(size) / compressed.value().compressedSize)
-                  << std::endl;
+            ASSERT_TRUE(decompressed.has_value()) << "Failed to decompress " << size << " bytes";
+            EXPECT_EQ(decompressed.value().size(), size);
+            EXPECT_EQ(decompressed.value(), data) << "Data integrity check failed";
+
+            auto compressMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(compressTime).count();
+            auto decompressMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(decompressTime).count();
+
+            std::cout << "    Compress: " << compressMs << "ms, Decompress: " << decompressMs
+                      << "ms" << std::endl;
+            std::cout << "    Ratio: "
+                      << (static_cast<double>(size) / compressed.value().compressedSize) << ":1"
+                      << std::endl;
+        }
     }
 }
 
-// Test sustained high-throughput compression
+// Test sustained high-throughput compression - enhanced with varying data patterns
 TEST_F(CompressionStressTest, SustainedHighThroughput) {
     auto& registry = CompressionRegistry::instance();
 
     const int durationSeconds = 10;
     const int numThreads = 8;
-    const size_t dataSize = 100 * 1024; // 100KB per operation
 
-    std::atomic<bool> shouldStop{false};
-    std::atomic<int64_t> totalOperations{0};
-    std::atomic<int64_t> totalBytes{0};
-    std::atomic<int> errors{0};
+    // Test with multiple data patterns
+    enum class DataPattern { Random, Zeros, Repetitive, Mixed };
+    std::vector<DataPattern> patterns = {DataPattern::Random, DataPattern::Zeros,
+                                         DataPattern::Repetitive};
 
-    std::vector<std::thread> threads;
+    for (auto pattern : patterns) {
+        std::string patternName;
+        switch (pattern) {
+            case DataPattern::Random:
+                patternName = "Random";
+                break;
+            case DataPattern::Zeros:
+                patternName = "Zeros";
+                break;
+            case DataPattern::Repetitive:
+                patternName = "Repetitive";
+                break;
+            default:
+                patternName = "Mixed";
+                break;
+        }
 
-    auto startTime = std::chrono::steady_clock::now();
+        std::cout << "\nTesting " << patternName << " data pattern:" << std::endl;
 
-    // Launch worker threads
-    for (int i = 0; i < numThreads; ++i) {
-        threads.emplace_back([&]() {
-            auto compressor = registry.createCompressor(CompressionAlgorithm::Zstandard);
-            if (!compressor) {
-                errors++;
-                return;
-            }
+        const size_t dataSize = 100 * 1024; // 100KB per operation
+        std::atomic<bool> shouldStop{false};
+        std::atomic<int64_t> totalOperations{0};
+        std::atomic<int64_t> totalBytes{0};
+        std::atomic<int> errors{0};
 
-            while (!shouldStop) {
-                auto data = generateRandomData(dataSize);
+        std::vector<std::thread> threads;
 
-                auto compressed = compressor->compress(data, 1); // Fast compression
-                if (!compressed.has_value()) {
+        auto startTime = std::chrono::steady_clock::now();
+
+        // Launch worker threads
+        for (int i = 0; i < numThreads; ++i) {
+            threads.emplace_back([&, threadId = i]() {
+                auto compressor = registry.createCompressor(CompressionAlgorithm::Zstandard);
+                if (!compressor) {
                     errors++;
-                    continue;
+                    return;
                 }
 
-                auto decompressed = compressor->decompress(compressed.value().data);
-                if (!decompressed.has_value() || decompressed.value() != data) {
-                    errors++;
-                    continue;
+                std::random_device rd;
+                std::mt19937 gen(rd() + threadId);
+
+                while (!shouldStop) {
+                    std::vector<std::byte> data(dataSize);
+
+                    // Generate data based on pattern
+                    switch (pattern) {
+                        case DataPattern::Random:
+                            data = generateRandomData(dataSize);
+                            break;
+                        case DataPattern::Zeros:
+                            std::fill(data.begin(), data.end(), std::byte{0});
+                            break;
+                        case DataPattern::Repetitive: {
+                            const std::string repetitive = "ABCDEFGH";
+                            for (size_t j = 0; j < dataSize; ++j) {
+                                data[j] = std::byte{
+                                    static_cast<uint8_t>(repetitive[j % repetitive.size()])};
+                            }
+                            break;
+                        }
+                        default:
+                            data = generateRandomData(dataSize);
+                            break;
+                    }
+
+                    auto compressed = compressor->compress(data, 1); // Fast compression
+                    if (!compressed.has_value()) {
+                        errors++;
+                        continue;
+                    }
+
+                    auto decompressed = compressor->decompress(compressed.value().data);
+                    if (!decompressed.has_value() || decompressed.value() != data) {
+                        errors++;
+                        continue;
+                    }
+
+                    totalOperations++;
+                    totalBytes += dataSize;
                 }
+            });
+        }
 
-                totalOperations++;
-                totalBytes += dataSize;
-            }
-        });
+        // Run for specified duration
+        std::this_thread::sleep_for(std::chrono::seconds(durationSeconds));
+        shouldStop = true;
+
+        // Wait for all threads
+        for (auto& t : threads) {
+            t.join();
+        }
+
+        auto endTime = std::chrono::steady_clock::now();
+        auto duration =
+            std::chrono::duration_cast<std::chrono::seconds>(endTime - startTime).count();
+
+        std::cout << "  Duration: " << duration << " seconds" << std::endl;
+        std::cout << "  Total operations: " << totalOperations.load() << std::endl;
+        std::cout << "  Operations/sec: " << (totalOperations.load() / duration) << std::endl;
+        std::cout << "  Throughput: " << (totalBytes.load() / (1024.0 * 1024.0 * duration))
+                  << " MB/s" << std::endl;
+        std::cout << "  Errors: " << errors.load() << std::endl;
+
+        EXPECT_EQ(errors.load(), 0) << "No errors should occur during normal operation";
+        EXPECT_GT(totalOperations.load(), numThreads * 10) << "Should complete many operations";
     }
-
-    // Run for specified duration
-    std::this_thread::sleep_for(std::chrono::seconds(durationSeconds));
-    shouldStop = true;
-
-    // Wait for all threads
-    for (auto& t : threads) {
-        t.join();
-    }
-
-    auto endTime = std::chrono::steady_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::seconds>(endTime - startTime).count();
-
-    std::cout << "Sustained throughput test results:" << std::endl;
-    std::cout << "  Duration: " << duration << " seconds" << std::endl;
-    std::cout << "  Total operations: " << totalOperations.load() << std::endl;
-    std::cout << "  Operations/sec: " << (totalOperations.load() / duration) << std::endl;
-    std::cout << "  Throughput: " << (totalBytes.load() / (1024.0 * 1024.0 * duration)) << " MB/s"
-              << std::endl;
-    std::cout << "  Errors: " << errors.load() << std::endl;
-
-    EXPECT_EQ(errors.load(), 0) << "No errors should occur during normal operation";
-    EXPECT_GT(totalOperations.load(), numThreads * 10) << "Should complete many operations";
 }
 
 // Test resource exhaustion handling
@@ -229,54 +288,96 @@ TEST_F(CompressionStressTest, ResourceExhaustion) {
     EXPECT_GT(successCount, 0) << "At least some operations should succeed";
 }
 
-// Test rapid compression/decompression cycles
+// Test rapid compression/decompression cycles - enhanced with multiple compressors
 TEST_F(CompressionStressTest, RapidCycles) {
     auto& registry = CompressionRegistry::instance();
-    auto compressor = registry.createCompressor(CompressionAlgorithm::Zstandard);
-    if (!compressor) {
-        GTEST_SKIP() << "Compressor not available";
-    }
 
-    const int cycles = 10000;
-    const size_t minSize = 100;
-    const size_t maxSize = 10000;
+    // Test multiple compression algorithms
+    std::vector<CompressionAlgorithm> algorithms = {
+        CompressionAlgorithm::Zstandard, CompressionAlgorithm::LZ4, CompressionAlgorithm::Gzip};
 
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<size_t> sizeDist(minSize, maxSize);
-
-    auto startTime = std::chrono::steady_clock::now();
-
-    for (int i = 0; i < cycles; ++i) {
-        size_t size = sizeDist(gen);
-        auto data = generateRandomData(size);
-
-        // Compress
-        auto compressed = compressor->compress(data);
-        ASSERT_TRUE(compressed.has_value()) << "Compression failed at cycle " << i;
-
-        // Decompress
-        auto decompressed = compressor->decompress(compressed.value().data);
-        ASSERT_TRUE(decompressed.has_value()) << "Decompression failed at cycle " << i;
-
-        // Verify
-        ASSERT_EQ(decompressed.value(), data) << "Data mismatch at cycle " << i;
-
-        // Report progress
-        if (i % 1000 == 0 && i > 0) {
-            auto elapsed = std::chrono::steady_clock::now() - startTime;
-            auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
-            std::cout << "Completed " << i << " cycles in " << elapsedMs << "ms" << std::endl;
+    for (auto algorithm : algorithms) {
+        auto compressor = registry.createCompressor(algorithm);
+        if (!compressor) {
+            std::cout << "Skipping algorithm (not available)" << std::endl;
+            continue;
         }
+
+        std::string algoName;
+        switch (algorithm) {
+            case CompressionAlgorithm::Zstandard:
+                algoName = "Zstandard";
+                break;
+            case CompressionAlgorithm::LZ4:
+                algoName = "LZ4";
+                break;
+            case CompressionAlgorithm::Gzip:
+                algoName = "Gzip";
+                break;
+            default:
+                algoName = "Unknown";
+                break;
+        }
+
+        std::cout << "\nTesting " << algoName << " algorithm:" << std::endl;
+
+        const int cycles = 10000;
+        const size_t minSize = 100;
+        const size_t maxSize = 10000;
+
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<size_t> sizeDist(minSize, maxSize);
+
+        auto startTime = std::chrono::steady_clock::now();
+        int errorCount = 0;
+
+        for (int i = 0; i < cycles; ++i) {
+            size_t size = sizeDist(gen);
+            auto data = generateRandomData(size);
+
+            // Compress
+            auto compressed = compressor->compress(data);
+            if (!compressed.has_value()) {
+                errorCount++;
+                FAIL() << "Compression failed at cycle " << i;
+                continue;
+            }
+
+            // Decompress
+            auto decompressed = compressor->decompress(compressed.value().data);
+            if (!decompressed.has_value()) {
+                errorCount++;
+                FAIL() << "Decompression failed at cycle " << i;
+                continue;
+            }
+
+            // Verify
+            if (decompressed.value() != data) {
+                errorCount++;
+                FAIL() << "Data mismatch at cycle " << i;
+                continue;
+            }
+
+            // Report progress
+            if (i % 1000 == 0 && i > 0) {
+                auto elapsed = std::chrono::steady_clock::now() - startTime;
+                auto elapsedMs =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+                std::cout << "  Completed " << i << " cycles in " << elapsedMs << "ms" << std::endl;
+            }
+        }
+
+        auto totalTime = std::chrono::steady_clock::now() - startTime;
+        auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(totalTime).count();
+
+        std::cout << "  Total cycles: " << cycles << std::endl;
+        std::cout << "  Total time: " << totalMs << "ms" << std::endl;
+        std::cout << "  Cycles/sec: " << (cycles * 1000.0 / totalMs) << std::endl;
+        std::cout << "  Errors: " << errorCount << std::endl;
+
+        EXPECT_EQ(errorCount, 0) << algoName << " had errors during rapid cycles";
     }
-
-    auto totalTime = std::chrono::steady_clock::now() - startTime;
-    auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(totalTime).count();
-
-    std::cout << "Rapid cycles test completed:" << std::endl;
-    std::cout << "  Total cycles: " << cycles << std::endl;
-    std::cout << "  Total time: " << totalMs << "ms" << std::endl;
-    std::cout << "  Cycles/sec: " << (cycles * 1000.0 / totalMs) << std::endl;
 }
 
 // Test memory leak detection

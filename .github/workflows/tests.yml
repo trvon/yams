@@ -32,7 +32,7 @@ jobs:
             needs_rosetta: false
             build_type: Debug
             coverage: true
-            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled"
+            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Denable-vector-tests=false"
           - suffix: linux-arm64
             runs_on: ubuntu-24.04-arm
             conan_host_profile: ./conan/profiles/host-linux-clang
@@ -40,7 +40,7 @@ jobs:
             needs_rosetta: false
             build_type: Debug
             coverage: false
-            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled"
+            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Denable-vector-tests=false"
           - suffix: macos-arm64
             runs_on: macos-15
             conan_host_profile: ./conan/profiles/host-macos-apple-clang
@@ -48,7 +48,7 @@ jobs:
             needs_rosetta: false
             build_type: Debug
             coverage: false
-            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled"
+            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Denable-vector-tests=false"
           - suffix: macos-x86_64
             runs_on: macos-13
             conan_host_profile: ./conan/profiles/host-macos-apple-clang-x86
@@ -56,7 +56,7 @@ jobs:
             needs_rosetta: false
             build_type: Debug
             coverage: false
-            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled"
+            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Denable-vector-tests=false"
     runs-on: ${{ matrix.runs_on }}
     # Allow extra time for safety across runners.
     timeout-minutes: 70

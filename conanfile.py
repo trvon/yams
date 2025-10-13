@@ -7,7 +7,7 @@ from conan.tools.build import check_min_cppstd
 class YamsConan(ConanFile):
     name = "yams"
     version = "0.7.1"
-    license = "APACHE 2.0"
+    license = "GPL-3.0-or-later"
     author = "YAMS Contributors"
     url = "https://github.com/trvon/yams"
     description = "Yet Another Memory System - Persistent memory for LLMs"
@@ -76,6 +76,12 @@ class YamsConan(ConanFile):
         
         if self.options.enable_onnx:
             self.requires("onnxruntime/1.18.1")
+            # Ensure ONNX Runtime's TBB runtime is available when system libtbb is missing
+            # Conan package name is onetbb (oneTBB)
+            try:
+                self.requires("onetbb/2022.2.0")
+            except Exception:
+                pass
         self.requires("xz_utils/5.4.5")
         if self.options.enable_pdf:
             self.requires("pdfium/95.0.4629")

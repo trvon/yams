@@ -4,8 +4,8 @@ namespace yams::daemon {
 
 MessageType getMessageType(const Request& req) {
     return std::visit(
-        [](auto&& r) -> MessageType {
-            using T = std::decay_t<decltype(r)>;
+        []<typename T0>(T0&& r) -> MessageType {
+            using T = std::decay_t<T0>;
 
             if constexpr (std::is_same_v<T, SearchRequest>) {
                 return MessageType::SearchRequest;
@@ -71,8 +71,8 @@ MessageType getMessageType(const Request& req) {
 
 MessageType getMessageType(const Response& res) {
     return std::visit(
-        [](auto&& r) -> MessageType {
-            using T = std::decay_t<decltype(r)>;
+        []<typename T0>([[maybe_unused]] T0&& r) -> MessageType {
+            using T = std::decay_t<T0>;
 
             if constexpr (std::is_same_v<T, SearchResponse>) {
                 return MessageType::SearchResponse;

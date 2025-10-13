@@ -3,6 +3,17 @@
 
 using namespace yams::cli;
 
+TEST(SessionCommandCLI, DiffSubcommandParses) {
+    YamsCLI cli;
+    const char* argv[] = {"yams", "session", "diff", "--json"};
+    (void)cli.run(static_cast<int>(std::size(argv)), const_cast<char**>(argv));
+    SUCCEED();
+}
+
+#include <yams/cli/yams_cli.h>
+
+using namespace yams::cli;
+
 TEST(SessionCommandCLI, ParsesWarmWithBudgets) {
     // Ensure CLI constructs and registers commands without throwing
     YamsCLI cli;

@@ -974,6 +974,15 @@ private:
         std::cout << "\n"
                   << colorize("→ For daemon telemetry run 'yams daemon status -d'", Ansi::DIM)
                   << "\n";
+
+        // Add hint to run doctor if embeddings have issues
+        const bool embeddingIssues = !info.vectorDbHealthy ||
+                                     (info.totalDocuments > 0 && info.embeddingCount == 0) ||
+                                     !info.autoGenerationEnabled;
+        if (embeddingIssues) {
+            std::cout << colorize("→ For configuration issues run 'yams doctor'", Ansi::YELLOW)
+                      << "\n";
+        }
     }
 
     std::string formatSize(uint64_t bytes) const {

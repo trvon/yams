@@ -154,8 +154,7 @@ public:
             }
 
             // Signal handlers
-            struct sigaction sa;
-            std::memset(&sa, 0, sizeof(sa));
+            struct sigaction sa = {};
             sa.sa_handler = [](int sig) {
                 g_shutdown = true;
                 std::cerr << "\n[Signal " << sig << " received, shutting down...]\n";

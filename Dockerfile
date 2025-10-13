@@ -37,22 +37,17 @@ COPY conan/ ./conan/
 RUN --mount=type=cache,target=/root/.conan2 \
   set -eux; \
   conan --version; \
-  # Speed up fetching from ConanCenter
   conan config set general.parallel_downloads=8 || true; \
   conan profile detect --force; \
   sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' /root/.conan2/profiles/default; \
   echo '=== Conan remotes (before ensure) ==='; conan remote list || true; \
-  # Ensure conancenter remote exists (some base images may have empty config)
   if ! conan remote list | grep -q 'conancenter'; then \
   conan remote add conancenter https://center.conan.io; \
   fi; \
-  # Ensure the URL is correct (update in-place if needed)
   conan remote update conancenter https://center.conan.io || true; \
   echo '=== Conan remotes (after ensure) ==='; conan remote list || true; \
-  # Provide a tiny user toolchain to relax minimum policy for legacy recipes (e.g., openjpeg/2.5.0)
   POLICY_TC=/tmp/yams_policy_toolchain.cmake; echo 'cmake_policy(VERSION 3.5)' > "$POLICY_TC"; \
   echo '=== Searching for libarchive/3.8.1 recipe (pre-install) ==='; conan search libarchive/3.8.1 -r=conancenter || true; \
-  # Choose profile based on host arch (amd64 vs arm64) and align compiler.version
   PROFILE=./conan/profiles/host-linux-gcc; \
   ARCH=$(uname -m); \
   if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then PROFILE=./conan/profiles/host-linux-gcc-arm; fi; \
@@ -65,7 +60,6 @@ RUN --mount=type=cache,target=/root/.conan2 \
     --output-folder=build/yams-release -s build_type=Release --build=missing; then \
   echo 'Initial conan install failed; dumping remotes and attempting a retry with cache clean.'; \
   conan cache clean --temp --locks || true; \
-  # Re-try resolution of openjpeg prior to full install for clearer diagnostics
   conan search openjpeg -r=conancenter || true; \
   conan search libarchive -r=conancenter || true; \
   conan install . -pr:h "$PROFILE" -pr:b=default \
@@ -109,13 +103,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
   && rm -rf /var/lib/apt/lists/*
 RUN groupadd -r yams && useradd -r -g yams -s /bin/false yams
 COPY --from=builder /opt/yams /opt/yams
-COPY --from=builder /src/data/magic_numbers.json /usr/local/share/yams/data/magic_numbers.json
 ENV YAMS_PREFIX=/opt/yams/usr/local
 ENV PATH="${YAMS_PREFIX}/bin:${PATH}"
 # Backward compatibility: retain standalone yams symlink
-RUN mkdir -p /usr/local/share/yams/data && \
-  ln -sf ${YAMS_PREFIX}/bin/yams /usr/local/bin/yams && \
-  if [ -f ${YAMS_PREFIX}/bin/yams-daemon ]; then ln -sf ${YAMS_PREFIX}/bin/yams-daemon /usr/local/bin/yams-daemon; fi
+RUN ln -sf ${YAMS_PREFIX}/bin/yams /usr/local/bin/yams && \
+  if [ -f ${YAMS_PREFIX}/bin/yams-daemon ]; then ln -sf ${YAMS_PREFIX}/bin/yams-daemon /usr/local/bin/yams-daemon; fi && \
+  mkdir -p /usr/local/share/yams/data && \
+  [ -f /src/data/magic_numbers.json ] || true
+COPY --from=builder /src/data/magic_numbers.json /usr/local/share/yams/data
 RUN mkdir -p /home/yams/.local/share/yams /home/yams/.config/yams && chown -R yams:yams /home/yams
 USER yams
 WORKDIR /home/yams

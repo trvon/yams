@@ -105,7 +105,7 @@ public:
         // Quick, pipe-friendly help examples for Unix ergonomics
         cmd->footer(R"(Examples:
   # Create and use a session
-  yams session init mywork --desc "PBI-008-11"
+  yams session start mywork --desc "PBI-008-11"
   yams session use mywork
 
   # Add selectors and warm a small cache
@@ -130,7 +130,7 @@ Env:
   YAMS_SESSION_CURRENT=<name> selects the default session for this process.)");
 
         // session lifecycle
-        auto* initCmd = cmd->add_subcommand("init", "Initialize a named session");
+        auto* initCmd = cmd->add_subcommand("start", "Start/initialize a named session");
         initCmd->add_option("name", sessionName_, "Session name")->required();
         initCmd->add_option("--desc", sessionDesc_, "Session description");
         initCmd->callback([this]() { this->mode_ = Mode::Init; });
@@ -244,6 +244,156 @@ Env:
             auto sess = name ? *name : (svc->current().value_or(std::string{"(none)"}));
             std::cout << "Watch: " << (enabled ? "enabled" : "disabled") << ", interval=" << curMs
                       << " ms, session='" << sess << "'\n";
+        });
+
+        // Diff: expose tree diff for latest snapshots of a pinned directory
+        auto* diffCmd =
+            cmd->add_subcommand("diff", "Show tree diff for session (latest snapshots)");
+        std::string baseSnap, targetSnap, dirPrefix, typeFilter;
+        bool jsonOut = false;
+        diffCmd->add_option("--base", baseSnap, "Base snapshot id");
+        diffCmd->add_option("--target", targetSnap, "Target snapshot id");
+        diffCmd->add_option("--dir", dirPrefix,
+                            "Pinned directory to use (defaults to first pinned)");
+        diffCmd->add_option("--type", typeFilter, "Filter: added|modified|deleted|renamed");
+        diffCmd->add_flag("--json", jsonOut, "JSON output");
+        diffCmd->callback([this, &baseSnap, &targetSnap, &dirPrefix, &typeFilter, &jsonOut]() {
+            auto appContext = cli_->getAppContext();
+            if (!appContext || !appContext->metadataRepo) {
+                std::cout << "Metadata repository unavailable\n";
+                return;
+            }
+            auto svc = sessionSvc();
+            if (!svc) {
+                std::cout << "Session service unavailable\n";
+                return;
+            }
+            auto cur = svc->current();
+            if (!cur) {
+                std::cout << "No current session\n";
+                return;
+            }
+            // Determine directory to scope by: first pinned selector that is a directory path
+            if (dirPrefix.empty()) {
+                for (const auto& sel : svc->listPathSelectors(*cur)) {
+                    std::error_code ec;
+                    std::filesystem::path p(sel);
+                    if (std::filesystem::is_directory(p, ec)) {
+                        dirPrefix = p.string();
+                        break;
+                    }
+                }
+            }
+            // Resolve snapshots if not specified: pick latest two for this directory
+            if (baseSnap.empty() || targetSnap.empty()) {
+                auto snaps = appContext->metadataRepo->listTreeSnapshots(100);
+                if (!snaps || snaps.value().empty()) {
+                    std::cout << "No snapshots found\n";
+                    return;
+                }
+                // Filter by directory_path match when provided
+                std::vector<yams::metadata::TreeSnapshotRecord> filtered;
+                for (const auto& s : snaps.value()) {
+                    auto it = s.metadata.find("directory_path");
+                    if (!dirPrefix.empty()) {
+                        if (it != s.metadata.end() && it->second == dirPrefix)
+                            filtered.push_back(s);
+                    } else {
+                        filtered.push_back(s);
+                    }
+                }
+                if (filtered.size() < 2) {
+                    std::cout << "Need at least two snapshots\n";
+                    return;
+                }
+                // Sort by createdTime descending
+                std::sort(filtered.begin(), filtered.end(), [](const auto& a, const auto& b) {
+                    return a.createdTime > b.createdTime;
+                });
+                if (targetSnap.empty())
+                    targetSnap = filtered[0].snapshotId;
+                if (baseSnap.empty())
+                    baseSnap = filtered[1].snapshotId;
+            }
+            yams::metadata::TreeDiffQuery q;
+            q.baseSnapshotId = baseSnap;
+            q.targetSnapshotId = targetSnap;
+            if (!dirPrefix.empty())
+                q.pathPrefix = dirPrefix;
+            if (!typeFilter.empty()) {
+                auto toLower = [](std::string s) {
+                    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+                    return s;
+                };
+                auto tf = toLower(typeFilter);
+                if (tf == "added")
+                    q.typeFilter = yams::metadata::TreeChangeType::Added;
+                else if (tf == "modified")
+                    q.typeFilter = yams::metadata::TreeChangeType::Modified;
+                else if (tf == "deleted")
+                    q.typeFilter = yams::metadata::TreeChangeType::Deleted;
+                else if (tf == "renamed")
+                    q.typeFilter = yams::metadata::TreeChangeType::Renamed;
+            }
+            q.limit = 1000;
+            q.offset = 0;
+            auto res = appContext->metadataRepo->listTreeChanges(q);
+            if (!res) {
+                std::cout << "Tree diff error: " << res.error().message << "\n";
+                return;
+            }
+            if (jsonOut) {
+                nlohmann::json arr = nlohmann::json::array();
+                for (const auto& c : res.value()) {
+                    std::string ct;
+                    switch (c.type) {
+                        case yams::metadata::TreeChangeType::Added:
+                            ct = "added";
+                            break;
+                        case yams::metadata::TreeChangeType::Deleted:
+                            ct = "deleted";
+                            break;
+                        case yams::metadata::TreeChangeType::Modified:
+                            ct = "modified";
+                            break;
+                        case yams::metadata::TreeChangeType::Renamed:
+                            ct = "renamed";
+                            break;
+                        default:
+                            ct = "unknown";
+                            break;
+                    }
+                    nlohmann::json j{{"type", ct},
+                                     {"path", c.newPath},
+                                     {"old_path", c.oldPath},
+                                     {"hash", c.newHash},
+                                     {"old_hash", c.oldHash}};
+                    arr.push_back(std::move(j));
+                }
+                std::cout << arr.dump(2) << std::endl;
+            } else {
+                for (const auto& c : res.value()) {
+                    std::string ct;
+                    switch (c.type) {
+                        case yams::metadata::TreeChangeType::Added:
+                            ct = "+";
+                            break;
+                        case yams::metadata::TreeChangeType::Deleted:
+                            ct = "-";
+                            break;
+                        case yams::metadata::TreeChangeType::Modified:
+                            ct = "~";
+                            break;
+                        case yams::metadata::TreeChangeType::Renamed:
+                            ct = ">";
+                            break;
+                        default:
+                            ct = "?";
+                            break;
+                    }
+                    std::cout << ct << " " << (!c.newPath.empty() ? c.newPath : c.oldPath) << "\n";
+                }
+            }
         });
     }
 

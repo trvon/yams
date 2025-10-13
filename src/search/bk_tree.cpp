@@ -137,8 +137,7 @@ std::vector<std::pair<std::string, size_t>> BKTree::search(const std::string& qu
     searchNode(root_.get(), query, maxDistance, results);
 
     // Sort by distance
-    std::sort(results.begin(), results.end(),
-              [](const auto& a, const auto& b) { return a.second < b.second; });
+    std::ranges::sort(results, [](const auto& a, const auto& b) { return a.second < b.second; });
 
     return results;
 }
@@ -222,7 +221,7 @@ std::vector<std::string> TrigramIndex::extractTrigrams(const std::string& str) c
 void TrigramIndex::add(const std::string& id, const std::string& value) {
     // Convert to lowercase for case-insensitive matching
     std::string lowerValue = value;
-    std::transform(lowerValue.begin(), lowerValue.end(), lowerValue.begin(), ::tolower);
+    std::ranges::transform(lowerValue, lowerValue.begin(), ::tolower);
 
     auto trigrams = extractTrigrams(lowerValue);
 
@@ -240,11 +239,10 @@ float TrigramIndex::jaccardSimilarity(const std::vector<std::string>& set1,
     std::set<std::string> s2(set2.begin(), set2.end());
 
     std::vector<std::string> intersection;
-    std::set_intersection(s1.begin(), s1.end(), s2.begin(), s2.end(),
-                          std::back_inserter(intersection));
+    std::ranges::set_intersection(s1, s2, std::back_inserter(intersection));
 
     std::vector<std::string> unionSet;
-    std::set_union(s1.begin(), s1.end(), s2.begin(), s2.end(), std::back_inserter(unionSet));
+    std::ranges::set_union(s1, s2, std::back_inserter(unionSet));
 
     if (unionSet.empty()) {
         return 0.0f;
@@ -256,7 +254,7 @@ float TrigramIndex::jaccardSimilarity(const std::vector<std::string>& set1,
 std::vector<std::pair<std::string, float>> TrigramIndex::search(const std::string& query,
                                                                 float threshold) const {
     std::string lowerQuery = query;
-    std::transform(lowerQuery.begin(), lowerQuery.end(), lowerQuery.begin(), ::tolower);
+    std::ranges::transform(lowerQuery, lowerQuery.begin(), ::tolower);
 
     auto queryTrigrams = extractTrigrams(lowerQuery);
     // std::cerr << "[DEBUG] TrigramIndex::search query='" << query << "' trigrams=" <<
@@ -290,7 +288,7 @@ std::vector<std::pair<std::string, float>> TrigramIndex::search(const std::strin
             auto strIt = idToString_.find(id);
             if (strIt != idToString_.end() && query.length() <= 10) {
                 std::string lowerStr = strIt->second;
-                std::transform(lowerStr.begin(), lowerStr.end(), lowerStr.begin(), ::tolower);
+                std::ranges::transform(lowerStr, lowerStr.begin(), ::tolower);
 
                 // Check if query is a substring (case-insensitive)
                 if (lowerStr.find(lowerQuery) != std::string::npos) {
@@ -322,8 +320,7 @@ std::vector<std::pair<std::string, float>> TrigramIndex::search(const std::strin
     }
 
     // Sort by similarity score
-    std::sort(results.begin(), results.end(),
-              [](const auto& a, const auto& b) { return a.second > b.second; });
+    std::ranges::sort(results, [](const auto& a, const auto& b) { return a.second > b.second; });
 
     return results;
 }
@@ -358,8 +355,9 @@ void HybridFuzzySearch::addDocument(const std::string& id, const std::string& ti
     int wordIndex = 0;
     while (titleStream >> word) {
         // Clean word - remove punctuation
-        word.erase(std::remove_if(word.begin(), word.end(),
-                                  [](char c) { return !std::isalnum(c) && c != '-' && c != '_'; }),
+        word.erase(std::ranges::remove_if(
+                       word, [](char c) { return !std::isalnum(c) && c != '-' && c != '_'; })
+                       .begin(),
                    word.end());
 
         if (!word.empty() && word.length() > 2) {
@@ -394,12 +392,10 @@ HybridFuzzySearch::search(const std::string& query, size_t maxResults,
     std::string word;
     while (queryStream >> word) {
         // Clean word - remove punctuation
-        word.erase(std::remove_if(word.begin(), word.end(),
-                                  [](char c) { return !std::isalnum(c) && c != '-' && c != '_'; }),
-                   word.end());
+        std::erase_if(word, [](char c) { return !std::isalnum(c) && c != '-' && c != '_'; });
 
         // Convert to lowercase
-        std::transform(word.begin(), word.end(), word.begin(), ::tolower);
+        std::ranges::transform(word, word.begin(), ::tolower);
 
         if (!word.empty() && word.length() > 2) {
             queryWords.push_back(word);

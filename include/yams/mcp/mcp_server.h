@@ -64,14 +64,13 @@ public:
 class StdioTransport : public ITransport {
 public:
     StdioTransport();
-    ~StdioTransport(); // Ensures writer thread is joined/flushed for clean shutdown
+    ~StdioTransport();
+
     void send(const json& message) override;
-    // NDJSON send - same as send() for stdio (spec-compliant)
     void sendNdjson(const json& message);
-    // Enqueue a message for the writer thread (non-blocking for request handlers)
     void sendAsync(json message);
-    // Framed send helper for pre-serialized JSON payloads (legacy compatibility)
     void sendFramedSerialized(const std::string& payload);
+
     MessageResult receive() override;
     bool isConnected() const override { return state_.load() == TransportState::Connected; }
     void close() override { state_.store(TransportState::Closing); }
@@ -81,9 +80,6 @@ public:
     void setShutdownFlag(std::atomic<bool>* shutdown) { externalShutdown_ = shutdown; }
 
 private:
-    // Unified non-blocking sender for all transports. Uses async send when available
-    // and falls back to a best-effort synchronous send otherwise.
-
     std::atomic<TransportState> state_{TransportState::Connected};
     std::atomic<bool>* externalShutdown_{nullptr};
     std::atomic<size_t> errorCount_{0};
@@ -91,20 +87,16 @@ private:
     // Receive poll timeout (ms). Default 500ms; configurable via env YAMS_MCP_RECV_TIMEOUT_MS.
     int recvTimeoutMs_{500};
 
-    // Mutex for thread-safe output operations (sending only) - instance member for proper RAII
+    // Mutex for thread-safe output operations
     mutable std::mutex outMutex_;
-    // Outbound writer queue + thread to avoid blocking on stdout writes
-    std::mutex queueMutex_;
-    std::condition_variable queueCv_;
-    std::deque<std::string> outQueue_;
-    std::thread writerThread_;
-    std::atomic<bool> writerRunning_{false};
-    void writerLoop();
 
-    // Helper for non-blocking stdin check
+    // Helper methods
     bool isInputAvailable(int timeoutMs = 100) const;
+    bool readLineWithTimeout(std::string& line, int timeoutMs) const;
+    MessageResult receiveLSPFramed(const std::string& firstLine);
+    static bool parseLSPHeader(const std::string& line, std::size_t& contentLength);
 
-    // Error recovery and circuit breaker
+    // Error recovery
     bool shouldRetryAfterError() const noexcept;
     void recordError() noexcept;
     void resetErrorCount() noexcept;
@@ -225,12 +217,13 @@ private:
     nlohmann::json readResource(const std::string& uri);
     nlohmann::json listPrompts();
     void initializeToolRegistry();
-    nlohmann::json createResponse(const nlohmann::json& id, const nlohmann::json& result);
-    nlohmann::json createError(const nlohmann::json& id, int code, const std::string& message);
+    static nlohmann::json createResponse(const nlohmann::json& id, const nlohmann::json& result);
+    static nlohmann::json createError(const nlohmann::json& id, int code,
+                                      const std::string& message);
     void sendResponse(const nlohmann::json& message);
 
     // --- Initialization / lifecycle helpers (added for spec-aligned handshake flexibility) ---
-    bool isMethodAllowedBeforeInitialization(const std::string& method) const;
+    static bool isMethodAllowedBeforeInitialization(const std::string& method);
     void markClientInitialized(); // Accept canonical + legacy initialized notifications
     void handleExitRequest();     // Graceful handling of 'exit' to set exitRequested_
     // Cancellation helpers
@@ -246,7 +239,7 @@ private:
                       std::optional<nlohmann::json> progressToken = std::nullopt);
     // Auto-ready scheduling (fallback when client omits 'initialized')
     void scheduleAutoReady();
-    bool shouldAutoInitialize() const;
+    static bool shouldAutoInitialize();
     // Record that a feature was used prior to client 'initialized'
     void recordEarlyFeatureUse();
 
@@ -366,9 +359,9 @@ private:
     handleUpdateMetadata(const MCPUpdateMetadataRequest& req);
     boost::asio::awaitable<Result<MCPRestoreCollectionResponse>>
     handleRestoreCollection(const MCPRestoreCollectionRequest& req);
-    boost::asio::awaitable<Result<MCPRestoreSnapshotResponse>>
+    static boost::asio::awaitable<Result<MCPRestoreSnapshotResponse>>
     handleRestoreSnapshot(const MCPRestoreSnapshotRequest& req);
-    boost::asio::awaitable<Result<MCPListCollectionsResponse>>
+    static boost::asio::awaitable<Result<MCPListCollectionsResponse>>
     handleListCollections(const MCPListCollectionsRequest& req);
     boost::asio::awaitable<Result<MCPListSnapshotsResponse>>
     handleListSnapshots(const MCPListSnapshotsRequest& req);
@@ -376,10 +369,10 @@ private:
     // Session start/stop (simplified surface)
     boost::asio::awaitable<Result<MCPSessionStartResponse>>
     handleSessionStart(const MCPSessionStartRequest& req);
-    boost::asio::awaitable<Result<MCPSessionStopResponse>>
+    static boost::asio::awaitable<Result<MCPSessionStopResponse>>
     handleSessionStop(const MCPSessionStopRequest& req);
     boost::asio::awaitable<Result<MCPSessionPinResponse>>
-    handleSessionPin(const MCPSessionPinRequest& req);
+    handleSessionPin(const MCPSessionPinRequest& req) const;
     boost::asio::awaitable<Result<MCPSessionUnpinResponse>>
     handleSessionUnpin(const MCPSessionUnpinRequest& req);
 

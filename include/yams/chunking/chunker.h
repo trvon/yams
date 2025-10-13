@@ -163,7 +163,7 @@ struct DeduplicationStats {
     size_t chunkCount = 0;
     size_t uniqueChunks = 0;
 
-    double getRatio() const {
+    constexpr double getRatio() const {
         return totalSize > 0
                    ? 1.0 - (static_cast<double>(uniqueSize) / static_cast<double>(totalSize))
                    : 0.0;

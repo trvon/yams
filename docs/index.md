@@ -113,4 +113,4 @@ Use the left navigation to browse all docs.
 
 - SourceHut: https://sr.ht/~trvon/yams/
 - GitHub (mirror): https://github.com/trvon/yams
-- License: Apache-2.0
+- License: GPL-3.0-or-later

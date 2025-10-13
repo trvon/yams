@@ -6,6 +6,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <stop_token>
+#include <unordered_map>
 #include "IComponent.h"
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/thread_pool.hpp>
@@ -235,6 +236,15 @@ public:
             return pluginLoader_->getLoadedPlugins();
         return {};
     }
+
+    // Session watchers: polling mtime/size for pinned directories
+    struct SessionWatchState {
+        std::unordered_map<std::string,
+                           std::unordered_map<std::string, std::pair<std::uint64_t, std::uint64_t>>>
+            dirFiles; // dir -> (file -> (mtime,size))
+    };
+    SessionWatchState sessionWatch_;
+    std::atomic<bool> sessionWatchStop_{false};
 
     // ABI plugin loader access
     AbiPluginLoader* getAbiPluginLoader() const { return abiPluginLoader_.get(); }

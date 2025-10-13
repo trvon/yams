@@ -26,6 +26,7 @@
 - GitHub mirror: https://github.com/trvon/yams
 - Docs: https://yamsmemory.ai
 - Discord: https://discord.gg/rTBmRHdTEc
+- License: GPL-3.0-or-later
 
 ## Install
 Supported platforms: Linux x86_64/ARM64, macOS x86_64/ARM64
@@ -54,6 +55,7 @@ Dependencies quick ref:
 - Linux: libssl-dev sqlite3 libsqlite3-dev protobuf-compiler ninja-build cmake (TUI enabled by default)
 - macOS (Homebrew): openssl@3 protobuf sqlite3 ninja cmake (TUI enabled by default)
   - Export `OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)` if CMake cannot locate OpenSSL
+- ONNX runtime (plugins): requires oneTBB at runtime. Provide via system packages (e.g., libtbb12/libtbb-dev) or Conan (`onetbb`).
 
 Common build options (Meson): `-Dbuild-tests=true|false`, `-Denable-tui=true|false` (defaults to true), `-Denable-onnx=enabled|disabled|auto`, `-Dplugin-onnx=true|false`, `-Dyams-version=...`.
 Fast iteration: set `FAST_MODE=1` when running `meson setup --reconfigure` to disable ONNX & tests in CI (SourceHut) or locally.
@@ -187,3 +189,14 @@ Plugins not listed by `yams plugin list`:
 - Check the daemon startup log for: `Plugin scan directories: dir1;dir2;...` to confirm discovery paths.
 
 Monitor with `yams stats --verbose` and `yams doctor`.
+
+### Cite
+```aiignore
+@misc{yams,
+author = {Trevon Williams},
+title = {yams: Content addressable storage with excellent search },
+year = {2025},
+publisher = {GitHub},
+url = {https://github.com/trvon/yams}
+}
+```

@@ -8,7 +8,6 @@
 #include <array>
 #include <chrono>
 #include <memory>
-#include <vector>
 #if __has_include(<tinyfsm.hpp>)
 #include <tinyfsm.hpp>
 #endif
@@ -332,8 +331,6 @@ void ConnectionFsm::debug_dump_snapshots(std::size_t max_entries) const noexcept
     std::uint32_t start = (impl->snapshots.head + (impl->snapshots.size + cap - count) % cap) % cap;
     for (std::uint32_t i = 0; i < count; ++i) {
         const auto& s = impl->snapshots.buf[(start + i) % cap];
-        spdlog::debug("FSM snapshot: state={}, t(ns)={}, last_event={}, bytes={}",
-                      to_string(s.state), s.ns_since_epoch, s.last_event, s.bytes_transferred);
     }
 }
 
@@ -364,12 +361,8 @@ bool ConnectionFsm::transition(State next, const char* reason) noexcept {
     bool legal = can_transition(from, next);
 
     if (!legal) {
-        spdlog::debug("ConnectionFsm: illegal transition {} -> {} (fd={}, reason={})",
-                      to_string(from), to_string(next), fd_, (reason ? reason : ""));
         return false;
     }
-    spdlog::debug("ConnectionFsm: {} -> {} (fd={}, reason={})", to_string(from), to_string(next),
-                  fd_, (reason ? reason : ""));
     // Leaving from-state: call exit(), cancel timers by default; re-arm as needed on enter
     if (auto* impl = impl_.get()) {
         if (impl->current)
@@ -541,9 +534,6 @@ void ConnectionFsm::on_body_parsed() {
     // Fallback: previous behavior
     if (state_ == State::ReadingPayload || state_ == State::ReadingHeader) {
         transition(State::WritingHeader, "on_body_parsed:fallback");
-    } else {
-        spdlog::debug("ConnectionFsm::on_body_parsed ignored in state {} (fd={})",
-                      to_string(state_), fd_);
     }
 }
 
@@ -561,9 +551,6 @@ void ConnectionFsm::on_stream_next(bool done) {
     if (state_ == State::WritingHeader || state_ == State::StreamingChunks) {
         transition(done ? State::Closing : State::StreamingChunks,
                    done ? "on_stream_next:done" : "on_stream_next:more");
-    } else {
-        spdlog::debug("ConnectionFsm::on_stream_next ignored in state {} (fd={})",
-                      to_string(state_), fd_);
     }
 }
 
@@ -600,8 +587,6 @@ void ConnectionFsm::on_timeout(Operation op) {
                 impl->op_deadline = now + std::chrono::milliseconds(dur_ms);
                 impl->op_armed = true;
             }
-            spdlog::debug("ConnectionFsm: timeout retry {}/{} in state {} (op={})", impl->retries,
-                          impl->cfg.max_retries, to_string(state_), static_cast<int>(op));
             return; // stay in current state
         }
     }
@@ -732,9 +717,6 @@ void ConnectionFsm::on_write_queued(std::size_t bytes) noexcept {
         if (was != impl->backpressured) {
             YAMS_PLOT("daemon_fsm_backpressure_flip",
                       static_cast<int64_t>(impl->backpressured ? 1 : 0));
-            spdlog::debug("ConnectionFsm: backpressure {} (bytes={}, cap={}, state={})",
-                          impl->backpressured ? "ON" : "OFF", impl->write_bytes, cap,
-                          to_string(state_));
         }
     }
 }
@@ -756,9 +738,6 @@ void ConnectionFsm::on_write_flushed(std::size_t bytes) noexcept {
         if (was != impl->backpressured) {
             YAMS_PLOT("daemon_fsm_backpressure_flip",
                       static_cast<int64_t>(static_cast<int>(impl->backpressured)));
-            spdlog::debug("ConnectionFsm: backpressure {} after flush (bytes={}, cap={}, state={})",
-                          impl->backpressured ? "ON" : "OFF", impl->write_bytes, cap,
-                          to_string(state_));
         }
     }
 }

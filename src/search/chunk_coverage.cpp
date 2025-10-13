@@ -59,7 +59,7 @@ std::vector<DocGroupStats> groupAndAggregate(
     }
 
     // Sort descending by pooled_score, stable for deterministic order
-    std::stable_sort(out.begin(), out.end(), [](const DocGroupStats& a, const DocGroupStats& b) {
+    std::ranges::stable_sort(out, [](const DocGroupStats& a, const DocGroupStats& b) {
         if (a.pooled_score != b.pooled_score)
             return a.pooled_score > b.pooled_score;
         return a.base_id < b.base_id;

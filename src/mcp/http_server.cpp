@@ -120,7 +120,7 @@ HttpMcpServer::HttpMcpServer(boost::asio::io_context& ioc, std::shared_ptr<MCPSe
 
 void HttpMcpServer::run() {
     beast::error_code ec;
-    tcp::endpoint ep{boost::asio::ip::make_address(cfg_.bindAddress, ec), cfg_.bindPort};
+    const tcp::endpoint ep{boost::asio::ip::make_address(cfg_.bindAddress, ec), cfg_.bindPort};
     if (ec)
         throw std::runtime_error("Invalid bind address: " + ec.message());
     acceptor_.open(ep.protocol(), ec);
@@ -246,7 +246,7 @@ HttpMcpServer::handleJsonRpc(http::request<http::string_body>& req, const std::s
             auto name = params.value("name", std::string(""));
             auto args = params.value("arguments", json::object());
             auto out = mcp_->callToolPublic(name, args);
-            json env = {{"jsonrpc", "2.0"}, {"id", id}, {"result", out}};
+            const json env = {{"jsonrpc", "2.0"}, {"id", id}, {"result", out}};
             res.body() = env.dump();
             res.prepare_payload();
             return res;
@@ -262,16 +262,16 @@ HttpMcpServer::handleJsonRpc(http::request<http::string_body>& req, const std::s
             res.body() = r.value().dump();
         } else {
             // On error from handler, return JSON-RPC error envelope
-            json err = {{"jsonrpc", "2.0"},
-                        {"id", j.value("id", nullptr)},
-                        {"error", {{"code", -32603}, {"message", r.error().message}}}};
+            const json err = {{"jsonrpc", "2.0"},
+                              {"id", j.value("id", nullptr)},
+                              {"error", {{"code", -32603}, {"message", r.error().message}}}};
             res.body() = err.dump();
         }
         res.prepare_payload();
         return res;
     } catch (const std::exception& e) {
         res.result(http::status::bad_request);
-        json err = {
+        const json err = {
             {"jsonrpc", "2.0"},
             {"id", nullptr},
             {"error", {{"code", -32700}, {"message", std::string("parse error: ") + e.what()}}}};

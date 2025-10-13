@@ -75,7 +75,7 @@ if lzma_dep.found() and lzma_opt.allowed()
   unit_compression_opt += files('compression/lzma_compressor_test.cpp')
 endif
 
-unit_daemon = files(
+unit_daemon_base = files(
   'daemon/connection_fsm_backpressure_test.cpp',
   'daemon/connection_fsm_error_flow_test.cpp',
   'daemon/connection_fsm_legality_test.cpp',
@@ -84,8 +84,6 @@ unit_daemon = files(
   'daemon/connection_fsm_test.cpp',
   'daemon/connection_fsm_timeout_retry_test.cpp',
   'daemon/daemon_lifecycle_fsm_test.cpp',
-  'daemon/embedding_provider_fsm_failure_test.cpp',
-  'daemon/embedding_provider_recovery_test.cpp',
   'daemon/service_manager_fsm_test.cpp',
   'daemon/daemon_test.cpp',
   'daemon/daemon_fsm_status_test.cpp',
@@ -112,7 +110,6 @@ unit_daemon = files(
   'daemon/service_manager_fsm_status_test.cpp',
   'daemon/service_manager_shutdown_ownership_test.cpp',
   'daemon/socket_server_lifecycle_test.cpp',
-  'daemon/status_embedding_test.cpp',
   'daemon/status_response_proto_test.cpp',
   'daemon/service_manager_provider_degraded_test.cpp',
   'daemon/ipc_message_type_test.cpp',
@@ -121,6 +118,18 @@ unit_daemon = files(
   'daemon/wasm_plugin_harness_test.cpp',
   # excluded: multiplex_client_test.cpp, request_dispatcher_plugin_test.cpp, onnx_*
 )
+
+# Daemon embedding tests - requires ONNX/model support
+unit_daemon_embedding = []
+if get_option('enable-vector-tests')
+  unit_daemon_embedding += files(
+    'daemon/embedding_provider_fsm_failure_test.cpp',
+    'daemon/embedding_provider_recovery_test.cpp',
+    'daemon/status_embedding_test.cpp',
+  )
+endif
+
+unit_daemon = unit_daemon_base + unit_daemon_embedding
 
 unit_downloader = files(
   'downloader/test_downloader_basic.cpp',
@@ -135,9 +144,17 @@ unit_integrity = files(
   # excluded: integrity_verifier_test.cpp
 )
 
-unit_repair = files(
-  'repair/embedding_repair_scan_test.cpp',
-)
+unit_repair_base = []
+
+# Repair embedding tests - requires vector support
+unit_repair_embedding = []
+if get_option('enable-vector-tests')
+  unit_repair_embedding += files(
+    'repair/embedding_repair_scan_test.cpp',
+  )
+endif
+
+unit_repair = unit_repair_base + unit_repair_embedding
 
 unit_manifest = files(
   # excluded: manifest/manifest_test.cpp
@@ -209,10 +226,15 @@ unit_storage = files(
   # excluded: storage_engine_test.cpp, compressed_storage_engine_test.cpp
 )
 
-unit_vector = files(
-  'vector/document_chunker_test.cpp',
-  'vector/embedding_genai_selection_test.cpp',
-)
+# Vector/embedding tests - excluded from base unit tests (requires ONNX/models)
+# These are heavy tests that require model downloads and ONNX runtime
+unit_vector = []
+if get_option('enable-vector-tests')
+  unit_vector += files(
+    'vector/document_chunker_test.cpp',
+    'vector/embedding_genai_selection_test.cpp',
+  )
+endif
 
 unit_wal = files(
   # legacy WAL tests removed

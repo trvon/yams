@@ -23,8 +23,7 @@ namespace {
 bool looksLikeHashPrefix(const std::string& input) {
     if (input.size() < 6 || input.size() > 64)
         return false;
-    return std::all_of(input.begin(), input.end(),
-                       [](unsigned char c) { return std::isxdigit(c) != 0; });
+    return std::ranges::all_of(input, [](unsigned char c) { return std::isxdigit(c) != 0; });
 }
 
 } // namespace
@@ -118,23 +117,6 @@ public:
                 }
                 dreq.hash = candidate;
             } else if (!name_.empty()) {
-                auto normalized = normalizeLookupPath(name_);
-                if (normalized.hasWildcards) {
-                    return Error{ErrorCode::InvalidArgument,
-                                 "cat does not support wildcard paths: " + name_};
-                }
-                if (normalized.changed) {
-                    name_ = normalized.normalized;
-                }
-
-                if (!name_.empty() && name_[0] != '/' && !looksLikeHashPrefix(name_)) {
-                    try {
-                        name_ = std::filesystem::weakly_canonical(name_).string();
-                    } catch (const std::filesystem::filesystem_error&) {
-                        // Not a path, treat as name
-                    }
-                }
-
                 dreq.name = name_;
                 dreq.byName = true;
 

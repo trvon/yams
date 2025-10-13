@@ -281,7 +281,8 @@ TEST_F(DatabaseTest, Migrations) {
     // Verify final version
     currentVersion = mm.getCurrentVersion();
     ASSERT_TRUE(currentVersion.has_value());
-    EXPECT_EQ(currentVersion.value(), 9); // Latest version includes vector search schema
+    EXPECT_EQ(currentVersion.value(),
+              15); // Latest schema version (includes tree, diffs, v14 paths)
 
     // Verify tables exist
     auto docExists = db.tableExists("documents");

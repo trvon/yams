@@ -39,7 +39,7 @@ struct CompressionResult {
      * @brief Calculate compression ratio
      * @return Ratio of original to compressed size
      */
-    [[nodiscard]] double ratio() const noexcept {
+    [[nodiscard]] constexpr double ratio() const noexcept {
         return compressedSize > 0
                    ? static_cast<double>(originalSize) / static_cast<double>(compressedSize)
                    : 0.0;
@@ -49,7 +49,7 @@ struct CompressionResult {
      * @brief Calculate space savings percentage
      * @return Percentage of space saved
      */
-    [[nodiscard]] double spaceSaved() const noexcept {
+    [[nodiscard]] constexpr double spaceSaved() const noexcept {
         return originalSize > 0 ? (1.0 - static_cast<double>(compressedSize) /
                                              static_cast<double>(originalSize)) *
                                       100.0

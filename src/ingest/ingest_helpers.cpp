@@ -20,7 +20,7 @@ Result<void> persist_content_and_index(metadata::IMetadataRepository& meta, int6
         double langConfidence = 0.0;
         contentRow.language =
             yams::extraction::LanguageDetector::detectLanguage(text, &langConfidence);
-        if (auto up = meta.insertContent(contentRow); !up) {
+        if (const auto up = meta.insertContent(contentRow); !up) {
             return Result<void>(Error{up.error()});
         }
         if (auto r = meta.indexDocumentContent(docId, title, text, mime); !r) {

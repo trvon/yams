@@ -77,8 +77,9 @@ public:
 
             // Prune old history
             auto cutoff = snapshot.timestamp - config_.historyRetention;
-            history_.erase(std::remove_if(history_.begin(), history_.end(),
-                                          [cutoff](const auto& s) { return s.timestamp < cutoff; }),
+            history_.erase(std::ranges::remove_if(
+                               history_, [cutoff](const auto& s) { return s.timestamp < cutoff; })
+                               .begin(),
                            history_.end());
         }
 
@@ -324,10 +325,9 @@ private:
         // Check if this alert is already active
         {
             std::lock_guard lock(alertsMutex_);
-            auto it =
-                std::find_if(activeAlerts_.begin(), activeAlerts_.end(), [&alert](const Alert& a) {
-                    return a.type == alert.type && a.algorithm == alert.algorithm;
-                });
+            auto it = std::ranges::find_if(activeAlerts_, [&alert](const Alert& a) {
+                return a.type == alert.type && a.algorithm == alert.algorithm;
+            });
 
             if (it != activeAlerts_.end()) {
                 // Update existing alert

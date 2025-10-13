@@ -13,14 +13,18 @@
 
 namespace yams::common {
 
-inline bool is_hex(char c) {
-    return std::isxdigit(static_cast<unsigned char>(c)) != 0;
+constexpr bool is_hex(char c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
 }
 
-inline bool is_valid_hash_prefix(std::string_view s) {
+constexpr bool is_valid_hash_prefix(std::string_view s) {
     if (s.size() < 8 || s.size() > 64)
         return false;
-    return std::all_of(s.begin(), s.end(), is_hex);
+    for (char c : s) {
+        if (!is_hex(c))
+            return false;
+    }
+    return true;
 }
 
 // Resolve partial or full hash to a full hash using MetadataRepository.

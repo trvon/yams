@@ -1,5 +1,5 @@
 // Copyright 2025 YAMS Project
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
 
@@ -147,7 +147,7 @@ private:
 /**
  * @brief Convert ChangeType to string for display
  */
-inline const char* changeTypeToString(ChangeType type) {
+constexpr const char* changeTypeToString(ChangeType type) {
     switch (type) {
         case ChangeType::Added:
             return "Added";

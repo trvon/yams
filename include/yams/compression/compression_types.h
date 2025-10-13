@@ -81,7 +81,7 @@ enum class CompressionError {
  * @param error Error code
  * @return Error description
  */
-[[nodiscard]] inline const char* compressionErrorToString(CompressionError error) {
+[[nodiscard]] constexpr const char* compressionErrorToString(CompressionError error) {
     switch (error) {
         case CompressionError::None:
             return "No error";

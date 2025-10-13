@@ -424,7 +424,7 @@ Name: yams
 Version: __VERSION__
 Release: __RELEASE__%{?dist}
 Summary: Yet Another Memory System
-License: Apache-2.0
+License: GPL-3.0-or-later
 URL: https://git.sr.ht/~trevon/yams
 Source0: %{name}-%{version}.tar.gz
 BuildArch: __RPM_ARCH__

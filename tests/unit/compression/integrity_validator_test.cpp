@@ -101,8 +101,7 @@ TEST_F(IntegrityValidatorTest, RoundTripValidation) {
 
     // Create mock compressed data
     std::vector<std::byte> compressedData(originalData.size() / 2);
-    std::copy(originalData.begin(), originalData.begin() + compressedData.size(),
-              compressedData.begin());
+    std::copy_n(originalData.begin(), compressedData.size(), compressedData.begin());
 
     auto result = validator_->validateRoundTrip(originalData, compressedData,
                                                 originalData, // Simulate perfect decompression

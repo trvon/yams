@@ -33,7 +33,7 @@ enum class ContentStoreError {
 };
 
 // Convert content store error to string
-inline const char* contentStoreErrorToString(ContentStoreError error) {
+constexpr const char* contentStoreErrorToString(ContentStoreError error) {
     switch (error) {
         case ContentStoreError::None:
             return "No error";
@@ -144,7 +144,7 @@ private:
 };
 
 // Convert generic error code to content store error
-inline ContentStoreError toContentStoreError(ErrorCode error) {
+constexpr ContentStoreError toContentStoreError(ErrorCode error) {
     switch (error) {
         case ErrorCode::Success:
             return ContentStoreError::None;

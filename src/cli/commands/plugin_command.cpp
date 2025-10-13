@@ -249,7 +249,9 @@ void PluginCommand::listPlugins() {
 
         auto fetch_status = [leaseHandle]() -> Result<StatusResponse> {
             auto& client = **leaseHandle;
-            return yams::cli::run_result<StatusResponse>(client.status(),
+            yams::daemon::StatusRequest sreq;
+            sreq.detailed = true; // require typed providers/plugins info from daemon
+            return yams::cli::run_result<StatusResponse>(client.call(sreq),
                                                          std::chrono::milliseconds(10000));
         };
 
@@ -265,7 +267,8 @@ void PluginCommand::listPlugins() {
         auto sres = fetch_status();
         auto res = fetch_stats();
         bool have_typed = sres && !sres.value().providers.empty();
-        bool have_json = res && res.value().additionalStats.contains("plugins_json");
+        bool have_json = res && res.value().additionalStats.contains("plugins_json") &&
+                         res.value().additionalStats.at("plugins_json") != "[]";
         // If not available, request a scan and then wait briefly for readiness/providers
         bool need_scan = !(have_typed || have_json);
         if (need_scan) {
@@ -302,6 +305,13 @@ void PluginCommand::listPlugins() {
         }
         if (!sres && !res) {
             std::cout << "Failed to query daemon for plugins\n";
+            return;
+        }
+        // If neither typed providers nor non-empty plugins_json present, fall back to direct scan
+        if ((!sres || sres.value().providers.empty()) &&
+            (!res || !res.value().additionalStats.contains("plugins_json") ||
+             res.value().additionalStats.at("plugins_json") == "[]")) {
+            std::cout << "Loaded plugins (0):\n";
             return;
         }
         // Prefer typed providers if present, but merge in interface hints from plugins_json when

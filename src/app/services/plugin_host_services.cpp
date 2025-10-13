@@ -1,6 +1,7 @@
 
 // --- Grep Service: grep ---
 
+#include <yams/plugins/host_services_v1.h>
 static yams::app::services::GrepRequest to_cpp_grep_request(const yams_grep_request_t* c_req) {
     yams::app::services::GrepRequest cpp_req;
     if (!c_req)
@@ -267,7 +268,7 @@ from_cpp_list_response(const yams::app::services::ListDocumentsResponse& cpp_res
 
     if (!cpp_res.paths.empty()) {
         c_res->paths_count = cpp_res.paths.size();
-        c_res->paths = (char**)malloc(sizeof(char*) * c_res->paths_count);
+        c_res->paths = static_cast<char**>(malloc(sizeof(char*) * c_res->paths_count));
         if (c_res->paths) {
             for (size_t i = 0; i < c_res->paths_count; ++i) {
                 c_res->paths[i] = c_string_from_cpp(cpp_res.paths[i]);
@@ -341,7 +342,7 @@ from_cpp_cat_response(const yams::app::services::CatDocumentResponse& cpp_res) {
     if (!c_res)
         return nullptr;
     memset(c_res, 0, sizeof(yams_cat_document_response_t));
-    c_res->content = (char*)malloc(cpp_res.content.size() + 1);
+    c_res->content = static_cast<char*>(malloc(cpp_res.content.size() + 1));
     if (c_res->content) {
         memcpy(c_res->content, cpp_res.content.c_str(), cpp_res.content.size() + 1);
         c_res->size = cpp_res.size;
@@ -424,7 +425,7 @@ from_cpp_search_response(const yams::app::services::SearchResponse& cpp_res) {
 
     if (!cpp_res.paths.empty()) {
         c_res->paths_count = cpp_res.paths.size();
-        c_res->paths = (char**)malloc(sizeof(char*) * c_res->paths_count);
+        c_res->paths = static_cast<char**>(malloc(sizeof(char*) * c_res->paths_count));
         if (c_res->paths) {
             for (size_t i = 0; i < c_res->paths_count; ++i) {
                 c_res->paths[i] = c_string_from_cpp(cpp_res.paths[i]);
@@ -533,15 +534,10 @@ yams_create_host_context(const yams::app::services::AppContext& app_ctx) {
 void yams_free_host_context(void* host_ctx) {
     if (!host_ctx)
         return;
-    auto* ctx = (yams_plugin_host_context_v1*)host_ctx;
-    auto* impl = (HostContextImpl*)ctx->impl;
+    auto* ctx = static_cast<yams_plugin_host_context_v1*>(host_ctx);
+    const auto* impl = static_cast<HostContextImpl*>(ctx->impl);
     delete impl;
     free(ctx);
-}
-andle is only valid as long as the service
-    // instance created here exists. The plugin host/loader will need to own
-    // the service instances and this context.
-
     return host_ctx;
 }
 

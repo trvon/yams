@@ -1,5 +1,4 @@
 #include <spdlog/spdlog.h>
-#include "test_helpers.h"
 #include <gtest/gtest.h>
 #include <yams/crypto/hasher.h>
 #include <yams/metadata/connection_pool.h>
@@ -17,18 +16,27 @@
 
 using namespace yams;
 using namespace yams::storage;
-using namespace yams::test;
 using namespace std::chrono_literals;
 
-class ConcurrentStorageTest : public YamsTest {
+// Helper function to generate random bytes
+static std::vector<std::byte> generateRandomBytes(size_t size) {
+    std::vector<std::byte> data(size);
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(0, 255);
+    for (auto& b : data) {
+        b = std::byte{static_cast<uint8_t>(dis(gen))};
+    }
+    return data;
+}
+
+class ConcurrentStorageTest : public ::testing::Test {
 protected:
     std::unique_ptr<StorageEngine> storage;
     std::filesystem::path storagePath;
 
     void SetUp() override {
-        YamsTest::SetUp();
-
-        storagePath = getTempDir() / "concurrent_test";
+        storagePath = std::filesystem::temp_directory_path() / "yams_stress_concurrent_test";
         std::filesystem::create_directories(storagePath);
 
         StorageConfig config{.basePath = storagePath,
@@ -43,7 +51,6 @@ protected:
     void TearDown() override {
         storage.reset();
         std::filesystem::remove_all(storagePath);
-        YamsTest::TearDown();
     }
 };
 
@@ -83,12 +90,16 @@ double runPoolWorkload(yams::metadata::ConnectionPool& pool, std::size_t workers
 }
 
 TEST_F(ConcurrentStorageTest, ThousandConcurrentReaders) {
-    // Pre-store test objects
+    // Pre-store test objects with varying sizes
     constexpr size_t numObjects = 100;
     std::vector<std::pair<std::string, std::vector<std::byte>>> testObjects;
 
+    // Test multiple object size categories
+    std::vector<size_t> sizeBuckets = {512, 1024, 4096, 8192, 16384};
+
     for (size_t i = 0; i < numObjects; ++i) {
-        auto data = generateRandomBytes(1024 * (i % 10 + 1));
+        size_t sizeCategory = sizeBuckets[i % sizeBuckets.size()];
+        auto data = generateRandomBytes(sizeCategory + (i % 100));
         auto hasher = crypto::createSHA256Hasher();
         auto hash = hasher->hash(data);
 
@@ -96,73 +107,78 @@ TEST_F(ConcurrentStorageTest, ThousandConcurrentReaders) {
         ASSERT_TRUE(storage->store(hash, data).has_value());
     }
 
-    // Launch 1000 reader threads
-    constexpr size_t numReaders = 1000;
-    constexpr size_t readsPerThread = 100;
+    // Test with different reader counts to validate scalability
+    std::vector<size_t> readerCounts = {100, 500, 1000};
 
-    std::atomic<size_t> totalReads{0};
-    std::atomic<size_t> successfulReads{0};
-    std::atomic<bool> hasErrors{false};
+    for (size_t numReaders : readerCounts) {
+        std::cout << "\n=== Testing with " << numReaders << " concurrent readers ===" << std::endl;
 
-    // Use C++20 barrier for synchronization
-    std::barrier startBarrier(numReaders + 1);
+        constexpr size_t readsPerThread = 100;
 
-    auto startTime = std::chrono::steady_clock::now();
+        std::atomic<size_t> totalReads{0};
+        std::atomic<size_t> successfulReads{0};
+        std::atomic<bool> hasErrors{false};
 
-    std::vector<std::thread> readers;
-    readers.reserve(numReaders);
+        // Use C++20 barrier for synchronization
+        std::barrier startBarrier(numReaders + 1);
 
-    for (size_t i = 0; i < numReaders; ++i) {
-        readers.emplace_back([&, threadId = i]() {
-            std::random_device rd;
-            std::mt19937 gen(rd() + threadId);
-            std::uniform_int_distribution<size_t> dis(0, numObjects - 1);
+        auto startTime = std::chrono::steady_clock::now();
 
-            // Wait for all threads to be ready
-            startBarrier.arrive_and_wait();
+        std::vector<std::thread> readers;
+        readers.reserve(numReaders);
 
-            for (size_t j = 0; j < readsPerThread; ++j) {
-                auto& [hash, expectedData] = testObjects[dis(gen)];
+        for (size_t i = 0; i < numReaders; ++i) {
+            readers.emplace_back([&, threadId = i]() {
+                std::random_device rd;
+                std::mt19937 gen(rd() + threadId);
+                std::uniform_int_distribution<size_t> dis(0, numObjects - 1);
 
-                totalReads.fetch_add(1);
-                auto result = storage->retrieve(hash);
+                // Wait for all threads to be ready
+                startBarrier.arrive_and_wait();
 
-                if (!result.has_value()) {
-                    hasErrors.store(true);
-                    spdlog::error("Read failed for hash: {}", hash);
-                } else if (result.value() != expectedData) {
-                    hasErrors.store(true);
-                    spdlog::error("Data mismatch for hash: {}", hash);
-                } else {
-                    successfulReads.fetch_add(1);
+                for (size_t j = 0; j < readsPerThread; ++j) {
+                    auto& [hash, expectedData] = testObjects[dis(gen)];
+
+                    totalReads.fetch_add(1);
+                    auto result = storage->retrieve(hash);
+
+                    if (!result.has_value()) {
+                        hasErrors.store(true);
+                        spdlog::error("Read failed for hash: {}", hash);
+                    } else if (result.value() != expectedData) {
+                        hasErrors.store(true);
+                        spdlog::error("Data mismatch for hash: {}", hash);
+                    } else {
+                        successfulReads.fetch_add(1);
+                    }
                 }
-            }
-        });
+            });
+        }
+
+        // Start all threads simultaneously
+        startBarrier.arrive_and_wait();
+
+        // Wait for all readers to complete
+        for (auto& reader : readers) {
+            reader.join();
+        }
+
+        auto endTime = std::chrono::steady_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+
+        // Verify results
+        EXPECT_FALSE(hasErrors.load()) << "Errors with " << numReaders << " readers";
+        EXPECT_EQ(successfulReads.load(), numReaders * readsPerThread);
+
+        // Performance check
+        auto readsPerSecond = (totalReads.load() * 1000) / duration.count();
+        spdlog::info("Completed {} reads in {} ms ({} reads/sec)", totalReads.load(),
+                     duration.count(), readsPerSecond);
+
+        // Verify < 10ms latency requirement
+        auto avgLatency = duration.count() / static_cast<double>(readsPerThread);
+        EXPECT_LT(avgLatency, 15.0) << "Average latency too high with " << numReaders << " readers";
     }
-
-    // Start all threads simultaneously
-    startBarrier.arrive_and_wait();
-
-    // Wait for all readers to complete
-    for (auto& reader : readers) {
-        reader.join();
-    }
-
-    auto endTime = std::chrono::steady_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
-
-    // Verify results
-    EXPECT_FALSE(hasErrors.load());
-    EXPECT_EQ(successfulReads.load(), numReaders * readsPerThread);
-
-    // Performance check
-    auto readsPerSecond = (totalReads.load() * 1000) / duration.count();
-    spdlog::info("Completed {} reads in {} ms ({} reads/sec)", totalReads.load(), duration.count(),
-                 readsPerSecond);
-
-    // Verify < 10ms latency requirement
-    auto avgLatency = duration.count() / static_cast<double>(readsPerThread);
-    EXPECT_LT(avgLatency, 15.0);
 }
 
 TEST_F(ConcurrentStorageTest, HundredConcurrentWriters) {
@@ -225,134 +241,173 @@ TEST_F(ConcurrentStorageTest, HundredConcurrentWriters) {
 }
 
 TEST_F(ConcurrentStorageTest, MixedReadWriteWorkload) {
-    // 80% reads, 20% writes - typical workload
-    constexpr size_t numThreads = 200;
-    constexpr size_t numReaders = 160;
-    constexpr size_t numWriters = 40;
-    constexpr size_t operationsPerThread = 100;
+    // Test multiple read/write ratios
+    struct WorkloadConfig {
+        size_t numReaders;
+        size_t numWriters;
+        const char* description;
+    };
 
-    // Pre-populate with some data
-    std::vector<std::string> existingHashes;
-    for (size_t i = 0; i < 500; ++i) {
-        auto data = generateRandomBytes(1024);
-        auto hasher = crypto::createSHA256Hasher();
-        auto hash = hasher->hash(data);
-        existingHashes.push_back(hash);
-        storage->store(hash, data);
-    }
+    std::vector<WorkloadConfig> workloads = {{160, 40, "80/20 read/write (typical)"},
+                                             {180, 20, "90/10 read/write (read-heavy)"},
+                                             {100, 100, "50/50 read/write (balanced)"},
+                                             {50, 150, "25/75 read/write (write-heavy)"}};
 
-    std::atomic<size_t> readOps{0};
-    std::atomic<size_t> writeOps{0};
-    std::atomic<size_t> conflicts{0};
+    for (const auto& workload : workloads) {
+        spdlog::info("Testing workload: {}", workload.description);
 
-    std::barrier startBarrier(numThreads + 1);
-    std::vector<std::thread> threads;
+        const size_t numThreads = workload.numReaders + workload.numWriters;
+        constexpr size_t operationsPerThread = 100;
 
-    // Reader threads
-    for (size_t i = 0; i < numReaders; ++i) {
-        threads.emplace_back([&]() {
-            std::random_device rd;
-            std::mt19937 gen(rd());
-            std::uniform_int_distribution<size_t> dis(0, existingHashes.size() - 1);
+        // Pre-populate with some data
+        std::vector<std::string> existingHashes;
+        for (size_t i = 0; i < 500; ++i) {
+            auto data = generateRandomBytes(1024 + (i % 1024));
+            auto hasher = crypto::createSHA256Hasher();
+            auto hash = hasher->hash(data);
+            existingHashes.push_back(hash);
+            storage->store(hash, data);
+        }
 
-            startBarrier.arrive_and_wait();
+        std::atomic<size_t> readOps{0};
+        std::atomic<size_t> writeOps{0};
+        std::atomic<size_t> conflicts{0};
 
-            for (size_t j = 0; j < operationsPerThread; ++j) {
-                auto& hash = existingHashes[dis(gen)];
-                storage->retrieve(hash);
-                readOps.fetch_add(1);
-            }
-        });
-    }
+        std::barrier startBarrier(numThreads + 1);
+        std::vector<std::thread> threads;
 
-    // Writer threads
-    for (size_t i = 0; i < numWriters; ++i) {
-        threads.emplace_back([&, threadId = i]() {
-            startBarrier.arrive_and_wait();
+        // Reader threads
+        for (size_t i = 0; i < workload.numReaders; ++i) {
+            threads.emplace_back([&]() {
+                std::random_device rd;
+                std::mt19937 gen(rd());
+                std::uniform_int_distribution<size_t> dis(0, existingHashes.size() - 1);
 
-            for (size_t j = 0; j < operationsPerThread; ++j) {
-                auto data = generateRandomBytes(2048);
-                auto hasher = crypto::createSHA256Hasher();
-                auto hash = hasher->hash(data);
+                startBarrier.arrive_and_wait();
 
-                auto result = storage->store(hash, data);
-                if (result.has_value()) {
-                    writeOps.fetch_add(1);
-                } else {
-                    conflicts.fetch_add(1);
+                for (size_t j = 0; j < operationsPerThread; ++j) {
+                    auto& hash = existingHashes[dis(gen)];
+                    storage->retrieve(hash);
+                    readOps.fetch_add(1);
                 }
-            }
-        });
+            });
+        }
+
+        // Writer threads
+        for (size_t i = 0; i < workload.numWriters; ++i) {
+            threads.emplace_back([&, threadId = i]() {
+                startBarrier.arrive_and_wait();
+
+                for (size_t j = 0; j < operationsPerThread; ++j) {
+                    auto data = generateRandomBytes(2048);
+                    auto hasher = crypto::createSHA256Hasher();
+                    auto hash = hasher->hash(data);
+
+                    auto result = storage->store(hash, data);
+                    if (result.has_value()) {
+                        writeOps.fetch_add(1);
+                    } else {
+                        conflicts.fetch_add(1);
+                    }
+                }
+            });
+        }
+
+        auto startTime = std::chrono::steady_clock::now();
+        startBarrier.arrive_and_wait();
+
+        for (auto& thread : threads) {
+            thread.join();
+        }
+
+        auto endTime = std::chrono::steady_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+
+        spdlog::info("  Completed: {} reads, {} writes in {} ms", readOps.load(), writeOps.load(),
+                     duration.count());
+
+        EXPECT_EQ(readOps.load(), workload.numReaders * operationsPerThread)
+            << "Failed for workload: " << workload.description;
+        EXPECT_EQ(writeOps.load(), workload.numWriters * operationsPerThread)
+            << "Failed for workload: " << workload.description;
+        EXPECT_EQ(conflicts.load(), 0u) << "Conflicts in workload: " << workload.description;
+
+        // Cleanup for next workload
+        existingHashes.clear();
     }
-
-    auto startTime = std::chrono::steady_clock::now();
-    startBarrier.arrive_and_wait();
-
-    for (auto& thread : threads) {
-        thread.join();
-    }
-
-    auto endTime = std::chrono::steady_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
-
-    spdlog::info("Mixed workload: {} reads, {} writes in {} ms", readOps.load(), writeOps.load(),
-                 duration.count());
-
-    EXPECT_EQ(readOps.load(), numReaders * operationsPerThread);
-    EXPECT_EQ(writeOps.load(), numWriters * operationsPerThread);
-    EXPECT_EQ(conflicts.load(), 0u);
 }
 
 TEST_F(ConcurrentStorageTest, HighContentionSameObjects) {
-    // Many threads accessing the same small set of objects
-    constexpr size_t numThreads = 50;
-    constexpr size_t numObjects = 10;
-    constexpr size_t opsPerThread = 200;
+    // Test with different contention levels
+    struct ContentionConfig {
+        size_t numThreads;
+        size_t numObjects;
+        const char* description;
+    };
 
-    // Create a small set of objects
-    std::vector<std::pair<std::string, std::vector<std::byte>>> objects;
-    for (size_t i = 0; i < numObjects; ++i) {
-        auto data = generateRandomBytes(4096);
-        auto hasher = crypto::createSHA256Hasher();
-        auto hash = hasher->hash(data);
-        objects.emplace_back(hash, data);
-        storage->store(hash, data);
-    }
+    std::vector<ContentionConfig> configs = {
+        {50, 10, "High contention (50 threads, 10 objects)"},
+        {100, 20, "Very high contention (100 threads, 20 objects)"},
+        {25, 50, "Moderate contention (25 threads, 50 objects)"},
+        {50, 100, "Low contention (50 threads, 100 objects)"}};
 
-    std::atomic<size_t> operations{0};
-    std::atomic<bool> dataCorruption{false};
+    for (const auto& config : configs) {
+        spdlog::info("Testing: {}", config.description);
 
-    std::vector<std::thread> threads;
-    for (size_t i = 0; i < numThreads; ++i) {
-        threads.emplace_back([&]() {
-            std::random_device rd;
-            std::mt19937 gen(rd());
-            std::uniform_int_distribution<size_t> objDis(0, numObjects - 1);
-            std::uniform_int_distribution<int> opDis(0, 9);
+        constexpr size_t opsPerThread = 200;
 
-            for (size_t j = 0; j < opsPerThread; ++j) {
-                auto& [hash, expectedData] = objects[objDis(gen)];
+        // Create a set of objects
+        std::vector<std::pair<std::string, std::vector<std::byte>>> objects;
+        for (size_t i = 0; i < config.numObjects; ++i) {
+            auto data = generateRandomBytes(4096 + (i % 1024));
+            auto hasher = crypto::createSHA256Hasher();
+            auto hash = hasher->hash(data);
+            objects.emplace_back(hash, data);
+            storage->store(hash, data);
+        }
 
-                if (opDis(gen) < 8) { // 80% reads
-                    auto result = storage->retrieve(hash);
-                    if (!result.has_value() || result.value() != expectedData) {
-                        dataCorruption.store(true);
+        std::atomic<size_t> operations{0};
+        std::atomic<bool> dataCorruption{false};
+        std::atomic<size_t> readOps{0};
+        std::atomic<size_t> writeOps{0};
+
+        std::vector<std::thread> threads;
+        for (size_t i = 0; i < config.numThreads; ++i) {
+            threads.emplace_back([&]() {
+                std::random_device rd;
+                std::mt19937 gen(rd());
+                std::uniform_int_distribution<size_t> objDis(0, config.numObjects - 1);
+                std::uniform_int_distribution<int> opDis(0, 9);
+
+                for (size_t j = 0; j < opsPerThread; ++j) {
+                    auto& [hash, expectedData] = objects[objDis(gen)];
+
+                    if (opDis(gen) < 8) { // 80% reads
+                        auto result = storage->retrieve(hash);
+                        if (!result.has_value() || result.value() != expectedData) {
+                            dataCorruption.store(true);
+                        }
+                        readOps.fetch_add(1);
+                    } else { // 20% re-writes (same data)
+                        storage->store(hash, expectedData);
+                        writeOps.fetch_add(1);
                     }
-                } else { // 20% re-writes (same data)
-                    storage->store(hash, expectedData);
+
+                    operations.fetch_add(1);
                 }
+            });
+        }
 
-                operations.fetch_add(1);
-            }
-        });
+        for (auto& thread : threads) {
+            thread.join();
+        }
+
+        spdlog::info("  Ops: {} ({} reads, {} writes)", operations.load(), readOps.load(),
+                     writeOps.load());
+
+        EXPECT_FALSE(dataCorruption.load()) << "Data corruption in: " << config.description;
+        EXPECT_EQ(operations.load(), config.numThreads * opsPerThread);
     }
-
-    for (auto& thread : threads) {
-        thread.join();
-    }
-
-    EXPECT_FALSE(dataCorruption.load());
-    EXPECT_EQ(operations.load(), numThreads * opsPerThread);
 }
 
 TEST_F(ConcurrentStorageTest, RapidCreateDeleteCycles) {
@@ -535,4 +590,241 @@ TEST_F(ConcurrentStorageTest, ConnectionPoolWorkerSweep) {
 
     pool.shutdown();
     std::filesystem::remove(dbPath);
+}
+
+// New comprehensive stress test: Variable object sizes under concurrent access
+TEST_F(ConcurrentStorageTest, VariableObjectSizesConcurrent) {
+    spdlog::info("Testing variable object sizes under concurrent access");
+
+    struct SizeClass {
+        size_t minSize;
+        size_t maxSize;
+        size_t count;
+        const char* name;
+    };
+
+    std::vector<SizeClass> sizeClasses = {{100, 1024, 100, "Tiny (100B-1KB)"},
+                                          {1024, 10 * 1024, 100, "Small (1KB-10KB)"},
+                                          {10 * 1024, 100 * 1024, 50, "Medium (10KB-100KB)"},
+                                          {100 * 1024, 1024 * 1024, 20, "Large (100KB-1MB)"}};
+
+    // Pre-populate with objects of varying sizes
+    std::vector<std::pair<std::string, std::vector<std::byte>>> allObjects;
+
+    for (const auto& sizeClass : sizeClasses) {
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<size_t> sizeDist(sizeClass.minSize, sizeClass.maxSize);
+
+        for (size_t i = 0; i < sizeClass.count; ++i) {
+            auto data = generateRandomBytes(sizeDist(gen));
+            auto hasher = crypto::createSHA256Hasher();
+            auto hash = hasher->hash(data);
+            allObjects.emplace_back(hash, data);
+            ASSERT_TRUE(storage->store(hash, data).has_value());
+        }
+    }
+
+    spdlog::info("Pre-populated {} objects across {} size classes", allObjects.size(),
+                 sizeClasses.size());
+
+    // Concurrent access test
+    constexpr size_t numThreads = 50;
+    constexpr size_t opsPerThread = 100;
+
+    std::atomic<size_t> successfulOps{0};
+    std::atomic<size_t> failedOps{0};
+    std::atomic<size_t> corruptedReads{0};
+
+    std::barrier startBarrier(numThreads + 1);
+    std::vector<std::thread> threads;
+
+    for (size_t i = 0; i < numThreads; ++i) {
+        threads.emplace_back([&]() {
+            std::random_device rd;
+            std::mt19937 gen(rd());
+            std::uniform_int_distribution<size_t> objDist(0, allObjects.size() - 1);
+
+            startBarrier.arrive_and_wait();
+
+            for (size_t j = 0; j < opsPerThread; ++j) {
+                auto& [hash, expectedData] = allObjects[objDist(gen)];
+
+                auto result = storage->retrieve(hash);
+                if (!result.has_value()) {
+                    failedOps.fetch_add(1);
+                } else if (result.value() != expectedData) {
+                    corruptedReads.fetch_add(1);
+                } else {
+                    successfulOps.fetch_add(1);
+                }
+            }
+        });
+    }
+
+    startBarrier.arrive_and_wait();
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    spdlog::info("Variable size test: {} successful, {} failed, {} corrupted", successfulOps.load(),
+                 failedOps.load(), corruptedReads.load());
+
+    EXPECT_EQ(successfulOps.load(), numThreads * opsPerThread);
+    EXPECT_EQ(failedOps.load(), 0u);
+    EXPECT_EQ(corruptedReads.load(), 0u);
+}
+
+// New stress test: Burst traffic patterns
+TEST_F(ConcurrentStorageTest, BurstTrafficPattern) {
+    spdlog::info("Testing burst traffic patterns");
+
+    // Pre-populate
+    std::vector<std::pair<std::string, std::vector<std::byte>>> objects;
+    for (size_t i = 0; i < 100; ++i) {
+        auto data = generateRandomBytes(2048);
+        auto hasher = crypto::createSHA256Hasher();
+        auto hash = hasher->hash(data);
+        objects.emplace_back(hash, data);
+        storage->store(hash, data);
+    }
+
+    struct BurstConfig {
+        size_t numThreads;
+        size_t opsPerThread;
+        std::chrono::milliseconds burstDuration;
+        std::chrono::milliseconds idleDuration;
+        const char* name;
+    };
+
+    std::vector<BurstConfig> bursts = {{100, 50, 100ms, 200ms, "Quick burst"},
+                                       {200, 25, 50ms, 150ms, "Intense burst"},
+                                       {50, 100, 200ms, 100ms, "Sustained burst"}};
+
+    for (const auto& burst : bursts) {
+        spdlog::info("  Testing: {}", burst.name);
+
+        std::atomic<size_t> totalOps{0};
+        std::atomic<bool> hasError{false};
+
+        // Burst phase
+        std::vector<std::thread> threads;
+        for (size_t i = 0; i < burst.numThreads; ++i) {
+            threads.emplace_back([&]() {
+                std::random_device rd;
+                std::mt19937 gen(rd());
+                std::uniform_int_distribution<size_t> objDist(0, objects.size() - 1);
+
+                for (size_t j = 0; j < burst.opsPerThread; ++j) {
+                    auto& [hash, expectedData] = objects[objDist(gen)];
+                    auto result = storage->retrieve(hash);
+
+                    if (!result.has_value() || result.value() != expectedData) {
+                        hasError.store(true);
+                    }
+                    totalOps.fetch_add(1);
+                }
+            });
+        }
+
+        auto start = std::chrono::steady_clock::now();
+        for (auto& thread : threads) {
+            thread.join();
+        }
+        auto elapsed = std::chrono::steady_clock::now() - start;
+
+        spdlog::info("    Completed {} ops in {}ms", totalOps.load(),
+                     std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
+
+        EXPECT_FALSE(hasError.load()) << "Errors in burst: " << burst.name;
+        EXPECT_EQ(totalOps.load(), burst.numThreads * burst.opsPerThread);
+
+        // Idle phase
+        std::this_thread::sleep_for(burst.idleDuration);
+    }
+}
+
+// New stress test: Long-running sustained load
+TEST_F(ConcurrentStorageTest, LongRunningSustainedLoad) {
+    spdlog::info("Testing long-running sustained load");
+
+    constexpr size_t numThreads = 20;
+    constexpr auto testDuration = 30s; // 30 seconds of sustained load
+
+    // Pre-populate
+    std::vector<std::pair<std::string, std::vector<std::byte>>> objects;
+    for (size_t i = 0; i < 200; ++i) {
+        auto data = generateRandomBytes(1024 + (i % 2048));
+        auto hasher = crypto::createSHA256Hasher();
+        auto hash = hasher->hash(data);
+        objects.emplace_back(hash, data);
+        storage->store(hash, data);
+    }
+
+    std::atomic<bool> stopFlag{false};
+    std::atomic<size_t> totalOperations{0};
+    std::atomic<size_t> readOps{0};
+    std::atomic<size_t> writeOps{0};
+    std::atomic<size_t> errors{0};
+
+    std::vector<std::thread> threads;
+
+    auto startTime = std::chrono::steady_clock::now();
+
+    for (size_t i = 0; i < numThreads; ++i) {
+        threads.emplace_back([&, threadId = i]() {
+            std::random_device rd;
+            std::mt19937 gen(rd() + threadId);
+            std::uniform_int_distribution<size_t> objDist(0, objects.size() - 1);
+            std::uniform_int_distribution<int> opTypeDist(0, 99);
+
+            while (!stopFlag.load()) {
+                int opType = opTypeDist(gen);
+
+                if (opType < 70) { // 70% reads
+                    auto& [hash, expectedData] = objects[objDist(gen)];
+                    auto result = storage->retrieve(hash);
+
+                    if (!result.has_value() || result.value() != expectedData) {
+                        errors.fetch_add(1);
+                    }
+                    readOps.fetch_add(1);
+                } else { // 30% writes (new objects)
+                    auto data = generateRandomBytes(1024);
+                    auto hasher = crypto::createSHA256Hasher();
+                    auto hash = hasher->hash(data);
+
+                    if (storage->store(hash, data).has_value()) {
+                        writeOps.fetch_add(1);
+                    } else {
+                        errors.fetch_add(1);
+                    }
+                }
+
+                totalOperations.fetch_add(1);
+            }
+        });
+    }
+
+    // Let it run for the test duration
+    std::this_thread::sleep_for(testDuration);
+    stopFlag.store(true);
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    auto endTime = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(endTime - startTime).count();
+
+    spdlog::info("Long-running test completed:");
+    spdlog::info("  Duration: {}s", elapsed);
+    spdlog::info("  Total ops: {}", totalOperations.load());
+    spdlog::info("  Reads: {}, Writes: {}", readOps.load(), writeOps.load());
+    spdlog::info("  Ops/sec: {}", totalOperations.load() / elapsed);
+    spdlog::info("  Errors: {}", errors.load());
+
+    EXPECT_EQ(errors.load(), 0u);
+    EXPECT_GT(totalOperations.load(), numThreads * 100); // Should do many operations
 }

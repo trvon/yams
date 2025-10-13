@@ -80,7 +80,7 @@ struct CompressionHeader {
      * @param flag Flag to check
      * @return True if the flag is set
      */
-    [[nodiscard]] bool hasFlag(CompressionFlags flag) const noexcept {
+    [[nodiscard]] constexpr bool hasFlag(CompressionFlags flag) const noexcept {
         return (flags & static_cast<uint8_t>(flag)) != 0;
     }
 
@@ -88,13 +88,13 @@ struct CompressionHeader {
      * @brief Set a compression flag
      * @param flag Flag to set
      */
-    void setFlag(CompressionFlags flag) noexcept { flags |= static_cast<uint8_t>(flag); }
+    constexpr void setFlag(CompressionFlags flag) noexcept { flags |= static_cast<uint8_t>(flag); }
 
     /**
      * @brief Get compression ratio
      * @return Ratio of original to compressed size
      */
-    [[nodiscard]] double compressionRatio() const noexcept {
+    [[nodiscard]] constexpr double compressionRatio() const noexcept {
         return compressedSize > 0
                    ? static_cast<double>(uncompressedSize) / static_cast<double>(compressedSize)
                    : 0.0;

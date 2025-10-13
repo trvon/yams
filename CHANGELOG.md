@@ -20,7 +20,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CLI Pattern Ergonomics**: Added `--pattern/-p` flag to `list` command as an alias for `--name`, improving consistency with other commands. The flag supports glob wildcards (`*`, `?`, `**`) and auto-normalizes relative paths to absolute when no wildcards are present. (`src/cli/commands/list_command.cpp`)
 - **Grep Literal Text Hints**: Added smart error detection and helpful hints when grep patterns contain regex special characters. When a pattern fails regex compilation or returns no results, grep now suggests using the `-F` flag with the exact command to run. Added `-Q` as a short alias for `-F/--fixed-strings/--literal-text` to match git grep convention. (`src/cli/commands/grep_command.cpp`)
 - **Search Literal Text Aliases**: Added `-F/-Q/--fixed-strings` aliases to `search` command for consistency with `grep`. These short flags make it easier to search for literal text containing special characters like `()[]{}.*+?`. Updated help text with concrete examples. (`src/cli/commands/search_command.cpp`)
-- **Pattern Ergonomics Audit**: Created comprehensive audit of all 9 CLI commands that use patterns (grep, search, list, get, delete, add, restore, diff, cat), identifying inconsistencies and proposing 3-phase improvement plan. Document includes analysis of shared vs custom pattern utilities and roadmap for smart auto-detection. (`docs/delivery/pattern-ergonomics-audit.md`)
 - Grep: enabling `[search.path_tree]` now lets explicit path filters reuse the metadata-backed
   path-tree engine, and tag-only invocations default the pattern to `.*`, removing the need for
   placeholder expressions. citesrc/app/services/grep_service.cpp:240src/cli/commands/grep_command.cpp:305
@@ -31,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **MCP Search Multi-Pattern Support**: Added `include_patterns` array parameter to MCP search tool, enabling clients to specify multiple path patterns with OR logic. The MCP server now populates `pathPatterns` in daemon requests, matching CLI behavior. (`include/yams/mcp/tool_registry.h`, `src/mcp/mcp_server.cpp`)
 
 ### Changed
+- **LICENSE UPDATE**
 - MCP stdio transport: stdout buffering now adapts to interactive vs non-interactive streams,
   stderr is forced unbuffered, and JSON-RPC batch arrays over stdio are parsed in-line to match
   the Model Context Protocol 2025-03-26 transport requirements. Additional unit coverage exercises
@@ -51,8 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Search Async Path**: Fixed `SearchCommand::executeAsync()` not populating `pathPatterns` field in daemon request, causing server-side multi-pattern filtering to fail. The async code path (default execution) now correctly sends all include patterns to the daemon, matching the behavior of the sync path. (`src/cli/commands/search_command.cpp:1360-1365`)
 - **Database Schema Compatibility**: Fixed "constraint failed" errors during document insertion on databases with migration v12 (pre-path-indexing schema). The `insertDocument()` function now conditionally builds INSERT statements based on the `hasPathIndexing_` flag, supporting both legacy (13-column) and modern (17-column with path indexing) schemas. This allows YAMS to work correctly regardless of whether migration v13 has been applied. (`src/metadata/metadata_repository.cpp:318-380`)
 - **MCP Protocol Version Negotiation**: Fixed "Unsupported protocol version requested by client" error (code -32901) by making protocol version negotiation permissive by default (`strictProtocol_ = false`). The server now gracefully accepts any protocol version requested by clients, falling back to the latest supported version (`2025-03-26`) if the requested version is not in the supported list. Also added intermediate MCP protocol versions (`2024-12-05`, `2025-01-15`) to the supported list. This ensures maximum compatibility with MCP clients regardless of which spec version they implement. (`src/mcp/mcp_server.cpp:560,1254-1260`)
-
-
+- **Plugins CLI/Daemon parity**: `yams plugin list` now queries the daemon for loaded plugins and providers, falling back to JSON when needed. Fix ensures managed plugin directory and daemon report consistent state. (`src/cli/commands/plugin_command.cpp`, daemon status providers)
+- **Embedding preload config reading**: Daemon now correctly reads `embeddings.preferred_model` from config (using flat TOML parse) in `resolvePreferredModel()` and uses it in preload. This fixes “No preferred model configured or installed” despite config being set. (`src/daemon/components/ServiceManager.cpp`)
+- **Session Command**: Experimental pinning command for folder watching enabled
+- 
 ## [v0.7.4] - 2025-10-010
 
 ### Changed

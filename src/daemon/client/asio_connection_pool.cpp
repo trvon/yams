@@ -161,14 +161,15 @@ AsioConnectionPool::get_or_create(const TransportOptions& opts) {
 
 void AsioConnectionPool::cleanup_stale_connections() {
     // Remove dead/closed connections from pool (lock must be held by caller)
-    connection_pool_.erase(std::remove_if(connection_pool_.begin(), connection_pool_.end(),
-                                          [](const std::weak_ptr<AsioConnection>& weak) {
-                                              auto conn = weak.lock();
-                                              return !conn ||
-                                                     !conn->alive.load(std::memory_order_relaxed) ||
-                                                     !conn->socket || !conn->socket->is_open();
-                                          }),
-                           connection_pool_.end());
+    connection_pool_.erase(
+        std::ranges::remove_if(connection_pool_,
+                               [](const std::weak_ptr<AsioConnection>& weak) {
+                                   auto conn = weak.lock();
+                                   return !conn || !conn->alive.load(std::memory_order_relaxed) ||
+                                          !conn->socket || !conn->socket->is_open();
+                               })
+            .begin(),
+        connection_pool_.end());
 }
 
 awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::acquire() {

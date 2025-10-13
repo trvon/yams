@@ -421,7 +421,7 @@ bool AbiPluginLoader::isTrusted(const std::filesystem::path& p) const {
             if (!v)
                 return false;
             std::string s(v);
-            std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+            std::ranges::transform(s, s.begin(), ::tolower);
             return s == "1" || s == "true" || s == "on" || s == "yes";
         };
         if (truthy(std::getenv("YAMS_PLUGIN_TRUST_ALL"))) {

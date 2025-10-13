@@ -53,8 +53,8 @@ std::optional<std::string> extractDocumentText(std::shared_ptr<yams::api::IConte
         try {
             HtmlTextExtractor html;
             ExtractionConfig cfg{};
-            auto res = html.extractFromBuffer(bytes, cfg);
-            if (res && res.value().isSuccess() && !res.value().text.empty()) {
+            if (auto res = html.extractFromBuffer(bytes, cfg);
+                res && res.value().isSuccess() && !res.value().text.empty()) {
                 return std::optional<std::string>(res.value().text);
             }
         } catch (...) {

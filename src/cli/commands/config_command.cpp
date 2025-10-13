@@ -876,7 +876,7 @@ private:
             auto models = getAvailableModels();
 
             // Check if the requested model is available
-            if (std::find(models.begin(), models.end(), embeddingModel_) == models.end()) {
+            if (std::ranges::find(models, embeddingModel_) == models.end()) {
                 std::cout << "✗ Model '" << embeddingModel_ << "' not found\n";
                 std::cout << "\nAvailable models:\n";
                 for (const auto& model : models) {
@@ -970,8 +970,8 @@ private:
         if (value.empty())
             return fallback;
         std::string mode = value;
-        std::transform(mode.begin(), mode.end(), mode.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        std::ranges::transform(mode, mode.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         if (mode == "fallback" || mode == "preferred")
             return mode;
         return fallback;
@@ -1058,8 +1058,9 @@ private:
             auto config = parseSimpleToml(configPath);
 
             auto toLower = [](std::string v) {
-                std::transform(v.begin(), v.end(), v.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                std::ranges::transform(v, v.begin(), [](unsigned char c) {
+                    return static_cast<char>(std::tolower(c));
+                });
                 return v;
             };
 

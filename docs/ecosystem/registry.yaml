@@ -7,14 +7,14 @@ maintained_plugins:
     transport: abi
     interfaces: [model_provider_v1]
     status: alpha
-    license: Apache-2.0
+    license: GPL-3.0-or-later
 
   - name: yams-ghidra-plugin
     repo: https://github.com/trvon/yams (plugins/yams-ghidra-plugin)
     transport: external
     interfaces: [ghidra_analysis_v1]
     status: prototype
-    license: Apache-2.0
+    license: GPL-3.0-or-later
 
 community_plugins:
   # Example entry; replace with real repo when available

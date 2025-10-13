@@ -63,24 +63,6 @@
 
 namespace yams::mcp {
 namespace {
-bool isInteractiveStream(FILE* stream) noexcept {
-    if (!stream) {
-        return false;
-    }
-#ifdef _WIN32
-    int fd = _fileno(stream);
-    if (fd == -1) {
-        return false;
-    }
-    return _isatty(fd) != 0;
-#else
-    int fd = fileno(stream);
-    if (fd == -1) {
-        return false;
-    }
-    return ::isatty(fd) != 0;
-#endif
-}
 
 // Synchronous pooled_execute is deprecated and returns NotImplemented
 // This is kept only for toolRegistry compatibility until it's migrated to async
@@ -96,11 +78,6 @@ Result<void> pooled_execute(Manager& manager, const TRequest& req,
         "Synchronous pooled_execute is deprecated. Use async handlers via direct method calls."};
 }
 
-// Async variant to be used once MCP handlers become coroutine-based.
-
-// No-op async bridge here; MCP dispatch below uses a detached thread
-// to run yams::Task<> to completion off the io thread.
-
 } // namespace
 
 thread_local std::string MCPServer::tlsSessionId_;
@@ -114,8 +91,6 @@ static nlohmann::json createLogNotification(const std::string& level, const std:
     nlohmann::json params = {{"level", level}, {"data", nlohmann::json{{"message", message}}}};
     return {{"jsonrpc", "2.0"}, {"method", "notifications/message"}, {"params", params}};
 }
-
-// Using instance mutex (outMutex_) declared in header; no static needed
 
 // Unified send helper: prefers non-blocking transports and posts async sends when possible
 void MCPServer::sendResponse(const nlohmann::json& message) {
@@ -206,25 +181,24 @@ boost::asio::awaitable<void> MCPServer::outboundDrainAsync() {
     co_return;
 }
 
-// Non-blocking send: enqueue message for writer thread
+// Non-blocking send: for now, just delegates to synchronous send
+// Future: could implement actual async queue if needed
 void StdioTransport::sendAsync(json message) {
-    if (state_.load() != TransportState::Connected) {
-        return;
-    }
-    // Writer thread retired; fall back to immediate framed send
     send(message);
 }
 
-// Dedicated writer thread: drains queue and writes framed messages to stdout
-void StdioTransport::writerLoop() { /* retired */ }
-
 // StdioTransport implementation
 StdioTransport::StdioTransport() {
-    // Ensure predictable stdio behavior. In tests, avoid changing global iostream
-    // configuration so that rdbuf redirection in unit tests works as expected.
+    // Ensure predictable stdio behavior. In tests (env YAMS_TESTING=1), avoid changing
+    // global iostream configuration so rdbuf redirection in unit tests works.
+    bool testing_env = false;
+    if (const char* t = std::getenv("YAMS_TESTING"))
+        testing_env = (*t != '\0' && *t != '0');
 #ifndef YAMS_TESTING
-    std::ios::sync_with_stdio(false);
-    std::cin.tie(nullptr);
+    if (!testing_env) {
+        std::ios::sync_with_stdio(false);
+        std::cin.tie(nullptr);
+    }
 #endif
 
     // Set stdin/stdout to binary mode on Windows to prevent CRLF translation
@@ -233,14 +207,11 @@ StdioTransport::StdioTransport() {
     _setmode(_fileno(stdout), _O_BINARY);
 #endif
 
-    // POSIX Issue 8: configure stdout buffering based on interactivity and keep stderr unbuffered.
-    const bool stdoutInteractive = isInteractiveStream(stdout);
-    if (stdoutInteractive) {
-        std::cout << std::unitbuf;
-    } else {
-        std::cout << std::nounitbuf;
+    // Configure stdout buffering: line buffering for MCP (flush on newline) only outside tests
+    if (!testing_env) {
+        std::cout.setf(std::ios::unitbuf);
+        std::cerr.setf(std::ios::unitbuf);
     }
-    std::cerr << std::unitbuf;
 
     // Configure receive timeout from environment, enforce a sane minimum
     if (const char* env = std::getenv("YAMS_MCP_RECV_TIMEOUT_MS"); env && *env) {
@@ -253,39 +224,26 @@ StdioTransport::StdioTransport() {
         }
     }
     state_.store(TransportState::Connected);
-    // Writer thread retired; unified outbound path in MCPServer handles ordering
-    writerRunning_.store(false);
 }
 
 StdioTransport::~StdioTransport() {
     state_.store(TransportState::Closing);
-    queueCv_.notify_all();
-    if (writerThread_.joinable()) {
-        try {
-            writerThread_.join();
-        } catch (...) {
-            // swallow any join exceptions
-        }
-    }
 }
 
 void StdioTransport::send(const json& message) {
-    auto currentState = state_.load();
-    if (currentState == TransportState::Connected) {
-        try {
-            std::lock_guard<std::mutex> lock(outMutex_);
+    if (state_.load() != TransportState::Connected) {
+        return;
+    }
 
-            // MCP stdio spec: newline-delimited JSON (NDJSON)
-            // Messages are delimited by newlines and MUST NOT contain embedded newlines
-            // Use std::endl to ensure proper flushing on all platforms
-            std::cout << message.dump() << std::endl;
-            std::cout.flush(); // Explicit flush for reliability
-
-        } catch (const std::exception& e) {
-            spdlog::error("StdioTransport::send exception: {}", e.what());
-        } catch (...) {
-            spdlog::error("StdioTransport::send unknown exception");
-        }
+    try {
+        std::lock_guard<std::mutex> lock(outMutex_);
+        // MCP stdio spec: newline-delimited JSON (NDJSON)
+        // Messages are delimited by newlines and MUST NOT contain embedded newlines
+        std::cout << message.dump() << '\n';
+        std::cout.flush();
+    } catch (const std::exception& e) {
+        spdlog::error("StdioTransport::send failed: {}", e.what());
+        recordError();
     }
 }
 
@@ -300,16 +258,15 @@ void StdioTransport::sendFramedSerialized(const std::string& payload) {
     if (state_.load() != TransportState::Connected) {
         return;
     }
+
     try {
         std::lock_guard<std::mutex> lock(outMutex_);
-        auto& out = std::cout;
         // MCP stdio spec: newline-delimited JSON
-        out << payload << "\n";
-        out.flush();
+        std::cout << payload << '\n';
+        std::cout.flush();
     } catch (const std::exception& e) {
-        spdlog::error("StdioTransport::sendFramedSerialized exception: {}", e.what());
-    } catch (...) {
-        spdlog::error("StdioTransport::sendFramedSerialized unknown exception");
+        spdlog::error("StdioTransport::sendFramedSerialized failed: {}", e.what());
+        recordError();
     }
 }
 
@@ -376,169 +333,194 @@ MessageResult StdioTransport::receive() {
     if (state_.load() != TransportState::Connected) {
         return Error{ErrorCode::NetworkError, "Transport not connected"};
     }
-    std::streambuf* inputBuffer = std::cin.rdbuf();
-    std::istream in(inputBuffer);
-    auto* stringBuffer = dynamic_cast<std::stringbuf*>(inputBuffer);
-    constexpr std::size_t kTestingIdleSpinLimit = 200;
-    std::size_t idleIterations = 0;
 
-    while (state_.load() != TransportState::Closing) {
-        if (stringBuffer) {
-            if (stringBuffer->in_avail() <= 0) {
-                if (externalShutdown_ && *externalShutdown_) {
-                    state_.store(TransportState::Closing);
-                    return Error{ErrorCode::NetworkError, "External shutdown requested"};
-                }
-                if (idleIterations++ >= kTestingIdleSpinLimit) {
-                    state_.store(TransportState::Disconnected);
-                    return Error{ErrorCode::NetworkError, "No stdin data available"};
-                }
-                std::this_thread::yield();
-                continue;
-            }
-            idleIterations = 0;
-        } else {
-            if (!isInputAvailable(recvTimeoutMs_)) {
-                if (externalShutdown_ && *externalShutdown_) {
-                    state_.store(TransportState::Closing);
-                    return Error{ErrorCode::NetworkError, "External shutdown requested"};
-                }
-                continue;
-            }
+    // Check for shutdown request before blocking
+    if (externalShutdown_ && *externalShutdown_) {
+        state_.store(TransportState::Closing);
+        return Error{ErrorCode::NetworkError, "External shutdown requested"};
+    }
+
+    // Primary path: Read a single line (NDJSON format per MCP spec)
+    std::string line;
+    if (!readLineWithTimeout(line, recvTimeoutMs_)) {
+        // Timeout or EOF
+        if (std::cin.eof()) {
+            spdlog::info("StdioTransport: EOF on stdin; client disconnected");
+            state_.store(TransportState::Disconnected);
+            return Error{ErrorCode::NetworkError, "EOF on stdin"};
         }
+        // Timeout - check shutdown and retry
+        if (externalShutdown_ && *externalShutdown_) {
+            state_.store(TransportState::Closing);
+            return Error{ErrorCode::NetworkError, "External shutdown requested"};
+        }
+        // Transient timeout - let caller retry
+        return Error{ErrorCode::NetworkError, "Read timeout"};
+    }
 
-        // Attempt to read framed headers; fallback to single-line JSON (non-seekable safe)
-        std::size_t contentLength = 0;
-        std::string line;
+    // Trim trailing CR if present (handles CRLF line endings)
+    if (!line.empty() && line.back() == '\r') {
+        line.pop_back();
+    }
 
-        // Read first non-empty line, but avoid blocking forever on empty input buffers (tests)
-        do {
-            if (!std::getline(in, line)) {
-                // Client closed stdin (EOF). Treat as normal shutdown; avoid alarming logs.
-                spdlog::info("StdioTransport: EOF on stdin; treating as client disconnect");
-                state_.store(TransportState::Disconnected);
-                return Error{ErrorCode::NetworkError, "EOF on stdin"};
-            }
-            if (!line.empty() && line.back() == '\r')
-                line.pop_back();
+    // Skip empty lines (be tolerant, but return network error for test compat)
+    if (line.empty()) {
+        recordError();
+        if (!shouldRetryAfterError()) {
+            state_.store(TransportState::Disconnected);
+        }
+        return Error{ErrorCode::NetworkError, "Empty line received"};
+    }
 
-            if (line.empty()) {
-                // For stringbuf-backed streams (tests/act), detect the "no more buffered data" case
-                // so we can bail out instead of blocking on std::getline forever.
-                if (stringBuffer && stringBuffer->in_avail() <= 0) {
-                    recordError();
-                    if (!shouldRetryAfterError())
-                        state_.store(TransportState::Disconnected);
-                    return Error{ErrorCode::NetworkError, "No stdin data available"};
-                }
-                // For real stdin, fall back to the usual readiness check before looping.
-                if (!stringBuffer && !isInputAvailable(recvTimeoutMs_)) {
-                    if (externalShutdown_ && *externalShutdown_) {
-                        state_.store(TransportState::Closing);
-                        return Error{ErrorCode::NetworkError, "External shutdown requested"};
-                    }
-                    // Timeout waiting for more data – treat as transient; continue outer loop.
-                    continue;
-                }
-            }
-        } while (line.empty());
+    spdlog::debug("StdioTransport: Received line: '{}'",
+                  line.length() > 200 ? line.substr(0, 200) + "..." : line);
 
-        spdlog::debug("StdioTransport: Read line: '{}'", line);
-
-        // NDJSON (newline-delimited JSON) - MCP stdio standard format
-        if (!line.empty() && (line.front() == '{' || line.front() == '[')) {
-            spdlog::debug("StdioTransport: Received NDJSON message (MCP stdio standard)");
-            auto parsed = json_utils::parse_json(line);
-            if (!parsed) {
-                spdlog::error("StdioTransport: Failed to parse JSON: {}", line);
-                recordError();
-                if (!shouldRetryAfterError())
-                    state_.store(TransportState::Error);
-                return parsed.error();
-            }
+    // Try to parse as NDJSON (MCP stdio standard)
+    if (line.front() == '{' || line.front() == '[') {
+        auto parsed = json_utils::parse_json(line);
+        if (parsed) {
             resetErrorCount();
             return parsed.value();
         }
-
-        auto parseHeader = [&](const std::string& hdr) -> bool {
-            auto pos = hdr.find(':');
-            if (pos == std::string::npos)
-                return false;
-            std::string key = hdr.substr(0, pos);
-            std::string val = hdr.substr(pos + 1);
-            while (!val.empty() && (val.front() == ' ' || val.front() == '\t'))
-                val.erase(val.begin());
-            std::transform(key.begin(), key.end(), key.begin(),
-                           [](unsigned char c) { return std::tolower(c); });
-            if (key == "content-length") {
-                try {
-                    contentLength = static_cast<std::size_t>(std::stoull(val));
-                } catch (...) {
-                    contentLength = 0;
-                }
-            }
-            return true;
-        };
-
-        if (!parseHeader(line)) {
-            recordError();
-            if (!shouldRetryAfterError())
-                state_.store(TransportState::Error);
-            return Error{ErrorCode::InvalidData, "Malformed header line"};
+        recordError();
+        if (!shouldRetryAfterError()) {
+            state_.store(TransportState::Error);
         }
-
-        // Remaining headers until blank line
-        while (true) {
-            if (!std::getline(in, line)) {
-                state_.store(TransportState::Disconnected);
-                return Error{ErrorCode::NetworkError, "EOF during headers"};
-            }
-            if (!line.empty() && line.back() == '\r')
-                line.pop_back();
-            if (line.empty())
-                break; // end of headers
-            if (!parseHeader(line)) {
-                recordError();
-                if (!shouldRetryAfterError())
-                    state_.store(TransportState::Error);
-                return Error{ErrorCode::InvalidData, "Malformed header line"};
-            }
-        }
-
-        if (contentLength == 0) {
-            recordError();
-            if (!shouldRetryAfterError())
-                state_.store(TransportState::Error);
-            return Error{ErrorCode::InvalidData, "Missing Content-Length"};
-        }
-
-        std::string payload(contentLength, '\0');
-        spdlog::debug("StdioTransport: Reading {} bytes of content", contentLength);
-        in.read(payload.data(), static_cast<std::streamsize>(contentLength));
-        if (in.gcount() != static_cast<std::streamsize>(contentLength)) {
-            recordError();
-            if (!shouldRetryAfterError())
-                state_.store(TransportState::Error);
-            return Error{ErrorCode::NetworkError, "Short read of framed JSON payload"};
-        }
-
-        spdlog::debug("StdioTransport: Received framed message with Content-Length: {}",
-                      contentLength);
-        auto parsed = json_utils::parse_json(payload);
-        if (!parsed) {
-            spdlog::error("StdioTransport: Failed to parse framed JSON payload");
-            recordError();
-            if (!shouldRetryAfterError())
-                state_.store(TransportState::Error);
-            return parsed.error();
-        }
-        // Successfully parsed LSP-framed message (backwards compatibility)
-        // Note: We still output NDJSON per MCP spec regardless of input format
-        resetErrorCount();
-        return parsed.value();
+        return parsed.error();
     }
 
-    return Error{ErrorCode::NetworkError, "Transport closed during receive"};
+    // Backwards compatibility: Try LSP-style framing (Content-Length header)
+    spdlog::debug("StdioTransport: Detected potential LSP framing, attempting parse");
+    return receiveLSPFramed(line);
+}
+
+// Helper: Read a line with timeout support
+bool StdioTransport::readLineWithTimeout(std::string& line, int timeoutMs) const {
+    // For testing with stringbuf-backed streams
+    std::streambuf* inputBuffer = std::cin.rdbuf();
+    auto* stringBuffer = dynamic_cast<std::stringbuf*>(inputBuffer);
+
+    if (stringBuffer) {
+        // Test mode: non-blocking check
+        if (stringBuffer->in_avail() <= 0) {
+            return false;
+        }
+        return static_cast<bool>(std::getline(std::cin, line));
+    }
+
+    // Production mode: wait for input with timeout
+    if (!isInputAvailable(timeoutMs)) {
+        return false;
+    }
+
+    return static_cast<bool>(std::getline(std::cin, line));
+}
+
+// Helper: Parse LSP-style framed message (backwards compatibility)
+MessageResult StdioTransport::receiveLSPFramed(const std::string& firstLine) {
+    std::size_t contentLength = 0;
+
+    // Parse first header line
+    if (!parseLSPHeader(firstLine, contentLength)) {
+        recordError();
+        if (!shouldRetryAfterError()) {
+            state_.store(TransportState::Error);
+        }
+        return Error{ErrorCode::InvalidData, "Malformed LSP header line"};
+    }
+
+    // Read remaining headers until blank line
+    std::string line;
+    while (true) {
+        if (!std::getline(std::cin, line)) {
+            state_.store(TransportState::Disconnected);
+            return Error{ErrorCode::NetworkError, "EOF during LSP headers"};
+        }
+
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+
+        if (line.empty()) {
+            break; // End of headers
+        }
+
+        if (!parseLSPHeader(line, contentLength)) {
+            recordError();
+            if (!shouldRetryAfterError()) {
+                state_.store(TransportState::Error);
+            }
+            return Error{ErrorCode::InvalidData, "Malformed LSP header line"};
+        }
+    }
+
+    if (contentLength == 0) {
+        recordError();
+        if (!shouldRetryAfterError()) {
+            state_.store(TransportState::Error);
+        }
+        return Error{ErrorCode::InvalidData, "Missing or zero Content-Length"};
+    }
+
+    // Read payload
+    std::string payload(contentLength, '\0');
+    std::cin.read(payload.data(), static_cast<std::streamsize>(contentLength));
+
+    if (std::cin.gcount() != static_cast<std::streamsize>(contentLength)) {
+        recordError();
+        if (!shouldRetryAfterError()) {
+            state_.store(TransportState::Error);
+        }
+        return Error{ErrorCode::NetworkError, fmt::format("Short read: expected {} bytes, got {}",
+                                                          contentLength, std::cin.gcount())};
+    }
+
+    spdlog::debug("StdioTransport: Parsed LSP framed message ({} bytes) - "
+                  "backwards compatibility mode",
+                  contentLength);
+
+    auto parsed = json_utils::parse_json(payload);
+    if (parsed) {
+        resetErrorCount();
+    } else {
+        recordError();
+        if (!shouldRetryAfterError()) {
+            state_.store(TransportState::Error);
+        }
+    }
+    return parsed;
+}
+
+// Helper: Parse a single LSP header line
+bool StdioTransport::parseLSPHeader(const std::string& line, std::size_t& contentLength) {
+    auto pos = line.find(':');
+    if (pos == std::string::npos) {
+        return false;
+    }
+
+    std::string key = line.substr(0, pos);
+    std::string val = line.substr(pos + 1);
+
+    // Trim leading whitespace from value
+    while (!val.empty() && (val.front() == ' ' || val.front() == '\t')) {
+        val.erase(val.begin());
+    }
+
+    // Convert key to lowercase for case-insensitive comparison
+    std::transform(key.begin(), key.end(), key.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+
+    if (key == "content-length") {
+        try {
+            contentLength = static_cast<std::size_t>(std::stoull(val));
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    // Ignore other headers (e.g., Content-Type)
+    return true;
 }
 
 bool StdioTransport::shouldRetryAfterError() const noexcept {
@@ -729,7 +711,7 @@ Result<void> MCPServer::ensureDaemonClient() {
         } catch (...) {
         }
         hint +=
-            "; set YAMS_DAEMON_SOCKET to explicit path or ensure XDG_RUNTIME_DIR is set on Linux.";
+            " set YAMS_DAEMON_SOCKET to explicit path or ensure XDG_RUNTIME_DIR is set on Linux.";
         return yams::Error{leaseRes.error().code, hint};
     }
     daemon_client_lease_ = leaseRes.value();
@@ -746,8 +728,13 @@ void MCPServer::start() {
         return; // Already running
     }
 
-    // Ensure stdout is not buffered for real-time communication
-    std::cout.setf(std::ios::unitbuf);
+    // Ensure stdout is not buffered for real-time communication (not in tests)
+    bool testing_env = false;
+    if (const char* t = std::getenv("YAMS_TESTING"))
+        testing_env = (*t != '\0' && *t != '0');
+    if (!testing_env) {
+        std::cout.setf(std::ios::unitbuf);
+    }
 
     spdlog::info("MCP server started");
 
@@ -796,7 +783,6 @@ void MCPServer::start() {
                     try {
                         std::string meth = request.value("method", "");
                         std::string id = request.contains("id") ? request["id"].dump() : "null";
-                        spdlog::trace("MCP handshake trace: recv method={} id={}", meth, id);
                     } catch (...) {
                     }
                 }
@@ -870,8 +856,7 @@ void MCPServer::start() {
                 }
 
                 this->enqueueTask([this, req = request]() mutable {
-                    auto response = this->handleRequest(req);
-                    if (response) {
+                    if (auto response = this->handleRequest(req)) {
                         this->sendResponse(response.value());
                     } else {
                         const auto& error = response.error();
@@ -886,7 +871,6 @@ void MCPServer::start() {
             };
 
             if (message.is_array()) {
-                spdlog::debug("MCP server received JSON-RPC batch with {} entries", message.size());
                 for (const auto& entry : message) {
                     processRequest(entry);
                 }
@@ -931,17 +915,10 @@ MessageResult MCPServer::handleRequest(const json& request) {
         json params = request.value("params", json::object());
         auto id2 = request.value("id", json{});
 
-        spdlog::debug("MCP server handling method: '{}' with id: {}", method, id.dump());
-
         // Route to appropriate handler
         if (method == "initialize") {
             spdlog::debug("MCP handling initialize request with params: {}", params.dump());
             auto initResult = initialize(params);
-
-            // Diagnostic logging for empty result issues
-            spdlog::debug("MCP initialize returned: is_null={}, is_object={}, empty={}, size={}",
-                          initResult.is_null(), initResult.is_object(), initResult.empty(),
-                          initResult.size());
 
             if (initResult.contains("_initialize_error")) {
                 spdlog::error("MCP initialize failed with error");
@@ -956,8 +933,6 @@ MessageResult MCPServer::handleRequest(const json& request) {
                           initResult.value("protocolVersion", "unknown"));
 
             auto response = createResponse(id2, initResult);
-            spdlog::debug("MCP createResponse returned: is_null={}, is_object={}, size={}",
-                          response.is_null(), response.is_object(), response.size());
 
             return response;
         } else if (method == "notifications/cancelled") {
@@ -1001,7 +976,6 @@ MessageResult MCPServer::handleRequest(const json& request) {
             recordEarlyFeatureUse();
             const auto toolName = params.value("name", "");
             const auto toolArgs = params.value("arguments", json::object());
-            spdlog::debug("MCP tool call: '{}' with args: {}", toolName, toolArgs.dump());
             // Emit a coarse progress notification for visibility
             sendProgress("tool", 0.0, std::string("calling ") + toolName);
             json raw = callTool(toolName, toolArgs);
@@ -1270,8 +1244,7 @@ json MCPServer::initialize(const json& params) {
 
     // Negotiate (fallback to latest if unsupported)
     std::string negotiated = latest;
-    bool matched = std::find(kSupported.begin(), kSupported.end(), requested) != kSupported.end();
-    if (matched) {
+    if (bool matched = std::ranges::find(kSupported, requested) != kSupported.end()) {
         negotiated = requested;
     } else if (strictProtocol_) {
         json error_data = {{"supportedVersions", kSupported}};
@@ -1304,10 +1277,6 @@ json MCPServer::initialize(const json& params) {
     spdlog::debug("  - protocolVersion: {}", negotiated);
     spdlog::debug("  - serverInfo.name: {}", serverInfo_.name);
     spdlog::debug("  - serverInfo.version: {}", serverInfo_.version);
-    spdlog::debug("  - capabilities size: {}", caps.size());
-    spdlog::debug("  - result is_null: {}, is_object: {}, empty: {}, size: {}", result.is_null(),
-                  result.is_object(), result.empty(), result.size());
-
     return result;
 }
 
@@ -2176,8 +2145,6 @@ json yams::mcp::MCPServer::listPrompts() {
 }
 
 json MCPServer::callTool(const std::string& name, const json& arguments) {
-    spdlog::info("MCP callTool invoked: name='{}', arguments={}", name, arguments.dump());
-
     if (!toolRegistry_) {
         return {{"error", {{"code", -32603}, {"message", "Tool registry not initialized"}}}};
     }
@@ -2232,7 +2199,6 @@ json MCPServer::callTool(const std::string& name, const json& arguments) {
         return yams::mcp::wrapToolResult(result, /*isError=*/false);
 
     } catch (const std::exception& e) {
-        spdlog::error("MCP tool '{}' threw exception: {}", name, e.what());
         return {{"error",
                  {{"code", -32603}, {"message", std::string("Tool call failed: ") + e.what()}}}};
     }
@@ -2315,8 +2281,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     } else {
         // Optional: degrade to keyword if provider/index unavailable
         try {
-            auto st = co_await daemon_client_->status();
-            if (st) {
+            if (auto st = co_await daemon_client_->status()) {
                 const auto& s = st.value();
                 bool provider_ready = false;
                 for (const auto& p : s.providers) {
@@ -2361,8 +2326,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             kreq.fuzzy = false;    // keep preview snappy
             kreq.similarity = 0.0; // skip vector
             kreq.limit = std::min<size_t>(dreq.limit > 0 ? dreq.limit : 10, 10);
-            auto kres = co_await daemon_client_->streamingSearch(kreq);
-            if (kres) {
+            if (auto kres = co_await daemon_client_->streamingSearch(kreq)) {
                 const auto& kr = kres.value();
                 // Notify clients about quick keyword candidates
                 json partial;
@@ -2441,7 +2405,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             std::string path =
                 !item.path.empty()
                     ? item.path
-                    : (item.metadata.count("path") ? item.metadata.at("path") : std::string());
+                    : (item.metadata.contains("path") ? item.metadata.at("path") : std::string());
             if (path.empty())
                 path = item.id; // last-resort fallback
             out.paths.push_back(std::move(path));
@@ -2453,12 +2417,12 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     for (const auto& item : r.results) {
         MCPSearchResponse::Result m;
         m.id = item.id;
-        m.hash = item.metadata.count("hash") ? item.metadata.at("hash") : "";
+        m.hash = item.metadata.contains("hash") ? item.metadata.at("hash") : "";
         m.title = item.title;
         // Fallback to metadata.path when daemon omitted direct path field
         m.path = !item.path.empty()
                      ? item.path
-                     : (item.metadata.count("path") ? item.metadata.at("path") : std::string());
+                     : (item.metadata.contains("path") ? item.metadata.at("path") : std::string());
         m.score = item.score;
         m.snippet = item.snippet;
         out.results.push_back(std::move(m));
@@ -2482,7 +2446,6 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                 }
                 if (idx != static_cast<size_t>(-1)) {
                     yams::app::services::RetrievalService rsvc;
-                    yams::app::services::RetrievalOptions ropts;
                     if (auto appc = app::services::makeSessionService(nullptr); appc) {
                         // no-op placeholder for future per-session retrieval options
                     }
@@ -2496,6 +2459,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                     // Retrieve indexed content by hash when available
                     std::string indexedContent;
                     if (!hash.empty()) {
+                        yams::app::services::RetrievalOptions ropts;
                         yams::app::services::GetOptions greq;
                         greq.hash = hash;
                         greq.metadataOnly = false;
@@ -2660,8 +2624,7 @@ MCPServer::handleGrepDocuments(const MCPGrepRequest& req) {
         sreq.fuzzy = true;
         sreq.searchType = "hybrid";
         sreq.pathsOnly = false;
-        auto sres = co_await daemon_client_->streamingSearch(sreq);
-        if (sres) {
+        if (auto sres = co_await daemon_client_->streamingSearch(sreq)) {
             const auto& sr = sres.value();
             MCPGrepResponse early;
             std::ostringstream oss_;
@@ -2734,10 +2697,7 @@ MCPServer::handleDownload(const MCPDownloadRequest& req) {
     const bool verbose =
         (std::getenv("YAMS_POOL_VERBOSE") && std::string(std::getenv("YAMS_POOL_VERBOSE")) != "0" &&
          std::string(std::getenv("YAMS_POOL_VERBOSE")) != "false");
-    if (verbose) {
-        spdlog::debug("[MCP] download: url='{}' post_index={} store_only={} export='{}'", req.url,
-                      req.postIndex, req.storeOnly, req.exportPath);
-    }
+
     // Perform download locally using downloader manager (store into CAS), then optionally
     // post-index.
     MCPDownloadResponse mcp_response;
@@ -2970,21 +2930,9 @@ MCPServer::handleDownload(const MCPDownloadRequest& req) {
                         std::string("Failed to prepare staging dir: ") + e.what()};
     }
 
-    if (verbose) {
-        spdlog::debug("[MCP] download: starting manager (conc={}, chunk={}, timeout_ms={}, "
-                      "follow_redirects={}, resume={}, store_only={})",
-                      cfg.defaultConcurrency, cfg.defaultChunkSizeBytes, cfg.defaultTimeout.count(),
-                      cfg.followRedirects, cfg.resume, cfg.storeOnly);
-        spdlog::debug("[MCP] download: staging_dir='{}' objects_dir='{}'",
-                      storage.stagingDir.string(), storage.objectsDir.string());
-    }
     auto manager = yams::downloader::makeDownloadManager(storage, cfg);
     auto dlRes = manager->download(dreq);
     if (!dlRes.ok()) {
-        if (verbose) {
-            spdlog::debug("[MCP] download: failed for url='{}' error='{}'", req.url,
-                          dlRes.error().message);
-        }
         co_return Error{ErrorCode::InternalError, dlRes.error().message};
     }
 
@@ -3007,25 +2955,9 @@ MCPServer::handleDownload(const MCPDownloadRequest& req) {
     if (final.suggestedName)
         mcp_response.suggestedName = *final.suggestedName;
 
-    if (verbose) {
-        spdlog::debug(
-            "[MCP] download: success url='{}' hash='{}' stored='{}' size={} http={} etag='{}' "
-            "lm='{}' checksum_ok={}",
-            mcp_response.url, mcp_response.hash, mcp_response.storedPath, mcp_response.sizeBytes,
-            (mcp_response.httpStatus ? *mcp_response.httpStatus : 0),
-            (mcp_response.etag ? *mcp_response.etag : ""),
-            (mcp_response.lastModified ? *mcp_response.lastModified : ""),
-            (mcp_response.checksumOk ? (*mcp_response.checksumOk ? "true" : "false") : "n/a"));
-    }
     // Optionally post-index the artifact via daemon
     // Optionally post-index the artifact via daemon
     if (mcp_response.success && req.postIndex) {
-        if (verbose) {
-            spdlog::debug("[MCP] post-index: starting for path='{}' collection='{}' "
-                          "snapshot_id='{}' snapshot_label='{}'",
-                          mcp_response.storedPath, req.collection, req.snapshotId,
-                          req.snapshotLabel);
-        }
         daemon::AddDocumentRequest addReq;
         // Resolve stored path to absolute under daemon-resolved content store root if relative
         std::filesystem::path __abs = std::filesystem::path(mcp_response.storedPath);
@@ -3057,10 +2989,6 @@ MCPServer::handleDownload(const MCPDownloadRequest& req) {
         auto __canon = std::filesystem::weakly_canonical(__abs, __canon_ec);
         if (!__canon_ec && !__canon.empty()) {
             __abs = __canon;
-        }
-        if (verbose) {
-            spdlog::debug("[MCP] post-index: resolved stored path: '{}' -> '{}'",
-                          mcp_response.storedPath, __abs.string());
         }
         addReq.path = __abs.string(); // normalized absolute path
 
@@ -3097,7 +3025,7 @@ MCPServer::handleDownload(const MCPDownloadRequest& req) {
 
         // 2) Derived tags: host:..., scheme:..., status:2xx/4xx/5xx
         auto extract_host = [](const std::string& url) -> std::string {
-            auto p = url.find("://");
+            const auto p = url.find("://");
             if (p == std::string::npos)
                 return {};
             auto rest = url.substr(p + 3);
@@ -3105,7 +3033,7 @@ MCPServer::handleDownload(const MCPDownloadRequest& req) {
             return (slash == std::string::npos) ? rest : rest.substr(0, slash);
         };
         auto extract_scheme = [](const std::string& url) -> std::string {
-            auto p = url.find("://");
+            const auto p = url.find("://");
             return (p == std::string::npos) ? std::string{} : url.substr(0, p);
         };
         auto host = extract_host(req.url);
@@ -3171,8 +3099,6 @@ MCPServer::handleDownload(const MCPDownloadRequest& req) {
         // Call daemon to add/index the downloaded document
         auto addres = co_await daemon_client_->streamingAddDocument(addReq);
         if (!addres) {
-            spdlog::error("[MCP] post-index: daemon add failed for path='{}' error='{}'",
-                          addReq.path, addres.error().message);
             mcp_response.indexed = false;
         } else {
             mcp_response.indexed = true;
@@ -3203,7 +3129,7 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
         using namespace std::chrono_literals;
         auto exec = co_await boost::asio::this_coro::executor;
         boost::asio::steady_timer timer{exec};
-        const int maxConcurrent = 2;
+        constexpr int maxConcurrent = 2;
         const auto throttleDeadline = 2s;
         auto start = std::chrono::steady_clock::now();
         while (addInFlight_.load(std::memory_order_relaxed) >= maxConcurrent) {
@@ -3255,8 +3181,8 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
                 auto s2 = co_await daemon_client_->status();
                 if (s2) {
                     const auto& ss = s2.value();
-                    auto it2 = ss.readinessStates.find("content_store");
-                    if (it2 == ss.readinessStates.end() || it2->second) {
+                    if (auto it2 = ss.readinessStates.find("content_store");
+                        it2 == ss.readinessStates.end() || it2->second) {
                         break; // proceed when ready or key missing
                     }
                 }
@@ -3284,12 +3210,10 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
         std::string tmp = req.name;
         // Strip CR/LF and trim
         if (!tmp.empty()) {
-            tmp.erase(std::remove_if(tmp.begin(), tmp.end(),
-                                     [](unsigned char c) { return c == '\n' || c == '\r'; }),
-                      tmp.end());
+            std::erase_if(tmp, [](unsigned char c) { return c == '\n' || c == '\r'; });
             auto ltrim = [](std::string& s) {
                 s.erase(s.begin(),
-                        std::find_if(s.begin(), s.end(), [](int ch) { return !std::isspace(ch); }));
+                        std::ranges::find_if(s, [](int ch) { return !std::isspace(ch); }));
             };
             auto rtrim = [](std::string& s) {
                 s.erase(std::find_if(s.rbegin(), s.rend(), [](int ch) { return !std::isspace(ch); })
@@ -3372,8 +3296,7 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
             bool resolved = false;
             for (const auto& base : bases) {
                 std::filesystem::path cand = base / (_p.rfind("./", 0) == 0 ? _p.substr(2) : _p);
-                std::error_code ec;
-                if (std::filesystem::exists(cand, ec)) {
+                if (std::error_code ec; std::filesystem::exists(cand, ec)) {
                     chosen = cand;
                     resolved = true;
                     break;
@@ -3431,7 +3354,7 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
         using namespace std::chrono_literals;
         auto exec = co_await boost::asio::this_coro::executor;
         boost::asio::steady_timer timer{exec};
-        const int maxAttempts = 3;
+        constexpr int maxAttempts = 3;
         bool hasContent = !daemon_req.content.empty();
         for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
             // Use streamingAddDocument for parity with CLI and to avoid unary-path edge cases
@@ -3548,8 +3471,8 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
     // Map MCP filters to daemon ListRequest
     // Prioritize pattern, but fall back to name.
     if (!req.pattern.empty()) {
-        auto normalized = yams::app::services::utils::normalizeLookupPath(req.pattern);
-        if (normalized.changed && !normalized.hasWildcards) {
+        if (auto normalized = yams::app::services::utils::normalizeLookupPath(req.pattern);
+            normalized.changed && !normalized.hasWildcards) {
             daemon_req.namePattern = normalized.normalized;
         } else {
             daemon_req.namePattern = req.pattern;
@@ -3628,8 +3551,8 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
         docJson["indexed"] = item.indexed;
         // Synthetic tag when caller provided a concrete local file and it matches by suffix
         if (!req.name.empty()) {
-            auto resolved = yams::app::services::resolveNameToPatternIfLocalFile(req.name);
-            if (resolved.isLocalFile && !item.path.empty()) {
+            if (auto resolved = yams::app::services::resolveNameToPatternIfLocalFile(req.name);
+                resolved.isLocalFile && !item.path.empty()) {
                 // If item.path ends with local abs path's filename, annotate
                 try {
                     std::string base = std::filesystem::path(*resolved.absPath).filename().string();
@@ -3654,8 +3577,7 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
                         yams::app::services::GetOptions greq;
                         greq.hash = item.hash;
                         greq.metadataOnly = false;
-                        auto gr = rsvc.get(greq, ropts);
-                        if (gr) {
+                        if (auto gr = rsvc.get(greq, ropts)) {
                             const auto& resp = gr.value();
                             auto toLines = [](const std::string& s) {
                                 std::vector<std::string> lines;
@@ -3791,12 +3713,10 @@ MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
         std::string path_str = req.directoryPath;
         // Sanitize accidental newlines/CRs from JSON inputs and trim whitespace
         if (!path_str.empty()) {
-            path_str.erase(std::remove_if(path_str.begin(), path_str.end(),
-                                          [](unsigned char c) { return c == '\n' || c == '\r'; }),
-                           path_str.end());
+            std::erase_if(path_str, [](unsigned char c) { return c == '\n' || c == '\r'; });
             auto ltrim = [](std::string& s) {
                 s.erase(s.begin(),
-                        std::find_if(s.begin(), s.end(), [](int ch) { return !std::isspace(ch); }));
+                        std::ranges::find_if(s, [](int ch) { return !std::isspace(ch); }));
             };
             auto rtrim = [](std::string& s) {
                 s.erase(std::find_if(s.rbegin(), s.rend(), [](int ch) { return !std::isspace(ch); })
@@ -3843,8 +3763,7 @@ MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
         boost::asio::steady_timer timer{exec};
         auto start = std::chrono::steady_clock::now();
         for (;;) {
-            auto sres = co_await daemon_client_->status();
-            if (sres) {
+            if (auto sres = co_await daemon_client_->status()) {
                 const auto& s = sres.value();
                 auto it = s.readinessStates.find("content_store");
                 if (it == s.readinessStates.end() || it->second) {
@@ -3941,8 +3860,7 @@ MCPServer::handleDoctor(const MCPDoctorRequest& req) {
     yams::daemon::StatusResponse s{};
     bool haveStatus = false;
     if (auto ensure = ensureDaemonClient(); ensure) {
-        auto sres = co_await daemon_client_->status();
-        if (sres) {
+        if (auto sres = co_await daemon_client_->status()) {
             s = sres.value();
             haveStatus = true;
         }
@@ -3963,48 +3881,48 @@ MCPServer::handleDoctor(const MCPDoctorRequest& req) {
     details["connectable"] = connectable;
 
     if (!haveStatus || !s.running) {
-        issues.push_back("daemon_not_running");
+        issues.emplace_back("daemon_not_running");
     }
     if (haveStatus && !s.ready) {
-        issues.push_back("daemon_not_ready");
+        issues.emplace_back("daemon_not_ready");
         for (const auto& [k, v] : s.readinessStates) {
             if (!v)
                 issues.push_back(std::string("subsystem_not_ready:") + k);
         }
     }
-    if (haveStatus && s.requestCounts.count("post_ingest_queued") &&
+    if (haveStatus && s.requestCounts.contains("post_ingest_queued") &&
         s.requestCounts.at("post_ingest_queued") > 1000) {
-        issues.push_back("post_ingest_backlog_high");
+        issues.emplace_back("post_ingest_backlog_high");
     }
-    if (haveStatus && s.requestCounts.count("worker_queued") &&
+    if (haveStatus && s.requestCounts.contains("worker_queued") &&
         s.requestCounts.at("worker_queued") > 1000) {
-        issues.push_back("worker_queue_high");
+        issues.emplace_back("worker_queue_high");
     }
-    if (haveStatus && s.readinessStates.count("vector_embeddings_available") &&
+    if (haveStatus && s.readinessStates.contains("vector_embeddings_available") &&
         !s.readinessStates.at("vector_embeddings_available")) {
-        issues.push_back("vector_embeddings_unavailable");
+        issues.emplace_back("vector_embeddings_unavailable");
     }
 
     // Suggestions
     std::vector<std::string> suggestions;
     for (const auto& iss : issues) {
         if (iss == "vector_embeddings_unavailable") {
-            suggestions.push_back(
+            suggestions.emplace_back(
                 "Load or initialize an embedding model; check plugins and model provider logs.");
         } else if (iss.rfind("subsystem_not_ready:", 0) == 0) {
-            suggestions.push_back(
+            suggestions.emplace_back(
                 "Review logs for the listed subsystem and ensure dependencies are initialized.");
         } else if (iss == "post_ingest_backlog_high") {
-            suggestions.push_back("Increase post-ingest threads via TuneAdvisor or pause adds "
-                                  "until the queue drains.");
+            suggestions.emplace_back("Increase post-ingest threads via TuneAdvisor or pause adds "
+                                     "until the queue drains.");
         } else if (iss == "worker_queue_high") {
-            suggestions.push_back(
+            suggestions.emplace_back(
                 "Reduce parallel requests or increase worker threads via TuneAdvisor.");
         } else if (iss == "daemon_not_ready") {
-            suggestions.push_back(
+            suggestions.emplace_back(
                 "Wait for initialization to complete or investigate lifecycle lastError.");
         } else if (iss == "daemon_not_running") {
-            suggestions.push_back("Start or restart the daemon.");
+            suggestions.emplace_back("Start or restart the daemon.");
         }
     }
 
@@ -4247,8 +4165,7 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
         lreq.pattern = pat;
         lreq.limit = 10000;
         lreq.pathsOnly = false;
-        auto lr = docService->list(lreq);
-        if (lr && !lr.value().documents.empty()) {
+        if (auto lr = docService->list(lreq); lr && !lr.value().documents.empty()) {
             for (const auto& d : lr.value().documents)
                 targets.push_back(d);
         }
@@ -4274,8 +4191,7 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
     }
 
     // De-duplicate by hash
-    std::sort(targets.begin(), targets.end(),
-              [](const auto& a, const auto& b) { return a.hash < b.hash; });
+    std::ranges::sort(targets, [](const auto& a, const auto& b) { return a.hash < b.hash; });
     targets.erase(std::unique(targets.begin(), targets.end(),
                               [](const auto& a, const auto& b) { return a.hash == b.hash; }),
                   targets.end());
@@ -4362,7 +4278,7 @@ MCPServer::handleSessionStart(const MCPSessionStartRequest& req) {
         dreq.limit = static_cast<std::size_t>(req.limit);
         dreq.snippetLen = static_cast<std::size_t>(req.snippetLen);
         bool needFallback = true;
-        if (auto ensure = ensureDaemonClient(); ensure) {
+        if (const auto ensure = ensureDaemonClient(); ensure) {
             auto resp = co_await daemon_client_->call<yams::daemon::PrepareSessionRequest>(dreq);
             if (resp) {
                 warmed = resp.value().warmedCount;
@@ -4399,7 +4315,7 @@ MCPServer::handleSessionStop(const MCPSessionStopRequest& req) {
 }
 
 boost::asio::awaitable<Result<MCPSessionPinResponse>>
-MCPServer::handleSessionPin(const MCPSessionPinRequest& req) {
+MCPServer::handleSessionPin(const MCPSessionPinRequest& req) const {
     // Validate inputs
     if (req.path.empty()) {
         co_return Error{ErrorCode::InvalidArgument, "path is required"};
@@ -4428,7 +4344,7 @@ MCPServer::handleSessionPin(const MCPSessionPinRequest& req) {
         // Add 'pinned' tag plus any user-specified tags
         u.addTags = req.tags;
         if (std::find(u.addTags.begin(), u.addTags.end(), "pinned") == u.addTags.end()) {
-            u.addTags.push_back("pinned");
+            u.addTags.emplace_back("pinned");
         }
 
         // Metadata: copy string values as-is; non-strings are serialized
@@ -4482,7 +4398,7 @@ MCPServer::handleSessionUnpin(const MCPSessionUnpinRequest& req) {
         app::services::UpdateMetadataRequest u;
         u.name = d.name;
 
-        u.removeTags.push_back("pinned");
+        u.removeTags.emplace_back("pinned");
         u.keyValues["pinned"] = "false";
 
         auto ur = docService->updateMetadata(u);
@@ -4975,7 +4891,6 @@ json MCPServer::createResponse(const json& id, const json& result) {
 }
 
 json MCPServer::createError(const json& id, int code, const std::string& message) {
-    spdlog::warn("MCP server creating error response: code={}, message='{}'", code, message);
     return json{{"jsonrpc", "2.0"}, {"id", id}, {"error", {{"code", code}, {"message", message}}}};
 }
 
@@ -5034,8 +4949,8 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
         } else {
             // Disambiguate
             if (req.latest || req.oldest) {
-                std::sort(matches.begin(), matches.end(),
-                          [](const auto& a, const auto& b) { return a.indexed < b.indexed; });
+                std::ranges::sort(
+                    matches, [](const auto& a, const auto& b) { return a.indexed < b.indexed; });
                 const auto pick = req.latest ? matches.back() : matches.front();
                 // Retrieve content by hash via RetrievalService
                 yams::app::services::RetrievalService rsvc;
@@ -5046,7 +4961,7 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
                 auto grres = rsvc.get(greq, ropts);
                 if (!grres)
                     co_return grres.error();
-                auto gr = grres.value();
+                const auto& gr = grres.value();
                 MCPGetByNameResponse out;
                 out.size = gr.size;
                 out.hash = gr.hash;
@@ -5074,7 +4989,7 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
             auto grres = rsvc.get(greq, ropts);
             if (!grres)
                 co_return grres.error();
-            auto gr = grres.value();
+            const auto& gr = grres.value();
             MCPGetByNameResponse out;
             out.size = gr.size;
             out.hash = gr.hash;
@@ -5146,7 +5061,8 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
                     return 800;
                 if (base.find(req.name) != std::string::npos)
                     return 600;
-                int dl = static_cast<int>(std::abs((long)(base.size() - req.name.size())));
+                int dl =
+                    static_cast<int>(std::abs(static_cast<long>(base.size() - req.name.size())));
                 return 400 - std::min(200, dl * 10);
             };
             int bestScore = -1;
@@ -5404,9 +5320,6 @@ yams::mcp::MCPServer::handleRestoreCollection(const yams::mcp::MCPRestoreCollect
                 // Retrieve content
                 auto contentResult = store_->retrieveBytes(doc.sha256Hash);
                 if (!contentResult) {
-                    spdlog::error(
-                        "MCP handleRestoreCollection: failed to retrieve content for '{}': {}",
-                        doc.fileName, contentResult.error().message);
                     continue;
                 }
 
@@ -5414,9 +5327,6 @@ yams::mcp::MCPServer::handleRestoreCollection(const yams::mcp::MCPRestoreCollect
                 std::error_code ec;
                 std::filesystem::create_directories(fullOutputPath.parent_path(), ec);
                 if (ec) {
-                    spdlog::error(
-                        "MCP handleRestoreCollection: failed to create directory for '{}': {}",
-                        fullOutputPath.string(), ec.message());
                     continue;
                 }
 
@@ -5438,9 +5348,6 @@ yams::mcp::MCPServer::handleRestoreCollection(const yams::mcp::MCPRestoreCollect
                              fullOutputPath.string());
             }
         }
-
-        spdlog::info("MCP handleRestoreCollection: restored {} files from collection '{}'{}",
-                     response.filesRestored, req.collection, req.dryRun ? " [DRY-RUN]" : "");
 
         co_return response;
     } catch (const std::exception& e) {
@@ -5529,7 +5436,7 @@ void MCPServer::enqueueTask(std::function<void()> task) {
 
 // ---------------- Lifecycle helper implementations ----------------
 
-bool MCPServer::isMethodAllowedBeforeInitialization(const std::string& method) const {
+bool MCPServer::isMethodAllowedBeforeInitialization(const std::string& method) {
     static const std::unordered_set<std::string> allowed = {
         "initialize", "exit",
         // readonly discovery before full init
@@ -5648,11 +5555,7 @@ void MCPServer::sendProgress(const std::string& /*phase*/, double percent,
     sendResponse({{"jsonrpc", "2.0"}, {"method", "notifications/progress"}, {"params", p}});
 }
 
-void MCPServer::scheduleAutoReady() {
-    // Removed - not part of MCP spec
-}
-
-bool MCPServer::shouldAutoInitialize() const {
+bool MCPServer::shouldAutoInitialize() {
     return false;
 }
 

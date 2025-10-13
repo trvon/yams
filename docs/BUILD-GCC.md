@@ -1,35 +1,46 @@
-# Building YAMS with GCC/G++
+# Building YAMS with GCC/G++ or Clang/LLVM
 
-YAMS prefers Clang + LLD when present; these instructions cover the fully supported GCC flow. If LLVM is not detected the presets transparently fall back to GCC.
+YAMS supports both GCC and Clang/LLVM toolchains with automatic fallback. When using Clang, the build system automatically prefers the LLD linker for faster linking. These instructions cover both flows.
 
 Use this file as a quick reference. Progresses from "10‑second build" to deeper detail.
 
 ## 1. Prerequisites (Minimal)
 
-Compiler:
-- GCC 11+ (coroutines / C++20)
-- GCC 13+ recommended (full `std::format`)
+Compiler (choose one or both):
+- **GCC**: GCC 11+ (coroutines / C++20), GCC 13+ recommended (full `std::format`)
+- **Clang/LLVM**: Clang 14+ (C++20), Clang 16+ recommended
 
 Quick check:
 ```bash
+# GCC
+gcc --version
+g++ --version
 
+# Clang/LLVM
+clang --version
+clang++ --version
 ```
 
 Fast build helpers (optional but recommended):
 ```bash
 # Ubuntu/Debian
-sudo apt-get install -y ninja-build ccache lld clang-tidy
+sudo apt-get install -y ninja-build ccache lld clang clang-tidy
 # Fedora
-sudo dnf install -y ninja-build ccache lld clang-tools-extra
+sudo dnf install -y ninja-build ccache lld clang clang-tools-extra
 # Arch
 sudo pacman -S --needed ninja ccache lld clang
 ```
-If `lld` or `clang-tidy` are missing the presets still work (they silently drop related flags).
+If `lld`, `clang`, or `clang-tidy` are missing, the build will fall back to available tools.
 
-Install a newer GCC (examples):
+Install a newer GCC (if needed):
 * Ubuntu: `sudo apt-get install gcc-13 g++-13` (enable via update-alternatives if desired)
 * Fedora / Arch: distro packages are recent
 * RHEL/CentOS/Rocky: enable devtoolset (`gcc-toolset-13`)
+
+Install Clang/LLVM (if not present):
+* Ubuntu: `sudo apt-get install clang lld`
+* Fedora: `sudo dnf install clang lld`
+* Arch: `sudo pacman -S clang lld`
 ## 2. System Packages
 
 Core dev libs (names by distro): OpenSSL, libcurl, sqlite3, protobuf compiler + dev headers, zlib.
@@ -41,6 +52,8 @@ sudo apt-get install -y build-essential cmake pkg-config libssl-dev libcurl4-ope
 Other distros: use analogous `*-devel` / package names.
 
 ## 3. Quick Start (Conan + Meson)
+
+### Option A: Build with GCC (default)
 
 ```bash
 # Debug
@@ -63,6 +76,54 @@ meson setup build/release \
   --native-file build/release/build-release/conan/conan_meson_native.ini \
   --buildtype=release
 meson compile -C build/release
+```
+
+### Option B: Build with Clang + LLD (recommended for faster builds)
+
+```bash
+# Debug
+conan install . -of build/clang-debug -s build_type=Debug \
+  -s compiler=clang -s compiler.version=19 -s compiler.libcxx=libstdc++11 \
+  -b missing
+CC=clang CXX=clang++ meson setup build/clang-debug \
+  --prefix /usr/local \
+  --native-file build/clang-debug/build-debug/conan/conan_meson_native.ini \
+  --buildtype=debug
+meson compile -C build/clang-debug
+
+# Release
+conan install . -of build/clang-release -s build_type=Release \
+  -s compiler=clang -s compiler.version=19 -s compiler.libcxx=libstdc++11 \
+  -b missing
+CC=clang CXX=clang++ meson setup build/clang-release \
+  --prefix /usr/local \
+  --native-file build/clang-release/build-release/conan/conan_meson_native.ini \
+  --buildtype=release
+meson compile -C build/clang-release
+```
+
+**Note**: The Meson build automatically detects when Clang is used and enables LLD linker if available. You'll see "Using LLD linker (auto with Clang)" in the configure output.
+
+### Option C: Force LLD with GCC (optional)
+
+You can also use LLD with GCC for faster linking:
+
+```bash
+# Configure with LLD forced
+meson setup build/gcc-lld \
+  --prefix /usr/local \
+  --native-file build/debug/build-debug/conan/conan_meson_native.ini \
+  --buildtype=debug \
+  -Duse-lld=enabled
+meson compile -C build/gcc-lld
+```
+
+### Disable LLD
+
+To explicitly disable LLD (use default linker):
+
+```bash
+meson setup build/debug -Duse-lld=disabled
 ```
 
 Set parallelism: `export CMAKE_BUILD_PARALLEL_LEVEL=$(nproc)` (Linux) or pass `-j` to build step.
@@ -168,28 +229,66 @@ gcovr --root . --exclude '_deps/*' --exclude 'tests/*' --html --html-details --o
 
 ## 6. Compiler Notes
 
+### Clang vs GCC
+
+YAMS supports both compilers equally:
+- **Clang**: Faster linking with LLD, better diagnostics, integrated sanitizers
+- **GCC**: Mature ecosystem, sometimes better optimizations for specific targets
+
+The build system automatically:
+- Detects which compiler is being used
+- Enables LLD when using Clang (if available)
+- Falls back gracefully when tools are missing
+
 ### std::format
 
 YAMS automatically detects std::format availability:
 
-- GCC 13+: Full std::format support
-- GCC 11–12: Falls back to fmt library
+- **Clang 16+**: Full std::format support
+- **GCC 13+**: Full std::format support
+- **GCC 11–12**: Falls back to fmt library
+- **Clang 14-15**: Falls back to fmt library
 - The build system will automatically configure the appropriate option
 
 ### Coroutines
 
-GCC has full C++20 coroutine support starting from version 11.0. The build system automatically adds the `-fcoroutines` flag when using GCC.
+Both GCC and Clang have full C++20 coroutine support:
+- **GCC**: Starting from version 11.0
+- **Clang**: Starting from version 14.0
+
+The build system automatically adds the necessary flags when using either compiler.
+
+### LLD Linker
+
+When using Clang, YAMS automatically prefers the LLD linker:
+- Significantly faster linking times compared to GNU ld
+- Lower memory usage during linking
+- Automatically detected and enabled via `-fuse-ld=lld`
+- Falls back to default linker if LLD is not available
+
+You can verify LLD is being used by checking the Meson configuration summary.
 
 ### LTO
 
 For optimal release builds with LTO:
 
+**GCC:**
 ```bash
 CC=gcc CXX=g++ cmake .. \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_CXX_FLAGS="-flto" \
     -DCMAKE_EXE_LINKER_FLAGS="-flto"
 ```
+
+**Clang + LLD (with ThinLTO):**
+```bash
+CC=clang CXX=clang++ cmake .. \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CXX_FLAGS="-flto=thin" \
+    -DCMAKE_EXE_LINKER_FLAGS="-flto=thin -fuse-ld=lld"
+```
+
+Note: ThinLTO with Clang+LLD provides faster incremental builds while maintaining most of the performance benefits of full LTO.
 
 ## 7. Troubleshooting
 
@@ -251,6 +350,15 @@ CC=gcc CXX=g++ cmake .. \
     -DCMAKE_EXE_LINKER_FLAGS="-flto -Wl,-O1"
 ```
 
+For best performance with Clang + LLD:
+
+```bash
+CC=clang CXX=clang++ cmake .. \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CXX_FLAGS="-O3 -march=native -mtune=native -flto=thin" \
+    -DCMAKE_EXE_LINKER_FLAGS="-flto=thin -fuse-ld=lld -Wl,-O2"
+```
+
 Note: `-march=native` optimizes for your specific CPU but makes binaries non-portable.
 
 ## 9. Quick Verification
@@ -270,7 +378,12 @@ yams --version
 
 ## 10. CI Snapshot
 
-YAMS CI/CD pipeline tests GCC builds on Ubuntu. The configuration used in CI can be found in `.github/workflows/ci.yml` under the "traditional" build matrix entry.
+YAMS CI/CD pipeline tests both GCC and Clang builds on Ubuntu:
+- **GCC builds**: Compatibility and fallback testing
+- **Clang + LLD builds**: Primary recommended configuration
+- **Sanitizer builds**: Clang with ASan/UBSan for debug validation
+
+The configuration used in CI can be found in `.github/workflows/ci.yml`.
 
 ## 11. References
 

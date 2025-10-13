@@ -1,4 +1,4 @@
-project('yams', ['cpp', 'c'],
+project('yams', 'cpp', 'c',
   version: '0.8.0',
   default_options: [
     'buildtype=release',
@@ -11,6 +11,10 @@ project('yams', ['cpp', 'c'],
 fs = import('fs')
 pkg = import('pkgconfig')
 
+# Define install prefix for runtime plugin discovery
+prefix = get_option('prefix')
+add_project_arguments('-DYAMS_INSTALL_PREFIX="' + prefix + '"', language: 'cpp')
+
 if host_machine.system() == 'darwin'
   add_global_link_arguments('-Wl,-no_warn_duplicate_libraries', language: 'cpp')
 endif
@@ -21,6 +25,26 @@ onnx_opt = get_option('enable-onnx')
 require_fts5 = get_option('require-fts5')
 sqlite_dep = dependency('sqlite3', required: true)
 cpp = meson.get_compiler('cpp')
+
+# Optional LLD linker support (preferred with Clang, optional with GCC)
+use_lld = get_option('use-lld')
+lld_available = cpp.has_link_argument('-fuse-ld=lld')
+
+if use_lld.enabled() and not lld_available
+  error('LLD linker was requested but is not available')
+elif use_lld.auto() and cpp.get_id() == 'clang' and lld_available
+  # Auto-enable LLD with Clang
+  add_project_link_arguments('-fuse-ld=lld', language: 'cpp')
+  add_project_link_arguments('-fuse-ld=lld', language: 'c')
+  message('Using LLD linker (auto-enabled with Clang)')
+elif use_lld.enabled() and lld_available
+  # Explicitly enabled
+  add_project_link_arguments('-fuse-ld=lld', language: 'cpp')
+  add_project_link_arguments('-fuse-ld=lld', language: 'c')
+  message('Using LLD linker (explicitly enabled)')
+elif use_lld.auto() and not lld_available
+  message('LLD linker not available; using default linker')
+endif
 # Skip FTS5 runtime check when cross-compiling (can't execute target binaries on host)
 if not meson.is_cross_build()
   fts5_prog = cpp.run(files('meson/fts5_check.cpp'), dependencies: sqlite_dep, name: 'sqlite3 FTS5 check')
@@ -131,10 +155,23 @@ if _tests_enabled
   subdir('tests')
 endif
 
+# Determine linker info for summary
+_linker_name = 'default (ld)'
+if use_lld.enabled() and lld_available
+  _linker_name = 'lld (forced)'
+elif use_lld.auto() and cpp.get_id() == 'clang' and lld_available
+  _linker_name = 'lld (auto with Clang)'
+elif lld_available and cpp.has_link_argument('-fuse-ld=lld')
+  # Check if LLD arguments were actually added
+  _linker_name = 'lld (available but not used)'
+endif
+
 summary({
   'project': meson.project_name(),
   'version': meson.project_version(),
   'cpp_std': get_option('cpp_std'),
+  'compiler': cpp.get_id() + ' ' + cpp.version(),
+  'linker': _linker_name,
   'build_cli': yams_build_cli,
   'build_mcp_server': yams_build_mcp,
   'enable_tui': yams_enable_tui,

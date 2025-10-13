@@ -77,8 +77,11 @@ TEST_F(StdioTransportTest, SendMessage) {
 
     transport->send(testMessage);
 
+    // Flush to ensure output is written to our stringstream
+    std::cout.flush();
+
     std::string output = getOutput();
-    EXPECT_FALSE(output.empty());
+    ASSERT_FALSE(output.empty()) << "Output buffer is empty after send()";
 
     // MCP stdio spec: output should be NDJSON (JSON + newline)
     EXPECT_EQ(output.back(), '\n');
