@@ -168,17 +168,18 @@ public:
             out.push_back(std::move(d));
         };
 
-        if (pathPattern == "%/a.txt" || pathPattern == "/root/a.txt" || pathPattern == "%") {
+        if (pathPattern == "%/a.txt" || pathPattern == "%a.txt" || pathPattern == "/root/a.txt" ||
+            pathPattern == "%") {
             pushDoc("/root/a.txt", "a.txt",
                     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
         }
         if (pathPattern == "%/b.txt" || pathPattern == "/root/sub/b.txt" ||
-            pathPattern == "/root/sub/%" || pathPattern == "%") {
+            pathPattern == "/root/sub/%" || pathPattern == "/root/sub%" || pathPattern == "%") {
             pushDoc("/root/sub/b.txt", "b.txt",
                     "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
         }
         if (pathPattern == "%/.hidden.txt" || pathPattern == "/root/sub/.hidden.txt" ||
-            pathPattern == "/root/sub/%" || pathPattern == "%") {
+            pathPattern == "/root/sub/%" || pathPattern == "/root/sub%" || pathPattern == "%") {
             pushDoc("/root/sub/.hidden.txt", ".hidden.txt",
                     "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH");
         }

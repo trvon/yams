@@ -92,13 +92,13 @@ MCPSearchRequest MCPSearchRequest::fromJson(const json& j) {
     MCPSearchRequest req;
     req.query = normalize_query(j.value("query", std::string{}));
     req.limit = parse_size_tolerant(j, "limit", 10);
-    req.fuzzy = j.value("fuzzy", false);
+    req.fuzzy = detail::jsonValueOr(j, "fuzzy", false);
     req.similarity = parse_double_tolerant(j, "similarity", 0.7);
     req.hash = j.value("hash", std::string{});
     req.type = j.value("type", std::string{"hybrid"});
-    req.verbose = j.value("verbose", false);
-    req.pathsOnly = j.value("paths_only", false);
-    req.lineNumbers = j.value("line_numbers", false);
+    req.verbose = detail::jsonValueOr(j, "verbose", false);
+    req.pathsOnly = detail::jsonValueOr(j, "paths_only", false);
+    req.lineNumbers = detail::jsonValueOr(j, "line_numbers", false);
 
     const int context = parse_int_tolerant(j, "context", 0);
     req.beforeContext = (context > 0) ? context : parse_int_tolerant(j, "before_context", 0);
@@ -110,9 +110,9 @@ MCPSearchRequest MCPSearchRequest::fromJson(const json& j) {
 
     detail::readStringArray(j, "include_patterns", req.includePatterns);
     detail::readStringArray(j, "tags", req.tags);
-    req.matchAllTags = j.value("match_all_tags", false);
-    req.includeDiff = j.value("include_diff", false);
-    req.useSession = j.value("use_session", true);
+    req.matchAllTags = detail::jsonValueOr(j, "match_all_tags", false);
+    req.includeDiff = detail::jsonValueOr(j, "include_diff", false);
+    req.useSession = detail::jsonValueOr(j, "use_session", true);
     req.sessionName = j.value("session", std::string{});
 
     return req;

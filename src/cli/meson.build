@@ -54,6 +54,10 @@ endif
 # Resolve CLI11 dependency; prefer system/pkg-config, fall back to Conan generators dir.
 # Normalize to lower-case pkg-config name when available
 cli11_dep = dependency('cli11', required: false)
+if not cli11_dep.found()
+  # Some Conan/PkgConfigDeps setups expose CLI11 as 'CLI11' (uppercase)
+  cli11_dep = dependency('CLI11', required: false, method: 'pkg-config')
+endif
 
 if not cli11_dep.found()
   conan_gen_opt = get_option('conan-generators-dir')
@@ -68,6 +72,9 @@ if not cli11_dep.found()
     join_paths(base_build, 'conan'),
     join_paths(base_build, 'conan', 'generators'),
     join_paths(base_build, 'generators'),
+    # Also check Conan 2 default generators dir
+    join_paths(base_build, 'build-release', 'conan', 'generators'),
+    join_paths(base_build, 'build-debug', 'conan', 'generators'),
   ]
 
   foreach variant : ['build-debug', 'build-release', 'debug', 'release']
@@ -107,6 +114,9 @@ if not cli11_dep.found()
 
   if cli11_paths.length() > 0
     cli11_dep = dependency('cli11', method: 'cmake', cmake_module_path: cli11_paths, required: false)
+    if not cli11_dep.found()
+      cli11_dep = dependency('CLI11', method: 'cmake', cmake_module_path: cli11_paths, required: false)
+    endif
   endif
 endif
 
@@ -173,6 +183,10 @@ yams_cli_lib = static_library('yams_cli',
 yams_cli_dep = declare_dependency(
   link_with: yams_cli_lib,
   include_directories: include_directories('../../include'),
+  dependencies: cli_deps,
 )
 
 meson.override_dependency('yams_cli', yams_cli_dep)
+
+
+# CLI executable is defined in tools/yams-cli (builds yams-cli and installs a 'yams' symlink)

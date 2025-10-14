@@ -35,7 +35,7 @@ class YamsConan(ConanFile):
         "enable_wasmtime": True,  # WASM host enabled by default (bring your own wasmtime-cpp)
     }
 
-    generators = ("MesonToolchain", "PkgConfigDeps")
+    generators = ("MesonToolchain", "PkgConfigDeps", "CMakeDeps")
 
     def requirements(self):
         # Core dependencies
@@ -78,8 +78,9 @@ class YamsConan(ConanFile):
             self.requires("onnxruntime/1.18.1")
             # Ensure ONNX Runtime's TBB runtime is available when system libtbb is missing
             # Conan package name is onetbb (oneTBB)
+            # Using 2021.12.0 as 2022.x versions are not available in ConanCenter
             try:
-                self.requires("onetbb/2022.2.0")
+                self.requires("onetbb/2021.12.0")
             except Exception:
                 pass
         self.requires("xz_utils/5.4.5")
@@ -96,10 +97,12 @@ class YamsConan(ConanFile):
                 pass
 
     def build_requirements(self):
+        # Use requires() instead of test_requires() to ensure pkg-config files
+        # are generated for Meson to find gtest/benchmark dependencies
         if self.options.build_tests:
-            self.test_requires("gtest/1.15.0")
+            self.requires("gtest/1.15.0")
         if self.options.build_benchmarks:
-            self.test_requires("benchmark/1.8.3")
+            self.requires("benchmark/1.8.3")
         if self.settings.build_type == "Debug":
             self.requires("tracy/0.12.2")
 
@@ -135,3 +138,16 @@ class YamsConan(ConanFile):
 
     def layout(self):
         basic_layout(self)
+
+
+    def generate(self):
+        try:
+            from conan.tools.meson import MesonToolchain
+            from conan.tools.gnu import PkgConfigDeps
+            from conan.tools.cmake import CMakeDeps
+            MesonToolchain(self).generate()
+            PkgConfigDeps(self).generate()
+            CMakeDeps(self).generate()
+        except Exception:
+            # Fallback for older Conan: rely on class-level generators
+            pass

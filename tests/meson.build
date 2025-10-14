@@ -16,6 +16,9 @@ endif
 fs = import('fs')
 cli11_dep = dependency('cli11', required: false)
 if not cli11_dep.found()
+  cli11_dep = dependency('CLI11', required: false, method: 'pkg-config')
+endif
+if not cli11_dep.found()
   # Some Conan/PkgConfigDeps setups expose CLI11 as 'CLI11' (uppercase)
   cli11_dep = dependency('CLI11', required: false, method: 'pkg-config')
 endif
@@ -32,6 +35,8 @@ if not cli11_dep.found()
     join_paths(base_build, 'conan'),
     join_paths(base_build, 'conan', 'generators'),
     join_paths(base_build, 'generators'),
+    join_paths(base_build, 'build-release', 'conan', 'generators'),
+    join_paths(base_build, 'build-debug', 'conan', 'generators'),
   ]
   foreach variant : ['build-debug', 'build-release', 'debug', 'release']
     variant_path = join_paths(base_build, variant)
@@ -70,6 +75,9 @@ if not cli11_dep.found()
 
   if cli11_paths.length() > 0
     cli11_dep = dependency('cli11', method: 'cmake', cmake_module_path: cli11_paths, required: false)
+    if not cli11_dep.found()
+      cli11_dep = dependency('CLI11', method: 'cmake', cmake_module_path: cli11_paths, required: false)
+    endif
   endif
 endif
 if not cli11_dep.found()

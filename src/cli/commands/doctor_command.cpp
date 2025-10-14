@@ -1291,7 +1291,21 @@ private:
         // - Daemon status
         // - Installed models
         // - Vector DB dimension check
+        // Daemon light check first; if not running, fast-fail and only run local checks
+        bool daemon_up = false;
+        {
+            using namespace yams::daemon;
+            std::string effectiveSocket =
+                daemon::DaemonClient::resolveSocketPathConfigFirst().string();
+            daemon_up = daemon::DaemonClient::isDaemonRunning(effectiveSocket);
+        }
         checkDaemon();
+        if (!daemon_up) {
+            // Only local checks when daemon is unavailable
+            checkInstalledModels();
+            checkEmbeddingDimMismatch();
+            return;
+        }
         checkInstalledModels();
         checkEmbeddingDimMismatch();
         // Show embedding runtime from daemon status (best-effort)
