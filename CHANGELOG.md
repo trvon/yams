@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
-## [v0.7.5] - Unreleased
+## [v0.7.6] - 10-13-2025
 ### Added
 - **CLI Pattern Ergonomics**: Added `--pattern/-p` flag to `list` command as an alias for `--name`, improving consistency with other commands. The flag supports glob wildcards (`*`, `?`, `**`) and auto-normalizes relative paths to absolute when no wildcards are present. (`src/cli/commands/list_command.cpp`)
 - **Grep Literal Text Hints**: Added smart error detection and helpful hints when grep patterns contain regex special characters. When a pattern fails regex compilation or returns no results, grep now suggests using the `-F` flag with the exact command to run. Added `-Q` as a short alias for `-F/--fixed-strings/--literal-text` to match git grep convention. (`src/cli/commands/grep_command.cpp`)
