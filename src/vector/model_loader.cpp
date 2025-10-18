@@ -1,3 +1,4 @@
+#include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <filesystem>
 #include <fstream>
@@ -38,12 +39,41 @@ public:
         model->info.format = "ONNX";
         model->info.memory_usage_bytes = fs::file_size(path);
 
-        // Mock model properties
+        // Model properties (dynamic embedding dim detection)
         model->info.input_names = {"input_ids", "attention_mask"};
         model->info.output_names = {"embeddings"};
         model->info.input_shapes["input_ids"] = {1, 512}; // batch_size, seq_length
         model->info.input_shapes["attention_mask"] = {1, 512};
-        model->info.output_shapes["embeddings"] = {1, 384}; // batch_size, embedding_dim
+        auto detect_dim = [&](const std::string& file_path) -> size_t {
+            try {
+                fs::path p(file_path);
+                fs::path dir = p.has_extension() ? p.parent_path() : p;
+                for (auto name : {"config.json", "sentence_bert_config.json"}) {
+                    auto cfg_path = dir / name;
+                    if (fs::exists(cfg_path)) {
+                        std::ifstream in(cfg_path);
+                        nlohmann::json j;
+                        in >> j;
+                        if (j.contains("hidden_size") && j["hidden_size"].is_number_integer())
+                            return static_cast<size_t>(j["hidden_size"].get<int>());
+                        if (j.contains("output_embedding_size") &&
+                            j["output_embedding_size"].is_number_integer())
+                            return static_cast<size_t>(j["output_embedding_size"].get<int>());
+                    }
+                }
+                std::string id_lower = model->info.model_id;
+                std::transform(id_lower.begin(), id_lower.end(), id_lower.begin(), ::tolower);
+                if (id_lower.find("mpnet") != std::string::npos)
+                    return 768;
+                if (id_lower.find("minilm") != std::string::npos)
+                    return 384;
+            } catch (...) {
+            }
+            return 384; // fallback
+        };
+        size_t emb_dim = detect_dim(path);
+        model->info.output_shapes["embeddings"] = {
+            1, static_cast<int64_t>(emb_dim)}; // batch_size, embedding_dim
 
         if (options.enable_optimization) {
             auto opt_result = optimizeModel(model);
@@ -91,9 +121,36 @@ public:
             result.warnings.push_back("Model file is very large (>5GB)");
         }
 
-        // Mock validation success
+        // Validation success (dynamic embedding dimension detection)
+        auto detect_dim_v = [&](const std::string& file_path) -> size_t {
+            try {
+                fs::path p(file_path);
+                fs::path dir = p.has_extension() ? p.parent_path() : p;
+                for (auto name : {"config.json", "sentence_bert_config.json"}) {
+                    auto cfg_path = dir / name;
+                    if (fs::exists(cfg_path)) {
+                        std::ifstream in(cfg_path);
+                        nlohmann::json j;
+                        in >> j;
+                        if (j.contains("hidden_size") && j["hidden_size"].is_number_integer())
+                            return static_cast<size_t>(j["hidden_size"].get<int>());
+                        if (j.contains("output_embedding_size") &&
+                            j["output_embedding_size"].is_number_integer())
+                            return static_cast<size_t>(j["output_embedding_size"].get<int>());
+                    }
+                }
+                std::string base = fs::path(file_path).stem().string();
+                std::transform(base.begin(), base.end(), base.begin(), ::tolower);
+                if (base.find("mpnet") != std::string::npos)
+                    return 768;
+                if (base.find("minilm") != std::string::npos)
+                    return 384;
+            } catch (...) {
+            }
+            return 384; // fallback
+        };
         result.is_valid = true;
-        result.embedding_dimension = 384;
+        result.embedding_dimension = detect_dim_v(path);
         result.max_sequence_length = 512;
         result.model_type = "BERT";
 

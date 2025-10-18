@@ -4,6 +4,7 @@
 #include <yams/daemon/ipc/ipc_protocol.h>
 
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace yams::daemon {
@@ -21,7 +22,7 @@ public:
     static yams::Result<void> encode_payload_into(const Message& msg, std::vector<uint8_t>& buffer);
 
     // Decode protobuf Envelope bytes into Message with payload set; caller sets msg.requestId.
-    static yams::Result<Message> decode_payload(const std::vector<uint8_t>& bytes);
+    static yams::Result<Message> decode_payload(std::span<const uint8_t> bytes);
 };
 
 } // namespace yams::daemon

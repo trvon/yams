@@ -1,5 +1,6 @@
 #pragma once
 
+#include <filesystem>
 #include <memory>
 
 #include <yams/core/types.h>
@@ -77,7 +78,8 @@ private:
      * Create a default embedding generator based on available models.
      * Returns nullptr if no models are available.
      */
-    static std::shared_ptr<vector::EmbeddingGenerator> createDefaultEmbeddingGenerator();
+    static std::shared_ptr<vector::EmbeddingGenerator>
+    createDefaultEmbeddingGenerator(const std::filesystem::path& dataPath);
 };
 
 } // namespace yams::search

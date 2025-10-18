@@ -7,3 +7,6 @@
 [submodule "yams-sdk"]
   path = external/yams-sdk
   url = git@git.sr.ht:~trvon/yams-sdk
+[submodule "third_party/sqlite-vec-cpp"]
+	path = third_party/sqlite-vec-cpp
+	url = git@github.com:trvon/sqlite-vec-cpp.git

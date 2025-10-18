@@ -153,6 +153,13 @@ public:
     struct StoreDocumentTask {
         AddDocumentRequest request;
     };
+    struct ModelReadyEvent {
+        std::string modelId;
+    };
+    struct ModelLoadFailedEvent {
+        std::string modelId;
+        std::string error;
+    };
 
 private:
     InternalEventBus() = default;

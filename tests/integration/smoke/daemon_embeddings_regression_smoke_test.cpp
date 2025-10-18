@@ -292,6 +292,10 @@ TEST(DaemonEmbeddingsRegressionSmoke, GeneratesVectorsForSearchCorpusPresets) {
     if (std::getenv("GTEST_DISCOVERY_MODE")) {
         GTEST_SKIP() << "Skipping during test discovery";
     }
+    // Respect CI gating: skip when vectors are disabled
+    if (const char* dv = std::getenv("YAMS_DISABLE_VECTORS"); truthy_env(dv)) {
+        GTEST_SKIP() << "Skipping embeddings smoke: YAMS_DISABLE_VECTORS=1";
+    }
     if (!canBindUnixSocketHere()) {
         GTEST_SKIP() << "Skipping smoke: environment forbids AF_UNIX bind (sandbox).";
     }

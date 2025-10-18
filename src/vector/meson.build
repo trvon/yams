@@ -122,22 +122,41 @@ sqlite_vec_hdr = configure_file(
   copy: true,
 )
 
+# Check for C++ implementation first, fallback to C
+sqlite_vec_cpp_dir = join_paths(meson.project_source_root(), 'third_party', 'sqlite-vec-cpp')
+sqlite_vec_cpp_inc = []
+sqlite_vec_cpp_src = []
+use_cpp_impl = false
+
+if fs.exists(join_paths(sqlite_vec_cpp_dir, 'include', 'sqlite-vec-cpp', 'sqlite_vec.hpp'))
+  message('Found sqlite-vec-cpp implementation')
+  use_cpp_impl = true
+  sqlite_vec_cpp_inc = include_directories(join_paths('../../third_party', 'sqlite-vec-cpp', 'include'), is_system: true)
+  # Add C++ sources from sqlite-vec-cpp
+  sqlite_vec_cpp_src = [
+    join_paths(sqlite_vec_cpp_dir, 'src', 'sqlite_vec_c_api.cpp'),
+  ]
+endif
+
 sqlite_vec_src_dir = get_option('sqlite-vec-source-dir')
 sqlite_vec_src = []
-if sqlite_vec_src_dir == ''
-  candidate = join_paths(meson.project_source_root(), 'third_party', 'sqlite-vec')
-  if fs.exists(join_paths(candidate, 'sqlite-vec.c'))
-    sqlite_vec_src_dir = candidate
+if not use_cpp_impl
+  if sqlite_vec_src_dir == ''
+    candidate = join_paths(meson.project_source_root(), 'third_party', 'sqlite-vec')
+    if fs.exists(join_paths(candidate, 'sqlite-vec.c'))
+      sqlite_vec_src_dir = candidate
+    endif
   endif
-endif
-if sqlite_vec_src_dir != ''
-  sqlite_vec_src = [join_paths(sqlite_vec_src_dir, 'sqlite-vec.c')]
+  if sqlite_vec_src_dir != ''
+    sqlite_vec_src = [join_paths(sqlite_vec_src_dir, 'sqlite-vec.c')]
+  endif
 endif
 
 # Enforce static sqlite-vec by default for clean, consistent builds.
-if sqlite_vec_src.length() == 0
+if sqlite_vec_src.length() == 0 and sqlite_vec_cpp_src.length() == 0
   if get_option('require-sqlite-vec')
-    error('sqlite-vec.c not found. Vendor the sources under third_party/sqlite-vec/ or pass -Dsqlite-vec-source-dir=/absolute/path/to/sqlite-vec. ' +
+    error('Neither sqlite-vec.c nor sqlite-vec-cpp found. Vendor the sources under third_party/sqlite-vec/ or third_party/sqlite-vec-cpp/. ' +
+          'Alternatively, pass -Dsqlite-vec-source-dir=/absolute/path/to/sqlite-vec. ' +
           'To bypass (NOT recommended), configure with -Drequire-sqlite-vec=false and provide a runtime module via YAMS_SQLITE_VEC_MODULE.')
   else
     message('sqlite-vec sources not found and require-sqlite-vec=false; building without static sqlite-vec (runtime module required).')
@@ -198,13 +217,18 @@ srcs = [
   'mock_embedding_provider.cpp',
   'dim_resolver.cpp',
   '../genai/onnx_genai_adapter.cpp',
-] + sqlite_vec_src
+] + (use_cpp_impl ? sqlite_vec_cpp_src : sqlite_vec_src)
 
 # Define SQLITE_VEC_STATIC based on whether we have sqlite-vec sources
-if sqlite_vec_src.length() > 0
+if sqlite_vec_src.length() > 0 or sqlite_vec_cpp_src.length() > 0
   vector_cppargs += ['-DSQLITE_VEC_STATIC=1']
 else
   vector_cppargs += ['-DSQLITE_VEC_STATIC=0']
+endif
+
+if use_cpp_impl
+  vector_cppargs += ['-DSQLITE_VEC_CPP=1']
+  message('Building with C++20/23 sqlite-vec implementation')
 endif
 
 deps_vec = [spdlog_dep, sqlite_dep, json_dep, fmt_dep, boost_dep, yams_core, yams_metadata, tl_expected_dep]
@@ -214,7 +238,7 @@ endif
 
 yams_vector = static_library('yams_vector',
   srcs,
-  include_directories: [include_directories('../../include'), include_directories('.'), hnsw_inc],
+  include_directories: [include_directories('../../include'), include_directories('.'), hnsw_inc] + (use_cpp_impl ? [sqlite_vec_cpp_inc] : []),
   dependencies: deps_vec,
   cpp_args: vector_cppargs,
   c_args: vector_cargs,

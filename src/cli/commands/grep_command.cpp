@@ -106,15 +106,6 @@ private:
     bool noSession_{false};
     std::vector<std::string> sessionPatterns_;
 
-    // Experimental path-tree traversal controls
-    bool pathTreeFlagEnable_{false};
-    bool pathTreeFlagDisable_{false};
-    std::optional<std::string> pathTreeModeOverride_;
-    bool pathTreeDefaultEnable_{false};
-    std::string pathTreeDefaultMode_{"fallback"};
-    bool pathTreeActive_{false};
-    std::string pathTreeModeEffective_{"fallback"};
-
     // Helpers for configuration discovery
     std::map<std::string, std::string> parseSimpleToml(const std::filesystem::path& path) const {
         std::map<std::string, std::string> config;
@@ -184,39 +175,6 @@ private:
                 return p;
         }
         return {};
-    }
-
-    std::string normalizePathTreeMode(const std::string& value, const std::string& fallback) const {
-        if (value.empty())
-            return fallback;
-        std::string mode = value;
-        std::transform(mode.begin(), mode.end(), mode.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        if (mode == "preferred" || mode == "fallback")
-            return mode;
-        return fallback;
-    }
-
-    void loadPathTreeDefaults() {
-        pathTreeDefaultEnable_ = false;
-        pathTreeDefaultMode_ = "fallback";
-        auto cfgPath = resolveConfigPath();
-        if (cfgPath.empty())
-            return;
-        auto cfg = parseSimpleToml(cfgPath);
-        auto toLower = [](std::string v) {
-            std::transform(v.begin(), v.end(), v.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            return v;
-        };
-        if (auto it = cfg.find("search.path_tree.enable"); it != cfg.end()) {
-            auto value = toLower(it->second);
-            pathTreeDefaultEnable_ =
-                (value == "1" || value == "true" || value == "yes" || value == "on");
-        }
-        if (auto it = cfg.find("search.path_tree.mode"); it != cfg.end()) {
-            pathTreeDefaultMode_ = normalizePathTreeMode(toLower(it->second), pathTreeDefaultMode_);
-        }
     }
 
 public:
@@ -306,31 +264,15 @@ public:
         cmd->add_option("--session", sessionOverride_, "Use this session for scoping");
         cmd->add_flag("--no-session", noSession_, "Bypass session scoping");
 
-        loadPathTreeDefaults();
-
         cmd->callback([this]() {
             if (pattern_.empty() && !paths_.empty()) {
                 pattern_ = paths_.front();
                 paths_.erase(paths_.begin());
             }
 
-            if (pathTreeFlagEnable_ && pathTreeFlagDisable_) {
-                throw CLI::ValidationError("path-tree",
-                                           "Cannot use --path-tree and --no-path-tree together");
-            }
-            pathTreeActive_ = pathTreeDefaultEnable_;
-            if (pathTreeFlagEnable_)
-                pathTreeActive_ = true;
-            if (pathTreeFlagDisable_)
-                pathTreeActive_ = false;
-            pathTreeModeEffective_ = normalizePathTreeMode(
-                pathTreeModeOverride_.value_or(pathTreeDefaultMode_), pathTreeDefaultMode_);
-            if (!pathTreeActive_)
-                pathTreeModeEffective_ = normalizePathTreeMode(pathTreeModeEffective_, "fallback");
-
             if (pattern_.empty()) {
-                bool hasFilters = !filterTags_.empty() || !paths_.empty() ||
-                                  !includePatterns_.empty() || pathTreeActive_;
+                bool hasFilters =
+                    !filterTags_.empty() || !paths_.empty() || !includePatterns_.empty();
                 if (hasFilters) {
                     pattern_ = ".*";
                     regexOnly_ = true;
@@ -411,9 +353,7 @@ public:
             if (cold_) {
                 enableStreaming_ = false;
             }
-            pathTreeFlagEnable_ = false;
-            pathTreeFlagDisable_ = false;
-            pathTreeModeOverride_.reset();
+
             auto result = execute();
             if (!result) {
                 spdlog::error("Grep failed: {}", result.error().message);
@@ -655,6 +595,7 @@ public:
                 ropts.headerTimeoutMs = 30000;
                 ropts.bodyTimeoutMs = 120000;
                 ropts.requestTimeoutMs = 30000;
+
                 auto gres = rsvc.grep(dreq, ropts);
                 if (!gres) {
                     if (gres.error().code == ErrorCode::Timeout) {

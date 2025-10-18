@@ -37,7 +37,6 @@
 #include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
-#include <yams/daemon/resource/plugin_loader.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/metadata/document_metadata.h>
 

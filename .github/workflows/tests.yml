@@ -74,8 +74,8 @@ jobs:
           sudo apt-get update
           # Provide system Boost as a fallback per docs/BUILD-GCC.md when CMakeDeps resolution
           # is not detected by CMake (module mode will pick this up).
-          # Install libbenchmark-dev for Google Benchmark support
-          sudo apt-get install -y --no-install-recommends libboost-all-dev meson pkg-config libbenchmark-dev
+          # Install libbenchmark-dev for Google Benchmark support and libgtest-dev for GTest
+          sudo apt-get install -y --no-install-recommends libboost-all-dev meson pkg-config libbenchmark-dev libgtest-dev libgmock-dev
           echo "Installed system Boost headers/libs for module-mode fallback"
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'

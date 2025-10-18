@@ -583,3 +583,94 @@ TEST_F(MetadataRepositoryTest, PathTreeCentroidAccumulatesEmbeddings) {
     ASSERT_TRUE(node.value().has_value());
     EXPECT_EQ(node.value()->centroidWeight, 1);
 }
+
+TEST_F(MetadataRepositoryTest, RemovePathTreeForDocumentDecrementsCountsAndDeletesEmptyNodes) {
+    // Insert a document with path tree metadata
+    auto docInfo =
+        makeDocumentWithPath("/project/src/lib/util.cpp",
+                             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+    auto docInsert = repository_->insertDocument(docInfo);
+    ASSERT_TRUE(docInsert.has_value());
+    auto docId = docInsert.value();
+    docInfo.id = docId;
+
+    // Create path tree nodes with embedding
+    std::vector<float> embedding{1.0F, 2.0F, 3.0F};
+    auto upsert = repository_->upsertPathTreeForDocument(
+        docInfo, docId, true, std::span<const float>(embedding.data(), embedding.size()));
+    ASSERT_TRUE(upsert.has_value());
+
+    // Verify nodes were created with doc_count = 1
+    auto leafNode = repository_->findPathTreeNodeByFullPath("/project/src/lib/util.cpp");
+    ASSERT_TRUE(leafNode.has_value());
+    ASSERT_TRUE(leafNode.value().has_value());
+    EXPECT_EQ(leafNode.value()->docCount, 1);
+    EXPECT_EQ(leafNode.value()->centroidWeight, 1);
+
+    auto libNode = repository_->findPathTreeNodeByFullPath("/project/src/lib");
+    ASSERT_TRUE(libNode.has_value());
+    ASSERT_TRUE(libNode.value().has_value());
+    EXPECT_EQ(libNode.value()->docCount, 1);
+
+    // Remove the document from path tree
+    auto remove = repository_->removePathTreeForDocument(
+        docInfo, docId, std::span<const float>(embedding.data(), embedding.size()));
+    ASSERT_TRUE(remove.has_value());
+
+    // Verify leaf node is deleted (doc_count = 0, no children)
+    auto afterRemoveLeaf = repository_->findPathTreeNodeByFullPath("/project/src/lib/util.cpp");
+    ASSERT_TRUE(afterRemoveLeaf.has_value());
+    EXPECT_FALSE(afterRemoveLeaf.value().has_value()) << "Leaf node should be deleted when empty";
+
+    // Verify parent nodes still exist but with decremented count
+    auto afterRemoveLib = repository_->findPathTreeNodeByFullPath("/project/src/lib");
+    ASSERT_TRUE(afterRemoveLib.has_value());
+    EXPECT_FALSE(afterRemoveLib.value().has_value())
+        << "Parent node should be deleted when empty and no children";
+}
+
+TEST_F(MetadataRepositoryTest, RemovePathTreeForDocumentRecalculatesCentroid) {
+    // Insert two documents in the same directory
+    auto doc1 = makeDocumentWithPath(
+        "/shared/file1.txt", "1111111111111111111111111111111111111111111111111111111111111111");
+    auto doc1Insert = repository_->insertDocument(doc1);
+    ASSERT_TRUE(doc1Insert.has_value());
+    doc1.id = doc1Insert.value();
+
+    auto doc2 = makeDocumentWithPath(
+        "/shared/file2.txt", "2222222222222222222222222222222222222222222222222222222222222222");
+    auto doc2Insert = repository_->insertDocument(doc2);
+    ASSERT_TRUE(doc2Insert.has_value());
+    doc2.id = doc2Insert.value();
+
+    // Add both with embeddings
+    std::vector<float> emb1{1.0F, 0.0F, 0.0F};
+    std::vector<float> emb2{0.0F, 1.0F, 0.0F};
+
+    auto upsert1 = repository_->upsertPathTreeForDocument(
+        doc1, doc1.id, true, std::span<const float>(emb1.data(), emb1.size()));
+    ASSERT_TRUE(upsert1.has_value());
+
+    auto upsert2 = repository_->upsertPathTreeForDocument(
+        doc2, doc2.id, true, std::span<const float>(emb2.data(), emb2.size()));
+    ASSERT_TRUE(upsert2.has_value());
+
+    // Verify shared directory has weight 2
+    auto sharedNode = repository_->findPathTreeNodeByFullPath("/shared");
+    ASSERT_TRUE(sharedNode.has_value());
+    ASSERT_TRUE(sharedNode.value().has_value());
+    EXPECT_EQ(sharedNode.value()->docCount, 2);
+    EXPECT_EQ(sharedNode.value()->centroidWeight, 2);
+
+    // Remove first document
+    auto remove1 = repository_->removePathTreeForDocument(
+        doc1, doc1.id, std::span<const float>(emb1.data(), emb1.size()));
+    ASSERT_TRUE(remove1.has_value());
+
+    // Verify shared directory has weight 1 and centroid updated
+    auto afterRemove = repository_->findPathTreeNodeByFullPath("/shared");
+    ASSERT_TRUE(afterRemove.has_value());
+    ASSERT_TRUE(afterRemove.value().has_value());
+    EXPECT_EQ(afterRemove.value()->docCount, 1);
+    EXPECT_EQ(afterRemove.value()->centroidWeight, 1);
+}

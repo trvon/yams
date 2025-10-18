@@ -67,44 +67,4 @@ private:
     std::unique_ptr<Impl> pImpl;
 };
 
-class WasmPluginHost : public IPluginHost {
-public:
-    explicit WasmPluginHost(const std::filesystem::path& trustFile = {});
-    ~WasmPluginHost();
-
-    Result<PluginDescriptor> scanTarget(const std::filesystem::path& file) override;
-    Result<std::vector<PluginDescriptor>> scanDirectory(const std::filesystem::path& dir) override;
-    Result<PluginDescriptor> load(const std::filesystem::path& file,
-                                  const std::string& configJson) override;
-    Result<void> unload(const std::string& name) override;
-    std::vector<PluginDescriptor> listLoaded() const override;
-    std::vector<std::filesystem::path> trustList() const override;
-    Result<void> trustAdd(const std::filesystem::path& p) override;
-    Result<void> trustRemove(const std::filesystem::path& p) override;
-    Result<std::string> health(const std::string& name) override;
-
-    void setTrustFile(const std::filesystem::path& trustFile);
-
-private:
-    struct Impl;
-    std::unique_ptr<Impl> pImpl_;
-};
-
-class ExternalPluginHost : public IPluginHost {
-public:
-    void setTrustFile(const std::filesystem::path& trustFile);
-
-public:
-    Result<PluginDescriptor> scanTarget(const std::filesystem::path& file) override;
-    Result<std::vector<PluginDescriptor>> scanDirectory(const std::filesystem::path& dir) override;
-    Result<PluginDescriptor> load(const std::filesystem::path& file,
-                                  const std::string& configJson) override;
-    Result<void> unload(const std::string& name) override;
-    std::vector<PluginDescriptor> listLoaded() const override;
-    std::vector<std::filesystem::path> trustList() const override;
-    Result<void> trustAdd(const std::filesystem::path& p) override;
-    Result<void> trustRemove(const std::filesystem::path& p) override;
-    Result<std::string> health(const std::string& name) override;
-};
-
 } // namespace yams::daemon

@@ -1,8 +1,10 @@
 #pragma once
 
+#include <cstddef>
 #include <filesystem>
 #include <functional>
 #include <optional>
+#include <string>
 
 #include <yams/core/types.h>
 // Ensure boost::asio symbols used by daemon_client.h are declared in TU including this header
@@ -11,6 +13,13 @@
 #include <yams/daemon/ipc/ipc_protocol.h>
 
 namespace yams::app::services {
+
+// PathTreeOptions for path-tree-enabled grep
+struct PathTreeOptions {
+    bool enabled = false;
+    std::string mode = "fallback";
+    std::size_t childLimit = 5;
+};
 
 struct RetrievalOptions {
     // Optional explicit daemon socket path (overrides default resolver)
@@ -139,6 +148,10 @@ public:
 
     Result<yams::daemon::GrepResponse> grep(const GrepOptions& req,
                                             const RetrievalOptions& opts) const;
+
+    // Overload to support optional PathTreeOptions (PBI-058)
+    Result<yams::daemon::GrepResponse> grep(const GrepOptions& req, const RetrievalOptions& opts,
+                                            const std::optional<PathTreeOptions>& pathTree) const;
 
     Result<yams::daemon::ListResponse> list(const ListOptions& req,
                                             const RetrievalOptions& opts) const;

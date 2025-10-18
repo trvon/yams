@@ -17,18 +17,11 @@ namespace yams::search {
 std::shared_ptr<KGScorer>
 makeSimpleKGScorer(std::shared_ptr<yams::metadata::KnowledgeGraphStore> store);
 
-std::shared_ptr<vector::EmbeddingGenerator> HybridSearchFactory::createDefaultEmbeddingGenerator() {
+std::shared_ptr<vector::EmbeddingGenerator>
+HybridSearchFactory::createDefaultEmbeddingGenerator(const std::filesystem::path& dataPath) {
     namespace fs = std::filesystem;
 
-    // Check for available models in ~/.yams/models
-    const char* home = std::getenv("HOME");
-    if (!home) {
-        spdlog::debug(
-            "HOME environment variable not set, cannot create default embedding generator");
-        return nullptr;
-    }
-
-    fs::path modelsPath = fs::path(home) / ".yams" / "models";
+    fs::path modelsPath = dataPath / "models";
     if (!fs::exists(modelsPath)) {
         spdlog::debug("Models directory does not exist: {}", modelsPath.string());
         return nullptr;

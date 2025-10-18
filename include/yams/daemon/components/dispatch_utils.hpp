@@ -20,6 +20,11 @@
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
 
+#include <filesystem>
+namespace yams::daemon::dispatch {
+const std::vector<std::filesystem::path>& defaultAbiPluginDirs() noexcept;
+}
+
 namespace yams::daemon::dispatch {
 
 template <typename Fn>
@@ -222,14 +227,7 @@ inline std::pair<std::string, size_t> build_plugins_json(ServiceManager* sm) {
                 arr.push_back(std::move(rec));
             }
         } else {
-            auto plugins = sm->getLoadedPlugins();
-            count = plugins.size();
-            for (const auto& pi : plugins) {
-                nlohmann::json rec;
-                rec["name"] = pi.name;
-                rec["path"] = pi.path.string();
-                arr.push_back(std::move(rec));
-            }
+            // Legacy loader removed; no fallback list available
         }
     } catch (...) {
     }
@@ -274,16 +272,7 @@ build_typed_providers(ServiceManager* sm, const yams::daemon::StateComponent* st
                 providers.push_back(std::move(p));
             }
         } else {
-            for (const auto& pi : sm->getLoadedPlugins()) {
-                yams::daemon::StatusResponse::ProviderInfo p{};
-                p.name = pi.name;
-                p.isProvider = (!adopted.empty() && adopted == pi.name);
-                p.ready = p.isProvider ? providerReady : true;
-                p.degraded = p.isProvider ? providerDegraded : false;
-                p.error = p.isProvider ? lastErr : std::string();
-                p.modelsLoaded = p.isProvider ? modelsLoaded : 0u;
-                providers.push_back(std::move(p));
-            }
+            // Legacy loader removed; no fallback enumeration
         }
     } catch (...) {
     }

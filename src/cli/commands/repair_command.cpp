@@ -970,8 +970,7 @@ private:
 
         // Check for available ONNX models
         namespace fs = std::filesystem;
-        const char* home = std::getenv("HOME");
-        fs::path modelsPath = fs::path(home ? home : "") / ".yams" / "models";
+        fs::path modelsPath = cli_->getDataPath() / "models";
         std::vector<std::string> availableModels;
 
         if (fs::exists(modelsPath)) {

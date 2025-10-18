@@ -2,7 +2,7 @@
 
 // Optional C-ABI surface for native GraphAdapter providers.
 // Plugins implementing GraphAdapter v1 may export the following symbols so the
-// daemon can discover and register them via PluginLoader:
+// daemon can discover and register them via AbiPluginLoader:
 //
 //   extern "C" const char* getGraphAdapterName();
 //   extern "C" yams::daemon::IGraphAdapter* createGraphAdapterV1();

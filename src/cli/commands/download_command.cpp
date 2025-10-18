@@ -86,6 +86,8 @@ public:
         cmd->add_option("--export", exportPath_,
                         "Export a copy/link from CAS to a user path (optional).");
         cmd->add_option("--export-dir", exportDir_, "Export directory for --list mode (optional).");
+        // Backward compatibility alias
+        cmd->add_option("-o,--out", exportPath_, "Alias for --export");
         cmd->add_option("--overwrite", overwritePolicy_,
                         "Overwrite policy for export only: [never|if-different-etag|always] "
                         "(default: never).")
@@ -210,6 +212,11 @@ public:
         serviceReq.storeOnly = !exportPath_ && !exportDir_;
         if (exportPath_) {
             serviceReq.exportPath = exportPath_->string();
+        }
+        if (exportDir_) {
+            // Ensure directory exists; service will validate writes
+            std::error_code ec;
+            fs::create_directories(*exportDir_, ec);
         }
         if (overwritePolicy_ == "never") {
             serviceReq.overwrite = downloader::OverwritePolicy::Never;

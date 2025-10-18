@@ -2,13 +2,13 @@
 #include <algorithm>
 #include <filesystem>
 
+#include <vector>
 #include <boost/asio/thread_pool.hpp>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/PluginHostFsm.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/plugin_host.h>
-#include <yams/daemon/resource/plugin_loader.h>
 
 namespace yams::daemon {
 
@@ -27,8 +27,9 @@ std::string to_string(PluginHostState state) {
             return "ready";
         case PluginHostState::Failed:
             return "failed";
+        default:
+            return "unknown";
     }
-    return "unknown";
 }
 
 template <typename Awaitable>
@@ -68,66 +69,38 @@ RequestDispatcher::handlePluginScanRequest(const PluginScanRequest& req) {
             co_return co_await guard_plugin_host_ready(
                 serviceManager_, [this, req]() -> boost::asio::awaitable<Response> {
                     auto abi = serviceManager_ ? serviceManager_->getAbiPluginHost() : nullptr;
-                    auto wasm = serviceManager_ ? serviceManager_->getWasmPluginHost() : nullptr;
-                    auto ext = serviceManager_ ? serviceManager_->getExternalPluginHost() : nullptr;
-                    if (!abi && !wasm && !ext)
+                    if (!abi)
                         co_return ErrorResponse{ErrorCode::NotImplemented,
                                                 "No plugin host available"};
 
                     PluginScanResponse resp;
+                    auto scanTarget = [&](const auto& host, const auto& target) {
+                        if (host) {
+                            if (auto r = host->scanTarget(target)) {
+                                resp.plugins.push_back(toRecord(r.value()));
+                                return true;
+                            }
+                        }
+                        return false;
+                    };
+                    auto scanDirectory = [&](const auto& host, const auto& dir) {
+                        if (host) {
+                            if (auto r = host->scanDirectory(dir))
+                                for (auto& sr : r.value())
+                                    resp.plugins.push_back(toRecord(sr));
+                        }
+                    };
+
                     if (!req.target.empty()) {
-                        bool any = false;
-                        if (abi) {
-                            if (auto r = abi->scanTarget(req.target)) {
-                                resp.plugins.push_back(toRecord(r.value()));
-                                any = true;
-                            }
-                        }
-                        if (wasm) {
-                            if (auto r = wasm->scanTarget(req.target)) {
-                                resp.plugins.push_back(toRecord(r.value()));
-                                any = true;
-                            }
-                        }
-                        if (ext) {
-                            if (auto r = ext->scanTarget(req.target)) {
-                                resp.plugins.push_back(toRecord(r.value()));
-                                any = true;
-                            }
-                        }
+                        bool any = scanTarget(abi, req.target);
                         if (!any)
                             co_return ErrorResponse{ErrorCode::NotFound,
                                                     "No plugin found at target"};
                     } else if (!req.dir.empty()) {
-                        if (abi) {
-                            if (auto r = abi->scanDirectory(req.dir))
-                                for (auto& sr : r.value())
-                                    resp.plugins.push_back(toRecord(sr));
-                        }
-                        if (wasm) {
-                            if (auto r = wasm->scanDirectory(req.dir))
-                                for (auto& sr : r.value())
-                                    resp.plugins.push_back(toRecord(sr));
-                        }
-                        if (ext) {
-                            if (auto r = ext->scanDirectory(req.dir))
-                                for (auto& sr : r.value())
-                                    resp.plugins.push_back(toRecord(sr));
-                        }
+                        scanDirectory(abi, req.dir);
                     } else {
-                        for (const auto& dir : PluginLoader::getDefaultPluginDirectories()) {
-                            if (abi)
-                                if (auto r = abi->scanDirectory(dir))
-                                    for (auto& sr : r.value())
-                                        resp.plugins.push_back(toRecord(sr));
-                            if (wasm)
-                                if (auto r = wasm->scanDirectory(dir))
-                                    for (auto& sr : r.value())
-                                        resp.plugins.push_back(toRecord(sr));
-                            if (ext)
-                                if (auto r = ext->scanDirectory(dir))
-                                    for (auto& sr : r.value())
-                                        resp.plugins.push_back(toRecord(sr));
+                        for (const auto& dir : yams::daemon::dispatch::defaultAbiPluginDirs()) {
+                            scanDirectory(abi, dir);
                         }
                     }
                     co_return resp;
@@ -141,78 +114,63 @@ RequestDispatcher::handlePluginLoadRequest(const PluginLoadRequest& req) {
         "plugin_load", [this, req]() -> boost::asio::awaitable<Response> {
             co_return co_await guard_plugin_host_ready(
                 serviceManager_, [this, req]() -> boost::asio::awaitable<Response> {
-                    auto abi = serviceManager_ ? serviceManager_->getAbiPluginHost() : nullptr;
-                    auto wasm = serviceManager_ ? serviceManager_->getWasmPluginHost() : nullptr;
-                    auto ext = serviceManager_ ? serviceManager_->getExternalPluginHost() : nullptr;
-                    if (!abi && !wasm && !ext)
+                    auto getHost = [this](auto getter) {
+                        return serviceManager_ ? (serviceManager_->*getter)() : nullptr;
+                    };
+
+                    auto abi = getHost(&ServiceManager::getAbiPluginHost);
+
+                    if (!abi) {
                         co_return ErrorResponse{ErrorCode::NotImplemented,
                                                 "No plugin host available"};
+                    }
 
                     PluginLoadResponse lr;
                     std::filesystem::path target(req.pathOrName);
-                    if (req.dryRun) {
-                        if (abi) {
-                            if (auto r = abi->scanTarget(target)) {
-                                lr.loaded = false;
-                                lr.message = "dry-run";
-                                lr.record = toRecord(r.value());
-                                co_return lr;
-                            }
+
+                    auto scanTarget = [&](auto host) -> bool {
+                        if (host && host->scanTarget(target)) {
+                            lr = {false, "dry-run", toRecord(host->scanTarget(target).value())};
+                            return true;
                         }
-                        if (wasm) {
-                            if (auto r = wasm->scanTarget(target)) {
-                                lr.loaded = false;
-                                lr.message = "dry-run";
-                                lr.record = toRecord(r.value());
-                                co_return lr;
-                            }
+                        return false;
+                    };
+
+                    if (req.dryRun) {
+                        if (scanTarget(abi)) {
+                            co_return lr;
                         }
                         co_return ErrorResponse{ErrorCode::NotFound, "Plugin not found"};
                     }
 
                     if (!std::filesystem::exists(target)) {
-                        bool found = false;
-                        for (const auto& dir : PluginLoader::getDefaultPluginDirectories()) {
-                            auto candidate = std::filesystem::path(dir) / req.pathOrName;
+                        for (const auto& dir : yams::daemon::dispatch::defaultAbiPluginDirs()) {
+                            auto candidate = dir / req.pathOrName;
                             if (std::filesystem::exists(candidate)) {
                                 target = candidate;
-                                found = true;
                                 break;
                             }
                         }
-                        if (!found)
+                        if (!std::filesystem::exists(target)) {
                             co_return ErrorResponse{ErrorCode::NotFound, "Plugin not found"};
+                        }
                     }
 
-                    if (abi && target.extension() != ".wasm") {
-                        if (auto r = abi->load(target, "")) {
-                            lr.loaded = true;
-                            lr.message = "loaded";
-                            lr.record = toRecord(r.value());
-                            if (serviceManager_)
-                                (void)serviceManager_->adoptModelProviderFromHosts(lr.record.name);
-                            co_return lr;
+                    auto loadPlugin = [&](auto host, const std::string& ext = "") -> bool {
+                        if (host && (ext.empty() || target.extension() == ext)) {
+                            if (auto r = host->load(target, "")) {
+                                lr = {true, "loaded", toRecord(r.value())};
+                                if (serviceManager_) {
+                                    serviceManager_->adoptModelProviderFromHosts(lr.record.name);
+                                }
+                                return true;
+                            }
                         }
-                    }
-                    if (wasm && target.extension() == ".wasm") {
-                        if (auto r = wasm->load(target, "")) {
-                            lr.loaded = true;
-                            lr.message = "loaded";
-                            lr.record = toRecord(r.value());
-                            if (serviceManager_)
-                                (void)serviceManager_->adoptModelProviderFromHosts(lr.record.name);
-                            co_return lr;
-                        }
-                    }
-                    if (ext) {
-                        if (auto r = ext->load(target, "")) {
-                            lr.loaded = true;
-                            lr.message = "loaded";
-                            lr.record = toRecord(r.value());
-                            if (serviceManager_)
-                                (void)serviceManager_->adoptModelProviderFromHosts(lr.record.name);
-                            co_return lr;
-                        }
+                        return false;
+                    };
+
+                    if (loadPlugin(abi)) {
+                        co_return lr;
                     }
 
                     co_return ErrorResponse{ErrorCode::InvalidState, "Load failed"};
@@ -221,25 +179,15 @@ RequestDispatcher::handlePluginLoadRequest(const PluginLoadRequest& req) {
 }
 
 boost::asio::awaitable<Response>
-RequestDispatcher::handlePluginUnloadRequest(const PluginUnloadRequest& req) {
+RequestDispatcher::handlePluginUnloadRequest(const PluginUnloadRequest& req) const {
     co_return co_await yams::daemon::dispatch::guard_await(
         "plugin_unload", [this, req]() -> boost::asio::awaitable<Response> {
             co_return co_await guard_plugin_host_ready(
                 serviceManager_, [this, req]() -> boost::asio::awaitable<Response> {
                     auto abi = serviceManager_ ? serviceManager_->getAbiPluginHost() : nullptr;
-                    auto wasm = serviceManager_ ? serviceManager_->getWasmPluginHost() : nullptr;
-                    auto ext = serviceManager_ ? serviceManager_->getExternalPluginHost() : nullptr;
                     bool ok = false;
                     if (abi) {
                         if (auto r = abi->unload(req.name))
-                            ok = true;
-                    }
-                    if (wasm && !ok) {
-                        if (auto r = wasm->unload(req.name))
-                            ok = true;
-                    }
-                    if (ext && !ok) {
-                        if (auto r = ext->unload(req.name))
                             ok = true;
                     }
                     if (!ok)
@@ -251,23 +199,15 @@ RequestDispatcher::handlePluginUnloadRequest(const PluginUnloadRequest& req) {
 }
 
 boost::asio::awaitable<Response>
-RequestDispatcher::handlePluginTrustListRequest(const PluginTrustListRequest& /*req*/) {
+RequestDispatcher::handlePluginTrustListRequest(const PluginTrustListRequest& /*req*/) const {
     co_return co_await yams::daemon::dispatch::guard_await(
         "plugin_trust_list", [this]() -> boost::asio::awaitable<Response> {
             co_return co_await guard_plugin_host_ready(
                 serviceManager_, [this]() -> boost::asio::awaitable<Response> {
                     auto abi = serviceManager_ ? serviceManager_->getAbiPluginHost() : nullptr;
-                    auto wasm = serviceManager_ ? serviceManager_->getWasmPluginHost() : nullptr;
-                    auto ext = serviceManager_ ? serviceManager_->getExternalPluginHost() : nullptr;
                     PluginTrustListResponse resp;
                     if (abi)
                         for (auto& p : abi->trustList())
-                            resp.paths.push_back(p.string());
-                    if (wasm)
-                        for (auto& p : wasm->trustList())
-                            resp.paths.push_back(p.string());
-                    if (ext)
-                        for (auto& p : ext->trustList())
                             resp.paths.push_back(p.string());
                     std::sort(resp.paths.begin(), resp.paths.end());
                     resp.paths.erase(std::unique(resp.paths.begin(), resp.paths.end()),
@@ -278,85 +218,76 @@ RequestDispatcher::handlePluginTrustListRequest(const PluginTrustListRequest& /*
 }
 
 boost::asio::awaitable<Response>
-RequestDispatcher::handlePluginTrustAddRequest(const PluginTrustAddRequest& req) {
+RequestDispatcher::handlePluginTrustAddRequest(const PluginTrustAddRequest& req) const {
     co_return co_await yams::daemon::dispatch::guard_await(
         "plugin_trust_add", [this, req]() -> boost::asio::awaitable<Response> {
             co_return co_await guard_plugin_host_ready(
                 serviceManager_, [this, req]() -> boost::asio::awaitable<Response> {
-                    auto abi = serviceManager_ ? serviceManager_->getAbiPluginHost() : nullptr;
-                    auto wasm = serviceManager_ ? serviceManager_->getWasmPluginHost() : nullptr;
-                    auto ext = serviceManager_ ? serviceManager_->getExternalPluginHost() : nullptr;
-                    bool ok = false;
-                    if (abi)
-                        if (auto r = abi->trustAdd(req.path))
-                            ok = true;
-                    if (wasm)
-                        if (auto r = wasm->trustAdd(req.path))
-                            ok = true;
-                    if (ext)
-                        if (auto r = ext->trustAdd(req.path))
-                            ok = true;
-                    if (!ok)
-                        co_return ErrorResponse{ErrorCode::Unknown, "Trust add failed"};
+                    auto addTrust = [&](auto host) -> bool {
+                        return host && host->trustAdd(req.path);
+                    };
 
-                    try {
-                        auto sm = serviceManager_;
-                        auto path = std::filesystem::path(req.path);
-                        auto exec = sm ? sm->getWorkerExecutor() : plugin_fallback_executor();
-                        boost::asio::co_spawn(
-                            exec,
-                            [abi, wasm, sm, path]() -> boost::asio::awaitable<void> {
-                                try {
-                                    if (std::filesystem::is_directory(path)) {
-                                        if (abi)
-                                            if (auto r = abi->scanDirectory(path))
-                                                for (const auto& d : r.value())
-                                                    (void)abi->load(d.path, "");
-                                        if (wasm)
-                                            if (auto r = wasm->scanDirectory(path))
-                                                for (const auto& d : r.value())
-                                                    (void)wasm->load(d.path, "");
-                                    } else if (std::filesystem::is_regular_file(path)) {
-                                        if (abi)
-                                            (void)abi->load(path, "");
-                                        if (wasm && path.extension() == ".wasm")
-                                            (void)wasm->load(path, "");
-                                    }
-                                    if (sm)
-                                        (void)sm->adoptModelProviderFromHosts();
-                                } catch (...) {
-                                }
-                                co_return;
-                            },
-                            boost::asio::detached);
-                    } catch (...) {
+                    auto abi = serviceManager_ ? serviceManager_->getAbiPluginHost() : nullptr;
+
+                    if (!addTrust(abi)) {
+                        co_return ErrorResponse{ErrorCode::Unknown, "Trust add failed"};
                     }
+
+                    auto path = std::filesystem::path(req.path);
+                    auto exec = serviceManager_ ? serviceManager_->getWorkerExecutor()
+                                                : plugin_fallback_executor();
+
+                    boost::asio::co_spawn(
+                        exec,
+                        [abi, path, sm = serviceManager_]() -> boost::asio::awaitable<void> {
+                            try {
+                                auto loadPlugins = [&](auto host, const auto& dir) {
+                                    if (host) {
+                                        if (auto r = host->scanDirectory(dir)) {
+                                            for (const auto& d : r.value()) {
+                                                (void)host->load(d.path, "");
+                                            }
+                                        }
+                                    }
+                                };
+
+                                if (std::filesystem::is_directory(path)) {
+                                    loadPlugins(abi, path);
+                                } else if (std::filesystem::is_regular_file(path)) {
+                                    if (abi)
+                                        (void)abi->load(path, "");
+                                }
+
+                                if (sm)
+                                    (void)sm->adoptModelProviderFromHosts();
+                            } catch (...) {
+                                // Handle exceptions silently
+                            }
+                            co_return;
+                        },
+                        boost::asio::detached);
+
                     co_return SuccessResponse{"ok"};
                 });
         });
 }
 
 boost::asio::awaitable<Response>
-RequestDispatcher::handlePluginTrustRemoveRequest(const PluginTrustRemoveRequest& req) {
+RequestDispatcher::handlePluginTrustRemoveRequest(const PluginTrustRemoveRequest& req) const {
     co_return co_await yams::daemon::dispatch::guard_await(
         "plugin_trust_remove", [this, req]() -> boost::asio::awaitable<Response> {
             co_return co_await guard_plugin_host_ready(
                 serviceManager_, [this, req]() -> boost::asio::awaitable<Response> {
+                    auto removeTrust = [&](auto host) {
+                        return host && host->trustRemove(req.path);
+                    };
+
                     auto abi = serviceManager_ ? serviceManager_->getAbiPluginHost() : nullptr;
-                    auto wasm = serviceManager_ ? serviceManager_->getWasmPluginHost() : nullptr;
-                    auto ext = serviceManager_ ? serviceManager_->getExternalPluginHost() : nullptr;
-                    bool ok = false;
-                    if (abi)
-                        if (auto r = abi->trustRemove(req.path))
-                            ok = true;
-                    if (wasm)
-                        if (auto r = wasm->trustRemove(req.path))
-                            ok = true;
-                    if (ext)
-                        if (auto r = ext->trustRemove(req.path))
-                            ok = true;
-                    if (!ok)
+
+                    if (!removeTrust(abi)) {
                         co_return ErrorResponse{ErrorCode::Unknown, "Trust remove failed"};
+                    }
+
                     co_return SuccessResponse{"ok"};
                 });
         });

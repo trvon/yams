@@ -1,12 +1,11 @@
 # Building YAMS with GCC/G++ or Clang/LLVM
 
 YAMS supports both GCC and Clang/LLVM toolchains with automatic fallback. When using Clang, the build system automatically prefers the LLD linker for faster linking. These instructions cover both flows.
-
 Use this file as a quick reference. Progresses from "10‑second build" to deeper detail.
 
 ## 1. Prerequisites (Minimal)
 
-Compiler (choose one or both):
+Compiler (choose one or both):yams c
 - **GCC**: GCC 11+ (coroutines / C++20), GCC 13+ recommended (full `std::format`)
 - **Clang/LLVM**: Clang 14+ (C++20), Clang 16+ recommended
 
@@ -36,7 +35,7 @@ Install a newer GCC (if needed):
 * Ubuntu: `sudo apt-get install gcc-13 g++-13` (enable via update-alternatives if desired)
 * Fedora / Arch: distro packages are recent
 * RHEL/CentOS/Rocky: enable devtoolset (`gcc-toolset-13`)
-
+That 
 Install Clang/LLVM (if not present):
 * Ubuntu: `sudo apt-get install clang lld`
 * Fedora: `sudo dnf install clang lld`

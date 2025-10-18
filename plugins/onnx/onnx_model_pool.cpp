@@ -86,7 +86,27 @@ public:
         sessionOptions_->SetIntraOpNumThreads(intra);
         sessionOptions_->SetInterOpNumThreads(inter);
         spdlog::info("[ONNX] SessionOptions threads: intra-op={} inter-op={}", intra, inter);
-        sessionOptions_->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+
+        // Graph optimization level: BASIC for fast startup, ALL for production
+        // ORT_ENABLE_ALL performs expensive graph transformations (minutes for large models)
+        // ORT_ENABLE_BASIC is much faster and sufficient for most embeddings models
+        GraphOptimizationLevel optLevel = GraphOptimizationLevel::ORT_ENABLE_BASIC;
+        if (const char* opt = std::getenv("YAMS_ONNX_OPT_LEVEL")) {
+            std::string level(opt);
+            std::transform(level.begin(), level.end(), level.begin(), ::tolower);
+            if (level == "all" || level == "extended") {
+                optLevel = GraphOptimizationLevel::ORT_ENABLE_ALL;
+                spdlog::info("[ONNX] Using ORT_ENABLE_ALL optimization (slow first load)");
+            } else if (level == "extended") {
+                optLevel = GraphOptimizationLevel::ORT_ENABLE_EXTENDED;
+            }
+        }
+        sessionOptions_->SetGraphOptimizationLevel(optLevel);
+
+        // Enable memory pattern optimization for faster inference
+        sessionOptions_->EnableMemPattern();
+        // Enable CPU memory arena for better memory reuse
+        sessionOptions_->EnableCpuMemArena();
 
         if (config.enable_gpu) {
             // TODO: Add GPU provider when available
@@ -108,7 +128,7 @@ public:
             std::transform(lname.begin(), lname.end(), lname.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             // Dimension defaults
-            if (embeddingDim_ == 0 || embeddingDim_ == 384) {
+            if (embeddingDim_ == 0) {
                 auto has = [&](const char* s) { return lname.find(s) != std::string::npos; };
                 // OpenAI TE3 sizes (mock support for external references)
                 if (has("text-embedding-3-large")) {
@@ -285,7 +305,7 @@ public:
             toks = preprocessor_.padTokens(toks, seq_len);
             auto mask = preprocessor_.generateAttentionMask(toks);
 
-            const size_t D = embeddingDim_ > 0 ? embeddingDim_ : 384;
+            const size_t D = embeddingDim_ > 0 ? embeddingDim_ : 0;
             auto prng_val = [](uint32_t seed) -> float {
                 // xorshift32 → map to [-1, 1]
                 uint32_t x = seed ? seed : 0x9e3779b9u;
@@ -736,7 +756,7 @@ private:
     std::vector<std::string> inputNames_;
     std::vector<std::string> outputNames_;
 
-    size_t embeddingDim_ = 384;
+    size_t embeddingDim_ = 0;
     size_t maxSequenceLength_ = 512;
     bool isLoaded_ = false;
     bool test_mode_ = false;
@@ -1017,24 +1037,41 @@ std::vector<std::string> OnnxModelPool::getLoadedModels() const {
 }
 
 Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
+    fprintf(stderr, "[ONNX Plugin] loadModel() called for: %s\n", modelName.c_str());
+    fflush(stderr);
+    spdlog::info("[ONNX Plugin] loadModel() called for: {}", modelName);
     // In test environments, avoid heavy model loading entirely
     if (yams::test::shouldSkipModelLoading()) {
         return Error{ErrorCode::NotFound, "Model loading skipped in test mode"};
     }
     // Quick check if already loaded (with minimal lock time)
+    fprintf(stderr, "[ONNX Plugin] Checking if model already loaded: %s\n", modelName.c_str());
+    fflush(stderr);
+    spdlog::info("[ONNX Plugin] Checking if model already loaded: {}", modelName);
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = models_.find(modelName);
         if (it != models_.end() && it->second.pool) {
+            fprintf(stderr, "[ONNX Plugin] Model already loaded: %s\n", modelName.c_str());
+            fflush(stderr);
+            spdlog::info("[ONNX Plugin] Model already loaded: {}", modelName);
             return Result<void>(); // Already loaded
         }
     }
 
     // Resolve model path WITHOUT holding the lock
-    spdlog::debug("Resolving model path for: {}", modelName);
+    fprintf(stderr, "[ONNX Plugin] Resolving model path for: %s\n", modelName.c_str());
+    fflush(stderr);
+    spdlog::info("[ONNX Plugin] Resolving model path for: {}", modelName);
     std::string modelPath = resolveModelPath(modelName);
+    fprintf(stderr, "[ONNX Plugin] Resolved path: %s\n", modelPath.c_str());
+    fflush(stderr);
+    spdlog::info("[ONNX Plugin] Resolved path: {}", modelPath);
 
     // Direct filesystem check - no async wrapper needed for local files
+    fprintf(stderr, "[ONNX Plugin] Checking file existence: %s\n", modelPath.c_str());
+    fflush(stderr);
+    spdlog::info("[ONNX Plugin] Checking file existence: {}", modelPath);
     bool fileExists = false;
     try {
         fileExists = fs::exists(modelPath) && fs::is_regular_file(modelPath);
@@ -1101,21 +1138,34 @@ Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
     }
 
     // Create model entry
+    spdlog::info("[ONNX Plugin] Creating model entry for: {}", modelName);
     ModelEntry& entry = models_[modelName];
     entry.name = modelName;
     entry.path = modelPath;
     entry.lastAccess = std::chrono::steady_clock::now();
 
     // Configure pool for this model
+    spdlog::info("[ONNX Plugin] Configuring resource pool (preCreate={})", !config_.lazyLoading);
     PoolConfig<OnnxModelSession> poolConfig;
     poolConfig.minSize = 1;
     poolConfig.maxSize = 3; // Allow up to 3 concurrent users per model
     poolConfig.maxIdle = 2;
     poolConfig.idleTimeout = config_.modelIdleTimeout;
-    // Honor keep-hot semantics: when lazyLoading=false, pre-create at least one session
-    // so the model is immediately usable for embeddings generation.
-    // When lazyLoading=true, defer creation to first acquire to avoid blocking startup.
-    poolConfig.preCreateResources = !config_.lazyLoading;
+    // CRITICAL FIX: Always use lazy loading to avoid deadlock!
+    // When preCreateResources=true, ResourcePool constructor synchronously calls factory_(),
+    // which happens while we hold mutex_ in loadModel(). This causes a deadlock.
+    // By setting preCreateResources=false, resources are created lazily on first acquire(),
+    // which is safer and doesn't block the loadModel() call.
+    poolConfig.preCreateResources = false; // Always lazy to avoid deadlock
+    // Allow override via env for debugging
+    if (const char* pc = std::getenv("YAMS_ONNX_PRECREATE_RESOURCES")) {
+        std::string v(pc);
+        std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+        if (v == "1" || v == "true" || v == "yes" || v == "on") {
+            poolConfig.preCreateResources = true;
+            spdlog::warn("[ONNX Plugin] preCreateResources overridden to true via env (may block)");
+        }
+    }
 
     // Create embedding config
     vector::EmbeddingConfig embConfig;
@@ -1125,17 +1175,22 @@ Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
     embConfig.num_threads = config_.numThreads;
 
     // Create resource pool for this model
+    spdlog::info("[ONNX Plugin] Creating ResourcePool with lazy loading (preCreate=false)");
     auto t0 = std::chrono::steady_clock::now();
     entry.pool = std::make_shared<ResourcePool<OnnxModelSession>>(
         poolConfig,
         [modelPath, modelName, embConfig,
          timeout = config_.modelLoadTimeout](const std::string& id) -> Result<ModelSessionPtr> {
+            spdlog::info("[ONNX Plugin] Pool factory lambda called for: {}", modelName);
             (void)id;
             // Bound session creation time to avoid hanging the pool indefinitely
             auto fut = std::async(std::launch::async, [=]() -> Result<ModelSessionPtr> {
+                spdlog::info("[ONNX Plugin] Creating OnnxModelSession for: {}", modelName);
                 try {
                     auto session =
                         std::make_shared<OnnxModelSession>(modelPath, modelName, embConfig);
+                    spdlog::info("[ONNX Plugin] OnnxModelSession created successfully for: {}",
+                                 modelName);
                     return session;
                 } catch (const std::exception& e) {
                     return Error{ErrorCode::InternalError,
@@ -1439,14 +1494,35 @@ std::string OnnxModelPool::resolveModelPath(const std::string& modelName) const 
         searchPaths.push_back(root + "/" + modelName + ".onnx");
     }
 
-    // Default locations
+    // Default locations (XDG standard first, then fallbacks)
+    // Priority: XDG_DATA_HOME > ~/.local/share/yams > ~/.yams > relative > system
+    std::string xdg_data_home;
+    if (const char* xdg = std::getenv("XDG_DATA_HOME")) {
+        xdg_data_home = xdg;
+    } else if (!homeDir.empty()) {
+        xdg_data_home = homeDir + "/.local/share";
+    }
+
+    // XDG paths (highest priority)
+    if (!xdg_data_home.empty()) {
+        searchPaths.push_back(xdg_data_home + "/yams/models/" + modelName + "/model.onnx");
+        searchPaths.push_back(xdg_data_home + "/yams/models/" + modelName + "/" + modelName +
+                              ".onnx");
+        searchPaths.push_back(xdg_data_home + "/yams/models/" + modelName + ".onnx");
+    }
+
+    // Legacy ~/.yams/models (for backward compatibility)
     searchPaths.push_back(homeDir + std::string("/.yams/models/") + modelName + "/model.onnx");
     searchPaths.push_back(homeDir + std::string("/.yams/models/") + modelName + "/" + modelName +
                           ".onnx");
     searchPaths.push_back(homeDir + std::string("/.yams/models/") + modelName + ".onnx");
+
+    // Relative paths
     searchPaths.push_back("models/" + modelName + "/model.onnx");
     searchPaths.push_back("models/" + modelName + "/" + modelName + ".onnx");
     searchPaths.push_back("models/" + modelName + ".onnx");
+
+    // System paths
     searchPaths.push_back("/usr/local/share/yams/models/" + modelName + "/model.onnx");
     searchPaths.push_back("/usr/local/share/yams/models/" + modelName + "/" + modelName + ".onnx");
     searchPaths.push_back("/usr/local/share/yams/models/" + modelName + ".onnx");

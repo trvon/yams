@@ -91,12 +91,14 @@ private:
     // Plugin management handlers
     boost::asio::awaitable<Response> handlePluginScanRequest(const PluginScanRequest& req);
     boost::asio::awaitable<Response> handlePluginLoadRequest(const PluginLoadRequest& req);
-    boost::asio::awaitable<Response> handlePluginUnloadRequest(const PluginUnloadRequest& req);
     boost::asio::awaitable<Response>
-    handlePluginTrustListRequest(const PluginTrustListRequest& req);
-    boost::asio::awaitable<Response> handlePluginTrustAddRequest(const PluginTrustAddRequest& req);
+    handlePluginUnloadRequest(const PluginUnloadRequest& req) const;
     boost::asio::awaitable<Response>
-    handlePluginTrustRemoveRequest(const PluginTrustRemoveRequest& req);
+    handlePluginTrustListRequest(const PluginTrustListRequest& req) const;
+    boost::asio::awaitable<Response>
+    handlePluginTrustAddRequest(const PluginTrustAddRequest& req) const;
+    boost::asio::awaitable<Response>
+    handlePluginTrustRemoveRequest(const PluginTrustRemoveRequest& req) const;
 
     // Embedding/model provider handlers
     boost::asio::awaitable<Response>

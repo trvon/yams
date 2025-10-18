@@ -2652,6 +2652,213 @@ Result<void> MetadataRepository::upsertPathTreeForDocument(const DocumentInfo& i
     return Result<void>();
 }
 
+Result<void> MetadataRepository::removePathTreeForDocument(const DocumentInfo& info,
+                                                           int64_t documentId,
+                                                           std::span<const float> embeddingValues) {
+    if (info.filePath.empty())
+        return Result<void>();
+
+    auto segments = splitPathSegments(info.filePath);
+    if (segments.empty())
+        return Result<void>();
+
+    const bool isAbsolute = !info.filePath.empty() && info.filePath.front() == '/';
+    int64_t parentNodeId = kPathTreeNullParent;
+    std::string currentPath = isAbsolute ? std::string("/") : std::string{};
+
+    // Collect all node IDs along the path for later cleanup
+    std::vector<int64_t> pathNodeIds;
+
+    for (const auto& part : segments) {
+        if (!currentPath.empty() && currentPath.back() != '/')
+            currentPath.push_back('/');
+        currentPath += part;
+
+        auto nodeResult = findPathTreeNode(parentNodeId, part);
+        if (!nodeResult)
+            return nodeResult.error();
+
+        if (!nodeResult.value()) {
+            // Node doesn't exist, nothing to remove
+            return Result<void>();
+        }
+
+        pathNodeIds.push_back(nodeResult.value()->id);
+        parentNodeId = nodeResult.value()->id;
+    }
+
+    // Remove document association and decrement counts from leaf to root
+    for (auto it = pathNodeIds.rbegin(); it != pathNodeIds.rend(); ++it) {
+        int64_t nodeId = *it;
+
+        // Remove the document-node association
+        auto removeAssoc = executeQuery<void>([&](Database& db) -> Result<void> {
+            auto deleteStmt = db.prepare(
+                "DELETE FROM path_tree_node_documents WHERE node_id = ? AND document_id = ?");
+            if (!deleteStmt)
+                return deleteStmt.error();
+
+            auto stmt = std::move(deleteStmt).value();
+            if (auto bindNode = stmt.bind(1, nodeId); !bindNode)
+                return bindNode.error();
+            if (auto bindDoc = stmt.bind(2, documentId); !bindDoc)
+                return bindDoc.error();
+
+            return stmt.execute();
+        });
+        if (!removeAssoc)
+            return removeAssoc.error();
+
+        // Decrement doc_count
+        auto decrementCount = executeQuery<void>([&](Database& db) -> Result<void> {
+            auto updateStmt =
+                db.prepare("UPDATE path_tree_nodes "
+                           "SET doc_count = MAX(0, doc_count - 1), last_updated = unixepoch() "
+                           "WHERE node_id = ?");
+            if (!updateStmt)
+                return updateStmt.error();
+
+            auto stmt = std::move(updateStmt).value();
+            if (auto bindNode = stmt.bind(1, nodeId); !bindNode)
+                return bindNode.error();
+
+            return stmt.execute();
+        });
+        if (!decrementCount)
+            return decrementCount.error();
+
+        // Recalculate centroid if embedding was provided
+        if (!embeddingValues.empty()) {
+            auto recalc = executeQuery<void>([&](Database& db) -> Result<void> {
+                // Get current centroid and weight
+                auto selectStmt =
+                    db.prepare("SELECT centroid, centroid_weight FROM path_tree_nodes "
+                               "WHERE node_id = ?");
+                if (!selectStmt)
+                    return selectStmt.error();
+
+                auto stmt = std::move(selectStmt).value();
+                if (auto bindNode = stmt.bind(1, nodeId); !bindNode)
+                    return bindNode.error();
+
+                auto stepRes = stmt.step();
+                if (!stepRes)
+                    return stepRes.error();
+                if (!stepRes.value())
+                    return Result<void>(); // Node doesn't exist anymore
+
+                std::vector<float> centroid;
+                int64_t currentWeight = stmt.getInt64(1);
+
+                if (!stmt.isNull(0)) {
+                    centroid = blobToFloatVector(stmt.getBlob(0));
+                }
+
+                if (currentWeight <= 1) {
+                    // Reset centroid when no documents remain
+                    auto updateStmt = db.prepare("UPDATE path_tree_nodes "
+                                                 "SET centroid = NULL, centroid_weight = 0, "
+                                                 "last_updated = unixepoch() "
+                                                 "WHERE node_id = ?");
+                    if (!updateStmt)
+                        return updateStmt.error();
+
+                    auto update = std::move(updateStmt).value();
+                    if (auto bindNode = update.bind(1, nodeId); !bindNode)
+                        return bindNode.error();
+
+                    return update.execute();
+                }
+
+                // Recalculate centroid: subtract the removed embedding
+                int64_t newWeight = currentWeight - 1;
+                if (centroid.size() == embeddingValues.size()) {
+                    const double oldWeightFactor = static_cast<double>(currentWeight);
+                    const double newWeightFactor = static_cast<double>(newWeight);
+                    for (std::size_t i = 0; i < embeddingValues.size(); ++i) {
+                        double updated =
+                            (centroid[i] * oldWeightFactor - embeddingValues[i]) / newWeightFactor;
+                        centroid[i] = static_cast<float>(updated);
+                    }
+
+                    auto updateStmt = db.prepare("UPDATE path_tree_nodes "
+                                                 "SET centroid = ?, centroid_weight = ?, "
+                                                 "last_updated = unixepoch() "
+                                                 "WHERE node_id = ?");
+                    if (!updateStmt)
+                        return updateStmt.error();
+
+                    auto update = std::move(updateStmt).value();
+
+                    std::span<const std::byte> blob(
+                        reinterpret_cast<const std::byte*>(centroid.data()),
+                        centroid.size() * sizeof(float));
+                    if (auto bindBlob = update.bind(1, blob); !bindBlob)
+                        return bindBlob.error();
+                    if (auto bindWeight = update.bind(2, newWeight); !bindWeight)
+                        return bindWeight.error();
+                    if (auto bindNode = update.bind(3, nodeId); !bindNode)
+                        return bindNode.error();
+
+                    return update.execute();
+                }
+
+                return Result<void>();
+            });
+            if (!recalc)
+                return recalc.error();
+        }
+
+        // Check if node is now empty and has no children
+        auto shouldDelete = executeQuery<bool>([&](Database& db) -> Result<bool> {
+            auto checkStmt = db.prepare(
+                "SELECT doc_count, "
+                "(SELECT COUNT(*) FROM path_tree_nodes WHERE parent_id = ?) as child_count "
+                "FROM path_tree_nodes WHERE node_id = ?");
+            if (!checkStmt)
+                return checkStmt.error();
+
+            auto stmt = std::move(checkStmt).value();
+            if (auto bind1 = stmt.bind(1, nodeId); !bind1)
+                return bind1.error();
+            if (auto bind2 = stmt.bind(2, nodeId); !bind2)
+                return bind2.error();
+
+            auto stepRes = stmt.step();
+            if (!stepRes)
+                return stepRes.error();
+            if (!stepRes.value())
+                return false; // Node doesn't exist
+
+            int64_t docCount = stmt.getInt64(0);
+            int64_t childCount = stmt.getInt64(1);
+
+            return (docCount == 0 && childCount == 0);
+        });
+
+        if (!shouldDelete)
+            return shouldDelete.error();
+
+        if (shouldDelete.value()) {
+            auto deleteNode = executeQuery<void>([&](Database& db) -> Result<void> {
+                auto deleteStmt = db.prepare("DELETE FROM path_tree_nodes WHERE node_id = ?");
+                if (!deleteStmt)
+                    return deleteStmt.error();
+
+                auto stmt = std::move(deleteStmt).value();
+                if (auto bindNode = stmt.bind(1, nodeId); !bindNode)
+                    return bindNode.error();
+
+                return stmt.execute();
+            });
+            if (!deleteNode)
+                return deleteNode.error();
+        }
+    }
+
+    return Result<void>();
+}
+
 // -----------------------------------------------------------------------------
 // Tree-based document queries (PBI-043 integration)
 // -----------------------------------------------------------------------------

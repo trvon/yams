@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <string_view> // PBI-058 Task 058-16
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -81,47 +82,55 @@ std::filesystem::path resolve_socket_path_config_first() {
             if (in) {
                 std::string line;
                 bool inDaemon = false;
-                auto trim = [](std::string s) {
+
+                // String view trim helper - avoids unnecessary allocations (PBI-058 Task 058-16)
+                auto trim = [](std::string_view s) -> std::string_view {
                     auto issp = [](unsigned char c) { return std::isspace(c); };
-                    s.erase(s.begin(), std::find_if(s.begin(), s.end(),
-                                                    [&](unsigned char c) { return !issp(c); }));
-                    s.erase(std::find_if(s.rbegin(), s.rend(),
-                                         [&](unsigned char c) { return !issp(c); })
-                                .base(),
-                            s.end());
-                    return s;
+                    // Trim leading whitespace
+                    auto start =
+                        std::find_if(s.begin(), s.end(), [&](unsigned char c) { return !issp(c); });
+                    if (start == s.end())
+                        return {};
+                    // Trim trailing whitespace
+                    auto end = std::find_if(s.rbegin(), s.rend(), [&](unsigned char c) {
+                                   return !issp(c);
+                               }).base();
+                    return s.substr(start - s.begin(), end - start);
                 };
+
                 while (std::getline(in, line)) {
-                    line = trim(line);
-                    if (line.empty() || line[0] == '#')
+                    std::string_view line_view = trim(line);
+                    if (line_view.empty() || line_view[0] == '#')
                         continue;
-                    if (line.rfind("[daemon]", 0) == 0) {
+                    if (line_view.starts_with("[daemon]")) {
                         inDaemon = true;
                         continue;
                     }
-                    if (inDaemon && !line.empty() && line[0] == '[') {
+                    if (inDaemon && !line_view.empty() && line_view[0] == '[') {
                         inDaemon = false;
                     }
                     if (!inDaemon)
                         continue;
-                    const std::string key = "socket_path";
-                    auto pos = line.find(key);
-                    if (pos == std::string::npos)
+
+                    constexpr std::string_view key = "socket_path";
+                    auto pos = line_view.find(key);
+                    if (pos == std::string_view::npos)
                         continue;
-                    auto eq = line.find('=', pos + key.size());
-                    if (eq == std::string::npos)
+                    auto eq = line_view.find('=', pos + key.size());
+                    if (eq == std::string_view::npos)
                         continue;
-                    std::string rhs = trim(line.substr(eq + 1));
+
+                    std::string_view rhs = trim(line_view.substr(eq + 1));
                     if (!rhs.empty() && (rhs.front() == '"' || rhs.front() == '\'')) {
                         char q = rhs.front();
                         auto endq = rhs.find_last_of(q);
-                        if (endq != std::string::npos && endq > 0) {
-                            std::string val = rhs.substr(1, endq - 1);
+                        if (endq != std::string_view::npos && endq > 0) {
+                            std::string_view val = rhs.substr(1, endq - 1);
                             if (!val.empty())
-                                return fs::path(val);
+                                return fs::path(std::string(val));
                         }
                     } else if (!rhs.empty()) {
-                        return fs::path(rhs);
+                        return fs::path(std::string(rhs));
                     }
                 }
             }

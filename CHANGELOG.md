@@ -15,6 +15,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
+## [v0.7.7] - Unreleased
+
+### Added
+- Started C++23 Compatibilty support expansion
+- Migrated vectordb to [https://github.com/trvon/sqlite-vec-cpp](https://github.com/trvon/sqlite-vec-cpp)
+
+### Changed
+- **ONNX Plugin Model Path Resolution**: Enhanced model path search to support XDG Base Directory specification
+- Model loading timeouts hardened: adapter and ONNX plugin now use std::async with bounded wait; removed detached threads causing UAF/segfaults (AsioConnectionPool guarded)
+- Vector DB dim resolution no longer hardcodes 384; resolves from DB/config/env/provider preferred model, else warns and defers embeddings
+- ONNX plugin: removed implicit 384 defaults, derives embeddingDim dynamically from model/config; added env override YAMS_ONNX_PRECREATE_RESOURCES
+- Improved load diagnostics: detailed logs for ABI table pointers, phases, and timeout causes
+- **Search Service Path Heuristic**: Tightened path-first detection to only trigger for single-token or quoted path-like queries (slashes, wildcards, or extensions). Multi-word queries now proceed to hybrid/metadata search, restoring results for phrases such as `"docs/delivery backlog prd tasks PBI"` while preserving fast path lookups for actual paths.
+
+## Removed
+- Removed WASM, and legacy plugin system from codebase and ServiceManager
+
 ## [v0.7.6] - 10-13-2025
 ### Added
 - **CLI Pattern Ergonomics**: Added `--pattern/-p` flag to `list` command as an alias for `--name`, improving consistency with other commands. The flag supports glob wildcards (`*`, `?`, `**`) and auto-normalizes relative paths to absolute when no wildcards are present. (`src/cli/commands/list_command.cpp`)

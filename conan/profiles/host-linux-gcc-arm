@@ -4,7 +4,7 @@ arch=armv8
 compiler=gcc
 compiler.version=11
 compiler.libcxx=libstdc++11
-compiler.cppstd=20
+compiler.cppstd=23
 build_type=Release
 
 [conf]

@@ -3,7 +3,7 @@ project('yams', 'cpp', 'c',
   default_options: [
     'buildtype=release',
     'warning_level=3',
-    'cpp_std=c++20',
+    'cpp_std=c++23',  # Request C++23 (fallback to C++20 via feature detection)
     'c_std=c11',
   ],
 )
@@ -25,6 +25,91 @@ onnx_opt = get_option('enable-onnx')
 require_fts5 = get_option('require-fts5')
 sqlite_dep = dependency('sqlite3', required: true)
 cpp = meson.get_compiler('cpp')
+
+# ============================================================================
+# C++23 Feature Detection
+# ============================================================================
+# Detect C++23 constexpr container support
+# This allows us to use constexpr std::vector, std::string in C++23 while
+# maintaining fallback compatibility with C++20 compilers
+has_constexpr_vector = cpp.compiles('''
+    #include <vector>
+    constexpr int test_constexpr_vector() {
+        std::vector<int> v = {1, 2, 3, 4, 5};
+        v.push_back(6);
+        return v.size();
+    }
+    int main() { 
+        constexpr int size = test_constexpr_vector();
+        return size == 6 ? 0 : 1;
+    }
+    ''',
+    name: 'C++23 constexpr std::vector support',
+    args: cpp.get_id() == 'msvc' ? ['/std:c++latest'] : []
+)
+
+has_constexpr_string = cpp.compiles('''
+    #include <string>
+    constexpr bool test_constexpr_string() {
+        std::string s = "hello";
+        s += " world";
+        return s.size() == 11;
+    }
+    int main() { 
+        constexpr bool result = test_constexpr_string();
+        return result ? 0 : 1;
+    }
+    ''',
+    name: 'C++23 constexpr std::string support',
+    args: cpp.get_id() == 'msvc' ? ['/std:c++latest'] : []
+)
+
+# Check actual C++ standard being used
+cpp_std_version = cpp.get_define('__cplusplus')
+message('C++ standard macro __cplusplus: @0@'.format(cpp_std_version))
+
+# Report feature detection results
+if has_constexpr_vector
+    message('✓ C++23 constexpr std::vector detected')
+    add_project_arguments('-DYAMS_HAS_CONSTEXPR_VECTOR=1', language: 'cpp')
+else
+    message('✗ C++23 constexpr std::vector not available (using C++20 fallback)')
+    add_project_arguments('-DYAMS_HAS_CONSTEXPR_VECTOR=0', language: 'cpp')
+endif
+
+if has_constexpr_string
+    message('✓ C++23 constexpr std::string detected')
+    add_project_arguments('-DYAMS_HAS_CONSTEXPR_STRING=1', language: 'cpp')
+else
+    message('✗ C++23 constexpr std::string not available (using C++20 fallback)')
+    add_project_arguments('-DYAMS_HAS_CONSTEXPR_STRING=0', language: 'cpp')
+endif
+
+# Add unified flag for all C++23 constexpr container features
+if has_constexpr_vector and has_constexpr_string
+    message('✓ Full C++23 constexpr containers support enabled')
+    add_project_arguments('-DYAMS_HAS_CONSTEXPR_CONTAINERS=1', language: 'cpp')
+else
+    message('ℹ Using C++20 mode (constexpr containers unavailable)')
+    add_project_arguments('-DYAMS_HAS_CONSTEXPR_CONTAINERS=0', language: 'cpp')
+endif
+
+# Detect compiler version for documentation
+cpp_id = cpp.get_id()
+cpp_version = cpp.version()
+message('Compiler: @0@ @1@'.format(cpp_id, cpp_version))
+
+# Warn if using older compiler that doesn't support C++23
+if not has_constexpr_vector
+    if cpp_id == 'gcc' and cpp_version.version_compare('<13.0')
+        warning('GCC 13+ recommended for full C++23 support (detected: @0@)'.format(cpp_version))
+    elif cpp_id == 'clang' and cpp_version.version_compare('<16.0')
+        warning('Clang 16+ recommended for full C++23 support (detected: @0@)'.format(cpp_version))
+    elif cpp_id == 'msvc' and cpp_version.version_compare('<19.33')
+        warning('MSVC 19.33+ (VS 2022 17.3+) recommended for full C++23 support (detected: @0@)'.format(cpp_version))
+    endif
+endif
+# ============================================================================
 
 # Optional LLD linker support (preferred with Clang, optional with GCC)
 use_lld = get_option('use-lld')

@@ -4,7 +4,7 @@ arch=armv8
 compiler=apple-clang
 compiler.version=14
 compiler.libcxx=libc++
-compiler.cppstd=20
+compiler.cppstd=23
 build_type=Debug
 
 [options]

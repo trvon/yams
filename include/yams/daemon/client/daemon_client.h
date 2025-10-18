@@ -25,6 +25,7 @@ struct ClientConfig {
     std::chrono::milliseconds bodyTimeout{60000};   // 60s timeout for receiving response body
     std::chrono::milliseconds requestTimeout{5000};
     size_t maxRetries = 3;
+    std::chrono::milliseconds retryBaseDelay{75}; // exponential backoff base
     bool autoStart = true;
     bool enableCircuitBreaker = true;
     bool enableChunkedResponses = true;

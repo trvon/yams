@@ -672,9 +672,8 @@ private:
         }
 
         // Check available models
-        const char* home = std::getenv("HOME");
-        if (home) {
-            fs::path modelsPath = fs::path(home) / ".yams" / "models";
+        if (cli_) {
+            fs::path modelsPath = cli_->getDataPath() / "models";
             if (fs::exists(modelsPath)) {
                 for (const auto& entry : fs::directory_iterator(modelsPath)) {
                     if (entry.is_directory()) {

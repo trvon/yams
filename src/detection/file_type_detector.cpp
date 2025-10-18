@@ -1,3 +1,4 @@
+#include <yams/core/magic_numbers.hpp> // C++23 constexpr patterns
 #include <yams/detection/file_type_detector.h>
 
 #include <nlohmann/json.hpp>
@@ -937,6 +938,42 @@ Result<std::vector<std::byte>> FileTypeDetector::hexToBytes(const std::string& h
 std::vector<FilePattern> getDefaultPatterns() {
     std::vector<FilePattern> patterns;
 
+#if YAMS_HAS_CONSTEXPR_CONTAINERS
+    // C++23: Use compile-time magic numbers
+    const auto& magic_patterns = yams::magic::get_magic_patterns();
+    patterns.reserve(magic_patterns.size());
+
+    for (const auto& magic_pat : magic_patterns) {
+        FilePattern pattern;
+        // Convert our magic pattern format to FilePattern format
+        pattern.offset = magic_pat.offset;
+        pattern.fileType = std::string(magic_pat.file_type);
+        pattern.mimeType = std::string(magic_pat.mime_type);
+        pattern.description = std::string(magic_pat.description);
+        pattern.confidence = magic_pat.confidence;
+
+        // Convert hex bytes to pattern
+        pattern.pattern.reserve(magic_pat.length);
+        for (size_t i = 0; i < magic_pat.length; ++i) {
+            pattern.pattern.push_back(static_cast<std::byte>(magic_pat.bytes[i]));
+        }
+
+        // Build hex string for compatibility
+        std::ostringstream hex_stream;
+        hex_stream << std::hex << std::uppercase << std::setfill('0');
+        for (size_t i = 0; i < magic_pat.length; ++i) {
+            hex_stream << std::setw(2) << static_cast<int>(magic_pat.bytes[i]);
+        }
+        pattern.patternHex = hex_stream.str();
+
+        patterns.push_back(std::move(pattern));
+    }
+
+    // Info: Loaded patterns from compile-time database
+    return patterns;
+
+#else
+    // C++20: Runtime fallback with smaller hardcoded set
     // Define common file signatures
     struct PatternDef {
         const char* hex;
@@ -1013,6 +1050,7 @@ std::vector<FilePattern> getDefaultPatterns() {
     }
 
     return patterns;
+#endif
 }
 
 bool isBinaryData(std::span<const std::byte> data) {

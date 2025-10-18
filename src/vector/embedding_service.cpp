@@ -100,12 +100,7 @@ bool EmbeddingService::isAvailable() const {
 std::vector<std::string> EmbeddingService::getAvailableModels() const {
     std::vector<std::string> availableModels;
 
-    const char* home = std::getenv("HOME");
-    if (!home) {
-        return availableModels;
-    }
-
-    fs::path modelsPath = fs::path(home) / ".yams" / "models";
+    fs::path modelsPath = dataPath_ / "models";
     if (!fs::exists(modelsPath)) {
         return availableModels;
     }
@@ -531,8 +526,7 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
             }
         }
 
-        const char* home = std::getenv("HOME");
-        fs::path modelsPath = fs::path(home ? home : "") / ".yams" / "models";
+        fs::path modelsPath = dataPath_ / "models";
 
         // Resolve target vector DB dimension first to steer model selection if needed
         size_t targetDbDim = 0;

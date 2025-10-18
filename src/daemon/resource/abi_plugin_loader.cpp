@@ -6,7 +6,6 @@
 #include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host_services.h>
-#include <yams/daemon/resource/plugin_loader.h>
 #include <yams/plugins/abi.h>
 
 namespace yams::daemon {
@@ -433,7 +432,16 @@ bool AbiPluginLoader::isTrusted(const std::filesystem::path& p) const {
             // PluginLoader::getDefaultPluginDirectories() and only considering those that
             // actually exist and contain the candidate path. This allows config-driven plugin
             // dirs to work without separate trust persistence in tests.
-            auto defaults = yams::daemon::PluginLoader::getDefaultPluginDirectories();
+            std::vector<std::filesystem::path> defaults;
+            if (const char* home = std::getenv("HOME"))
+                defaults.push_back(std::filesystem::path(home) / ".local" / "lib" / "yams" /
+                                   "plugins");
+            defaults.push_back(std::filesystem::path("/usr/local/lib/yams/plugins"));
+            defaults.push_back(std::filesystem::path("/usr/lib/yams/plugins"));
+#ifdef YAMS_INSTALL_PREFIX
+            defaults.push_back(std::filesystem::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" /
+                               "plugins");
+#endif
             for (const auto& cd : defaults) {
                 std::error_code ec;
                 if (cd.empty() || !std::filesystem::exists(cd, ec))

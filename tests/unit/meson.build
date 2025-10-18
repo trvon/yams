@@ -29,6 +29,7 @@ unit_app_services = files(
   'app/services/search_hash_edge_cases_test.cpp',
   'app/services/session_service_test.cpp',
   'app/services/utils_test.cpp',
+  'app/services/download_service_smoke_test.cpp',
 )
 
 unit_chunking = files(
@@ -36,15 +37,23 @@ unit_chunking = files(
   'chunking/streaming_chunker_test.cpp',
 )
 
+unit_core = files(
+  'core/cpp23_features_test.cpp',
+  'core/magic_numbers_test.cpp',
+)
+
 unit_cli = []
 if tests_has_cli
   unit_cli += files(
+    'cli/config_command_test.cpp',
     'cli/daemon_command_test.cpp',
     'cli/model_command_test.cpp',
     'cli/recommendation_util_test.cpp',
     'cli/session_command_test.cpp',
     'cli/stream_heuristics_test.cpp',
     'cli/update_command_test.cpp',
+    'cli/add_command_stdin_test.cpp',
+    'cli/grep_command_path_tree_test.cpp',
   )
 
   if get_option('enable-tui')
@@ -91,12 +100,12 @@ unit_daemon_base = files(
   'daemon/get_stats_wal_metrics_test.cpp',
   'daemon/ipc_server_test.cpp',
   'daemon/message_framing_test.cpp',
+  'daemon/socket_utils_test.cpp',
   'daemon/plugin_host_test.cpp',
   'daemon/plugin_host_fsm_failure_test.cpp',
   'daemon/plugin_host_fsm_recovery_test.cpp',
   'daemon/daemon_plugins_degraded_status_test.cpp',
   'daemon/daemon_plugins_recovery_status_test.cpp',
-  'daemon/plugin_loader_test.cpp',
   'daemon/post_ingest_queue_test.cpp',
   'daemon/grep_response_proto_test.cpp',
   'daemon/internal_event_bus_concurrency_test.cpp',
@@ -115,7 +124,6 @@ unit_daemon_base = files(
   'daemon/ipc_message_type_test.cpp',
   'daemon/proto_roundtrip_test.cpp',
   'daemon/streaming_processor_test.cpp',
-  'daemon/wasm_plugin_harness_test.cpp',
   # excluded: multiplex_client_test.cpp, request_dispatcher_plugin_test.cpp, onnx_*
 )
 
@@ -177,22 +185,25 @@ unit_mcp = files(
 )
 
 unit_metadata = files(
+  'metadata/concepts_compile_test.cpp',
+  'metadata/connection_pool_maintenance_smoke_test.cpp',
+  'metadata/connection_pool_waiting_guard_test.cpp',
+  'metadata/database_statement_time_test.cpp',
   'metadata/database_test.cpp',
+  'metadata/fts_queryspec_integration_test.cpp',
+  'metadata/fts5_performance_stress_test.cpp',
   'metadata/fts5_test.cpp',
   'metadata/kg_store_alias_and_entities_test.cpp',
   'metadata/kg_store_test.cpp',
+  'metadata/metadata_repository_cache_test.cpp',
   'metadata/metadata_repository_test.cpp',
   'metadata/metadata_schema_test.cpp',
+  'metadata/metadata_value_variant_test.cpp',
+  'metadata/path_tree_delete_test.cpp',
+  'metadata/query_helpers_integration_test.cpp',
   'metadata/query_helpers_test.cpp',
   'metadata/sql_build_select_test.cpp',
-  'metadata/concepts_compile_test.cpp',
   'metadata/tags_queryspec_integration_test.cpp',
-  'metadata/fts_queryspec_integration_test.cpp',
-  'metadata/query_helpers_integration_test.cpp',
-  'metadata/database_statement_time_test.cpp',
-  'metadata/metadata_repository_cache_test.cpp',
-  'metadata/connection_pool_maintenance_smoke_test.cpp',
-  'metadata/connection_pool_waiting_guard_test.cpp',
   'metadata/tree_builder_test.cpp',
   'metadata/tree_differ_test.cpp',
 )
@@ -245,6 +256,7 @@ unit_srcs += unit_root
 unit_srcs += unit_api
 unit_srcs += unit_app_services
 unit_srcs += unit_chunking
+unit_srcs += unit_core
 unit_srcs += unit_cli
 unit_srcs += unit_compression
 unit_srcs += unit_compression_opt

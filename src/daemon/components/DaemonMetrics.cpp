@@ -878,9 +878,9 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                     // Best-effort local model path resolution
                     if (out.embeddingModelPath.empty() && !out.embeddingModel.empty()) {
                         try {
-                            if (const char* home = std::getenv("HOME")) {
+                            if (services_) {
                                 namespace fs = std::filesystem;
-                                fs::path p = fs::path(home) / ".yams" / "models" /
+                                fs::path p = services_->getResolvedDataDir() / "models" /
                                              out.embeddingModel / "model.onnx";
                                 std::error_code ec;
                                 if (fs::exists(p, ec))

@@ -144,7 +144,8 @@ public:
                         "Name for the document (especially useful for stdin)");
         cmd->add_option("-t,--tags", tags_, "Tags for the document (comma-separated)")
             ->delimiter(',');
-        cmd->add_option("-m,--metadata", metadata_, "Metadata key=value pairs");
+        cmd->add_option("-m,--metadata", metadata_, "Metadata key=value pairs (comma-separated)")
+            ->delimiter(',');
         cmd->add_option("--mime-type", mimeType_, "MIME type of the document");
         cmd->add_flag("--no-auto-mime", disableAutoMime_, "Disable automatic MIME type detection");
         cmd->add_flag("--no-embeddings", noEmbeddings_,
@@ -497,12 +498,9 @@ private:
             return Error{ErrorCode::NotInitialized, "Failed to create document service"};
         }
 
-        // Read all content from stdin
-        std::string content;
-        std::string line;
-        while (std::getline(std::cin, line)) {
-            content += line + "\n";
-        }
+        // Read all content from stdin (preserve bytes/newlines)
+        std::string content((std::istreambuf_iterator<char>(std::cin)),
+                            std::istreambuf_iterator<char>());
 
         if (content.empty()) {
             return Error{ErrorCode::InvalidArgument, "No content received from stdin"};

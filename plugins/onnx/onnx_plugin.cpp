@@ -15,7 +15,7 @@ static const char* kManifestJson = R"JSON({
   "interfaces": [
     {"id": "model_provider_v1", "version": 2}
   ]
-})JSON";
+})JSON"; // ABI v1.2 (model_provider_v1 version=2)
 
 // Lightweight runtime flags
 static bool g_plugin_disabled = false; // set by env at init
@@ -57,8 +57,8 @@ YAMS_PLUGIN_API int yams_plugin_get_interface(const char* id, uint32_t version, 
     *out_iface = nullptr;
     if (g_plugin_disabled)
         return YAMS_PLUGIN_ERR_NOT_FOUND;
-    if ((version == 2 || version == YAMS_IFACE_MODEL_PROVIDER_V1_VERSION) &&
-        std::strcmp(id, YAMS_IFACE_MODEL_PROVIDER_V1) == 0) {
+    // Accept any version >= 1 up to our max (2), to avoid CLI hangs on minor mismatches
+    if ((version >= 1 && version <= 2) && std::strcmp(id, YAMS_IFACE_MODEL_PROVIDER_V1) == 0) {
         *out_iface = static_cast<void*>(yams_onnx_get_model_provider());
         return (*out_iface) ? YAMS_PLUGIN_OK : YAMS_PLUGIN_ERR_NOT_FOUND;
     }

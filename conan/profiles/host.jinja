@@ -1,7 +1,7 @@
 include(default)
 
 [settings]
-compiler.cppstd=20
+compiler.cppstd=23
 {% if os == "Macos" %}
 # Conan Jinja execution context does not expose a generic 'env' mapping reliably; we pin a default.
 # Override at CI by post-edit (sed) if a different apple-clang major is required.

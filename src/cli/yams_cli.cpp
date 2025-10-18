@@ -705,9 +705,8 @@ Result<void> YamsCLI::initializeStorage() {
             }
 
             // Second, detect dimension from available models
-            const char* home = std::getenv("HOME");
-            if (home) {
-                fs::path modelsPath = fs::path(home) / ".yams" / "models";
+            if (const char* home = std::getenv("HOME"); home) {
+                fs::path modelsPath = dataPath_ / "models";
                 if (fs::exists(modelsPath)) {
                     // Check for specific models in priority order
                     if (fs::exists(modelsPath / "all-MiniLM-L6-v2" / "model.onnx")) {
@@ -750,9 +749,8 @@ Result<void> YamsCLI::initializeStorage() {
             if (vectorIndexManager_) {
                 try {
                     // Check for available models
-                    // Reuse existing HOME env var; avoid shadowing warnings
-                    if (home) {
-                        fs::path modelsPath = fs::path(home) / ".yams" / "models";
+                    if (const char* home = std::getenv("HOME"); home) {
+                        fs::path modelsPath = dataPath_ / "models";
                         if (fs::exists(modelsPath)) {
                             // Configure embedding settings
                             vector::EmbeddingConfig embConfig;

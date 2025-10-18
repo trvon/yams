@@ -3,10 +3,9 @@ import os
 from conan.tools.layout import basic_layout
 from conan.tools.build import check_min_cppstd
 
-
 class YamsConan(ConanFile):
     name = "yams"
-    version = "0.7.1"
+    version = "0.8.0"
     license = "GPL-3.0-or-later"
     author = "YAMS Contributors"
     url = "https://github.com/trvon/yams"

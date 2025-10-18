@@ -2,20 +2,44 @@
 #include <yams/daemon/ipc/proto_serializer.h>
 
 #include <spdlog/spdlog.h>
+#include <array>
 #include <cstring>
-#include <zlib.h> // For CRC32
 #include <arpa/inet.h>
 
 namespace yams::daemon {
 
 // ============================================================================
-// CRC32 Calculation
+// CRC32 Calculation with Constexpr Table (PBI-058 Task 058-15)
 // ============================================================================
 
 namespace {
-uint32_t calculate_crc32_impl(const uint8_t* data, size_t size) {
-    return crc32(0, data, size);
+
+// Generate CRC32 lookup table at compile-time
+// Uses the CRC-32 polynomial 0xEDB88320 (reversed 0x04C11DB7)
+constexpr std::array<uint32_t, 256> generate_crc32_table() noexcept {
+    std::array<uint32_t, 256> table{};
+    for (uint32_t i = 0; i < 256; ++i) {
+        uint32_t crc = i;
+        for (int j = 0; j < 8; ++j) {
+            crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320 : 0);
+        }
+        table[i] = crc;
+    }
+    return table;
 }
+
+// Compile-time generated CRC32 table
+constexpr auto CRC32_TABLE = generate_crc32_table();
+
+// Runtime CRC32 calculation using constexpr table
+uint32_t calculate_crc32_impl(const uint8_t* data, size_t size) noexcept {
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 0; i < size; ++i) {
+        crc = CRC32_TABLE[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+    }
+    return ~crc;
+}
+
 } // namespace
 
 uint32_t MessageFramer::calculate_crc32(std::span<const uint8_t> data) noexcept {
@@ -90,7 +114,7 @@ Result<std::vector<uint8_t>> MessageFramer::frame_message(const Message& message
     auto res = frame_message_into(message, frame);
     if (!res)
         return res.error();
-    return frame;
+    return std::move(frame);
 }
 
 Result<std::vector<uint8_t>> MessageFramer::frame_message_header(const Message& message,
@@ -99,7 +123,7 @@ Result<std::vector<uint8_t>> MessageFramer::frame_message_header(const Message& 
     auto res = frame_message_header_into(message, frame);
     if (!res)
         return res.error();
-    return frame;
+    return std::move(frame);
 }
 
 Result<std::vector<uint8_t>> MessageFramer::frame_message_chunk(const Message& message,
@@ -108,7 +132,7 @@ Result<std::vector<uint8_t>> MessageFramer::frame_message_chunk(const Message& m
     auto res = frame_message_chunk_into(message, frame, last_chunk);
     if (!res)
         return res.error();
-    return frame;
+    return std::move(frame);
 }
 
 Result<MessageFramer::ChunkedMessageInfo>
@@ -135,7 +159,7 @@ MessageFramer::get_frame_info(std::span<const uint8_t> data) {
     return info;
 }
 
-Result<Message> MessageFramer::parse_frame(const std::vector<uint8_t>& frame) {
+Result<Message> MessageFramer::parse_frame(std::span<const uint8_t> frame) {
     if (frame.size() < sizeof(FrameHeader)) {
         return Error{ErrorCode::InvalidData, "Frame too small for header"};
     }
@@ -159,8 +183,8 @@ Result<Message> MessageFramer::parse_frame(const std::vector<uint8_t>& frame) {
         return Error{ErrorCode::InvalidData, "Frame size mismatch"};
     }
 
-    // Extract message data
-    std::vector<uint8_t> message_data(frame.begin() + sizeof(FrameHeader), frame.end());
+    // Extract message data as span (zero-copy)
+    auto message_data = frame.subspan(sizeof(FrameHeader));
 
     // Verify checksum
     uint32_t calculated_crc = calculate_crc32(message_data);
@@ -183,7 +207,7 @@ Result<std::vector<uint8_t>> MessageFramer::serialize_message(const Message& mes
     }
 }
 
-Result<Message> MessageFramer::deserialize_message(const std::vector<uint8_t>& data) {
+Result<Message> MessageFramer::deserialize_message(std::span<const uint8_t> data) {
     try {
         return ProtoSerializer::decode_payload(data);
     } catch (const std::exception& e) {

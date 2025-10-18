@@ -235,6 +235,37 @@ message GrepRequest {
   bool show_diff = 26;
 }
 
+// ---------------------------------------------------------------------------
+// Path‑tree (hierarchical) search request/response.
+// This is a lightweight RPC that returns aggregated document counts for a
+// given prefix and optionally the top‑N child nodes. It is used by the new
+// RetrievalService::pathTreeGrep implementation (option B).
+// ---------------------------------------------------------------------------
+message PathTreeRequest {
+  // The normalized prefix to query – must be an absolute path (e.g. "/project/src").
+  string prefix = 1;
+  // Maximum number of child entries to return. Zero means only the node stats.
+  uint64 child_limit = 2;
+}
+
+message PathTreeNode {
+  // Full path of the node (including the prefix and the child segment).
+  string full_path = 1;
+  // Number of documents indexed under this node (including its subtree).
+  int64 doc_count = 2;
+  // Optional centroid vector for the node – stored as raw bytes (float array).
+  bytes centroid = 3;
+}
+
+message PathTreeResponse {
+  // Document count for the requested prefix node.
+  int64 doc_count = 1;
+  // Optional centroid for the prefix node.
+  bytes centroid = 2;
+  // Top‑N child nodes ordered by doc_count (if child_limit > 0).
+  repeated PathTreeNode top_children = 3;
+}
+
 message UpdateDocumentRequest {
   string hash = 1;
   string name = 2;
@@ -674,5 +705,7 @@ message Envelope {
     // Tree diff responses (PBI-043)
     ListTreeDiffResponse list_tree_diff_response = 129;
     FileHistoryResponse file_history_response = 130;
+    PathTreeResponse path_tree_response = 131;
+
   }
 }

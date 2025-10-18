@@ -27,7 +27,8 @@ else
   message('yams_cli dependency unavailable; skipping CLI-driven smoke tests.')
 endif
 
-if get_option('enable-integration-tests') and get_option('enable-integration-smoke') and integration_smoke_srcs.length() > 0
+dbg = (get_option('buildtype') == 'debug')
+if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-smoke') or dbg) and integration_smoke_srcs.length() > 0
   integ_exe = executable('yams_integration_smoke_tests', integration_smoke_srcs + files('test_main_smoke.cpp'),
     include_directories: incs,
     dependencies: [gtest_dep, test_deps],
@@ -37,7 +38,10 @@ if get_option('enable-integration-tests') and get_option('enable-integration-smo
 
   test('integration_smoke', integ_exe,
     suite: ['integration', 'isolated'],
-    env: {'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1'},
+    env: {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'YAMS_DISABLE_VECTORS': '1',
+    },
     is_parallel: false,
     timeout: get_option('integration-smoke-timeout'),
   )

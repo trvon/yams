@@ -14,10 +14,8 @@
 #include <fstream>
 #include <iostream>
 #include <yams/config/config_migration.h>
-#include <yams/daemon/ipc/fsm_metrics_registry.h>
-
 #include <yams/daemon/components/TuneAdvisor.h>
-#include <yams/daemon/resource/plugin_loader.h>
+#include <yams/daemon/ipc/fsm_metrics_registry.h>
 
 // POSIX headers for daemonization
 #include <fcntl.h>     // for open(), O_RDONLY, O_RDWR
@@ -646,14 +644,6 @@ int main(int argc, char* argv[]) {
         config.dataDir = expand_tilde(config.dataDir);
     } catch (...) {
         // best effort
-    }
-
-    // Propagate configured plugin directory (if any) into PluginLoader global configuredDirs
-    if (!config.pluginDir.empty()) {
-        yams::daemon::PluginLoader::setConfiguredPluginDirectories({config.pluginDir});
-    } else {
-        // Clear configured dirs to rely solely on defaults if none provided
-        yams::daemon::PluginLoader::setConfiguredPluginDirectories({});
     }
 
     // If dataDir not specified, allow environment to define it (YAMS_STORAGE or YAMS_DATA_DIR)

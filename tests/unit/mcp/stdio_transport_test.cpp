@@ -15,14 +15,6 @@ static std::string frameMessage(const test_json& j) {
     return j.dump() + "\n";
 }
 
-// Legacy LSP-style framing (for backwards compatibility testing)
-static std::string frameLSP(const test_json& j) {
-    std::string payload = j.dump();
-    std::ostringstream oss;
-    oss << "Content-Length: " << payload.size() << "\r\n\r\n" << payload;
-    return oss.str();
-}
-
 static std::string frameRaw(const std::string& raw) {
     return raw + "\n";
 }
@@ -327,30 +319,6 @@ TEST_F(StdioTransportTest, LargeMessage) {
     }
 }
 
-TEST_F(StdioTransportTest, BackwardsCompatibilityLSPInput) {
-    // Test that we can read LSP-style input (backwards compatibility)
-    // but always output NDJSON (spec-compliant)
-    json testMessage = {{"jsonrpc", "2.0"}, {"id", 1}, {"method", "test"}};
-
-    // Send LSP-framed input
-    setInput(frameLSP(testMessage));
-    auto result = transport->receive();
-
-    EXPECT_TRUE(result);
-    if (result) {
-        EXPECT_EQ(result.value()["method"], "test");
-    }
-
-    // But output should still be NDJSON
-    clearOutput();
-    transport->send(testMessage);
-    std::string output = getOutput();
-
-    // Should be NDJSON, not LSP
-    EXPECT_EQ(output.back(), '\n');
-    EXPECT_EQ(output.find("Content-Length:"), std::string::npos);
-}
-
 TEST_F(StdioTransportTest, NDJSONInputAndOutput) {
     // Test standard NDJSON input/output (MCP spec compliant)
     json testMessage = {{"jsonrpc", "2.0"}, {"id", 1}, {"method", "test"}};
@@ -389,18 +357,6 @@ TEST_F(StdioTransportTest, ReceiveJsonRpcBatch) {
     EXPECT_EQ(received.size(), 2);
     EXPECT_EQ(received[0].at("id"), 1);
     EXPECT_EQ(received[1].at("method"), "batch.two");
-}
-
-TEST_F(StdioTransportTest, ReceivesFramedMessageWithContentLength) {
-    json framedMessage = {{"jsonrpc", "2.0"}, {"id", 7}, {"method", "framed"}};
-
-    setInput(frameLSP(framedMessage));
-
-    auto result = transport->receive();
-    ASSERT_TRUE(result);
-    const auto& message = result.value();
-    EXPECT_EQ(message.at("id"), 7);
-    EXPECT_EQ(message.at("method"), "framed");
 }
 
 TEST_F(StdioTransportTest, MalformedHeadersExhaustRetryBudget) {

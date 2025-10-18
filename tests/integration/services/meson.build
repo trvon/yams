@@ -1,7 +1,8 @@
 # Meson-native registration for services integration tests (no shell globs)
 
 # Explicit file list keeps configuration deterministic and fast
-if get_option('enable-integration-tests') and get_option('enable-integration-services') and tests_has_cli
+dbg = (get_option('buildtype') == 'debug')
+if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-services') or dbg) and tests_has_cli
   services_integration_srcs = files(
     'retrieval_and_ingestion_service_test.cpp',
     'ipc_conformance_test.cpp',
@@ -22,6 +23,7 @@ if get_option('enable-integration-tests') and get_option('enable-integration-ser
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'YAMS_STRESS_ITERS': get_option('stress-iters').to_string(),
+      'YAMS_DISABLE_VECTORS': '1',
     },
     is_parallel: false,
     timeout: get_option('integration-timeout'),
@@ -33,6 +35,7 @@ if get_option('enable-integration-tests') and get_option('enable-integration-ser
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'YAMS_STRESS_ITERS': get_option('stress-iters').to_string(),
+      'YAMS_DISABLE_VECTORS': '1',
     },
     is_parallel: false,
     timeout: get_option('integration-ui-timeout'),

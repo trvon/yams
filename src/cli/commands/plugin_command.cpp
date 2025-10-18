@@ -269,40 +269,7 @@ void PluginCommand::listPlugins() {
         bool have_typed = sres && !sres.value().providers.empty();
         bool have_json = res && res.value().additionalStats.contains("plugins_json") &&
                          res.value().additionalStats.at("plugins_json") != "[]";
-        // If not available, request a scan and then wait briefly for readiness/providers
-        bool need_scan = !(have_typed || have_json);
-        if (need_scan) {
-            PluginScanRequest scan; // empty -> server uses configured search paths
-            auto& client = **leaseHandle;
-            auto scanRes = yams::cli::run_result<PluginScanResponse>(
-                client.call(scan), std::chrono::milliseconds(10000));
-            if (!scanRes) {
-                auto err = scanRes.error();
-                auto statusFetcher = [&]() -> StatusResult { return fetch_status(); };
-                if (!handle_plugin_rpc_error(err, statusFetcher, "Plugin scan"))
-                    return;
-            }
-            // Wait up to ~3s for plugin readiness/providers
-            for (int i = 0; i < 6; ++i) {
-                sres = fetch_status();
-                if (sres) {
-                    const auto& st = sres.value();
-                    if (!st.providers.empty())
-                        break;
-                    auto itp = st.readinessStates.find("plugins");
-                    if (itp != st.readinessStates.end() && itp->second)
-                        break;
-                    auto itmp = st.readinessStates.find("model_provider");
-                    if (itmp != st.readinessStates.end() && itmp->second)
-                        break;
-                }
-                // Fallback to JSON snapshot
-                res = fetch_stats();
-                if (res && res.value().additionalStats.contains("plugins_json"))
-                    break;
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            }
-        }
+        // Do not trigger scans or poll; rely on daemon-provided status/stats only
         if (!sres && !res) {
             std::cout << "Failed to query daemon for plugins\n";
             return;

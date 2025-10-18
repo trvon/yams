@@ -27,7 +27,7 @@
 #include <yams/daemon/ipc/retrieval_session.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/plugin_host.h>
-#include <yams/daemon/resource/plugin_loader.h>
+
 #include <yams/extraction/content_extractor.h>
 
 // Forward declarations for services
@@ -50,7 +50,7 @@ class EmbeddingGenerator;
 class VectorDatabase;
 } // namespace yams::vector
 namespace yams::daemon {
-class PluginLoader;
+
 class AbiPluginLoader;
 class IModelProvider;
 class RetrievalSessionManager;
@@ -215,28 +215,6 @@ public:
         walMetricsProvider_->setManager(std::move(wal));
     }
 
-    // Plugins
-    std::vector<PluginInfo> getLoadedPlugins() const {
-        // Prefer ABI host view of loaded plugins; adapt to PluginInfo for stats
-        if (abiHost_) {
-            std::vector<PluginInfo> out;
-            try {
-                for (const auto& d : abiHost_->listLoaded()) {
-                    PluginInfo pi;
-                    pi.name = d.name;
-                    pi.path = d.path;
-                    pi.loaded = true;
-                    out.push_back(std::move(pi));
-                }
-                return out;
-            } catch (...) {
-            }
-        }
-        if (pluginLoader_)
-            return pluginLoader_->getLoadedPlugins();
-        return {};
-    }
-
     // Session watchers: polling mtime/size for pinned directories
     struct SessionWatchState {
         std::unordered_map<std::string,
@@ -250,8 +228,6 @@ public:
     AbiPluginLoader* getAbiPluginLoader() const { return abiPluginLoader_.get(); }
     // Plugin host (C‑ABI)
     AbiPluginHost* getAbiPluginHost() const { return abiHost_.get(); }
-    WasmPluginHost* getWasmPluginHost() const { return wasmHost_.get(); }
-    ExternalPluginHost* getExternalPluginHost() const { return externalHost_.get(); }
 
     // Worker pool metrics accessors
     std::size_t getWorkerActive() const { return poolActive_.load(std::memory_order_relaxed); }
@@ -290,7 +266,6 @@ public:
     // Ensure an embedding generator is available by adopting a provider and loading
     // the preferred model if necessary. Preferred model is resolved from config or
     // environment (YAMS_PREFERRED_MODEL), with a fallback to the first installed
-    // local model under ~/.yams/models.
     Result<void> ensureEmbeddingGeneratorReady();
     bool shouldPreloadEmbeddings() const;
     void scheduleEmbeddingWarmup();
@@ -416,11 +391,9 @@ private:
     std::unique_ptr<boost::asio::thread_pool> initPool_;
     std::unique_ptr<boost::asio::thread_pool>
         modelLoadPool_; // Dedicated pool for model loading operations
-    std::unique_ptr<PluginLoader> pluginLoader_;
+
     std::unique_ptr<AbiPluginLoader> abiPluginLoader_;
     std::unique_ptr<AbiPluginHost> abiHost_;
-    std::unique_ptr<WasmPluginHost> wasmHost_;
-    std::unique_ptr<ExternalPluginHost> externalHost_;
     std::unique_ptr<RetrievalSessionManager> retrievalSessions_;
     std::shared_ptr<WorkerPool> workerPool_;
     // Phase 6: background reconciler for PoolManager stats (logging only)

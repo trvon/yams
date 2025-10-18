@@ -8,7 +8,7 @@
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/client/daemon_client.h>
-#include <yams/daemon/resource/plugin_loader.h>
+#include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
@@ -183,8 +183,8 @@ public:
             if (const char* pref = std::getenv("YAMS_PREFERRED_MODEL"))
                 pick = std::string(pref);
             if (pick.empty()) {
-                if (const char* home = std::getenv("HOME")) {
-                    fs::path models = fs::path(home) / ".yams" / "models";
+                if (cli_) {
+                    fs::path models = cli_->getDataPath() / "models";
                     std::error_code ec;
                     if (fs::exists(models, ec) && fs::is_directory(models, ec)) {
                         for (const auto& e : fs::directory_iterator(models, ec)) {
@@ -284,10 +284,9 @@ public:
                     targetModel = p;
                 if (targetModel.empty()) {
                     // Fallback: prefer common local models
-                    const char* home = std::getenv("HOME");
-                    if (home) {
+                    if (cli_) {
                         namespace fs = std::filesystem;
-                        fs::path base = fs::path(home) / ".yams" / "models";
+                        fs::path base = cli_->getDataPath() / "models";
                         std::vector<std::string> prefs{"nomic-embed-text-v1.5",
                                                        "nomic-embed-text-v1", "all-MiniLM-L6-v2",
                                                        "all-mpnet-base-v2"};
@@ -1079,8 +1078,18 @@ private:
     // Resolve name to path by scanning default plugin dirs for a matching descriptor name
     static std::optional<std::filesystem::path> resolveByName(const std::string& name) {
         namespace fs = std::filesystem;
-        // 1) Try exact filename/stem match first
-        for (const auto& dir : yams::daemon::PluginLoader::getDefaultPluginDirectories()) {
+        // 1) Try exact filename/stem match first (ABI default dirs)
+        for (const auto& dir : std::vector<std::filesystem::path>{
+                 (std::getenv("HOME") ? std::filesystem::path(std::getenv("HOME")) / ".local" /
+                                            "lib" / "yams" / "plugins"
+                                      : std::filesystem::path()),
+                 std::filesystem::path("/usr/local/lib/yams/plugins"),
+                 std::filesystem::path("/usr/lib/yams/plugins")
+#ifdef YAMS_INSTALL_PREFIX
+                     ,
+                 std::filesystem::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins"
+#endif
+             }) {
             std::error_code ec;
             if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec))
                 continue;
@@ -1095,8 +1104,18 @@ private:
                     return p;
             }
         }
-        // 2) Try ABI descriptor name via dlopen + yams_plugin_get_name()
-        for (const auto& dir : yams::daemon::PluginLoader::getDefaultPluginDirectories()) {
+        // 2) Try ABI descriptor name via dlopen + yams_plugin_get_name() in default dirs
+        for (const auto& dir : std::vector<std::filesystem::path>{
+                 (std::getenv("HOME") ? std::filesystem::path(std::getenv("HOME")) / ".local" /
+                                            "lib" / "yams" / "plugins"
+                                      : std::filesystem::path()),
+                 std::filesystem::path("/usr/local/lib/yams/plugins"),
+                 std::filesystem::path("/usr/lib/yams/plugins")
+#ifdef YAMS_INSTALL_PREFIX
+                     ,
+                 std::filesystem::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins"
+#endif
+             }) {
             std::error_code ec;
             if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec))
                 continue;
@@ -1121,7 +1140,17 @@ private:
             }
         }
         // 3) Heuristic: filename contains the token (e.g., libyams_onnx_plugin.so for "onnx")
-        for (const auto& dir : yams::daemon::PluginLoader::getDefaultPluginDirectories()) {
+        for (const auto& dir : std::vector<std::filesystem::path>{
+                 (std::getenv("HOME") ? std::filesystem::path(std::getenv("HOME")) / ".local" /
+                                            "lib" / "yams" / "plugins"
+                                      : std::filesystem::path()),
+                 std::filesystem::path("/usr/local/lib/yams/plugins"),
+                 std::filesystem::path("/usr/lib/yams/plugins")
+#ifdef YAMS_INSTALL_PREFIX
+                     ,
+                 std::filesystem::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins"
+#endif
+             }) {
             std::error_code ec;
             if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec))
                 continue;
@@ -1302,11 +1331,11 @@ private:
         checkDaemon();
         if (!daemon_up) {
             // Only local checks when daemon is unavailable
-            checkInstalledModels();
+            checkInstalledModels(cli_);
             checkEmbeddingDimMismatch();
             return;
         }
-        checkInstalledModels();
+        checkInstalledModels(cli_);
         checkEmbeddingDimMismatch();
         // Show embedding runtime from daemon status (best-effort)
         try {
@@ -1671,7 +1700,7 @@ private:
 
     // Legacy prompt removed; using prompt_yes_no from prompt_util.h
 
-    static void checkInstalledModels() {
+    static void checkInstalledModels(YamsCLI* cli) {
         namespace fs = std::filesystem;
         const char* home = std::getenv("HOME");
         if (!home)
@@ -1681,9 +1710,12 @@ private:
         fs::path old_base = fs::path(home) / ".yams" / "models";
 
         // Check for models in NEW unified location
-        const char* xdg_data = std::getenv("XDG_DATA_HOME");
-        fs::path new_base = xdg_data ? fs::path(xdg_data) / "yams" / "models"
-                                     : fs::path(home) / ".local" / "share" / "yams" / "models";
+        fs::path new_base = cli ? cli->getDataPath() / "models" : "";
+        if (new_base.empty()) {
+            const char* xdg_data = std::getenv("XDG_DATA_HOME");
+            new_base = xdg_data ? fs::path(xdg_data) / "yams" / "models"
+                                : fs::path(home) / ".local" / "share" / "yams" / "models";
+        }
 
         std::error_code ec;
 
@@ -1829,9 +1861,31 @@ private:
         bool dbReady = status.vectorDbReady;
         size_t dbDim = status.vectorDbDim;
 
+        // Avoid polling in CLI; rely on current daemon status only
+
         if (!dbReady) {
+            // No direct DB/FS probing here — rely solely on daemon-reported status
+
             std::cout << "Vector database is not ready according to the daemon." << std::endl;
-            // The logic to offer DB creation can be adapted here to call a new daemon command.
+            // Provide actionable guidance
+            size_t runtimeDim = status.embeddingDim; // from daemon
+            std::cout << "\nTo initialize or rebuild vector DB:" << "\n"
+                      << "  1. (Optional) Remove corrupt or old DB: rm "
+                      << (cli_ ? (cli_->getDataPath() / "vectors.db").string()
+                               : "~/.local/share/yams/vectors.db")
+                      << " (only if you want a fresh index)\n"
+                      << "  2. Ensure desired model is installed: yams model download <model-name>"
+                      << "\n"
+                      << "  3. Set preferred model (env or config): yams config embeddings model "
+                         "<model-name>"
+                      << "\n"
+                      << "  4. (Optional) Set embedding dim: yams config set "
+                         "embeddings.embedding_dim <dim>"
+                      << "\n"
+                      << "  5. Restart daemon: yams daemon restart" << "\n"
+                      << "  6. Trigger rebuild by adding docs or running a search." << "\n";
+            std::cout << "\nInstalled models with heuristics (run 'yams doctor' above for details)."
+                      << std::endl;
             return;
         }
 

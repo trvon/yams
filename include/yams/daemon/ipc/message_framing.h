@@ -101,6 +101,15 @@ public:
         }
     };
 
+    // Compile-time validation (PBI-058 Task 058-15)
+    static_assert(HEADER_SIZE % 4 == 0, "Frame header must be 4-byte aligned for uint32_t fields");
+    static_assert(HEADER_SIZE == sizeof(FrameHeader),
+                  "HEADER_SIZE constant must match actual struct size");
+    static_assert(std::is_trivially_copyable_v<FrameHeader>,
+                  "FrameHeader must be trivially copyable for memcpy");
+    static_assert(std::is_standard_layout_v<FrameHeader>,
+                  "FrameHeader must have standard layout for binary serialization");
+
     // Frame a message with header and checksum
     template <FramedMessage T>
     [[nodiscard]] Result<std::vector<uint8_t>> frame(const T& message, bool chunked = false,
@@ -224,7 +233,7 @@ public:
                                            uint64_t total_size = 0);
     Result<void> frame_message_chunk_into(const Message& message, std::vector<uint8_t>& buffer,
                                           bool last_chunk = false);
-    Result<Message> parse_frame(const std::vector<uint8_t>& frame);
+    Result<Message> parse_frame(std::span<const uint8_t> frame);
 
     // Stream-oriented message framing
     struct ChunkedMessageInfo {
@@ -241,7 +250,7 @@ private:
     size_t max_message_size_;
 
     Result<std::vector<uint8_t>> serialize_message(const Message& message);
-    Result<Message> deserialize_message(const std::vector<uint8_t>& data);
+    Result<Message> deserialize_message(std::span<const uint8_t> data);
 
     // CRC32 checksum calculation
     [[nodiscard]] static uint32_t calculate_crc32(std::span<const uint8_t> data) noexcept;

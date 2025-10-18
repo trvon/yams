@@ -1,11 +1,15 @@
 // Replace stub with actual ONNX-backed implementation
-#include "model_provider.h"
+#include <future>
+
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <thread>
+#include "model_provider.h"
+#include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/resource/onnx_model_pool.h>
 
 namespace {
@@ -17,10 +21,12 @@ static yams_status_t onnx_set_threading(void* /*self*/, const char* /*model_id*/
 }
 
 struct ProviderCtx {
+    enum class State : uint8_t { Unloaded, Loading, Ready, Failed };
     std::mutex mu;
     yams_model_load_progress_cb progress_cb = nullptr;
     void* progress_user = nullptr;
     std::unique_ptr<yams::daemon::OnnxModelPool> pool;
+    std::unordered_map<std::string, State> model_states; // per-model FSM
     bool ready = false;
     bool disabled = false;
     std::string last_error;
@@ -115,13 +121,22 @@ struct ProviderCtx {
             // ignore config parse errors
         }
         pool = std::make_unique<yams::daemon::OnnxModelPool>(cfg);
-        if (auto r = pool->initialize()) {
-            ready = true;
-            last_error.clear();
+        // Initialize pool with bounded time to avoid hangs during plugin listing/doctor
+        auto fut = std::async(std::launch::async, [this]() { return pool->initialize(); });
+        if (fut.wait_for(std::chrono::seconds(5)) == std::future_status::ready) {
+            auto res = fut.get();
+            if (res) {
+                ready = true;
+                last_error.clear();
+            } else {
+                ready = false;
+                last_error = res.error().message;
+                spdlog::warn("[ONNX-Plugin] Pool initialize failed: {}", last_error);
+            }
         } else {
             ready = false;
-            last_error = r.error().message;
-            spdlog::warn("[ONNX-Plugin] Pool initialize failed: {}", last_error);
+            last_error = "pool_initialize_timeout";
+            spdlog::warn("[ONNX-Plugin] Pool initialize timed out");
         }
     }
 };
@@ -185,18 +200,44 @@ struct ProviderSingleton {
                     c->pool->setResolutionHints(model_id, hints);
                 }
             } catch (...) {
-                // ignore malformed options
+            }
+            // FSM: if already loading/ready, return OK
+            {
+                std::lock_guard<std::mutex> lk(c->mu);
+                auto& st = c->model_states[model_id];
+                if (st == ProviderCtx::State::Ready || st == ProviderCtx::State::Loading)
+                    return YAMS_OK;
+                st = ProviderCtx::State::Loading;
             }
             emit_progress(c, model_id, YAMS_MODEL_PHASE_PROBE, "probe");
-            auto r = c->pool->loadModel(model_id);
-            if (!r) {
-                emit_progress(c, model_id, YAMS_MODEL_PHASE_UNKNOWN, "error");
-                return YAMS_ERR_NOT_FOUND;
-            }
-            emit_progress(c, model_id, YAMS_MODEL_PHASE_LOAD, "initializing");
-            // Ready (pool creates session on first acquire if lazyLoading)
-            emit_progress(c, model_id, YAMS_MODEL_PHASE_READY, "ready");
-            return YAMS_OK;
+            // Launch async background loader; publish events
+            std::thread([c, mid = std::string(model_id)]() {
+                auto r = c->pool->loadModel(mid);
+                if (r) {
+                    {
+                        std::lock_guard<std::mutex> lk(c->mu);
+                        c->model_states[mid] = ProviderCtx::State::Ready;
+                    }
+                    emit_progress(c, mid.c_str(), YAMS_MODEL_PHASE_READY, "ready");
+                    auto q =
+                        yams::daemon::InternalEventBus::instance()
+                            .get_or_create_channel<yams::daemon::InternalEventBus::ModelReadyEvent>(
+                                "model.events", 256);
+                    (void)q->try_push({mid});
+                } else {
+                    {
+                        std::lock_guard<std::mutex> lk(c->mu);
+                        c->model_states[mid] = ProviderCtx::State::Failed;
+                    }
+                    emit_progress(c, mid.c_str(), YAMS_MODEL_PHASE_UNKNOWN, "error");
+                    auto q = yams::daemon::InternalEventBus::instance()
+                                 .get_or_create_channel<
+                                     yams::daemon::InternalEventBus::ModelLoadFailedEvent>(
+                                     "model.events", 256);
+                    (void)q->try_push({mid, r.error().message});
+                }
+            }).detach();
+            return YAMS_OK; // non-blocking
         };
 
         vtable.unload_model = [](void* self, const char* model_id) -> yams_status_t {
@@ -224,7 +265,16 @@ struct ProviderSingleton {
                 *out_loaded = false;
                 return YAMS_ERR_INTERNAL;
             }
-            *out_loaded = c->pool->isModelLoaded(model_id);
+            bool loaded = c->pool->isModelLoaded(model_id);
+            // Consider FSM Ready as loaded (pool may be lazy)
+            {
+                std::lock_guard<std::mutex> lk(c->mu);
+                auto it = c->model_states.find(model_id);
+                if (!loaded && it != c->model_states.end() &&
+                    it->second == ProviderCtx::State::Ready)
+                    loaded = true;
+            }
+            *out_loaded = loaded;
             return YAMS_OK;
         };
 
@@ -284,7 +334,7 @@ struct ProviderSingleton {
             if (!c->ready || !c->pool)
                 return YAMS_ERR_INTERNAL;
             std::string text(reinterpret_cast<const char*>(input), input_len);
-            auto h = c->pool->acquireModel(model_id, std::chrono::seconds(10));
+            auto h = c->pool->acquireModel(model_id, std::chrono::seconds(30));
             if (!h)
                 return YAMS_ERR_INTERNAL;
             auto& session = *h.value();
@@ -327,9 +377,11 @@ struct ProviderSingleton {
             for (size_t i = 0; i < batch_size; ++i) {
                 texts.emplace_back(reinterpret_cast<const char*>(inputs[i]), input_lens[i]);
             }
-            auto h = c->pool->acquireModel(model_id, std::chrono::seconds(10));
-            if (!h)
+            auto h = c->pool->acquireModel(model_id, std::chrono::seconds(30));
+            if (!h) {
+                spdlog::warn("[ONNX Plugin] acquireModel failed for {} (batch)", model_id);
                 return YAMS_ERR_INTERNAL;
+            }
             auto& session = *h.value();
             auto r =
                 const_cast<yams::daemon::OnnxModelSession&>(session).generateBatchEmbeddings(texts);
@@ -362,20 +414,109 @@ struct ProviderSingleton {
                 std::free(vecs);
         };
 
-        // v1.2: get_embedding_dim
+        // v1.2: get_embedding_dim (non-loading path)
         vtable.get_embedding_dim = [](void* self, const char* model_id,
                                       size_t* out_dim) -> yams_status_t {
             if (!self || !model_id || !out_dim)
                 return YAMS_ERR_INVALID_ARG;
             auto* c = static_cast<ProviderCtx*>(self);
-            if (!c->ready || !c->pool)
+            if (!c->pool)
                 return YAMS_ERR_INTERNAL;
-            auto h = c->pool->acquireModel(model_id, std::chrono::seconds(5));
-            if (!h)
-                return YAMS_ERR_INTERNAL;
-            auto& s = *h.value();
-            *out_dim = s.getEmbeddingDim();
-            return YAMS_OK;
+
+            // 1) If a hot session already exists, read its dim without blocking
+            if (c->ready && c->pool->isModelLoaded(model_id)) {
+                auto h = c->pool->acquireModel(model_id, std::chrono::milliseconds(0));
+                if (h) {
+                    *out_dim = h.value()->getEmbeddingDim();
+                    if (*out_dim > 0)
+                        return YAMS_OK;
+                }
+            }
+
+            // 2) Probe model directory metadata without loading the model
+            namespace fs = std::filesystem;
+            size_t dim = 0;
+            try {
+                auto read_dim = [&](const fs::path& p) -> size_t {
+                    try {
+                        if (!fs::exists(p))
+                            return 0u;
+                        std::ifstream in(p);
+                        if (!in)
+                            return 0u;
+                        nlohmann::json j;
+                        in >> j;
+                        if (j.contains("embedding_dimension"))
+                            return j.value("embedding_dimension", 0u);
+                        if (j.contains("embedding_dim"))
+                            return j.value("embedding_dim", 0u);
+                        if (j.contains("hidden_size"))
+                            return j.value("hidden_size", 0u);
+                    } catch (...) {
+                    }
+                    return 0u;
+                };
+
+                // Candidate roots: XDG_DATA_HOME/yams/models, HOME/.local/share/yams/models
+                std::vector<fs::path> roots;
+                if (const char* xdg = std::getenv("XDG_DATA_HOME"))
+                    roots.emplace_back(fs::path(xdg) / "yams" / "models");
+                if (const char* home = std::getenv("HOME"))
+                    roots.emplace_back(fs::path(home) / ".local" / "share" / "yams" / "models");
+
+                for (const auto& r : roots) {
+                    fs::path base = r / model_id;
+                    for (const auto& fn :
+                         {"sentence_bert_config.json", "config.json", "model.onnx.yams.meta.json",
+                          "config.json.yams.meta.json",
+                          "sentence_bert_config.json.yams.meta.json"}) {
+                        dim = read_dim(base / fn);
+                        if (dim > 0)
+                            break;
+                    }
+                    if (dim > 0)
+                        break;
+                }
+            } catch (...) {
+            }
+            if (dim > 0) {
+                *out_dim = dim;
+                return YAMS_OK;
+            }
+
+            // 3) Heuristic from common embedding model names (no load)
+            std::string lm(model_id);
+            for (auto& ch : lm)
+                ch = static_cast<char>(std::tolower(ch));
+            if (lm.find("minilm") != std::string::npos)
+                dim = 384;
+            else if (lm.find("mpnet") != std::string::npos || lm.find("nomic") != std::string::npos)
+                dim = 768;
+            else if (lm.find("bge-m3") != std::string::npos ||
+                     (lm.find("bge") != std::string::npos && lm.find("large") != std::string::npos))
+                dim = 1024;
+            else if (lm.find("bge") != std::string::npos && lm.find("small") != std::string::npos)
+                dim = 384;
+            else if (lm.find("e5") != std::string::npos && lm.find("large") != std::string::npos)
+                dim = 1024;
+            else if (lm.find("e5") != std::string::npos && lm.find("small") != std::string::npos)
+                dim = 384;
+            else if (lm.find("gte") != std::string::npos && lm.find("large") != std::string::npos)
+                dim = 1024;
+            else if (lm.find("gte") != std::string::npos && lm.find("small") != std::string::npos)
+                dim = 384;
+            else if (lm.find("text-embedding-3-large") != std::string::npos)
+                dim = 3072;
+            else if (lm.find("text-embedding-3-small") != std::string::npos)
+                dim = 1536;
+
+            if (dim > 0) {
+                *out_dim = dim;
+                return YAMS_OK;
+            }
+
+            *out_dim = 0;
+            return YAMS_ERR_UNSUPPORTED;
         };
 
         // v1.2: get_runtime_info_json

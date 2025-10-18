@@ -79,62 +79,6 @@ TEST_F(PluginHostTest, AbiHostLoadUntrustedReturnsUnauthorized) {
     EXPECT_EQ(res.error().code, ErrorCode::Unauthorized);
 }
 
-TEST_F(PluginHostTest, WasmHostScanParsesManifest) {
-    WasmPluginHost host(trustFile_);
-    auto wasm = makeFile("dummy.wasm", "00asm");
-    // Sidecar manifest
-    auto manifest = wasm;
-    manifest += ".manifest.json";
-    std::ofstream mf(manifest);
-    mf << R"({"name":"os_wasm","version":"0.1.0","interfaces":["object_storage_v1"]})";
-    mf.close();
-    auto sr = host.scanTarget(wasm);
-    ASSERT_TRUE(sr);
-    auto desc = sr.value();
-    EXPECT_EQ(desc.name, "os_wasm");
-    EXPECT_EQ(desc.version, "0.1.0");
-    ASSERT_FALSE(desc.interfaces.empty());
-    EXPECT_EQ(desc.interfaces[0], std::string("object_storage_v1"));
-}
-
-TEST_F(PluginHostTest, WasmHostTrustPolicyAddRemove) {
-    WasmPluginHost host(trustFile_);
-    auto initial = host.trustList().size();
-    auto dir = tempDir_ / "trusted_wasm";
-    fs::create_directories(dir);
-    ASSERT_TRUE(host.trustAdd(dir));
-    auto tl = host.trustList();
-    ASSERT_EQ(tl.size(), initial + 1);
-    auto canon_dir = fs::weakly_canonical(dir);
-    bool found = false;
-    for (const auto& p : tl) {
-        if (fs::weakly_canonical(p) == canon_dir) {
-            found = true;
-            break;
-        }
-    }
-    EXPECT_TRUE(found);
-    ASSERT_TRUE(host.trustRemove(dir));
-    auto after = host.trustList();
-    EXPECT_EQ(after.size(), initial);
-    bool still_present = false;
-    for (const auto& p : after) {
-        if (fs::weakly_canonical(p) == canon_dir) {
-            still_present = true;
-            break;
-        }
-    }
-    EXPECT_FALSE(still_present);
-}
-
-TEST_F(PluginHostTest, WasmHostLoadUntrustedReturnsUnauthorized) {
-    WasmPluginHost host(trustFile_);
-    auto wasm = makeFile("dummy2.wasm", "00asm");
-    auto res = host.load(wasm, "{}");
-    ASSERT_FALSE(res);
-    EXPECT_EQ(res.error().code, ErrorCode::Unauthorized);
-}
-
 #ifdef TEST_ABI_PLUGIN_FILE
 TEST_F(PluginHostTest, AbiHostLoadMockModelPluginAndGetInterface) {
     AbiPluginHost host(nullptr);

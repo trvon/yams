@@ -535,10 +535,9 @@ public:
 private:
     std::vector<ModelInfo> discoverLocalModels() const {
         std::vector<ModelInfo> locals;
-        const char* home = std::getenv("HOME");
-        if (!home)
+        if (!cli_)
             return locals;
-        fs::path base = fs::path(home) / ".yams" / "models";
+        fs::path base = cli_->getDataPath() / "models";
         std::error_code ec;
         if (!fs::exists(base, ec) || !fs::is_directory(base, ec))
             return locals;
@@ -680,9 +679,8 @@ private:
                 // Try to read config.json or sentence_bert_config.json for dim/seq
                 size_t dim = 0, seq = 0;
                 try {
-                    const char* home = std::getenv("HOME");
-                    if (home) {
-                        auto base = std::filesystem::path(home) / ".yams" / "models" / m.name;
+                    if (cli_) {
+                        auto base = cli_->getDataPath() / "models" / m.name;
                         for (auto file : {std::string("config.json"),
                                           std::string("sentence_bert_config.json")}) {
                             auto p = base / file;
@@ -810,24 +808,7 @@ private:
 
         // Determine output path
         fs::path output_path;
-        if (!output_dir.empty()) {
-            output_path = fs::path(output_dir) / model.name;
-
-            // Validate user-provided path
-            if (!isPathSafe(output_path)) {
-                return Error{
-                    ErrorCode::InvalidPath,
-                    "Invalid output path - contains unsafe characters or directory traversal"};
-            }
-        } else {
-            // Default to ~/.yams/models/
-            const char* home = std::getenv("HOME");
-            if (!home) {
-                return Error{ErrorCode::InvalidPath, "Cannot determine home directory"};
-            }
-            // Use unified storage location instead of ~/.yams/models
-            output_path = cli_->getDataPath() / "models" / model.name;
-        }
+        output_path = cli_->getDataPath() / "models" / model.name;
 
         // Create directory if needed
         fs::create_directories(output_path);

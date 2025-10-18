@@ -112,18 +112,43 @@ static bool wildcardMatch(const std::string& text, const std::string& pattern) {
 
 // Heuristic: treat as path/filename when the query contains a separator
 // or looks like a single token with an extension and no spaces.
-static bool looksLikePathQuery(const std::string& q) {
-    if (q.find('/') != std::string::npos || q.find('\\') != std::string::npos)
+static std::string trimCopy(std::string s) {
+    const auto isSpace = [](unsigned char c) { return static_cast<bool>(std::isspace(c)); };
+    s.erase(s.begin(), std::find_if_not(s.begin(), s.end(), isSpace));
+    s.erase(std::find_if_not(s.rbegin(), s.rend(), isSpace).base(), s.end());
+    return s;
+}
+
+static bool hasWhitespace(const std::string& s) {
+    return std::any_of(s.begin(), s.end(), [](unsigned char c) { return std::isspace(c); });
+}
+
+static bool looksLikePathToken(const std::string& token) {
+    if (token.find('/') != std::string::npos || token.find('\\') != std::string::npos)
         return true;
-    if (q.find(' ') != std::string::npos)
-        return false;
-    auto dot = q.rfind('.');
-    if (dot != std::string::npos && dot > 0 && dot + 1 < q.size()) {
+    auto dot = token.rfind('.');
+    if (dot != std::string::npos && dot > 0 && dot + 1 < token.size()) {
         // Has an extension-like suffix
         return true;
     }
     // Wildcards also indicate a path-style intent
-    return hasWildcard(q);
+    return hasWildcard(token);
+}
+
+static bool looksLikePathQuery(const std::string& raw) {
+    auto trimmed = trimCopy(raw);
+    if (trimmed.empty())
+        return false;
+
+    const bool quoted =
+        (trimmed.size() >= 2 && ((trimmed.front() == '"' && trimmed.back() == '"') ||
+                                 (trimmed.front() == '\'' && trimmed.back() == '\'')));
+    std::string token = quoted ? trimmed.substr(1, trimmed.size() - 2) : trimmed;
+
+    if (!quoted && hasWhitespace(token))
+        return false;
+
+    return looksLikePathToken(token);
 }
 
 // Presence-based tag match using metadata repository

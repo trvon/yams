@@ -37,6 +37,10 @@ using yams::metadata::PathTreeNode;
 // Minimal mock for IMetadataRepository (override only what we call)
 class MockRepo : public IMetadataRepository {
 public:
+    MockRepo() = default;
+    ~MockRepo() override = default;
+
+public:
     // Document CRUD operations (unused in these tests; stubbed)
     Result<int64_t> insertDocument(const DocumentInfo&) override {
         return Error{ErrorCode::NotImplemented, "NI"};
@@ -306,6 +310,10 @@ public:
         return Error{ErrorCode::NotImplemented, "NI"};
     }
     Result<void> upsertPathTreeForDocument(const DocumentInfo&, int64_t, bool,
+                                           std::span<const float>) override {
+        return Result<void>();
+    }
+    Result<void> removePathTreeForDocument(const DocumentInfo&, int64_t,
                                            std::span<const float>) override {
         return Result<void>();
     }

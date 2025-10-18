@@ -1,7 +1,10 @@
 #include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <future>
+#include <thread>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
 
 namespace yams::daemon {
@@ -124,9 +127,55 @@ AbiModelProviderAdapter::generateBatchEmbeddingsFor(const std::string& modelName
 }
 
 Result<void> AbiModelProviderAdapter::loadModel(const std::string& modelName) {
-    if (!table_ || !table_->load_model)
+    spdlog::info("[ABI Adapter] loadModel() called for: {}", modelName);
+    if (!table_) {
+        spdlog::error("[ABI Adapter] table_ is null!");
         return ErrorCode::NotImplemented;
-    auto st = table_->load_model(table_->self, modelName.c_str(), nullptr, nullptr);
+    }
+    if (!table_->load_model) {
+        spdlog::error("[ABI Adapter] table_->load_model function pointer is null!");
+        return ErrorCode::NotImplemented;
+    }
+    spdlog::info(
+        "[ABI Adapter] table_ = {}, load_model = {}, self = {}", static_cast<const void*>(table_),
+        reinterpret_cast<const void*>(table_->load_model), static_cast<const void*>(table_->self));
+    spdlog::info("[ABI Adapter] Calling table_->load_model({})...", modelName);
+
+    // Run plugin load_model() asynchronously with timeout using std::async
+    auto read_timeout_ms = [](const char* env, int def_ms) {
+        int ms = def_ms;
+        if (const char* s = std::getenv(env)) {
+            try {
+                ms = std::stoi(s);
+            } catch (...) {
+            }
+        }
+        if (ms < 100)
+            ms = 100;
+        return ms;
+    };
+    const int timeout_ms = read_timeout_ms("YAMS_ABI_LOAD_MODEL_TIMEOUT_MS", 90000); // 90s default
+
+    auto fut = std::async(std::launch::async, [this, modelName]() -> yams_status_t {
+        return table_->load_model(table_->self, modelName.c_str(), nullptr, nullptr);
+    });
+
+    if (fut.wait_for(std::chrono::milliseconds(timeout_ms)) != std::future_status::ready) {
+        spdlog::warn("[ABI Adapter] load_model timeout after {} ms for: {}", timeout_ms, modelName);
+        return Error{ErrorCode::Timeout, "Model load timed out"};
+    }
+    yams_status_t st = YAMS_ERR_INTERNAL;
+    try {
+        st = fut.get();
+    } catch (const std::exception& e) {
+        spdlog::error("[ABI Adapter] load_model async exception: {}", e.what());
+        return Error{ErrorCode::InternalError, std::string("load_model exception: ") + e.what()};
+    } catch (...) {
+        spdlog::error("[ABI Adapter] load_model async unknown exception");
+        return Error{ErrorCode::InternalError, "load_model unknown exception"};
+    }
+    spdlog::info("[ABI Adapter] table_->load_model() returned status: {}", static_cast<int>(st));
+
     if (st != YAMS_OK)
         return mapStatus(st, "load_model");
     return Result<void>();

@@ -150,3 +150,19 @@ daemon_socket_accept_bench = executable('daemon_socket_accept_bench', files('dae
 )
 
 alias_target('bench_socket_accept', daemon_socket_accept_bench)
+
+# Magic numbers detection benchmark (C++23 constexpr vs C++20 runtime)
+magic_numbers_bench = executable('magic_numbers_bench', files('magic_numbers_bench.cpp'),
+  include_directories: incs,
+  dependencies: [
+    test_deps,
+    dependency('yams_benchmarks'),
+    dependency('yams_detection'),
+    dependency('nlohmann_json'),
+  ] + tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  install: false,
+)
+
+alias_target('bench_magic_numbers', magic_numbers_bench)
+

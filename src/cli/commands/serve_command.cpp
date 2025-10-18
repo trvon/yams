@@ -41,6 +41,8 @@ public:
         cli_ = cli;
 
         auto* cmd = app.add_subcommand("serve", getDescription());
+        cmd->add_option("--daemon-socket", daemonSocket_, "Override daemon socket path")
+            ->envname("YAMS_DAEMON_SOCKET");
 
         // Backward compatible (now redundant) flag: default is already quiet.
         cmd->add_flag(
@@ -185,6 +187,14 @@ public:
 
 private:
     Result<void> runStdioServer() {
+        // Pre-resolve daemon socket (non-fatal) by writing a transient override file if needed
+        if (!daemonSocket_.empty()) {
+            // Instead of env mutation, prefer a config-first override by creating a lightweight
+            // ephemeral config snippet (not persisted) if future logic supports it. For now we
+            // just log; DaemonClient will still auto-resolve if unset.
+            spdlog::debug("serve: requested daemon socket override {} (config-based resolution)",
+                          daemonSocket_);
+        }
         if (!effectiveQuiet_) {
             std::cerr << "\n=== YAMS MCP Server (stdio) ===\n";
             std::cerr << "Transport: stdio (JSON-RPC over stdin/stdout)\n";
@@ -193,7 +203,8 @@ private:
         }
 
         auto transport = std::make_unique<mcp::StdioTransport>();
-        auto server = std::make_unique<mcp::MCPServer>(std::move(transport), &g_shutdown);
+        auto server =
+            std::make_unique<mcp::MCPServer>(std::move(transport), &g_shutdown, daemonSocket_);
         server->start();
         spdlog::info("MCP stdio server stopped");
         return {};
@@ -207,7 +218,7 @@ private:
             std::cerr << "Press Ctrl+C to stop the server\n\n";
         }
 
-        auto server = std::make_shared<mcp::MCPServer>(nullptr, &g_shutdown);
+        auto server = std::make_shared<mcp::MCPServer>(nullptr, &g_shutdown, daemonSocket_);
 
         mcp::HttpMcpServer::Config cfg;
         cfg.bindAddress = http_host_;
@@ -233,6 +244,7 @@ private:
 
     // Derived effective quiet state after env + flags
     bool effectiveQuiet_ = true;
+    std::string daemonSocket_;
 };
 
 // Factory function

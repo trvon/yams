@@ -2129,10 +2129,10 @@ Result<std::vector<uint8_t>> ProtoSerializer::encode_payload(const Message& msg)
     auto res = encode_payload_into(msg, out);
     if (!res)
         return res.error();
-    return out;
+    return std::move(out);
 }
 
-Result<Message> ProtoSerializer::decode_payload(const std::vector<uint8_t>& bytes) {
+Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) {
     if (bytes.size() > MAX_MESSAGE_SIZE) {
         return Error{ErrorCode::InvalidData, "Payload exceeds MAX_MESSAGE_SIZE"};
     }
@@ -2485,7 +2485,7 @@ Result<Message> ProtoSerializer::decode_payload(const std::vector<uint8_t>& byte
             return Error{ErrorCode::InvalidData, "Unsupported or empty Envelope payload"};
     }
 
-    return m;
+    return std::move(m);
 }
 
 } // namespace daemon

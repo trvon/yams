@@ -238,6 +238,8 @@ public:
     virtual Result<void> upsertPathTreeForDocument(const DocumentInfo& info, int64_t documentId,
                                                    bool isNewDocument,
                                                    std::span<const float> embeddingValues) = 0;
+    virtual Result<void> removePathTreeForDocument(const DocumentInfo& info, int64_t documentId,
+                                                   std::span<const float> embeddingValues) = 0;
 
     // Tree-based document queries (PBI-043 integration)
     virtual Result<std::vector<DocumentInfo>>
@@ -398,6 +400,8 @@ public:
                                                            std::size_t limit = 25) override;
     Result<void> upsertPathTreeForDocument(const DocumentInfo& info, int64_t documentId,
                                            bool isNewDocument,
+                                           std::span<const float> embeddingValues) override;
+    Result<void> removePathTreeForDocument(const DocumentInfo& info, int64_t documentId,
                                            std::span<const float> embeddingValues) override;
 
     // Tree-based document queries (PBI-043 integration)

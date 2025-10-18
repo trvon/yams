@@ -749,11 +749,18 @@ private:
     // Check if embedding models are available
     std::vector<std::string> getAvailableModels() {
         std::vector<std::string> models;
-        const char* home = std::getenv("HOME");
-        if (!home)
-            return models;
 
-        fs::path modelsPath = fs::path(home) / ".yams" / "models";
+        fs::path modelsPath;
+        const char* xdgDataHome = std::getenv("XDG_DATA_HOME");
+        if (xdgDataHome && *xdgDataHome) {
+            modelsPath = fs::path(xdgDataHome) / "yams" / "models";
+        } else {
+            const char* home = std::getenv("HOME");
+            if (!home)
+                return models;
+            modelsPath = fs::path(home) / ".local" / "share" / "yams" / "models";
+        }
+
         if (fs::exists(modelsPath)) {
             for (const auto& entry : fs::directory_iterator(modelsPath)) {
                 if (entry.is_directory()) {

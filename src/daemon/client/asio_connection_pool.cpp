@@ -177,22 +177,16 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::acquire() {
         co_return co_await create_connection();
     }
 
-    // Try to find an available connection from the pool
+    // Try to find an existing alive, open connection from the pool (allow concurrent sharing)
     std::shared_ptr<AsioConnection> existing;
     {
         std::lock_guard<std::mutex> lk(mutex_);
         cleanup_stale_connections();
 
-        // Look for an alive, open, AND NOT IN USE connection
         for (auto& weak : connection_pool_) {
             if (auto conn = weak.lock()) {
-                // Atomically check and set in_use flag
-                bool expected = false;
                 if (conn->alive.load(std::memory_order_relaxed) && conn->socket &&
-                    conn->socket->is_open() &&
-                    conn->in_use.compare_exchange_strong(expected, true,
-                                                         std::memory_order_acquire)) {
-                    // Successfully checked out this connection
+                    conn->socket->is_open()) {
                     existing = conn;
                     break;
                 }
@@ -204,21 +198,17 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::acquire() {
         co_return existing;
     }
 
-    // No available connection - create a new one (outside the lock)
+    // No existing connection - create a new one (outside the lock)
     auto fresh = co_await create_connection();
 
     if (shared_ && fresh && fresh->alive.load(std::memory_order_relaxed)) {
         std::lock_guard<std::mutex> lk(mutex_);
-        // Re-check for available connections that might have been released
-        // while we were creating a new one.
+        // Another connection might have appeared while creating this one; prefer reusing it
         for (auto& weak : connection_pool_) {
             if (auto conn = weak.lock()) {
-                bool expected = false;
                 if (conn->alive.load(std::memory_order_relaxed) && conn->socket &&
-                    conn->socket->is_open() &&
-                    conn->in_use.compare_exchange_strong(expected, true,
-                                                         std::memory_order_acquire)) {
-                    // A connection became available. Use it and discard the one we created.
+                    conn->socket->is_open()) {
+                    // Discard the newly created extra connection and return the existing one
                     boost::system::error_code ec;
                     fresh->socket->close(ec);
                     fresh->alive = false;
@@ -227,8 +217,7 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::acquire() {
             }
         }
 
-        // No connection became available. Use the one we created.
-        fresh->in_use.store(true, std::memory_order_relaxed);
+        // Otherwise, add the new connection to the pool and return it
         if (connection_pool_.size() < kMaxPoolSize) {
             connection_pool_.push_back(fresh);
         }
@@ -248,8 +237,19 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
     if (!socket_res) {
         co_return nullptr;
     }
+    // Adopt connected socket first
     conn->socket = std::move(socket_res.value());
     conn->alive = true;
+    // Set small send/recv buffer to avoid head-of-line blocking under multiplexed load
+    try {
+        if (conn->socket && conn->socket->is_open()) {
+            boost::asio::socket_base::send_buffer_size send_sz(64 * 1024);
+            boost::asio::socket_base::receive_buffer_size recv_sz(64 * 1024);
+            conn->socket->set_option(send_sz);
+            conn->socket->set_option(recv_sz);
+        }
+    } catch (...) {
+    }
 
     // Start background read loop to receive responses
     if (!conn->read_started.exchange(true)) {
@@ -269,6 +269,9 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                         co_return;
                     }
 
+                    if (!conn->socket || !conn->socket->is_open()) {
+                        co_return;
+                    }
                     auto hres = co_await async_read_exact(
                         *conn->socket, sizeof(MessageFramer::FrameHeader),
                         conn->streaming_started.load(std::memory_order_relaxed)

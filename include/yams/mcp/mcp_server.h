@@ -93,8 +93,6 @@ private:
     // Helper methods
     bool isInputAvailable(int timeoutMs = 100) const;
     bool readLineWithTimeout(std::string& line, int timeoutMs) const;
-    MessageResult receiveLSPFramed(const std::string& firstLine);
-    static bool parseLSPHeader(const std::string& line, std::size_t& contentLength);
 
     // Error recovery
     bool shouldRetryAfterError() const noexcept;
@@ -110,7 +108,8 @@ private:
  */
 class MCPServer {
 public:
-    MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* externalShutdown = nullptr);
+    MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* externalShutdown = nullptr,
+              std::filesystem::path overrideSocket = {});
     ~MCPServer();
 
     void start();
@@ -200,6 +199,7 @@ private:
     std::shared_ptr<yams::cli::DaemonClientPool::Lease> daemon_client_lease_;
     yams::daemon::DaemonClient* daemon_client_{nullptr};
     yams::daemon::ClientConfig daemon_client_config_{};
+    std::filesystem::path daemonSocketOverride_;
     std::function<Result<void>(const yams::daemon::ClientConfig&)> testEnsureDaemonClientHook_{};
     struct ClientInfo {
         std::string name;

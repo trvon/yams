@@ -334,64 +334,59 @@ MessageResult StdioTransport::receive() {
         return Error{ErrorCode::NetworkError, "Transport not connected"};
     }
 
-    // Check for shutdown request before blocking
     if (externalShutdown_ && *externalShutdown_) {
         state_.store(TransportState::Closing);
         return Error{ErrorCode::NetworkError, "External shutdown requested"};
     }
 
-    // Primary path: Read a single line (NDJSON format per MCP spec)
     std::string line;
-    if (!readLineWithTimeout(line, recvTimeoutMs_)) {
-        // Timeout or EOF
+    // Loop to handle timeouts without exiting, which is required for clients like Jan
+    // that keep the MCP server running idly.
+    while (!readLineWithTimeout(line, recvTimeoutMs_)) {
         if (std::cin.eof()) {
             spdlog::info("StdioTransport: EOF on stdin; client disconnected");
             state_.store(TransportState::Disconnected);
             return Error{ErrorCode::NetworkError, "EOF on stdin"};
         }
-        // Timeout - check shutdown and retry
         if (externalShutdown_ && *externalShutdown_) {
             state_.store(TransportState::Closing);
             return Error{ErrorCode::NetworkError, "External shutdown requested"};
         }
-        // Transient timeout - let caller retry
-        return Error{ErrorCode::NetworkError, "Read timeout"};
+        // It was a timeout, so we loop again.
     }
 
-    // Trim trailing CR if present (handles CRLF line endings)
+    // Trim trailing CR for CRLF line endings
     if (!line.empty() && line.back() == '\r') {
         line.pop_back();
     }
 
-    // Skip empty lines (be tolerant, but return network error for test compat)
+    // Trim leading whitespace
+    line.erase(line.begin(), std::find_if(line.begin(), line.end(),
+                                          [](unsigned char ch) { return !std::isspace(ch); }));
+
     if (line.empty()) {
-        recordError();
-        if (!shouldRetryAfterError()) {
-            state_.store(TransportState::Disconnected);
-        }
+        // Ignore empty lines and wait for the next message
         return Error{ErrorCode::NetworkError, "Empty line received"};
     }
 
     spdlog::debug("StdioTransport: Received line: '{}'",
                   line.length() > 200 ? line.substr(0, 200) + "..." : line);
 
-    // Try to parse as NDJSON (MCP stdio standard)
-    if (line.front() == '{' || line.front() == '[') {
-        auto parsed = json_utils::parse_json(line);
-        if (parsed) {
-            resetErrorCount();
-            return parsed.value();
-        }
-        recordError();
-        if (!shouldRetryAfterError()) {
-            state_.store(TransportState::Error);
-        }
-        return parsed.error();
+    // Parse as NDJSON. The LSP-style framing is removed for simplicity and to
+    // strictly adhere to the modern MCP spec for stdio.
+    auto parsed = json_utils::parse_json(line);
+    if (parsed) {
+        resetErrorCount();
+        return parsed.value();
     }
 
-    // Backwards compatibility: Try LSP-style framing (Content-Length header)
-    spdlog::debug("StdioTransport: Detected potential LSP framing, attempting parse");
-    return receiveLSPFramed(line);
+    // JSON parsing failed.
+    recordError();
+    if (!shouldRetryAfterError()) {
+        state_.store(TransportState::Error);
+    }
+    spdlog::error("Failed to parse MCP message as JSON: {}", parsed.error().message);
+    return parsed.error();
 }
 
 // Helper: Read a line with timeout support
@@ -416,113 +411,6 @@ bool StdioTransport::readLineWithTimeout(std::string& line, int timeoutMs) const
     return static_cast<bool>(std::getline(std::cin, line));
 }
 
-// Helper: Parse LSP-style framed message (backwards compatibility)
-MessageResult StdioTransport::receiveLSPFramed(const std::string& firstLine) {
-    std::size_t contentLength = 0;
-
-    // Parse first header line
-    if (!parseLSPHeader(firstLine, contentLength)) {
-        recordError();
-        if (!shouldRetryAfterError()) {
-            state_.store(TransportState::Error);
-        }
-        return Error{ErrorCode::InvalidData, "Malformed LSP header line"};
-    }
-
-    // Read remaining headers until blank line
-    std::string line;
-    while (true) {
-        if (!std::getline(std::cin, line)) {
-            state_.store(TransportState::Disconnected);
-            return Error{ErrorCode::NetworkError, "EOF during LSP headers"};
-        }
-
-        if (!line.empty() && line.back() == '\r') {
-            line.pop_back();
-        }
-
-        if (line.empty()) {
-            break; // End of headers
-        }
-
-        if (!parseLSPHeader(line, contentLength)) {
-            recordError();
-            if (!shouldRetryAfterError()) {
-                state_.store(TransportState::Error);
-            }
-            return Error{ErrorCode::InvalidData, "Malformed LSP header line"};
-        }
-    }
-
-    if (contentLength == 0) {
-        recordError();
-        if (!shouldRetryAfterError()) {
-            state_.store(TransportState::Error);
-        }
-        return Error{ErrorCode::InvalidData, "Missing or zero Content-Length"};
-    }
-
-    // Read payload
-    std::string payload(contentLength, '\0');
-    std::cin.read(payload.data(), static_cast<std::streamsize>(contentLength));
-
-    if (std::cin.gcount() != static_cast<std::streamsize>(contentLength)) {
-        recordError();
-        if (!shouldRetryAfterError()) {
-            state_.store(TransportState::Error);
-        }
-        return Error{ErrorCode::NetworkError, fmt::format("Short read: expected {} bytes, got {}",
-                                                          contentLength, std::cin.gcount())};
-    }
-
-    spdlog::debug("StdioTransport: Parsed LSP framed message ({} bytes) - "
-                  "backwards compatibility mode",
-                  contentLength);
-
-    auto parsed = json_utils::parse_json(payload);
-    if (parsed) {
-        resetErrorCount();
-    } else {
-        recordError();
-        if (!shouldRetryAfterError()) {
-            state_.store(TransportState::Error);
-        }
-    }
-    return parsed;
-}
-
-// Helper: Parse a single LSP header line
-bool StdioTransport::parseLSPHeader(const std::string& line, std::size_t& contentLength) {
-    auto pos = line.find(':');
-    if (pos == std::string::npos) {
-        return false;
-    }
-
-    std::string key = line.substr(0, pos);
-    std::string val = line.substr(pos + 1);
-
-    // Trim leading whitespace from value
-    while (!val.empty() && (val.front() == ' ' || val.front() == '\t')) {
-        val.erase(val.begin());
-    }
-
-    // Convert key to lowercase for case-insensitive comparison
-    std::transform(key.begin(), key.end(), key.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
-
-    if (key == "content-length") {
-        try {
-            contentLength = static_cast<std::size_t>(std::stoull(val));
-            return true;
-        } catch (...) {
-            return false;
-        }
-    }
-
-    // Ignore other headers (e.g., Content-Type)
-    return true;
-}
-
 bool StdioTransport::shouldRetryAfterError() const noexcept {
     constexpr size_t MAX_CONSECUTIVE_ERRORS = 5;
     return errorCount_.load() < MAX_CONSECUTIVE_ERRORS;
@@ -537,10 +425,11 @@ void StdioTransport::resetErrorCount() noexcept {
 }
 
 // MCPServer implementation
-MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* externalShutdown)
+MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* externalShutdown,
+                     std::filesystem::path overrideSocket)
     : transport_(std::move(transport)), externalShutdown_(externalShutdown),
-      eagerReadyEnabled_(false), autoReadyEnabled_(false), strictProtocol_(false),
-      limitToolResultDup_(false) {
+      daemonSocketOverride_(std::move(overrideSocket)), eagerReadyEnabled_(false),
+      autoReadyEnabled_(false), strictProtocol_(false), limitToolResultDup_(false) {
     // Ensure logging goes to stderr to keep stdout clean for MCP framing
     if (auto existing = spdlog::get("yams-mcp")) {
         spdlog::set_default_logger(existing);
@@ -556,13 +445,49 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
     // Initialize a single multiplexed daemon client; rely on DaemonClient defaults for dataDir
     {
         yams::daemon::ClientConfig cfg;
-        cfg.socketPath = yams::daemon::socket_utils::resolve_socket_path_config_first();
+        if (!daemonSocketOverride_.empty()) {
+            cfg.socketPath = daemonSocketOverride_;
+        } else {
+            cfg.socketPath = yams::daemon::socket_utils::resolve_socket_path_config_first();
+        }
         cfg.enableChunkedResponses = true;
-        cfg.singleUseConnections = false;
+        // Connection strategy: default pooled/multiplexed; allow overrides to match CLI behavior
+        // YAMS_MCP_CONN_MODE=single|fresh (fresh => new socket each request)
+        // or YAMS_MCP_SINGLE_USE_SOCKETS=1
+        bool single_use = false;
+        if (const char* m = std::getenv("YAMS_MCP_CONN_MODE")) {
+            std::string v(m);
+            for (auto& c : v)
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (v == "fresh" || v == "single_use")
+                single_use = true;
+        }
+        if (const char* s = std::getenv("YAMS_MCP_SINGLE_USE_SOCKETS")) {
+            if (std::string(s) == "1" || std::string(s) == "true")
+                single_use = true;
+        }
+        cfg.singleUseConnections = single_use;
         cfg.requestTimeout = std::chrono::milliseconds(10000);
         cfg.headerTimeout = std::chrono::milliseconds(5000);
         cfg.bodyTimeout = std::chrono::milliseconds(15000);
-        cfg.maxInflight = 128;
+        if (const char* mi = std::getenv("YAMS_MCP_MAX_INFLIGHT")) {
+            long v = std::strtol(mi, nullptr, 10);
+            if (v > 0)
+                cfg.maxInflight = static_cast<size_t>(v);
+        } else {
+            cfg.maxInflight = 128;
+        }
+        // Align dataDir resolution with CLI helpers if provided via env
+        if (const char* ds = std::getenv("YAMS_STORAGE")) {
+            if (*ds)
+                cfg.dataDir = ds;
+        }
+        if (cfg.dataDir.empty()) {
+            if (const char* dd = std::getenv("YAMS_DATA_DIR")) {
+                if (*dd)
+                    cfg.dataDir = dd;
+            }
+        }
         cfg.autoStart = false; // MCP server should not be responsible for starting the daemon
         daemon_client_config_ = cfg;
         if (auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg); leaseRes) {
@@ -700,7 +625,20 @@ Result<void> MCPServer::ensureDaemonClient() {
             return hookResult;
         }
     }
-    if (daemon_client_)
+    // Re-evaluate connection mode per-request to bridge CLI helpers
+    bool single_use = daemon_client_config_.singleUseConnections;
+    if (const char* m = std::getenv("YAMS_MCP_CONN_MODE")) {
+        std::string v(m);
+        for (auto& c : v)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        single_use = (v == "fresh" || v == "single_use");
+    }
+    if (const char* s = std::getenv("YAMS_MCP_SINGLE_USE_SOCKETS")) {
+        if (std::string(s) == "1" || std::string(s) == "true")
+            single_use = true;
+    }
+    daemon_client_config_.singleUseConnections = single_use;
+    if (daemon_client_ && !single_use)
         return Result<void>();
     auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(daemon_client_config_);
     if (!leaseRes) {
@@ -1249,9 +1187,9 @@ json MCPServer::initialize(const json& params) {
     } else if (strictProtocol_) {
         json error_data = {{"supportedVersions", kSupported}};
         return {{"_initialize_error", true},
-                {"code", kErrUnsupportedProtocolVersion},
-                {"message", "Unsupported protocol version requested by client"},
-                {"data", error_data}};
+                {{"code", kErrUnsupportedProtocolVersion}},
+                {{"message", "Unsupported protocol version requested by client"}},
+                {{"data", error_data}}};
     }
 
     // Capture client info if present (tolerant)
@@ -2326,7 +2264,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             kreq.fuzzy = false;    // keep preview snappy
             kreq.similarity = 0.0; // skip vector
             kreq.limit = std::min<size_t>(dreq.limit > 0 ? dreq.limit : 10, 10);
-            if (auto kres = co_await daemon_client_->streamingSearch(kreq)) {
+            if (auto kres = co_await daemon_client_->search(kreq)) {
                 const auto& kr = kres.value();
                 // Notify clients about quick keyword candidates
                 json partial;
@@ -2375,7 +2313,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         boost::asio::co_spawn(
             io,
             [&, pr = std::move(prom)]() mutable -> boost::asio::awaitable<void> {
-                auto sr = co_await daemon_client_->streamingSearch(dreq);
+                auto sr = co_await daemon_client_->search(dreq);
                 pr.set_value(std::move(sr));
                 co_return;
             },
@@ -2624,7 +2562,7 @@ MCPServer::handleGrepDocuments(const MCPGrepRequest& req) {
         sreq.fuzzy = true;
         sreq.searchType = "hybrid";
         sreq.pathsOnly = false;
-        if (auto sres = co_await daemon_client_->streamingSearch(sreq)) {
+        if (auto sres = co_await daemon_client_->search(sreq)) {
             const auto& sr = sres.value();
             MCPGrepResponse early;
             std::ostringstream oss_;

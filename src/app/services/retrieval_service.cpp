@@ -1,5 +1,6 @@
 #include <yams/app/services/retrieval_service.h>
 
+#include <spdlog/spdlog.h>
 #include <algorithm>
 #include <filesystem>
 #include <future>
@@ -11,6 +12,8 @@
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/daemon/client/global_io_context.h>
+#include <yams/metadata/connection_pool.h>
+#include <yams/metadata/metadata_repository.h>
 
 namespace yams::app::services {
 
@@ -90,6 +93,13 @@ Result<yams::daemon::GetResponse> RetrievalService::get(const GetOptions& req_op
 
 Result<yams::daemon::GrepResponse> RetrievalService::grep(const GrepOptions& req_opts,
                                                           const RetrievalOptions& opts) const {
+    // TODO: Future enhancement - use path-tree metadata internally to find related/duplicate files
+    // and enrich results with "Related files" section based on:
+    // - Same parent directory (siblings)
+    // - Similar centroid embeddings (similar code paths)
+    // - Directory hierarchy relationships
+
+    // Normal daemon grep request
     yams::daemon::GrepRequest req;
     req.pattern = req_opts.pattern;
     req.paths = req_opts.paths;
@@ -140,6 +150,15 @@ Result<yams::daemon::GrepResponse> RetrievalService::grep(const GrepOptions& req
     }
 
     return Error{ErrorCode::Timeout, "grep timed out"};
+}
+
+Result<yams::daemon::GrepResponse>
+RetrievalService::grep(const GrepOptions& req_opts, const RetrievalOptions& opts,
+                       const std::optional<PathTreeOptions>& /*pathTree*/
+) const {
+    // PBI-058: PathTreeOptions overload currently delegates to standard grep.
+    // Future: implement path-tree-aware behavior when enabled.
+    return grep(req_opts, opts);
 }
 
 Result<yams::daemon::ListResponse> RetrievalService::list(const ListOptions& req_opts,

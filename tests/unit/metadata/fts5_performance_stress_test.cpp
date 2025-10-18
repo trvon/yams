@@ -108,9 +108,10 @@ protected:
             doc.filePath = "path/to/" + doc.fileName;
             doc.fileSize = 1024 + (i % 10000);
             doc.mimeType = "text/plain";
-            doc.createdTime = system_clock::now();
-            doc.modifiedTime = doc.createdTime;
-            doc.indexedTime = doc.createdTime;
+            auto now = std::chrono::time_point_cast<std::chrono::seconds>(system_clock::now());
+            doc.createdTime = now;
+            doc.modifiedTime = now;
+            doc.indexedTime = now;
             doc.contentExtracted = true;
             doc.extractionStatus = ExtractionStatus::Success;
 
@@ -128,8 +129,8 @@ protected:
                 << "Failed to insert document " << i << ": " << insertResult.error().message;
 
             if (insertResult.has_value() && !content.empty()) {
-                auto indexResult =
-                    repo_->indexDocumentContent(insertResult.value(), doc.fileName, content);
+                auto indexResult = repo_->indexDocumentContent(insertResult.value(), doc.fileName,
+                                                               content, "text/plain");
                 if (!indexResult.has_value()) {
                     spdlog::warn("Failed to index content for doc {}: {}", i,
                                  indexResult.error().message);
@@ -290,7 +291,9 @@ TEST_F(FTS5StressTest, PathResolutionAtScale) {
         spdlog::info("Testing path pattern: '{}'", pattern);
 
         auto start = high_resolution_clock::now();
-        auto result = repo_->queryDocumentsByPattern(pattern, 100);
+        metadata::DocumentQueryOptions opts{};
+        opts.likePattern = pattern;
+        auto result = repo_->queryDocuments(opts);
         auto elapsed = duration_cast<milliseconds>(high_resolution_clock::now() - start);
 
         ASSERT_TRUE(result.has_value()) << "Pattern query failed";
