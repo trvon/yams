@@ -698,3 +698,16 @@ ca_path = ""
 [downloader.proxy]
 # Proxy URL (e.g., http://user:pass@host:port) or empty
 url = ""
+
+[plugins]
+# Global plugin settings
+
+[plugins.symbol_extraction]
+# Enable Tree-sitter based symbol extraction plugins (runtime toggle)
+enable = true
+# Optional: restrict languages processed by the symbol extractor plugin
+# languages = ["cpp", "python", "c", "go", "rust", "js", "ts"]
+# Optional: override grammar .so paths per language
+# grammar_paths.cpp = "/usr/lib/libtree-sitter-cpp.so"
+# grammar_paths.python = "/usr/lib/libtree-sitter-python.so"
+

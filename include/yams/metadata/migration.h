@@ -191,6 +191,9 @@ private:
 
     // Version 15: Path tree nodes schema (PBI-051 scaffold)
     static Migration createPathTreeSchema();
+
+    // Version 16: Symbol metadata materialized view (derived from KG)
+    static Migration createSymbolMetadataSchema();
 };
 
 /**
