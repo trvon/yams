@@ -12,3 +12,7 @@ if get_option('plugin-pdf')
   subdir('pdf_extractor')
 endif
 
+if get_option('plugin-symbols')
+  subdir('symbol_extractor_treesitter')
+endif
+

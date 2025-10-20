@@ -333,8 +333,25 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                     frame.insert(frame.end(), payload.begin(), payload.end());
 
                     auto msgRes = framer.parse_frame(frame);
-                    if (!msgRes)
-                        continue;
+                    if (!msgRes) {
+                        Error e{ErrorCode::InvalidData, "Failed to parse daemon response frame"};
+                        if (auto c = weak_conn.lock()) {
+                            for (auto& [rid, h] : c->handlers) {
+                                if (h.unary)
+                                    h.unary->channel->try_send(
+                                        make_error_code(boost::system::errc::io_error),
+                                        std::make_shared<Result<Response>>(e));
+                                if (h.streaming) {
+                                    h.streaming->onError(e);
+                                    h.streaming->done_channel->try_send(boost::system::error_code{},
+                                                                        e);
+                                }
+                            }
+                            c->handlers.clear();
+                            c->alive = false;
+                        }
+                        co_return;
+                    }
                     auto& msg = msgRes.value();
                     static std::atomic<bool> warned{false};
                     if (!warned.load()) {
@@ -356,8 +373,13 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                     if (auto it = conn->handlers.find(reqId); it != conn->handlers.end()) {
                         handlerPtr = &it->second;
                     }
-                    if (!handlerPtr)
+                    if (!handlerPtr) {
+                        spdlog::warn("ASIO read loop: no handler for daemon response with request "
+                                     "id {}. This may indicate a response was already received or "
+                                     "the request timed out.",
+                                     reqId);
                         continue;
+                    }
 
                     bool isChunked = header.is_chunked();
                     bool isHeaderOnly = header.is_header_only();

@@ -41,16 +41,19 @@
 #include <yams/daemon/resource/abi_content_extractor_adapter.h>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
+#include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/metadata/migration.h>
+#include <yams/plugins/symbol_extractor_v1.h>
 #include <yams/repair/embedding_repair_util.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
 
 namespace {
+// Minimal helpers - prefer using components directly
 std::optional<size_t> read_db_embedding_dim(const std::filesystem::path& dbPath) {
     try {
         namespace fs = std::filesystem;
@@ -68,6 +71,7 @@ std::optional<size_t> read_db_embedding_dim(const std::filesystem::path& dbPath)
     }
     return std::nullopt;
 }
+
 void write_vector_sentinel(const std::filesystem::path& dataDir, size_t dim,
                            const std::string& /*tableName*/, int schemaVersion) {
     try {
@@ -83,6 +87,7 @@ void write_vector_sentinel(const std::filesystem::path& dataDir, size_t dim,
     } catch (...) {
     }
 }
+
 bool env_truthy(const char* value) {
     if (!value || !*value) {
         return false;
@@ -175,6 +180,59 @@ std::map<std::string, std::string> parseSimpleTomlFlat(const std::filesystem::pa
     }
     return config;
 }
+
+// Template-based plugin adoption helper to reduce code duplication
+template <typename AbiTableType, typename AdapterType, typename ContainerValueType>
+size_t adoptPluginInterface(yams::daemon::AbiPluginHost* host, const std::string& interfaceName,
+                            int interfaceVersion,
+                            std::vector<std::shared_ptr<ContainerValueType>>& targetContainer,
+                            std::function<bool(const AbiTableType*)> validateTable = nullptr) {
+    size_t adopted = 0;
+    if (!host)
+        return adopted;
+
+    for (const auto& descriptor : host->listLoaded()) {
+        // Check if plugin exposes the requested interface
+        bool hasInterface = false;
+        for (const auto& id : descriptor.interfaces) {
+            if (id == interfaceName) {
+                hasInterface = true;
+                break;
+            }
+        }
+        if (!hasInterface)
+            continue;
+
+        // Get the interface table
+        auto ifaceRes = host->getInterface(descriptor.name, interfaceName, interfaceVersion);
+        if (!ifaceRes)
+            continue;
+
+        auto* table = reinterpret_cast<AbiTableType*>(ifaceRes.value());
+        if (!table)
+            continue;
+
+        // Optional validation
+        if (validateTable && !validateTable(table))
+            continue;
+
+        // Create adapter and add to container
+        try {
+            auto adapter = std::make_shared<AdapterType>(table);
+            targetContainer.push_back(std::move(adapter));
+            ++adopted;
+            spdlog::info("Adopted {} from plugin: {}", interfaceName, descriptor.name);
+        } catch (const std::exception& e) {
+            spdlog::warn("Failed to create adapter for {} from plugin {}: {}", interfaceName,
+                         descriptor.name, e.what());
+        } catch (...) {
+            spdlog::warn("Failed to create adapter for {} from plugin {} (unknown error)",
+                         interfaceName, descriptor.name);
+        }
+    }
+    return adopted;
+}
+
 } // namespace
 
 // Open the daemon namespace for all following member definitions.
@@ -226,9 +284,10 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             }
         } catch (...) {
         }
+        x
 #endif
-        // Initialize worker pool early at a conservative minimum; TuningManager will scale up.
-        try {
+            // Initialize worker pool early at a conservative minimum; TuningManager will scale up.
+            try {
             if (!workerPool_) {
                 auto threads = static_cast<std::size_t>(TuneAdvisor::poolMinSizeIpc());
                 if (threads < 1)
@@ -1686,6 +1745,33 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             if (extractorResult) {
                 spdlog::info("ServiceManager: Adopted {} content extractors.",
                              extractorResult.value());
+
+                // Respect config flag plugins.symbol_extraction.enable (default: true)
+                bool enableSymbols = true;
+                try {
+                    auto cfgPath = resolveDefaultConfigPath();
+                    if (!cfgPath.empty()) {
+                        auto flat = parseSimpleTomlFlat(cfgPath);
+                        auto it = flat.find("plugins.symbol_extraction.enable");
+                        if (it != flat.end()) {
+                            std::string v = it->second;
+                            std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                            enableSymbols = !(v == "0" || v == "false" || v == "off" || v == "no");
+                        }
+                    }
+                } catch (...) {
+                }
+                if (enableSymbols) {
+                    auto symRes = init::step<size_t>("adopt_symbol_extractors", [&]() {
+                        return adoptSymbolExtractorsFromHosts();
+                    });
+                    if (symRes) {
+                        spdlog::info("ServiceManager: Adopted {} symbol extractors.",
+                                     symRes.value());
+                    }
+                } else {
+                    spdlog::info("ServiceManager: symbol extractor plugins disabled by config");
+                }
             }
         }
         // If autoload is disabled but model provider is enabled, defer initialization
@@ -2336,39 +2422,17 @@ Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& pref
 }
 
 Result<size_t> ServiceManager::adoptContentExtractorsFromHosts() {
-    size_t adopted = 0;
     try {
-        if (abiHost_) {
-            // Scan loaded plugins for content_extractor_v1 and adopt as extractors
-            for (const auto& d : abiHost_->listLoaded()) {
-                bool hasIface = false;
-                for (const auto& id : d.interfaces) {
-                    if (id == std::string("content_extractor_v1")) {
-                        hasIface = true;
-                        break;
-                    }
-                }
-                if (!hasIface)
-                    continue;
-                auto ifaceRes = abiHost_->getInterface(d.name, "content_extractor_v1", 1);
-                if (!ifaceRes)
-                    continue;
-                auto* table = reinterpret_cast<yams_content_extractor_v1*>(ifaceRes.value());
-                if (!table || table->abi_version != YAMS_IFACE_CONTENT_EXTRACTOR_V1_VERSION)
-                    continue;
-                try {
-                    auto adapter = std::make_shared<AbiContentExtractorAdapter>(table);
-                    contentExtractors_.push_back(std::move(adapter));
-                    ++adopted;
-                    spdlog::info("Adopted content extractor from plugin: {}", d.name);
-                } catch (...) {
-                }
-            }
-        }
+        size_t adopted = adoptPluginInterface<yams_content_extractor_v1, AbiContentExtractorAdapter,
+                                              yams::extraction::IContentExtractor>(
+            abiHost_.get(), "content_extractor_v1", YAMS_IFACE_CONTENT_EXTRACTOR_V1_VERSION,
+            contentExtractors_, [](const yams_content_extractor_v1* table) {
+                return table->abi_version == YAMS_IFACE_CONTENT_EXTRACTOR_V1_VERSION;
+            });
+        return Result<size_t>(adopted);
     } catch (const std::exception& e) {
         return Error{ErrorCode::Unknown, e.what()};
     }
-    return Result<size_t>(adopted);
 }
 
 boost::asio::any_io_executor ServiceManager::getWorkerExecutor() const {
@@ -2697,9 +2761,9 @@ void ServiceManager::preloadPreferredModelIfConfigured() {
                         }
                     }
                 } catch (const std::exception& e) {
-                    spdlog::warn("preloadPreferredModelIfConfigured error: {}", e.what());
+                    spdlog::warn("preloadPreferredModelIfConfigured lambda error: {}", e.what());
                 } catch (...) {
-                    spdlog::warn("preloadPreferredModelIfConfigured: unknown error");
+                    spdlog::warn("preloadPreferredModelIfConfigured lambda: unknown error");
                 }
             });
         } catch (const std::bad_weak_ptr& e) {
@@ -2731,27 +2795,43 @@ void ServiceManager::preloadPreferredModelIfConfigured() {
                         } catch (...) {
                         }
                     } else {
-                        readiness->modelLoadProgress.store(0, std::memory_order_relaxed);
-                        spdlog::warn("Preferred model '{}' preload failed: {}", preferred,
+#ifndef YAMS_USE_ONNX_RUNTIME
+                        spdlog::warn("ONNX runtime disabled in this build; model preloading not "
+                                     "supported by daemon binary");
+#endif
+                        spdlog::warn("Preferred model '{}' failed (fallback): {}", preferred,
                                      r.error().message);
-                        try {
-                            this->embeddingFsm_.dispatch(LoadFailureEvent{r.error().message});
-                        } catch (...) {
-                        }
                     }
-                } catch (const std::exception& fallbackEx) {
-                    spdlog::warn("preloadPreferredModelIfConfigured fallback error: {}",
-                                 fallbackEx.what());
-                    try {
-                        this->embeddingFsm_.dispatch(LoadFailureEvent{fallbackEx.what()});
-                    } catch (...) {
-                    }
+                } catch (const std::exception& e) {
+                    spdlog::warn("Model preload task (fallback) threw: {}", e.what());
+                } catch (...) {
+                    spdlog::warn("Model preload task (fallback) threw unknown exception");
                 }
             });
         }
     } catch (const std::exception& e) {
         spdlog::warn("preloadPreferredModelIfConfigured error: {}", e.what());
+    } catch (...) {
+        spdlog::warn("preloadPreferredModelIfConfigured: unknown error");
     }
+}
+
+Result<size_t> ServiceManager::adoptSymbolExtractorsFromHosts() {
+#if !YAMS_ENABLE_SYMBOL_EXTRACTION
+    return Result<size_t>(0);
+#else
+    try {
+        size_t adopted = adoptPluginInterface<yams_symbol_extractor_v1, AbiSymbolExtractorAdapter,
+                                              AbiSymbolExtractorAdapter>(
+            abiHost_.get(), YAMS_IFACE_SYMBOL_EXTRACTOR_V1, YAMS_IFACE_SYMBOL_EXTRACTOR_V1_VERSION,
+            symbolExtractors_, [](const yams_symbol_extractor_v1* table) {
+                return table->abi_version == YAMS_IFACE_SYMBOL_EXTRACTOR_V1_VERSION;
+            });
+        return Result<size_t>(adopted);
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::Unknown, e.what()};
+    }
+#endif
 }
 
 boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {

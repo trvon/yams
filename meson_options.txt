@@ -15,6 +15,7 @@ option('plugin-s3', type: 'boolean', value: true, description: 'Build object_sto
 option('plugin-pdf', type: 'boolean', value: true, description: 'Build PDF extractor plugin (requires pdfium and app/services)')
 option('plugin-onnx', type: 'boolean', value: true, description: 'Build ONNX plugin (requires onnxruntime and vector lib)')
 option('build-tests', type: 'boolean', value: false, description: 'Build unit/integration tests under tests/')
+option('plugin-symbols', type: 'boolean', value: true, description: 'Build Tree-sitter symbol extractor plugin')
 option('yams-version', type: 'string', value: '', description: 'Override runtime/display version (falls back to project version when empty). A generated header will expose this.')
 option('unit-timeout', type: 'integer', value: 1200, description: 'Total time budget (seconds) for unit tests; per-shard timeout is derived automatically when sharding is enabled')
 option('unit-shards', type: 'integer', value: 6, description: 'Number of shards to split the unit test binary into via GTest sharding (set to 1 to disable)')
@@ -37,3 +38,5 @@ option('enable-bench-tests', type: 'boolean', value: false, description: 'Regist
 option('enable-daemon-long-tests', type: 'boolean', value: false, description: 'Register long-running daemon lifecycle tests')
 option('enable-stress-tests', type: 'boolean', value: false, description: 'Register stress test binary')
 option('enable-reliability-tests', type: 'boolean', value: false, description: 'Register reliability gate (retries/latency sensitive)')
+
+option('enable-symbol-extraction', type: 'boolean', value: true, description: 'Enable symbol extraction (plugins & features)')

@@ -2,74 +2,34 @@
 	"version": "2.0.0",
 	"tasks": [
 		{
-			"label": "conan: install (Debug)",
+			"label": "setup (Debug)",
 			"type": "shell",
-			"command": "conan install . -of builddir -s build_type=Debug -b missing",
+			"command": "./setup.sh Debug",
 			"problemMatcher": [],
-			"group": "none",
 			"presentation": {
 				"reveal": "always",
 				"panel": "shared"
+			},
+			"group": {
+				"kind": "build",
+				"isDefault": true
 			}
 		},
 		{
-			"label": "conan: install (Release)",
+			"label": "setup (Release)",
 			"type": "shell",
-			"command": "conan install . -of build/release -s build_type=Release -b missing",
+			"command": "./setup.sh Release",
 			"problemMatcher": [],
-			"group": "none",
 			"presentation": {
 				"reveal": "always",
 				"panel": "shared"
 			}
 		},
 		{
-			"label": "meson: setup (Debug)",
+			"label": "build (Debug)",
 			"type": "shell",
 			"dependsOn": [
-				"conan: install (Debug)"
-			],
-			"command": "meson setup builddir --native-file builddir/build-debug/conan/conan_meson_native.ini -Dbuildtype=debug",
-			"problemMatcher": [
-				"$gcc"
-			],
-			"group": "none",
-			"presentation": {
-				"reveal": "always",
-				"panel": "shared"
-			}
-		},
-		{
-			"label": "meson: setup (Release)",
-			"type": "shell",
-			"dependsOn": [
-				"conan: install (Release)"
-			],
-			"command": "meson setup build/release --native-file build/release/build-release/conan/conan_meson_native.ini -Dbuildtype=release",
-			"problemMatcher": [
-				"$gcc"
-			],
-			"group": "none",
-			"presentation": {
-				"reveal": "always",
-				"panel": "shared"
-			}
-		},
-		{
-			"label": "meson: configure (Debug)",
-			"type": "shell",
-			"dependsOn": [
-				"meson: setup (Debug)"
-			],
-			"command": "meson configure builddir",
-			"problemMatcher": [],
-			"group": "none"
-		},
-		{
-			"label": "meson: compile (Debug)",
-			"type": "shell",
-			"dependsOn": [
-				"meson: setup (Debug)"
+				"setup (Debug)"
 			],
 			"command": "meson compile -C builddir",
 			"problemMatcher": [
@@ -85,10 +45,10 @@
 			}
 		},
 		{
-			"label": "meson: compile (Release)",
+			"label": "build (Release)",
 			"type": "shell",
 			"dependsOn": [
-				"meson: setup (Release)"
+				"setup (Release)"
 			],
 			"command": "meson compile -C build/release",
 			"problemMatcher": [
@@ -101,10 +61,10 @@
 			}
 		},
 		{
-			"label": "meson: test (Debug)",
+			"label": "test (Debug)",
 			"type": "shell",
 			"dependsOn": [
-				"meson: compile (Debug)"
+				"build (Debug)"
 			],
 			"command": "meson test -C builddir --print-errorlogs",
 			"problemMatcher": [
@@ -120,9 +80,9 @@
 			}
 		},
 		{
-			"label": "meson: clean",
+			"label": "clean",
 			"type": "shell",
-			"command": "rm -rf builddir build/release",
+			"command": "rm -rf builddir build",
 			"problemMatcher": [],
 			"group": "none"
 		},
@@ -166,16 +126,6 @@
 			"command": "docker run --rm -v ${workspaceFolder}:/work -w /work yams/local-ci:ubuntu-24.04 bash -lc 'rm -rf build || true'",
 			"problemMatcher": [],
 			"group": "none"
-		},
-		{
-			"label": "local-ci: run meson unit tests (docker)",
-			"type": "shell",
-			"command": "docker run --rm -v ${workspaceFolder}:/work -w /work yams/local-ci:ubuntu-24.04 bash -lc 'scripts/local-ci/run_meson_tests.sh'",
-			"isBackground": false,
-			"problemMatcher": [
-				"$gcc"
-			],
-			"group": "test"
 		}
 	]
 }

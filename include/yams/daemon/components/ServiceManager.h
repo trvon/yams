@@ -26,6 +26,7 @@
 #include <yams/daemon/daemon.h> // For DaemonConfig
 #include <yams/daemon/ipc/retrieval_session.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
+#include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/daemon/resource/plugin_host.h>
 
 #include <yams/extraction/content_extractor.h>
@@ -201,6 +202,10 @@ public:
     getContentExtractors() const {
         return contentExtractors_;
     }
+    // Symbol extractors (ABI adapters)
+    const std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>>& getSymbolExtractors() const {
+        return symbolExtractors_;
+    }
 
     // ContentStore diagnostics
     std::string getContentStoreError() const { return contentStoreError_; }
@@ -261,6 +266,7 @@ public:
     // Returns true on success.
     Result<bool> adoptModelProviderFromHosts(const std::string& preferredName = "");
     Result<size_t> adoptContentExtractorsFromHosts();
+    Result<size_t> adoptSymbolExtractorsFromHosts();
     bool isEmbeddingsAutoOnAdd() const { return embeddingsAutoOnAdd_; }
 
     // Ensure an embedding generator is available by adopting a provider and loading
@@ -423,6 +429,7 @@ private:
     std::shared_ptr<WalMetricsProvider> walMetricsProvider_;
     std::unique_ptr<PostIngestQueue> postIngest_;
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors_;
+    std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> symbolExtractors_;
     bool embeddingsAutoOnAdd_{false};
     // Centralized tuning config (persistable via config file; avoids envs).
     TuningConfig tuningConfig_{};

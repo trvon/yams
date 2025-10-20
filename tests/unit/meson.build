@@ -228,6 +228,10 @@ unit_search = files(
   'search/search_smoke_test.cpp',
 )
 
+unit_plugins = files(
+  'plugins/symbol_extractor_query_test.cpp',
+)
+
 unit_storage = files(
   'storage/compressed_storage_stats_test.cpp',
   'storage/object_storage_adapter_test.cpp',
@@ -244,6 +248,7 @@ if get_option('enable-vector-tests')
   unit_vector += files(
     'vector/document_chunker_test.cpp',
     'vector/embedding_genai_selection_test.cpp',
+    'vector/sqlite_vec_c_api_smoke_test.cpp',
   )
 endif
 
@@ -272,6 +277,7 @@ unit_srcs += unit_search
 unit_srcs += unit_storage
 unit_srcs += unit_vector
 unit_srcs += unit_wal
+unit_srcs += unit_plugins
 
 yams_unit_objs = static_library('yams_unit_objs', unit_srcs,
   include_directories: incs,

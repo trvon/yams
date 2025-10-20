@@ -150,6 +150,14 @@ endif
 boost_dep = dependency('boost', modules: ['system', 'thread'], method: 'cmake', required: true)
 meson.override_dependency('boost', boost_dep)
 
+# Symbol extraction feature flag
+sym_opt = get_option('enable-symbol-extraction')
+if sym_opt
+  add_project_arguments('-DYAMS_ENABLE_SYMBOL_EXTRACTION=1', language: ['c','cpp'])
+else
+  add_project_arguments('-DYAMS_ENABLE_SYMBOL_EXTRACTION=0', language: ['c','cpp'])
+endif
+
 # --- Version header generation ---
 _override_version = get_option('yams-version')
 _effective_version = _override_version != '' ? _override_version : meson.project_version()
@@ -260,4 +268,5 @@ summary({
   'build_cli': yams_build_cli,
   'build_mcp_server': yams_build_mcp,
   'enable_tui': yams_enable_tui,
+  'enable_symbol_extraction': sym_opt,
 }, section: 'YAMS Meson configuration', bool_yn: true)

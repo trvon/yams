@@ -315,7 +315,7 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             createVectorSearchSchema(),   upgradeFTS5Tokenization(),
             createTreeSnapshotsSchema(),  createTreeDiffsSchema(),
             addPathIndexingSchema(),      chunkedPathIndexingBackfill(),
-            createPathTreeSchema()};
+            createPathTreeSchema(),       createSymbolMetadataSchema()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -1646,6 +1646,47 @@ Migration YamsMetadataMigrations::createPathTreeSchema() {
     builder.down(R"(DROP INDEX IF EXISTS idx_path_tree_nodes_segment;)");
     builder.down(R"(DROP INDEX IF EXISTS idx_path_tree_nodes_parent;)");
     builder.down(R"(DROP TABLE IF EXISTS path_tree_nodes;)");
+
+    return builder.build();
+}
+
+Migration YamsMetadataMigrations::createSymbolMetadataSchema() {
+    MigrationBuilder builder(16, "Create symbol metadata schema");
+
+    builder.up(R"(
+        CREATE TABLE IF NOT EXISTS symbol_metadata (
+            symbol_id INTEGER PRIMARY KEY,
+            document_hash TEXT NOT NULL,
+            symbol_name TEXT NOT NULL,
+            qualified_name TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            start_line INTEGER,
+            end_line INTEGER,
+            start_offset INTEGER,
+            end_offset INTEGER,
+            return_type TEXT,
+            parameters TEXT,
+            documentation TEXT
+        );
+    )");
+
+    builder.up(R"(
+        CREATE INDEX IF NOT EXISTS idx_symbol_name ON symbol_metadata(symbol_name);
+    )");
+
+    builder.up(R"(
+        CREATE INDEX IF NOT EXISTS idx_symbol_kind ON symbol_metadata(kind);
+    )");
+
+    builder.down(R"(
+        DROP INDEX IF EXISTS idx_symbol_kind;
+    )");
+    builder.down(R"(
+        DROP INDEX IF EXISTS idx_symbol_name;
+    )");
+    builder.down(R"(
+        DROP TABLE IF EXISTS symbol_metadata;
+    )");
 
     return builder.build();
 }

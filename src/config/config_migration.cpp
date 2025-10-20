@@ -130,6 +130,7 @@ Result<void> ConfigMigrator::createDefaultV2Config(const fs::path& configPath) {
 std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2AdditiveDefaults() {
     // Additive keys introduced post-initial v2 rollout. These will be merged non-destructively.
     return {{"embeddings", {{"auto_on_add", "false"}}},
+            {"plugins.symbol_extraction", {{"enable", "true"}}},
             {"tuning",
              {{"profile", "balanced"},
               {"backpressure_read_pause_ms", "10"},
@@ -458,6 +459,7 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
 
             {"experimental", {{"enable", "false"}}},
 
+            {"plugins.symbol_extraction", {{"enable", "true"}}},
             {"experimental.bert_ner",
              {{"enable", "false"},
               {"model_path", ""},

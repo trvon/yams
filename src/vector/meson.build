@@ -168,6 +168,18 @@ vector_cppargs = [
   '-DSQLITE_ENABLE_LOAD_EXTENSION=1',
 ]
 
+# Enable SIMD for sqlite-vec-cpp when supported
+cpp_comp = meson.get_compiler('cpp')
+host_cpu = host_machine.cpu_family()
+if host_cpu == 'x86_64' or host_cpu == 'x86'
+  if cpp_comp.has_argument('-mavx')
+    vector_cppargs += ['-DSQLITE_VEC_ENABLE_AVX', '-mavx']
+  endif
+elif host_cpu == 'aarch64' or host_cpu == 'arm'
+  # NEON is baseline on aarch64; on 32-bit arm it may depend on sub-arch
+  vector_cppargs += ['-DSQLITE_VEC_ENABLE_NEON']
+endif
+
 # C sources (sqlite-vec.c) need the same defines
 vector_cargs = [
   '-DSQLITE_CORE=1',

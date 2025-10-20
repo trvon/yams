@@ -22,6 +22,7 @@ class YamsConan(ConanFile):
         "enable_tui": [True, False],  # Separate TUI from CLI
         "enable_onnx": [True, False],  # Gate ONNX Runtime and its transitive graph
         "enable_wasmtime": [True, False],  # Gate WASM host (wasmtime-cpp integration)
+        "enable_symbol_extraction": [True, False],  # Gate symbol extraction features and deps
     }
     default_options = {
         "build_cli": True,
@@ -32,6 +33,7 @@ class YamsConan(ConanFile):
         "enable_tui": True,  # TUI enabled by default
         "enable_onnx": True,  # ONNX enabled by default; can be disabled to drop Boost
         "enable_wasmtime": True,  # WASM host enabled by default (bring your own wasmtime-cpp)
+        "enable_symbol_extraction": True,  # Enabled by default; disable to drop extractors
     }
 
     generators = ("MesonToolchain", "PkgConfigDeps", "CMakeDeps")
@@ -72,6 +74,12 @@ class YamsConan(ConanFile):
         if self.options.enable_tui:
             # FTXUI: Modern C++17 TUI library, zero external dependencies
             self.requires("ftxui/5.0.0")
+        
+        if self.options.enable_symbol_extraction:
+            try:
+                self.requires("tree-sitter/0.25.9")
+            except Exception:
+                pass
         
         if self.options.enable_onnx:
             self.requires("onnxruntime/1.18.1")

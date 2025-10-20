@@ -224,6 +224,44 @@ public:
             }
         });
 
+        // Grammar subcommands for tree-sitter symbol extraction
+        auto* grammarCmd =
+            cmd->add_subcommand("grammar", "Manage tree-sitter grammars for symbol extraction");
+        grammarCmd->require_subcommand();
+
+        auto* grammarListCmd =
+            grammarCmd->add_subcommand("list", "List available and installed grammars");
+        grammarListCmd->callback([this]() {
+            auto result = executeGrammarList();
+            if (!result) {
+                spdlog::error("Grammar list failed: {}", result.error().message);
+                std::exit(1);
+            }
+        });
+
+        auto* grammarDownloadCmd =
+            grammarCmd->add_subcommand("download", "Download tree-sitter grammar");
+        grammarDownloadCmd
+            ->add_option("language", grammarLanguage_,
+                         "Language (cpp, python, rust, go, javascript, typescript, java)")
+            ->required();
+        grammarDownloadCmd->callback([this]() {
+            auto result = executeGrammarDownload();
+            if (!result) {
+                spdlog::error("Grammar download failed: {}", result.error().message);
+                std::exit(1);
+            }
+        });
+
+        auto* grammarPathCmd = grammarCmd->add_subcommand("path", "Show grammar installation path");
+        grammarPathCmd->callback([this]() {
+            auto result = executeGrammarPath();
+            if (!result) {
+                spdlog::error("Grammar path failed: {}", result.error().message);
+                std::exit(1);
+            }
+        });
+
         // Check subcommand to verify if migration is needed
         auto* checkCmd = cmd->add_subcommand("check", "Check if config needs migration");
         checkCmd->add_option("--config-path", configPath_, "Path to config file");
@@ -296,6 +334,7 @@ private:
     std::string embeddingPreset_;
     std::string tuningProfile_;
     std::string pathTreeMode_;
+    std::string grammarLanguage_;
     bool noBackup_ = false;
     bool dryRun_ = false;
 
@@ -307,6 +346,85 @@ private:
     std::string s3AccessKey_;
     std::string s3SecretKey_;
     bool s3UsePathStyle_ = false;
+
+    // Template helper for setting single config value with validation
+    template <typename Validator = std::nullptr_t>
+    Result<void> setConfigValue(const std::string& key, const std::string& value,
+                                Validator validator = nullptr) {
+        try {
+            if constexpr (!std::is_same_v<Validator, std::nullptr_t>) {
+                auto validationResult = validator(key, value);
+                if (!validationResult) {
+                    return validationResult;
+                }
+            }
+
+            auto result = writeConfigValue(key, value);
+            if (!result)
+                return result;
+
+            std::cout << "✓ Updated " << key << " = " << value << " in " << getConfigPath() << "\n";
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string(e.what())};
+        }
+    }
+
+    // Template helper for setting multiple config values
+    template <typename... Pairs> Result<void> setConfigValues(Pairs&&... pairs) {
+        try {
+            auto results = {setConfigValue(std::forward<Pairs>(pairs).first,
+                                           std::forward<Pairs>(pairs).second)...};
+            for (const auto& result : results) {
+                if (!result)
+                    return result;
+            }
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string(e.what())};
+        }
+    }
+
+    // Template helper for setting multiple config key-value pairs from a map/vector
+    Result<void>
+    setMultipleConfigs(const std::vector<std::pair<std::string, std::string>>& configs) {
+        try {
+            for (const auto& [key, value] : configs) {
+                auto result = writeConfigValue(key, value);
+                if (!result)
+                    return result;
+            }
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string(e.what())};
+        }
+    }
+
+    // Template helper for showing status with config values
+    template <typename ConfigMap>
+    void printStatusSection(const std::string& title, const ConfigMap& items) {
+        std::cout << title << "\n";
+        std::cout << std::string(title.length(), '=') << "\n\n";
+        for (const auto& [label, value] : items) {
+            std::cout << label << ": " << value << "\n";
+        }
+        std::cout << "\n";
+    }
+
+    // Template helper for enable/disable operations
+    Result<void> setBooleanConfig(const std::string& key, bool enabled,
+                                  const std::string& enableMsg, const std::string& disableMsg) {
+        try {
+            auto result = writeConfigValue(key, enabled ? "true" : "false");
+            if (!result)
+                return result;
+
+            std::cout << "✓ " << (enabled ? enableMsg : disableMsg) << "\n";
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string(e.what())};
+        }
+    }
 
     fs::path getConfigPath() const {
         if (!configPath_.empty()) {
@@ -785,19 +903,10 @@ private:
             }
 
             // Set default configurations for auto-generation
-            auto result = writeConfigValue("embeddings.auto_generate", "true");
-            if (!result)
-                return result;
-
-            result = writeConfigValue("embeddings.preferred_model", models[0]);
-            if (!result)
-                return result;
-
-            result = writeConfigValue("embeddings.batch_size", "16");
-            if (!result)
-                return result;
-
-            result = writeConfigValue("embeddings.generation_delay_ms", "1000");
+            auto result = setMultipleConfigs({{"embeddings.auto_generate", "true"},
+                                              {"embeddings.preferred_model", models[0]},
+                                              {"embeddings.batch_size", "16"},
+                                              {"embeddings.generation_delay_ms", "1000"}});
             if (!result)
                 return result;
 
@@ -809,26 +918,16 @@ private:
             std::cout << "generate embeddings in the background.\n";
 
             return Result<void>();
-
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string(e.what())};
         }
     }
 
     Result<void> executeEmbeddingsDisable() {
-        try {
-            auto result = writeConfigValue("embeddings.auto_generate", "false");
-            if (!result)
-                return result;
-
-            std::cout << "✓ Automatic embedding generation disabled\n";
-            std::cout << "  Use 'yams repair --embeddings' to manually generate embeddings\n";
-
-            return Result<void>();
-
-        } catch (const std::exception& e) {
-            return Error{ErrorCode::Unknown, std::string(e.what())};
-        }
+        return setBooleanConfig("embeddings.auto_generate", false,
+                                "Automatic embedding generation disabled",
+                                "Automatic embedding generation disabled\n"
+                                "  Use 'yams repair --embeddings' to manually generate embeddings");
     }
 
     Result<void> executeEmbeddingsStatus() {
@@ -910,64 +1009,47 @@ private:
 
     Result<void> executeEmbeddingsTune() {
         try {
+            std::vector<std::pair<std::string, std::string>> configs;
+            std::string description;
+
             // Apply preset configurations
             if (embeddingPreset_ == "performance") {
-                auto result = writeConfigValue("embeddings.batch_size", "32");
-                if (!result)
-                    return result;
-                result = writeConfigValue("embeddings.generation_delay_ms", "500");
-                if (!result)
-                    return result;
-                // Keep user's preferred model unless unset; recommend nomic for performance/quality
+                configs = {{"embeddings.batch_size", "32"},
+                           {"embeddings.generation_delay_ms", "500"}};
+                // Keep user's preferred model unless unset
                 if (parseSimpleToml(getConfigPath())["embeddings.preferred_model"].empty()) {
-                    result =
-                        writeConfigValue("embeddings.preferred_model", "nomic-embed-text-v1.5");
-                } else {
-                    result = Result<void>();
+                    configs.push_back({"embeddings.preferred_model", "nomic-embed-text-v1.5"});
                 }
-                if (!result)
-                    return result;
-
-                std::cout << "✓ Performance preset applied\n";
-                std::cout << "  - Larger batch size (32)\n";
-                std::cout << "  - Faster processing (500ms delay)\n";
-                std::cout << "  - Lightweight model (MiniLM)\n";
-
+                description = "Performance preset applied\n"
+                              "  - Larger batch size (32)\n"
+                              "  - Faster processing (500ms delay)\n"
+                              "  - Lightweight model (MiniLM)";
             } else if (embeddingPreset_ == "quality") {
-                auto result = writeConfigValue("embeddings.batch_size", "8");
-                if (!result)
-                    return result;
-                result = writeConfigValue("embeddings.generation_delay_ms", "2000");
-                if (!result)
-                    return result;
-                result = writeConfigValue("embeddings.preferred_model", "all-mpnet-base-v2");
-                if (!result)
-                    return result;
-
-                std::cout << "✓ Quality preset applied\n";
-                std::cout << "  - Smaller batch size (8)\n";
-                std::cout << "  - Slower processing (2000ms delay)\n";
-                std::cout << "  - High-quality model (MPNet)\n";
-
+                configs = {{"embeddings.batch_size", "8"},
+                           {"embeddings.generation_delay_ms", "2000"},
+                           {"embeddings.preferred_model", "all-mpnet-base-v2"}};
+                description = "Quality preset applied\n"
+                              "  - Smaller batch size (8)\n"
+                              "  - Slower processing (2000ms delay)\n"
+                              "  - High-quality model (MPNet)";
             } else if (embeddingPreset_ == "balanced") {
-                auto result = writeConfigValue("embeddings.batch_size", "16");
-                if (!result)
-                    return result;
-                result = writeConfigValue("embeddings.generation_delay_ms", "1000");
-                if (!result)
-                    return result;
-                result = writeConfigValue("embeddings.preferred_model", "all-MiniLM-L6-v2");
-                if (!result)
-                    return result;
-
-                std::cout << "✓ Balanced preset applied\n";
-                std::cout << "  - Medium batch size (16)\n";
-                std::cout << "  - Moderate processing (1000ms delay)\n";
-                std::cout << "  - Efficient model (MiniLM)\n";
+                configs = {{"embeddings.batch_size", "16"},
+                           {"embeddings.generation_delay_ms", "1000"},
+                           {"embeddings.preferred_model", "all-MiniLM-L6-v2"}};
+                description = "Balanced preset applied\n"
+                              "  - Medium batch size (16)\n"
+                              "  - Moderate processing (1000ms delay)\n"
+                              "  - Efficient model (MiniLM)";
+            } else {
+                return Error{ErrorCode::InvalidArgument, "Unknown preset: " + embeddingPreset_};
             }
 
-            return Result<void>();
+            auto result = setMultipleConfigs(configs);
+            if (!result)
+                return result;
 
+            std::cout << "✓ " << description << "\n";
+            return Result<void>();
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string(e.what())};
         }
@@ -985,49 +1067,32 @@ private:
     }
 
     Result<void> executePathTreeEnable() {
-        try {
-            auto mode = normalizePathTreeMode(pathTreeMode_, "preferred");
+        auto mode = normalizePathTreeMode(pathTreeMode_, "preferred");
 
-            auto result = writeConfigValue("search.path_tree.enable", "true");
-            if (!result)
-                return result;
+        auto result = writeConfigValue("search.path_tree.enable", "true");
+        if (!result)
+            return result;
 
-            result = writeConfigValue("search.path_tree.mode", mode);
-            if (!result)
-                return result;
+        result = writeConfigValue("search.path_tree.mode", mode);
+        if (!result)
+            return result;
 
-            std::cout << "✓ Path-tree traversal enabled\n";
-            std::cout << "  Mode: " << mode << "\n";
-            if (mode == "fallback") {
-                std::cout
-                    << "  Baseline scans remain as a safety net when tree nodes are missing.\n";
-            } else {
-                std::cout << "  Path-tree results will be preferred for eligible workloads.\n";
-            }
-
-            pathTreeMode_.clear();
-            return Result<void>();
-
-        } catch (const std::exception& e) {
-            return Error{ErrorCode::Unknown, std::string(e.what())};
+        std::cout << "✓ Path-tree traversal enabled\n";
+        std::cout << "  Mode: " << mode << "\n";
+        if (mode == "fallback") {
+            std::cout << "  Baseline scans remain as a safety net when tree nodes are missing.\n";
+        } else {
+            std::cout << "  Path-tree results will be preferred for eligible workloads.\n";
         }
+
+        pathTreeMode_.clear();
+        return Result<void>();
     }
 
     Result<void> executePathTreeDisable() {
-        try {
-            auto result = writeConfigValue("search.path_tree.enable", "false");
-            if (!result)
-                return result;
-
-            std::cout << "✓ Path-tree traversal disabled\n";
-            std::cout << "  Workloads will continue to use the legacy scan engine.\n";
-
-            pathTreeMode_.clear();
-            return Result<void>();
-
-        } catch (const std::exception& e) {
-            return Error{ErrorCode::Unknown, std::string(e.what())};
-        }
+        return setBooleanConfig("search.path_tree.enable", false, "Path-tree traversal disabled",
+                                "Path-tree traversal disabled\n"
+                                "  Workloads will continue to use the legacy scan engine.");
     }
 
     Result<void> executePathTreeMode() {
@@ -1376,6 +1441,119 @@ private:
             }
 
             std::cout << "Storage configuration updated successfully." << std::endl;
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string(e.what())};
+        }
+    }
+
+    fs::path getGrammarPath() const {
+        const char* xdgDataHome = std::getenv("XDG_DATA_HOME");
+        const char* homeEnv = std::getenv("HOME");
+
+        fs::path dataHome;
+        if (xdgDataHome) {
+            dataHome = fs::path(xdgDataHome);
+        } else if (homeEnv) {
+            dataHome = fs::path(homeEnv) / ".local" / "share";
+        } else {
+            return fs::path("~/.local/share") / "yams" / "grammars";
+        }
+
+        return dataHome / "yams" / "grammars";
+    }
+
+    Result<void> executeGrammarList() {
+        try {
+            auto grammarPath = getGrammarPath();
+
+            std::cout << "Tree-sitter Grammar Status\n";
+            std::cout << "==========================\n\n";
+            std::cout << "Installation path: " << grammarPath << "\n\n";
+
+            // Supported languages
+            std::vector<std::pair<std::string, std::string>> languages = {
+                {"cpp", "libtree-sitter-cpp.so"},
+                {"python", "libtree-sitter-python.so"},
+                {"rust", "libtree-sitter-rust.so"},
+                {"go", "libtree-sitter-go.so"},
+                {"javascript", "libtree-sitter-javascript.so"},
+                {"typescript", "libtree-sitter-typescript.so"},
+                {"java", "libtree-sitter-java.so"}};
+
+            std::cout << "Supported Languages:\n";
+            for (const auto& [lang, lib] : languages) {
+                fs::path libPath = grammarPath / lib;
+                bool installed = fs::exists(libPath);
+                std::cout << "  " << std::left << std::setw(15) << lang
+                          << (installed ? "✓ installed" : "✗ not installed") << "\n";
+            }
+
+            std::cout << "\nCommands:\n";
+            std::cout << "  yams config grammar download <language>  - Download grammar\n";
+            std::cout << "  yams config grammar path                 - Show installation path\n";
+
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string(e.what())};
+        }
+    }
+
+    Result<void> executeGrammarDownload() {
+        try {
+            // Supported grammars mapped to their repository URLs
+            std::map<std::string, std::string> grammarRepos = {
+                {"cpp", "tree-sitter/tree-sitter-cpp"},
+                {"python", "tree-sitter/tree-sitter-python"},
+                {"rust", "tree-sitter/tree-sitter-rust"},
+                {"go", "tree-sitter/tree-sitter-go"},
+                {"javascript", "tree-sitter/tree-sitter-javascript"},
+                {"typescript", "tree-sitter/tree-sitter-typescript"},
+                {"java", "tree-sitter/tree-sitter-java"}};
+
+            if (grammarRepos.find(grammarLanguage_) == grammarRepos.end()) {
+                std::cout << "✗ Unsupported language: " << grammarLanguage_ << "\n";
+                std::cout << "Supported: cpp, python, rust, go, javascript, typescript, java\n";
+                return Error{ErrorCode::InvalidArgument, "Unsupported language"};
+            }
+
+            auto grammarPath = getGrammarPath();
+            fs::create_directories(grammarPath);
+
+            std::cout << "Downloading tree-sitter grammar for " << grammarLanguage_ << "...\n";
+            std::cout << "Repository: " << grammarRepos[grammarLanguage_] << "\n";
+            std::cout << "Target: " << grammarPath << "\n\n";
+
+            // Instructions since we can't directly download/compile here
+            std::cout << "Manual installation steps:\n";
+            std::cout << "1. Clone the repository:\n";
+            std::cout << "   git clone https://github.com/" << grammarRepos[grammarLanguage_]
+                      << " /tmp/tree-sitter-" << grammarLanguage_ << "\n\n";
+            std::cout << "2. Build the shared library:\n";
+            std::cout << "   cd /tmp/tree-sitter-" << grammarLanguage_ << "\n";
+            std::cout << "   gcc -shared -fPIC -o libtree-sitter-" << grammarLanguage_
+                      << ".so src/parser.c -I.\n\n";
+            std::cout << "3. Copy to YAMS grammar directory:\n";
+            std::cout << "   cp libtree-sitter-" << grammarLanguage_ << ".so " << grammarPath
+                      << "/\n\n";
+
+            std::cout << "Or set environment variable:\n";
+            std::cout << "   export YAMS_TS_" << grammarLanguage_ << "_LIB=/path/to/libtree-sitter-"
+                      << grammarLanguage_ << ".so\n\n";
+
+            std::cout << "⚠ Note: Automatic downloads will be added in a future update.\n";
+            std::cout << "For now, follow the manual steps above or use system packages.\n";
+
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string(e.what())};
+        }
+    }
+
+    Result<void> executeGrammarPath() {
+        try {
+            auto grammarPath = getGrammarPath();
+            std::cout << grammarPath << "\n";
             return Result<void>();
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string(e.what())};

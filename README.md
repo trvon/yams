@@ -34,20 +34,20 @@ Supported platforms: Linux x86_64/ARM64, macOS x86_64/ARM64
 ### Build with Meson (Recommended)
 
 ```bash
-# 1. Resolve dependencies
-conan install . -of build/release -s build_type=Release -b missing
+# Configure dependencies + Meson in one step
+./setup.sh    # or ./setup.sh Debug
 
-# 2. Configure
-meson setup build/release \
-  --native-file build/release/build-release/conan/conan_meson_native.ini \
-  --buildtype=release
+# Build / test
+meson compile -C builddir          # Debug output
+meson test -C builddir --print-errorlogs
+meson compile -C build/release     # Release output
 
-# 3. Build
-meson compile -C build/release
-
-# 4. (Optional) Install
+# (Optional) Install
 meson install -C build/release
 ```
+
+The setup script prefers Clang when available, falling back to GCC. Debug artifacts live under `builddir/`, release
+under `build/release/`.
 
 
 Dependencies quick ref:
