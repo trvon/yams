@@ -57,23 +57,9 @@ Dependencies quick ref:
   - Export `OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)` if CMake cannot locate OpenSSL
 - ONNX runtime (plugins): requires oneTBB at runtime. Provide via system packages (e.g., libtbb12/libtbb-dev) or Conan (`onetbb`).
 
-Common build options (Meson): `-Dbuild-tests=true|false`, `-Denable-tui=true|false` (defaults to true), `-Denable-onnx=enabled|disabled|auto`, `-Dplugin-onnx=true|false`, `-Dyams-version=...`.
-Fast iteration: set `FAST_MODE=1` when running `meson setup --reconfigure` to disable ONNX & tests in CI (SourceHut) or locally.
-Media metadata: install `mediainfo` + dev package (e.g. `libmediainfo-dev`) or FFmpeg (`ffprobe`) to enable richer video parsing.
-
 Further build documentation:
 - GCC specifics / quick reference: `docs/BUILD-GCC.md`
 - Developer build system & internal ONNX Runtime path: `docs/developer/build_system.md`
-
-ONNX embeddings (experimental):
-
-- The ONNX plugin is experimental and may not work as intended.
-- Conan: default profiles enable `yams/*:enable_onnx=True`. With custom profiles, pass `-o yams/*:enable_onnx=True` to `conan install`.
-- Plain CMake: configure with `-DYAMS_ENABLE_ONNX=ON` and ensure `onnxruntime` is discoverable (e.g., via `CMAKE_PREFIX_PATH`).
-- Verify configure logs include: `ONNX Runtime found - enabling local embedding generation` (and not disabled).
-- Internal newer ORT (GenAI headers) path: run Conan with `-o yams/*:use_conan_onnx=False` and configure with `-DYAMS_BUILD_INTERNAL_ONNXRUNTIME=ON` (see developer build doc for details).
-
-Note: Plain CMake without Conan may miss dependencies; prefer Conan builds.
 
 ## Quick Start
 ```bash
@@ -106,61 +92,6 @@ When enabled, `yams grep` accepts tag or path filters (it defaults the pattern t
 filters) and, when you specify explicit path prefixes, the service seeds candidates through
 `MetadataRepository::listPathTreeChildren`—the same engine exercised by
 `tests/benchmarks/search_tree_bench.cpp`. citetests/benchmarks/search_tree_bench.cpp:188src/app/services/grep_service.cpp:247
-
-## CLI Cheat Sheet
-```bash
-# set storage per-run
-yams --data-dir /tmp/yams add -
-
-# list (minimal for pipes)
-yams list --format minimal
-
-# fuzzy search
-yams search database --fuzzy --similarity 0.8
-
-# delete preview
-yams delete --pattern "*.log" --dry-run
-```
-
-## Plugins (ONNX Provider)
-YAMS loads optional plugins via a stable C‑ABI host with a simple trust policy.
-
-- Trust file: `~/.config/yams/plugins_trust.txt` (one absolute path per line; default deny)
-- Discovery order:
-  - `YAMS_PLUGIN_DIR` (exclusive override)
-  - `$HOME/.local/lib/yams/plugins`
-  - `/usr/local/lib/yams/plugins`, `/usr/lib/yams/plugins`
-  - `${CMAKE_INSTALL_PREFIX}/lib/yams/plugins`
-- Disable plugin subsystem: start daemon with `--no-plugins`.
-
-ONNX plugin build/install/runtime:
-
-- Prerequisite: onnxruntime (headers + shared libraries) must be available at build and runtime.
-- Build: `yams_onnx_plugin` is built when `onnxruntime` is found and ONNX is enabled.
-- Install: plugin installs under `${CMAKE_INSTALL_LIBDIR}/yams/plugins` (e.g., `/usr/local/lib/yams/plugins`).
-- Packaging: set `-DYAMS_PACKAGE_PLUGINS=ON` (default) and run `cpack` to include the plugin in binary packages.
-- Discovery: daemon logs a line on startup with plugin scan directories (useful for troubleshooting).
-
-Usage (CLI):
-```bash
-# scan, trust, load
-yams plugin scan
-yams plugin trust add /usr/local/lib/yams/plugins
-yams plugin load /usr/local/lib/yams/plugins/libyams_onnx_plugin.so
-```
-
-First‑time setup with `yams init`:
-
-- The init dialog asks whether to enable plugins; if yes, it creates and trusts `~/.local/lib/yams/plugins`.
-- Non‑interactive: pass `--enable-plugins`.
-
-Dev overrides:
-
-- Set `YAMS_PLUGIN_DIR` to your build output (e.g., `.../build/.../plugins/onnx`) to have the daemon scan it.
-
-Behavior:
-
-- If a trusted plugin advertises `model_provider_v1`, the daemon prefers it for embeddings. Otherwise it falls back to the legacy registry or mock/null providers (env: `YAMS_USE_MOCK_PROVIDER`, `YAMS_DISABLE_ONNX`).
 
 ## MCP
 ```bash
@@ -200,4 +131,3 @@ publisher = {GitHub},
 url = {https://github.com/trvon/yams}
 }
 ```
-it 
