@@ -57,8 +57,15 @@ if [[ "${COMPILER_OVERRIDE}" == clang ]] || { [[ -z "${COMPILER_OVERRIDE}" ]] &&
   echo "--- Using Clang toolchain ---"
   export CC="clang"
   export CXX="clang++"
-  export CXXFLAGS="${CXXFLAGS:-} -include cstdint"
-  export CFLAGS="${CFLAGS:-} -include stdint.h"
+  # macOS requires libc++, Linux can use libstdc++11
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    LIBCXX="libc++"
+  else
+    LIBCXX="libstdc++11"
+    # Only add forced includes on Linux where they don't break Conan builds
+    export CXXFLAGS="${CXXFLAGS:-} -include cstdint"
+    export CFLAGS="${CFLAGS:-} -include stdint.h"
+  fi
   CLANG_VERSION=$(detect_version clang++)
   CLANG_MAJOR=$(COERCE_MAJOR "${CLANG_VERSION:-0}")
   if [[ -z "${CLANG_MAJOR}" || "${CLANG_MAJOR}" == 0 ]]; then
@@ -68,7 +75,7 @@ if [[ "${COMPILER_OVERRIDE}" == clang ]] || { [[ -z "${COMPILER_OVERRIDE}" ]] &&
   CONAN_ARGS+=(
     -s "compiler=clang"
     -s "compiler.version=${CLANG_MAJOR}"
-    -s "compiler.libcxx=libstdc++11"
+    -s "compiler.libcxx=${LIBCXX}"
     -s "compiler.cppstd=20"
   )
 else
