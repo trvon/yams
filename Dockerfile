@@ -37,15 +37,22 @@ COPY conan/ ./conan/
 RUN --mount=type=cache,target=/root/.conan2 \
   set -eux; \
   conan --version; \
+  # Speed up fetching from ConanCenter
   conan config set general.parallel_downloads=8 || true; \
   conan profile detect --force; \
   sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' /root/.conan2/profiles/default; \
   echo '=== Conan remotes (before ensure) ==='; conan remote list || true; \
-  conan remote remove conancenter || true; \
-  conan remote add conancenter https://center.conan.io --force; \
+  # Ensure conancenter remote exists (some base images may have empty config)
+  if ! conan remote list | grep -q 'conancenter'; then \
+  conan remote add conancenter https://center.conan.io; \
+  fi; \
+  # Ensure the URL is correct (update in-place if needed)
+  conan remote update conancenter https://center.conan.io || true; \
   echo '=== Conan remotes (after ensure) ==='; conan remote list || true; \
+  # Provide a tiny user toolchain to relax minimum policy for legacy recipes (e.g., openjpeg/2.5.0)
   POLICY_TC=/tmp/yams_policy_toolchain.cmake; echo 'cmake_policy(VERSION 3.5)' > "$POLICY_TC"; \
-  echo '=== Searching for onetbb/2022.2.0 recipe (pre-install) ==='; conan search onetbb/2022.2.0 -r=conancenter || true; \
+  echo '=== Searching for libarchive/3.8.1 recipe (pre-install) ==='; conan search libarchive/3.8.1 -r=conancenter || true; \
+  # Choose profile based on host arch (amd64 vs arm64) and align compiler.version
   PROFILE=./conan/profiles/host-linux-gcc; \
   ARCH=$(uname -m); \
   if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then PROFILE=./conan/profiles/host-linux-gcc-arm; fi; \
@@ -55,19 +62,14 @@ RUN --mount=type=cache,target=/root/.conan2 \
   fi; \
   if ! conan install . -pr:h "$PROFILE" -pr:b=default \
     -c tools.cmake.cmaketoolchain:user_toolchain+=$POLICY_TC \
-    -o "yams/*:build_tests=False" \
-    -o "yams/*:build_benchmarks=False" \
     --output-folder=build/yams-release -s build_type=Release --build=missing; then \
   echo 'Initial conan install failed; dumping remotes and attempting a retry with cache clean.'; \
-  conan remote list; \
   conan cache clean --temp --locks || true; \
-  conan search onetbb -r=conancenter || true; \
+  # Re-try resolution of openjpeg prior to full install for clearer diagnostics
   conan search openjpeg -r=conancenter || true; \
   conan search libarchive -r=conancenter || true; \
   conan install . -pr:h "$PROFILE" -pr:b=default \
     -c tools.cmake.cmaketoolchain:user_toolchain+=$POLICY_TC \
-    -o "yams/*:build_tests=False" \
-    -o "yams/*:build_benchmarks=False" \
     --output-folder=build/yams-release -s build_type=Release --build=missing; \
   fi
 
@@ -84,13 +86,8 @@ RUN --mount=type=cache,target=/root/.conan2 \
   sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' /root/.conan2/profiles/default || true; \
   PROFILE=./conan/profiles/host-linux-gcc; ARCH=$(uname -m); if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then PROFILE=./conan/profiles/host-linux-gcc-arm; fi; \
   if command -v g++ >/dev/null 2>&1; then GCC_MAJOR=$(g++ -dumpfullversion -dumpversion | cut -d. -f1); if [ -n "$GCC_MAJOR" ]; then sed -i -E "s/^compiler.version=.*/compiler.version=${GCC_MAJOR}/" "$PROFILE" || true; fi; fi; \
-  CONAN_BUILD_TESTS="False"; CONAN_BUILD_BENCHMARKS="False"; \
-  if [ "$BUILD_TESTS" = "true" ]; then CONAN_BUILD_TESTS="True"; fi; \
-  if [ "$BUILD_BENCHMARKS" = "true" ]; then CONAN_BUILD_BENCHMARKS="True"; fi; \
   conan install . -pr:h "$PROFILE" -pr:b=default \
     -c tools.cmake.cmaketoolchain:user_toolchain+=$POLICY_TC \
-    -o "yams/*:build_tests=${CONAN_BUILD_TESTS}" \
-    -o "yams/*:build_benchmarks=${CONAN_BUILD_BENCHMARKS}" \
     --output-folder=build/yams-release -s build_type=Release --build=missing && \
   meson setup build/yams-release \
   $( \

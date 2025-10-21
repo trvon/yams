@@ -18,10 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.7.7] - Unreleased
 
 ### Added
-- Started C++23 Compatibilty support expansion
+- Started C++23 Compatibility support expansion
 - Migrated vectordb to [https://github.com/trvon/sqlite-vec-cpp](https://github.com/trvon/sqlite-vec-cpp)
-- New Tree-sitter based symbol extractor plugin (enabled by default, pluggable C-ABI). Multi-language support (c, cpp, python, go, rust, js/ts) via env/config; easy disable via config flag.
-- Unit tests for symbol extraction: verifies C++ class/function and Python function detection via ABI host.
+- **Tree-sitter Symbol Extraction Plugin**: C-ABI based plugin system for multi-language symbol extraction
+  - Plugin auto-downloads tree-sitter grammars on first use (configurable via `plugins.symbol_extraction.auto_download_grammars`)
+  - CLI commands: `yams config grammar list/download/path/auto-enable/auto-disable`
+  - Supports tree-sitter v13-15 grammar versions
+  - **Note**: TypeScript grammar requires manual installation due to non-standard build structure requiring internal tree-sitter headers
 
 ### Changed
 - **ONNX Plugin Model Path Resolution**: Enhanced model path search to support XDG Base Directory specification

@@ -7,6 +7,8 @@
 #include <vector>
 #include <gtest/gtest.h>
 
+#include "../../common/plugins.h"
+#include <yams/plugins/abi.h>
 #include <yams/plugins/symbol_extractor_v1.h>
 
 /**
@@ -26,8 +28,13 @@ protected:
         extractor_ = nullptr;
 
         // Load the plugin from build directory
+#ifdef __APPLE__
+        const char* so_path =
+            "builddir/plugins/symbol_extractor_treesitter/libsymbol_extractor_treesitter.dylib";
+#else
         const char* so_path =
             "builddir/plugins/symbol_extractor_treesitter/libsymbol_extractor_treesitter.so";
+#endif
         pluginHandle_ = dlopen(so_path, RTLD_LAZY | RTLD_LOCAL);
         ASSERT_NE(pluginHandle_, nullptr) << "Failed to load plugin: " << dlerror();
 
@@ -83,6 +90,7 @@ protected:
         int rc = extractor_->extract_symbols(extractor_->self, code.c_str(), code.length(),
                                              filePath.c_str(), language.c_str(), &result);
 
+        PLUGIN_MISSING_SKIP(rc, result, "symbol grammar not available");
         EXPECT_EQ(rc, 0) << "Extraction failed with code: " << rc;
         EXPECT_NE(result, nullptr) << "Result is null";
 

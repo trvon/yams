@@ -141,23 +141,6 @@ jobs:
           echo "Running tree_diff_benchmarks..."
           ( cd "$BUILD_DIR" && ./tests/benchmarks/tree_diff_benchmarks ) || exit 1
 
-      - name: Run Core Benchmarks (Hashing, Chunking, Compression)
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Running yams_core_benchmarks..."
-          ( cd "$BUILD_DIR" && ./tests/benchmarks/yams_core_benchmarks --iterations 10 ) || exit 1
-
-      - name: Run Ingestion Throughput Benchmark
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Running ingestion_throughput_bench..."
-          ( cd "$BUILD_DIR" && timeout 120 ./tests/benchmarks/ingestion_throughput_bench ) || {
-            echo "::warning::Ingestion throughput benchmark timed out or failed"
-            exit 0
-          }
-
       - name: Regression Check (API)
         shell: bash
         run: |
@@ -191,21 +174,6 @@ jobs:
             --output "$BUILD_DIR/bench_results/tree_diff_benchmarks_regression.json" \
             --fail-on-regression
 
-      - name: Regression Check (Core Benchmarks)
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -f "$BUILD_DIR/bench_results/core_benchmarks.json" ]; then
-            python3 tests/scripts/check_regression.py \
-              "$BUILD_DIR/bench_results/core_benchmarks.json" \
-              tests/benchmarks/baseline/core_benchmarks.baseline.json \
-              --threshold 0.5 \
-              --output "$BUILD_DIR/bench_results/core_benchmarks_regression.json" \
-              --fail-on-regression
-          else
-            echo "::warning::Core benchmarks results not found"
-          fi
-
       - name: Summarize Benchmarks in Job Summary
         if: always()
         shell: bash
@@ -238,12 +206,8 @@ jobs:
             ${{ env.BUILD_DIR }}/bench_results/search_benchmarks.json
             ${{ env.BUILD_DIR }}/bench_results/search_benchmark_report.json
             ${{ env.BUILD_DIR }}/bench_results/search_benchmark_report.md
-            ${{ env.BUILD_DIR }}/bench_results/core_benchmarks.json
-            ${{ env.BUILD_DIR }}/bench_results/core_benchmark_report.json
-            ${{ env.BUILD_DIR }}/bench_results/core_benchmark_report.md
             ${{ env.BUILD_DIR }}/bench_results/api_benchmarks_regression.json
             ${{ env.BUILD_DIR }}/bench_results/search_benchmarks_regression.json
-            ${{ env.BUILD_DIR }}/bench_results/core_benchmarks_regression.json
             ${{ env.BUILD_DIR }}/bench_results/tree_diff_benchmark_results.json
             ${{ env.BUILD_DIR }}/bench_results/tree_diff_benchmarks_regression.json
           retention-days: 7

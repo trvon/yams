@@ -30,7 +30,25 @@ case "${BUILD_TYPE_LOWER}" in
     echo "Unknown build type: ${BUILD_TYPE_INPUT}. Expected Debug or Release." >&2
     exit 1
     ;;
+
 esac
+
+# Select desired C++ standard (defaults to C++23). Override with YAMS_CPPSTD=20/23.
+CPPSTD_INPUT=${YAMS_CPPSTD:-23}
+case "${CPPSTD_INPUT}" in
+  17|20|23)
+    CPPSTD="${CPPSTD_INPUT}"
+    ;;
+  c++17|c++20|c++23)
+    CPPSTD="${CPPSTD_INPUT#c++}"
+    ;;
+  *)
+    echo "Unknown C++ standard: ${CPPSTD_INPUT}. Expected 17|20|23 or c++17|c++20|c++23." >&2
+    exit 1
+    ;;
+esac
+# Value for Meson project option
+MESON_CPPSTD="c++${CPPSTD}"
 
 CONAN_ARGS=(-s "build_type=${BUILD_TYPE}" -b missing --update)
 
@@ -42,7 +60,7 @@ detect_version() {
     elif "${bin}" -dumpversion >/dev/null 2>&1; then
       "${bin}" -dumpversion
     else
-      "${bin}" --version | head -n1 | grep -oE '[0-9]+(\\.[0-9]+)*' | head -n1
+      "${bin}" --version | head -n1 | grep -oE '[0-9]+(\.[0-9]+)*' | head -n1
     fi
   fi
 }
@@ -72,12 +90,23 @@ if [[ "${COMPILER_OVERRIDE}" == clang ]] || { [[ -z "${COMPILER_OVERRIDE}" ]] &&
     echo "Unable to detect clang version." >&2
     exit 1
   fi
-  CONAN_ARGS+=(
-    -s "compiler=clang"
-    -s "compiler.version=${CLANG_MAJOR}"
-    -s "compiler.libcxx=${LIBCXX}"
-    -s "compiler.cppstd=20"
-  )
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    # On macOS use Conan's apple-clang compiler model
+    CONAN_ARGS+=(
+      -s "compiler=apple-clang"
+      -s "compiler.version=${CLANG_MAJOR}"
+      -s "compiler.libcxx=${LIBCXX}"
+      -s "compiler.cppstd=${CPPSTD}"
+    )
+  else
+    # Linux/other: vanilla clang
+    CONAN_ARGS+=(
+      -s "compiler=clang"
+      -s "compiler.version=${CLANG_MAJOR}"
+      -s "compiler.libcxx=${LIBCXX}"
+      -s "compiler.cppstd=${CPPSTD}"
+    )
+  fi
 else
   echo "--- Using GCC toolchain ---"
   export CC="gcc"
@@ -96,7 +125,7 @@ else
     -s "compiler=gcc"
     -s "compiler.version=${GCC_MAJOR}"
     -s "compiler.libcxx=libstdc++11"
-    -s "compiler.cppstd=20"
+    -s "compiler.cppstd=${CPPSTD}"
   )
 fi
 
@@ -110,6 +139,7 @@ fi
 
 echo "Build Type: ${BUILD_TYPE}"
 echo "Build Dir:  ${BUILD_DIR}"
+echo "C++ Std:    ${MESON_CPPSTD} (Conan: ${CPPSTD})"
 
 echo "--- Running conan install... ---"
 conan install . -of "${BUILD_DIR}" "${CONAN_ARGS[@]}"
@@ -129,11 +159,14 @@ MESON_ARGS=(
   "--buildtype" "${BUILD_TYPE_LOWER}"
 )
 
-if [[ -f "${BUILD_DIR}/meson-info/meson-info.json" ]]; then
-  MESON_ARGS+=("--reconfigure")
+# Detect previous configured cpp_std to decide on reconfigure vs wipe
+PREV_CPPSTD=""
+INTRO_OPTS_JSON="${BUILD_DIR}/meson-info/intro-buildoptions.json"
+if [[ -f "${INTRO_OPTS_JSON}" ]]; then
+  PREV_CPPSTD=$(awk '/"name"\s*:\s*"cpp_std"/{flag=1} flag && /"value"/{gsub(/.*"value"\s*:\s*"|".*/,"",$0); print; exit}' "${INTRO_OPTS_JSON}" || true)
 fi
 
-MESON_OPTIONS=("-Dbuild-cli=true")
+MESON_OPTIONS=("-Dbuild-cli=true" "-Dcpp_std=${MESON_CPPSTD}")
 
 if [[ "${BUILD_TYPE}" == "Debug" ]]; then
   MESON_OPTIONS+=(
@@ -143,7 +176,16 @@ if [[ "${BUILD_TYPE}" == "Debug" ]]; then
 fi
 
 echo "--- Running meson setup... ---"
-meson setup "${MESON_ARGS[@]}" "${MESON_OPTIONS[@]}"
+if [[ -n "${PREV_CPPSTD}" ]]; then
+  if [[ "${PREV_CPPSTD}" != "${MESON_CPPSTD}" ]]; then
+    echo "cpp_std changed (${PREV_CPPSTD} -> ${MESON_CPPSTD}); wiping build directory configuration..."
+    meson setup "${MESON_ARGS[@]}" "${MESON_OPTIONS[@]}" --wipe
+  else
+    meson setup "${MESON_ARGS[@]}" "${MESON_OPTIONS[@]}" --reconfigure
+  fi
+else
+  meson setup "${MESON_ARGS[@]}" "${MESON_OPTIONS[@]}"
+fi
 
 echo
 echo "--- Setup complete! ---"

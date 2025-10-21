@@ -77,6 +77,16 @@ private:
         {"ts", "YAMS_TS_TS_LIB", "tree_sitter_typescript", "libtree-sitter-typescript.so"},
         {"typescript", "YAMS_TS_TS_LIB", "tree_sitter_typescript", "libtree-sitter-typescript.so"},
         {"java", "YAMS_TS_JAVA_LIB", "tree_sitter_java", "libtree-sitter-java.so"},
+        {"csharp", "YAMS_TS_CSHARP_LIB", "tree_sitter_c_sharp", "libtree-sitter-c-sharp.so"},
+        {"c#", "YAMS_TS_CSHARP_LIB", "tree_sitter_c_sharp", "libtree-sitter-c-sharp.so"},
+        {"cs", "YAMS_TS_CSHARP_LIB", "tree_sitter_c_sharp", "libtree-sitter-c-sharp.so"},
+        {"php", "YAMS_TS_PHP_LIB", "tree_sitter_php", "libtree-sitter-php.so"},
+        {"kotlin", "YAMS_TS_KOTLIN_LIB", "tree_sitter_kotlin", "libtree-sitter-kotlin.so"},
+        {"kt", "YAMS_TS_KOTLIN_LIB", "tree_sitter_kotlin", "libtree-sitter-kotlin.so"},
+        {"perl", "YAMS_TS_PERL_LIB", "tree_sitter_perl", "libtree-sitter-perl.so"},
+        {"pl", "YAMS_TS_PERL_LIB", "tree_sitter_perl", "libtree-sitter-perl.so"},
+        {"r", "YAMS_TS_R_LIB", "tree_sitter_r", "libtree-sitter-r.so"},
+        {"sql", "YAMS_TS_SQL_LIB", "tree_sitter_sql", "libtree-sitter-sql.so"},
     };
 
     const GrammarSpec* findSpec(std::string_view language) const;
@@ -108,24 +118,21 @@ private:
     static constexpr struct GrammarRepo {
         std::string_view language;
         std::string_view repo;
-        std::string_view build_command;
     } kGrammarRepos[] = {
-        {"cpp", "tree-sitter/tree-sitter-cpp",
-         "gcc -shared -fPIC -o libtree-sitter-{lang}.so src/parser.c src/scanner.c -I."},
-        {"python", "tree-sitter/tree-sitter-python",
-         "gcc -shared -fPIC -o libtree-sitter-{lang}.so src/parser.c src/scanner.c -I."},
-        {"rust", "tree-sitter/tree-sitter-rust",
-         "gcc -shared -fPIC -o libtree-sitter-{lang}.so src/parser.c -I."},
-        {"go", "tree-sitter/tree-sitter-go",
-         "gcc -shared -fPIC -o libtree-sitter-{lang}.so src/parser.c -I."},
-        {"javascript", "tree-sitter/tree-sitter-javascript",
-         "gcc -shared -fPIC -o libtree-sitter-{lang}.so src/parser.c -I."},
-        {"typescript", "tree-sitter/tree-sitter-typescript",
-         "gcc -shared -fPIC -o libtree-sitter-{lang}.so src/parser.c -I."},
-        {"java", "tree-sitter/tree-sitter-java",
-         "gcc -shared -fPIC -o libtree-sitter-{lang}.so src/parser.c -I."},
-        {"c", "tree-sitter/tree-sitter-c",
-         "gcc -shared -fPIC -o libtree-sitter-{lang}.so src/parser.c -I."},
+        {"c", "tree-sitter/tree-sitter-c"},
+        {"cpp", "tree-sitter/tree-sitter-cpp"},
+        {"python", "tree-sitter/tree-sitter-python"},
+        {"rust", "tree-sitter/tree-sitter-rust"},
+        {"go", "tree-sitter/tree-sitter-go"},
+        {"javascript", "tree-sitter/tree-sitter-javascript"},
+        {"typescript", "tree-sitter/tree-sitter-typescript"},
+        {"java", "tree-sitter/tree-sitter-java"},
+        {"csharp", "tree-sitter/tree-sitter-c-sharp"},
+        {"php", "tree-sitter/tree-sitter-php"},
+        {"kotlin", "fwcd/tree-sitter-kotlin"},
+        {"perl", "tree-sitter-perl/tree-sitter-perl"},
+        {"r", "r-lib/tree-sitter-r"},
+        {"sql", "DerekStride/tree-sitter-sql"},
     };
 };
 

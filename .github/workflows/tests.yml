@@ -32,7 +32,7 @@ jobs:
             needs_rosetta: false
             build_type: Debug
             coverage: true
-            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Denable-vector-tests=false"
+            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled"
           - suffix: linux-arm64
             runs_on: ubuntu-24.04-arm
             conan_host_profile: ./conan/profiles/host-linux-clang
@@ -40,7 +40,7 @@ jobs:
             needs_rosetta: false
             build_type: Debug
             coverage: false
-            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Denable-vector-tests=false"
+            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled"
           - suffix: macos-arm64
             runs_on: macos-15
             conan_host_profile: ./conan/profiles/host-macos-apple-clang
@@ -48,7 +48,7 @@ jobs:
             needs_rosetta: false
             build_type: Debug
             coverage: false
-            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Denable-vector-tests=false"
+            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled"
           - suffix: macos-x86_64
             runs_on: macos-13
             conan_host_profile: ./conan/profiles/host-macos-apple-clang-x86
@@ -56,7 +56,7 @@ jobs:
             needs_rosetta: false
             build_type: Debug
             coverage: false
-            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Denable-vector-tests=false"
+            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled"
     runs-on: ${{ matrix.runs_on }}
     # Allow extra time for safety across runners.
     timeout-minutes: 70
@@ -74,8 +74,8 @@ jobs:
           sudo apt-get update
           # Provide system Boost as a fallback per docs/BUILD-GCC.md when CMakeDeps resolution
           # is not detected by CMake (module mode will pick this up).
-          # Install libbenchmark-dev for Google Benchmark support and libgtest-dev for GTest
-          sudo apt-get install -y --no-install-recommends libboost-all-dev meson pkg-config libbenchmark-dev libgtest-dev libgmock-dev
+          # Install libbenchmark-dev for Google Benchmark support
+          sudo apt-get install -y --no-install-recommends libboost-all-dev meson pkg-config libbenchmark-dev
           echo "Installed system Boost headers/libs for module-mode fallback"
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
@@ -273,7 +273,7 @@ jobs:
             find "${{ env.BUILD_DIR }}" -maxdepth 5 -type f -name "*.sh" >&2 || true
           fi
           # Relax noisy third-party warnings observed in CI (e.g., sign-compare from gtest)
-          export CXXFLAGS="${CXXFLAGS:-} -Wno-sign-compare -Wno-unused-result"
+          export CXXFLAGS="$CXXFLAGS -Wno-sign-compare -Wno-unused-result"
           # Find Conan-generated Meson toolchain file
           # Conan 2.x generates files in: <output-folder>/build-<build_type>/conan/
           TOOLCHAIN_DIR="${{ env.BUILD_DIR }}/build-debug/conan"

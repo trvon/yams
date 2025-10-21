@@ -5,7 +5,7 @@ endif
 cpp = meson.get_compiler('cpp')
 
 # Conan-provided runtime (PkgConfigDeps)
-ts_dep = dependency('tree-sitter', required: false)
+ts_dep = dependency('tree-sitter', required: true)
 if not ts_dep.found()
   warning('tree-sitter dependency not found, skipping symbol_extractor_treesitter plugin.')
   subdir_done()
@@ -34,6 +34,7 @@ shared_module(
   include_directories: [ include_directories('../../include'), include_directories('.') ],
   dependencies: [ts_dep, libdl_dep],
   cpp_args: ['-std=c++23', '-fexceptions'],  # C++23 with exceptions for error handling
+  build_by_default: true,
   install: true,
   install_dir: plugins_dir,
 )

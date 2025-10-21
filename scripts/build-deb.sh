@@ -167,6 +167,7 @@ run_conan_install() {
     -pr:b=./conan/profiles/host-linux-gcc \
     -s build_type=Release \
     -c tools.build:jobs="${CONAN_CPU_COUNT}" \
+    -o "sqlite3/*:fts5=True" \
     --build=missing
 }
 
@@ -299,17 +300,12 @@ package_tarball() {
 
 package_deb() {
   if ! command -v dpkg-deb >/dev/null 2>&1; then
-    echo "ERROR: dpkg-deb not available; cannot create .deb package" >&2
-    exit 1
+    echo "dpkg-deb not available; skipping .deb packaging" >&2
+    return
   fi
   local version="$1"
   local build_dir="$2"
   local stage_root="$3"
-  
-  if [ ! -d "${stage_root}" ]; then
-    echo "ERROR: stage_root directory ${stage_root} does not exist" >&2
-    exit 1
-  fi
   local deb_arch
   deb_arch="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
   local work_dir="${build_dir}/deb-work"
@@ -372,17 +368,12 @@ __DEB_CONTROL__
 
 package_rpm() {
   if ! command -v rpmbuild >/dev/null 2>&1; then
-    echo "WARNING: rpmbuild not available; skipping .rpm packaging" >&2
-    return 0
+    echo "rpmbuild not available; skipping .rpm packaging" >&2
+    return
   fi
   local version="$1"
   local build_dir="$2"
   local stage_root="$3"
-  
-  if [ ! -d "${stage_root}" ]; then
-    echo "ERROR: stage_root directory ${stage_root} does not exist" >&2
-    return 1
-  fi
   local rpm_arch
   rpm_arch="$(rpm --eval '%{_arch}' 2>/dev/null || uname -m)"
   local rpm_root="${build_dir}/rpmbuild"
@@ -424,7 +415,7 @@ Name: yams
 Version: __VERSION__
 Release: __RELEASE__%{?dist}
 Summary: Yet Another Memory System
-License: GPL-3.0-or-later
+License: Apache-2.0
 URL: https://git.sr.ht/~trevon/yams
 Source0: %{name}-%{version}.tar.gz
 BuildArch: __RPM_ARCH__
@@ -505,7 +496,6 @@ package_only_main() {
   local version="$1"
   local build_dir="$2"
   local stage_dir="${3:-stage}"
-  persist_env_defaults
   package_all "${version}" "${build_dir}" "${stage_dir}" 1
   exit 0
 }

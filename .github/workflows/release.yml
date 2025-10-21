@@ -717,9 +717,6 @@ jobs:
           BASE_VERSION: ${{ steps.meta.outputs.base_version }}
         shell: bash
         run: |
-          # Install packaging tools (dpkg-deb for .deb, rpmbuild for .rpm)
-          sudo apt-get update -qq
-          sudo apt-get install -y dpkg rpm
           # Package-only: reuse staged install without triggering a rebuild
           # Use BASE_VERSION to generate Debian/RPM policy-compliant versions for nightly/weekly
           chmod +x scripts/build-deb.sh
@@ -913,12 +910,18 @@ jobs:
           cd assets
           echo "Generating SHA256SUMS for release assets" >&2
           # Exclude bench JSON and summaries from checksum manifest (only distributable binaries)
-          ls -1 | grep -E '\.(tar.gz|zip|deb|rpm|AppImage|pkg)$' | while read -r f; do
-            sha256sum "$f" >> SHA256SUMS
-          done
-          sort -o SHA256SUMS SHA256SUMS
-          echo "Created checksum manifest:" >&2
-          cat SHA256SUMS >&2
+          # Check if any distributable files exist before creating SHA256SUMS
+          if ls -1 | grep -qE '\.(tar.gz|zip|deb|rpm|AppImage|pkg)$' 2>/dev/null; then
+            ls -1 | grep -E '\.(tar.gz|zip|deb|rpm|AppImage|pkg)$' | while read -r f; do
+              sha256sum "$f" >> SHA256SUMS
+            done
+            sort -o SHA256SUMS SHA256SUMS
+            echo "Created checksum manifest:" >&2
+            cat SHA256SUMS >&2
+          else
+            echo "No distributable assets found; creating empty SHA256SUMS" >&2
+            touch SHA256SUMS
+          fi
 
       - name: Install Wrangler CLI
         if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.upload_r2 == 'true')) && env.CLOUDFLARE_ACCOUNT_ID != '' && env.CLOUDFLARE_API_TOKEN != ''

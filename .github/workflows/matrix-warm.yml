@@ -121,7 +121,12 @@ jobs:
         run: |
           set -euo pipefail
           conan profile detect --force
-          sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
+          # Use C++20 instead of C++23 to avoid pdfium compilation issues
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            sed -i '' 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
+          else
+            sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
+          fi
           conan profile show
 
       - name: Warm dependencies (${{ inputs.build_type }})

@@ -31,13 +31,6 @@ search_bench = executable('yams_search_benchmarks', files('search_benchmarks.cpp
   install: false,
 )
 
-core_bench = executable('yams_core_benchmarks', files('core_benchmarks.cpp'),
-  include_directories: incs,
-  dependencies: [test_deps, dependency('yams_benchmarks')] + tracy_deps,
-  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
-  install: false,
-)
-
 search_tree_bench = executable('search_tree_bench', files('search_tree_bench.cpp'),
   include_directories: incs,
   dependencies: [
@@ -47,7 +40,6 @@ search_tree_bench = executable('search_tree_bench', files('search_tree_bench.cpp
     dependency('yams_search'),
     dependency('spdlog'),
     dependency('nlohmann_json'),
-    dependency('boost', modules: ['system', 'thread', 'context', 'coroutine']),
   ] + tracy_deps,
   cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
   install: false,
@@ -64,7 +56,7 @@ if benchmark_dep.found()
     install: false,
   )
 
-  metadata_query_bench_deps = [dependency('yams_metadata'), dependency('yams_search'), dependency('spdlog')] + tracy_deps + [benchmark_dep]
+  metadata_query_bench_deps = [dependency('yams_metadata'), dependency('yams_search')] + tracy_deps + [benchmark_dep]
 
   metadata_query_bench = executable('metadata_path_query_bench', files('metadata_path_query_bench.cpp'),
     include_directories: incs,
@@ -94,10 +86,8 @@ ingestion_bench = executable('ingestion_throughput_bench', files('ingestion_thro
     dependency('yams_app_services'),
     dependency('yams_metadata'),
     dependency('yams_storage_engine'),
-    dependency('boost'),
     dependency('nlohmann_json'),
     dependency('spdlog'),
-    dependency('boost', modules: ['system', 'thread', 'context', 'coroutine']),
   ] + tracy_deps,
   cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
   install: false,
@@ -126,7 +116,6 @@ ipc_stream_bench = executable('ipc_stream_bench', files('ipc_streaming_bench.cpp
     dependency('yams_benchmarks'),
     dependency('yams_daemon'),
     dependency('nlohmann_json'),
-    dependency('boost', modules: ['system', 'thread', 'context', 'coroutine']),
   ] + tracy_deps,
   cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
   install: false,
@@ -143,26 +132,9 @@ daemon_socket_accept_bench = executable('daemon_socket_accept_bench', files('dae
     dependency('yams_benchmarks'),
     dependency('yams_daemon'),
     dependency('nlohmann_json'),
-    dependency('boost', modules: ['system', 'thread', 'context', 'coroutine']),
   ] + tracy_deps,
   cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
   install: false,
 )
 
 alias_target('bench_socket_accept', daemon_socket_accept_bench)
-
-# Magic numbers detection benchmark (C++23 constexpr vs C++20 runtime)
-magic_numbers_bench = executable('magic_numbers_bench', files('magic_numbers_bench.cpp'),
-  include_directories: incs,
-  dependencies: [
-    test_deps,
-    dependency('yams_benchmarks'),
-    dependency('yams_detection'),
-    dependency('nlohmann_json'),
-  ] + tracy_deps,
-  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
-  install: false,
-)
-
-alias_target('bench_magic_numbers', magic_numbers_bench)
-

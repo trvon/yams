@@ -260,12 +260,24 @@ static int extract_symbols_abi(void* /*self*/, const char* content, size_t conte
     using yams::plugins::treesitter::GrammarLoader;
     GrammarLoader loader;
     auto lg = loader.loadGrammar(language);
+    std::string dl_err;
+    if (!lg) {
+        std::fprintf(stderr,
+                     "[yams] auto-installing tree-sitter grammar for '%s' into datadir...\n",
+                     language);
+        auto dl = yams::plugins::treesitter::GrammarDownloader::downloadGrammar(language);
+        if (dl.has_value()) {
+            lg = loader.loadGrammar(language);
+        } else if (dl.error().size()) {
+            dl_err = dl.error();
+        }
+    }
     if (!lg) {
         auto* r = (yams_symbol_extraction_result_v1*)std::calloc(
             1, sizeof(yams_symbol_extraction_result_v1));
         if (!r)
             return YAMS_PLUGIN_ERR_INVALID;
-        r->error = dup_cstr(lg.error().message);
+        r->error = dup_cstr(dl_err.empty() ? lg.error().message : dl_err);
         *out = r;
         return YAMS_PLUGIN_ERR_NOT_FOUND;
     }

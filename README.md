@@ -17,9 +17,6 @@
 - WAL‑backed durability, high‑throughput I/O, thread‑safe
 - Portable CLI and MCP server
 - Extensible with Plugin Support
-- Experimental path-tree traversal for prefix/semantic/diff workloads (see `[search.path_tree]`
-  in the config template) enabling ~62–66% faster scans vs. baseline grep queries when coupled
-  with the new hierarchical benchmarks. citedocs/delivery/051/benchmark_plan.md:160
 
 ## Links
 - SourceHut: https://sr.ht/~trvon/yams/

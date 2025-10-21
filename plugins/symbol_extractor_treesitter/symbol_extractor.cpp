@@ -39,14 +39,24 @@ SymbolExtractor::Result SymbolExtractor::extract(std::string_view content,
         return std::unexpected("Empty content provided");
     }
 
+    // Defensive: verify parser language set successfully
+    if (ts_parser_language(parser_.get()) == nullptr) {
+        return std::unexpected("Parser has no language set");
+    }
+
     ExtractionResult result;
     ExtractionContext ctx{.content = content,
                           .language = language,
                           .file_path = file_path,
                           .enable_call_graph = enable_call_graph};
 
-    // Parse the content
-    ctx.tree = ts_parser_parse_string(parser_.get(), nullptr, content.data(), content.length());
+    // Parse the content (guard against null pointers)
+    if (!parser_.get() || content.data() == nullptr) {
+        return std::unexpected("Invalid parser or content");
+    }
+    // Use ts_parser_set_language already set in ctor. Extra guard around parse.
+    ctx.tree =
+        ts_parser_parse_string(parser_.get(), nullptr, content.data(), (uint32_t)content.length());
     if (!ctx.tree) {
         return std::unexpected("Failed to parse content");
     }
@@ -319,7 +329,9 @@ bool SymbolExtractor::executeQuery(const ExtractionContext& ctx, std::string_vie
     while (ts_query_cursor_next_match(cursor, &match)) {
         for (uint32_t i = 0; i < match.capture_count; ++i) {
             TSQueryCapture capture = match.captures[i];
-            const char* capture_name = ts_query_capture_name_for_id(query, capture.index, nullptr);
+            uint32_t name_len = 0;
+            const char* capture_name =
+                ts_query_capture_name_for_id(query, capture.index, &name_len);
 
             if (capture_name && std::string_view(capture_name) == "name") {
                 std::string name_text = ctx.extractNodeText(capture.node);
@@ -463,8 +475,10 @@ SymbolExtractor::extractCallRelations(const ExtractionContext& ctx,
 
         // Find calls within this function
         for (auto pattern : call_patterns) {
+            uint32_t error_offset = 0;
+            TSQueryError error_type = TSQueryErrorNone;
             TSQuery* query =
-                ts_query_new(language_, pattern.data(), pattern.size(), nullptr, nullptr);
+                ts_query_new(language_, pattern.data(), pattern.size(), &error_offset, &error_type);
             if (!query)
                 continue;
 
@@ -488,8 +502,9 @@ SymbolExtractor::extractCallRelations(const ExtractionContext& ctx,
             while (ts_query_cursor_next_match(cursor, &match)) {
                 for (uint32_t i = 0; i < match.capture_count; ++i) {
                     TSQueryCapture capture = match.captures[i];
+                    uint32_t name_len = 0;
                     const char* capture_name =
-                        ts_query_capture_name_for_id(query, capture.index, nullptr);
+                        ts_query_capture_name_for_id(query, capture.index, &name_len);
                     if (capture_name && std::string_view(capture_name) == "callee") {
                         std::string callee_name = ctx.extractNodeText(capture.node);
                         if (!callee_name.empty() && callee_name != caller_name &&
