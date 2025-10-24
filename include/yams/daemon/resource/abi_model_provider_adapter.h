@@ -35,6 +35,8 @@ public:
 
     Result<ModelInfo> getModelInfo(const std::string& modelName) const override;
     size_t getEmbeddingDim(const std::string& modelName) const override;
+    std::shared_ptr<vector::EmbeddingGenerator>
+    getEmbeddingGenerator(const std::string& modelName) override;
 
     std::string getProviderName() const override;
     std::string getProviderVersion() const override;

@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <type_traits>
+#include <unordered_map>
 #include <variant>
 #include <vector>
 
@@ -2057,6 +2058,73 @@ struct FileHistoryRequest {
     }
 };
 
+// Prune request (PBI-062)
+struct PruneRequest {
+    std::vector<std::string> categories;      // build-artifacts, logs, etc.
+    std::vector<std::string> extensions;      // Specific extensions
+    std::string olderThan;                    // "30d", "2w", etc.
+    std::string largerThan;                   // "10MB", etc.
+    std::string smallerThan;                  // "1KB", etc.
+    std::vector<std::string> excludePatterns; // Paths to exclude
+    bool dryRun{true};                        // Preview mode
+    bool verbose{false};                      // Detailed output
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << categories << extensions << olderThan << largerThan << smallerThan << excludePatterns
+            << dryRun << verbose;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<PruneRequest> deserialize(Deserializer& deser) {
+        PruneRequest req;
+
+        if (auto r = deser.readStringVector(); r)
+            req.categories = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readStringVector(); r)
+            req.extensions = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            req.olderThan = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            req.largerThan = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            req.smallerThan = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readStringVector(); r)
+            req.excludePatterns = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readBool(); r)
+            req.dryRun = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.readBool(); r)
+            req.verbose = r.value();
+        else
+            return r.error();
+
+        return req;
+    }
+};
+
 // Plugin management requests
 struct PluginScanRequest {
     std::string dir;    // optional
@@ -2200,7 +2268,7 @@ using Request = std::variant<
     PrepareSessionRequest, EmbedDocumentsRequest, PluginScanRequest, PluginLoadRequest,
     PluginUnloadRequest, PluginTrustListRequest, PluginTrustAddRequest, PluginTrustRemoveRequest,
     CancelRequest, CatRequest, ListSessionsRequest, UseSessionRequest, AddPathSelectorRequest,
-    RemovePathSelectorRequest, ListTreeDiffRequest, FileHistoryRequest>;
+    RemovePathSelectorRequest, ListTreeDiffRequest, FileHistoryRequest, PruneRequest>;
 
 // ============================================================================
 // Response Types
@@ -4322,6 +4390,102 @@ struct FileHistoryResponse {
     }
 };
 
+// Prune response (PBI-062)
+struct PruneResponse {
+    uint64_t filesDeleted{0};
+    uint64_t filesFailed{0};
+    uint64_t totalBytesFreed{0};
+    std::unordered_map<std::string, uint64_t> categoryCounts; // Category -> file count
+    std::unordered_map<std::string, uint64_t> categorySizes;  // Category -> bytes
+    std::vector<std::string> deletedPaths;                    // If verbose
+    std::vector<std::string> failedPaths;
+    std::string errorMessage;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << filesDeleted << filesFailed << totalBytesFreed;
+
+        ser << static_cast<uint32_t>(categoryCounts.size());
+        for (const auto& [cat, count] : categoryCounts) {
+            ser << cat << count;
+        }
+
+        ser << static_cast<uint32_t>(categorySizes.size());
+        for (const auto& [cat, size] : categorySizes) {
+            ser << cat << size;
+        }
+
+        ser << deletedPaths << failedPaths << errorMessage;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<PruneResponse> deserialize(Deserializer& deser) {
+        PruneResponse res;
+
+        if (auto r = deser.template read<uint64_t>(); r)
+            res.filesDeleted = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<uint64_t>(); r)
+            res.filesFailed = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<uint64_t>(); r)
+            res.totalBytesFreed = r.value();
+        else
+            return r.error();
+
+        // Read categoryCounts map
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto key = deser.readString();
+                if (!key)
+                    return key.error();
+                auto val = deser.template read<uint64_t>();
+                if (!val)
+                    return val.error();
+                res.categoryCounts[key.value()] = val.value();
+            }
+        } else
+            return cnt.error();
+
+        // Read categorySizes map
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto key = deser.readString();
+                if (!key)
+                    return key.error();
+                auto val = deser.template read<uint64_t>();
+                if (!val)
+                    return val.error();
+                res.categorySizes[key.value()] = val.value();
+            }
+        } else
+            return cnt.error();
+
+        if (auto r = deser.readStringVector(); r)
+            res.deletedPaths = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readStringVector(); r)
+            res.failedPaths = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            res.errorMessage = std::move(r.value());
+        else
+            return r.error();
+
+        return res;
+    }
+};
+
 // Plugin responses
 struct PluginRecord {
     std::string name;
@@ -4873,7 +5037,7 @@ using Response =
                  AddDocumentResponse, GrepResponse, UpdateDocumentResponse, GetStatsResponse,
                  DownloadResponse, DeleteResponse, PrepareSessionResponse, EmbedDocumentsResponse,
                  PluginScanResponse, PluginLoadResponse, PluginTrustListResponse, CatResponse,
-                 ListSessionsResponse, ListTreeDiffResponse, FileHistoryResponse,
+                 ListSessionsResponse, ListTreeDiffResponse, FileHistoryResponse, PruneResponse,
                  // Streaming events (progress/heartbeats)
                  EmbeddingEvent, ModelLoadEvent>;
 
@@ -4943,6 +5107,8 @@ enum class MessageType : uint8_t {
     ListTreeDiffRequest = 30,
     // File history request (PBI-043 enhancement)
     FileHistoryRequest = 31,
+    // Prune request (PBI-062)
+    PruneRequest = 32,
 
     // Responses
     SearchResponse = 128,
@@ -4972,6 +5138,8 @@ enum class MessageType : uint8_t {
     ListTreeDiffResponse = 154,
     // File history response (PBI-043 enhancement)
     FileHistoryResponse = 155,
+    // Prune response (PBI-062)
+    PruneResponse = 156,
     // Events
     EmbeddingEvent = 149,
     ModelLoadEvent = 150,

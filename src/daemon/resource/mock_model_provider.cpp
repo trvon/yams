@@ -227,6 +227,13 @@ public:
         return it->second.embeddingDim;
     }
 
+    std::shared_ptr<vector::EmbeddingGenerator>
+    getEmbeddingGenerator(const std::string& modelName) override {
+        // Mock provider doesn't create separate EmbeddingGenerator
+        (void)modelName;
+        return nullptr;
+    }
+
     // ========================================================================
     // Provider Information
     // ========================================================================
@@ -318,6 +325,9 @@ public:
     }
 
     size_t getEmbeddingDim(const std::string&) const override { return 0; }
+    std::shared_ptr<vector::EmbeddingGenerator> getEmbeddingGenerator(const std::string&) override {
+        return nullptr;
+    }
     std::string getProviderName() const override { return "NullProvider"; }
     std::string getProviderVersion() const override { return "1.0.0"; }
     bool isAvailable() const override { return false; }

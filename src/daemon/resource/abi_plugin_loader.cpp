@@ -130,19 +130,17 @@ AbiPluginLoader::scanDirectory(const std::filesystem::path& dir) const {
         auto ext = p.extension().string();
         if (ext == ".so" || ext == ".dylib" || ext == ".dll") {
             // Reduce risk: only consider files that look like YAMS plugins by name
-            // e.g., libyams_foo_plugin.*
+            // Accept: libyams_*.* or yams_*.*
             auto fname = p.filename().string();
             bool looks_like_yams = false;
             try {
-                bool has_prefix =
+                looks_like_yams =
                     (fname.rfind("libyams_", 0) == 0) || (fname.rfind("yams_", 0) == 0);
-                bool has_suffix = (fname.find("_plugin") != std::string::npos);
-                looks_like_yams = has_prefix && has_suffix;
             } catch (...) {
             }
             if (!looks_like_yams) {
                 if (namePolicy_ == NamePolicy::Spec) {
-                    lastSkips_.push_back(SkipInfo{p, "name policy: require libyams_*_plugin.*"});
+                    lastSkips_.push_back(SkipInfo{p, "name policy: require libyams_* or yams_*"});
                 }
                 continue;
             }

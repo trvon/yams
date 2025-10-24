@@ -99,6 +99,10 @@ template <> struct ResponseOf<PluginTrustRemoveRequest> {
     using type = SuccessResponse;
 };
 
+template <> struct ResponseOf<PruneRequest> {
+    using type = PruneResponse;
+};
+
 // Helper alias
 template <typename Req> using ResponseOfT = typename ResponseOf<Req>::type;
 

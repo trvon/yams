@@ -184,7 +184,8 @@ Result<GCStats> GarbageCollector::collect(const GCOptions& options) {
 
 // Async garbage collection
 std::future<Result<GCStats>> GarbageCollector::collectAsync(const GCOptions& options) {
-    return std::async(std::launch::async, [this, options]() { return collect(options); });
+    return std::async(std::launch::async,
+                      [this, options = options]() -> Result<GCStats> { return collect(options); });
 }
 
 // Schedule periodic collection

@@ -51,6 +51,11 @@ private:
     bool isBinaryFile(std::span<const std::byte> data);
 
     /**
+     * @brief Check if data is parseable text (UTF-8 or ASCII)
+     */
+    bool isParseableText(std::span<const std::byte> data);
+
+    /**
      * @brief Extract metadata from specific file types
      */
     void extractFileMetadata(ExtractionResult& result, const std::filesystem::path& path);

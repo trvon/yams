@@ -7,6 +7,7 @@
 #include <yams/cli/recommendation_util.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
+#include <yams/core/magic_numbers.hpp>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/extraction/extraction_util.h>
@@ -26,6 +27,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <iomanip>
 #include <iostream>
 #include <optional>
 #include <regex>
@@ -51,12 +53,18 @@ public:
 
     Result<void> execute() override { return Result<void>(); }
     boost::asio::awaitable<Result<void>> executeAsync() override {
-        // Default doctor behavior: combined summary (runAll already checks daemon)
-        try {
-            runAll();
-        } catch (const std::exception& e) {
-            std::cout << "Doctor error: " << e.what() << "\n";
-            co_return Error{ErrorCode::Unknown, e.what()};
+        // Only run default doctor if no subcommand was invoked
+        // Subcommands set their own flags and handle execution themselves
+        if (!fixEmbeddings_ && !fixFts5_ && !fixGraph_ && !fixAll_ && !fixAllTop_ &&
+            !dedupeApply_ && pruneCategories_.empty() && pruneExtensions_.empty() &&
+            pluginArg_.empty() && !fixConfigDims_ && !recreateVectors_) {
+            // No subcommand flags set, run default doctor summary
+            try {
+                runAll();
+            } catch (const std::exception& e) {
+                std::cout << "Doctor error: " << e.what() << "\n";
+                co_return Error{ErrorCode::Unknown, e.what()};
+            }
         }
         co_return Result<void>();
     }
@@ -822,7 +830,7 @@ private:
     // repairGraph declared earlier in the class
 
     // Minimal daemon check: connect and get status
-    void checkDaemon() {
+    void checkDaemon(std::optional<yams::daemon::StatusResponse>& cachedStatus) {
         using namespace yams::daemon;
         try {
             // First, perform a lightweight check to see if the daemon is responsive.
@@ -841,22 +849,35 @@ private:
                 return;
             }
 
-            yams::daemon::ClientConfig cfg;
-            if (cli_)
-                if (cli_->hasExplicitDataDir()) {
-                    cfg.dataDir = cli_->getDataPath();
+            // If no cached status, fetch it now
+            if (!cachedStatus) {
+                yams::daemon::ClientConfig cfg;
+                if (cli_)
+                    if (cli_->hasExplicitDataDir()) {
+                        cfg.dataDir = cli_->getDataPath();
+                    }
+                cfg.requestTimeout = std::chrono::milliseconds(10000);
+                auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+                if (!leaseRes) {
+                    std::cout << "\n" << yams::cli::ui::section_header("Daemon Health") << "\n\n";
+                    std::cout << yams::cli::ui::colorize("✗ UNAVAILABLE", yams::cli::ui::Ansi::RED)
+                              << " - " << leaseRes.error().message << "\n";
+                    return;
                 }
-            // Use longer timeout when daemon might be initializing
-            cfg.requestTimeout = std::chrono::milliseconds(10000);
-            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
-            if (!leaseRes) {
-                std::cout << "\n" << yams::cli::ui::section_header("Daemon Health") << "\n\n";
-                std::cout << yams::cli::ui::colorize("✗ UNAVAILABLE", yams::cli::ui::Ansi::RED)
-                          << " - " << leaseRes.error().message << "\n";
-                return;
+                auto leaseHandle = std::move(leaseRes.value());
+                auto& client = **leaseHandle;
+
+                auto sres = yams::cli::run_result<StatusResponse>(client.status(),
+                                                                  std::chrono::seconds(10));
+                if (!sres) {
+                    std::cout << "\n" << yams::cli::ui::section_header("Daemon Health") << "\n\n";
+                    std::cout << yams::cli::ui::colorize("✗ Failed to get status",
+                                                         yams::cli::ui::Ansi::RED)
+                              << " - " << sres.error().message << "\n";
+                    return;
+                }
+                cachedStatus = std::move(sres.value());
             }
-            auto leaseHandle = std::move(leaseRes.value());
-            auto& client = **leaseHandle;
 
             // Database migrations health (local DB), surface failures and guidance
             try {
@@ -925,21 +946,15 @@ private:
             } catch (...) {
             }
             std::cout << "\n" << yams::cli::ui::section_header("Daemon Health") << "\n\n";
-            // Use longer timeout for status call - daemon may be initializing
-            auto s = yams::cli::run_result<yams::daemon::StatusResponse>(client.status(),
-                                                                         std::chrono::seconds(10));
-            if (!s) {
+
+            // Use cached status
+            if (!cachedStatus) {
                 std::cout << yams::cli::ui::colorize("✗ Failed to get status",
                                                      yams::cli::ui::Ansi::RED)
-                          << " - " << s.error().message << "\n";
-                std::cout << "\n"
-                          << yams::cli::ui::colorize("Hint: Daemon may be starting up. Try 'yams "
-                                                     "daemon doctor' for detailed diagnostics.",
-                                                     yams::cli::ui::Ansi::DIM)
                           << "\n";
                 return;
             }
-            const auto& st = s.value();
+            const auto& st = cachedStatus.value();
 
             std::vector<yams::cli::ui::Row> daemonRows;
             std::string statusDisplay;
@@ -1320,6 +1335,13 @@ private:
         // - Daemon status
         // - Installed models
         // - Vector DB dimension check
+
+        // Show loading indicator immediately
+        std::cout << yams::cli::ui::colorize("◷ Collecting system information...",
+                                             yams::cli::ui::Ansi::CYAN)
+                  << "\n"
+                  << std::flush;
+
         // Daemon light check first; if not running, fast-fail and only run local checks
         bool daemon_up = false;
         {
@@ -1328,28 +1350,61 @@ private:
                 daemon::DaemonClient::resolveSocketPathConfigFirst().string();
             daemon_up = daemon::DaemonClient::isDaemonRunning(effectiveSocket);
         }
-        checkDaemon();
+
+        // Fetch daemon status once if available (reuse throughout)
+        std::optional<yams::daemon::StatusResponse> cachedStatus;
+        std::optional<yams::daemon::GetStatsResponse> cachedStats;
+        if (daemon_up) {
+            try {
+                using namespace yams::daemon;
+                ClientConfig cfg;
+                if (cli_ && cli_->hasExplicitDataDir()) {
+                    cfg.dataDir = cli_->getDataPath();
+                }
+                cfg.requestTimeout = std::chrono::milliseconds(10000);
+                auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+                if (leaseRes) {
+                    auto leaseHandle = std::move(leaseRes.value());
+                    auto& client = **leaseHandle;
+
+                    // Single status call
+                    auto sres = yams::cli::run_result<StatusResponse>(client.status(),
+                                                                      std::chrono::seconds(10));
+                    if (sres) {
+                        cachedStatus = std::move(sres.value());
+                    }
+
+                    // Single stats call with detailed info
+                    GetStatsRequest req;
+                    req.detailed = true;
+                    req.showFileTypes = false;
+                    auto gres = yams::cli::run_result<GetStatsResponse>(
+                        client.call(req), std::chrono::milliseconds(10000));
+                    if (gres) {
+                        cachedStats = std::move(gres.value());
+                    }
+                }
+            } catch (...) {
+                // Continue with cached data (may be empty)
+            }
+        }
+
+        // Clear loading message
+        std::cout << "\r" << std::string(50, ' ') << "\r" << std::flush;
+
+        checkDaemon(cachedStatus);
         if (!daemon_up) {
             // Only local checks when daemon is unavailable
             checkInstalledModels(cli_);
-            checkEmbeddingDimMismatch();
+            checkEmbeddingDimMismatch(cachedStatus);
             return;
         }
         checkInstalledModels(cli_);
-        checkEmbeddingDimMismatch();
-        // Show embedding runtime from daemon status (best-effort)
+        checkEmbeddingDimMismatch(cachedStatus);
+        // Show embedding runtime from daemon status (best-effort, use cached data)
         try {
-            using namespace yams::daemon;
-            ClientConfig cfg;
-            cfg.requestTimeout = std::chrono::milliseconds(10000);
-            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
-            if (!leaseRes)
-                throw std::runtime_error(leaseRes.error().message);
-            auto leaseHandle = std::move(leaseRes.value());
-            auto& client = **leaseHandle;
-            auto st = yams::cli::run_result(client.status(), std::chrono::seconds(10));
-            if (st) {
-                const auto& s = st.value();
+            if (cachedStatus) {
+                const auto& s = cachedStatus.value();
                 std::cout << "\n" << yams::cli::ui::section_header("Embedding Runtime") << "\n\n";
 
                 std::vector<yams::cli::ui::Row> embRows;
@@ -1425,89 +1480,13 @@ private:
             // Silent: doctor remains best-effort
         }
 
-        // Show currently loaded plugins, mirroring `yams plugin list` logic
+        // Show currently loaded plugins, mirroring `yams plugin list` logic (use cached data)
         try {
-            using namespace yams::daemon;
-            yams::daemon::ClientConfig cfg;
-            if (cli_ && cli_->hasExplicitDataDir()) {
-                cfg.dataDir = cli_->getDataPath();
-            }
-            // Use longer timeout for daemon calls during initialization
-            cfg.requestTimeout = std::chrono::milliseconds(10000);
-            cfg.enableChunkedResponses = false;
-            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
-            if (!leaseRes)
-                throw std::runtime_error(leaseRes.error().message);
-            auto leaseHandle = std::move(leaseRes.value());
-            auto& client = **leaseHandle;
-
-            auto sres = yams::cli::run_result<StatusResponse>(client.status(),
-                                                              std::chrono::milliseconds(10000));
-            GetStatsResponse stats{};
-            bool haveStats = false;
-            {
-                GetStatsRequest req;
-                req.detailed = true; // request plugin JSON snapshot too
-                req.showFileTypes = false;
-                auto gres = yams::cli::run_result<GetStatsResponse>(
-                    client.call(req), std::chrono::milliseconds(10000));
-                if (gres) {
-                    stats = gres.value();
-                    haveStats = true;
-                }
-            }
-            // If neither typed providers nor plugins_json are present, ask daemon to scan and wait
-            // briefly
-            try {
-                auto haveTyped = (sres && !sres.value().providers.empty());
-                auto haveJson = false;
-                if (haveStats) {
-                    auto it0 = stats.additionalStats.find("plugins_json");
-                    haveJson = (it0 != stats.additionalStats.end() && !it0->second.empty());
-                }
-                if (!(haveTyped || haveJson)) {
-                    // Request a scan of default search paths
-                    yams::daemon::PluginScanRequest scanReq;
-                    (void)yams::cli::run_result<yams::daemon::PluginScanResponse>(
-                        client.call(scanReq), std::chrono::milliseconds(3000));
-                    // Poll up to ~3s for providers or json to appear
-                    for (int i = 0; i < 6; ++i) {
-                        sres = yams::cli::run_result<StatusResponse>(
-                            client.status(), std::chrono::milliseconds(1500));
-                        if (sres) {
-                            const auto& st = sres.value();
-                            if (!st.providers.empty())
-                                break;
-                            auto itp = st.readinessStates.find("plugins");
-                            if (itp != st.readinessStates.end() && itp->second)
-                                break;
-                            auto itmp = st.readinessStates.find("model_provider");
-                            if (itmp != st.readinessStates.end() && itmp->second)
-                                break;
-                        }
-                        GetStatsRequest req2;
-                        req2.detailed = true;
-                        req2.showFileTypes = false;
-                        auto gres2 = yams::cli::run_result<GetStatsResponse>(
-                            client.call(req2), std::chrono::milliseconds(1500));
-                        if (gres2) {
-                            stats = gres2.value();
-                            auto itj = stats.additionalStats.find("plugins_json");
-                            if (itj != stats.additionalStats.end() && !itj->second.empty())
-                                break;
-                        }
-                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                    }
-                }
-            } catch (...) {
-                // best-effort; continue
-            }
-
             std::cout << "\n" << yams::cli::ui::section_header("Loaded Plugins") << "\n\n";
 
             // Prefer typed providers list from StatusResponse
-            if (sres && !sres.value().providers.empty()) {
-                const auto& st = sres.value();
+            if (cachedStatus && !cachedStatus.value().providers.empty()) {
+                const auto& st = cachedStatus.value();
                 for (const auto& p : st.providers) {
                     std::string status;
                     if (p.degraded) {
@@ -1550,10 +1529,10 @@ private:
                                                              yams::cli::ui::Ansi::RED);
                     std::cout << "\n";
                 }
-            } else if (haveStats) {
+            } else if (cachedStats) {
                 // Fallback to JSON snapshot embedded in stats
-                auto it = stats.additionalStats.find("plugins_json");
-                if (it != stats.additionalStats.end() && !it->second.empty()) {
+                auto it = cachedStats.value().additionalStats.find("plugins_json");
+                if (it != cachedStats.value().additionalStats.end() && !it->second.empty()) {
                     try {
                         auto j = nlohmann::json::parse(it->second, nullptr, false);
                         if (!j.is_discarded() && j.is_array() && !j.empty()) {
@@ -1614,10 +1593,12 @@ private:
                     std::cout << "(none loaded)\n";
                 }
 
-                // Show any loader errors captured in stats
-                auto eit = stats.additionalStats.find("plugins_error");
-                if (eit != stats.additionalStats.end() && !eit->second.empty()) {
-                    std::cout << "(plugins error: " << eit->second << ")\n";
+                // Show any loader errors captured in stats (use cached stats)
+                if (cachedStats) {
+                    auto eit = cachedStats.value().additionalStats.find("plugins_error");
+                    if (eit != cachedStats.value().additionalStats.end() && !eit->second.empty()) {
+                        std::cout << "(plugins error: " << eit->second << ")\n";
+                    }
                 }
             } else {
                 std::cout << "(none loaded)\n";
@@ -1828,34 +1809,38 @@ private:
         }
     }
 
-    void checkEmbeddingDimMismatch() {
+    void checkEmbeddingDimMismatch(std::optional<yams::daemon::StatusResponse>& cachedStatus) {
         namespace fs = std::filesystem;
         printHeader("Vectors Database");
 
-        // Get daemon status
+        // Use cached status if available, otherwise fetch
         daemon::StatusResponse status;
-        try {
-            yams::daemon::ClientConfig cfg;
-            if (cli_ && cli_->hasExplicitDataDir()) {
-                cfg.dataDir = cli_->getDataPath();
-            }
-            cfg.requestTimeout = std::chrono::seconds(5);
-            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
-            if (!leaseRes) {
-                printError("Daemon unavailable: " + leaseRes.error().message);
+        if (cachedStatus) {
+            status = cachedStatus.value();
+        } else {
+            try {
+                yams::daemon::ClientConfig cfg;
+                if (cli_ && cli_->hasExplicitDataDir()) {
+                    cfg.dataDir = cli_->getDataPath();
+                }
+                cfg.requestTimeout = std::chrono::seconds(5);
+                auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+                if (!leaseRes) {
+                    printError("Daemon unavailable: " + leaseRes.error().message);
+                    return;
+                }
+                auto leaseHandle = std::move(leaseRes.value());
+                auto& client = **leaseHandle;
+                auto statusRes = yams::cli::run_result(client.status(), std::chrono::seconds(5));
+                if (!statusRes) {
+                    printError("Failed to get daemon status: " + statusRes.error().message);
+                    return;
+                }
+                status = statusRes.value();
+            } catch (const std::exception& e) {
+                printError(std::string("Failed to get daemon status: ") + e.what());
                 return;
             }
-            auto leaseHandle = std::move(leaseRes.value());
-            auto& client = **leaseHandle;
-            auto statusRes = yams::cli::run_result(client.status(), std::chrono::seconds(5));
-            if (!statusRes) {
-                printError("Failed to get daemon status: " + statusRes.error().message);
-                return;
-            }
-            status = statusRes.value();
-        } catch (const std::exception& e) {
-            printError(std::string("Failed to get daemon status: ") + e.what());
-            return;
         }
 
         bool dbReady = status.vectorDbReady;
@@ -1868,7 +1853,6 @@ private:
 
             std::cout << "Vector database is not ready according to the daemon." << std::endl;
             // Provide actionable guidance
-            size_t runtimeDim = status.embeddingDim; // from daemon
             std::cout << "\nTo initialize or rebuild vector DB:" << "\n"
                       << "  1. (Optional) Remove corrupt or old DB: rm "
                       << (cli_ ? (cli_->getDataPath() / "vectors.db").string()
@@ -1946,6 +1930,15 @@ private:
     bool dedupeVerbose_{false};
     Result<void> repairGraph();
     void runDedupe();
+    // Prune state
+    bool pruneApply_{false};
+    std::vector<std::string> pruneCategories_;
+    std::vector<std::string> pruneExtensions_;
+    std::string pruneOlderThan_;
+    std::string pruneLargerThan_;
+    std::string pruneSmallerThan_;
+    bool pruneVerbose_{false};
+    void runPrune();
     // Tuning helpers
     Result<void> applyTuningBaseline(bool apply);
     std::map<std::string, std::string> parseSimpleToml(const std::filesystem::path& path) const;
@@ -1975,7 +1968,10 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
     doctor->callback([this]() { cli_->setPendingCommand(this); });
 
     auto* dsub = doctor->add_subcommand("daemon", "Check daemon socket and status");
-    dsub->callback([this]() { checkDaemon(); });
+    dsub->callback([this]() {
+        std::optional<yams::daemon::StatusResponse> status;
+        checkDaemon(status);
+    });
 
     auto* psub = doctor->add_subcommand("plugin", "Check a plugin (.so/.wasm or by name)");
     psub->add_option("target", pluginArg_, "Plugin path or logical name");
@@ -2025,6 +2021,28 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
                  "Allow deletion even when differing hashes (treat as duplicates)");
     dd->add_flag("-v,--verbose", dedupeVerbose_, "Verbose listing of each group");
     dd->callback([this]() { runDedupe(); });
+
+    // Prune subcommand
+    auto* prune =
+        doctor->add_subcommand("prune", "Remove build artifacts, logs, cache, and temporary files");
+    prune->add_flag("--apply", pruneApply_, "Apply deletions (default: dry-run)");
+    prune
+        ->add_option("--category,-c", pruneCategories_,
+                     "Categories to prune (comma-separated): build-artifacts, build-system, "
+                     "build (both), logs, cache, temp, coverage, ide, all")
+        ->delimiter(',');
+    prune
+        ->add_option("--extension,-e", pruneExtensions_,
+                     "File extensions to prune (comma-separated, e.g., o,obj,log)")
+        ->delimiter(',');
+    prune->add_option("--older-than", pruneOlderThan_,
+                      "Only prune files older than duration (e.g., 30d, 2w, 6m)");
+    prune->add_option("--larger-than", pruneLargerThan_,
+                      "Only prune files larger than size (e.g., 10MB, 1GB)");
+    prune->add_option("--smaller-than", pruneSmallerThan_,
+                      "Only prune files smaller than size (e.g., 1KB)");
+    prune->add_flag("-v,--verbose", pruneVerbose_, "Verbose output");
+    prune->callback([this]() { runPrune(); });
 
     // Auto-tuning baseline
     auto* tsub =
@@ -2477,6 +2495,169 @@ void DoctorCommand::runDedupe() {
         printSuccess("Deleted " + std::to_string(toDelete.size()) + " duplicate rows");
     } catch (const std::exception& e) {
         printError(std::string("Exception: ") + e.what());
+    }
+}
+
+void DoctorCommand::runPrune() {
+    try {
+        if (pruneCategories_.empty() && pruneExtensions_.empty()) {
+            std::cout << "\n" << yams::cli::ui::section_header("YAMS Doctor Prune") << "\n\n";
+            std::cout
+                << "Remove build artifacts, logs, cache, and temporary files from YAMS index.\n\n";
+
+            std::cout << yams::cli::ui::subsection_header("Composite Categories") << "\n\n";
+            std::cout << "  "
+                      << yams::cli::ui::colorize("build-artifacts", yams::cli::ui::Ansi::CYAN)
+                      << "  - Compiled objects, libraries, executables, archives\n";
+            std::cout << "  " << yams::cli::ui::colorize("build-system", yams::cli::ui::Ansi::CYAN)
+                      << "     - CMake, Ninja, Meson, Make, Gradle, Maven, NPM, Cargo, Go\n";
+            std::cout << "  " << yams::cli::ui::colorize("build", yams::cli::ui::Ansi::CYAN)
+                      << "            - Both build-artifacts and build-system\n";
+            std::cout << "  " << yams::cli::ui::colorize("logs", yams::cli::ui::Ansi::CYAN)
+                      << "             - Build and test logs\n";
+            std::cout << "  " << yams::cli::ui::colorize("cache", yams::cli::ui::Ansi::CYAN)
+                      << "            - Compiler and package manager cache\n";
+            std::cout << "  " << yams::cli::ui::colorize("temp", yams::cli::ui::Ansi::CYAN)
+                      << "             - Temporary files, backups, swap files\n";
+            std::cout << "  " << yams::cli::ui::colorize("coverage", yams::cli::ui::Ansi::CYAN)
+                      << "         - Code coverage data\n";
+            std::cout << "  " << yams::cli::ui::colorize("ide", yams::cli::ui::Ansi::CYAN)
+                      << "              - IDE project files and caches\n";
+            std::cout << "  " << yams::cli::ui::colorize("all", yams::cli::ui::Ansi::CYAN)
+                      << "              - Everything except distribution packages\n\n";
+
+            std::cout << yams::cli::ui::subsection_header("Specific Categories") << "\n\n";
+            std::cout << "  build-object, build-library, build-executable, build-archive\n";
+            std::cout << "  system-cmake, system-ninja, system-meson, system-make\n";
+            std::cout << "  system-gradle, system-maven, system-npm, system-cargo, system-go\n\n";
+
+            std::cout << yams::cli::ui::subsection_header("Usage Examples") << "\n\n";
+            std::cout << "  "
+                      << yams::cli::ui::colorize("# Preview what would be deleted",
+                                                 yams::cli::ui::Ansi::DIM)
+                      << "\n";
+            std::cout << "  yams doctor prune --category build-artifacts\n\n";
+            std::cout << "  "
+                      << yams::cli::ui::colorize("# Delete old logs", yams::cli::ui::Ansi::DIM)
+                      << "\n";
+            std::cout << "  yams doctor prune --category logs --older-than 30d --apply\n\n";
+            std::cout << "  "
+                      << yams::cli::ui::colorize("# Delete by extension", yams::cli::ui::Ansi::DIM)
+                      << "\n";
+            std::cout << "  yams doctor prune --extension o,obj,log --apply\n\n";
+            std::cout << "  "
+                      << yams::cli::ui::colorize("# Delete multiple categories",
+                                                 yams::cli::ui::Ansi::DIM)
+                      << "\n";
+            std::cout << "  yams doctor prune --category build,temp --apply\n\n";
+
+            std::cout << yams::cli::ui::colorize("Note:", yams::cli::ui::Ansi::YELLOW)
+                      << " Prune operates on files tracked in YAMS metadata.\n";
+            std::cout << "      Use --apply to actually delete files (dry-run by default).\n\n";
+            return;
+        }
+
+        if (!cli_) {
+            printError("CLI context unavailable");
+            return;
+        }
+
+        // Build prune request
+        daemon::PruneRequest req;
+        req.categories = pruneCategories_;
+        req.extensions = pruneExtensions_;
+        req.olderThan = pruneOlderThan_;
+        req.largerThan = pruneLargerThan_;
+        req.smallerThan = pruneSmallerThan_;
+        req.dryRun = !pruneApply_;
+        req.verbose = pruneVerbose_;
+
+        // Get daemon client configuration
+        daemon::ClientConfig clientCfg;
+        clientCfg.socketPath = daemon::DaemonClient::resolveSocketPathConfigFirst();
+        clientCfg.requestTimeout = std::chrono::milliseconds(300000); // 5 minutes
+
+        // Check if daemon is running
+        if (!daemon::DaemonClient::isDaemonRunning(clientCfg.socketPath)) {
+            printError("Daemon not running on socket: " + clientCfg.socketPath.string());
+            std::cout << yams::cli::ui::colorize("\nHint:", yams::cli::ui::Ansi::YELLOW)
+                      << " Start the daemon with 'yams daemon start'\n\n";
+            return;
+        }
+
+        std::cout << "\n"
+                  << yams::cli::ui::colorize("Sending prune request to daemon...",
+                                             yams::cli::ui::Ansi::CYAN)
+                  << "\n";
+
+        // Acquire client from pool and send request
+        auto leaseRes = acquire_cli_daemon_client(clientCfg, 1, 4);
+        if (!leaseRes) {
+            printError("Failed to acquire daemon client: " + leaseRes.error().message);
+            return;
+        }
+
+        auto lease = std::move(leaseRes.value());
+
+        // Use run_result to execute the async call synchronously
+        auto respRes =
+            run_result(lease->call<daemon::PruneRequest>(req), std::chrono::milliseconds(300000));
+        if (!respRes) {
+            printError("Prune request failed: " + respRes.error().message);
+            return;
+        }
+
+        const auto& resp = respRes.value();
+
+        if (!resp.errorMessage.empty()) {
+            printError("Prune operation failed: " + resp.errorMessage);
+            return;
+        }
+
+        // Display results
+        std::cout << "\n" << yams::cli::ui::section_header("Prune Summary") << "\n\n";
+
+        uint64_t totalFiles = resp.filesDeleted + resp.filesFailed;
+        std::cout << "  " << yams::cli::ui::colorize("Total files:", yams::cli::ui::Ansi::BOLD)
+                  << " " << totalFiles << "\n";
+        std::cout << "  " << yams::cli::ui::colorize("Total size:", yams::cli::ui::Ansi::BOLD)
+                  << " " << std::fixed << std::setprecision(2)
+                  << (resp.totalBytesFreed / 1024.0 / 1024.0) << " MB\n\n";
+
+        if (!resp.categoryCounts.empty()) {
+            std::cout << yams::cli::ui::subsection_header("By Category") << "\n\n";
+            for (const auto& [cat, count] : resp.categoryCounts) {
+                auto it = resp.categorySizes.find(cat);
+                uint64_t size = (it != resp.categorySizes.end()) ? it->second : 0;
+                double sizeMB = size / 1024.0 / 1024.0;
+                std::cout << "  " << yams::cli::ui::colorize(cat, yams::cli::ui::Ansi::CYAN) << ": "
+                          << count << " files, " << std::fixed << std::setprecision(2) << sizeMB
+                          << " MB\n";
+            }
+            std::cout << "\n";
+        }
+
+        if (req.dryRun) {
+            std::cout << yams::cli::ui::colorize("⚠ Dry-run mode.", yams::cli::ui::Ansi::YELLOW)
+                      << " Use " << yams::cli::ui::colorize("--apply", yams::cli::ui::Ansi::BOLD)
+                      << " to actually delete files.\n\n";
+        } else {
+            std::cout << yams::cli::ui::colorize("✓ Deleted " + std::to_string(resp.filesDeleted) +
+                                                     " files",
+                                                 yams::cli::ui::Ansi::GREEN)
+                      << "\n";
+            if (resp.filesFailed > 0) {
+                std::cout << yams::cli::ui::colorize("⚠ Failed to delete " +
+                                                         std::to_string(resp.filesFailed) +
+                                                         " files",
+                                                     yams::cli::ui::Ansi::YELLOW)
+                          << "\n";
+            }
+            std::cout << "\n";
+        }
+
+    } catch (const std::exception& e) {
+        printError(std::string("Prune error: ") + e.what());
     }
 }
 } // namespace yams::cli

@@ -25,10 +25,13 @@ struct ConnectionPoolConfig {
     size_t minConnections = 2;                   ///< Minimum connections to maintain
     size_t maxConnections = 10;                  ///< Maximum connections allowed
     std::chrono::seconds idleTimeout{300};       ///< Idle connection timeout
-    std::chrono::seconds connectTimeout{5};      ///< Connection establishment timeout
-    std::chrono::milliseconds busyTimeout{5000}; ///< SQLite busy timeout
-    bool enableWAL = true;                       ///< Enable WAL mode
-    bool enableForeignKeys = true;               ///< Enable foreign key constraints
+    std::chrono::seconds maxConnectionAge{3600}; ///< Maximum connection age before refresh
+    std::chrono::seconds connectTimeout{
+        2}; ///< Connection establishment timeout (mirrors socket server)
+    std::chrono::milliseconds busyTimeout{
+        2000};                     ///< SQLite busy timeout (mirrors socket server default)
+    bool enableWAL = true;         ///< Enable WAL mode
+    bool enableForeignKeys = true; ///< Enable foreign key constraints
 };
 
 /**
@@ -67,6 +70,11 @@ public:
     }
 
     /**
+     * @brief Get creation time
+     */
+    [[nodiscard]] std::chrono::steady_clock::time_point createdAt() const { return createdAt_; }
+
+    /**
      * @brief Mark connection as accessed
      */
     void touch() { lastAccessed_ = std::chrono::steady_clock::now(); }
@@ -77,6 +85,7 @@ private:
     std::unique_ptr<Database> db_;
     std::function<void(PooledConnection*)> returnFunc_;
     std::chrono::steady_clock::time_point lastAccessed_;
+    std::chrono::steady_clock::time_point createdAt_{std::chrono::steady_clock::now()};
     bool returned_ = false;
 };
 

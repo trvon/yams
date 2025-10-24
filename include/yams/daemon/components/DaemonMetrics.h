@@ -101,6 +101,17 @@ struct MetricsSnapshot {
     std::uint64_t documentsIndexed{0};
     std::uint64_t documentsContentExtracted{0};
 
+    // FTS5 orphan scan metrics (from InternalEventBus)
+    std::uint64_t fts5OrphansDetected{0}; // total orphans found since daemon start
+    std::uint64_t fts5OrphansRemoved{0};  // total orphans removed since daemon start
+    std::string lastOrphanScanTime;       // ISO8601 timestamp of last scan (empty if never)
+
+    // FTS5 indexing failure breakdown (from InternalEventBus)
+    std::uint64_t fts5FailNoDoc{0};      // document not found in metadata
+    std::uint64_t fts5FailExtraction{0}; // text extraction failed or empty
+    std::uint64_t fts5FailIndex{0};      // FTS5 indexing failed (DB error)
+    std::uint64_t fts5FailException{0};  // unexpected exceptions
+
     // Content store & compression snapshot (best-effort)
     std::uint64_t storeObjects{0};
     std::uint64_t uniqueBlocks{0};

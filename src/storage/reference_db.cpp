@@ -135,17 +135,17 @@ private:
     sqlite3* db_ = nullptr;
 };
 
-// Simple database wrapper
+// Simple database wrapper with proper thread safety
 class Database {
 public:
     explicit Database(const std::filesystem::path& path) {
-        int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
-                    SQLITE_OPEN_NOMUTEX; // We handle thread safety ourselves
+        // Use FULLMUTEX for proper thread safety - SQLite will handle internal locking
+        int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX;
 
         int rc = sqlite3_open_v2(path.string().c_str(), &db_, flags, nullptr);
         if (rc != SQLITE_OK) {
-            throw std::runtime_error(
-                yamsfmt::format("Failed to open database: {}", sqlite3_errmsg(db_)));
+            std::string errMsg = db_ ? sqlite3_errmsg(db_) : "Failed to open database";
+            throw std::runtime_error(yamsfmt::format("Failed to open database: {}", errMsg));
         }
 
         // Enable foreign keys
@@ -154,8 +154,7 @@ public:
         // Set busy timeout for concurrent transactions (15 seconds)
         sqlite3_busy_timeout(db_, 15000);
 
-        // WAL light mode: if YAMS_TESTING is set, use memory journal mode
-        // to avoid WAL contention during parallel test runs
+        // WAL mode for better concurrency (unless testing)
         if (const char* test_env = std::getenv("YAMS_TESTING")) {
             std::string v(test_env);
             std::transform(v.begin(), v.end(), v.begin(),
@@ -163,13 +162,18 @@ public:
             if (v == "1" || v == "true" || v == "yes" || v == "on") {
                 execute("PRAGMA journal_mode = MEMORY");
                 spdlog::debug("Reference DB: using MEMORY journal mode (YAMS_TESTING=1)");
+            } else {
+                execute("PRAGMA journal_mode = WAL");
             }
+        } else {
+            execute("PRAGMA journal_mode = WAL");
         }
     }
 
     ~Database() {
         if (db_) {
-            sqlite3_close(db_);
+            // Finalize all cached statements before closing
+            sqlite3_close_v2(db_); // v2 allows cleanup of lingering statements
         }
     }
 
@@ -200,8 +204,13 @@ public:
         execute(buffer.str());
     }
 
-    // Prepare statement
-    Statement prepare(const std::string& sql) { return Statement(db_, sql); }
+    // Prepare statement - now returns by value (move semantics handle efficiency)
+    Statement prepare(const std::string& sql) {
+        if (!db_) {
+            throw std::runtime_error("Database not initialized");
+        }
+        return Statement(db_, sql);
+    }
 
     // Transaction control with proper timeout handling
     void beginTransaction() {
@@ -279,31 +288,35 @@ private:
 };
 
 // Statement cache for prepared statements
+// Note: Returns by value to avoid lifetime issues. Move semantics make this efficient.
 class StatementCache {
 public:
     explicit StatementCache(Database& db) : db_(db) {}
 
-    Statement& get(const std::string& key, const std::string& sql) {
+    // Returns a copy/move of the cached statement with reset bindings
+    Statement get(const std::string& key, const std::string& sql) {
         std::lock_guard lock(mutex_);
 
-        auto it = cache_.find(key);
-        if (it != cache_.end()) {
-            it->second.reset();
-            return it->second;
+        auto it = sqlCache_.find(key);
+        if (it != sqlCache_.end()) {
+            // Use cached SQL to create a fresh statement
+            return db_.prepare(it->second);
         }
 
-        auto [inserted, success] = cache_.emplace(key, db_.prepare(sql));
-        return inserted->second;
+        // Cache the SQL text, not the statement itself
+        sqlCache_[key] = sql;
+        return db_.prepare(sql);
     }
 
     void clear() {
         std::lock_guard lock(mutex_);
-        cache_.clear();
+        sqlCache_.clear();
     }
 
 private:
     Database& db_;
-    std::unordered_map<std::string, Statement> cache_;
+    // Cache SQL text, not prepared statements (avoids lifetime issues)
+    std::unordered_map<std::string, std::string> sqlCache_;
     mutable std::mutex mutex_;
 };
 

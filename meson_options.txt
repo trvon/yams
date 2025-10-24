@@ -40,3 +40,6 @@ option('enable-stress-tests', type: 'boolean', value: false, description: 'Regis
 option('enable-reliability-tests', type: 'boolean', value: false, description: 'Register reliability gate (retries/latency sensitive)')
 
 option('enable-symbol-extraction', type: 'boolean', value: true, description: 'Enable symbol extraction (plugins & features)')
+
+# libc++ hardening modes (only effective when using libc++)
+option('libcxx-hardening', type: 'combo', choices: ['none', 'fast', 'extensive', 'debug'], value: 'none', description: 'libc++ hardening mode: none (default), fast (minimal overhead), extensive (more checks), debug (maximum validation)')

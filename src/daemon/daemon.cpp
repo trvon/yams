@@ -3,9 +3,13 @@
 #include <spdlog/spdlog.h>
 
 #include <fstream>
+#include <future>
 #include <mutex>
 #include <thread>
 #include <unistd.h> // For getuid(), geteuid(), getpid()
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/thread_pool.hpp>
+#include <boost/asio/use_future.hpp>
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/LifecycleComponent.h>
@@ -55,7 +59,11 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config) : config_(config) {
     }
 
     lifecycleManager_ = std::make_unique<LifecycleComponent>(this, config_.pidFile);
-    serviceManager_ = std::make_unique<ServiceManager>(config_, state_);
+    serviceManager_ = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+
+    // Start background task coroutines now that shared_ptr exists
+    serviceManager_->startBackgroundTasks();
+
     // Create metrics aggregator before the dispatcher so status can pull from a single snapshot
     metrics_ = std::make_unique<DaemonMetrics>(&lifecycleFsm_, &state_, serviceManager_.get());
     requestDispatcher_ =
@@ -113,7 +121,26 @@ Result<size_t> YamsDaemon::autoloadPluginsNow() {
     if (!serviceManager_) {
         return Error{ErrorCode::NotInitialized, "ServiceManager not initialized"};
     }
-    return serviceManager_->autoloadPluginsNow();
+    // Bridge awaitable<Result<size_t>> to sync Result<size_t> without requiring
+    // default-constructible T
+    try {
+        boost::asio::thread_pool tp(1);
+        std::promise<Result<size_t>> prom;
+        auto fut = prom.get_future();
+        auto sm = serviceManager_.get();
+        boost::asio::co_spawn(
+            tp,
+            [sm, p = std::move(prom)]() mutable -> boost::asio::awaitable<void> {
+                auto r = co_await sm->autoloadPluginsNow();
+                p.set_value(std::move(r));
+                co_return;
+            },
+            boost::asio::detached);
+        tp.join();
+        return fut.get();
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::InternalError, e.what()};
+    }
 }
 
 Result<void> YamsDaemon::start() {

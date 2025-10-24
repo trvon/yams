@@ -7,16 +7,6 @@
 
 namespace yams::extraction::util {
 
-static inline bool is_text_like(const std::string& mime) {
-    if (mime.rfind("text/", 0) == 0)
-        return true;
-    if (mime == "application/json" || mime == "application/xml" || mime == "application/x-yaml" ||
-        mime == "application/yaml") {
-        return true;
-    }
-    return false;
-}
-
 std::optional<std::string> extractDocumentText(std::shared_ptr<yams::api::IContentStore> store,
                                                const std::string& hash, const std::string& mime,
                                                const std::string& extension,
@@ -28,6 +18,9 @@ std::optional<std::string> extractDocumentText(std::shared_ptr<yams::api::IConte
     if (!bytesRes)
         return std::nullopt;
     const auto& bytes = bytesRes.value();
+
+    // Get FileTypeDetector for MIME type checks (uses magic_numbers.hpp)
+    auto& detector = yams::detection::FileTypeDetector::instance();
 
     // 1) Try plugin extractors first (best-match)
     for (const auto& ext : extractors) {
@@ -62,15 +55,22 @@ std::optional<std::string> extractDocumentText(std::shared_ptr<yams::api::IConte
         }
     }
 
-    // 3) Built-in fallbacks for clearly text-like MIME types
-    if (is_text_like(mime)) {
+    // 3) Built-in fallbacks for text-like MIME types (uses magic_numbers.hpp via FileTypeDetector)
+    if (!mime.empty() && detector.isTextMimeType(mime)) {
         return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
     }
 
-    // 4) As a last resort, if extension implies text
+    // 4) As a last resort, if extension implies text (uses magic_numbers.hpp)
     try {
-        auto mt = yams::detection::FileTypeDetector::getMimeTypeFromExtension(extension);
-        if (!mt.empty() && is_text_like(mt)) {
+        // Normalize extension: ensure it has a leading dot
+        std::string normalizedExt = extension;
+        if (!normalizedExt.empty() && normalizedExt[0] != '.') {
+            normalizedExt = "." + normalizedExt;
+        }
+
+        auto detectedMime =
+            yams::detection::FileTypeDetector::getMimeTypeFromExtension(normalizedExt);
+        if (!detectedMime.empty() && detector.isTextMimeType(detectedMime)) {
             return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
         }
     } catch (const std::exception& e) {

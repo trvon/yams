@@ -70,6 +70,7 @@ TEST_F(VersioningIndexerTest, PathSeries_NewThenUpdate_CreatesVersionEdgeAndFlag
     ASSERT_NE(id1, id2);
 
     // Exactly one latest=true at this path and it's id2
+    std::cout << "Query path: " << filePath.string() << std::endl;
     auto samePathDocs = metadata::queryDocumentsByPattern(*repo, filePath.string());
     ASSERT_TRUE(samePathDocs);
     std::cout << "samePathDocs size=" << samePathDocs.value().size() << std::endl;

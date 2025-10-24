@@ -1,5 +1,6 @@
 #include <chrono>
 #include <gtest/gtest.h>
+#include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
@@ -65,9 +66,10 @@ private:
 
 TEST(StatusEmbedding, SnapshotShowsEmbeddingRuntime) {
     StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
     DaemonConfig cfg;
     cfg.dataDir = std::filesystem::temp_directory_path() / "yams_test_embedding_status";
-    ServiceManager svc(cfg, state);
+    ServiceManager svc(cfg, state, lifecycleFsm);
 
     // Inject stub provider and mark as adopted
     auto provider = std::make_shared<StubProvider>(384, "/tmp/test-model.onnx");

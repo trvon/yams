@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <filesystem>
 #include <random>
 #include <thread>
@@ -260,8 +261,8 @@ TEST_F(StorageBackendTest, ParseURLWithQueryParams) {
         "s3://bucket/path?cache_size=1048576&cache_ttl=7200&timeout=60");
     EXPECT_EQ(config.type, "s3");
     EXPECT_EQ(config.cacheSize, 1048576u);
-    EXPECT_EQ(config.cacheTTL, 7200);
-    EXPECT_EQ(config.requestTimeout, 60);
+    EXPECT_EQ(config.cacheTTL, 7200u);
+    EXPECT_EQ(config.requestTimeout, 60u);
 }
 
 // Storage Stats Test
@@ -285,8 +286,8 @@ TEST_F(StorageBackendTest, FilesystemBackendStats) {
     ASSERT_TRUE(statsResult);
 
     auto& stats = statsResult.value();
-    EXPECT_EQ(stats.totalObjects, 5);
-    EXPECT_EQ(stats.totalBytes, 1024 + 2048 + 3072 + 4096 + 5120);
+    EXPECT_EQ(stats.totalObjects, 5u);
+    EXPECT_EQ(stats.totalBytes, 1024u + 2048u + 3072u + 4096u + 5120u);
 }
 
 // Edge Cases

@@ -621,6 +621,29 @@ message FileHistoryRequest {
   string filepath = 1;
 }
 
+// Prune/cleanup operations
+message PruneRequest {
+  repeated string categories = 1;  // build-artifacts, build-system, logs, cache, temp, etc.
+  repeated string extensions = 2;  // Specific extensions to prune
+  string older_than = 3;           // Duration string: 30d, 2w, 6m
+  string larger_than = 4;          // Size string: 10MB, 1GB
+  string smaller_than = 5;         // Size string: 1KB
+  repeated string exclude_patterns = 6;  // Paths to exclude
+  bool dry_run = 7;                // Don't actually delete
+  bool verbose = 8;                // Detailed output
+}
+
+message PruneResponse {
+  uint64 files_deleted = 1;
+  uint64 files_failed = 2;
+  uint64 total_bytes_freed = 3;
+  map<string, uint64> category_counts = 4;  // Category name -> file count
+  map<string, uint64> category_sizes = 5;   // Category name -> total bytes
+  repeated string deleted_paths = 6;        // Paths that were deleted (if verbose)
+  repeated string failed_paths = 7;         // Paths that failed to delete
+  string error_message = 8;
+}
+
 // ENVELOPE
 message Envelope {
   uint32 version = 1;
@@ -669,6 +692,8 @@ message Envelope {
     // Tree diff requests (PBI-043)
     ListTreeDiffRequest list_tree_diff_request = 45;
     FileHistoryRequest file_history_request = 46;
+    // Prune request
+    PruneRequest prune_request = 47;
 
     // Responses
     SuccessResponse success_response = 100;
@@ -706,6 +731,8 @@ message Envelope {
     ListTreeDiffResponse list_tree_diff_response = 129;
     FileHistoryResponse file_history_response = 130;
     PathTreeResponse path_tree_response = 131;
+    // Prune response
+    PruneResponse prune_response = 132;
 
   }
 }

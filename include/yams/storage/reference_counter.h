@@ -7,6 +7,7 @@
 #include <chrono>
 #include <coroutine>
 #include <filesystem>
+#include <functional>
 #include <future>
 #include <memory>
 #include <mutex>

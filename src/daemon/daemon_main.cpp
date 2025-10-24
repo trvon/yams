@@ -73,6 +73,13 @@ static std::atomic<bool> g_autoload_plugins_now{false};
 void setup_fatal_handlers() {
     std::signal(SIGSEGV, signal_handler);
     std::signal(SIGABRT, signal_handler);
+    // Ensure SIGTERM/SIGINT terminate the daemon promptly if graceful shutdown isn't possible.
+#ifdef SIGTERM
+    std::signal(SIGTERM, [](int) { std::_Exit(0); });
+#endif
+#ifdef SIGINT
+    std::signal(SIGINT, [](int) { std::_Exit(0); });
+#endif
     // Use SIGUSR1 as on-demand plugin autoload trigger
 #ifdef SIGUSR1
     std::signal(SIGUSR1,

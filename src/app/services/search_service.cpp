@@ -6,6 +6,7 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/app/services/enhanced_search_executor.h>
 #include <yams/app/services/services.hpp>
+#include <yams/detection/file_type_detector.h>
 #include <yams/metadata/query_helpers.h>
 #ifdef YAMS_ENABLE_DAEMON_FEATURES
 #include <yams/daemon/components/ServiceManager.h>
@@ -669,15 +670,23 @@ public:
             // Only attempt lightweight extraction for text-like types or small files
             const std::string mime = info.mimeType;
             const std::string ext = info.fileExtension;
-            const bool looksTextMime = (!mime.empty() && mime.rfind("text/", 0) == 0) ||
-                                       mime == "application/json" || mime == "application/xml";
-            const bool looksTextExt =
-                (!ext.empty() &&
-                 (ext == ".txt" || ext == ".md" || ext == ".json" || ext == ".csv" ||
-                  ext == ".log" || ext == ".xml" || ext == ".yaml" || ext == ".yml" ||
-                  ext == ".toml" || ext == ".html" || ext == ".htm"));
 
-            if (!looksTextMime && !looksTextExt) {
+            // Use FileTypeDetector for consistent MIME type checks (leverages magic_numbers.hpp)
+            auto& detector = yams::detection::FileTypeDetector::instance();
+            bool isTextLike = false;
+
+            if (!mime.empty() && detector.isTextMimeType(mime)) {
+                isTextLike = true;
+            } else if (!ext.empty()) {
+                // Try extension-based detection
+                auto detectedMime =
+                    yams::detection::FileTypeDetector::getMimeTypeFromExtension(ext);
+                if (!detectedMime.empty() && detector.isTextMimeType(detectedMime)) {
+                    isTextLike = true;
+                }
+            }
+
+            if (!isTextLike) {
                 // Skip non-text types here; daemon/background can handle richer extraction if
                 // needed.
                 co_return Result<void>();

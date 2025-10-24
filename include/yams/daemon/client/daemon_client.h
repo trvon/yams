@@ -384,7 +384,9 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
             // Plugin management requests
             std::is_same<Req, PluginScanRequest>, std::is_same<Req, PluginLoadRequest>,
             std::is_same<Req, PluginUnloadRequest>, std::is_same<Req, PluginTrustListRequest>,
-            std::is_same<Req, PluginTrustAddRequest>, std::is_same<Req, PluginTrustRemoveRequest>>,
+            std::is_same<Req, PluginTrustAddRequest>, std::is_same<Req, PluginTrustRemoveRequest>,
+            // Doctor commands
+            std::is_same<Req, PruneRequest>>,
         "Req must be a valid daemon Request alternative");
 
     // Force streaming for streaming-capable requests

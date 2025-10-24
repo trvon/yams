@@ -347,6 +347,22 @@ public:
         }
         return def;
     }
+
+    // Orphan scan interval (hours). Default 6h. Range 1-48h.
+    // Env: YAMS_ORPHAN_SCAN_INTERVAL_HOURS
+    static uint32_t orphanScanIntervalHours() {
+        uint32_t def = 6;
+        if (const char* s = std::getenv("YAMS_ORPHAN_SCAN_INTERVAL_HOURS")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1 && v <= 48)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return def;
+    }
+
     // Hysteresis: ms to hold busy before degrading. Default 750 ms.
     static uint32_t repairDegradeHoldMs() {
         uint32_t def = 750;

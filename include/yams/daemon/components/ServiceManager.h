@@ -13,11 +13,14 @@
 #include <yams/app/services/services.hpp>
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/core/types.h>
+#include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/EmbeddingProviderFsm.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PluginHostFsm.h>
 #include <yams/daemon/components/PoolManager.h>
 #include <yams/daemon/components/PostIngestQueue.h>
+#include <yams/daemon/components/SearchEngineFsm.h>
+#include <yams/daemon/components/SearchEngineManager.h>
 #include <yams/daemon/components/ServiceManagerFsm.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -40,6 +43,9 @@ class Database;
 class ConnectionPool;
 class MetadataRepository;
 } // namespace yams::metadata
+namespace yams::integrity {
+class RepairManager;
+} // namespace yams::integrity
 namespace yams::search {
 class SearchExecutor;
 class HybridSearchEngine;
@@ -62,12 +68,14 @@ class TuningManager;
 namespace yams::daemon {
 
 class IngestService;
+class EntityGraphService;
 
 class ServiceManager : public IComponent, public std::enable_shared_from_this<ServiceManager> {
 public:
     using InitCompleteCallback = std::function<void(bool success, const std::string& error)>;
 
-    ServiceManager(const DaemonConfig& config, StateComponent& state);
+    ServiceManager(const DaemonConfig& config, StateComponent& state,
+                   DaemonLifecycleFsm& lifecycleFsm);
     ~ServiceManager() override;
 
     // IComponent interface
@@ -80,10 +88,16 @@ public:
         initCompleteCallback_ = callback;
     }
 
+    // Start background task coroutines (must be called after shared_ptr construction)
+    void startBackgroundTasks();
+
     // Service Accessors
     std::shared_ptr<api::IContentStore> getContentStore() const { return contentStore_; }
     std::shared_ptr<metadata::MetadataRepository> getMetadataRepo() const { return metadataRepo_; }
     std::shared_ptr<search::SearchExecutor> getSearchExecutor() const { return searchExecutor_; }
+    std::shared_ptr<EntityGraphService> getEntityGraphService() const {
+        return entityGraphService_;
+    }
     std::shared_ptr<IModelProvider> getModelProvider() const { return modelProvider_; }
     std::shared_ptr<yams::search::HybridSearchEngine> getSearchEngineSnapshot() const;
     std::shared_ptr<vector::VectorIndexManager> getVectorIndexManager() const {
@@ -114,6 +128,21 @@ public:
         std::size_t queued;
         std::size_t active;
         std::size_t target;
+    };
+
+    // Plugin status snapshot structures (PBI-046: non-blocking status)
+    struct PluginStatusRecord {
+        std::string name;
+        bool isProvider{false};
+        bool ready{false};
+        bool degraded{false};
+        std::string error;
+        std::uint32_t modelsLoaded{0};
+    };
+
+    struct PluginStatusSnapshot {
+        PluginHostSnapshot host;
+        std::vector<PluginStatusRecord> records;
     };
 
     void publishIngestMetrics(std::size_t queued, std::size_t active) {
@@ -168,9 +197,20 @@ public:
             postIngest_->notifyWorkers();
         }
     }
-    // Last search engine build metadata (for diagnostics/status)
-    std::string getLastSearchBuildReason() const { return lastSearchBuildReason_; }
-    bool getLastVectorEnabled() const { return lastVectorEnabled_; }
+    // Phase 2.4: Delegate to SearchEngineManager
+    SearchEngineSnapshot getSearchEngineFsmSnapshot() const {
+        return searchEngineManager_.getSnapshot();
+    }
+    yams::search::HybridSearchEngine* getCachedSearchEngine() const {
+        return searchEngineManager_.getCachedEngine();
+    }
+
+    // Plugin status snapshot API (PBI-046: non-blocking status)
+    PluginStatusSnapshot getPluginStatusSnapshot() const;
+    void setCachedModelProviderModelCount(std::uint32_t count) {
+        cachedModelProviderModelCount_.store(count, std::memory_order_relaxed);
+    }
+    void refreshPluginStatusSnapshot();
     boost::asio::any_io_executor getWorkerExecutor() const;
     std::function<void(bool)> getWorkerJobSignal();
     // Best-effort queue depth estimation for backpressure/telemetry
@@ -207,12 +247,18 @@ public:
         return symbolExtractors_;
     }
 
+    // Knowledge Graph Store (PBI-059)
+    std::shared_ptr<metadata::KnowledgeGraphStore> getKgStore() const { return kgStore_; }
+
     // ContentStore diagnostics
     std::string getContentStoreError() const { return contentStoreError_; }
 
     // WAL metrics provider (may return zeros until a WALManager is attached)
     std::shared_ptr<WalMetricsProvider> getWalMetricsProvider() const {
         return walMetricsProvider_;
+    }
+    std::shared_ptr<yams::integrity::RepairManager> getRepairManager() const {
+        return repairManager_;
     }
     void attachWalManager(std::shared_ptr<yams::wal::WALManager> wal) {
         if (!walMetricsProvider_)
@@ -252,6 +298,10 @@ public:
     ProviderSnapshot getEmbeddingProviderFsmSnapshot() const { return embeddingFsm_.snapshot(); }
     PluginHostSnapshot getPluginHostFsmSnapshot() const { return pluginHostFsm_.snapshot(); }
 
+    // DEPRECATED: Remove these methods - replaced by SearchEngineManager delegates above
+    // std::shared_ptr<yams::search::HybridSearchEngine> getCachedSearchEngine() const;
+    // void refreshSearchEngineSnapshot();
+
     // PBI-008-11: FSM hook scaffolds for session preparation lifecycle (no-op for now)
     void onPrepareSessionRequested() {};
     void onPrepareSessionCompleted() {};
@@ -279,7 +329,7 @@ public:
     // Explicit, on-demand plugin autoload: scans trusted roots and default directories,
     // loads plugins via ABI hosts, and attempts to adopt model providers and content extractors.
     // Returns number of plugins loaded during this invocation.
-    Result<size_t> autoloadPluginsNow();
+    boost::asio::awaitable<Result<size_t>> autoloadPluginsNow();
     // Attempt to preload preferred model if a model provider is available.
     // Preferred model is resolved from env (YAMS_PREFERRED_MODEL) or by scanning ~/.yams/models.
     void preloadPreferredModelIfConfigured();
@@ -300,9 +350,11 @@ public:
             return false;
         }
     }
-    const std::string& lastModelError() const { return lastModelError_; }
+    // Deprecated: Use lifecycleFsm_.degradationReason("embeddings") instead
+    std::string lastModelError() const;
     const std::string& adoptedProviderPluginName() const { return adoptedProviderPluginName_; }
-    void clearModelProviderError() { lastModelError_.clear(); }
+    // Clear embedding subsystem degradation
+    void clearModelProviderError();
 
     // Combined embedding initialization and search engine rebuild coroutine.
     // This method provides idempotent, race-safe initialization of embedding capabilities
@@ -327,20 +379,8 @@ public:
     void __test_setAdoptedProviderPluginName(const std::string& name) {
         adoptedProviderPluginName_ = name;
     }
-    void __test_setModelProviderDegraded(bool degraded, const std::string& error = {}) {
-        lastModelError_ = error;
-        try {
-            if (degraded) {
-                embeddingFsm_.dispatch(
-                    ProviderDegradedEvent{error.empty() ? std::string{"test"} : error});
-            } else {
-                // Treat as recovered to a ready-ish state without asserting a model; use
-                // ModelLoadedEvent with dimension 0 to clear degraded state in FSM.
-                embeddingFsm_.dispatch(ModelLoadedEvent{embeddingModelName_, 0});
-            }
-        } catch (...) {
-        }
-    }
+    void __test_setModelProviderDegraded(bool degraded, const std::string& error = {});
+
 #ifdef YAMS_TESTING
     AbiPluginHost* __test_getAbiHost() const { return abiHost_.get(); }
     AbiPluginLoader* __test_getAbiPluginLoader() const { return abiPluginLoader_.get(); }
@@ -380,7 +420,6 @@ private:
 
     const DaemonConfig& config_;
     StateComponent& state_;
-    yams::compat::jthread initThread_;
 
     // All the services managed by this component
     std::shared_ptr<api::IContentStore> contentStore_;
@@ -392,19 +431,25 @@ private:
     std::shared_ptr<vector::VectorIndexManager> vectorIndexManager_;
     std::shared_ptr<vector::EmbeddingGenerator> embeddingGenerator_;
     std::shared_ptr<vector::VectorDatabase> vectorDatabase_;
-    std::shared_ptr<search::SearchEngineBuilder> searchBuilder_;
     std::shared_ptr<IModelProvider> modelProvider_;
+
+    // Thread pools: declared early so they destruct LAST (after threads that use them)
     std::unique_ptr<boost::asio::thread_pool> initPool_;
-    std::unique_ptr<boost::asio::thread_pool>
-        modelLoadPool_; // Dedicated pool for model loading operations
+    std::unique_ptr<boost::asio::thread_pool> modelLoadPool_;
+    std::unique_ptr<boost::asio::thread_pool> pluginLoadPool_;
+    std::shared_ptr<WorkerPool> workerPool_;
+
+    std::shared_ptr<EntityGraphService> entityGraphService_;
 
     std::unique_ptr<AbiPluginLoader> abiPluginLoader_;
     std::unique_ptr<AbiPluginHost> abiHost_;
     std::unique_ptr<RetrievalSessionManager> retrievalSessions_;
-    std::shared_ptr<WorkerPool> workerPool_;
-    // Phase 6: background reconciler for PoolManager stats (logging only)
-    yams::compat::jthread poolReconThread_;
-    // Removed: lifecycleReadyWatchdog_ (1200ms defensive timeout eliminated)
+
+    // Phase 1 (PBI-002): Background task coordination
+    // CRITICAL: Must be declared BEFORE jthreads so it destructs AFTER threads
+    // (reverse order), ensuring coroutines are cancelled before executor dies
+    std::unique_ptr<class BackgroundTaskManager> backgroundTaskManager_;
+
     // Worker pool metrics
     std::atomic<std::size_t> poolActive_{0};
     std::atomic<std::size_t> poolPosted_{0};
@@ -415,7 +460,6 @@ private:
     std::atomic<std::size_t> ingestActive_{0};
     std::atomic<std::size_t> ingestWorkerTarget_{1};
 
-    std::atomic<bool> embeddingWarmupScheduled_{false};
     bool embeddingPreloadOnStartup_{false};
 
     std::unique_ptr<IngestService> ingestService_;
@@ -427,6 +471,7 @@ private:
     std::filesystem::path resolvedDataDir_;
 
     std::shared_ptr<WalMetricsProvider> walMetricsProvider_;
+    std::shared_ptr<yams::integrity::RepairManager> repairManager_;
     std::unique_ptr<PostIngestQueue> postIngest_;
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors_;
     std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> symbolExtractors_;
@@ -446,15 +491,9 @@ private:
     // because it was already attempted elsewhere. On failure, returns Error.
     Result<bool> initializeVectorDatabaseOnce(const std::filesystem::path& dataDir);
 
-    // Degraded provider tracking (FSM-first). Atomic retained only for ABI/back-compat during
-    // transition, but not written by new code paths.
-    std::atomic<bool> modelProviderDegraded_{false};
-    std::string lastModelError_;
     std::string adoptedProviderPluginName_;
 
-    // Diagnostics: track last search build reason and vector enablement
-    std::string lastSearchBuildReason_{"unknown"};
-    bool lastVectorEnabled_{false};
+    // Diagnostics: embedding model name
     std::string embeddingModelName_;
 
     // Diagnostics: track last content store init error (empty when none)
@@ -463,10 +502,27 @@ private:
     // Idempotence: guard against double shutdown (stop() plus destructor)
     std::atomic<bool> shutdownInvoked_{false};
 
+    // Reference to parent daemon's lifecycle FSM (for subsystem degradation tracking)
+    DaemonLifecycleFsm& lifecycleFsm_;
+
     // FSMs introduced by PBI-046 (initially advisory; will replace atomic flags incrementally)
     ServiceManagerFsm serviceFsm_{};
     EmbeddingProviderFsm embeddingFsm_{};
     PluginHostFsm pluginHostFsm_{};
+
+    // jthreads: declared AFTER FSMs so they destruct FIRST (requesting stop and joining)
+    // CRITICAL: Threads must destruct before FSMs because the init lambda dispatches FSM events
+    // Their destructors automatically call request_stop() and join()
+    yams::compat::jthread initThread_;      // Uses initPool_ executor - may dispatch to serviceFsm_
+    yams::compat::jthread poolReconThread_; // Uses workerPool_ executor
+
+    // Phase 2.4: Extracted managers (consolidate lifecycle management)
+    SearchEngineManager searchEngineManager_;
+
+    // Plugin status snapshot cache (PBI-046: non-blocking status)
+    mutable std::shared_mutex pluginStatusMutex_;
+    PluginStatusSnapshot pluginStatusSnapshot_{};
+    std::atomic<std::uint32_t> cachedModelProviderModelCount_{0};
 };
 
 } // namespace yams::daemon

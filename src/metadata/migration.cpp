@@ -849,7 +849,7 @@ Migration YamsMetadataMigrations::createKnowledgeGraphSchema() {
             FOREIGN KEY (node_id) REFERENCES kg_nodes(id) ON DELETE CASCADE
         );
 
-        CREATE TABLE IF NOT EXISTS doc_entities (
+        CREATE TABLE IF NOT EXISTS kg_doc_entities (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             document_id INTEGER NOT NULL,
             entity_text TEXT NOT NULL,
@@ -877,8 +877,8 @@ Migration YamsMetadataMigrations::createKnowledgeGraphSchema() {
         CREATE INDEX IF NOT EXISTS idx_kg_edges_src ON kg_edges(src_node_id);
         CREATE INDEX IF NOT EXISTS idx_kg_edges_dst ON kg_edges(dst_node_id);
         CREATE INDEX IF NOT EXISTS idx_kg_edges_relation ON kg_edges(relation);
-        CREATE INDEX IF NOT EXISTS idx_doc_entities_document ON doc_entities(document_id);
-        CREATE INDEX IF NOT EXISTS idx_doc_entities_node ON doc_entities(node_id);
+        CREATE INDEX IF NOT EXISTS idx_kg_doc_entities_document ON kg_doc_entities(document_id);
+        CREATE INDEX IF NOT EXISTS idx_kg_doc_entities_node ON kg_doc_entities(node_id);
         CREATE INDEX IF NOT EXISTS idx_kg_embeddings_model ON kg_node_embeddings(model);
         )");
         if (!base)
@@ -962,7 +962,7 @@ Migration YamsMetadataMigrations::createKnowledgeGraphSchema() {
         DROP INDEX IF EXISTS idx_kg_nodes_type;
 
         DROP TABLE IF EXISTS kg_node_stats;
-        DROP TABLE IF EXISTS doc_entities;
+        DROP TABLE IF EXISTS kg_doc_entities;
         DROP TABLE IF EXISTS kg_node_embeddings;
         DROP TABLE IF EXISTS kg_edges;
         DROP TABLE IF EXISTS kg_aliases;
@@ -1655,8 +1655,9 @@ Migration YamsMetadataMigrations::createSymbolMetadataSchema() {
 
     builder.up(R"(
         CREATE TABLE IF NOT EXISTS symbol_metadata (
-            symbol_id INTEGER PRIMARY KEY,
+            symbol_id INTEGER PRIMARY KEY AUTOINCREMENT,
             document_hash TEXT NOT NULL,
+            file_path TEXT NOT NULL,
             symbol_name TEXT NOT NULL,
             qualified_name TEXT NOT NULL,
             kind TEXT NOT NULL,
@@ -1666,7 +1667,8 @@ Migration YamsMetadataMigrations::createSymbolMetadataSchema() {
             end_offset INTEGER,
             return_type TEXT,
             parameters TEXT,
-            documentation TEXT
+            documentation TEXT,
+            FOREIGN KEY (document_hash) REFERENCES documents(sha256_hash) ON DELETE CASCADE
         );
     )");
 
@@ -1675,11 +1677,32 @@ Migration YamsMetadataMigrations::createSymbolMetadataSchema() {
     )");
 
     builder.up(R"(
+        CREATE INDEX IF NOT EXISTS idx_symbol_document ON symbol_metadata(document_hash);
+    )");
+
+    builder.up(R"(
+        CREATE INDEX IF NOT EXISTS idx_symbol_file_path ON symbol_metadata(file_path);
+    )");
+
+    builder.up(R"(
         CREATE INDEX IF NOT EXISTS idx_symbol_kind ON symbol_metadata(kind);
     )");
 
+    builder.up(R"(
+        CREATE INDEX IF NOT EXISTS idx_symbol_qualified ON symbol_metadata(qualified_name);
+    )");
+
+    builder.down(R"(
+        DROP INDEX IF EXISTS idx_symbol_qualified;
+    )");
     builder.down(R"(
         DROP INDEX IF EXISTS idx_symbol_kind;
+    )");
+    builder.down(R"(
+        DROP INDEX IF EXISTS idx_symbol_file_path;
+    )");
+    builder.down(R"(
+        DROP INDEX IF EXISTS idx_symbol_document;
     )");
     builder.down(R"(
         DROP INDEX IF EXISTS idx_symbol_name;

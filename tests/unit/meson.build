@@ -124,6 +124,7 @@ unit_daemon_base = files(
   'daemon/ipc_message_type_test.cpp',
   'daemon/proto_roundtrip_test.cpp',
   'daemon/streaming_processor_test.cpp',
+  'daemon/entity_graph_service_test.cpp',
   # excluded: multiplex_client_test.cpp, request_dispatcher_plugin_test.cpp, onnx_*
 )
 
@@ -193,6 +194,7 @@ unit_metadata = files(
   'metadata/fts_queryspec_integration_test.cpp',
   'metadata/fts5_performance_stress_test.cpp',
   'metadata/fts5_test.cpp',
+  'metadata/fuzzy_index_prioritization_test.cpp',
   'metadata/kg_store_alias_and_entities_test.cpp',
   'metadata/kg_store_test.cpp',
   'metadata/metadata_repository_cache_test.cpp',
@@ -236,13 +238,11 @@ unit_storage = files(
   'storage/compressed_storage_stats_test.cpp',
   'storage/object_storage_adapter_test.cpp',
   'storage/reference_counter_test.cpp',
+  'storage/reference_counter_stress_test.cpp',
   'storage/s3_signer_test.cpp',
   'storage/test_storage_backend.cpp',
-  # excluded: storage_engine_test.cpp, compressed_storage_engine_test.cpp
 )
 
-# Vector/embedding tests - excluded from base unit tests (requires ONNX/models)
-# These are heavy tests that require model downloads and ONNX runtime
 unit_vector = []
 if get_option('enable-vector-tests')
   unit_vector += files(

@@ -1,4 +1,5 @@
 spdlog_dep = dependency('spdlog', required: true)
+nlohmann_json_dep = dependency('nlohmann_json', required: true)
 yams_core = dependency('yams_core', required: false)
 yams_metadata = dependency('yams_metadata', required: false)
 yams_vector = dependency('yams_vector', required: false)
@@ -21,9 +22,10 @@ yams_search = static_library('yams_search',
     'search_engine_builder.cpp',
     'bk_tree.cpp',
     'hotzone_manager.cpp',
+    'symbol_enrichment.cpp',
   ],
   include_directories: include_directories('../../include'),
-  dependencies: [spdlog_dep, yams_core, yams_metadata, yams_vector],
+  dependencies: [spdlog_dep, nlohmann_json_dep, yams_core, yams_metadata, yams_vector],
   install: true,
 )
 

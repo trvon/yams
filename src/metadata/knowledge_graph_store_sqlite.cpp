@@ -823,7 +823,7 @@ public:
             return Result<void>();
         return pool_->withConnection([&](Database& db) -> Result<void> {
             return db.transaction([&]() -> Result<void> {
-                auto stmtR = db.prepare("INSERT INTO doc_entities (document_id, entity_text, "
+                auto stmtR = db.prepare("INSERT INTO kg_doc_entities (document_id, entity_text, "
                                         "node_id, start_offset, end_offset, confidence, extractor) "
                                         "VALUES (?, ?, ?, ?, ?, ?, ?)");
                 if (!stmtR)
@@ -966,7 +966,7 @@ public:
         return pool_->withConnection([&](Database& db) -> Result<std::vector<DocEntity>> {
             auto stmtR = db.prepare("SELECT id, document_id, entity_text, node_id, start_offset, "
                                     "end_offset, confidence, extractor "
-                                    "FROM doc_entities WHERE document_id = ? LIMIT ? OFFSET ?");
+                                    "FROM kg_doc_entities WHERE document_id = ? LIMIT ? OFFSET ?");
             if (!stmtR)
                 return stmtR.error();
             auto stmt = std::move(stmtR).value();
@@ -1010,7 +1010,7 @@ public:
 
     Result<void> deleteDocEntitiesForDocument(std::int64_t documentId) override {
         return pool_->withConnection([&](Database& db) -> Result<void> {
-            auto stmtR = db.prepare("DELETE FROM doc_entities WHERE document_id = ?");
+            auto stmtR = db.prepare("DELETE FROM kg_doc_entities WHERE document_id = ?");
             if (!stmtR)
                 return stmtR.error();
             auto stmt = std::move(stmtR).value();

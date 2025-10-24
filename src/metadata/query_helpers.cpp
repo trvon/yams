@@ -1,3 +1,4 @@
+#include <spdlog/spdlog.h>
 #include <numeric>
 #include <ranges>
 #include <string>
@@ -103,11 +104,12 @@ queryDocumentsByPattern(IMetadataRepository& repo, const std::string& likePatter
     if (limit > 0)
         opts.limit = limit;
     auto result = repo.queryDocuments(opts);
+    // Fallback: if no results and no '%' wildcard, try as exact path
     if (result && result.value().empty() && !likePattern.empty() &&
-        likePattern.find('%') == std::string::npos && likePattern.find('_') == std::string::npos) {
+        likePattern.find('%') == std::string::npos) {
         DocumentQueryOptions fallback;
         auto derived = computePathDerivedValues(likePattern);
-        fallback.likePattern = derived.normalizedPath;
+        fallback.exactPath = derived.normalizedPath;
         if (limit > 0)
             fallback.limit = limit;
         result = repo.queryDocuments(fallback);
@@ -122,9 +124,10 @@ queryDocumentsByPattern(MetadataRepository& repo, const std::string& likePattern
 
 DocumentQueryOptions buildQueryOptionsForSqlLikePattern(const std::string& pattern) {
     DocumentQueryOptions opts;
-    auto has_wildcard =
-        pattern.find('%') != std::string::npos || pattern.find('_') != std::string::npos;
-    if (!has_wildcard) {
+    // Only treat '%' as a wildcard; '_' in paths should be literal
+    auto has_percent = pattern.find('%') != std::string::npos;
+    if (!has_percent) {
+        // No wildcards - treat as exact path match
         auto derived = computePathDerivedValues(pattern);
         DocumentQueryOptions direct;
         direct.exactPath = derived.normalizedPath;

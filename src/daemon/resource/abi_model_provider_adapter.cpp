@@ -282,6 +282,14 @@ size_t AbiModelProviderAdapter::getEmbeddingDim(const std::string& modelName) co
     return 0;
 }
 
+std::shared_ptr<vector::EmbeddingGenerator>
+AbiModelProviderAdapter::getEmbeddingGenerator(const std::string& modelName) {
+    // For now, return nullptr - plugins provide embeddings via generateEmbedding()
+    // ServiceManager should use modelProvider directly, not create separate EmbeddingGenerator
+    (void)modelName;
+    return nullptr;
+}
+
 std::string AbiModelProviderAdapter::getProviderName() const {
     return "ABIModelProvider";
 }

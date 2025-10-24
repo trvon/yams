@@ -15,12 +15,53 @@ if host_machine.system() == 'darwin'
   add_global_link_arguments('-Wl,-no_warn_duplicate_libraries', language: 'cpp')
 endif
 
+# --- libc++ hardening mode ---
+# Apply hardening defines when using libc++ (Darwin always uses libc++, Linux when explicitly set)
+cpp = meson.get_compiler('cpp')
+libcxx_hardening = get_option('libcxx-hardening')
+
+if libcxx_hardening != 'none'
+  # Check if we're actually using libc++
+  using_libcxx = false
+  if host_machine.system() == 'darwin'
+    # macOS always uses libc++
+    using_libcxx = true
+  elif cpp.get_id() == 'clang' or cpp.get_id() == 'clang-cl'
+    # On non-Darwin, check if -stdlib=libc++ is in use
+    # This is a heuristic; proper detection would check link flags
+    has_libcxx = cpp.has_header('__config', prefix: '#include <ciso646>')
+    if has_libcxx
+      using_libcxx = true
+    endif
+  endif
+  
+  if using_libcxx
+    hardening_mode_map = {
+      'fast': '_LIBCPP_HARDENING_MODE_FAST',
+      'extensive': '_LIBCPP_HARDENING_MODE_EXTENSIVE',
+      'debug': '_LIBCPP_HARDENING_MODE_DEBUG',
+    }
+    hardening_define = hardening_mode_map.get(libcxx_hardening)
+    if hardening_define != ''
+      add_project_arguments('-D' + hardening_define, language: 'cpp')
+      message('Enabling libc++ hardening mode: ' + libcxx_hardening + ' (' + hardening_define + ')')
+    endif
+  else
+    warning('libc++ hardening requested but not using libc++ (detected: ' + cpp.get_id() + '). Hardening mode ignored.')
+  endif
+endif
+
+# --- Install prefix for plugin auto-trust ---
+# Pass the install prefix to C++ code so the daemon knows where system plugins are installed
+install_prefix = get_option('prefix')
+add_project_arguments('-DYAMS_INSTALL_PREFIX="' + install_prefix + '"', language: 'cpp')
+message('YAMS install prefix: ' + install_prefix)
+
 onnx_opt = get_option('enable-onnx')
 
 # Enforce sqlite3 FTS5 presence at configure time (configurable)
 require_fts5 = get_option('require-fts5')
 sqlite_dep = dependency('sqlite3', required: true)
-cpp = meson.get_compiler('cpp')
 fts5_prog = cpp.run(files('meson/fts5_check.cpp'), dependencies: sqlite_dep, name: 'sqlite3 FTS5 check')
 if fts5_prog.returncode() != 0
   msg = 'SQLite3 built without FTS5 support. Enable FTS5 in your package manager or Conan (e.g., -o "sqlite3/*:fts5=True").'

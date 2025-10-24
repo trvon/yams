@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -18,6 +19,7 @@ struct PluginHostSnapshot {
     PluginHostState state{PluginHostState::NotInitialized};
     std::string lastError;
     std::size_t loadedCount{0};
+    std::vector<std::string> loadedPlugins;
 };
 
 struct PluginScanStartedEvent {
@@ -43,11 +45,20 @@ public:
         transitionTo(PluginHostState::ScanningDirectories);
     }
     void dispatch(const PluginTrustVerifiedEvent&) {
-        transitionTo(PluginHostState::VerifyingTrust);
+        // Trust verified - transition to VerifyingTrust state
+        // This allows trust to be configured before scanning begins
+        if (snap_.state == PluginHostState::NotInitialized) {
+            transitionTo(PluginHostState::VerifyingTrust);
+        }
+        // Otherwise, stay in current state (don't regress)
     }
-    void dispatch(const PluginLoadedEvent&) {
+    void dispatch(const PluginLoadedEvent& ev) {
         transitionTo(PluginHostState::LoadingPlugins);
         ++snap_.loadedCount;
+        if (std::find(snap_.loadedPlugins.begin(), snap_.loadedPlugins.end(), ev.name) ==
+            snap_.loadedPlugins.end()) {
+            snap_.loadedPlugins.push_back(ev.name);
+        }
     }
     void dispatch(const AllPluginsLoadedEvent& ev) {
         snap_.loadedCount = ev.count;

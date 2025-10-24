@@ -90,7 +90,8 @@ TEST(MagicNumbersTest, PatternDatabaseNotEmpty) {
     const auto& patterns = get_magic_patterns();
 #if YAMS_HAS_CONSTEXPR_CONTAINERS
     EXPECT_GT(patterns.size(), 0);
-    EXPECT_GE(patterns.size(), 90); // Should have at least 90 patterns
+    EXPECT_EQ(patterns.size(),
+              86); // High-confidence patterns only (low-confidence code patterns omitted)
 #endif
 }
 

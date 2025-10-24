@@ -2,6 +2,8 @@
 plugin_tests = files(
   'symbol_extractor_all_langs_test.cpp',
   'symbol_extractor_edge_cases_test.cpp',
+  'onnx_request_plugin_test.cpp',
+  'onnx_provider_plugin_test.cpp',
   '../test_main.cpp',
 )
 
@@ -17,4 +19,4 @@ plugin_exe = executable('yams_plugin_tests', plugin_tests,
   install: false,
 )
 
-test('plugins', plugin_exe, env: {'YAMS_AUTO_DOWNLOAD_GRAMMARS':'1'})
+test('plugins', plugin_exe, env: {'YAMS_AUTO_DOWNLOAD_GRAMMARS':'1','YAMS_SKIP_MODEL_LOADING':'1'})

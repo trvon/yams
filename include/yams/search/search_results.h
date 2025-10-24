@@ -27,6 +27,33 @@ struct SearchHighlight {
 };
 
 /**
+ * @brief Symbol context information for code-aware search
+ */
+struct SymbolInfo {
+    std::string name;                        // Simple symbol name
+    std::string qualifiedName;               // Fully qualified name
+    std::string kind;                        // function, class, method, variable, etc.
+    std::string definitionFile;              // File where symbol is defined
+    int definitionLine = 0;                  // Line number of definition
+    int callersCount = 0;                    // Number of callers
+    int calleesCount = 0;                    // Number of callees
+    std::vector<std::string> relatedSymbols; // Related symbols (parents, siblings)
+    std::string returnType;                  // Return type (for functions/methods)
+    std::vector<std::string> parameters;     // Parameters (for functions/methods)
+    std::string documentation;               // Extracted documentation
+};
+
+/**
+ * @brief Symbol context attached to search results
+ */
+struct SymbolContext {
+    std::vector<SymbolInfo> symbols; // Symbols found in this result
+    std::string matchType;           // "definition", "usage", "comment", "import"
+    float symbolScore = 0.0f;        // Symbol-based relevance score [0,1]
+    bool isSymbolQuery = false;      // Whether query was detected as symbol search
+};
+
+/**
  * @brief Individual search result item
  */
 struct SearchResultItem {
@@ -62,6 +89,9 @@ struct SearchResultItem {
     // Content preview
     std::string contentPreview;
     size_t previewLength = 200;
+
+    // Symbol-aware enrichment (PBI-059)
+    std::optional<SymbolContext> symbolContext;
 };
 
 /**

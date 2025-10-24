@@ -115,7 +115,7 @@ public:
     DaemonConfig config_;
     StateComponent state_;
     std::unique_ptr<LifecycleComponent> lifecycleManager_;
-    std::unique_ptr<ServiceManager> serviceManager_;
+    std::shared_ptr<ServiceManager> serviceManager_;
     std::unique_ptr<RequestDispatcher> requestDispatcher_;
     std::unique_ptr<DaemonMetrics> metrics_;
     // Integrated socket server (replaces external yams-socket-server)

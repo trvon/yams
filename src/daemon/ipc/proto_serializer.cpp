@@ -2044,6 +2044,42 @@ template <> struct ProtoBinding<FileHistoryResponse> {
     }
 };
 
+template <> struct ProtoBinding<PruneResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kPruneResponse;
+    static void set(Envelope& env, const PruneResponse& r) {
+        auto* o = env.mutable_prune_response();
+        o->set_files_deleted(r.filesDeleted);
+        o->set_files_failed(r.filesFailed);
+        o->set_total_bytes_freed(r.totalBytesFreed);
+        for (const auto& [cat, count] : r.categoryCounts) {
+            (*o->mutable_category_counts())[cat] = count;
+        }
+        for (const auto& [cat, size] : r.categorySizes) {
+            (*o->mutable_category_sizes())[cat] = size;
+        }
+        set_string_list(r.deletedPaths, o->mutable_deleted_paths());
+        set_string_list(r.failedPaths, o->mutable_failed_paths());
+        o->set_error_message(r.errorMessage);
+    }
+    static PruneResponse get(const Envelope& env) {
+        const auto& i = env.prune_response();
+        PruneResponse r{};
+        r.filesDeleted = i.files_deleted();
+        r.filesFailed = i.files_failed();
+        r.totalBytesFreed = i.total_bytes_freed();
+        for (const auto& [cat, count] : i.category_counts()) {
+            r.categoryCounts[cat] = count;
+        }
+        for (const auto& [cat, size] : i.category_sizes()) {
+            r.categorySizes[cat] = size;
+        }
+        r.deletedPaths = get_string_list(i.deleted_paths());
+        r.failedPaths = get_string_list(i.failed_paths());
+        r.errorMessage = i.error_message();
+        return r;
+    }
+};
+
 // Helper to encode Request/Response variants using bindings
 template <typename Variant>
 static Result<void> encode_variant_into(Envelope& env, const Variant& v) {
@@ -2468,6 +2504,11 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
         case Envelope::kFileHistoryResponse: {
             auto v = ProtoBinding<FileHistoryResponse>::get(env);
             m.payload = Response{std::in_place_type<FileHistoryResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kPruneResponse: {
+            auto v = ProtoBinding<PruneResponse>::get(env);
+            m.payload = Response{std::in_place_type<PruneResponse>, std::move(v)};
             break;
         }
         case Envelope::kEmbedEvent: {

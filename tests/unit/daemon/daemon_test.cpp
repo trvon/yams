@@ -93,6 +93,22 @@ protected:
         FAIL() << "Failed to start daemon for " << context << ": " << error.message;
     }
 
+    // Wait for daemon to finish async initialization
+    // Returns true if ready, false if timed out
+    bool waitForDaemonReady(std::chrono::milliseconds timeout = 5000ms) {
+        auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            const auto& state = daemon_->getState();
+            // Just wait for content store - this is a basic "daemon is alive" check
+            // Full initialization (database, metadata repo) may take longer
+            if (state.readiness.contentStoreReady.load()) {
+                return true;
+            }
+            std::this_thread::sleep_for(50ms);
+        }
+        return false;
+    }
+
     DaemonConfig config_;
     std::unique_ptr<YamsDaemon> daemon_;
     fs::path runtime_root_;
@@ -123,6 +139,9 @@ TEST_F(DaemonTest, StartStop) {
 
     // PID file should exist
     EXPECT_TRUE(fs::exists(config_.pidFile));
+
+    // Wait for daemon to complete async initialization
+    EXPECT_TRUE(waitForDaemonReady()) << "Daemon failed to initialize within timeout";
 
     // Note: No in-process IPC acceptor anymore; socket file is owned by external server.
     // Do not assert socket path existence here.

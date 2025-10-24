@@ -711,7 +711,7 @@ RequestHandler::write_message(boost::asio::local::stream_protocol::socket& socke
         auto frame_result = framer_.frame_message_into(message, frame);
         if (!frame_result)
             co_return frame_result.error();
-        if (write_strand_exec_)
+        if (write_strand_exec_ && socket.is_open())
             co_await boost::asio::dispatch(*write_strand_exec_, use_awaitable);
         auto enq = co_await enqueue_frame(message.requestId, std::move(frame), true);
         if (!enq)
@@ -1339,6 +1339,10 @@ RequestHandler::write_header(boost::asio::local::stream_protocol::socket& socket
     spdlog::debug("stream: write_header req_id={} type={} flush={}", request_id,
                   static_cast<int>(getMessageType(std::get<Response>(response_msg.payload))),
                   flush);
+    // Early check: if socket is closed, abort immediately
+    if (!socket.is_open()) {
+        co_return Error{ErrorCode::NetworkError, "Socket closed before write_header"};
+    }
     if (config_.enable_multiplexing) {
         // Frame and enqueue for fair writer
         std::vector<uint8_t> frame;
@@ -1346,7 +1350,7 @@ RequestHandler::write_header(boost::asio::local::stream_protocol::socket& socket
         auto framed = framer_.frame_message_header_into(response_msg, frame);
         if (!framed)
             co_return framed.error();
-        if (write_strand_exec_)
+        if (write_strand_exec_ && socket.is_open())
             co_await boost::asio::dispatch(*write_strand_exec_, use_awaitable);
         auto enq = co_await enqueue_frame(request_id, std::move(frame), false, fsm);
         if (!enq) {
@@ -1363,7 +1367,7 @@ RequestHandler::write_header(boost::asio::local::stream_protocol::socket& socket
         }
         co_return Result<void>{};
     } else {
-        if (write_strand_exec_)
+        if (write_strand_exec_ && socket.is_open())
             co_await boost::asio::dispatch(*write_strand_exec_, use_awaitable);
         co_return co_await write_header_frame(socket, response_msg, flush, fsm);
     }
@@ -1373,6 +1377,10 @@ boost::asio::awaitable<Result<void>>
 RequestHandler::write_chunk(boost::asio::local::stream_protocol::socket& socket, Response response,
                             uint64_t request_id, bool last_chunk, bool flush, ConnectionFsm* fsm) {
     using boost::asio::use_awaitable;
+    // Early check: if socket is closed, abort immediately
+    if (!socket.is_open()) {
+        co_return Error{ErrorCode::NetworkError, "Socket closed before write_chunk"};
+    }
     // Create message envelope for response chunk
     Message response_msg;
     response_msg.version = PROTOCOL_VERSION;
@@ -1385,7 +1393,7 @@ RequestHandler::write_chunk(boost::asio::local::stream_protocol::socket& socket,
         auto framed = framer_.frame_message_chunk_into(response_msg, frame, last_chunk);
         if (!framed)
             co_return framed.error();
-        if (write_strand_exec_)
+        if (write_strand_exec_ && socket.is_open())
             co_await boost::asio::dispatch(*write_strand_exec_, use_awaitable);
         auto enq = co_await enqueue_frame(request_id, std::move(frame), last_chunk, fsm);
         if (!enq) {
@@ -1402,7 +1410,7 @@ RequestHandler::write_chunk(boost::asio::local::stream_protocol::socket& socket,
         }
         co_return Result<void>{};
     } else {
-        if (write_strand_exec_)
+        if (write_strand_exec_ && socket.is_open())
             co_await boost::asio::dispatch(*write_strand_exec_, use_awaitable);
         co_return co_await write_chunk_frame(socket, response_msg, last_chunk, flush, fsm);
     }
@@ -1447,8 +1455,12 @@ RequestHandler::write_error_immediate(boost::asio::local::stream_protocol::socke
                                       uint64_t request_id, ErrorCode code,
                                       const std::string& message, ConnectionFsm* fsm) {
     using boost::asio::use_awaitable;
+    // Early check: if socket is closed, abort immediately
+    if (!socket.is_open()) {
+        co_return Error{ErrorCode::NetworkError, "Socket closed before write_error_immediate"};
+    }
     // Honor write strand if present
-    if (write_strand_exec_) {
+    if (write_strand_exec_ && socket.is_open()) {
         co_await boost::asio::dispatch(*write_strand_exec_, use_awaitable);
     }
     // FSM guard

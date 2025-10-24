@@ -713,3 +713,231 @@ TEST_F(MetadataSchemaTest, PerformanceMetrics) {
     // Should be able to query 100 documents by hash in under 100ms
     EXPECT_LT(queryTime.count(), 100);
 }
+
+TEST_F(MetadataSchemaTest, MigrationVersion16Hash) {
+    // Test that migration v16 exists and can be applied
+    auto result = pool_->withConnection([](Database& db) -> Result<void> {
+        MigrationManager mm(db);
+        auto initResult = mm.initialize();
+        if (!initResult)
+            return initResult.error();
+
+        // Check current version is at least 16
+        auto versionResult = mm.getCurrentVersion();
+        if (!versionResult)
+            return versionResult.error();
+
+        int currentVersion = versionResult.value();
+        if (currentVersion < 16) {
+            return Error{ErrorCode::InvalidData, "Migration v16 not applied"};
+        }
+
+        return Result<void>();
+    });
+
+    ASSERT_TRUE(result.has_value()) << result.error().message;
+}
+
+TEST_F(MetadataSchemaTest, SymbolMetadataSchema) {
+    // Verify symbol_metadata table exists and has correct schema
+    auto result = pool_->withConnection([](Database& db) -> Result<void> {
+        // Check table exists
+        auto stmt = db.prepare(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='symbol_metadata'");
+        if (!stmt)
+            return stmt.error();
+        auto step = stmt.value().step();
+        if (!step)
+            return step.error();
+        if (!step.value())
+            return Error{ErrorCode::NotFound, "symbol_metadata table not found"};
+
+        // Check all required columns exist
+        const char* columns[] = {"symbol_id",      "document_hash", "file_path",   "symbol_name",
+                                 "qualified_name", "kind",          "start_line",  "end_line",
+                                 "start_offset",   "end_offset",    "return_type", "parameters",
+                                 "documentation"};
+
+        for (const char* col : columns) {
+            auto colStmt =
+                db.prepare("SELECT " + std::string(col) + " FROM symbol_metadata LIMIT 0");
+            if (!colStmt) {
+                return Error{ErrorCode::NotFound, std::string("Column not found: ") + col};
+            }
+        }
+
+        // Check indices exist
+        const char* indices[] = {"idx_symbol_name", "idx_symbol_document", "idx_symbol_file_path",
+                                 "idx_symbol_kind", "idx_symbol_qualified"};
+
+        for (const char* idx : indices) {
+            auto idxStmt =
+                db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name=?");
+            if (!idxStmt)
+                return idxStmt.error();
+            if (auto r = idxStmt.value().bind(1, idx); !r)
+                return r.error();
+            auto idxStep = idxStmt.value().step();
+            if (!idxStep)
+                return idxStep.error();
+            if (!idxStep.value()) {
+                return Error{ErrorCode::NotFound, std::string("Index not found: ") + idx};
+            }
+        }
+
+        return Result<void>();
+    });
+
+    ASSERT_TRUE(result.has_value()) << result.error().message;
+}
+
+TEST_F(MetadataSchemaTest, SymbolMetadataInsertAndQuery) {
+    // Create a test document first to satisfy FK constraint
+    auto doc = createTestDocument("test_symbol.cpp");
+    doc.sha256Hash = "test_hash_for_symbol";
+    auto insertDoc = repo_->insertDocument(doc);
+    ASSERT_TRUE(insertDoc.has_value());
+
+    // Insert multiple symbols with different kinds
+    auto insertResult = pool_->withConnection([](Database& db) -> Result<void> {
+        const char* symbols[][7] = {{"test_hash_for_symbol", "/test/file.cpp", "myFunction",
+                                     "ns::myFunction", "function", "10", "20"},
+                                    {"test_hash_for_symbol", "/test/file.cpp", "MyClass",
+                                     "ns::MyClass", "class", "25", "50"},
+                                    {"test_hash_for_symbol", "/test/file.cpp", "helper",
+                                     "ns::MyClass::helper", "method", "30", "35"}};
+
+        for (auto& sym : symbols) {
+            auto stmt = db.prepare(R"(
+                INSERT INTO symbol_metadata 
+                (document_hash, file_path, symbol_name, qualified_name, kind, start_line, end_line)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            )");
+            if (!stmt)
+                return stmt.error();
+
+            for (int i = 0; i < 7; ++i) {
+                if (i < 5) {
+                    if (auto r = stmt.value().bind(i + 1, sym[i]); !r)
+                        return r.error();
+                } else {
+                    if (auto r = stmt.value().bind(i + 1, std::atoi(sym[i])); !r)
+                        return r.error();
+                }
+            }
+
+            if (auto r = stmt.value().execute(); !r)
+                return r.error();
+        }
+
+        return Result<void>();
+    });
+
+    ASSERT_TRUE(insertResult.has_value()) << insertResult.error().message;
+
+    // Query by document hash
+    auto hashQuery = pool_->withConnection([](Database& db) -> Result<int> {
+        auto stmt = db.prepare("SELECT COUNT(*) FROM symbol_metadata WHERE document_hash=?");
+        if (!stmt)
+            return stmt.error();
+        if (auto r = stmt.value().bind(1, "test_hash_for_symbol"); !r)
+            return r.error();
+        auto step = stmt.value().step();
+        if (!step)
+            return step.error();
+        if (!step.value())
+            return Error{ErrorCode::NotFound, "No symbols found"};
+        return stmt.value().getInt(0);
+    });
+
+    ASSERT_TRUE(hashQuery.has_value());
+    EXPECT_EQ(hashQuery.value(), 3);
+
+    // Query by symbol name
+    auto nameQuery = pool_->withConnection([](Database& db) -> Result<std::string> {
+        auto stmt = db.prepare("SELECT qualified_name FROM symbol_metadata WHERE symbol_name=?");
+        if (!stmt)
+            return stmt.error();
+        if (auto r = stmt.value().bind(1, "myFunction"); !r)
+            return r.error();
+        auto step = stmt.value().step();
+        if (!step)
+            return step.error();
+        if (!step.value())
+            return Error{ErrorCode::NotFound, "Symbol not found"};
+        return stmt.value().getString(0);
+    });
+
+    ASSERT_TRUE(nameQuery.has_value());
+    EXPECT_EQ(nameQuery.value(), "ns::myFunction");
+
+    // Query by kind
+    auto kindQuery = pool_->withConnection([](Database& db) -> Result<int> {
+        auto stmt = db.prepare("SELECT COUNT(*) FROM symbol_metadata WHERE kind=?");
+        if (!stmt)
+            return stmt.error();
+        if (auto r = stmt.value().bind(1, "function"); !r)
+            return r.error();
+        auto step = stmt.value().step();
+        if (!step)
+            return step.error();
+        if (!step.value())
+            return 0;
+        return stmt.value().getInt(0);
+    });
+
+    ASSERT_TRUE(kindQuery.has_value());
+    EXPECT_EQ(kindQuery.value(), 1);
+
+    // Query by file path
+    auto pathQuery = pool_->withConnection([](Database& db) -> Result<int> {
+        auto stmt = db.prepare("SELECT COUNT(*) FROM symbol_metadata WHERE file_path=?");
+        if (!stmt)
+            return stmt.error();
+        if (auto r = stmt.value().bind(1, "/test/file.cpp"); !r)
+            return r.error();
+        auto step = stmt.value().step();
+        if (!step)
+            return step.error();
+        if (!step.value())
+            return 0;
+        return stmt.value().getInt(0);
+    });
+
+    ASSERT_TRUE(pathQuery.has_value());
+    EXPECT_EQ(pathQuery.value(), 3);
+}
+
+TEST_F(MetadataSchemaTest, SymbolMetadataForeignKeyConstraint) {
+    // Try to insert symbol with non-existent document hash (should fail)
+    auto result = pool_->withConnection([](Database& db) -> Result<void> {
+        auto stmt = db.prepare(R"(
+            INSERT INTO symbol_metadata 
+            (document_hash, file_path, symbol_name, qualified_name, kind, start_line, end_line)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        )");
+        if (!stmt)
+            return stmt.error();
+
+        if (auto r = stmt.value().bind(1, "nonexistent_hash"); !r)
+            return r.error();
+        if (auto r = stmt.value().bind(2, "/test/file.cpp"); !r)
+            return r.error();
+        if (auto r = stmt.value().bind(3, "someFunc"); !r)
+            return r.error();
+        if (auto r = stmt.value().bind(4, "someFunc"); !r)
+            return r.error();
+        if (auto r = stmt.value().bind(5, "function"); !r)
+            return r.error();
+        if (auto r = stmt.value().bind(6, 1); !r)
+            return r.error();
+        if (auto r = stmt.value().bind(7, 10); !r)
+            return r.error();
+
+        return stmt.value().execute();
+    });
+
+    // Should fail due to FK constraint
+    ASSERT_FALSE(result.has_value());
+    EXPECT_NE(result.error().message.find("constraint"), std::string::npos);
+}

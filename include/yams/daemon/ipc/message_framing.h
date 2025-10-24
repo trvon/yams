@@ -1,3 +1,12 @@
+/**
+ * @file message_framing.h
+ * @brief IPC message framing utilities for YAMS daemon.
+ *
+ * Provides compile‑time validated frame header definitions, CRC32 checksum
+ * calculation, and functions to frame/unframe messages that satisfy the
+ * @ref FramedMessage concept.
+ *
+ */
 #pragma once
 
 #include <yams/common/expected_compat.h>
@@ -12,7 +21,13 @@
 
 namespace yams::daemon {
 
-// C++20 concept for framed messages
+/**
+ * @brief Concept that a message type must satisfy to be framed.
+ *
+ * A @c FramedMessage must provide a `serialize()` method returning a
+ * `std::vector<uint8_t>` and a static `deserialize(std::span<const uint8_t>)`
+ * returning a `Result<T>`.
+ */
 template <typename T>
 concept FramedMessage = requires(T msg) {
     { msg.serialize() } -> std::convertible_to<std::vector<uint8_t>>;

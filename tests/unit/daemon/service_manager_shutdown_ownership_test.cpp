@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/ServiceManager.h>
 
 using namespace yams::daemon;
@@ -8,8 +9,9 @@ TEST(ServiceManagerShutdownOwnership, AbiHostReleasedOnShutdownAndFsmStopped) {
     DaemonConfig cfg;
     cfg.workerThreads = 1;
     StateComponent state{};
+    DaemonLifecycleFsm lifecycleFsm;
 
-    ServiceManager sm(cfg, state);
+    ServiceManager sm(cfg, state, lifecycleFsm);
 
     // Abi host is created during construction when possible
     auto* hostBefore = sm.__test_getAbiHost();

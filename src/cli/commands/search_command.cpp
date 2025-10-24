@@ -732,17 +732,22 @@ public:
                             groups;
                         groups.reserve(items.size());
                         auto getPath = [](const yams::daemon::SearchResult& r) {
+                            // Prefer r.path as primary grouping key for consistency
+                            if (!r.path.empty())
+                                return r.path;
                             auto it = r.metadata.find("path");
                             if (it != r.metadata.end() && !it->second.empty())
                                 return it->second;
-                            if (!r.path.empty())
-                                return r.path;
                             if (!r.title.empty())
                                 return r.title; // fallback
                             return r.id;
                         };
                         for (const auto& r : items) {
-                            groups[getPath(r)].push_back(r);
+                            std::string key = getPath(r);
+                            // Skip empty keys to avoid polluting output
+                            if (key.empty())
+                                continue;
+                            groups[key].push_back(r);
                         }
                         // Optional grouped JSON
                         if (jsonOutput_ && jsonGrouped_) {
@@ -799,7 +804,25 @@ public:
                             std::cout << output.dump(2) << std::endl;
                         } else {
                             // Human readable grouped table
-                            for (auto& [path, vec] : groups) {
+                            // Sort groups by best score for presentation order
+                            std::vector<
+                                std::pair<std::string, std::vector<yams::daemon::SearchResult>>>
+                                sortedGroups(groups.begin(), groups.end());
+                            std::sort(sortedGroups.begin(), sortedGroups.end(),
+                                      [](const auto& a, const auto& b) {
+                                          if (a.second.empty())
+                                              return false;
+                                          if (b.second.empty())
+                                              return true;
+                                          double maxA = 0, maxB = 0;
+                                          for (const auto& r : a.second)
+                                              maxA = std::max(maxA, r.score);
+                                          for (const auto& r : b.second)
+                                              maxB = std::max(maxB, r.score);
+                                          return maxA > maxB;
+                                      });
+
+                            for (auto& [path, vec] : sortedGroups) {
                                 auto sorter = [&](const auto& a, const auto& b) {
                                     if (versionsSort_ == "path")
                                         return a.path < b.path;
@@ -809,8 +832,11 @@ public:
                                 };
                                 std::stable_sort(vec.begin(), vec.end(), sorter);
                                 const auto& best = vec.front();
-                                std::cout << best.score << "  " << path << "  (" << vec.size()
-                                          << " versions)\n";
+                                std::cout << best.score << "  " << path;
+                                if (vec.size() > 1)
+                                    std::cout << "  (" << vec.size() << " versions)";
+                                std::cout << "\n";
+
                                 std::size_t cap = (versionsMode_ == "all") ? versionsTopk_ : 1;
                                 for (std::size_t i = 0; i < vec.size() && i < cap; ++i) {
                                     const auto& v = vec[i];
@@ -818,25 +844,38 @@ public:
                                     auto itHv = v.metadata.find("hash");
                                     if (itHv != v.metadata.end() && itHv->second.size() >= 8)
                                         hash8 = itHv->second.substr(0, 8);
-                                    std::cout << "  - "
-                                              << (hash8.empty() ? std::string("[--------]")
-                                                                : ("[" + hash8 + "]"))
-                                              << "  " << v.score << "  ";
-                                    if (!v.title.empty())
-                                        std::cout << v.title;
-                                    if (!v.snippet.empty())
-                                        std::cout << "\n      " << truncateSnippet(v.snippet, 200);
-                                    if (showTools_ && !hash8.empty()) {
-                                        std::cout << "\n      tools: yams get --hash "
+
+                                    // Only show version details if there are multiple versions or
+                                    // --versions=all
+                                    if (vec.size() > 1 || versionsMode_ == "all") {
+                                        std::cout << "  - "
+                                                  << (hash8.empty() ? std::string("[--------]")
+                                                                    : ("[" + hash8 + "]"))
+                                                  << "  " << v.score;
+                                        if (!v.title.empty() && v.title != path)
+                                            std::cout << "  " << v.title;
+                                        std::cout << "\n";
+                                    }
+
+                                    if (!v.snippet.empty()) {
+                                        std::string snippet = truncateSnippet(v.snippet, 200);
+                                        if (vec.size() > 1)
+                                            std::cout << "      " << snippet << "\n";
+                                        else
+                                            std::cout << "    " << snippet << "\n";
+                                    }
+
+                                    if (showTools_ && !hash8.empty() && i == 0) {
+                                        std::string indent = vec.size() > 1 ? "      " : "    ";
+                                        std::cout << indent << "tools: yams get --hash "
                                                   << itHv->second << " | yams cat --hash "
-                                                  << itHv->second << " | yams restore --hash "
                                                   << itHv->second;
                                         if (resolvedLocalFilePath_.has_value()) {
                                             std::cout << " | yams diff --hash " << itHv->second
                                                       << " " << *resolvedLocalFilePath_;
                                         }
+                                        std::cout << "\n";
                                     }
-                                    std::cout << "\n";
                                 }
                                 if (versionsMode_ == "all" && vec.size() > cap) {
                                     std::cout << "    (+" << (vec.size() - cap) << " more)\n";

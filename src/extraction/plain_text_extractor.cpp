@@ -2,16 +2,16 @@
 #include <algorithm>
 #include <fstream>
 #include <sstream>
+#include <yams/detection/file_type_detector.h>
 #include <yams/extraction/plain_text_extractor.h>
 
 namespace yams::extraction {
 
-// Register the extractor for various text file types
+// Register the extractor with common text extensions as a baseline
+// Additional extensions are handled dynamically via FileTypeDetector
 REGISTER_EXTRACTOR(PlainTextExtractor, ".txt", ".md", ".log", ".csv", ".json", ".xml", ".yml",
-                   ".yaml", ".cpp", ".cxx", ".cc", ".c", ".h", ".hpp", ".hxx", ".py", ".js", ".ts",
-                   ".java", ".go", ".rs", ".rb", ".php", ".sh", ".bash", ".zsh", ".ps1", ".bat",
-                   ".cmd", ".css", ".scss", ".less", ".sql", ".conf", ".cfg", ".ini", ".toml",
-                   ".tex", ".bib", ".rst", ".adoc", ".org");
+                   ".yaml", ".toml", ".ini", ".conf", ".cfg", ".rst", ".adoc", ".org", ".tex",
+                   ".bib");
 
 Result<ExtractionResult> PlainTextExtractor::extract(const std::filesystem::path& path,
                                                      const ExtractionConfig& config) {
@@ -81,10 +81,17 @@ Result<ExtractionResult> PlainTextExtractor::extractFromBuffer(std::span<const s
     ExtractionResult result;
     result.extractionMethod = "plain_text_buffer";
 
-    // Check if data looks binary
+    // Check if data looks binary (improved heuristic with UTF-8 validation)
     if (isBinaryFile(data)) {
         result.success = false;
         result.error = "Buffer appears to contain binary data";
+        return result;
+    }
+
+    // Additional check: validate as parseable text (UTF-8 or ASCII)
+    if (!isParseableText(data)) {
+        result.success = false;
+        result.error = "Buffer does not contain valid text encoding";
         return result;
     }
 
@@ -231,11 +238,14 @@ bool PlainTextExtractor::isBinaryFile(std::span<const std::byte> data) {
     size_t nonPrintable = 0;
     size_t checkSize = std::min(data.size(), size_t(8192));
 
+    if (checkSize == 0)
+        return false; // Empty is text
+
     for (size_t i = 0; i < checkSize; ++i) {
         uint8_t byte = static_cast<uint8_t>(data[i]);
 
-        // Null byte is strong indicator of binary
-        if (byte == 0) {
+        // Null byte is strong indicator of binary (but allow BOM)
+        if (byte == 0 && i > 3) {
             return true;
         }
 
@@ -247,6 +257,46 @@ bool PlainTextExtractor::isBinaryFile(std::span<const std::byte> data) {
 
     // If more than 30% non-printable, consider binary
     return (nonPrintable * 100 / checkSize) > 30;
+}
+
+bool PlainTextExtractor::isParseableText(std::span<const std::byte> data) {
+    // Validate UTF-8 encoding (allows ASCII as subset)
+    size_t checkSize = std::min(data.size(), size_t(8192));
+    size_t i = 0;
+
+    while (i < checkSize) {
+        uint8_t byte = static_cast<uint8_t>(data[i]);
+
+        // ASCII range (0x00-0x7F)
+        if (byte <= 0x7F) {
+            i++;
+            continue;
+        }
+
+        // Multi-byte UTF-8 sequences
+        int seqLen = 0;
+        if ((byte & 0xE0) == 0xC0)
+            seqLen = 2; // 110xxxxx: 2-byte
+        else if ((byte & 0xF0) == 0xE0)
+            seqLen = 3; // 1110xxxx: 3-byte
+        else if ((byte & 0xF8) == 0xF0)
+            seqLen = 4; // 11110xxx: 4-byte
+        else
+            return false; // Invalid UTF-8 start byte
+
+        // Validate continuation bytes
+        for (int j = 1; j < seqLen; j++) {
+            if (i + j >= checkSize)
+                return true; // Truncated at boundary, assume valid
+            uint8_t cont = static_cast<uint8_t>(data[i + j]);
+            if ((cont & 0xC0) != 0x80)
+                return false; // Must be 10xxxxxx
+        }
+
+        i += seqLen;
+    }
+
+    return true; // All bytes validated as UTF-8 or ASCII
 }
 
 void PlainTextExtractor::extractFileMetadata(ExtractionResult& result,

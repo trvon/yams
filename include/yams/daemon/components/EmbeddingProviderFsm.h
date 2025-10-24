@@ -41,7 +41,9 @@ class EmbeddingProviderFsm {
 public:
     ProviderSnapshot snapshot() const { return snap_; }
 
-    void dispatch(const ProviderAdoptedEvent&) { /* plugin-level event */ }
+    void dispatch(const ProviderAdoptedEvent&) {
+        transitionTo(EmbeddingProviderState::ProviderAdopted);
+    }
     void dispatch(const ModelLoadStartedEvent& ev) {
         snap_.modelName = ev.modelName;
         transitionTo(EmbeddingProviderState::ModelLoading);
@@ -62,6 +64,10 @@ public:
 
     bool isReady() const { return snap_.state == EmbeddingProviderState::ModelReady; }
     bool isDegraded() const { return snap_.state == EmbeddingProviderState::Degraded; }
+    bool isLoadingOrReady() const {
+        return snap_.state == EmbeddingProviderState::ModelLoading ||
+               snap_.state == EmbeddingProviderState::ModelReady;
+    }
     std::size_t dimension() const { return snap_.embeddingDimension; }
 
 private:

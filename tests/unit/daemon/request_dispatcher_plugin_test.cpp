@@ -1,5 +1,6 @@
 #include <filesystem>
 #include <gtest/gtest.h>
+#include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
@@ -22,7 +23,8 @@ protected:
         tempDir_ = fs::temp_directory_path() / ("yams_rdph_" + std::to_string(::getpid()));
         fs::create_directories(tempDir_);
         state_ = std::make_unique<StateComponent>();
-        svc_ = std::make_unique<ServiceManager>(makeConfig(tempDir_), *state_);
+        lifecycleFsm_ = std::make_unique<DaemonLifecycleFsm>();
+        svc_ = std::make_unique<ServiceManager>(makeConfig(tempDir_), *state_, *lifecycleFsm_);
         dispatcher_ = std::make_unique<RequestDispatcher>(svc_.get(), state_.get());
     }
     void TearDown() override {
@@ -30,10 +32,12 @@ protected:
         fs::remove_all(tempDir_, ec);
         dispatcher_.reset();
         svc_.reset();
+        lifecycleFsm_.reset();
         state_.reset();
     }
     fs::path tempDir_;
     std::unique_ptr<StateComponent> state_;
+    std::unique_ptr<DaemonLifecycleFsm> lifecycleFsm_;
     std::unique_ptr<ServiceManager> svc_;
     std::unique_ptr<RequestDispatcher> dispatcher_;
 };

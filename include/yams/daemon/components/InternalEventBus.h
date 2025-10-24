@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <vector>
 #include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/integrity/repair_manager.h>
 
 namespace yams::daemon {
 
@@ -146,6 +147,17 @@ public:
         bool skipExisting{true};
         std::string modelName;
     };
+
+    enum class Fts5Operation {
+        ExtractAndIndex, // Extract content + index in FTS5
+        RemoveOrphans    // Remove FTS5 entries for non-existent documents
+    };
+
+    struct Fts5Job {
+        std::vector<std::string> hashes;
+        uint32_t batchSize{0};
+        Fts5Operation operation{Fts5Operation::ExtractAndIndex};
+    };
     struct PostIngestTask {
         std::string hash;
         std::string mime;
@@ -161,6 +173,12 @@ public:
         std::string error;
     };
 
+    // PBI-062: Prune job
+    struct PruneJob {
+        uint64_t requestId; // To match response
+        yams::integrity::PruneConfig config;
+    };
+
 private:
     InternalEventBus() = default;
     std::mutex mu_;
@@ -169,6 +187,16 @@ private:
     std::atomic<std::uint64_t> embedQueued_{0};
     std::atomic<std::uint64_t> embedDropped_{0};
     std::atomic<std::uint64_t> embedConsumed_{0};
+    std::atomic<std::uint64_t> fts5Queued_{0};
+    std::atomic<std::uint64_t> fts5Dropped_{0};
+    std::atomic<std::uint64_t> fts5Consumed_{0};
+    std::atomic<std::uint64_t> orphansDetected_{0};
+    std::atomic<std::uint64_t> orphansRemoved_{0};
+    std::atomic<std::uint64_t> lastOrphanScanEpochMs_{0}; // milliseconds since epoch, 0 = never
+    std::atomic<std::uint64_t> fts5FailNoDoc_{0};         // Document not found in metadata
+    std::atomic<std::uint64_t> fts5FailExtraction_{0};    // Text extraction failed or empty
+    std::atomic<std::uint64_t> fts5FailIndex_{0};         // FTS5 indexing failed (DB error)
+    std::atomic<std::uint64_t> fts5FailException_{0};     // Unexpected exceptions
     std::atomic<std::uint64_t> postQueued_{0};
     std::atomic<std::uint64_t> postDropped_{0};
     std::atomic<std::uint64_t> postConsumed_{0};
@@ -178,6 +206,30 @@ public:
     void incEmbedQueued() { embedQueued_.fetch_add(1, std::memory_order_relaxed); }
     void incEmbedDropped() { embedDropped_.fetch_add(1, std::memory_order_relaxed); }
     void incEmbedConsumed() { embedConsumed_.fetch_add(1, std::memory_order_relaxed); }
+    void incFts5Queued() { fts5Queued_.fetch_add(1, std::memory_order_relaxed); }
+    void incFts5Dropped() { fts5Dropped_.fetch_add(1, std::memory_order_relaxed); }
+    void incFts5Consumed() { fts5Consumed_.fetch_add(1, std::memory_order_relaxed); }
+    void incOrphansDetected(uint64_t count = 1) {
+        orphansDetected_.fetch_add(count, std::memory_order_relaxed);
+    }
+    void incOrphansRemoved(uint64_t count = 1) {
+        orphansRemoved_.fetch_add(count, std::memory_order_relaxed);
+    }
+    void setLastOrphanScanTime(uint64_t epochMs) {
+        lastOrphanScanEpochMs_.store(epochMs, std::memory_order_relaxed);
+    }
+    void incFts5FailNoDoc(uint64_t count = 1) {
+        fts5FailNoDoc_.fetch_add(count, std::memory_order_relaxed);
+    }
+    void incFts5FailExtraction(uint64_t count = 1) {
+        fts5FailExtraction_.fetch_add(count, std::memory_order_relaxed);
+    }
+    void incFts5FailIndex(uint64_t count = 1) {
+        fts5FailIndex_.fetch_add(count, std::memory_order_relaxed);
+    }
+    void incFts5FailException(uint64_t count = 1) {
+        fts5FailException_.fetch_add(count, std::memory_order_relaxed);
+    }
     void incPostQueued() { postQueued_.fetch_add(1, std::memory_order_relaxed); }
     void incPostDropped() { postDropped_.fetch_add(1, std::memory_order_relaxed); }
     void incPostConsumed() { postConsumed_.fetch_add(1, std::memory_order_relaxed); }
@@ -185,6 +237,24 @@ public:
     std::uint64_t embedQueued() const { return embedQueued_.load(std::memory_order_relaxed); }
     std::uint64_t embedDropped() const { return embedDropped_.load(std::memory_order_relaxed); }
     std::uint64_t embedConsumed() const { return embedConsumed_.load(std::memory_order_relaxed); }
+    std::uint64_t fts5Queued() const { return fts5Queued_.load(std::memory_order_relaxed); }
+    std::uint64_t fts5Dropped() const { return fts5Dropped_.load(std::memory_order_relaxed); }
+    std::uint64_t fts5Consumed() const { return fts5Consumed_.load(std::memory_order_relaxed); }
+    std::uint64_t orphansDetected() const {
+        return orphansDetected_.load(std::memory_order_relaxed);
+    }
+    std::uint64_t orphansRemoved() const { return orphansRemoved_.load(std::memory_order_relaxed); }
+    std::uint64_t lastOrphanScanEpochMs() const {
+        return lastOrphanScanEpochMs_.load(std::memory_order_relaxed);
+    }
+    std::uint64_t fts5FailNoDoc() const { return fts5FailNoDoc_.load(std::memory_order_relaxed); }
+    std::uint64_t fts5FailExtraction() const {
+        return fts5FailExtraction_.load(std::memory_order_relaxed);
+    }
+    std::uint64_t fts5FailIndex() const { return fts5FailIndex_.load(std::memory_order_relaxed); }
+    std::uint64_t fts5FailException() const {
+        return fts5FailException_.load(std::memory_order_relaxed);
+    }
     std::uint64_t postQueued() const { return postQueued_.load(std::memory_order_relaxed); }
     std::uint64_t postDropped() const { return postDropped_.load(std::memory_order_relaxed); }
     std::uint64_t postConsumed() const { return postConsumed_.load(std::memory_order_relaxed); }

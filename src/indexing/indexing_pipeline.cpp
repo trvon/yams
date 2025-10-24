@@ -4,6 +4,8 @@
 #include <iomanip>
 #include <sstream>
 #include <yams/crypto/hasher.h>
+#include <yams/daemon/components/EntityGraphService.h>
+#include <yams/daemon/components/ServiceManager.h>
 #include <yams/indexing/document_indexer.h>
 #include <yams/indexing/indexing_pipeline.h>
 #include <yams/metadata/path_utils.h>
@@ -217,6 +219,25 @@ IndexingResult IndexingPipeline::processTask(IndexingTask& task) {
             result.status = IndexingStatus::Failed;
             result.error = "Content indexing failed";
             return result;
+        }
+
+        // Best-effort: delegate entity/symbol extraction to daemon service
+        try {
+            namespace ydaemon = ::yams::daemon;
+            extern ydaemon::ServiceManager* yams_get_global_service_manager();
+            if (auto* sm = yams_get_global_service_manager()) {
+                auto svc = sm->getEntityGraphService();
+                if (svc && task.extractionResult) {
+                    ydaemon::EntityGraphService::Job j;
+                    if (task.documentInfo)
+                        j.documentHash = task.documentInfo->sha256Hash;
+                    j.filePath = task.path.string();
+                    j.contentUtf8 = task.extractionResult->text;
+                    j.language = task.extractionResult->language;
+                    (void)svc->submitExtraction(std::move(j));
+                }
+            }
+        } catch (...) {
         }
 
         task.stage = PipelineStage::Completed;

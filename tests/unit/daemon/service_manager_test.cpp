@@ -7,6 +7,7 @@
 #include <memory>
 #include <gtest/gtest.h>
 
+#include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
 
@@ -44,39 +45,28 @@ protected:
 
     DaemonConfig config_;
     StateComponent state_;
+    DaemonLifecycleFsm lifecycleFsm_;
     fs::path testDir_;
 };
 
 // Test 1: Basic construction succeeds
 TEST_F(ServiceManagerTest, Construction) {
-    EXPECT_NO_THROW({ ServiceManager sm(config_, state_); });
+    EXPECT_NO_THROW({ ServiceManager sm(config_, state_, lifecycleFsm_); });
 }
 
 // Test 2: getName returns correct component name
 TEST_F(ServiceManagerTest, GetName) {
-    ServiceManager sm(config_, state_);
+    ServiceManager sm(config_, state_, lifecycleFsm_);
     EXPECT_STREQ(sm.getName(), "ServiceManager");
 }
 
 // Test 3: Service accessors after construction
 TEST_F(ServiceManagerTest, ServiceAccessorsAfterConstruction) {
-    ServiceManager sm(config_, state_);
+    ServiceManager sm(config_, state_, lifecycleFsm_);
 
-    auto envTruthy = [](const char* v) {
-        if (!v)
-            return false;
-        std::string s(v);
-        std::transform(s.begin(), s.end(), s.begin(), ::tolower);
-        return s == "1" || s == "true" || s == "yes" || s == "on";
-    };
-    const bool vectorsDisabled = envTruthy(std::getenv("YAMS_DISABLE_VECTORS")) ||
-                                 envTruthy(std::getenv("YAMS_DISABLE_VECTOR_DB"));
-
-    if (vectorsDisabled) {
-        EXPECT_EQ(sm.getVectorDatabase(), nullptr);
-    } else {
-        EXPECT_NE(sm.getVectorDatabase(), nullptr);
-    }
+    // PBI-057: Vector DB initialization is deferred to async phase to avoid blocking
+    // daemon startup. It's no longer initialized in the constructor.
+    EXPECT_EQ(sm.getVectorDatabase(), nullptr);
 
     // Other services are initialized during initialize(), not in constructor
     EXPECT_EQ(sm.getContentStore(), nullptr);
@@ -87,8 +77,8 @@ TEST_F(ServiceManagerTest, ServiceAccessorsAfterConstruction) {
 // Test 4: Multiple construction is idempotent
 TEST_F(ServiceManagerTest, MultipleConstruction) {
     EXPECT_NO_THROW({
-        ServiceManager sm1(config_, state_);
-        ServiceManager sm2(config_, state_);
+        ServiceManager sm1(config_, state_, lifecycleFsm_);
+        ServiceManager sm2(config_, state_, lifecycleFsm_);
     });
 }
 
@@ -96,20 +86,20 @@ TEST_F(ServiceManagerTest, MultipleConstruction) {
 TEST_F(ServiceManagerTest, ConstructionWithMissingDataDir) {
     fs::remove_all(config_.dataDir);
 
-    EXPECT_NO_THROW({ ServiceManager sm(config_, state_); });
+    EXPECT_NO_THROW({ ServiceManager sm(config_, state_, lifecycleFsm_); });
 }
 
 // Test 6: Destructor handles cleanup
 TEST_F(ServiceManagerTest, DestructorCleanup) {
     EXPECT_NO_THROW({
-        auto sm = std::make_unique<ServiceManager>(config_, state_);
+        auto sm = std::make_unique<ServiceManager>(config_, state_, lifecycleFsm_);
         sm.reset();
     });
 }
 
 // Test 7: getConfig returns the configuration
 TEST_F(ServiceManagerTest, GetConfig) {
-    ServiceManager sm(config_, state_);
+    ServiceManager sm(config_, state_, lifecycleFsm_);
 
     const auto& cfg = sm.getConfig();
     EXPECT_EQ(cfg.dataDir, config_.dataDir);
@@ -118,7 +108,7 @@ TEST_F(ServiceManagerTest, GetConfig) {
 
 // Test 8: PostIngestQueue accessor returns null before init
 TEST_F(ServiceManagerTest, PostIngestQueueBeforeInit) {
-    ServiceManager sm(config_, state_);
+    ServiceManager sm(config_, state_, lifecycleFsm_);
 
     // May be null before initialization
     auto* piq = sm.getPostIngestQueue();
@@ -129,7 +119,7 @@ TEST_F(ServiceManagerTest, PostIngestQueueBeforeInit) {
 
 // Test 9: Worker pool methods don't crash
 TEST_F(ServiceManagerTest, WorkerPoolMethodsSafe) {
-    ServiceManager sm(config_, state_);
+    ServiceManager sm(config_, state_, lifecycleFsm_);
 
     EXPECT_NO_THROW({
         auto pool = sm.getWorkerPool();
@@ -139,7 +129,7 @@ TEST_F(ServiceManagerTest, WorkerPoolMethodsSafe) {
 
 // Test 10: Tuning config getter doesn't crash
 TEST_F(ServiceManagerTest, GetTuningConfig) {
-    ServiceManager sm(config_, state_);
+    ServiceManager sm(config_, state_, lifecycleFsm_);
 
     EXPECT_NO_THROW({
         const auto& tuning = sm.getTuningConfig();
@@ -149,7 +139,7 @@ TEST_F(ServiceManagerTest, GetTuningConfig) {
 
 // Test 11: Set tuning config doesn't crash
 TEST_F(ServiceManagerTest, SetTuningConfig) {
-    ServiceManager sm(config_, state_);
+    ServiceManager sm(config_, state_, lifecycleFsm_);
 
     TuningConfig tc;
     tc.postIngestCapacity = 1000;
@@ -161,7 +151,7 @@ TEST_F(ServiceManagerTest, SetTuningConfig) {
 
 // Test 12: Resize worker pool returns result
 TEST_F(ServiceManagerTest, ResizeWorkerPool) {
-    ServiceManager sm(config_, state_);
+    ServiceManager sm(config_, state_, lifecycleFsm_);
 
     EXPECT_NO_THROW({
         bool result = sm.resizeWorkerPool(4);
@@ -171,7 +161,7 @@ TEST_F(ServiceManagerTest, ResizeWorkerPool) {
 
 // Test 13: Resize post-ingest threads returns result
 TEST_F(ServiceManagerTest, ResizePostIngestThreads) {
-    ServiceManager sm(config_, state_);
+    ServiceManager sm(config_, state_, lifecycleFsm_);
 
     EXPECT_NO_THROW({
         bool result = sm.resizePostIngestThreads(2);
@@ -181,7 +171,7 @@ TEST_F(ServiceManagerTest, ResizePostIngestThreads) {
 
 // Test 14: getWorkerQueueDepth doesn't crash
 TEST_F(ServiceManagerTest, GetWorkerQueueDepth) {
-    ServiceManager sm(config_, state_);
+    ServiceManager sm(config_, state_, lifecycleFsm_);
 
     EXPECT_NO_THROW({
         auto depth = sm.getWorkerQueueDepth();
@@ -191,35 +181,37 @@ TEST_F(ServiceManagerTest, GetWorkerQueueDepth) {
 
 // Test 15: enqueuePostIngest doesn't crash
 TEST_F(ServiceManagerTest, EnqueuePostIngest) {
-    ServiceManager sm(config_, state_);
+    ServiceManager sm(config_, state_, lifecycleFsm_);
 
     EXPECT_NO_THROW({ sm.enqueuePostIngest("test_hash", "text/plain"); });
 }
 
 // Test 16: getLastSearchBuildReason doesn't crash
-TEST_F(ServiceManagerTest, GetLastSearchBuildReason) {
-    ServiceManager sm(config_, state_);
+// Test 16: Search engine snapshot doesn't crash (Phase 2.4: updated for SearchEngineManager)
+TEST_F(ServiceManagerTest, GetSearchEngineSnapshot) {
+    ServiceManager sm(config_, state_, lifecycleFsm_);
 
     EXPECT_NO_THROW({
-        auto reason = sm.getLastSearchBuildReason();
-        (void)reason;
+        auto snapshot = sm.getSearchEngineFsmSnapshot();
+        (void)snapshot.buildReason;
+        (void)snapshot.vectorEnabled;
     });
 }
 
-// Test 17: getLastVectorEnabled doesn't crash
-TEST_F(ServiceManagerTest, GetLastVectorEnabled) {
-    ServiceManager sm(config_, state_);
+// Test 17: Cached search engine access doesn't crash (Phase 2.4: updated for SearchEngineManager)
+TEST_F(ServiceManagerTest, GetCachedSearchEngine) {
+    ServiceManager sm(config_, state_, lifecycleFsm_);
 
     EXPECT_NO_THROW({
-        bool enabled = sm.getLastVectorEnabled();
-        (void)enabled;
+        auto* engine = sm.getCachedSearchEngine();
+        (void)engine; // May be null, that's OK
     });
 }
 
 // Test 18: Memory cleanup verification
 TEST_F(ServiceManagerTest, MemoryCleanupVerification) {
     for (int i = 0; i < 3; ++i) {
-        auto sm = std::make_unique<ServiceManager>(config_, state_);
+        auto sm = std::make_unique<ServiceManager>(config_, state_, lifecycleFsm_);
         sm.reset();
     }
 

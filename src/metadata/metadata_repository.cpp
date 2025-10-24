@@ -49,6 +49,14 @@ constexpr const char* kDocumentColumnListCompatQualified =
 
 constexpr int64_t kPathTreeNullParent = PathTreeNode::kNullParent;
 
+std::vector<float> blobToFloatVector(const std::vector<std::byte>& blob) {
+    if (blob.empty() || (blob.size() % sizeof(float)) != 0)
+        return {};
+    std::vector<float> out(blob.size() / sizeof(float));
+    std::memcpy(out.data(), blob.data(), blob.size());
+    return out;
+}
+
 PathTreeNode mapPathTreeNodeRow(Statement& stmt) {
     PathTreeNode node;
     node.id = stmt.getInt64(0);
@@ -57,15 +65,10 @@ PathTreeNode mapPathTreeNodeRow(Statement& stmt) {
     node.fullPath = stmt.getString(3);
     node.docCount = stmt.getInt64(4);
     node.centroidWeight = stmt.getInt64(5);
+    if (!stmt.isNull(6)) {
+        node.centroid = blobToFloatVector(stmt.getBlob(6));
+    }
     return node;
-}
-
-std::vector<float> blobToFloatVector(const std::vector<std::byte>& blob) {
-    if (blob.empty() || (blob.size() % sizeof(float)) != 0)
-        return {};
-    std::vector<float> out(blob.size() / sizeof(float));
-    std::memcpy(out.data(), blob.data(), blob.size());
-    return out;
 }
 
 Result<void> bindParentId(Statement& stmt, int index, int64_t parentId) {
@@ -1155,6 +1158,91 @@ Result<void> MetadataRepository::removeFromIndex(int64_t documentId) {
     if (result)
         invalidateQueryCache();
     return result;
+}
+
+Result<void> MetadataRepository::removeFromIndexByHash(const std::string& hash) {
+    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
+        // First check if FTS5 is available
+        auto fts5Result = db.hasFTS5();
+        if (!fts5Result)
+            return fts5Result.error();
+
+        if (!fts5Result.value()) {
+            return {};
+        }
+
+        // Get document ID from hash first
+        auto stmtResult = db.prepare("SELECT id FROM documents WHERE sha256_hash = ?");
+        if (!stmtResult)
+            return stmtResult.error();
+
+        Statement stmt = std::move(stmtResult).value();
+        auto bindResult = stmt.bind(1, hash);
+        if (!bindResult)
+            return bindResult.error();
+
+        auto stepResult = stmt.step();
+        if (!stepResult)
+            return stepResult.error();
+
+        if (!stepResult.value()) {
+            // Document not found - treat as success (already removed/doesn't exist)
+            return {};
+        }
+
+        int64_t docId = stmt.getInt64(0);
+
+        // Now remove from FTS5 index
+        auto delStmtResult = db.prepare("DELETE FROM documents_fts WHERE rowid = ?");
+        if (!delStmtResult)
+            return delStmtResult.error();
+
+        Statement delStmt = std::move(delStmtResult).value();
+        auto delBindResult = delStmt.bind(1, docId);
+        if (!delBindResult)
+            return delBindResult.error();
+
+        return delStmt.execute();
+    });
+
+    if (result)
+        invalidateQueryCache();
+    return result;
+}
+
+Result<std::vector<int64_t>> MetadataRepository::getAllFts5IndexedDocumentIds() {
+    return executeQuery<std::vector<int64_t>>([&](Database& db) -> Result<std::vector<int64_t>> {
+        // First check if FTS5 is available
+        auto fts5Result = db.hasFTS5();
+        if (!fts5Result)
+            return fts5Result.error();
+
+        if (!fts5Result.value()) {
+            return std::vector<int64_t>{}; // FTS5 not available, return empty
+        }
+
+        // Query all rowids from FTS5 index (rowid corresponds to document.id)
+        auto stmtResult = db.prepare("SELECT DISTINCT rowid FROM documents_fts");
+        if (!stmtResult)
+            return stmtResult.error();
+
+        Statement stmt = std::move(stmtResult).value();
+        std::vector<int64_t> docIds;
+
+        for (;;) {
+            auto stepResult = stmt.step();
+            if (!stepResult)
+                return stepResult.error();
+
+            if (!stepResult.value())
+                break;
+
+            int64_t docId = stmt.getInt64(0);
+            docIds.push_back(docId);
+        }
+
+        return docIds;
+    });
 }
 
 // Helper function to sanitize FTS5 query strings
@@ -2299,10 +2387,10 @@ MetadataRepository::findPathTreeNode(int64_t parentId, std::string_view pathSegm
             const bool parentIsNull = parentId == kPathTreeNullParent;
             const char* sql =
                 parentIsNull ? "SELECT node_id, parent_id, path_segment, full_path, doc_count, "
-                               "centroid_weight FROM path_tree_nodes "
+                               "centroid_weight, centroid FROM path_tree_nodes "
                                "WHERE parent_id IS NULL AND path_segment = ?"
                              : "SELECT node_id, parent_id, path_segment, full_path, doc_count, "
-                               "centroid_weight FROM path_tree_nodes "
+                               "centroid_weight, centroid FROM path_tree_nodes "
                                "WHERE parent_id = ? AND path_segment = ?";
 
             auto stmtResult = db.prepare(sql);
@@ -2687,7 +2775,7 @@ Result<void> MetadataRepository::removePathTreeForDocument(const DocumentInfo& i
         parentNodeId = nodeResult.value()->id;
     }
 
-    // Remove document association and decrement counts from leaf to root
+    // First pass: Remove document associations and decrement counts from leaf to root
     for (auto it = pathNodeIds.rbegin(); it != pathNodeIds.rend(); ++it) {
         int64_t nodeId = *it;
 
@@ -2807,6 +2895,19 @@ Result<void> MetadataRepository::removePathTreeForDocument(const DocumentInfo& i
             });
             if (!recalc)
                 return recalc.error();
+        }
+    }
+
+    // Second pass: Delete empty nodes from leaf to root, but keep top-level directories
+    // This ensures parent nodes are only checked after all their children have been processed
+    for (size_t i = 0; i < pathNodeIds.size(); ++i) {
+        size_t reverseIdx = pathNodeIds.size() - 1 - i;
+        int64_t nodeId = pathNodeIds[reverseIdx];
+
+        // Keep first-level directories (direct children of root) even if empty
+        bool isFirstLevel = (reverseIdx == 0);
+        if (isFirstLevel) {
+            continue; // Don't delete top-level directories
         }
 
         // Check if node is now empty and has no children
@@ -3706,10 +3807,47 @@ Result<void> MetadataRepository::buildFuzzyIndex() {
         // Create new fuzzy search index
         fuzzySearchIndex_ = std::make_unique<search::HybridFuzzySearch>();
 
-        // Query all documents
+        // Smart filtering: use metadata and KG to prioritize relevant documents
+        // This keeps memory bounded while indexing the most important documents
         auto stmtResult = db.prepare(R"(
+            WITH ranked_docs AS (
+                SELECT 
+                    d.id,
+                    d.file_name,
+                    d.file_path,
+                    d.indexed_time,
+                    -- Prioritize documents with rich metadata
+                    COALESCE((SELECT COUNT(*) FROM metadata m WHERE m.document_id = d.id AND m.key = 'tag'), 0) as tag_count,
+                    -- Prioritize documents in knowledge graph (have symbols/entities)
+                    COALESCE((SELECT COUNT(DISTINCT kde.entity_id) 
+                              FROM kg_doc_entities kde 
+                              WHERE kde.document_hash = d.sha256_hash), 0) as entity_count,
+                    -- Recency score
+                    CASE 
+                        WHEN d.indexed_time > datetime('now', '-7 days') THEN 4
+                        WHEN d.indexed_time > datetime('now', '-30 days') THEN 3
+                        WHEN d.indexed_time > datetime('now', '-90 days') THEN 2
+                        WHEN d.indexed_time > datetime('now', '-180 days') THEN 1
+                        ELSE 0
+                    END as recency_score,
+                    -- Boost code files (likely to have symbols)
+                    CASE 
+                        WHEN d.mime_type LIKE 'text/x-%' OR 
+                             d.mime_type IN ('application/javascript', 'application/typescript') OR
+                             d.file_name LIKE '%.py' OR d.file_name LIKE '%.cpp' OR 
+                             d.file_name LIKE '%.h' OR d.file_name LIKE '%.hpp' OR
+                             d.file_name LIKE '%.rs' OR d.file_name LIKE '%.go' THEN 2
+                        ELSE 0
+                    END as code_boost
+                FROM documents d
+                WHERE d.indexed_time IS NOT NULL
+            )
             SELECT id, file_name, file_path
-            FROM documents
+            FROM ranked_docs
+            -- Prioritize: tagged > KG-connected > recent > code files > rest
+            ORDER BY (tag_count * 3 + entity_count * 2 + recency_score + code_boost) DESC, 
+                     indexed_time DESC
+            LIMIT 50000
         )");
 
         if (!stmtResult)
@@ -3717,12 +3855,23 @@ Result<void> MetadataRepository::buildFuzzyIndex() {
 
         Statement stmt = std::move(stmtResult).value();
 
+        size_t docsAdded = 0;
+        // Allow override via environment variable for large repos
+        const char* envLimit = std::getenv("YAMS_FUZZY_INDEX_LIMIT");
+        const size_t MAX_DOCS = envLimit ? std::stoul(envLimit) : 50000;
+
         while (true) {
             auto stepResult = stmt.step();
             if (!stepResult)
                 return stepResult.error();
             if (!stepResult.value())
                 break;
+
+            // Safety check: stop if we're approaching memory limits
+            if (docsAdded >= MAX_DOCS) {
+                spdlog::warn("Fuzzy index limited to {} documents for memory safety", MAX_DOCS);
+                break;
+            }
 
             int64_t id = stmt.getInt64(0);
             std::string fileName = stmt.getString(1);
@@ -3747,7 +3896,14 @@ Result<void> MetadataRepository::buildFuzzyIndex() {
 
             // Add document to fuzzy index with both filename and content
             // First add with filename as title
-            fuzzySearchIndex_->addDocument(std::to_string(id), fileName, keywords);
+            try {
+                fuzzySearchIndex_->addDocument(std::to_string(id), fileName, keywords);
+                docsAdded++;
+            } catch (const std::bad_alloc& e) {
+                spdlog::error("Memory exhausted building fuzzy index at {} documents, stopping",
+                              docsAdded);
+                break;
+            }
             // std::cerr << "[DEBUG] Added doc " << id << " with title '" << fileName << "' and " <<
             // keywords.size() << " keywords" << std::endl;
 
@@ -3800,8 +3956,19 @@ Result<void> MetadataRepository::buildFuzzyIndex() {
                 // Add content-based entry with more content preview
                 std::string contentPreview = content.contentText.substr(
                     0, std::min(size_t(200), content.contentText.length()));
-                fuzzySearchIndex_->addDocument(std::to_string(id) + "_content", contentPreview,
-                                               contentKeywords);
+                try {
+                    fuzzySearchIndex_->addDocument(std::to_string(id) + "_content", contentPreview,
+                                                   contentKeywords);
+                    docsAdded++;
+                } catch (const std::bad_alloc& e) {
+                    spdlog::warn("Memory limit reached adding content entries, skipping remaining");
+                    break;
+                }
+            }
+
+            // Check if we've hit the limit
+            if (docsAdded >= MAX_DOCS) {
+                break;
             }
         }
 
@@ -3827,18 +3994,36 @@ Result<void> MetadataRepository::buildFuzzyIndex() {
                 docTags[docId].push_back(tag);
             }
 
-            // Update documents with tags
+            // Update documents with tags (respecting limit)
             for (const auto& [docId, tags] : docTags) {
+                if (docsAdded >= MAX_DOCS) {
+                    spdlog::info("Fuzzy index reached {} document limit, skipping remaining tags",
+                                 MAX_DOCS);
+                    break;
+                }
+
                 auto docResult = getDocument(docId);
                 if (docResult && docResult.value().has_value()) {
                     auto doc = docResult.value().value();
-                    fuzzySearchIndex_->addDocument(std::to_string(docId), doc.fileName, tags);
+                    try {
+                        fuzzySearchIndex_->addDocument(std::to_string(docId), doc.fileName, tags);
+                        docsAdded++;
+                    } catch (const std::bad_alloc& e) {
+                        spdlog::error("Memory exhausted adding tagged documents at {} docs",
+                                      docsAdded);
+                        break;
+                    }
                 }
             }
         }
 
-        spdlog::info("Built fuzzy index with {} documents",
-                     fuzzySearchIndex_->getStats().documentCount);
+        const size_t totalDocs = fuzzySearchIndex_->getStats().documentCount;
+        if (totalDocs >= MAX_DOCS) {
+            spdlog::info("Built fuzzy index with {} documents (limited for memory safety)",
+                         totalDocs);
+        } else {
+            spdlog::info("Built fuzzy index with {} documents", totalDocs);
+        }
 
         return Result<void>();
     });

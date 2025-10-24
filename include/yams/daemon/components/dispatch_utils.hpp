@@ -149,7 +149,8 @@ inline VectorDiag collect_vector_diag(ServiceManager* sm) {
     if (!sm)
         return d;
     try {
-        auto eng = sm->getSearchEngineSnapshot();
+        // Phase 2.2: Use non-blocking cached snapshot instead of getSearchEngineSnapshot()
+        auto cachedEngine = sm->getCachedSearchEngine();
         auto gen = sm->getEmbeddingGenerator();
         if (gen) {
             try {
@@ -157,15 +158,17 @@ inline VectorDiag collect_vector_diag(ServiceManager* sm) {
             } catch (...) {
             }
         }
-        if (eng) {
+        if (cachedEngine) {
             try {
-                const auto& cfg = eng->getConfig();
+                const auto& cfg = cachedEngine->getConfig();
                 d.scoringEnabled = (cfg.vector_weight > 0.0f) && d.embeddingsAvailable;
             } catch (...) {
             }
         }
         try {
-            d.buildReason = sm->getLastSearchBuildReason();
+            // Get build reason from FSM snapshot instead of lastSearchBuildReason_
+            auto fsmSnapshot = sm->getSearchEngineFsmSnapshot();
+            d.buildReason = fsmSnapshot.buildReason;
         } catch (...) {
         }
     } catch (...) {
@@ -238,8 +241,10 @@ inline std::pair<std::string, size_t> build_plugins_json(ServiceManager* sm) {
 inline std::vector<yams::daemon::StatusResponse::ProviderInfo>
 build_typed_providers(ServiceManager* sm, const yams::daemon::StateComponent* state) {
     std::vector<yams::daemon::StatusResponse::ProviderInfo> providers;
-    if (!sm)
+    if (!sm) {
+        spdlog::debug("[build_typed_providers] ServiceManager is null");
         return providers;
+    }
     try {
         const bool providerReady = state ? state->readiness.modelProviderReady.load() : false;
         bool providerDegraded = false;
@@ -250,32 +255,47 @@ build_typed_providers(ServiceManager* sm, const yams::daemon::StateComponent* st
         } catch (...) {
         }
         const std::string lastErr = sm->lastModelError();
-        uint32_t modelsLoaded = 0;
-        // Use non-blocking cached count instead of getLoadedModels().size()
-        try {
-            auto mp = sm->getModelProvider();
-            if (mp)
-                modelsLoaded = static_cast<uint32_t>(mp->getLoadedModelCount());
-        } catch (...) {
-        }
-        std::string adopted = sm->adoptedProviderPluginName();
-        if (auto* abi = sm->getAbiPluginHost()) {
-            for (const auto& d : abi->listLoaded()) {
+        const auto statusSnapshot = sm->getPluginStatusSnapshot();
+        if (!statusSnapshot.records.empty()) {
+            for (const auto& rec : statusSnapshot.records) {
                 yams::daemon::StatusResponse::ProviderInfo p{};
-                p.name = d.name;
-                p.isProvider = (!adopted.empty() && adopted == d.name);
-                p.ready =
-                    p.isProvider ? providerReady : true; // loaded plugins are considered ready
-                p.degraded = p.isProvider ? providerDegraded : false;
-                p.error = p.isProvider ? lastErr : std::string();
-                p.modelsLoaded = p.isProvider ? modelsLoaded : 0u;
+                p.name = rec.name;
+                p.isProvider = rec.isProvider;
+                p.ready = rec.isProvider ? (rec.ready || providerReady) : rec.ready;
+                p.degraded = rec.isProvider ? (rec.degraded || providerDegraded) : rec.degraded;
+                p.error = rec.isProvider && !lastErr.empty() ? lastErr : rec.error;
+                if (p.isProvider && p.error.empty())
+                    p.error = lastErr;
+                p.modelsLoaded = rec.modelsLoaded;
+                spdlog::debug("[build_typed_providers]   snapshot plugin: name='{}' provider={}",
+                              rec.name, rec.isProvider);
                 providers.push_back(std::move(p));
             }
         } else {
-            // Legacy loader removed; no fallback enumeration
+            std::string adopted = sm->adoptedProviderPluginName();
+            spdlog::debug(
+                "[build_typed_providers] snapshot empty, falling back to FSM. adopted='{}'",
+                adopted);
+            const auto pluginSnap = sm->getPluginHostFsmSnapshot();
+            for (const auto& name : pluginSnap.loadedPlugins) {
+                yams::daemon::StatusResponse::ProviderInfo p{};
+                p.name = name;
+                p.isProvider = (!adopted.empty() && adopted == name);
+                p.ready =
+                    p.isProvider ? providerReady : (pluginSnap.state == PluginHostState::Ready);
+                p.degraded =
+                    p.isProvider ? providerDegraded : (pluginSnap.state == PluginHostState::Failed);
+                p.error = p.isProvider ? lastErr : pluginSnap.lastError;
+                p.modelsLoaded = 0u;
+                providers.push_back(std::move(p));
+            }
         }
+    } catch (const std::exception& e) {
+        spdlog::error("[build_typed_providers] Exception: {}", e.what());
     } catch (...) {
+        spdlog::error("[build_typed_providers] Unknown exception");
     }
+    spdlog::info("[build_typed_providers] Returning {} providers", providers.size());
     return providers;
 }
 

@@ -8,7 +8,7 @@ namespace yams::daemon {
 boost::asio::awaitable<Response>
 RequestDispatcher::handleListSessionsRequest(const ListSessionsRequest& req) {
     co_return co_await yams::daemon::dispatch::guard_await(
-        "list_sessions", [this, req]() -> boost::asio::awaitable<Response> {
+        "list_sessions", [this]() -> boost::asio::awaitable<Response> {
             auto appContext = serviceManager_->getAppContext();
             auto sessionService = app::services::makeSessionService(&appContext);
             auto sessions = sessionService->listSessions();

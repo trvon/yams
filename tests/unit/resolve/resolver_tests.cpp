@@ -129,6 +129,12 @@ public:
     Result<void> removeFromIndex(int64_t) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
+    Result<void> removeFromIndexByHash(const std::string&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+    Result<std::vector<int64_t>> getAllFts5IndexedDocumentIds() override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
     Result<yams::metadata::SearchResults>
     search(const std::string&, int, int,
            const std::optional<std::vector<int64_t>>& = std::nullopt) override {
@@ -173,12 +179,13 @@ public:
         };
 
         if (pathPattern == "%/a.txt" || pathPattern == "%a.txt" || pathPattern == "/root/a.txt" ||
-            pathPattern == "%") {
+            pathPattern == "a.txt" || pathPattern == "%") {
             pushDoc("/root/a.txt", "a.txt",
                     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
         }
-        if (pathPattern == "%/b.txt" || pathPattern == "/root/sub/b.txt" ||
-            pathPattern == "/root/sub/%" || pathPattern == "/root/sub%" || pathPattern == "%") {
+        if (pathPattern == "%/b.txt" || pathPattern == "%b.txt" ||
+            pathPattern == "/root/sub/b.txt" || pathPattern == "/root/sub/%" ||
+            pathPattern == "/root/sub%" || pathPattern == "b.txt" || pathPattern == "%") {
             pushDoc("/root/sub/b.txt", "b.txt",
                     "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
         }

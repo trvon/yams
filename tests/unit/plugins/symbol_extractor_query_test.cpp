@@ -58,7 +58,11 @@ static yams_symbol_extractor_v1* load_plugin(const char* so_path) {
 }
 
 TEST(SymbolExtractorQueryTest, CppDetectsFunctionAndClass) {
-    const char* so = "plugins/symbol_extractor_treesitter/libsymbol_extractor_treesitter.so";
+#ifdef __APPLE__
+    const char* so = "/usr/local/lib/yams/plugins/libsymbol_extractor_treesitter.dylib";
+#else
+    const char* so = "/usr/local/lib/yams/plugins/libsymbol_extractor_treesitter.so";
+#endif
     auto* api = load_plugin(so);
     ASSERT_NE(api, nullptr);
 
@@ -87,7 +91,11 @@ TEST(SymbolExtractorQueryTest, CppDetectsFunctionAndClass) {
 }
 
 TEST(SymbolExtractorQueryTest, PythonDetectsFunction) {
-    const char* so = "plugins/symbol_extractor_treesitter/libsymbol_extractor_treesitter.so";
+#ifdef __APPLE__
+    const char* so = "/usr/local/lib/yams/plugins/libsymbol_extractor_treesitter.dylib";
+#else
+    const char* so = "/usr/local/lib/yams/plugins/libsymbol_extractor_treesitter.so";
+#endif
     auto* api = load_plugin(so);
     ASSERT_NE(api, nullptr);
 

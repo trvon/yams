@@ -201,6 +201,10 @@ private:
     yams::daemon::ClientConfig daemon_client_config_{};
     std::filesystem::path daemonSocketOverride_;
     std::function<Result<void>(const yams::daemon::ClientConfig&)> testEnsureDaemonClientHook_{};
+
+    // Socket staleness tracking
+    std::mutex daemon_client_mutex_;
+    std::chrono::steady_clock::time_point last_daemon_use_;
     struct ClientInfo {
         std::string name;
         std::string version;

@@ -3,6 +3,7 @@ import os
 from conan.tools.layout import basic_layout
 from conan.tools.build import check_min_cppstd
 
+
 class YamsConan(ConanFile):
     name = "yams"
     version = "0.8.0"
@@ -22,7 +23,10 @@ class YamsConan(ConanFile):
         "enable_tui": [True, False],  # Separate TUI from CLI
         "enable_onnx": [True, False],  # Gate ONNX Runtime and its transitive graph
         "enable_wasmtime": [True, False],  # Gate WASM host (wasmtime-cpp integration)
-        "enable_symbol_extraction": [True, False],  # Gate symbol extraction features and deps
+        "enable_symbol_extraction": [
+            True,
+            False,
+        ],  # Gate symbol extraction features and deps
     }
     default_options = {
         "build_cli": True,
@@ -69,18 +73,17 @@ class YamsConan(ConanFile):
         # Boost is used directly (e.g., boost.asio for daemon comms); declare as a direct requirement
         # Using only override=True will not pull Boost into the graph when no transitive dep needs it
         self.requires("boost/1.83.0")
-        
+
         # TUI framework dependencies
         if self.options.enable_tui:
-            # FTXUI: Modern C++17 TUI library, zero external dependencies
             self.requires("ftxui/5.0.0")
-        
+
         if self.options.enable_symbol_extraction:
             try:
                 self.requires("tree-sitter/0.25.9")
             except Exception:
                 pass
-        
+
         if self.options.enable_onnx:
             self.requires("onnxruntime/1.18.1")
             # Ensure ONNX Runtime's TBB runtime is available when system libtbb is missing
@@ -146,12 +149,12 @@ class YamsConan(ConanFile):
     def layout(self):
         basic_layout(self)
 
-
     def generate(self):
         try:
             from conan.tools.meson import MesonToolchain
             from conan.tools.gnu import PkgConfigDeps
             from conan.tools.cmake import CMakeDeps
+
             MesonToolchain(self).generate()
             PkgConfigDeps(self).generate()
             CMakeDeps(self).generate()

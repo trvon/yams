@@ -531,7 +531,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
 boost::asio::awaitable<Response>
 RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
     co_return co_await yams::daemon::dispatch::guard_await(
-        "add_document", [this, req]() -> boost::asio::awaitable<Response> {
+        "add_document", [req]() -> boost::asio::awaitable<Response> {
             // Be forgiving: if the path is a directory but recursive was not set, treat it as
             // a directory ingestion with recursive=true to avoid file_size errors sent by clients
             // that didn't set the flag (common with LLM-driven clients).

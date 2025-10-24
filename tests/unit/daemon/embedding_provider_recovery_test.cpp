@@ -1,6 +1,7 @@
-// Validates degraded->ready recovery via ServiceManager’s FSM helper.
+// Validates degraded->ready recovery via ServiceManager's FSM helper.
 #include <gtest/gtest.h>
 
+#include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/EmbeddingProviderFsm.h>
 #include <yams/daemon/components/ServiceManager.h>
 
@@ -9,8 +10,9 @@ using namespace yams::daemon;
 TEST(EmbeddingProviderRecovery, DegradedThenRecoveredToReady) {
     DaemonConfig cfg; // defaults are fine; no plugins needed
     StateComponent state{};
+    DaemonLifecycleFsm lifecycleFsm;
 
-    ServiceManager sm(cfg, state);
+    ServiceManager sm(cfg, state, lifecycleFsm);
 
     // Simulate degraded provider
     sm.__test_setModelProviderDegraded(true, "unit-test degraded");

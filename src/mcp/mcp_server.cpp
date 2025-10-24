@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -62,35 +63,9 @@
 #endif
 
 namespace yams::mcp {
-namespace {
-
-// Synchronous pooled_execute is deprecated and returns NotImplemented
-// This is kept only for toolRegistry compatibility until it's migrated to async
-template <typename Manager, typename TRequest, typename Render>
-Result<void> pooled_execute(Manager& manager, const TRequest& req,
-                            std::function<Result<void>()> fallback, Render&& render) {
-    (void)manager;
-    (void)req;
-    (void)fallback;
-    (void)render;
-    return Error{
-        ErrorCode::NotImplemented,
-        "Synchronous pooled_execute is deprecated. Use async handlers via direct method calls."};
-}
-
-} // namespace
 
 thread_local std::string MCPServer::tlsSessionId_;
 thread_local nlohmann::json MCPServer::tlsProgressToken_ = nullptr;
-
-// In-band logging helper (level + message variant) - YAMS extension, not standard MCP
-static nlohmann::json createLogNotification(const std::string& level, const std::string& message) {
-    // NOTE: This is a YAMS-specific extension. Standard MCP only supports notifications/log from
-    // client->server Wrap simple textual message inside a data object for consistency with the
-    // (level,data,logger) overload
-    nlohmann::json params = {{"level", level}, {"data", nlohmann::json{{"message", message}}}};
-    return {{"jsonrpc", "2.0"}, {"method", "notifications/message"}, {"params", params}};
-}
 
 // Unified send helper: prefers non-blocking transports and posts async sends when possible
 void MCPServer::sendResponse(const nlohmann::json& message) {
@@ -179,12 +154,6 @@ boost::asio::awaitable<void> MCPServer::outboundDrainAsync() {
         }
     }
     co_return;
-}
-
-// Non-blocking send: for now, just delegates to synchronous send
-// Future: could implement actual async queue if needed
-void StdioTransport::sendAsync(json message) {
-    send(message);
 }
 
 // StdioTransport implementation
@@ -372,8 +341,44 @@ MessageResult StdioTransport::receive() {
     spdlog::debug("StdioTransport: Received line: '{}'",
                   line.length() > 200 ? line.substr(0, 200) + "..." : line);
 
-    // Parse as NDJSON. The LSP-style framing is removed for simplicity and to
-    // strictly adhere to the modern MCP spec for stdio.
+    // Support both NDJSON (MCP stdio) and LSP-style Content-Length framing on input.
+    // If a Content-Length header is detected, consume headers and read the next line as body.
+    {
+        std::string lower = line;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        if (lower.rfind("content-length:", 0) == 0) {
+            // Parse length after ':' (whitespace tolerated)
+            std::size_t colon = line.find(':');
+            int contentLength = 0;
+            if (colon != std::string::npos) {
+                try {
+                    contentLength = std::stoi(line.substr(colon + 1));
+                } catch (...) {
+                    // ignore length parse errors; fall back to parsing next line
+                }
+            }
+            // Read header lines until blank line
+            std::string headerLine;
+            while (readLineWithTimeout(headerLine, recvTimeoutMs_)) {
+                if (!headerLine.empty() && headerLine.back() == '\r')
+                    headerLine.pop_back();
+                if (headerLine.empty())
+                    break; // end of headers
+            }
+            // Read body line (most clients send compact single-line JSON)
+            std::string bodyLine;
+            if (readLineWithTimeout(bodyLine, recvTimeoutMs_)) {
+                if (!bodyLine.empty() && bodyLine.back() == '\r')
+                    bodyLine.pop_back();
+                line = std::move(bodyLine);
+                spdlog::debug("StdioTransport: Consumed LSP-framed body ({} bytes announced)",
+                              contentLength);
+            }
+        }
+    }
+
+    // Parse JSON payload (expects a complete JSON value on a single line)
     auto parsed = json_utils::parse_json(line);
     if (parsed) {
         resetErrorCount();
@@ -428,8 +433,8 @@ void StdioTransport::resetErrorCount() noexcept {
 MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* externalShutdown,
                      std::filesystem::path overrideSocket)
     : transport_(std::move(transport)), externalShutdown_(externalShutdown),
-      daemonSocketOverride_(std::move(overrideSocket)), eagerReadyEnabled_(false),
-      autoReadyEnabled_(false), strictProtocol_(false), limitToolResultDup_(false) {
+      eagerReadyEnabled_(false), autoReadyEnabled_(false), strictProtocol_(false),
+      limitToolResultDup_(false), daemonSocketOverride_(std::move(overrideSocket)) {
     // Ensure logging goes to stderr to keep stdout clean for MCP framing
     if (auto existing = spdlog::get("yams-mcp")) {
         spdlog::set_default_logger(existing);
@@ -454,17 +459,24 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
         // Connection strategy: default pooled/multiplexed; allow overrides to match CLI behavior
         // YAMS_MCP_CONN_MODE=single|fresh (fresh => new socket each request)
         // or YAMS_MCP_SINGLE_USE_SOCKETS=1
-        bool single_use = false;
+        // Default to single-use to mirror CLI behavior and avoid stale/half-open sockets
+        bool single_use = true;
         if (const char* m = std::getenv("YAMS_MCP_CONN_MODE")) {
             std::string v(m);
             for (auto& c : v)
                 c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            if (v == "fresh" || v == "single_use")
+            if (v == "fresh" || v == "single_use") {
                 single_use = true;
+            } else if (v == "pooled" || v == "pool" || v == "reuse") {
+                single_use = false;
+            }
         }
         if (const char* s = std::getenv("YAMS_MCP_SINGLE_USE_SOCKETS")) {
-            if (std::string(s) == "1" || std::string(s) == "true")
+            if (std::string(s) == "0" || std::string(s) == "false") {
+                single_use = false;
+            } else if (std::string(s) == "1" || std::string(s) == "true") {
                 single_use = true;
+            }
         }
         cfg.singleUseConnections = single_use;
         cfg.requestTimeout = std::chrono::milliseconds(10000);
@@ -619,12 +631,15 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
 }
 
 Result<void> MCPServer::ensureDaemonClient() {
+    std::lock_guard<std::mutex> lock(daemon_client_mutex_);
+
     if (testEnsureDaemonClientHook_) {
         auto hookResult = testEnsureDaemonClientHook_(daemon_client_config_);
         if (!hookResult) {
             return hookResult;
         }
     }
+
     // Re-evaluate connection mode per-request to bridge CLI helpers
     bool single_use = daemon_client_config_.singleUseConnections;
     if (const char* m = std::getenv("YAMS_MCP_CONN_MODE")) {
@@ -638,8 +653,33 @@ Result<void> MCPServer::ensureDaemonClient() {
             single_use = true;
     }
     daemon_client_config_.singleUseConnections = single_use;
-    if (daemon_client_ && !single_use)
-        return Result<void>();
+
+    // For pooled connections, check if socket is stale (idle > 30s) or broken
+    if (daemon_client_ && !single_use) {
+        auto now = std::chrono::steady_clock::now();
+        auto idle_duration =
+            std::chrono::duration_cast<std::chrono::seconds>(now - last_daemon_use_).count();
+
+        // Socket staleness threshold: 30 seconds (configurable via env)
+        int stale_threshold = 30;
+        if (const char* thresh = std::getenv("YAMS_MCP_SOCKET_STALE_SECONDS")) {
+            stale_threshold = std::max(5, std::atoi(thresh));
+        }
+
+        bool is_stale = idle_duration > stale_threshold;
+        bool is_connected = daemon_client_->isConnected();
+
+        if (is_stale || !is_connected) {
+            spdlog::debug("MCP daemon socket {} (idle={}s, connected={}), refreshing",
+                          is_stale ? "stale" : "disconnected", idle_duration, is_connected);
+            daemon_client_lease_.reset();
+            daemon_client_ = nullptr;
+        } else {
+            last_daemon_use_ = now;
+            return Result<void>();
+        }
+    }
+
     auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(daemon_client_config_);
     if (!leaseRes) {
         // Augment error with actionable connection details for MCP clients
@@ -654,6 +694,8 @@ Result<void> MCPServer::ensureDaemonClient() {
     }
     daemon_client_lease_ = leaseRes.value();
     daemon_client_ = &(**daemon_client_lease_);
+    last_daemon_use_ = std::chrono::steady_clock::now();
+
     return Result<void>();
 }
 
@@ -673,6 +715,10 @@ void MCPServer::start() {
     if (!testing_env) {
         std::cout.setf(std::ios::unitbuf);
     }
+#ifndef _WIN32
+    // Prevent abrupt termination on first write if the client side is not yet reading
+    std::signal(SIGPIPE, SIG_IGN);
+#endif
 
     spdlog::info("MCP server started");
 
@@ -2152,7 +2198,6 @@ boost::asio::awaitable<json> MCPServer::callToolAsync(const std::string& name,
     co_return result;
 }
 
-// Modern C++20 tool handler implementations
 boost::asio::awaitable<Result<MCPSearchResponse>>
 MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     if (auto ensure = ensureDaemonClient(); !ensure) {
@@ -2548,14 +2593,6 @@ MCPServer::handleGrepDocuments(const MCPGrepRequest& req) {
 
     // Fast-first path: emit early semantic suggestions and return immediately if requested
     if (req.fastFirst) {
-        try {
-            if (transport_) {
-                sendResponse(createLogNotification(
-                    "info", "grep fast-first: returning semantic semantic suggestions"));
-            }
-        } catch (...) {
-            // best-effort notification
-        }
         yams::daemon::SearchRequest sreq;
         sreq.query = req.pattern;
         sreq.limit = 10;
@@ -4837,11 +4874,6 @@ void MCPServer::recordEarlyFeatureUse() {
         earlyFeatureUse_ = true;
     }
 }
-
-// Helper: create a structured MCP logging notification (optional, in-band logging)
-// Removed duplicate unused createLogNotification overload (previously: level + data + logger)
-
-/* Removed misplaced logging/setLevel block (should reside inside MCPServer::handleRequest) */
 
 boost::asio::awaitable<Result<MCPGetByNameResponse>>
 MCPServer::handleGetByName(const MCPGetByNameRequest& req) {

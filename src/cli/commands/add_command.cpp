@@ -288,8 +288,14 @@ public:
                 for (const auto& p : paths) {
                     if (p.string() == "-") {
                         groupedPaths[p].push_back("-");
+                    } else if (std::filesystem::is_directory(p)) {
+                        groupedPaths[p];
                     } else {
-                        groupedPaths[p.parent_path()].push_back(p.filename().string());
+                        auto parent = p.parent_path();
+                        if (parent.empty() && p.is_relative()) {
+                            parent = ".";
+                        }
+                        groupedPaths[parent].push_back(p.filename().string());
                     }
                 }
 

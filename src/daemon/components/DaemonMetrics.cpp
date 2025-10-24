@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 #include <yams/compression/compression_monitor.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
@@ -757,6 +758,33 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 out.documentsTotal = cachedDocumentsTotal_;
                 out.documentsIndexed = cachedDocumentsIndexed_;
                 out.documentsContentExtracted = cachedDocumentsExtracted_;
+            }
+            // FTS5 orphan scan metrics from InternalEventBus
+            try {
+                auto& bus = InternalEventBus::instance();
+                out.fts5OrphansDetected = bus.orphansDetected();
+                out.fts5OrphansRemoved = bus.orphansRemoved();
+
+                // FTS5 failure breakdown
+                out.fts5FailNoDoc = bus.fts5FailNoDoc();
+                out.fts5FailExtraction = bus.fts5FailExtraction();
+                out.fts5FailIndex = bus.fts5FailIndex();
+                out.fts5FailException = bus.fts5FailException();
+
+                // Convert epoch ms to ISO8601 timestamp
+                uint64_t epochMs = bus.lastOrphanScanEpochMs();
+                if (epochMs > 0) {
+                    auto tp =
+                        std::chrono::system_clock::time_point(std::chrono::milliseconds(epochMs));
+                    std::time_t tt = std::chrono::system_clock::to_time_t(tp);
+                    std::tm tm;
+                    ::gmtime_r(&tt, &tm);
+                    std::ostringstream oss;
+                    oss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+                    out.lastOrphanScanTime = oss.str();
+                }
+            } catch (...) {
+                // Metrics unavailable, leave defaults (0, 0, empty string)
             }
             // Content store stats and sizes (logical always, deep stats when detailed)
             bool disableStoreStats = false;

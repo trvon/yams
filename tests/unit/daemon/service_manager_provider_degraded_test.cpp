@@ -1,6 +1,7 @@
 // Minimal unit covering degraded transition when no provider can be adopted.
 #include <gtest/gtest.h>
 
+#include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/EmbeddingProviderFsm.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
@@ -8,10 +9,11 @@
 using namespace yams::daemon;
 
 TEST(ServiceManagerProviderDegradedTest, DegradesWhenNoProviderAvailable) {
-    DaemonConfig cfg;       // defaults: autoLoadPlugins=false; no pluginDir
-    StateComponent state{}; // empty readiness snapshot
+    DaemonConfig cfg;                // defaults: autoLoadPlugins=false; no pluginDir
+    StateComponent state{};          // empty readiness snapshot
+    DaemonLifecycleFsm lifecycleFsm; // lifecycle FSM for degradation tracking
 
-    ServiceManager sm(cfg, state);
+    ServiceManager sm(cfg, state, lifecycleFsm);
 
     auto res = sm.adoptModelProviderFromHosts();
     ASSERT_TRUE(res.has_value());

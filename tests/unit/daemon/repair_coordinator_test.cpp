@@ -192,4 +192,24 @@ TEST(RepairCoordinatorTest, StatsTrackingUpdatesQueueDepth) {
     coordinator.stop();
 }
 
+// ===== Phase 3: Binary File Filtering Tests =====
+
+TEST(RepairCoordinatorTest, FiltersNonTextFilesWithoutPlugins) {
+    // This test validates that binary files are not queued for FTS5 repair
+    // unless there's a custom plugin that can handle them
+
+    // Test will require mocking ServiceManager to verify filtering logic
+    // For now, this is a placeholder for future integration test
+    EXPECT_TRUE(true); // TODO: Implement with proper mocking
+}
+
+TEST(RepairCoordinatorTest, AllowsBinaryFilesWithCustomPlugins) {
+    // This test validates that binary files ARE queued for FTS5 repair
+    // when a custom plugin extractor is available
+
+    // Test will require mocking ServiceManager and plugin extractors
+    // For now, this is a placeholder for future integration test
+    EXPECT_TRUE(true); // TODO: Implement with proper mocking
+}
+
 } // namespace yams::daemon

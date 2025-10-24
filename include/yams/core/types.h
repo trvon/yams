@@ -166,6 +166,9 @@ struct Error {
 // Simple Result type for operations that can fail (compatible with pre-C++23)
 template <typename T> class Result {
 public:
+    // Default constructor for awaitable compatibility (creates error state)
+    Result() : data_(Error{ErrorCode::InternalError, "Uninitialized Result"}) {}
+
     Result(T&& value) : data_(std::move(value)) {}
     Result(const T& value)
     requires std::is_copy_constructible_v<T>

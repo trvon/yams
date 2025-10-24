@@ -100,6 +100,7 @@ YamsCLI::YamsCLI() {
     spdlog::set_level(spdlog::level::warn);
 
     app_ = std::make_unique<CLI::App>("YAMS", "yams");
+    app_->prefix_command(); // Allow global options before and after subcommands
     // Prefer generated effective version if present; otherwise fallback to existing macros.
 #if __has_include(<yams/version_generated.h>)
     {

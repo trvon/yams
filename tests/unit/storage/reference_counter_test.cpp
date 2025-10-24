@@ -78,7 +78,7 @@ TEST_F(ReferenceCounterTest, BasicIncrementDecrement) {
 
     count = refCounter->getRefCount(hash);
     ASSERT_TRUE(count.has_value());
-    EXPECT_EQ(count.value(), 0);
+    EXPECT_EQ(count.value(), 0u);
 }
 
 TEST_F(ReferenceCounterTest, HasReferences) {
@@ -118,7 +118,7 @@ TEST_F(ReferenceCounterTest, BatchOperations) {
     for (const auto& hash : hashes) {
         auto count = refCounter->getRefCount(hash);
         ASSERT_TRUE(count.has_value());
-        EXPECT_EQ(count.value(), 1);
+        EXPECT_EQ(count.value(), 1u);
     }
 
     // Batch decrement
@@ -129,7 +129,7 @@ TEST_F(ReferenceCounterTest, BatchOperations) {
     for (const auto& hash : hashes) {
         auto count = refCounter->getRefCount(hash);
         ASSERT_TRUE(count.has_value());
-        EXPECT_EQ(count.value(), 0);
+        EXPECT_EQ(count.value(), 0u);
     }
 }
 
@@ -151,7 +151,7 @@ TEST_F(ReferenceCounterTest, BatchWithSizes) {
     for (const auto& block : blocks) {
         auto count = refCounter->getRefCount(block.hash);
         ASSERT_TRUE(count.has_value());
-        EXPECT_EQ(count.value(), 1);
+        EXPECT_EQ(count.value(), 1u);
     }
 }
 
@@ -170,7 +170,7 @@ TEST_F(ReferenceCounterTest, TransactionCommit) {
     // Counts should still be zero (not committed)
     auto count1 = refCounter->getRefCount(hash1);
     ASSERT_TRUE(count1.has_value());
-    EXPECT_EQ(count1.value(), 0);
+    EXPECT_EQ(count1.value(), 0u);
 
     // Commit transaction
     auto result = txn->commit();
@@ -180,11 +180,11 @@ TEST_F(ReferenceCounterTest, TransactionCommit) {
     // Now counts should be updated
     count1 = refCounter->getRefCount(hash1);
     ASSERT_TRUE(count1.has_value());
-    EXPECT_EQ(count1.value(), 1);
+    EXPECT_EQ(count1.value(), 1u);
 
     auto count2 = refCounter->getRefCount(hash2);
     ASSERT_TRUE(count2.has_value());
-    EXPECT_EQ(count2.value(), 1);
+    EXPECT_EQ(count2.value(), 1u);
 }
 
 TEST_F(ReferenceCounterTest, TransactionRollback) {
@@ -203,7 +203,7 @@ TEST_F(ReferenceCounterTest, TransactionRollback) {
     // Count should still be zero
     auto count = refCounter->getRefCount(hash);
     ASSERT_TRUE(count.has_value());
-    EXPECT_EQ(count.value(), 0);
+    EXPECT_EQ(count.value(), 0u);
 }
 
 TEST_F(ReferenceCounterTest, TransactionAutoRollback) {
@@ -218,7 +218,7 @@ TEST_F(ReferenceCounterTest, TransactionAutoRollback) {
     // Count should still be zero
     auto count = refCounter->getRefCount(hash);
     ASSERT_TRUE(count.has_value());
-    EXPECT_EQ(count.value(), 0);
+    EXPECT_EQ(count.value(), 0u);
 }
 
 TEST_F(ReferenceCounterTest, GetUnreferencedBlocks) {
@@ -278,8 +278,8 @@ TEST_F(ReferenceCounterTest, Statistics) {
     EXPECT_EQ(stats.totalBlocks, numBlocks);
     EXPECT_EQ(stats.totalReferences, numBlocks - 3); // 3 were decremented
     EXPECT_EQ(stats.totalBytes, numBlocks * blockSize);
-    EXPECT_EQ(stats.unreferencedBlocks, 3);
-    EXPECT_EQ(stats.unreferencedBytes, 3 * blockSize);
+    EXPECT_EQ(stats.unreferencedBlocks, 3u);
+    EXPECT_EQ(stats.unreferencedBytes, 3u * blockSize);
 }
 
 TEST_F(ReferenceCounterTest, ConcurrentOperations) {
@@ -292,7 +292,7 @@ TEST_F(ReferenceCounterTest, ConcurrentOperations) {
 
     // Each thread increments the same hash
     for (size_t t = 0; t < numThreads; ++t) {
-        threads.emplace_back([this, &successCount, &sharedHash, opsPerThread]() {
+        threads.emplace_back([this, &successCount, &sharedHash]() {
             for (size_t i = 0; i < opsPerThread; ++i) {
                 auto result = refCounter->increment(sharedHash, 1024);
                 if (result.has_value()) {
@@ -326,38 +326,38 @@ TEST_F(ReferenceCounterTest, ConcurrentTransactions) {
     std::atomic<size_t> errorCount{0};
 
     for (size_t t = 0; t < numThreads; ++t) {
-        threads.emplace_back([this, &commitCount, &threadStarted, &threadCompleted, &errorCount, t,
-                              hashesPerThread]() {
-            threadStarted++;
+        threads.emplace_back(
+            [this, &commitCount, &threadStarted, &threadCompleted, &errorCount, t]() {
+                threadStarted++;
 
-            try {
-                auto txn = refCounter->beginTransaction();
-                if (!txn) {
+                try {
+                    auto txn = refCounter->beginTransaction();
+                    if (!txn) {
+                        errorCount++;
+                        threadCompleted++;
+                        return;
+                    }
+
+                    // Each thread works on its own set of hashes
+                    for (size_t i = 0; i < hashesPerThread; ++i) {
+                        auto hash = generateHash(800 + t * 100 + i);
+                        txn->increment(hash, 2048);
+                    }
+
+                    auto result = txn->commit();
+                    if (result.has_value()) {
+                        commitCount++;
+                    } else {
+                        errorCount++;
+                    }
+
+                } catch (const std::exception& e) {
                     errorCount++;
-                    threadCompleted++;
-                    return;
+                    // Don't use ASSERT in thread - it would abort the thread
                 }
 
-                // Each thread works on its own set of hashes
-                for (size_t i = 0; i < hashesPerThread; ++i) {
-                    auto hash = generateHash(800 + t * 100 + i);
-                    txn->increment(hash, 2048);
-                }
-
-                auto result = txn->commit();
-                if (result.has_value()) {
-                    commitCount++;
-                } else {
-                    errorCount++;
-                }
-
-            } catch (const std::exception& e) {
-                errorCount++;
-                // Don't use ASSERT in thread - it would abort the thread
-            }
-
-            threadCompleted++;
-        });
+                threadCompleted++;
+            });
     }
 
     // Wait for all threads to complete
@@ -368,7 +368,7 @@ TEST_F(ReferenceCounterTest, ConcurrentTransactions) {
     // Verify all threads completed without errors
     EXPECT_EQ(threadStarted.load(), numThreads);
     EXPECT_EQ(threadCompleted.load(), numThreads);
-    EXPECT_EQ(errorCount.load(), 0);
+    EXPECT_EQ(errorCount.load(), 0u);
     EXPECT_EQ(commitCount.load(), numThreads);
 
     // Verify all hashes were incremented correctly
@@ -377,7 +377,7 @@ TEST_F(ReferenceCounterTest, ConcurrentTransactions) {
             auto hash = generateHash(800 + t * 100 + i);
             auto count = refCounter->getRefCount(hash);
             ASSERT_TRUE(count.has_value());
-            EXPECT_EQ(count.value(), 1);
+            EXPECT_EQ(count.value(), 1u);
         }
     }
 }
@@ -431,15 +431,15 @@ TEST_F(ReferenceCounterTest, BackupRestore) {
     // Verify restored state
     auto count1 = refCounter->getRefCount(hash1);
     ASSERT_TRUE(count1.has_value());
-    EXPECT_EQ(count1.value(), 1); // Original value
+    EXPECT_EQ(count1.value(), 1u); // Original value
 
     auto count2 = refCounter->getRefCount(hash2);
     ASSERT_TRUE(count2.has_value());
-    EXPECT_EQ(count2.value(), 2); // Original value
+    EXPECT_EQ(count2.value(), 2u); // Original value
 
     auto count3 = refCounter->getRefCount(generateHash(1002));
     ASSERT_TRUE(count3.has_value());
-    EXPECT_EQ(count3.value(), 0); // Not in backup
+    EXPECT_EQ(count3.value(), 0u); // Not in backup
 
     // Cleanup
     std::filesystem::remove(backupPath);
@@ -462,7 +462,7 @@ TEST_F(ReferenceCounterTest, AsyncBatchOperations) {
     for (const auto& hash : hashes) {
         auto count = refCounter->getRefCount(hash);
         ASSERT_TRUE(count.has_value());
-        EXPECT_EQ(count.value(), 1);
+        EXPECT_EQ(count.value(), 1u);
     }
 }
 
@@ -547,8 +547,8 @@ TEST_F(GarbageCollectorTest, BasicCollection) {
     ASSERT_TRUE(result.has_value());
 
     const auto& stats = result.value();
-    EXPECT_EQ(stats.blocksScanned, 3); // 3 unreferenced blocks
-    EXPECT_EQ(stats.blocksDeleted, 3);
+    EXPECT_EQ(stats.blocksScanned, 3u); // 3 unreferenced blocks
+    EXPECT_EQ(stats.blocksDeleted, 3u);
     EXPECT_GT(stats.bytesReclaimed, 0u);
     EXPECT_TRUE(stats.errors.empty());
 
@@ -619,7 +619,7 @@ TEST_F(GarbageCollectorTest, AsyncCollection) {
 
     ASSERT_TRUE(result.has_value());
     const auto& stats = result.value();
-    EXPECT_EQ(stats.blocksDeleted, 1);
+    EXPECT_EQ(stats.blocksDeleted, 1u);
 }
 
 TEST_F(GarbageCollectorTest, ConcurrentCollectionPrevented) {

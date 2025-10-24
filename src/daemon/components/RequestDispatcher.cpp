@@ -256,6 +256,8 @@ boost::asio::awaitable<Response> RequestDispatcher::dispatch(const Request& req)
                     co_return co_await handleListTreeDiffRequest(arg);
                 } else if constexpr (std::is_same_v<T, FileHistoryRequest>) {
                     co_return co_await handleFileHistoryRequest(arg);
+                } else if constexpr (std::is_same_v<T, PruneRequest>) {
+                    co_return co_await handlePruneRequest(arg);
                 } else if constexpr (std::is_same_v<T, AddDocumentRequest>) {
                     co_return co_await handleAddDocumentRequest(arg);
                 } else if constexpr (std::is_same_v<T, ListRequest>) {
@@ -346,14 +348,12 @@ boost::asio::awaitable<Response>
 RequestDispatcher::handleShutdownRequest(const ShutdownRequest& req) {
     spdlog::info("Received shutdown request (graceful={})", req.graceful);
 
-    // Important: ensure the shutdown response is flushed back to the client before the
-    // socket server begins tearing down the IO context. Schedule the stop slightly later
-    // on a detached thread to give RequestHandler time to write the response frame.
+    // Ask daemon to stop; don't detach unnecessarily to avoid losing the request in high load.
     if (daemon_) {
         bool graceful = req.graceful;
         std::thread([d = daemon_, graceful]() {
             try {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
             } catch (...) {
             }
             d->requestStop();

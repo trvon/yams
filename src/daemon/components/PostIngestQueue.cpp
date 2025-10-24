@@ -430,8 +430,13 @@ void PostIngestQueue::workerLoop() {
                             vdb = getVectorDatabase_();
                     }
                     if (gen && vdb) {
-                        if (!gen->isInitialized())
+                        // Proactively initialize embedding generator if not already done
+                        // This triggers model loading and vector DB initialization
+                        if (!gen->isInitialized()) {
+                            spdlog::info("PostIngestQueue: initializing embedding generator for {}",
+                                         task.hash);
                             (void)gen->initialize();
+                        }
                         if (docId >= 0) {
                             auto contentOpt = meta_->getContent(docId);
                             if (contentOpt && contentOpt.value().has_value()) {

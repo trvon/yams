@@ -7,7 +7,6 @@
 #include <yams/vector/sqlite_vec_backend.h>
 
 #ifdef SQLITE_VEC_CPP
-// Use modern C++20/23 implementation
 #include <sqlite-vec-cpp/distances/cosine.hpp>
 #include <sqlite-vec-cpp/distances/l1.hpp>
 #include <sqlite-vec-cpp/distances/l2.hpp>
@@ -15,7 +14,6 @@
 #include <sqlite-vec-cpp/utils/array.hpp>
 #include <sqlite-vec-cpp/vector_view.hpp>
 #else
-// Fallback to C implementation
 extern "C" {
 #include "sqlite-vec.h"
 }
@@ -1770,7 +1768,6 @@ void SqliteVecBackend::finalizeStatements() {
 
 std::vector<uint8_t> SqliteVecBackend::vectorToBlob(const std::vector<float>& vec) const {
 #ifdef SQLITE_VEC_CPP
-    // Use modern C++ implementation - create span from const vector
     std::span<const float> span_view(vec);
     sqlite_vec_cpp::VectorView<const float> view(span_view);
     return view.to_blob();
@@ -1784,7 +1781,6 @@ std::vector<uint8_t> SqliteVecBackend::vectorToBlob(const std::vector<float>& ve
 
 std::vector<float> SqliteVecBackend::blobToVector(const void* blob, size_t size) const {
 #ifdef SQLITE_VEC_CPP
-    // Use modern C++ implementation - deserialize from blob
     size_t num_floats = size / sizeof(float);
     std::vector<float> result(num_floats);
     if (num_floats > 0) {

@@ -571,8 +571,10 @@ private:
         if (daemonRunning) {
             daemon::ShutdownRequest sreq;
             sreq.graceful = !force_;
+            yams::daemon::ClientConfig cfg;
+            cfg.socketPath = effectiveSocket;
             auto shutdownResult = runDaemonClient(
-                {},
+                cfg,
                 [&](yams::daemon::DaemonClient& client) { return client.shutdown(sreq.graceful); },
                 std::chrono::seconds(10));
             if (shutdownResult) {
@@ -588,11 +590,9 @@ private:
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }
 
-                // If we sent the shutdown successfully, consider it stopped
-                // even if we can't immediately verify
+                // If not yet stopped, proceed to PID-based termination fallback
                 if (!stopped) {
-                    spdlog::info("Daemon shutdown requested, may take a moment to fully stop");
-                    stopped = true;
+                    spdlog::info("Daemon shutdown requested; waiting for process to exit");
                 }
             } else {
                 // Treat common peer-closure/transient errors as potentially-successful if the
@@ -646,7 +646,7 @@ private:
             spdlog::warn("Daemon not responding to shutdown, attempting to kill orphaned process");
 
             // Use pkill to find and kill yams-daemon processes with our socket
-            std::string pkillCmd = "pkill -f 'yams-daemon.*" + socketPath_ + "'";
+            std::string pkillCmd = "pkill -f 'yams-daemon.*" + effectiveSocket + "'";
             int pkillResult = std::system(pkillCmd.c_str());
 
             if (pkillResult == 0) {
@@ -1950,8 +1950,10 @@ private:
         // Stop daemon if running
         if (daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
             spdlog::info("Stopping YAMS daemon...");
+            yams::daemon::ClientConfig cfg;
+            cfg.socketPath = effectiveSocket;
             (void)runDaemonClient(
-                {}, [](yams::daemon::DaemonClient& client) { return client.shutdown(true); },
+                cfg, [](yams::daemon::DaemonClient& client) { return client.shutdown(true); },
                 std::chrono::seconds(10));
 
             for (int i = 0; i < 10; i++) {

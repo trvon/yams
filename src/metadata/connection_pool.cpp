@@ -209,25 +209,40 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout) {
         }
     }
 
-    // Get connection from pool
-    auto conn = std::move(available_.front());
-    available_.pop();
+    // Get connection from pool and validate it
+    std::unique_ptr<PooledConnection> conn;
+    bool foundValid = false;
 
-    // Validate connection
-    if (!isConnectionValid(**conn)) {
-        // Try to create a new one
+    // Try up to 3 connections from the pool before creating a new one
+    for (int attempt = 0; attempt < 3 && !available_.empty() && !foundValid; ++attempt) {
+        conn = std::move(available_.front());
+        available_.pop();
+
+        if (isConnectionValid(**conn)) {
+            foundValid = true;
+            break;
+        } else {
+            // Connection is stale, discard it
+            totalConnections_--;
+            spdlog::warn("Discarded stale connection on acquire (attempt {})", attempt + 1);
+            conn.reset();
+        }
+    }
+
+    // If no valid connection found, create a new one
+    if (!foundValid) {
         lock.unlock();
         auto connResult = createConnection();
         lock.lock();
 
         if (!connResult) {
             failedAcquisitions_++;
-            totalConnections_--;
             return connResult.error();
         }
 
         conn = std::make_unique<PooledConnection>(
             std::move(connResult).value(), [this](PooledConnection* c) { returnConnection(c); });
+        totalConnections_++;
     }
 
     conn->touch();
@@ -301,27 +316,64 @@ void ConnectionPool::pruneIdleConnections() {
 
     std::queue<std::unique_ptr<PooledConnection>> keep;
     auto now = std::chrono::steady_clock::now();
+    size_t prunedIdle = 0;
+    size_t prunedInvalid = 0;
+    size_t prunedAge = 0;
 
-    while (!available_.empty() && keep.size() + activeConnections_ < config_.minConnections) {
+    while (!available_.empty()) {
         auto conn = std::move(available_.front());
         available_.pop();
 
+        auto age = now - conn->createdAt();
         auto idleTime = now - conn->lastAccessed();
-        if (idleTime < config_.idleTimeout) {
-            keep.push(std::move(conn));
-        } else {
+
+        // Always keep minimum connections, but validate them and check age
+        if (keep.size() + activeConnections_ < config_.minConnections) {
+            // Even for minimum connections, prune if too old
+            if (age >= config_.maxConnectionAge) {
+                totalConnections_--;
+                prunedAge++;
+                spdlog::debug("Pruned aged connection (age: {}s)",
+                              std::chrono::duration_cast<std::chrono::seconds>(age).count());
+            } else if (isConnectionValid(**conn)) {
+                keep.push(std::move(conn));
+            } else {
+                totalConnections_--;
+                prunedInvalid++;
+                spdlog::debug("Pruned invalid connection during maintenance");
+            }
+            continue;
+        }
+
+        // For connections above minimum, check idle time and age
+        if (age >= config_.maxConnectionAge) {
             totalConnections_--;
-            spdlog::debug("Pruned idle connection");
+            prunedAge++;
+            spdlog::debug("Pruned aged connection (age: {}s)",
+                          std::chrono::duration_cast<std::chrono::seconds>(age).count());
+        } else if (idleTime >= config_.idleTimeout) {
+            totalConnections_--;
+            prunedIdle++;
+            spdlog::debug("Pruned idle connection (idle: {}s)",
+                          std::chrono::duration_cast<std::chrono::seconds>(idleTime).count());
+        } else {
+            // Validate before keeping
+            if (isConnectionValid(**conn)) {
+                keep.push(std::move(conn));
+            } else {
+                totalConnections_--;
+                prunedInvalid++;
+                spdlog::debug("Pruned invalid connection during maintenance");
+            }
         }
     }
 
-    // Move remaining connections to keep queue
-    while (!available_.empty()) {
-        keep.push(std::move(available_.front()));
-        available_.pop();
-    }
-
     available_ = std::move(keep);
+
+    if (prunedIdle > 0 || prunedInvalid > 0 || prunedAge > 0) {
+        spdlog::info("Connection pool pruned {} idle, {} invalid, {} aged connections", prunedIdle,
+                     prunedInvalid, prunedAge);
+    }
 }
 
 Result<std::unique_ptr<Database>> ConnectionPool::createConnection() {
@@ -397,6 +449,17 @@ void ConnectionPool::returnConnection(PooledConnection* conn) {
         return;
     }
 
+    // Reset any pending transaction before validation
+    try {
+        conn->operator*().rollback(); // Ignore error
+    } catch (...) {
+        // If rollback fails, connection is likely stale
+        activeConnections_--;
+        totalConnections_--;
+        spdlog::warn("Failed to rollback transaction, discarding connection");
+        return;
+    }
+
     // Check if connection is still valid
     if (!isConnectionValid(**conn)) {
         activeConnections_--;
@@ -404,9 +467,6 @@ void ConnectionPool::returnConnection(PooledConnection* conn) {
         spdlog::warn("Returned connection is invalid, discarding");
         return;
     }
-
-    // Reset any pending transaction
-    conn->operator*().rollback(); // Ignore error
 
     // Move the database out of the PooledConnection
     auto db = std::move(conn->db_);
@@ -428,15 +488,26 @@ bool ConnectionPool::isConnectionValid(const Database& db) const {
         return false;
     }
 
-    // Try a simple query
+    // Try a simple query with write operation to detect stale connections
     try {
+        // First verify we can read
         auto stmtResult = const_cast<Database&>(db).prepare("SELECT 1");
         if (!stmtResult)
             return false;
 
         Statement stmt = std::move(stmtResult).value();
         auto result = stmt.step();
-        return result.has_value();
+        if (!result.has_value())
+            return false;
+
+        // Also verify we can write (detects locked/stale connections)
+        // Use a temp table to avoid affecting the schema
+        auto writeTest = const_cast<Database&>(db).execute(
+            "CREATE TEMP TABLE IF NOT EXISTS __pool_health_check (id INTEGER)");
+        if (!writeTest)
+            return false;
+
+        return true;
     } catch (...) {
         return false;
     }

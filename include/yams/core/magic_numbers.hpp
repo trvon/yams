@@ -113,15 +113,15 @@ constexpr uint8_t hex_length(std::string_view hex) {
  * eliminating the need to parse JSON at startup.
  *
  * Data migrated from: data/magic_numbers.json
- * Total patterns: 125
+ * Total patterns: 86 (high-confidence only; low-confidence code patterns omitted)
  * Auto-generated with minor manual curation
  */
 constexpr auto make_magic_patterns() {
     std::vector<MagicPattern> patterns;
-    patterns.reserve(130);
+    patterns.reserve(90);
 
     // Auto-generated from data/magic_numbers.json
-    // Total patterns: 125
+    // Total patterns: 86 (high-confidence patterns)
 
     // Image Formats (12 patterns)
     patterns.push_back(MAGIC_PATTERN("FFD8FF", 0, "image", "image/jpeg", "JPEG image", 1.0f));
@@ -393,13 +393,13 @@ struct MagicDatabaseInfo {
 #if YAMS_HAS_CONSTEXPR_CONTAINERS
         return MAGIC_PATTERNS.size();
 #else
-        return 99; // High-confidence patterns migrated (omitted 26 low-confidence code patterns)
+        return 86; // High-confidence patterns migrated (omitted low-confidence code patterns)
 #endif
     }
 
     static constexpr const char* mode() {
 #if YAMS_HAS_CONSTEXPR_CONTAINERS
-        return "compile-time (99 patterns)";
+        return "compile-time (86 patterns)";
 #else
         return "runtime (JSON)";
 #endif
@@ -407,5 +407,326 @@ struct MagicDatabaseInfo {
 
     static constexpr const char* source() { return "data/magic_numbers.json v1.0"; }
 };
+
+/**
+ * @brief Prune categories for cleanup operations
+ *
+ * Categories are hierarchical and composable for flexible file cleanup.
+ * Users can specify categories, extensions, or MIME types to prune.
+ */
+enum class PruneCategory {
+    // Build artifacts - compiled outputs
+    BuildObject,     // .o, .obj, .class, .pyc, .rlib, etc
+    BuildLibrary,    // .a, .so, .dylib, .dll, .lib
+    BuildExecutable, // .exe, compiled binaries
+    BuildArchive,    // .jar, .war, .whl, .egg, .gem
+
+    // Build systems - generated files
+    SystemCMake,  // CMake generated files
+    SystemNinja,  // Ninja build files
+    SystemMeson,  // Meson build files
+    SystemMake,   // Make generated files
+    SystemGradle, // Gradle build files
+    SystemMaven,  // Maven build files
+    SystemNpm,    // NPM/Yarn files
+    SystemCargo,  // Rust Cargo files
+    SystemGo,     // Go build files
+
+    // Logs and temporary
+    Logs,     // .log, build logs
+    Cache,    // Compiler/package manager cache
+    Temp,     // Temporary files, backups
+    Coverage, // Code coverage data
+
+    // IDE
+    IdeProject, // IDE project files and caches
+
+    // Distribution (careful!)
+    Packages, // .deb, .rpm, .apk, .msi
+
+    None // Not categorized
+};
+
+/**
+ * @brief Get prune category name for CLI/display
+ */
+inline constexpr const char* getPruneCategoryName(PruneCategory cat) {
+    switch (cat) {
+        case PruneCategory::BuildObject:
+            return "build-object";
+        case PruneCategory::BuildLibrary:
+            return "build-library";
+        case PruneCategory::BuildExecutable:
+            return "build-executable";
+        case PruneCategory::BuildArchive:
+            return "build-archive";
+        case PruneCategory::SystemCMake:
+            return "system-cmake";
+        case PruneCategory::SystemNinja:
+            return "system-ninja";
+        case PruneCategory::SystemMeson:
+            return "system-meson";
+        case PruneCategory::SystemMake:
+            return "system-make";
+        case PruneCategory::SystemGradle:
+            return "system-gradle";
+        case PruneCategory::SystemMaven:
+            return "system-maven";
+        case PruneCategory::SystemNpm:
+            return "system-npm";
+        case PruneCategory::SystemCargo:
+            return "system-cargo";
+        case PruneCategory::SystemGo:
+            return "system-go";
+        case PruneCategory::Logs:
+            return "logs";
+        case PruneCategory::Cache:
+            return "cache";
+        case PruneCategory::Temp:
+            return "temp";
+        case PruneCategory::Coverage:
+            return "coverage";
+        case PruneCategory::IdeProject:
+            return "ide";
+        case PruneCategory::Packages:
+            return "packages";
+        case PruneCategory::None:
+            return "none";
+    }
+    return "unknown";
+}
+
+/**
+ * @brief Get prune category description
+ */
+inline constexpr const char* getPruneCategoryDescription(PruneCategory cat) {
+    switch (cat) {
+        case PruneCategory::BuildObject:
+            return "Compiled object files (.o, .obj, .class, .pyc, .rlib, .hi, .beam)";
+        case PruneCategory::BuildLibrary:
+            return "Static/dynamic libraries (.a, .so, .dylib, .dll)";
+        case PruneCategory::BuildExecutable:
+            return "Compiled executables";
+        case PruneCategory::BuildArchive:
+            return "Build output archives (.jar, .whl, .gem)";
+        case PruneCategory::SystemCMake:
+            return "CMake generated files (CMakeCache.txt, CMakeFiles/)";
+        case PruneCategory::SystemNinja:
+            return "Ninja build files (build.ninja, .ninja_deps)";
+        case PruneCategory::SystemMeson:
+            return "Meson build files (meson-private/, coredata.dat)";
+        case PruneCategory::SystemMake:
+            return "Make generated files";
+        case PruneCategory::SystemGradle:
+            return "Gradle build files (.gradle/, build/)";
+        case PruneCategory::SystemMaven:
+            return "Maven build files (target/)";
+        case PruneCategory::SystemNpm:
+            return "NPM/Yarn files (node_modules/, .npm/)";
+        case PruneCategory::SystemCargo:
+            return "Rust Cargo build files (target/)";
+        case PruneCategory::SystemGo:
+            return "Go build files";
+        case PruneCategory::Logs:
+            return "Build and test logs (.log, meson-log.txt)";
+        case PruneCategory::Cache:
+            return "Compiler/package manager cache (.pch, .ccache/, .pip/)";
+        case PruneCategory::Temp:
+            return "Temporary and backup files (.tmp, .bak, *~, .swp)";
+        case PruneCategory::Coverage:
+            return "Code coverage data (.gcda, .gcno, .coverage)";
+        case PruneCategory::IdeProject:
+            return "IDE files (.idea/, .vs/, .vscode/, .DS_Store)";
+        case PruneCategory::Packages:
+            return "Distribution packages (.deb, .rpm, .apk, .msi)";
+        case PruneCategory::None:
+            return "Not categorized for pruning";
+    }
+    return "Unknown category";
+}
+
+/**
+ * @brief Detect prune category from filename and extension
+ *
+ * Uses comprehensive pattern matching across multiple languages and build systems.
+ * Supports C/C++, Java, .NET, Python, JavaScript, Rust, Go, OCaml, Haskell, Erlang, and more.
+ */
+inline PruneCategory getPruneCategory(std::string_view filename, std::string_view ext = "") {
+    std::string extLower, filenameLower;
+
+    // Extract and lowercase extension
+    if (!ext.empty()) {
+        extLower.reserve(ext.size());
+        for (char c : ext)
+            extLower += (c >= 'A' && c <= 'Z') ? (c + 32) : c;
+    } else {
+        auto dotPos = filename.rfind('.');
+        if (dotPos != std::string_view::npos && dotPos < filename.size() - 1) {
+            auto extPart = filename.substr(dotPos + 1);
+            extLower.reserve(extPart.size());
+            for (char c : extPart)
+                extLower += (c >= 'A' && c <= 'Z') ? (c + 32) : c;
+        }
+    }
+
+    // Lowercase filename for pattern matching
+    filenameLower.reserve(filename.size());
+    for (char c : filename)
+        filenameLower += (c >= 'A' && c <= 'Z') ? (c + 32) : c;
+
+    // === Build Objects ===
+    if (extLower == "o" || extLower == "obj" || extLower == "lo" || extLower == "al" ||
+        extLower == "class" || extLower == "pyc" || extLower == "pyo" || extLower == "rlib" ||
+        extLower == "rmeta" || // Rust
+        extLower == "cmo" || extLower == "cmi" || extLower == "cmx" || extLower == "cma" ||
+        extLower == "cmxa" ||                                              // OCaml
+        extLower == "hi" || extLower == "dyn_hi" || extLower == "dyn_o" || // Haskell
+        extLower == "beam" ||                                              // Erlang
+        extLower == "elc" ||                                               // Emacs Lisp
+        extLower == "fasl" || extLower == "fas") {                         // Common Lisp
+        return PruneCategory::BuildObject;
+    }
+
+    // === Build Libraries ===
+    if (extLower == "a" || extLower == "lib" || extLower == "so" || extLower == "dylib" ||
+        extLower == "dll" || extLower == "pyd" || extLower == "node" || extLower == "la") {
+        return PruneCategory::BuildLibrary;
+    }
+
+    // === Build Executables ===
+    if (extLower == "exe" || extLower == "com" || extLower == "bat" || extLower == "cmd" ||
+        extLower == "app" || extLower == "out") {
+        return PruneCategory::BuildExecutable;
+    }
+    if (filenameLower == "a.out")
+        return PruneCategory::BuildExecutable;
+
+    // === Build Archives ===
+    if (extLower == "jar" || extLower == "war" || extLower == "ear" || extLower == "aar" || // Java
+        extLower == "whl" || extLower == "egg" ||    // Python
+        extLower == "gem" ||                         // Ruby
+        extLower == "nupkg" || extLower == "vsix") { // .NET
+        return PruneCategory::BuildArchive;
+    }
+
+    // === Distribution Packages ===
+    if (extLower == "deb" || extLower == "rpm" || extLower == "apk" || extLower == "ipa" ||
+        extLower == "pkg" || extLower == "msi") {
+        return PruneCategory::Packages;
+    }
+
+    // === Logs ===
+    if (extLower == "log" || extLower == "tlog")
+        return PruneCategory::Logs;
+    if (filenameLower == "meson-log.txt" || filenameLower == "lasttest.log" ||
+        filenameLower == "build.log" || filenameLower.find("npm-debug.log") == 0 ||
+        filenameLower.find("yarn-error.log") == 0) {
+        return PruneCategory::Logs;
+    }
+
+    // === Cache ===
+    if (extLower == "pch" || extLower == "gch" || extLower == "ipch")
+        return PruneCategory::Cache;
+
+    // === Temp ===
+    if (extLower == "tmp" || extLower == "temp" || extLower == "bak" || extLower == "backup" ||
+        extLower == "cache" || extLower == "swp" || extLower == "swo") {
+        return PruneCategory::Temp;
+    }
+    if (!filenameLower.empty() && filenameLower.back() == '~')
+        return PruneCategory::Temp;
+    if (filenameLower == "core" || filenameLower.find("core.") == 0)
+        return PruneCategory::Temp;
+
+    // === Coverage ===
+    if (extLower == "gcda" || extLower == "gcno" || extLower == "gcov" || extLower == "profdata" ||
+        extLower == "profraw") {
+        return PruneCategory::Coverage;
+    }
+    if (filenameLower == ".coverage")
+        return PruneCategory::Coverage;
+
+    // === IDE ===
+    if (extLower == "suo" || extLower == "user" || extLower == "sdf" || extLower == "ncb" ||
+        extLower == "idb" || extLower == "ipdb") {
+        return PruneCategory::IdeProject;
+    }
+    if (filenameLower == ".ds_store" || filenameLower == "thumbs.db" ||
+        filenameLower == ".project" || filenameLower == ".cproject") {
+        return PruneCategory::IdeProject;
+    }
+
+    // === Build System Patterns ===
+    // CMake
+    if (filenameLower == "cmakecache.txt" || filenameLower == "cmake_install.cmake" ||
+        filenameLower == "compile_commands.json" || filenameLower == "ctesttestfile.cmake" ||
+        filenameLower == "install_manifest.txt" || filenameLower == "cmakeuserpresets.json") {
+        return PruneCategory::SystemCMake;
+    }
+
+    // Ninja
+    if (filenameLower == "build.ninja" || filenameLower == "rules.ninja" ||
+        filenameLower == ".ninja_deps" || filenameLower == ".ninja_log") {
+        return PruneCategory::SystemNinja;
+    }
+
+    // Meson
+    if (filenameLower.find("intro-") == 0 || filenameLower == "coredata.dat" ||
+        filenameLower == "coredata.dat.prev") {
+        return PruneCategory::SystemMeson;
+    }
+    if (extLower == "dat" &&
+        (filenameLower == "coredata.dat" || filenameLower == "coredata.dat.prev")) {
+        return PruneCategory::SystemMeson;
+    }
+
+    // Make
+    if (filenameLower == "makefile")
+        return PruneCategory::SystemMake;
+
+    // Gradle
+    if (filenameLower == ".gradletasknamecache")
+        return PruneCategory::SystemGradle;
+
+    // Cargo
+    if (filenameLower == "cargo.lock")
+        return PruneCategory::SystemCargo;
+
+    // Go
+    if (filenameLower == "go.work.sum")
+        return PruneCategory::SystemGo;
+
+    return PruneCategory::None;
+}
+
+/**
+ * @brief Check if category matches a group pattern
+ *
+ * Supports composite categories like "build-artifacts", "build-system", "all"
+ */
+inline bool matchesPruneGroup(PruneCategory cat, std::string_view group) {
+    if (group == "all")
+        return cat != PruneCategory::None && cat != PruneCategory::Packages;
+
+    if (group == "build-artifacts") {
+        return cat == PruneCategory::BuildObject || cat == PruneCategory::BuildLibrary ||
+               cat == PruneCategory::BuildExecutable || cat == PruneCategory::BuildArchive;
+    }
+
+    if (group == "build-system") {
+        return cat == PruneCategory::SystemCMake || cat == PruneCategory::SystemNinja ||
+               cat == PruneCategory::SystemMeson || cat == PruneCategory::SystemMake ||
+               cat == PruneCategory::SystemGradle || cat == PruneCategory::SystemMaven ||
+               cat == PruneCategory::SystemNpm || cat == PruneCategory::SystemCargo ||
+               cat == PruneCategory::SystemGo;
+    }
+
+    if (group == "build") {
+        return matchesPruneGroup(cat, "build-artifacts") || matchesPruneGroup(cat, "build-system");
+    }
+
+    // Direct category name match
+    return getPruneCategoryName(cat) == group;
+}
 
 } // namespace yams::magic

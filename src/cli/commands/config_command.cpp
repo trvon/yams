@@ -262,6 +262,26 @@ public:
             }
         });
 
+        auto* grammarAutoEnableCmd =
+            grammarCmd->add_subcommand("auto-enable", "Enable automatic grammar downloads");
+        grammarAutoEnableCmd->callback([this]() {
+            auto result = executeGrammarAutoEnable();
+            if (!result) {
+                spdlog::error("Enable auto-download failed: {}", result.error().message);
+                std::exit(1);
+            }
+        });
+
+        auto* grammarAutoDisableCmd =
+            grammarCmd->add_subcommand("auto-disable", "Disable automatic grammar downloads");
+        grammarAutoDisableCmd->callback([this]() {
+            auto result = executeGrammarAutoDisable();
+            if (!result) {
+                spdlog::error("Disable auto-download failed: {}", result.error().message);
+                std::exit(1);
+            }
+        });
+
         // Check subcommand to verify if migration is needed
         auto* checkCmd = cmd->add_subcommand("check", "Check if config needs migration");
         checkCmd->add_option("--config-path", configPath_, "Path to config file");
@@ -1554,6 +1574,37 @@ private:
         try {
             auto grammarPath = getGrammarPath();
             std::cout << grammarPath << "\n";
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string(e.what())};
+        }
+    }
+
+    Result<void> executeGrammarAutoEnable() {
+        try {
+            auto result =
+                writeConfigValue("plugins.symbol_extraction.auto_download_grammars", "true");
+            if (!result) {
+                return result;
+            }
+            std::cout << "✓ Automatic grammar downloads enabled\n";
+            std::cout << "Grammars will be downloaded automatically when needed.\n";
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string(e.what())};
+        }
+    }
+
+    Result<void> executeGrammarAutoDisable() {
+        try {
+            auto result =
+                writeConfigValue("plugins.symbol_extraction.auto_download_grammars", "false");
+            if (!result) {
+                return result;
+            }
+            std::cout << "✓ Automatic grammar downloads disabled\n";
+            std::cout << "You can manually download grammars using: yams config grammar download "
+                         "<language>\n";
             return Result<void>();
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string(e.what())};

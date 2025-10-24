@@ -283,31 +283,48 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 }
             }
         }
+        spdlog::info("[StatusRequest] About to check search engine degradation");
         try {
             bool searchDegraded = true;
             if (serviceManager_) {
+                spdlog::info("[StatusRequest] Calling getSearchEngineSnapshot()");
                 auto engine = serviceManager_->getSearchEngineSnapshot();
+                spdlog::info("[StatusRequest] getSearchEngineSnapshot() returned, engine={}",
+                             (void*)engine.get());
                 searchDegraded = (engine == nullptr);
             }
             res.readinessStates["search_engine_degraded"] = searchDegraded;
         } catch (...) {
             res.readinessStates["search_engine_degraded"] = true;
         }
-        try {
-            auto d = yams::daemon::dispatch::collect_vector_diag(serviceManager_);
-            res.readinessStates["vector_embeddings_available"] = d.embeddingsAvailable;
-            res.readinessStates["vector_scoring_enabled"] = d.scoringEnabled;
-            // Also mirror in counters for MCP/CLI parity
-            res.requestCounts["vector_embeddings_available"] = d.embeddingsAvailable ? 1 : 0;
-            res.requestCounts["vector_scoring_enabled"] = d.scoringEnabled ? 1 : 0;
-            res.readinessStates["search_engine_build_reason_initial"] =
-                (d.buildReason == "initial");
-            res.readinessStates["search_engine_build_reason_rebuild"] =
-                (d.buildReason == "rebuild");
-            res.readinessStates["search_engine_build_reason_degraded"] =
-                (d.buildReason == "degraded");
-        } catch (...) {
-        }
+        // TODO: BLOCKING CALL - collect_vector_diag acquires locks that can hang
+        // See docs/architecture/servicemanager-refactor.md for architectural solution
+        // Temporarily disabled to unblock development - needs snapshot-based implementation
+        //
+        // Only collect vector diag if daemon is fully ready (avoid blocking during init)
+        // bool isReady = false;
+        // try {
+        //     auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
+        //     isReady = (lifecycleSnapshot.state == LifecycleState::Ready);
+        // } catch (...) {
+        // }
+        // if (isReady) {
+        //     spdlog::info("[StatusRequest] Daemon is Ready, collecting vector diag");
+        //     try {
+        //         auto d = yams::daemon::dispatch::collect_vector_diag(serviceManager_);
+        //         res.readinessStates["vector_embeddings_available"] = d.embeddingsAvailable;
+        //         res.readinessStates["vector_scoring_enabled"] = d.scoringEnabled;
+        //     // Also mirror in counters for MCP/CLI parity
+        //     res.requestCounts["vector_embeddings_available"] = d.embeddingsAvailable ? 1 : 0;
+        //     res.requestCounts["vector_scoring_enabled"] = d.scoringEnabled ? 1 : 0;
+        //     res.readinessStates["search_engine_build_reason_initial"] =
+        //         (d.buildReason == "initial");
+        //     res.readinessStates["search_engine_build_reason_rebuild"] =
+        //         (d.buildReason == "rebuild");
+        //     res.readinessStates["search_engine_build_reason_degraded"] =
+        //         (d.buildReason == "degraded");
+        // } catch (...) {
+        // }
         try {
             auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
             switch (lifecycleSnapshot.state) {
@@ -343,14 +360,19 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 c = static_cast<char>(std::tolower(c));
             res.lifecycleState = res.overallStatus;
         }
-        // Populate typed provider details (prefer clients to use this)
-        // CRITICAL: Only do this for detailed requests to avoid blocking on plugin operations
-        if (req.detailed) {
-            try {
-                res.providers =
-                    yams::daemon::dispatch::build_typed_providers(serviceManager_, state_);
-            } catch (...) {
+        // Populate typed provider details (always send, let UI filter if needed)
+        try {
+            res.providers = yams::daemon::dispatch::build_typed_providers(serviceManager_, state_);
+            spdlog::info("[StatusRequest] built {} providers", res.providers.size());
+            for (const auto& p : res.providers) {
+                spdlog::info(
+                    "[StatusRequest]   provider: name='{}' ready={} degraded={} isProvider={}",
+                    p.name, p.ready, p.degraded, p.isProvider);
             }
+        } catch (const std::exception& e) {
+            spdlog::warn("[StatusRequest] Exception building providers: {}", e.what());
+        } catch (...) {
+            spdlog::warn("[StatusRequest] Unknown exception building providers");
         }
         // Populate skipped plugin diagnostics from last scan (if available)
         try {

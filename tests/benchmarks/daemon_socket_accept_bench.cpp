@@ -1,6 +1,7 @@
 // Benchmark/stress test for daemon socket server accept performance
 // Tests: connection accept latency, concurrent connections, metrics polling overhead
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <thread>

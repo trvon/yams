@@ -77,6 +77,9 @@ private:
     // ONNX Runtime components (using unique_ptr for PIMPL)
     class Impl;
     std::unique_ptr<Impl> pImpl;
+    // no copy/move
+    OnnxModelSession(const OnnxModelSession&) = delete;
+    OnnxModelSession& operator=(const OnnxModelSession&) = delete;
 };
 
 // ============================================================================

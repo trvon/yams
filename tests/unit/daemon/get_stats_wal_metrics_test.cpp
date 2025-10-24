@@ -4,6 +4,7 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/use_future.hpp>
 #include <gtest/gtest.h>
+#include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
@@ -29,7 +30,8 @@ TEST(DaemonStatsWalMetricsTest, GetStatsIncludesWalKeys) {
     YamsDaemon daemon(cfg);
 
     StateComponent state; // default readiness/metrics
-    ServiceManager svc(cfg, state);
+    DaemonLifecycleFsm lifecycleFsm;
+    ServiceManager svc(cfg, state, lifecycleFsm);
     RequestDispatcher dispatcher(&daemon, &svc, &state);
 
     GetStatsRequest req; // defaults ok

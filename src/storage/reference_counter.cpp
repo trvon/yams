@@ -445,7 +445,7 @@ Result<void> ReferenceCounter::increment(std::string_view blockHash, size_t bloc
     try {
         std::unique_lock lock(pImpl->dbMutex);
 
-        auto& stmt = pImpl->stmtCache->get(Impl::INCREMENT_STMT, "");
+        auto stmt = pImpl->stmtCache->get(Impl::INCREMENT_STMT, "");
         stmt.bind(1, blockHash);
         stmt.bind(2, static_cast<int64_t>(blockSize));
         stmt.execute();
@@ -462,7 +462,7 @@ Result<void> ReferenceCounter::decrement(std::string_view blockHash) {
     try {
         std::unique_lock lock(pImpl->dbMutex);
 
-        auto& stmt = pImpl->stmtCache->get(Impl::DECREMENT_STMT, "");
+        auto stmt = pImpl->stmtCache->get(Impl::DECREMENT_STMT, "");
         stmt.bind(1, blockHash);
         stmt.execute();
 
@@ -481,10 +481,10 @@ Result<void> ReferenceCounter::decrement(std::string_view blockHash) {
 // Get reference count
 Result<uint64_t> ReferenceCounter::getRefCount(std::string_view blockHash) const {
     try {
-        // Database handle opened with SQLITE_OPEN_NOMUTEX; ensure exclusive access per connection
-        std::unique_lock lock(pImpl->dbMutex);
+        // With FULLMUTEX mode, SQLite handles thread safety
+        std::shared_lock lock(pImpl->dbMutex);
 
-        auto& stmt = pImpl->stmtCache->get(Impl::GET_REF_COUNT_STMT, "");
+        auto stmt = pImpl->stmtCache->get(Impl::GET_REF_COUNT_STMT, "");
         stmt.bind(1, blockHash);
 
         if (stmt.step()) {
@@ -510,61 +510,69 @@ Result<bool> ReferenceCounter::hasReferences(std::string_view blockHash) const {
 // Get statistics
 Result<RefCountStats> ReferenceCounter::getStats() const {
     try {
-        // Ensure exclusive connection use to avoid cross-thread stepping on NOMUTEX connections
-        std::unique_lock lock(pImpl->dbMutex);
+        // With FULLMUTEX mode, SQLite handles thread safety internally
+        // We still use shared_lock for read operations to coordinate with schema changes
+        std::shared_lock lock(pImpl->dbMutex);
 
         RefCountStats stats{};
 
         // Read materialized counters from ref_statistics (single-row result via scalar subselects)
-        auto stmt = pImpl->db->prepare(R"(
-            SELECT
-              (SELECT stat_value FROM ref_statistics WHERE stat_name='total_blocks'),
-              (SELECT stat_value FROM ref_statistics WHERE stat_name='total_references'),
-              (SELECT stat_value FROM ref_statistics WHERE stat_name='total_bytes'),
-              (SELECT stat_value FROM ref_statistics WHERE stat_name='unreferenced_blocks'),
-              (SELECT stat_value FROM ref_statistics WHERE stat_name='unreferenced_bytes'),
-              (SELECT stat_value FROM ref_statistics WHERE stat_name='transactions_completed'),
-              (SELECT stat_value FROM ref_statistics WHERE stat_name='transactions_rolled_back')
-        )");
+        // Create statement in local scope - destructor will properly finalize
+        {
+            auto stmt = pImpl->db->prepare(R"(
+                SELECT
+                  (SELECT stat_value FROM ref_statistics WHERE stat_name='total_blocks'),
+                  (SELECT stat_value FROM ref_statistics WHERE stat_name='total_references'),
+                  (SELECT stat_value FROM ref_statistics WHERE stat_name='total_bytes'),
+                  (SELECT stat_value FROM ref_statistics WHERE stat_name='unreferenced_blocks'),
+                  (SELECT stat_value FROM ref_statistics WHERE stat_name='unreferenced_bytes'),
+                  (SELECT stat_value FROM ref_statistics WHERE stat_name='transactions_completed'),
+                  (SELECT stat_value FROM ref_statistics WHERE stat_name='transactions_rolled_back')
+            )");
 
-        if (stmt.step()) {
-            stats.totalBlocks = static_cast<uint64_t>(stmt.getInt64(0));
-            stats.totalReferences = static_cast<uint64_t>(stmt.getInt64(1));
-            stats.totalBytes = static_cast<uint64_t>(stmt.getInt64(2));
-            stats.unreferencedBlocks = static_cast<uint64_t>(stmt.getInt64(3));
-            stats.unreferencedBytes = static_cast<uint64_t>(stmt.getInt64(4));
-            stats.transactions = static_cast<uint64_t>(stmt.getInt64(5));
-            stats.rollbacks = static_cast<uint64_t>(stmt.getInt64(6));
+            if (stmt.step()) {
+                stats.totalBlocks = static_cast<uint64_t>(stmt.getInt64(0));
+                stats.totalReferences = static_cast<uint64_t>(stmt.getInt64(1));
+                stats.totalBytes = static_cast<uint64_t>(stmt.getInt64(2));
+                stats.unreferencedBlocks = static_cast<uint64_t>(stmt.getInt64(3));
+                stats.unreferencedBytes = static_cast<uint64_t>(stmt.getInt64(4));
+                stats.transactions = static_cast<uint64_t>(stmt.getInt64(5));
+                stats.rollbacks = static_cast<uint64_t>(stmt.getInt64(6));
+            }
+            // stmt destructor called here, finalizes sqlite3_stmt
         }
 
         // Defensive recomputation: if triggers drift or stats table falls behind, reconcile
         // with authoritative values from block_references.
-        auto recalcStmt = pImpl->db->prepare(R"(
-            SELECT
-              COUNT(*) AS total_blocks,
-              IFNULL(SUM(ref_count), 0) AS total_references,
-              IFNULL(SUM(block_size), 0) AS total_bytes,
-              COUNT(CASE WHEN ref_count = 0 THEN 1 END) AS unreferenced_blocks,
-              IFNULL(SUM(CASE WHEN ref_count = 0 THEN block_size ELSE 0 END), 0) AS unreferenced_bytes
-            FROM block_references
-        )");
+        {
+            auto recalcStmt = pImpl->db->prepare(R"(
+                SELECT
+                  COUNT(*) AS total_blocks,
+                  IFNULL(SUM(ref_count), 0) AS total_references,
+                  IFNULL(SUM(block_size), 0) AS total_bytes,
+                  COUNT(CASE WHEN ref_count = 0 THEN 1 END) AS unreferenced_blocks,
+                  IFNULL(SUM(CASE WHEN ref_count = 0 THEN block_size ELSE 0 END), 0) AS unreferenced_bytes
+                FROM block_references
+            )");
 
-        if (recalcStmt.step()) {
-            const auto tableBlocks = static_cast<uint64_t>(recalcStmt.getInt64(0));
-            const auto tableRefs = static_cast<uint64_t>(recalcStmt.getInt64(1));
-            const auto tableBytes = static_cast<uint64_t>(recalcStmt.getInt64(2));
-            const auto tableUnref = static_cast<uint64_t>(recalcStmt.getInt64(3));
-            const auto tableUnrefBytes = static_cast<uint64_t>(recalcStmt.getInt64(4));
+            if (recalcStmt.step()) {
+                const auto tableBlocks = static_cast<uint64_t>(recalcStmt.getInt64(0));
+                const auto tableRefs = static_cast<uint64_t>(recalcStmt.getInt64(1));
+                const auto tableBytes = static_cast<uint64_t>(recalcStmt.getInt64(2));
+                const auto tableUnref = static_cast<uint64_t>(recalcStmt.getInt64(3));
+                const auto tableUnrefBytes = static_cast<uint64_t>(recalcStmt.getInt64(4));
 
-            if (stats.totalBlocks != tableBlocks || stats.totalReferences != tableRefs ||
-                stats.totalBytes != tableBytes || stats.unreferencedBlocks != tableUnref ||
-                stats.unreferencedBytes != tableUnrefBytes) {
-                stats.totalBlocks = tableBlocks;
-                stats.totalReferences = tableRefs;
-                stats.totalBytes = tableBytes;
-                stats.unreferencedBlocks = tableUnref;
-                stats.unreferencedBytes = tableUnrefBytes;
+                if (stats.totalBlocks != tableBlocks || stats.totalReferences != tableRefs ||
+                    stats.totalBytes != tableBytes || stats.unreferencedBlocks != tableUnref ||
+                    stats.unreferencedBytes != tableUnrefBytes) {
+                    stats.totalBlocks = tableBlocks;
+                    stats.totalReferences = tableRefs;
+                    stats.totalBytes = tableBytes;
+                    stats.unreferencedBlocks = tableUnref;
+                    stats.unreferencedBytes = tableUnrefBytes;
+                }
             }
+            // recalcStmt destructor called here, finalizes sqlite3_stmt
         }
 
         return stats;
@@ -578,13 +586,14 @@ Result<RefCountStats> ReferenceCounter::getStats() const {
 Result<std::vector<std::string>>
 ReferenceCounter::getUnreferencedBlocks(size_t limit, std::chrono::seconds minAge) const {
     try {
-        // Ensure exclusive access to the underlying connection (NOMUTEX mode)
-        std::unique_lock lock(pImpl->dbMutex);
+        // Shared lock for read operation
+        std::shared_lock lock(pImpl->dbMutex);
 
         std::vector<std::string> blocks;
         blocks.reserve(limit);
 
-        auto& stmt = pImpl->stmtCache->get(Impl::GET_UNREFERENCED_STMT, "");
+        // Get a fresh statement (cache now returns by value)
+        auto stmt = pImpl->stmtCache->get(Impl::GET_UNREFERENCED_STMT, "");
         stmt.bind(1, static_cast<int64_t>(minAge.count()));
         stmt.bind(2, static_cast<int64_t>(limit));
 
@@ -718,13 +727,13 @@ Result<void> ReferenceCounter::Transaction::commit() {
             // Apply all queued operations atomically
             for (const auto& op : operations_) {
                 if (op.type == Operation::Type::Increment) {
-                    auto& stmt =
+                    auto stmt =
                         counter_->pImpl->stmtCache->get(ReferenceCounter::Impl::INCREMENT_STMT, "");
                     stmt.bind(1, op.blockHash);
                     stmt.bind(2, static_cast<int64_t>(op.blockSize));
                     stmt.execute();
                 } else {
-                    auto& stmt =
+                    auto stmt =
                         counter_->pImpl->stmtCache->get(ReferenceCounter::Impl::DECREMENT_STMT, "");
                     stmt.bind(1, op.blockHash);
                     stmt.execute();

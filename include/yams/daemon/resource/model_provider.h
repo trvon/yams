@@ -9,6 +9,10 @@
 #include <yams/core/types.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 
+namespace yams::vector {
+class EmbeddingGenerator;
+}
+
 namespace yams::daemon {
 // Forward declaration
 struct ModelPoolConfig;
@@ -135,6 +139,17 @@ public:
      * @return Embedding dimension or 0 if not loaded
      */
     virtual size_t getEmbeddingDim(const std::string& modelName) const = 0;
+
+    /**
+     * Get an EmbeddingGenerator backed by this provider
+     * This allows ServiceManager to work with a unified EmbeddingGenerator interface
+     * while the provider handles the actual model management internally.
+     *
+     * @param modelName Name of the model to use (empty = use default/first loaded model)
+     * @return Shared pointer to EmbeddingGenerator or nullptr if not available
+     */
+    virtual std::shared_ptr<vector::EmbeddingGenerator>
+    getEmbeddingGenerator(const std::string& modelName = "") = 0;
 
     // ========================================================================
     // Provider Information

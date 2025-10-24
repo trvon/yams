@@ -333,8 +333,11 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
   endif
 
   if get_option('enable-bench-tests')
+  # Note: All bench tests use suite 'bench' or ['bench', 'isolated']
+  # Run unified benchmarks with: meson test -C builddir --suite bench
+  
   test('unit_isolated_integrity_verifier', unit_exe,
-    suite: ['bench', 'isolated'],
+    suite: ['bench', 'isolated', 'perf'],
     args: ['--gtest_filter=IntegrityVerifierTest.*'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
@@ -360,7 +363,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
 
   if get_option('enable-bench-tests')
   test('unit_isolated_streaming_chunker', unit_exe,
-    suite: ['bench', 'isolated'],
+    suite: ['bench', 'isolated', 'perf'],
     args: ['--gtest_filter=StreamingChunkerTest.*'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
@@ -370,7 +373,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
   )
 
   test('unit_isolated_chunk_validator', unit_exe,
-    suite: ['bench', 'isolated'],
+    suite: ['bench', 'isolated', 'perf'],
     args: ['--gtest_filter=ChunkValidatorParallel.*'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
@@ -380,7 +383,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
   )
 
   test('unit_isolated_download_manager', unit_exe,
-    suite: ['bench', 'isolated'],
+    suite: ['bench', 'isolated', 'perf'],
     args: ['--gtest_filter=DownloadManagerExport.*'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
@@ -390,7 +393,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
   )
 
   test('unit_isolated_storage_backend', unit_exe,
-    suite: ['bench', 'isolated'],
+    suite: ['bench', 'isolated', 'perf'],
     args: ['--gtest_filter=StorageBackendTest.*'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
@@ -400,7 +403,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
   )
 
   test('unit_isolated_repair_coordinator', unit_exe,
-    suite: ['bench', 'isolated'],
+    suite: ['bench', 'isolated', 'perf'],
     args: ['--gtest_filter=RepairCoordinatorTest.*'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
@@ -410,7 +413,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
   )
 
   test('unit_isolated_service_manager', unit_exe,
-    suite: ['bench', 'isolated'],
+    suite: ['bench', 'isolated', 'perf'],
     args: ['--gtest_filter=ServiceManagerTest.*'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
@@ -420,7 +423,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
   )
 
   test('unit_shard_vectordb_metrics', unit_exe,
-    suite: ['bench'],
+    suite: ['bench', 'perf'],
     args: ['--gtest_filter=DaemonMetrics.VectorDbReadyHealsFromHandle'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
@@ -430,7 +433,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
   )
 
   test('unit_shard_post_ingest_queue', unit_exe,
-    suite: ['bench'],
+    suite: ['bench', 'perf'],
     args: ['--gtest_filter=PostIngestQueueStandardTest.*'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
@@ -441,7 +444,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
 
   # Fast warm-latency bench (replaces unit WarmLatencyBenchmark)
   test('unit_bench_daemon_warm_latency', unit_exe,
-    suite: ['bench'],
+    suite: ['bench', 'perf'],
     args: ['--gtest_filter=DaemonBench.WarmLatencyFast'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
@@ -563,7 +566,7 @@ daemon_warm_bench = executable('yams_bench_daemon_warm',
 
 if get_option('enable-bench-tests')
   test('bench_daemon_warm_latency', daemon_warm_bench,
-    suite: ['bench'],
+    suite: ['bench', 'perf'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
     },

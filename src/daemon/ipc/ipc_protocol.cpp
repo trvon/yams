@@ -63,6 +63,8 @@ MessageType getMessageType(const Request& req) {
                 return MessageType::RemovePathSelectorRequest;
             } else if constexpr (std::is_same_v<T, FileHistoryRequest>) {
                 return MessageType::FileHistoryRequest;
+            } else if constexpr (std::is_same_v<T, PruneRequest>) {
+                return MessageType::PruneRequest;
             }
             return MessageType::StatusRequest; // Default
         },
@@ -126,6 +128,8 @@ MessageType getMessageType(const Response& res) {
                 return MessageType::ListSessionsResponse;
             } else if constexpr (std::is_same_v<T, FileHistoryResponse>) {
                 return MessageType::FileHistoryResponse;
+            } else if constexpr (std::is_same_v<T, PruneResponse>) {
+                return MessageType::PruneResponse;
             }
             return MessageType::ErrorResponse; // Default
         },
@@ -179,6 +183,8 @@ std::string getRequestName(const Request& req) {
                 return "AddPathSelector";
             } else if constexpr (std::is_same_v<T, RemovePathSelectorRequest>) {
                 return "RemovePathSelector";
+            } else if constexpr (std::is_same_v<T, PruneRequest>) {
+                return "Prune";
             }
             return "Unknown";
         },

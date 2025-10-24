@@ -154,6 +154,8 @@ public:
                                               const std::string& content,
                                               const std::string& contentType) = 0;
     virtual Result<void> removeFromIndex(int64_t documentId) = 0;
+    virtual Result<void> removeFromIndexByHash(const std::string& hash) = 0;
+    virtual Result<std::vector<int64_t>> getAllFts5IndexedDocumentIds() = 0;
     virtual Result<SearchResults>
     search(const std::string& query, int limit = 50, int offset = 0,
            const std::optional<std::vector<int64_t>>& docIds = std::nullopt) = 0;
@@ -310,6 +312,8 @@ public:
                                       const std::string& content,
                                       const std::string& contentType) override;
     Result<void> removeFromIndex(int64_t documentId) override;
+    Result<void> removeFromIndexByHash(const std::string& hash) override;
+    Result<std::vector<int64_t>> getAllFts5IndexedDocumentIds() override;
     Result<SearchResults>
     search(const std::string& query, int limit = 50, int offset = 0,
            const std::optional<std::vector<int64_t>>& docIds = std::nullopt) override;

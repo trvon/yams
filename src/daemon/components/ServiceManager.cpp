@@ -11,6 +11,7 @@
 #include <future>
 #include <map>
 #include <optional>
+#include <system_error>
 #include <thread>
 #include <unistd.h>
 #include <boost/asio/as_tuple.hpp>
@@ -19,6 +20,7 @@
 #include <boost/asio/detached.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/experimental/channel.hpp>
+#include <boost/asio/experimental/parallel_group.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
@@ -27,7 +29,9 @@
 #include <yams/app/services/session_service.hpp>
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/core/types.h>
+#include <yams/daemon/components/BackgroundTaskManager.h>
 #include <yams/daemon/components/DaemonMetrics.h>
+#include <yams/daemon/components/EntityGraphService.h>
 #include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/init_utils.hpp>
 #include <yams/daemon/components/InternalEventBus.h>
@@ -45,6 +49,8 @@
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/detection/file_type_detector.h>
+#include <yams/extraction/extraction_util.h>
+#include <yams/integrity/repair_manager.h>
 #include <yams/metadata/migration.h>
 #include <yams/plugins/symbol_extractor_v1.h>
 #include <yams/repair/embedding_repair_util.h>
@@ -244,8 +250,60 @@ using yams::ErrorCode;
 using yams::Result;
 namespace search = yams::search;
 
-ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state)
-    : config_(config), state_(state) {
+ServiceManager::PluginStatusSnapshot ServiceManager::getPluginStatusSnapshot() const {
+    std::shared_lock lk(pluginStatusMutex_);
+    return pluginStatusSnapshot_;
+}
+
+void ServiceManager::refreshPluginStatusSnapshot() {
+    PluginStatusSnapshot snapshot;
+    try {
+        snapshot.host = pluginHostFsm_.snapshot();
+        bool providerDegraded = false;
+        try {
+            auto es = embeddingFsm_.snapshot();
+            providerDegraded = (es.state == EmbeddingProviderState::Degraded ||
+                                es.state == EmbeddingProviderState::Failed);
+        } catch (...) {
+        }
+        const bool providerReady = state_.readiness.modelProviderReady.load();
+        const auto providerError =
+            lifecycleFsm_.degradationReason("embeddings"); // Use lifecycleFsm instead
+        const auto modelsLoaded = cachedModelProviderModelCount_.load(std::memory_order_relaxed);
+        if (abiHost_) {
+            auto loaded = abiHost_->listLoaded();
+            snapshot.records.reserve(loaded.size());
+            for (const auto& d : loaded) {
+                PluginStatusRecord rec;
+                rec.name = d.name;
+                rec.isProvider =
+                    (!adoptedProviderPluginName_.empty() && adoptedProviderPluginName_ == d.name);
+                if (rec.isProvider) {
+                    rec.ready = providerReady;
+                    rec.degraded = providerDegraded;
+                    rec.error = providerError;
+                    rec.modelsLoaded = modelsLoaded;
+                } else {
+                    rec.ready = (snapshot.host.state == PluginHostState::Ready);
+                    rec.degraded = (snapshot.host.state == PluginHostState::Failed);
+                    if (rec.degraded)
+                        rec.error = snapshot.host.lastError;
+                }
+                snapshot.records.push_back(std::move(rec));
+            }
+        }
+    } catch (...) {
+        // leave snapshot empty on failure
+    }
+    {
+        std::unique_lock lk(pluginStatusMutex_);
+        pluginStatusSnapshot_ = std::move(snapshot);
+    }
+}
+
+ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state,
+                               DaemonLifecycleFsm& lifecycleFsm)
+    : config_(config), state_(state), lifecycleFsm_(lifecycleFsm) {
     tuningConfig_ = config_.tuning;
 
     ingestWorkerTarget_.store(1, std::memory_order_relaxed);
@@ -266,6 +324,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
 
     try {
         spdlog::debug("ServiceManager constructor start");
+        refreshPluginStatusSnapshot();
         // In test builds, prefer mock embedding provider unless explicitly disabled.
         // This avoids heavy ONNX runtime usage and platform-specific crashes on CI/macOS.
 #ifdef YAMS_TESTING
@@ -284,10 +343,9 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             }
         } catch (...) {
         }
-        x
 #endif
-            // Initialize worker pool early at a conservative minimum; TuningManager will scale up.
-            try {
+        // Initialize worker pool early at a conservative minimum; TuningManager will scale up.
+        try {
             if (!workerPool_) {
                 auto threads = static_cast<std::size_t>(TuneAdvisor::poolMinSizeIpc());
                 if (threads < 1)
@@ -445,6 +503,18 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                     ingestThreads = 1;
                 }
                 ingestService_ = std::make_unique<IngestService>(this, ingestThreads);
+                // Initialize EntityGraphService skeleton
+                try {
+                    if (!entityGraphService_) {
+                        entityGraphService_ = std::make_shared<EntityGraphService>(this, 1);
+                        entityGraphService_->start();
+                        spdlog::info("EntityGraphService initialized (workers=1)");
+                    }
+                } catch (const std::exception& e2) {
+                    spdlog::warn("Failed to initialize EntityGraphService: {}", e2.what());
+                } catch (...) {
+                    spdlog::warn("Unknown error initializing EntityGraphService");
+                }
             }
         } catch (const std::exception& e) {
             spdlog::warn("ServiceManager: failed to initialize IngestService scaffold: {}",
@@ -556,9 +626,26 @@ yams::Result<void> ServiceManager::initialize() {
             modelLoadPool_ = std::make_unique<boost::asio::thread_pool>(2);
             spdlog::debug("Model load pool initialized with 2 threads");
         } catch (const std::exception& e) {
-            spdlog::warn("Failed to create model load thread pool: {}", e.what());
+            spdlog::warn("Failed to create model load thread pool: {} (will use worker executor)",
+                         e.what());
         }
     }
+    // Initialize dedicated plugin loading pool (2 threads for concurrent plugin loading)
+    if (!pluginLoadPool_) {
+        try {
+            pluginLoadPool_ = std::make_unique<boost::asio::thread_pool>(2);
+            spdlog::debug("Plugin load pool initialized with 2 threads");
+        } catch (const std::exception& e) {
+            spdlog::warn("Failed to create plugin load thread pool: {} (will use worker executor)",
+                         e.what());
+        }
+    }
+    if (initThread_.joinable()) {
+        spdlog::debug("Previous init thread still active; requesting stop before restart");
+        initThread_.request_stop();
+        initThread_.join();
+    }
+
     initThread_ = yams::compat::jthread([this](yams::compat::stop_token token) {
         spdlog::info("Starting async resource initialization (coroutine)...");
         // Launch coroutine on system executor and wait for completion in this thread
@@ -655,35 +742,51 @@ void ServiceManager::shutdown() {
         spdlog::debug("ServiceManager: shutdown already invoked; skipping.");
         return;
     }
-    // Stop pool reconciler thread first
-    try {
-        if (poolReconThread_.joinable()) {
-            poolReconThread_.request_stop();
-        }
-    } catch (...) {
-    }
-    // Removed: lifecycleReadyWatchdog_ shutdown (thread eliminated)
 
-    if (initThread_.joinable()) {
-        initThread_.request_stop();
-        initThread_.join();
+    spdlog::info("ServiceManager shutdown initiated");
+
+    // Phase 1: Stop application-level background task consumers
+    // This signals coroutines to exit gracefully
+    if (backgroundTaskManager_) {
+        backgroundTaskManager_->stop();
+        spdlog::debug("Background task manager stopped");
     }
-    if (initPool_) {
-        try {
-            initPool_->stop();
-            initPool_->join();
-        } catch (...) {
+
+    // Phase 2: Stop worker pool executor (no new work accepted)
+    if (workerPool_) {
+        workerPool_->stop();
+        spdlog::debug("Worker pool stopped");
+    }
+
+    // Phase 3: Stop auxiliary threads before dependent services destruct.
+    auto joinThread = [](yams::compat::jthread& thread, const char* name) {
+        if (!thread.joinable()) {
+            return;
         }
-        initPool_.reset();
-    }
-    if (modelLoadPool_) {
-        try {
-            modelLoadPool_->stop();
-            modelLoadPool_->join();
-        } catch (...) {
+        if (std::this_thread::get_id() == thread.get_id()) {
+            spdlog::warn(
+                "Skipping join for {} thread because shutdown is executing on the same thread",
+                name);
+            return;
         }
-        modelLoadPool_.reset();
-    }
+
+        spdlog::debug("Requesting stop for {} thread", name);
+        thread.request_stop();
+        try {
+            thread.join();
+            spdlog::debug("{} thread joined", name);
+        } catch (const std::system_error& ex) {
+            spdlog::warn("Failed to join {} thread cleanly: {}", name, ex.what());
+        }
+    };
+
+    joinThread(poolReconThread_, "pool reconciliation");
+    joinThread(initThread_, "init");
+
+    // Phase 4: Remaining cleanup handled automatically via RAII as members destruct in reverse
+    // order.
+
+    spdlog::info("ServiceManager shutdown complete (awaiting RAII cleanup)");
 
     spdlog::debug("ServiceManager: Shutting down daemon resources");
 
@@ -692,17 +795,17 @@ void ServiceManager::shutdown() {
         ingestService_.reset();
     }
 
+    if (entityGraphService_) {
+        entityGraphService_->stop();
+        entityGraphService_.reset();
+    }
+
     if (postIngest_) {
         postIngest_.reset();
     }
 
-    if (workerPool_) {
-        try {
-            workerPool_->stop();
-        } catch (...) {
-        }
-        workerPool_.reset();
-    }
+    // Thread pools and BackgroundTaskManager will be destroyed automatically by member destructors
+    // in reverse order of declaration, which is correct (backgroundTaskManager_ before workerPool_)
 
     // Persist vector index when ready
     if (vectorIndexManager_ && state_.readiness.vectorIndexReady.load()) {
@@ -789,7 +892,6 @@ void ServiceManager::shutdown() {
     searchExecutor_.reset();
     metadataRepo_.reset();
     vectorIndexManager_.reset();
-    searchBuilder_.reset();
     contentStore_.reset();
 
     // Small ownership alignment: ensure plugin loader/hosts are released at stop
@@ -1094,25 +1196,7 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
             // fallthrough on success to existing success block
             ;
 
-            // original blocking call (kept for structure; already done by async)
-            // if (!vdb->initialize()) { ... }
-
-            // success continues below
-            if (false) {
-            init_failed_path:
-                // Heuristic: retry on lock/busy/timeout errors; otherwise abort early
-                auto err = vdb->getLastError();
-                std::string el = err;
-                std::transform(el.begin(), el.end(), el.begin(), ::tolower);
-                bool transient = (el.find("busy") != std::string::npos) ||
-                                 (el.find("lock") != std::string::npos) ||
-                                 (el.find("locked") != std::string::npos) ||
-                                 (el.find("timeout") != std::string::npos) || el.empty();
-                if (!transient && attempt + 1 < maxAttempts) {
-                    attempt = maxAttempts - 1; // non-transient: stop early
-                }
-                continue;
-            }
+        init_failed_path:
             spdlog::info("[VectorInit] Calling vdb->initialize() attempt {}", attempt + 1);
             if (!vdb->initialize()) {
                 auto err = vdb->getLastError();
@@ -1400,10 +1484,20 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     auto dbPath = dataDir / "yams.db";
     database_ = std::make_shared<metadata::Database>();
     int open_timeout = read_timeout_ms("YAMS_DB_OPEN_TIMEOUT_MS", 5000, 250);
-    // FSM: opening database
+
+    // Check stop again before FSM transition
+    if (token.stop_requested())
+        co_return Error{ErrorCode::OperationCancelled, "Shutdown requested"};
+
+    // FSM: opening database (catch exceptions during shutdown race)
     try {
         serviceFsm_.dispatch(OpeningDatabaseEvent{});
+    } catch (const std::exception& e) {
+        spdlog::warn("[ServiceManager] FSM dispatch during shutdown: {}", e.what());
+        co_return Error{ErrorCode::OperationCancelled, "FSM dispatch failed during shutdown"};
     } catch (...) {
+        spdlog::warn("[ServiceManager] FSM dispatch during shutdown (unknown exception)");
+        co_return Error{ErrorCode::OperationCancelled, "FSM dispatch failed during shutdown"};
     }
     bool db_ok = co_await init::await_record_duration(
         "database",
@@ -1489,6 +1583,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     // Initialize component-owned metrics (sync with DB once at startup)
                     metadataRepo_->initializeCounters();
                     spdlog::info("Metadata repository initialized successfully");
+
+                    // Note: RepairManager initialization deferred to RepairCoordinator
+                    // since it needs access to storage engine which is not directly
+                    // exposed by IContentStore interface
+
                     return yams::Result<void>();
                 },
                 state_.initDurationsMs);
@@ -1708,8 +1807,9 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                 enableAutoload = false;
         }
         if (enableAutoload) {
-            auto loadResult =
-                init::step<size_t>("plugin_autoload_now", [&]() { return autoloadPluginsNow(); });
+            auto loadResult = co_await init::await_step(
+                "plugin_autoload_now",
+                [&]() -> boost::asio::awaitable<Result<size_t>> { return autoloadPluginsNow(); });
             if (loadResult) {
                 spdlog::info("ServiceManager: Autoloaded {} plugins.", loadResult.value());
             }
@@ -1784,6 +1884,9 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         spdlog::warn("Plugin autoload failed: {}", e.what());
     }
     spdlog::info("[ServiceManager] Phase: Plugins Autoloaded.");
+    // Update pluginsReady flag after actual loading completes
+    state_.readiness.pluginsReady = true;
+    refreshPluginStatusSnapshot();
 
     embeddingPreloadOnStartup_ = detectEmbeddingPreloadFlag();
     // Now initialize Vector DB synchronously so embedding flow sees correct dim
@@ -1829,17 +1932,39 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             writeBootstrapStatusFile(config_, state_);
         }
         int build_timeout = read_timeout_ms("YAMS_SEARCH_BUILD_TIMEOUT_MS", 5000, 250);
+
+        // Determine vector_enabled: check if vector DB has usable data
+        bool vectorEnabled = false;
+        if (vectorDatabase_) {
+            try {
+                // Use VectorDatabase directly - it knows the actual DB size
+                auto vectorCount = vectorDatabase_->getVectorCount();
+                vectorEnabled = (vectorCount > 0);
+                spdlog::info("[SearchBuild] Vector DB has {} vectors, vector_enabled={}",
+                             vectorCount, vectorEnabled);
+            } catch (const std::exception& e) {
+                spdlog::warn("[SearchBuild] Could not check vector count: {}", e.what());
+            }
+        }
+
         spdlog::info("[SearchBuild] scheduling initial build (vector_enabled hint={})",
-                     (embeddingGenerator_ && embeddingGenerator_->isInitialized()) ? "true"
-                                                                                   : "false");
+                     vectorEnabled);
         // Nudge progress to indicate we're in the final build step
         try {
             state_.readiness.searchProgress =
                 std::max<int>(state_.readiness.searchProgress.load(), 90);
         } catch (...) {
         }
-        auto built = co_await co_buildEngine(build_timeout, token, false);
-        if (built) {
+
+        // Phase 2.4: Use SearchEngineManager instead of co_buildEngine
+        // Pass embeddingGenerator_ even if not initialized - SearchEngineManager will check vector
+        // DB data
+        auto buildResult = co_await searchEngineManager_.buildEngine(
+            metadataRepo_, vectorIndexManager_, embeddingGenerator_, "initial", build_timeout,
+            getWorkerExecutor());
+
+        if (buildResult.has_value()) {
+            auto built = buildResult.value();
             std::lock_guard<std::shared_mutex> lk(searchEngineMutex_); // Exclusive write
             searchEngine_ = built;
             state_.readiness.searchEngineReady = true;
@@ -1872,148 +1997,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     }
     spdlog::info("[ServiceManager] Phase: Ingest Service Started.");
 
-    // Launch InternalEventBus consumer for embed jobs when worker executors are available.
-    try {
-        std::shared_ptr<ServiceManager> self;
-        try {
-            self = shared_from_this();
-        } catch (const std::bad_weak_ptr&) {
-            self.reset();
-            // Subscribe to model provider readiness events to trigger deferred vector DB init
-            try {
-                using Bus = yams::daemon::InternalEventBus;
-                static std::shared_ptr<SpscQueue<Bus::ModelReadyEvent>> modelQ =
-                    Bus::instance().get_or_create_channel<Bus::ModelReadyEvent>("model.events",
-                                                                                256);
-                // Poll once non-blocking; if any ready event matches preferred model, try init now
-                Bus::ModelReadyEvent ev;
-                int drained = 0;
-                while (modelQ->try_pop(ev)) {
-                    ++drained;
-                    try {
-                        auto preferred = resolvePreferredModel();
-                        if (!preferred.empty() && ev.modelId == preferred) {
-                            spdlog::info("[VectorInit] ModelReadyEvent for '{}' -> attempting init",
-                                         ev.modelId);
-                            auto vdbRes = initializeVectorDatabaseOnce(dataDir);
-                            if (!vdbRes)
-                                spdlog::warn("[VectorInit] init on event failed: {}",
-                                             vdbRes.error().message);
-                        }
-                    } catch (...) {
-                    }
-                }
-                if (drained == 0) {
-                    spdlog::debug("[VectorInit] no model events yet; init stays deferred");
-                }
-            } catch (...) {
-            }
-        }
-        if (self) {
-            auto exec = getWorkerExecutor();
-            boost::asio::co_spawn(
-                exec,
-                [self]() -> boost::asio::awaitable<void> {
-                    using Bus = yams::daemon::InternalEventBus;
-                    auto channel =
-                        Bus::instance().get_or_create_channel<Bus::EmbedJob>("embed_jobs", 1024);
-                    using namespace std::chrono_literals;
-                    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
-                    for (;;) {
-                        Bus::EmbedJob job;
-                        if (channel && channel->try_pop(job)) {
-                            try {
-                                auto content = self->getContentStore();
-                                auto meta = self->getMetadataRepo();
-                                auto embed = self->getEmbeddingGenerator();
-                                if (!embed) {
-                                    (void)self->ensureEmbeddingGeneratorReady();
-                                    embed = self->getEmbeddingGenerator();
-                                }
-                                if (!(content && meta && embed)) {
-                                    spdlog::debug(
-                                        "EmbedJob: services not ready; dropping job ({} docs)",
-                                        job.hashes.size());
-                                } else {
-                                    yams::repair::EmbeddingRepairConfig rcfg;
-                                    rcfg.batchSize = job.batchSize ? job.batchSize : 32u;
-                                    rcfg.skipExisting = job.skipExisting;
-                                    rcfg.dataPath = self->getConfig().dataDir;
-                                    if (self) {
-                                        auto exec = self->getWorkerExecutor();
-                                        // Background listener: model readiness -> attempt deferred
-                                        // Vector DB init
-                                        boost::asio::co_spawn(
-                                            exec,
-                                            [self]() -> boost::asio::awaitable<void> {
-                                                using Bus = yams::daemon::InternalEventBus;
-                                                auto q = Bus::instance()
-                                                             .get_or_create_channel<
-                                                                 Bus::ModelReadyEvent>(
-                                                                 "model.events", 256);
-                                                boost::asio::steady_timer timer(
-                                                    co_await boost::asio::this_coro::executor);
-                                                for (;;) {
-                                                    Bus::ModelReadyEvent ev;
-                                                    bool had = false;
-                                                    while (q->try_pop(ev)) {
-                                                        had = true;
-                                                        try {
-                                                            auto preferred =
-                                                                self->resolvePreferredModel();
-                                                            if (!preferred.empty() &&
-                                                                ev.modelId == preferred) {
-                                                                spdlog::info("[VectorInit] async "
-                                                                             "ModelReadyEvent for "
-                                                                             "'{}' -> init",
-                                                                             ev.modelId);
-                                                                auto vdbRes =
-                                                                    self->initializeVectorDatabaseOnce(
-                                                                        self->config_.dataDir);
-                                                                if (!vdbRes)
-                                                                    spdlog::warn(
-                                                                        "[VectorInit] init on "
-                                                                        "event failed: {}",
-                                                                        vdbRes.error().message);
-                                                            }
-                                                        } catch (...) {
-                                                        }
-                                                    }
-                                                    using namespace std::chrono_literals;
-                                                    timer.expires_after(had ? 5ms : 200ms);
-                                                    co_await timer.async_wait(
-                                                        boost::asio::use_awaitable);
-                                                }
-                                                co_return;
-                                            },
-                                            boost::asio::detached);
-                                    }
-
-                                    auto repair = yams::repair::repairMissingEmbeddings(
-                                        content, meta, embed, rcfg, job.hashes, nullptr,
-                                        self->getContentExtractors());
-                                    if (!repair) {
-                                        spdlog::warn("EmbedJob: repair failed: {}",
-                                                     repair.error().message);
-                                    }
-                                }
-                            } catch (const std::exception& e) {
-                                spdlog::debug("EmbedJob consumer exception: {}", e.what());
-                            } catch (...) {
-                            }
-                            Bus::instance().incEmbedConsumed();
-                            continue;
-                        }
-                        timer.expires_after(100ms);
-                        co_await timer.async_wait(boost::asio::use_awaitable);
-                    }
-                    co_return;
-                },
-                boost::asio::detached);
-        }
-    } catch (...) {
-    }
-    spdlog::info("[ServiceManager] Phase: Event Bus Consumer Launched.");
+    // Note: Background task coroutines (EmbedJob/Fts5Job consumers, OrphanScan) are launched
+    // via startBackgroundTasks() after construction, when shared_from_this() is available.
 
     co_return Result<void>();
 }
@@ -2121,96 +2106,6 @@ boost::asio::awaitable<bool> ServiceManager::co_migrateDatabase(int timeout_ms,
     co_return static_cast<bool>(pres1 && (*pres1));
 }
 
-boost::asio::awaitable<std::shared_ptr<search::HybridSearchEngine>>
-ServiceManager::co_buildEngine(int timeout_ms, yams::compat::stop_token token,
-                               bool includeEmbeddingGenerator) {
-    using namespace boost::asio::experimental::awaitable_operators;
-    auto ex = co_await boost::asio::this_coro::executor;
-    bool vector_enabled = false;
-    try {
-        vector_enabled = includeEmbeddingGenerator && embeddingGenerator_ &&
-                         embeddingGenerator_->isInitialized();
-    } catch (...) {
-    }
-    // Record intended reason: initial when not including embeddings; rebuild otherwise.
-    try {
-        this->lastSearchBuildReason_ = includeEmbeddingGenerator ? "rebuild" : "initial";
-    } catch (...) {
-    }
-    spdlog::info("[SearchBuild] start include_embeddings={} vector_enabled={} timeout_ms={}",
-                 includeEmbeddingGenerator ? "true" : "false", vector_enabled ? "true" : "false",
-                 timeout_ms);
-    searchBuilder_ = std::make_shared<search::SearchEngineBuilder>();
-    searchBuilder_->withMetadataRepo(metadataRepo_);
-    if (vectorIndexManager_)
-        searchBuilder_->withVectorIndex(vectorIndexManager_);
-    if (includeEmbeddingGenerator && embeddingGenerator_)
-        searchBuilder_->withEmbeddingGenerator(embeddingGenerator_);
-    auto opts = search::SearchEngineBuilder::BuildOptions::makeDefault();
-    try {
-        serviceFsm_.dispatch(SearchEngineBuildStartedEvent{});
-    } catch (...) {
-    }
-    using RetT = Result<std::shared_ptr<search::HybridSearchEngine>>;
-
-    boost::asio::experimental::channel<void(boost::system::error_code, std::shared_ptr<RetT>)> ch(
-        ex, 1);
-    try {
-        boost::asio::post(getWorkerExecutor(), [this, opts, &ch]() mutable {
-            try {
-                auto r = searchBuilder_->buildEmbedded(opts);
-                ch.try_send(boost::system::error_code{}, std::make_shared<RetT>(std::move(r)));
-            } catch (...) {
-                ch.try_send(make_error_code(std::errc::operation_canceled),
-                            std::make_shared<RetT>(
-                                Error{ErrorCode::InternalError, "Engine build exception"}));
-            }
-        });
-    } catch (...) {
-        auto r = searchBuilder_->buildEmbedded(opts);
-        if (r) {
-            spdlog::info("[SearchBuild] completed synchronously (fallback) ok vector_enabled={}",
-                         vector_enabled ? "true" : "false");
-            co_return r.value();
-        }
-        spdlog::warn("[SearchBuild] failed synchronously (fallback)");
-        co_return nullptr;
-    }
-
-    boost::asio::steady_timer timer(ex);
-    timer.expires_after(std::chrono::milliseconds(timeout_ms));
-    auto which = co_await (ch.async_receive(boost::asio::as_tuple(boost::asio::use_awaitable)) ||
-                           timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable)));
-    if (which.index() == 1 || token.stop_requested()) {
-        spdlog::warn("[SearchBuild] timeout after {} ms; continuing degraded", timeout_ms);
-        try {
-            this->lastSearchBuildReason_ = "degraded";
-        } catch (...) {
-        }
-        co_return nullptr;
-    }
-    auto tup2 = std::move(std::get<0>(which));
-    auto ec2 = std::get<0>(tup2);
-    auto pres2 = std::get<1>(tup2);
-    if (ec2 || !pres2 || !(*pres2)) {
-        if (pres2 && (*pres2))
-            spdlog::warn("[SearchBuild] failed: {}", pres2->error().message);
-        else
-            spdlog::warn("[SearchBuild] failed: unknown error");
-        try {
-            this->lastSearchBuildReason_ = "degraded";
-        } catch (...) {
-        }
-        co_return nullptr;
-    }
-    spdlog::info("[SearchBuild] end ok vector_enabled={}", vector_enabled ? "true" : "false");
-    try {
-        this->lastVectorEnabled_ = vector_enabled;
-    } catch (...) {
-    }
-    co_return pres2->value();
-}
-
 Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& preferredName) {
     try {
         if (abiHost_) {
@@ -2266,6 +2161,13 @@ Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& pref
                              pluginName, path_for(pluginName), (int)table->abi_version);
                 adoptedProviderPluginName_ = pluginName;
                 clearModelProviderError();
+                try {
+                    auto count = static_cast<std::uint32_t>(modelProvider_->getLoadedModelCount());
+                    setCachedModelProviderModelCount(count);
+                } catch (...) {
+                    setCachedModelProviderModelCount(0);
+                }
+                refreshPluginStatusSnapshot();
                 try {
                     embeddingFsm_.dispatch(ProviderAdoptedEvent{pluginName});
                 } catch (...) {
@@ -2402,6 +2304,14 @@ Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& pref
                         state_.readiness.modelProviderReady = (modelProvider_ != nullptr);
                         adoptedProviderPluginName_ = d.name;
                         clearModelProviderError();
+                        try {
+                            auto count =
+                                static_cast<std::uint32_t>(modelProvider_->getLoadedModelCount());
+                            setCachedModelProviderModelCount(count);
+                        } catch (...) {
+                            setCachedModelProviderModelCount(0);
+                        }
+                        refreshPluginStatusSnapshot();
                         return Result<bool>(true);
                     } catch (...) {
                     }
@@ -2418,6 +2328,7 @@ Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& pref
     } catch (...) {
         // best-effort: FSM dispatch should not interfere with result propagation
     }
+    refreshPluginStatusSnapshot();
     return Result<bool>(false);
 }
 
@@ -2463,28 +2374,38 @@ bool ServiceManager::resizeWorkerPool(std::size_t target) {
     }
 }
 
-Result<size_t> ServiceManager::autoloadPluginsNow() {
+boost::asio::awaitable<Result<size_t>> ServiceManager::autoloadPluginsNow() {
+    auto self = shared_from_this(); // Capture shared_from_this for coroutine safety
+    auto plugin_load_executor =
+        pluginLoadPool_ ? pluginLoadPool_->get_executor() : getWorkerExecutor();
+    std::vector<boost::asio::awaitable<Result<PluginDescriptor>>> load_tasks;
+    size_t loaded_count = 0; // Initialize loaded_count here
     try {
         // FSM guard: avoid concurrent autoload scans
         try {
             auto ps = pluginHostFsm_.snapshot().state;
+            spdlog::info("Plugin autoload(now): FSM state check - current state: {}",
+                         static_cast<int>(ps));
             if (ps == PluginHostState::ScanningDirectories ||
                 ps == PluginHostState::LoadingPlugins) {
-                spdlog::debug("Plugin autoload skipped: scan already in progress");
-                return Result<size_t>(0);
+                spdlog::warn("Plugin autoload skipped: scan already in progress (state={})",
+                             static_cast<int>(ps));
+                co_return Result<size_t>(0);
             }
+            // VerifyingTrust and NotInitialized are OK - proceed with scan
         } catch (...) {
         }
+        refreshPluginStatusSnapshot();
         // In mock/test mode, skip scanning/loading ABI plugins entirely to avoid
         // platform-specific crashes from dlopen or missing runtimes. The embedding
         // stack will use the mock provider instead.
         if (config_.useMockModelProvider || env_truthy(std::getenv("YAMS_USE_MOCK_PROVIDER"))) {
             spdlog::info("Plugin autoload skipped (mock provider in use)");
-            return Result<size_t>(0);
+            co_return Result<size_t>(0);
         }
         if (const char* d = std::getenv("YAMS_DISABLE_ABI_PLUGINS"); d && *d) {
             spdlog::info("Plugin autoload disabled by YAMS_DISABLE_ABI_PLUGINS");
-            return Result<size_t>(0);
+            co_return Result<size_t>(0);
         }
         std::vector<std::filesystem::path> roots;
         if (abiHost_) {
@@ -2516,18 +2437,20 @@ Result<size_t> ServiceManager::autoloadPluginsNow() {
         } catch (...) {
         }
         for (const auto& r : roots) {
-            spdlog::debug("Plugin autoload(now): root {}", r.string());
+            spdlog::info("Plugin autoload(now): scanning root {}", r.string());
         }
-        size_t loaded_count = 0;
         for (const auto& r : roots) {
             try {
-                if (abiHost_) {
-                    if (auto sr = abiHost_->scanDirectory(r)) {
+                if (self->abiHost_) {                                 // Use self->abiHost_
+                    if (auto sr = self->abiHost_->scanDirectory(r)) { // Use self->abiHost_
                         if (sr.value().empty()) {
-                            spdlog::debug("Plugin autoload(now): no candidates in {}", r.string());
+                            spdlog::info("Plugin autoload(now): no candidates in {}", r.string());
+                        } else {
+                            spdlog::info("Plugin autoload(now): found {} candidate(s) in {}",
+                                         sr.value().size(), r.string());
                         }
                         for (const auto& d : sr.value()) {
-                            spdlog::debug(
+                            spdlog::info(
                                 "Plugin autoload(now): candidate '{}' path='{}' ifaces=[{}]",
                                 d.name, d.path.string(), [&]() {
                                     std::string s;
@@ -2538,89 +2461,107 @@ Result<size_t> ServiceManager::autoloadPluginsNow() {
                                     }
                                     return s;
                                 }());
-                            auto lr = abiHost_->load(d.path, "");
-                            if (lr) {
-                                ++loaded_count;
-                                spdlog::info("Plugin autoload(now): loaded '{}' (ifaces=[{}])",
-                                             d.name, [&]() {
-                                                 std::string s;
-                                                 for (size_t i = 0; i < d.interfaces.size(); ++i) {
-                                                     if (i)
-                                                         s += ",";
-                                                     s += d.interfaces[i];
-                                                 }
-                                                 return s;
-                                             }());
-                                try {
-                                    pluginHostFsm_.dispatch(PluginLoadedEvent{d.name});
-                                } catch (...) {
-                                }
-                            } else {
-                                spdlog::warn("Plugin autoload(now): load failed '{}' : {}", d.name,
-                                             lr.error().message);
-                                try {
-                                    pluginHostFsm_.dispatch(
-                                        PluginLoadFailedEvent{lr.error().message});
-                                } catch (...) {
-                                }
-                            }
+                            // Create an awaitable for each plugin load
+                            load_tasks.push_back(boost::asio::co_spawn(
+                                plugin_load_executor,
+                                [self, d]() -> boost::asio::awaitable<Result<PluginDescriptor>> {
+                                    co_return self->abiHost_->load(d.path, "");
+                                },
+                                boost::asio::use_awaitable));
                         }
                     } else {
                         // Scan failure (e.g., invalid directory): mark degraded
                         try {
-                            pluginHostFsm_.dispatch(PluginLoadFailedEvent{sr.error().message});
+                            self->pluginHostFsm_.dispatch(
+                                PluginLoadFailedEvent{sr.error().message});
                         } catch (...) {
                         }
+                        self->refreshPluginStatusSnapshot();
                     }
                 }
             } catch (const std::exception& e) {
                 spdlog::warn("Plugin autoload(now): scan/load error at {}: {}", r.string(),
                              e.what());
                 try {
-                    pluginHostFsm_.dispatch(PluginLoadFailedEvent{e.what()});
+                    self->pluginHostFsm_.dispatch(PluginLoadFailedEvent{e.what()});
                 } catch (...) {
                 }
+                self->refreshPluginStatusSnapshot();
             } catch (...) {
                 spdlog::warn("Plugin autoload(now): unknown error at {}", r.string());
                 try {
-                    pluginHostFsm_.dispatch(PluginLoadFailedEvent{"unknown error"});
+                    self->pluginHostFsm_.dispatch(PluginLoadFailedEvent{"unknown error"});
                 } catch (...) {
+                    // Ignore FSM dispatch errors
+                }
+                self->refreshPluginStatusSnapshot();
+            }
+        }
+        // Await all plugin load tasks (sequentially for simplicity with Result<T>)
+        if (!load_tasks.empty()) {
+            for (auto& task : load_tasks) {
+                try {
+                    auto res = co_await std::move(task);
+                    if (res) {
+                        ++loaded_count;
+                        spdlog::info("Plugin autoload(now): loaded '{}' (ifaces=[{}])",
+                                     res.value().name, [&]() {
+                                         std::string s;
+                                         for (size_t i = 0; i < res.value().interfaces.size();
+                                              ++i) {
+                                             if (i)
+                                                 s += ",";
+                                             s += res.value().interfaces[i];
+                                         }
+                                         return s;
+                                     }());
+                        try {
+                            self->pluginHostFsm_.dispatch(PluginLoadedEvent{res.value().name});
+                        } catch (...) {
+                        }
+                        self->refreshPluginStatusSnapshot();
+                    } else {
+                        spdlog::warn("Plugin autoload(now): load failed: {}", res.error().message);
+                        try {
+                            self->pluginHostFsm_.dispatch(
+                                PluginLoadFailedEvent{res.error().message});
+                        } catch (...) {
+                        }
+                        self->refreshPluginStatusSnapshot();
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::warn("Plugin autoload(now): exception awaiting task: {}", e.what());
                 }
             }
         }
         spdlog::info("Plugin autoload(now): loaded {} plugin(s)", loaded_count);
         try {
-            pluginHostFsm_.dispatch(AllPluginsLoadedEvent{loaded_count});
+            self->pluginHostFsm_.dispatch(AllPluginsLoadedEvent{loaded_count});
         } catch (...) {
         }
-        auto adopted = adoptModelProviderFromHosts();
+        self->refreshPluginStatusSnapshot();
+        auto adopted = self->adoptModelProviderFromHosts();
         if (adopted && adopted.value()) {
             spdlog::info("Plugin autoload(now): model provider adopted");
         } else {
             spdlog::info("Plugin autoload(now): no model provider adopted");
         }
-        (void)adoptContentExtractorsFromHosts();
+        (void)self->adoptContentExtractorsFromHosts();
         // Skip model preload during init to avoid blocking - it will load on first use
         // or can be triggered explicitly via daemon main loop after Ready state
         spdlog::info("Model preload deferred until after initialization completes");
-        writeBootstrapStatusFile(config_, state_);
-        return Result<size_t>(loaded_count);
+        writeBootstrapStatusFile(self->config_, self->state_);
+        co_return Result<size_t>(loaded_count);
     } catch (const std::exception& e) {
-        return Error{ErrorCode::InternalError, e.what()};
+        co_return Error{ErrorCode::InternalError, e.what()};
     }
 }
 
 void ServiceManager::preloadPreferredModelIfConfigured() {
-    // FSM-based idempotence
-    try {
-        auto snap = embeddingFsm_.snapshot();
-        if (snap.state == EmbeddingProviderState::ModelLoading ||
-            snap.state == EmbeddingProviderState::ModelReady) {
-            spdlog::debug("preloadPreferredModelIfConfigured: model state={} — skip",
-                          static_cast<int>(snap.state));
-            return;
-        }
-    } catch (...) {
+    // FSM-based idempotence: skip if already loading or ready
+    if (embeddingFsm_.isLoadingOrReady()) {
+        spdlog::debug("preloadPreferredModelIfConfigured: already loading or ready (FSM)");
+        return;
     }
 
     try {
@@ -2628,21 +2569,9 @@ void ServiceManager::preloadPreferredModelIfConfigured() {
             spdlog::info("Scheduling preferred model preload (async)");
             return yams::Result<void>();
         });
-        // Skip if embedding generator is already initialized
-        if (embeddingGenerator_ && embeddingGenerator_->isInitialized()) {
-            spdlog::debug("preloadPreferredModelIfConfigured: embedding generator already "
-                          "initialized, skipping");
-            // Reflect ready state in FSM
-            try {
-                std::size_t dim = 0;
-                try {
-                    if (embeddingGenerator_)
-                        dim = embeddingGenerator_->getEmbeddingDimension();
-                } catch (...) {
-                }
-                embeddingFsm_.dispatch(ModelLoadedEvent{embeddingModelName_, dim});
-            } catch (...) {
-            }
+        // Skip if embedding already ready (FSM is authoritative)
+        if (embeddingFsm_.isReady()) {
+            spdlog::debug("preloadPreferredModelIfConfigured: already ready (FSM)");
             return;
         }
 
@@ -2713,10 +2642,11 @@ void ServiceManager::preloadPreferredModelIfConfigured() {
                                                                        std::memory_order_relaxed);
                         spdlog::warn("Preferred model '{}' preload failed: {}", preferred,
                                      r.error().message);
-                        self->lastModelError_ = std::string("preload failed: ") + r.error().message;
+                        const std::string errorMsg =
+                            std::string("preload failed: ") + r.error().message;
                         try {
-                            self->embeddingFsm_.dispatch(
-                                ProviderDegradedEvent{self->lastModelError_});
+                            self->embeddingFsm_.dispatch(ProviderDegradedEvent{errorMsg});
+                            self->lifecycleFsm_.setSubsystemDegraded("embeddings", true, errorMsg);
                         } catch (...) {
                         }
                         try {
@@ -2744,6 +2674,8 @@ void ServiceManager::preloadPreferredModelIfConfigured() {
                                 }
                                 self->embeddingFsm_.dispatch(
                                     ModelLoadedEvent{self->embeddingModelName_, dim});
+                                self->lifecycleFsm_.setSubsystemDegraded(
+                                    "embeddings", false); // Clear on retry success
                             } catch (...) {
                             }
                         } else {
@@ -2756,6 +2688,8 @@ void ServiceManager::preloadPreferredModelIfConfigured() {
                             try {
                                 self->embeddingFsm_.dispatch(
                                     LoadFailureEvent{r_retry.error().message});
+                                self->lifecycleFsm_.setSubsystemDegraded("embeddings", true,
+                                                                         r_retry.error().message);
                             } catch (...) {
                             }
                         }
@@ -2817,9 +2751,6 @@ void ServiceManager::preloadPreferredModelIfConfigured() {
 }
 
 Result<size_t> ServiceManager::adoptSymbolExtractorsFromHosts() {
-#if !YAMS_ENABLE_SYMBOL_EXTRACTION
-    return Result<size_t>(0);
-#else
     try {
         size_t adopted = adoptPluginInterface<yams_symbol_extractor_v1, AbiSymbolExtractorAdapter,
                                               AbiSymbolExtractorAdapter>(
@@ -2831,21 +2762,15 @@ Result<size_t> ServiceManager::adoptSymbolExtractorsFromHosts() {
     } catch (const std::exception& e) {
         return Error{ErrorCode::Unknown, e.what()};
     }
-#endif
 }
 
 boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
-    // FSM-based guard: if embedding load is in progress or ready, skip duplicate init
-    try {
-        auto snap = embeddingFsm_.snapshot();
-        if (snap.state == EmbeddingProviderState::ModelLoading ||
-            snap.state == EmbeddingProviderState::ModelReady) {
-            spdlog::debug("[Rebuild] skip: embedding init already in state {}",
-                          static_cast<int>(snap.state));
-            co_return;
-        }
-    } catch (...) {
+    // FSM-based guard: if embedding already loading or ready, skip duplicate init
+    if (embeddingFsm_.isLoadingOrReady()) {
+        spdlog::debug("[Rebuild] skip: embedding already loading or ready (FSM)");
+        co_return;
     }
+
     // Signal started
     try {
         embeddingFsm_.dispatch(ModelLoadStartedEvent{resolvePreferredModel()});
@@ -2859,6 +2784,7 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
             spdlog::warn("[Rebuild] embedding init failed: {}", res.error().message);
             try {
                 embeddingFsm_.dispatch(LoadFailureEvent{res.error().message});
+                lifecycleFsm_.setSubsystemDegraded("embeddings", true, res.error().message);
             } catch (...) {
             }
             co_return;
@@ -2873,6 +2799,7 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
             } catch (...) {
             }
             embeddingFsm_.dispatch(ModelLoadedEvent{embeddingModelName_, dim});
+            lifecycleFsm_.setSubsystemDegraded("embeddings", false); // Clear degradation
         } catch (...) {
         }
 
@@ -2886,9 +2813,14 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
         if (!buildingAlready) {
             spdlog::info("[Rebuild] search engine rebuild begin (enable vector scoring)");
             int build_timeout = 15000; // Generous timeout for rebuild
-            auto rebuilt = co_await co_buildEngine(build_timeout, {}, true);
 
-            if (rebuilt) {
+            // Phase 2.4: Use SearchEngineManager instead of co_buildEngine
+            auto rebuildResult = co_await searchEngineManager_.buildEngine(
+                metadataRepo_, vectorIndexManager_, embeddingGenerator_, "rebuild", build_timeout,
+                getWorkerExecutor());
+
+            if (rebuildResult.has_value()) {
+                auto rebuilt = rebuildResult.value();
                 {
                     std::lock_guard<std::shared_mutex> lk(searchEngineMutex_); // Exclusive write
                     searchEngine_ = rebuilt;
@@ -3033,279 +2965,48 @@ bool ServiceManager::applySearchConcurrencyTarget(std::size_t target) {
 
 Result<void> ServiceManager::ensureEmbeddingGeneratorReady() {
     spdlog::info("[EmbedGen] ensureEmbeddingGeneratorReady() called");
-    try {
-        // Check if already initialized
-        if (embeddingGenerator_ && embeddingGenerator_->isInitialized()) {
-            spdlog::debug("EmbeddingGenerator already initialized");
-            return Result<void>();
-        }
 
-        // If we have a stale generator, reset it
-        if (embeddingGenerator_) {
-            spdlog::debug("Resetting uninitialized EmbeddingGenerator");
-            embeddingGenerator_.reset();
-        }
+    // Verify plugin provider is available
+    if (!modelProvider_ || !modelProvider_->isAvailable()) {
+        return Error{ErrorCode::NotInitialized, "Model provider not available"};
+    }
 
-        spdlog::info("[EmbedGen] Checking for mock provider preference");
-        const bool preferMockProvider =
-            config_.useMockModelProvider || env_truthy(std::getenv("YAMS_USE_MOCK_PROVIDER"));
+    // Determine preferred model
+    std::string preferred = resolvePreferredModel();
+    if (preferred.empty()) {
+        return Error{ErrorCode::NotFound, "No preferred model configured or installed"};
+    }
 
-        // Try to get or create a model provider
-        spdlog::info("[EmbedGen] Checking model provider availability");
-        if (!modelProvider_ || !modelProvider_->isAvailable()) {
-            spdlog::info("[EmbedGen] Model provider not available, checking alternatives");
-            // In config-driven mock mode, bypass plugin loading entirely.
-            if (preferMockProvider) {
-                spdlog::info("Using mock model provider (config/env preference)");
-                try {
-                    modelProvider_ = std::shared_ptr<IModelProvider>(createModelProvider(
-                        config_.modelPoolConfig, /*preferredProvider=*/"", true));
-                    state_.readiness.modelProviderReady = (modelProvider_ != nullptr);
-                } catch (const std::exception& e) {
-                    spdlog::warn("Failed to instantiate mock provider: {}", e.what());
-                }
-            }
-            if (modelProvider_ && modelProvider_->isAvailable()) {
-                spdlog::debug("Mock provider ready; skipping plugin adoption");
-            } else {
-                spdlog::debug("Model provider not available, attempting to load plugins");
-                (void)autoloadPluginsNow();
-                auto adopted = adoptModelProviderFromHosts();
-                if (!adopted || !adopted.value()) {
-                    spdlog::debug("No model provider adopted from plugins, trying local fallback");
-                    // Fallback to local model generator when provider not available
-                    try {
-                        // Use unified selector that honors env, config preferred_model, preload
-                        // list, and DB-aligned auto-detection
-                        std::string preferred_local = resolvePreferredModel();
-                        if (preferred_local.empty()) {
-                            namespace fs = std::filesystem;
-                            if (!resolvedDataDir_.empty()) {
-                                fs::path models = resolvedDataDir_ / "models";
-                                std::error_code ec;
-                                if (fs::exists(models, ec) && fs::is_directory(models, ec)) {
-                                    // Prefer a model matching existing DB dim if available
-                                    size_t dbDim = 0;
-                                    try {
-                                        if (auto s = read_vector_sentinel_dim(getResolvedDataDir()))
-                                            dbDim = *s;
-                                    } catch (...) {
-                                    }
-                                    auto exists = [&](const char* n) {
-                                        return fs::exists(models / n / "model.onnx", ec);
-                                    };
+    // Check if model is already loaded
+    if (modelProvider_->isModelLoaded(preferred)) {
+        spdlog::debug("[EmbedGen] Model '{}' already loaded", preferred);
+        return Result<void>();
+    }
 
-                                    // Fallback: first available
-                                    if (preferred_local.empty()) {
-                                        for (const auto& e : fs::directory_iterator(models, ec)) {
-                                            if (e.is_directory() &&
-                                                fs::exists(e.path() / "model.onnx", ec)) {
-                                                preferred_local = e.path().filename().string();
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if (!preferred_local.empty()) {
-                            vector::EmbeddingConfig ecfg;
-                            if (!resolvedDataDir_.empty()) {
-                                ecfg.model_path =
-                                    (resolvedDataDir_ / "models" / preferred_local / "model.onnx")
-                                        .string();
-                            }
-                            ecfg.model_name = preferred_local;
-                            ecfg.backend = vector::EmbeddingConfig::Backend::Hybrid;
-                            ecfg.daemon_auto_start = false;
-                            auto eg = std::make_shared<vector::EmbeddingGenerator>(ecfg);
-                            if (eg->initialize()) {
-                                embeddingGenerator_ = eg;
-                                embeddingModelName_ = preferred_local;
-                                spdlog::info("EmbeddingGenerator initialized from local model: {}",
-                                             preferred_local);
-                                alignVectorComponentDimensions();
-                                return Result<void>();
-                            } else {
-                                spdlog::warn(
-                                    "Failed to initialize local EmbeddingGenerator for model: {}",
-                                    preferred_local);
-                            }
-                        }
-                    } catch (const std::exception& e) {
-                        spdlog::warn("Exception during local model fallback: {}", e.what());
-                    }
-                    return Error{ErrorCode::NotInitialized,
-                                 "Model provider not available and local fallback failed"};
-                }
-            }
-        }
+    spdlog::info("[EmbedGen] Triggering non-blocking model load for '{}'", preferred);
 
-        // At this point we have a model provider
-        // Determine preferred model
-        std::string preferred = resolvePreferredModel();
-        if (preferred.empty()) {
-            return Error{ErrorCode::NotFound, "No preferred model configured or installed"};
-        }
-
-        spdlog::debug("Attempting to load preferred model: {}", preferred);
-
-        // Try to load the model through the provider (offloaded to avoid blocking coroutine)
-        // Use std::async for reliable async execution with timeout
-        spdlog::info("[ModelLoad] Starting async load for: {}", preferred);
-        spdlog::info("[ModelLoad] modelProvider_ pointer: {}",
-                     static_cast<const void*>(modelProvider_.get()));
-        spdlog::info("[ModelLoad] Calling isAvailable() on provider...");
-        bool avail = modelProvider_->isAvailable();
-        spdlog::info("[ModelLoad] isAvailable() returned: {}", avail);
-
-        auto loadFuture = std::async(std::launch::async, [this, preferred]() {
-            spdlog::info("[ModelLoad] Thread executing load for: {}", preferred);
-            spdlog::info("[ModelLoad] Thread: modelProvider_ pointer: {}",
-                         static_cast<const void*>(modelProvider_.get()));
-            spdlog::info("[ModelLoad] Thread: calling isAvailable() on provider...");
-            bool avail2 = modelProvider_->isAvailable();
-            spdlog::info("[ModelLoad] Thread: isAvailable() returned: {}", avail2);
-            spdlog::info("[ModelLoad] About to call modelProvider_->loadModel({})...", preferred);
-            auto result = modelProvider_->loadModel(preferred);
-            spdlog::info("[ModelLoad] modelProvider_->loadModel() returned for: {}", preferred);
-            return result;
-        });
-
-        Result<void> r{Error{ErrorCode::InternalError, "Model load not attempted"}};
-        // Wait with timeout to avoid indefinite hang (generous 120s for large models like 416MB
-        // all-mpnet)
-        if (loadFuture.wait_for(std::chrono::seconds(120)) == std::future_status::ready) {
-            try {
-                r = loadFuture.get();
-                spdlog::info("[ModelLoad] Load completed for: {}", preferred);
-            } catch (const std::exception& e) {
-                r = Error{ErrorCode::InternalError,
-                          std::string("Model load exception: ") + e.what()};
-                spdlog::warn("[ModelLoad] Exception during load: {}", e.what());
-            }
-        } else {
-            spdlog::warn("[ModelLoad] Timed out after 120s for: {}", preferred);
-            r = Error{ErrorCode::Timeout, "Model load timed out"};
-        }
-
-        if (!r) {
-            spdlog::warn("Model provider failed to load '{}': {}", preferred, r.error().message);
-            // Best-effort: unload the model if partially loaded and mark provider degraded
-            try {
-                (void)modelProvider_->unloadModel(preferred);
-            } catch (...) {
-            }
-            lastModelError_ = std::string("load '") + preferred + "' failed: " + r.error().message;
-            try {
-                embeddingFsm_.dispatch(ProviderDegradedEvent{lastModelError_});
-            } catch (...) {
-            }
-            // Fallback to local model generator
-            try {
-                vector::EmbeddingConfig ecfg;
-                if (const char* home = std::getenv("HOME")) {
-                    ecfg.model_path = (std::filesystem::path(home) / ".yams" / "models" /
-                                       preferred / "model.onnx")
-                                          .string();
-                }
-                ecfg.model_name = preferred;
-                ecfg.backend = vector::EmbeddingConfig::Backend::Hybrid;
-                ecfg.daemon_auto_start = false;
-                auto eg = std::make_shared<vector::EmbeddingGenerator>(ecfg);
-                if (eg->initialize()) {
-                    embeddingGenerator_ = eg;
-                    embeddingModelName_ = preferred;
-                    spdlog::info("EmbeddingGenerator initialized from local model (fallback): {}",
-                                 preferred);
-                    alignVectorComponentDimensions();
-                    return Result<void>();
-                }
-            } catch (const std::exception& e) {
-                spdlog::warn("Local fallback failed: {}", e.what());
-            }
-            return Error{ErrorCode::InternalError, std::string("Failed to load model '") +
-                                                       preferred + "': " + r.error().message};
-        }
-
-        clearModelProviderError();
-        // Ensure only the selected model remains loaded in the provider
+    // Trigger non-blocking load via plugin (plugin handles async loading internally)
+    auto loadResult = modelProvider_->loadModel(preferred);
+    if (!loadResult) {
+        const std::string errorMsg =
+            std::string("load '") + preferred + "' failed: " + loadResult.error().message;
+        spdlog::warn("[EmbedGen] Model load trigger failed: {}", errorMsg);
         try {
-            if (modelProvider_) {
-                auto loaded = modelProvider_->getLoadedModels();
-                for (const auto& name : loaded) {
-                    if (name != preferred) {
-                        auto ur = modelProvider_->unloadModel(name);
-                        if (!ur) {
-                            spdlog::debug("Unload extra model '{}' failed: {}", name,
-                                          ur.error().message);
-                        }
-                    }
-                }
-            }
+            embeddingFsm_.dispatch(ProviderDegradedEvent{errorMsg});
+            lifecycleFsm_.setSubsystemDegraded("embeddings", true, errorMsg);
         } catch (...) {
         }
-
-        // Create and initialize embedding generator, bound to the provider-loaded model via daemon
-        // backend. Use provider-reported dimensions to ensure downstream vector DB/index alignment.
-        try {
-            size_t providerDim = 0;
-            size_t providerMaxSeq = 0;
-            try {
-                if (modelProvider_) {
-                    providerDim = modelProvider_->getEmbeddingDim(preferred);
-                    if (auto mi = modelProvider_->getModelInfo(preferred)) {
-                        providerMaxSeq = mi.value().maxSequenceLength;
-                    }
-                }
-            } catch (...) {
-            }
-
-            vector::EmbeddingConfig
-                ecfg; // default Hybrid -> override to Daemon explicitly in daemon
-            ecfg.backend = vector::EmbeddingConfig::Backend::Daemon;
-            ecfg.model_name = preferred;
-            if (providerDim > 0)
-                ecfg.embedding_dim = providerDim; // seed until backend reports
-            if (providerMaxSeq > 0)
-                ecfg.max_sequence_length = providerMaxSeq;
-            ecfg.daemon_auto_start = false; // we are in-daemon; avoid self-spawn paths
-
-            auto eg = std::make_shared<vector::EmbeddingGenerator>(ecfg);
-            if (!eg->initialize()) {
-                spdlog::warn("EmbeddingGenerator (daemon backend) init failed; falling back to "
-                             "default config");
-                // Fallback to previous behavior
-                eg = std::make_shared<vector::EmbeddingGenerator>();
-                if (!eg->initialize()) {
-                    embeddingGenerator_.reset();
-                    return Error{ErrorCode::InternalError,
-                                 "Failed to initialize embedding generator"};
-                }
-            }
-            // Gracefully shutdown any previous generator before replacement
-            if (embeddingGenerator_) {
-                try {
-                    embeddingGenerator_->shutdown();
-                } catch (...) {
-                }
-            }
-            embeddingGenerator_ = std::move(eg);
-            embeddingModelName_ = preferred;
-        } catch (const std::exception& egEx) {
-            spdlog::warn("EmbeddingGenerator init exception: {}", egEx.what());
-            embeddingGenerator_.reset();
-            return Error{ErrorCode::InternalError, "Failed to initialize embedding generator"};
-        }
-
-        spdlog::info("EmbeddingGenerator initialized successfully (model='{}', backend=Daemon)",
-                     preferred);
-        alignVectorComponentDimensions();
-
-        return Result<void>();
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::InternalError, e.what()};
+        return loadResult;
     }
+
+    // Plugin is now loading asynchronously - FSM will be updated via InternalEventBus
+    spdlog::info("[EmbedGen] Model load triggered successfully (async)");
+    try {
+        embeddingFsm_.dispatch(ModelLoadStartedEvent{preferred});
+    } catch (...) {
+    }
+
+    return Result<void>();
 }
 
 bool ServiceManager::detectEmbeddingPreloadFlag() const {
@@ -3341,8 +3042,12 @@ bool ServiceManager::detectEmbeddingPreloadFlag() const {
 void ServiceManager::scheduleEmbeddingWarmup() {
     if (!embeddingPreloadOnStartup_)
         return;
-    if (embeddingWarmupScheduled_.exchange(true))
+
+    // Use FSM state to avoid duplicate warmup if already loading/ready
+    if (embeddingFsm_.isLoadingOrReady()) {
+        spdlog::debug("[Warmup] skipping: embedding already loading or ready (FSM)");
         return;
+    }
 
     spdlog::info("[Warmup] scheduling embedding preload task");
     auto exec = getWorkerExecutor();
@@ -3409,9 +3114,10 @@ Result<void> ServiceManager::ensureEmbeddingGeneratorFor(const std::string& mode
         ecfg.daemon_auto_start = false;
         auto eg = std::make_shared<vector::EmbeddingGenerator>(ecfg);
         if (!eg->initialize()) {
-            lastModelError_ = "embedding_generator_init_failed";
+            const std::string errorMsg = "embedding_generator_init_failed";
             try {
-                embeddingFsm_.dispatch(ProviderDegradedEvent{lastModelError_});
+                embeddingFsm_.dispatch(ProviderDegradedEvent{errorMsg});
+                lifecycleFsm_.setSubsystemDegraded("embeddings", true, errorMsg);
             } catch (...) {
             }
             return Error{ErrorCode::InternalError, "Failed to initialize embedding generator"};
@@ -3530,7 +3236,7 @@ std::string ServiceManager::resolvePreferredModel() const {
             fs::path models = resolvedDataDir_ / "models";
             std::error_code ec;
             if (fs::exists(models, ec) && fs::is_directory(models, ec)) {
-                size_t dbDim = 0;
+                [[maybe_unused]] size_t dbDim = 0;
                 try {
                     // Prefer sentinel dim when available
                     if (auto s = read_vector_sentinel_dim(getResolvedDataDir()))
@@ -3621,6 +3327,58 @@ bool ServiceManager::resizePostIngestThreads(std::size_t target) {
         return postIngest_->resize(target);
     } catch (...) {
         return false;
+    }
+}
+
+// Start background task coroutines (EmbedJob/Fts5Job consumers, OrphanScan)
+// Must be called after shared_ptr construction so shared_from_this() works.
+void ServiceManager::startBackgroundTasks() {
+    spdlog::debug("[ServiceManager] Starting background task coroutines via BackgroundTaskManager");
+
+    // Acquire shared_from_this once - fail fast if unavailable
+    std::shared_ptr<ServiceManager> self;
+    try {
+        self = shared_from_this();
+    } catch (const std::bad_weak_ptr& e) {
+        spdlog::error("[ServiceManager] Cannot launch consumers: shared_from_this() failed: {}",
+                      e.what());
+        return;
+    }
+
+    // Create BackgroundTaskManager with dependencies
+    BackgroundTaskManager::Dependencies deps{
+        .serviceManager = self, .lifecycleFsm = lifecycleFsm_, .executor = getWorkerExecutor()};
+
+    try {
+        backgroundTaskManager_ = std::make_unique<BackgroundTaskManager>(std::move(deps));
+        backgroundTaskManager_->start();
+        spdlog::info("[ServiceManager] Background tasks delegated to BackgroundTaskManager");
+    } catch (const std::exception& e) {
+        spdlog::error("[ServiceManager] Failed to start BackgroundTaskManager: {}", e.what());
+        lifecycleFsm_.setSubsystemDegraded("background_tasks", true, e.what());
+    }
+}
+
+std::string ServiceManager::lastModelError() const {
+    return lifecycleFsm_.degradationReason("embeddings");
+}
+
+void ServiceManager::clearModelProviderError() {
+    lifecycleFsm_.setSubsystemDegraded("embeddings", false);
+}
+
+void ServiceManager::__test_setModelProviderDegraded(bool degraded, const std::string& error) {
+    try {
+        lifecycleFsm_.setSubsystemDegraded("embeddings", degraded, error);
+        if (degraded) {
+            embeddingFsm_.dispatch(
+                ProviderDegradedEvent{error.empty() ? std::string{"test"} : error});
+        } else {
+            // Treat as recovered to a ready-ish state without asserting a model; use
+            // ModelLoadedEvent with dimension 0 to clear degraded state in FSM.
+            embeddingFsm_.dispatch(ModelLoadedEvent{embeddingModelName_, 0});
+        }
+    } catch (...) {
     }
 }
 

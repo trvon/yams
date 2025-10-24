@@ -5,10 +5,12 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <queue>
 #include <thread>
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/thread_pool.hpp>
 #include <yams/compat/thread_stop_compat.h>
 
 namespace yams {
@@ -138,9 +140,13 @@ private:
     void update_progress_pct();
 
     // Graceful shutdown coordination for detached coroutine
-    std::atomic<bool> finished_{false};
-    std::mutex doneMutex_;
-    std::condition_variable doneCv_;
+    struct ShutdownState {
+        std::atomic<bool> finished{false};
+        std::atomic<bool> running{true}; // Coroutine-owned running flag
+        std::mutex mutex;
+        std::condition_variable cv;
+    };
+    std::shared_ptr<ShutdownState> shutdownState_;
 };
 
 } // namespace yams::daemon
