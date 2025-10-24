@@ -81,6 +81,7 @@ endif
 ingestion_bench = executable('ingestion_throughput_bench', files('ingestion_throughput_bench.cpp'),
   include_directories: incs,
   dependencies: [
+    dependency('boost', modules: ['system']),
     dependency('yams_benchmarks'),
     dependency('yams_api'),
     dependency('yams_app_services'),
