@@ -50,6 +50,11 @@ esac
 # Value for Meson project option
 MESON_CPPSTD="c++${CPPSTD}"
 
+# libc++ hardening mode (only applies when using libc++)
+# Options: none, fast, extensive, debug
+# Override with YAMS_LIBCXX_HARDENING=fast|extensive|debug|none
+LIBCXX_HARDENING=${YAMS_LIBCXX_HARDENING:-none}
+
 CONAN_ARGS=(-s "build_type=${BUILD_TYPE}" -b missing --update)
 
 detect_version() {
@@ -137,11 +142,40 @@ else
   CONAN_SUBDIR="build-${BUILD_TYPE_LOWER}"
 fi
 
-echo "Build Type: ${BUILD_TYPE}"
-echo "Build Dir:  ${BUILD_DIR}"
-echo "C++ Std:    ${MESON_CPPSTD} (Conan: ${CPPSTD})"
+# Detect install prefix based on platform
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  # macOS: check for Homebrew installation
+  if command -v brew >/dev/null 2>&1; then
+    BREW_PREFIX=$(brew --prefix 2>/dev/null || echo "/usr/local")
+    INSTALL_PREFIX="${BREW_PREFIX}"
+  else
+    INSTALL_PREFIX="/usr/local"
+  fi
+else
+  # Linux: use standard prefix
+  INSTALL_PREFIX="/usr/local"
+fi
+
+# Allow override via environment
+INSTALL_PREFIX="${YAMS_INSTALL_PREFIX:-${INSTALL_PREFIX}}"
+
+echo "Build Type:        ${BUILD_TYPE}"
+echo "Build Dir:         ${BUILD_DIR}"
+echo "Install Prefix:    ${INSTALL_PREFIX}"
+echo "C++ Std:           ${MESON_CPPSTD} (Conan: ${CPPSTD})"
+if [[ "${LIBCXX_HARDENING}" != "none" ]]; then
+  echo "libc++ Hardening:  ${LIBCXX_HARDENING}"
+fi
 
 echo "--- Running conan install... ---"
+# Add policy toolchain for legacy recipes if in Docker or CI
+POLICY_TC=""
+if [[ -n "${DOCKERFILE_CONF_REV:-}" ]] || [[ -n "${CI:-}" ]]; then
+  POLICY_TC="/tmp/yams_policy_toolchain.cmake"
+  echo 'cmake_policy(VERSION 3.5)' > "$POLICY_TC"
+  CONAN_ARGS+=(-c "tools.cmake.cmaketoolchain:user_toolchain+=${POLICY_TC}")
+fi
+
 conan install . -of "${BUILD_DIR}" "${CONAN_ARGS[@]}"
 
 NATIVE_FILE="${BUILD_DIR}/${CONAN_SUBDIR}/conan/conan_meson_native.ini"
@@ -154,7 +188,7 @@ fi
 
 MESON_ARGS=(
   "${BUILD_DIR}"
-  "--prefix" "/usr/local"
+  "--prefix" "${INSTALL_PREFIX}"
   "--native-file" "${NATIVE_FILE}"
   "--buildtype" "${BUILD_TYPE_LOWER}"
 )
@@ -167,6 +201,11 @@ if [[ -f "${INTRO_OPTS_JSON}" ]]; then
 fi
 
 MESON_OPTIONS=("-Dbuild-cli=true" "-Dcpp_std=${MESON_CPPSTD}")
+
+# Add libc++ hardening mode if specified
+if [[ "${LIBCXX_HARDENING}" != "none" ]]; then
+  MESON_OPTIONS+=("-Dlibcxx-hardening=${LIBCXX_HARDENING}")
+fi
 
 if [[ "${BUILD_TYPE}" == "Debug" ]]; then
   MESON_OPTIONS+=(

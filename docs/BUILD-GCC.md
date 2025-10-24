@@ -150,7 +150,43 @@ cmake --preset yams-debug-no-conan
 cmake --build --preset yams-debug-no-conan -j
 ```
 
-## 4. Defaults & Tooling (Debug)
+## 4. libc++ Hardening
+
+When building with Clang and libc++, enable runtime hardening to detect bugs:
+
+```bash
+# Fast mode (recommended for Debug, ~5% overhead)
+YAMS_LIBCXX_HARDENING=fast ./setup.sh Debug
+
+# Extensive mode (thorough testing, ~10-20% overhead)
+YAMS_LIBCXX_HARDENING=extensive ./setup.sh Debug
+
+# Debug mode (maximum validation)
+YAMS_LIBCXX_HARDENING=debug ./setup.sh Debug
+```
+
+Hardening detects:
+- Out-of-bounds container access
+- Iterator invalidation
+- Use of moved-from objects
+- String bound violations
+
+**Platform support:**
+- macOS: Works automatically (always uses libc++)
+- Linux: Only when using Clang with `-stdlib=libc++`
+- GCC: Ignored (use `-D_GLIBCXX_DEBUG` instead)
+
+Can be combined with sanitizers:
+```bash
+YAMS_LIBCXX_HARDENING=extensive \
+CXXFLAGS="-fsanitize=address" \
+LDFLAGS="-fsanitize=address" \
+./setup.sh Debug
+```
+
+See [libc++ Hardening Documentation](https://libcxx.llvm.org/Hardening.html) for details.
+
+## 5. Defaults & Tooling (Debug)
 
 Debug presets enable:
 - Unity builds (faster iterative compile)
@@ -159,7 +195,7 @@ Debug presets enable:
 
 If `ccache` present it is leveraged via environment/toolchain; if absent nothing breaks.
 
-## 5. Manual (Without Presets)
+## 6. Manual (Without Presets)
 
 If you prefer manual configuration without presets:
 
@@ -226,7 +262,7 @@ meson test -C build/debug
 gcovr --root . --exclude '_deps/*' --exclude 'tests/*' --html --html-details --output build/debug/coverage.html
 ```
 
-## 6. Compiler Notes
+## 7. Compiler Notes
 
 ### Clang vs GCC
 
@@ -289,7 +325,7 @@ CC=clang CXX=clang++ cmake .. \
 
 Note: ThinLTO with Clang+LLD provides faster incremental builds while maintaining most of the performance benefits of full LTO.
 
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 ### "std::format not found"
 
@@ -338,7 +374,7 @@ Causes and fixes:
   - Set `-DCMAKE_PREFIX_PATH=/path/to/onnxruntime` so `find_package(onnxruntime REQUIRED)` succeeds.
 - Validate your configure log shows: `ONNX Runtime found - enabling local embedding generation`.
 
-## 8. Performance Tips
+## 9. Performance Tips
 
 For best performance with GCC:
 
@@ -360,7 +396,7 @@ CC=clang CXX=clang++ cmake .. \
 
 Note: `-march=native` optimizes for your specific CPU but makes binaries non-portable.
 
-## 9. Quick Verification
+## 10. Quick Verification
 
 After building, verify the installation:
 
@@ -375,7 +411,7 @@ echo "Hello, YAMS!" | ./tools/yams-cli/yams add -
 yams --version
 ```
 
-## 10. CI Snapshot
+## 11. CI Snapshot
 
 YAMS CI/CD pipeline tests both GCC and Clang builds on Ubuntu:
 - **GCC builds**: Compatibility and fallback testing
@@ -384,14 +420,14 @@ YAMS CI/CD pipeline tests both GCC and Clang builds on Ubuntu:
 
 The configuration used in CI can be found in `.github/workflows/ci.yml`.
 
-## 11. References
+## 12. References
 
 - GCC Documentation: https://gcc.gnu.org/onlinedocs/
 - GCC C++20 Status: https://gcc.gnu.org/projects/cxx-status.html#cxx20
 - CMake Presets: https://cmake.org/cmake/help/latest/manual/cmake-presets.7.html
 - YAMS Build Options: BUILD.md
 
-## 12. Sanitizer Example (Standalone)
+## 13. Sanitizer Example (Standalone)
 ```bash
 cmake -S . -B build/asan -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE=build/asan/generators/conan_toolchain.cmake \

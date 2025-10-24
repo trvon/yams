@@ -27,7 +27,7 @@ tags:
   - weekly
 
 environment:
-  # Define consistent directories.
+  # Define consistent directories (setup.sh uses build/release for Release builds).
   BUILD_DIR: build/release
   STAGE_DIR: stage  # relative to BUILD_DIR (Meson --destdir uses builddir as base)
   # Optional: set this to "nightly" or "weekly" via scheduler/env to produce
@@ -216,53 +216,30 @@ tasks:
       CLEAN_VERSION_MESON="${YAMS_VERSION}"
       echo "Starting build (Meson version ${CLEAN_VERSION_MESON})"
 
-      # Fetch dependencies and generate Meson toolchain/deps.
-      conan install . \
-        -of "${BUILD_DIR}" \
-        -pr:h=./conan/profiles/host-linux-gcc \
-        -pr:b=./conan/profiles/host-linux-gcc \
-        -s build_type=Release \
-        -c tools.build:jobs="${CONAN_CPU_COUNT}" \
-        --build=missing
-
-      # Configure with Meson.
-      # NOTE: Do not pass -Dversion here; no custom Meson option is defined. Runtime/display versioning
-      # is handled separately and project() version remains the static value in meson.build until
-      # a dedicated yams-version option is introduced.
-      # Conan 2 generates the Meson native file under: <build dir>/build-<buildtype-lowercase>/conan/
-      MESON_EXTRA_ARGS=""
+      # Use setup.sh for consistent build configuration
+      # Force GCC for SourceHut CI builds
+      export YAMS_COMPILER=gcc
+      export YAMS_CPPSTD=20
+      
+      # Apply FAST_MODE settings before setup.sh
       if [ "${FAST_MODE:-0}" = "1" ]; then
-        echo "FAST_MODE=1: disabling ONNX and tests for quicker build"
-        MESON_EXTRA_ARGS="${MESON_EXTRA_ARGS} -Denable-onnx=disabled -Dplugin-onnx=false -Dbuild-tests=false"
+        echo "FAST_MODE=1: build will skip ONNX and tests"
+        # setup.sh doesn't expose these options; we'll reconfigure Meson after
       fi
-      # Find the Meson toolchain file robustly.
-      TOOLCHAIN_FILE=""
-      # Check the path confirmed from developer docs.
-      if [ -f "${BUILD_DIR}/build-release/conan/conan_meson_native.ini" ]; then
-        TOOLCHAIN_FILE="${BUILD_DIR}/build-release/conan/conan_meson_native.ini"
-      fi
-
-      # If not found in the primary location, search for it.
-      if [ -z "$TOOLCHAIN_FILE" ]; then
-        TOOLCHAIN_FILE=$(find "${BUILD_DIR}" -name "conan_meson_native.ini" -print -quit)
+      
+      # Run setup.sh (Release build)
+      ./setup.sh Release
+      
+      # Apply FAST_MODE settings by reconfiguring Meson
+      if [ "${FAST_MODE:-0}" = "1" ]; then
+        meson configure build/release -Denable-onnx=disabled -Dplugin-onnx=false -Dbuild-tests=false
       fi
 
-      if [ -z "$TOOLCHAIN_FILE" ] || [ ! -f "$TOOLCHAIN_FILE" ]; then
-        echo "ERROR: Could not find conan_meson_native.ini in ${BUILD_DIR}" >&2
-        ls -R "${BUILD_DIR}" >&2
-        exit 1
-      fi
-      echo "Found Meson toolchain file: ${TOOLCHAIN_FILE}"
-
-      meson setup "${BUILD_DIR}" \
-        --native-file "${TOOLCHAIN_FILE}" \
-        ${MESON_EXTRA_ARGS}
-
-      # Build the project.
-      meson compile -C "${BUILD_DIR}"
+      # Build the project
+      meson compile -C build/release
 
       # Install the built artifacts into build-local staging directory (BUILD_DIR/STAGE_DIR).
-      meson install -C "${BUILD_DIR}" --destdir "${STAGE_DIR}"
+      meson install -C build/release --destdir "${STAGE_DIR}"
 
       # Show ccache stats after build (if available)
       if command -v ccache >/dev/null 2>&1; then

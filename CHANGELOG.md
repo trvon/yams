@@ -18,21 +18,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.7.7] - Unreleased
 
 ### Added
+- **Doctor Prune Command (PBI-062)**: Intelligent cleanup of build artifacts, logs, cache, and temporary files
+  - Comprehensive magic number detection for 125+ file types (images, archives, documents, executables, audio, video, etc.)
+  - Support for 9 build systems (CMake, Ninja, Meson, Make, Gradle, Maven, NPM/Yarn, Cargo, Go)
+  - Detection across 10+ programming languages (C/C++, Java, Python, JavaScript, Rust, Go, OCaml, Haskell, Erlang, etc.)
+  - Hierarchical category system: build-artifacts, build-system, logs, cache, temp, coverage, IDE
+  - Dry-run by default with `--apply` flag for execution
+  - Usage: `yams doctor prune --category build-artifacts --older-than 30d --apply`
+  - **Architecture**: Fully implemented via daemon IPC (PruneRequest/PruneResponse) for non-blocking operation
+  - **RepairManager Integration**: Prune operations delegated to `RepairManager::pruneFiles()` via InternalEventBus
+  - **Clean Separation**: CLI layer communicates via daemon client; no direct database access
+  - **Modern C++23**: Uses std::ranges, constexpr, templates for efficient file type detection
 - Started C++23 Compatibility support expansion
 - Migrated vectordb to [https://github.com/trvon/sqlite-vec-cpp](https://github.com/trvon/sqlite-vec-cpp)
 - **Tree-sitter Symbol Extraction Plugin**: C-ABI based plugin system for multi-language symbol extraction
   - Plugin auto-downloads tree-sitter grammars on first use (configurable via `plugins.symbol_extraction.auto_download_grammars`)
   - CLI commands: `yams config grammar list/download/path/auto-enable/auto-disable`
   - Supports tree-sitter v13-15 grammar versions
-  - **Note**: TypeScript grammar requires manual installation due to non-standard build structure requiring internal tree-sitter headers
+- **Entity Graph Service**: Background service for extracting and materializing code symbols into Knowledge Graph
+  - Wired into IndexingPipeline and RepairCoordinator for automatic symbol extraction
+  - Supports plugin-based language-specific symbol extraction
+  - Foundation for symbol-aware search and code intelligence features
+- **Database Schema v16**: Added `symbol_metadata` table for rich symbol information storage
+  - Stores symbol definitions, references, and metadata from code analysis plugins
+  - Indexed by document hash and symbol name for efficient lookups
+  - Integrated with Knowledge Graph for entity relationship tracking
+  - Migration includes tests for both schema changes and symbol metadata storage
+- **Symbol-Aware Search Infrastructure**: Enhanced search with symbol/entity detection and enrichment
+  - `SymbolEnricher` class extracts rich metadata from Knowledge Graph (definitions, references, call graphs)
+  - `KGScorer::detectSymbolQuery()` uses KG queries to identify symbol searches (no pattern matching)
+  - Symbol context includes type, scope, caller/callee counts, and related symbols
+
+### Fixed
+- **Embedding Consumer Deadlock**: Fixed race condition causing embedding job consumer to stall
+  - Added defensive retry mechanism with exponential backoff for queue state recovery
+  - Impact: Embedding background processing now reliable under high load
+- **FSM Cleanup & Degradation Tracking**: Standardized FSM usage across ServiceManager
+  - Added `DaemonLifecycleFsm` reference to ServiceManager for centralized subsystem degradation tracking
+- **ServiceManager FSM Architecture**: Centralized state management and eliminated duplication
+  - Added `DaemonLifecycleFsm& lifecycleFsm_` reference to ServiceManager for daemon-level degradation tracking
+  - Removed scattered manual FSM state checks in favor of FSM query methods (`isReady()`, `isLoadingOrReady()`)
 
 ### Changed
+- **Fuzzy Index Memory Optimization**: Enhanced BK-tree index building with intelligent document prioritization
+  - Uses metadata and Knowledge Graph to rank documents by relevance (tagged > KG-connected > recent > code files)
+  - Limits index to 50,000 documents by default (configurable via `YAMS_FUZZY_INDEX_LIMIT` environment variable)
+  - Graceful degradation with `std::bad_alloc` handling prevents daemon crashes on large repositories
+  - **Known Limitation**: Fuzzy search on very large repositories (>100k documents) may experience memory pressure. Consider using metadata/KG filters or grep with exact patterns for better performance
 - **ONNX Plugin Model Path Resolution**: Enhanced model path search to support XDG Base Directory specification
+- **Platform-Aware Plugin Installation**: Build system now auto-detects Homebrew prefix on macOS
+  - `/opt/homebrew` on Apple Silicon, `/usr/local` on Intel Macs and Linux
+  - System plugin directory automatically trusted by daemon at runtime
+  - Override via `YAMS_INSTALL_PREFIX` environment variable
 - Model loading timeouts hardened: adapter and ONNX plugin now use std::async with bounded wait; removed detached threads causing UAF/segfaults (AsioConnectionPool guarded)
 - Vector DB dim resolution no longer hardcodes 384; resolves from DB/config/env/provider preferred model, else warns and defers embeddings
 - ONNX plugin: removed implicit 384 defaults, derives embeddingDim dynamically from model/config; added env override YAMS_ONNX_PRECREATE_RESOURCES
 - Improved load diagnostics: detailed logs for ABI table pointers, phases, and timeout causes
 - **Search Service Path Heuristic**: Tightened path-first detection to only trigger for single-token or quoted path-like queries (slashes, wildcards, or extensions). Multi-word queries now proceed to hybrid/metadata search, restoring results for phrases such as `"docs/delivery backlog prd tasks PBI"` while preserving fast path lookups for actual paths.
+
+### Fixed
+- Daemon stop reliability: `yams daemon stop` now only reports success after the process actually exits and will fall back to PID-based termination (and orphan cleanup) when the socket path is unresponsive.
+- Prompt termination on signals: the daemon now handles SIGTERM/SIGINT to exit promptly when graceful shutdown isn't possible, addressing lingering yams-daemon processes after stop.
 
 ## Removed
 - Removed WASM, and legacy plugin system from codebase and ServiceManager

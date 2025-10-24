@@ -10,7 +10,7 @@ Reporting
 Response targets
 - Acknowledge receipt within 48 hours.
 - Triage within 7 days; we will inform you of severity and next steps.
-- Fix or mitigation target within 90 days for high/critical, best effort otherwise.
+- Fix or mitigation target within 90 days for high/critical, the best effort otherwise.
 
 Disclosure
 - We prefer coordinated disclosure. We will credit reporters unless you ask otherwise.
