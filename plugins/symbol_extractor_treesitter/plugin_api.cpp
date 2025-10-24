@@ -234,6 +234,15 @@ const char* yams_plugin_get_version(void) {
     return "1.0.0";
 }
 
+const char* yams_plugin_get_manifest_json(void) {
+    return R"({
+  "name": "symbol_extractor_treesitter",
+  "version": "1.0.0",
+  "interfaces": ["symbol_extractor_v1"],
+  "description": "Tree-sitter based symbol extraction for multiple languages"
+})";
+}
+
 int yams_plugin_init(const char* config_json, const void* host_context) {
     // Plugin is stateless and uses runtime grammar loading
     (void)config_json;

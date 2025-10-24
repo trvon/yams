@@ -261,3 +261,7 @@ While this specification focuses on the core C ABI, YAMS also supports external 
 - **Note**: Example of external process communication, not core ABI
 
 These examples showcase integration patterns but the primary plugin development should target the C ABI specification above for production use.
+
+## Future Plugin Opportunities
+
+Binary/specialized file types currently fail text extraction and would benefit from dedicated extractor plugins.

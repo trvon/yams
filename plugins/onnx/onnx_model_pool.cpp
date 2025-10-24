@@ -4,6 +4,10 @@
 
 #include <nlohmann/json.hpp>
 #include <onnxruntime_cxx_api.h>
+static Ort::Env& get_global_ort_env() {
+    static Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "YamsDaemon");
+    return env;
+}
 #ifdef YAMS_ENABLE_ONNX_GENAI
 #include <yams/daemon/resource/onnx_genai_adapter.h>
 #endif
@@ -64,7 +68,8 @@ public:
 #endif
 
         // Initialize ONNX Runtime environment
-        env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, modelName.c_str());
+        // Use a single global Ort::Env per process (best practice)
+        env_ = &get_global_ort_env();
 
         // Configure session options
         sessionOptions_ = std::make_unique<Ort::SessionOptions>();
@@ -749,7 +754,7 @@ private:
     vector::EmbeddingConfig config_;
     yams::vector::TextPreprocessor preprocessor_;
 
-    std::unique_ptr<Ort::Env> env_;
+    Ort::Env* env_ = nullptr; // shared global env
     std::unique_ptr<Ort::SessionOptions> sessionOptions_;
     std::unique_ptr<Ort::Session> session_;
 

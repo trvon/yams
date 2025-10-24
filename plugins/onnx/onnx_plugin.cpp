@@ -5,17 +5,20 @@
 extern "C" {
 #include <yams/plugins/abi.h>
 #include <yams/plugins/model_provider_v1.h>
+#include <yams/plugins/onnx_request_v1.h>
 }
 
+#include <nlohmann/json.hpp>
 #include "model_provider.h"
 
 static const char* kManifestJson = R"JSON({
   "name": "onnx",
   "version": "0.1.0",
   "interfaces": [
-    {"id": "model_provider_v1", "version": 2}
+    {"id": "model_provider_v1", "version": 2},
+    {"id": "onnx_request_v1", "version": 1}
   ]
-})JSON"; // ABI v1.2 (model_provider_v1 version=2)
+})JSON"; // ABI v1.2 (model_provider_v1 version=2) + onnx_request_v1
 
 // Lightweight runtime flags
 static bool g_plugin_disabled = false; // set by env at init
@@ -51,6 +54,98 @@ YAMS_PLUGIN_API int yams_plugin_init(const char* /*config_json*/, const void* /*
 
 YAMS_PLUGIN_API void yams_plugin_shutdown(void) { /* nothing to do */ }
 
+static yams_onnx_request_v1 g_req_v1 = {
+    /*abi_version*/ YAMS_IFACE_ONNX_REQUEST_V1_VERSION,
+    /*self*/ nullptr,
+    /*process_json*/
+    [](void*, const char* req, char** out_json) -> int {
+        if (!out_json)
+            return YAMS_PLUGIN_ERR_INVALID;
+        nlohmann::json resp;
+        try {
+            auto j = nlohmann::json::parse(req ? req : "{}", nullptr, false);
+            if (j.is_discarded()) {
+                resp = {{"error", "invalid_json"}};
+            } else {
+                std::string task = j.value("task", "embedding");
+                std::string model = j.value("model_id", "");
+                if (task == "embedding") {
+                    auto* prov = yams_onnx_get_model_provider();
+                    if (!prov) {
+                        resp = {{"error", "provider_unavailable"}};
+                    } else {
+                        // Pass options through to load_model so provider can configure
+                        // device/batching hints
+                        if (j.contains("options")) {
+                            try {
+                                std::string opt = j["options"].dump();
+                                (void)prov->load_model(prov->self, model.c_str(), nullptr,
+                                                       opt.c_str());
+                            } catch (...) {
+                            }
+                        }
+                        std::vector<std::string> inputs;
+                        if (j.contains("inputs") && j["inputs"].is_array()) {
+                            for (auto& x : j["inputs"])
+                                if (x.is_string())
+                                    inputs.push_back(x.get<std::string>());
+                        }
+                        size_t b = inputs.size();
+                        if (b == 0) {
+                            resp = {{"error", "no_inputs"}};
+                        } else {
+                            std::vector<const uint8_t*> ptrs(b);
+                            std::vector<size_t> lens(b);
+                            for (size_t i = 0; i < b; ++i) {
+                                ptrs[i] = reinterpret_cast<const uint8_t*>(inputs[i].data());
+                                lens[i] = inputs[i].size();
+                            }
+                            float* out = nullptr;
+                            size_t out_b = 0, out_d = 0;
+                            auto rc = prov->generate_embedding_batch(prov->self, model.c_str(),
+                                                                     ptrs.data(), lens.data(), b,
+                                                                     &out, &out_b, &out_d);
+                            if (rc == YAMS_OK && out && out_b == b && out_d > 0) {
+                                resp["task"] = "embedding";
+                                resp["model_id"] = model;
+                                resp["batch"] = out_b;
+                                resp["dim"] = out_d;
+                                resp["vectors"] = nlohmann::json::array();
+                                for (size_t i = 0; i < out_b; ++i) {
+                                    nlohmann::json row = nlohmann::json::array();
+                                    for (size_t d = 0; d < out_d; ++d)
+                                        row.push_back(out[i * out_d + d]);
+                                    resp["vectors"].push_back(std::move(row));
+                                }
+                                prov->free_embedding_batch(prov->self, out, out_b, out_d);
+                            } else {
+                                resp = {{"error", "embedding_failed"}};
+                            }
+                        }
+                    }
+                } else if (task == "sentiment") {
+                    resp = {{"error", "sentiment_not_implemented"}};
+                } else {
+                    resp = {{"error", "unsupported_task"}};
+                }
+            }
+        } catch (...) {
+            resp = {{"error", "exception"}};
+        }
+        std::string s = resp.dump();
+        char* buf = (char*)std::malloc(s.size() + 1);
+        if (!buf)
+            return YAMS_PLUGIN_ERR_INVALID;
+        std::memcpy(buf, s.c_str(), s.size() + 1);
+        *out_json = buf;
+        return YAMS_PLUGIN_OK;
+    },
+    /*free_string*/
+    [](void*, char* s) {
+        if (s)
+            std::free(s);
+    }};
+
 YAMS_PLUGIN_API int yams_plugin_get_interface(const char* id, uint32_t version, void** out_iface) {
     if (!id || !out_iface)
         return YAMS_PLUGIN_ERR_INVALID;
@@ -61,6 +156,11 @@ YAMS_PLUGIN_API int yams_plugin_get_interface(const char* id, uint32_t version, 
     if ((version >= 1 && version <= 2) && std::strcmp(id, YAMS_IFACE_MODEL_PROVIDER_V1) == 0) {
         *out_iface = static_cast<void*>(yams_onnx_get_model_provider());
         return (*out_iface) ? YAMS_PLUGIN_OK : YAMS_PLUGIN_ERR_NOT_FOUND;
+    }
+    if (version == YAMS_IFACE_ONNX_REQUEST_V1_VERSION &&
+        std::strcmp(id, YAMS_IFACE_ONNX_REQUEST_V1) == 0) {
+        *out_iface = static_cast<void*>(&g_req_v1);
+        return YAMS_PLUGIN_OK;
     }
     return YAMS_PLUGIN_ERR_NOT_FOUND;
 }

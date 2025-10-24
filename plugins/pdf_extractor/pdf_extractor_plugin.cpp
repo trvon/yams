@@ -88,7 +88,10 @@ void free_result(yams_extraction_result_t* result) {
 }
 
 static yams_content_extractor_v1 content_extractor_iface = {
-    .abi_version = 2, .supports = supports, .extract = extract, .free_result = free_result};
+    .abi_version = YAMS_IFACE_CONTENT_EXTRACTOR_V1_VERSION,
+    .supports = supports,
+    .extract = extract,
+    .free_result = free_result};
 
 // --- Plugin ABI Implementation ---
 
@@ -107,18 +110,12 @@ const char* yams_plugin_get_version(void) {
 }
 
 const char* yams_plugin_get_manifest_json(void) {
-    // This could be read from the file, but for simplicity, we'll hardcode it.
     return R"({
-      "name": "pdf_extractor",
-      "version": "1.0.0",
-      "abi": 1,
-      "interfaces": [
-        {
-          "id": "content_extractor_v1",
-          "version": 2
-        }
-      ]
-    })";
+  "name": "pdf_extractor",
+  "version": "1.0.0",
+  "interfaces": ["content_extractor_v1"],
+  "description": "PDF content extraction plugin"
+})";
 }
 
 int yams_plugin_init(const char* config_json, const void* host_context) {
@@ -139,7 +136,7 @@ int yams_plugin_get_interface(const char* iface_id, uint32_t version, void** out
     *out_iface = nullptr;
 
     if (strcmp(iface_id, YAMS_IFACE_CONTENT_EXTRACTOR_V1_ID) == 0) {
-        if (version == 2 || version == YAMS_IFACE_CONTENT_EXTRACTOR_V1_VERSION) {
+        if (version == YAMS_IFACE_CONTENT_EXTRACTOR_V1_VERSION) {
             *out_iface = &content_extractor_iface;
             return YAMS_PLUGIN_OK;
         }

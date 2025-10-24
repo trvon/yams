@@ -40,6 +40,7 @@ struct ProviderCtx {
         }
         yams::daemon::ModelPoolConfig cfg;
         // Defaults: prefer lazy loading to avoid blocking startup
+        // Models will be loaded on first use, not during plugin initialization
         cfg.lazyLoading = true;
         cfg.enableGPU = false;
         cfg.numThreads = std::max(1u, std::thread::hardware_concurrency());
@@ -53,8 +54,16 @@ struct ProviderCtx {
                 cfgPath = fs::path(home) / ".config" / "yams" / "config.toml";
             }
             std::string modelsRoot;
+            std::string dataDir;
             bool keepModelHot = true;
             std::string preferredModel;
+            std::vector<std::string> preloadList;
+
+            // First, check for YAMS_STORAGE environment variable
+            if (const char* storage = std::getenv("YAMS_STORAGE")) {
+                dataDir = storage;
+            }
+
             if (!cfgPath.empty() && fs::exists(cfgPath)) {
                 std::ifstream file(cfgPath);
                 std::string line;
@@ -89,11 +98,15 @@ struct ProviderCtx {
                     }
                     if (value.size() >= 2 && value.front() == '"' && value.back() == '"')
                         value = value.substr(1, value.size() - 2);
+
+                    // Read data directory from [storage].base_path if not set by env
+                    if (section == "storage" && key == "base_path" && dataDir.empty()) {
+                        dataDir = value;
+                    }
+
                     if (section == "embeddings") {
                         if (key == "preferred_model" && preferredModel.empty())
                             preferredModel = value;
-                        else if (key == "model_path" && modelsRoot.empty())
-                            modelsRoot = value;
                         else if (key == "keep_model_hot") {
                             std::string v = value;
                             for (auto& c : v)
@@ -101,42 +114,97 @@ struct ProviderCtx {
                             keepModelHot = !(v == "false" || v == "0" || v == "no" || v == "off");
                         }
                     }
+                    // New: preload list under [plugins.onnx]
+                    if (section == "plugins.onnx" && key == "preload") {
+                        // parse CSV style list: preload = "modelA,modelB"
+                        std::string s = value;
+                        for (char& ch : s) {
+                            if (ch == '[' || ch == ']')
+                                ch = ' ';
+                        }
+                        trim(s);
+                        // allow ["a","b"] or a,b
+                        if (!s.empty() && s.front() == '"' && s.back() == '"')
+                            s = s.substr(1, s.size() - 2);
+                        size_t start = 0;
+                        while (start < s.size()) {
+                            auto comma = s.find(',', start);
+                            std::string item =
+                                s.substr(start, comma == std::string::npos ? std::string::npos
+                                                                           : (comma - start));
+                            trim(item);
+                            if (!item.empty() && item.front() == '"' && item.back() == '"')
+                                item = item.substr(1, item.size() - 2);
+                            if (!item.empty())
+                                preloadList.push_back(item);
+                            if (comma == std::string::npos)
+                                break;
+                            start = comma + 1;
+                        }
+                    }
+                    // New: explicit models table entries [plugins.onnx.models.NAME]
+                    if (section.rfind("plugins.onnx.models.", 0) == 0 && key == "task") {
+                        // Section name encodes model_id; mark for preload as hot
+                        std::string model_id =
+                            section.substr(std::string("plugins.onnx.models.").size());
+                        if (!model_id.empty())
+                            preloadList.push_back(model_id);
+                    }
                 }
             }
-            if (!modelsRoot.empty() && modelsRoot[0] == '~') {
-                if (const char* home = std::getenv("HOME"))
-                    modelsRoot = std::string(home) + modelsRoot.substr(1);
+
+            // Set modelsRoot to $dataDir/models if dataDir is available
+            if (!dataDir.empty()) {
+                // Expand ~ if present
+                if (dataDir[0] == '~') {
+                    if (const char* home = std::getenv("HOME"))
+                        dataDir = std::string(home) + dataDir.substr(1);
+                }
+                cfg.modelsRoot = dataDir + "/models";
+                spdlog::info("[ONNX-Plugin] Using models directory: {}", cfg.modelsRoot);
             }
-            if (!modelsRoot.empty())
-                cfg.modelsRoot = modelsRoot;
-            // Map keep_model_hot to lazyLoading inverse
-            cfg.lazyLoading = !keepModelHot;
-            if (keepModelHot && !preferredModel.empty()) {
-                if (!modelsRoot.empty())
-                    cfg.preloadModels = {modelsRoot + "/" + preferredModel + "/model.onnx"};
-                else
-                    cfg.preloadModels = {preferredModel};
+            // Map keep_model_hot to lazyLoading inverse - but always use lazy loading
+            // during plugin initialization to avoid blocking daemon startup.
+            // Background preloading (if configured) will happen after init completes.
+            cfg.lazyLoading = true; // Force lazy loading during plugin init
+            // Build preload list if any (will be deferred until after initialization)
+            if (!preloadList.empty()) {
+                cfg.preloadModels = preloadList;
+            } else if (keepModelHot && !preferredModel.empty()) {
+                cfg.preloadModels = {preferredModel};
+            }
+            // Force no-preload in test/mock environments to avoid background threads
+            if (std::getenv("YAMS_SKIP_MODEL_LOADING") || std::getenv("YAMS_TEST_MODE") ||
+                std::getenv("YAMS_USE_MOCK_PROVIDER")) {
+                cfg.preloadModels.clear();
+                cfg.lazyLoading = true;
             }
         } catch (const std::exception&) {
             // ignore config parse errors
         }
         pool = std::make_unique<yams::daemon::OnnxModelPool>(cfg);
-        // Initialize pool with bounded time to avoid hangs during plugin listing/doctor
+        // Initialize pool asynchronously (non-blocking)
+        // Note: With lazyLoading=true, initialize() just sets a flag and returns immediately.
+        // Actual model loading happens on-demand via loadModel() when first requested.
         auto fut = std::async(std::launch::async, [this]() { return pool->initialize(); });
-        if (fut.wait_for(std::chrono::seconds(5)) == std::future_status::ready) {
+        if (fut.wait_for(std::chrono::seconds(10)) == std::future_status::ready) {
             auto res = fut.get();
             if (res) {
                 ready = true;
                 last_error.clear();
             } else {
+                // Initialization failed (rare - only happens if mutex deadlock or similar)
                 ready = false;
                 last_error = res.error().message;
                 spdlog::warn("[ONNX-Plugin] Pool initialize failed: {}", last_error);
             }
         } else {
-            ready = false;
-            last_error = "pool_initialize_timeout";
-            spdlog::warn("[ONNX-Plugin] Pool initialize timed out");
+            // Timeout during init (should be rare with lazyLoading=true)
+            // Mark as ready anyway - models can still be loaded on-demand
+            spdlog::warn("[ONNX-Plugin] Pool initialize timed out after 10s, marking ready anyway "
+                         "(lazy loading enabled)");
+            ready = true;
+            last_error.clear();
         }
     }
 };
@@ -531,7 +599,9 @@ struct ProviderSingleton {
             j["backend"] = "onnxruntime";
             j["pipeline"] = "raw_ort";
             j["model"] = model_id;
-            // Best-effort dimension
+            // Best-effort dimension and runtime hints
+            j["graph_optimization"] = "enabled";
+            j["execution_provider"] = "cpu";
             size_t dim = 0;
             if (c->ready) {
                 auto h = c->pool->acquireModel(model_id, std::chrono::seconds(2));

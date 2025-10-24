@@ -29,7 +29,7 @@ extractor_headers = files(
 )
 
 shared_module(
-  'symbol_extractor_treesitter',
+  'yams_symbol_extractor',
   extractor_sources,
   include_directories: [ include_directories('../../include'), include_directories('.') ],
   dependencies: [ts_dep, libdl_dep],
@@ -37,4 +37,5 @@ shared_module(
   build_by_default: true,
   install: true,
   install_dir: plugins_dir,
+  name_prefix: '',  # Don't add 'lib' prefix
 )

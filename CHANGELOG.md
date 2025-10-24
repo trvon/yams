@@ -18,17 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.7.7] - Unreleased
 
 ### Added
-- **Doctor Prune Command (PBI-062)**: Intelligent cleanup of build artifacts, logs, cache, and temporary files
-  - Comprehensive magic number detection for 125+ file types (images, archives, documents, executables, audio, video, etc.)
+- **Doctor Prune Command**: Intelligent cleanup of build artifacts, logs, cache, and temporary files
   - Support for 9 build systems (CMake, Ninja, Meson, Make, Gradle, Maven, NPM/Yarn, Cargo, Go)
   - Detection across 10+ programming languages (C/C++, Java, Python, JavaScript, Rust, Go, OCaml, Haskell, Erlang, etc.)
   - Hierarchical category system: build-artifacts, build-system, logs, cache, temp, coverage, IDE
   - Dry-run by default with `--apply` flag for execution
   - Usage: `yams doctor prune --category build-artifacts --older-than 30d --apply`
-  - **Architecture**: Fully implemented via daemon IPC (PruneRequest/PruneResponse) for non-blocking operation
-  - **RepairManager Integration**: Prune operations delegated to `RepairManager::pruneFiles()` via InternalEventBus
-  - **Clean Separation**: CLI layer communicates via daemon client; no direct database access
-  - **Modern C++23**: Uses std::ranges, constexpr, templates for efficient file type detection
 - Started C++23 Compatibility support expansion
 - Migrated vectordb to [https://github.com/trvon/sqlite-vec-cpp](https://github.com/trvon/sqlite-vec-cpp)
 - **Tree-sitter Symbol Extraction Plugin**: C-ABI based plugin system for multi-language symbol extraction
@@ -58,6 +53,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ServiceManager FSM Architecture**: Centralized state management and eliminated duplication
   - Added `DaemonLifecycleFsm& lifecycleFsm_` reference to ServiceManager for daemon-level degradation tracking
   - Removed scattered manual FSM state checks in favor of FSM query methods (`isReady()`, `isLoadingOrReady()`)
+- **Text Extraction for Source Code**: Fixed critical issue where JavaScript/TypeScript/Solidity/config files failed FTS5 extraction
+    - `src/extraction/extraction_util.cpp`: Replaced hardcoded `is_text_like()` with `FileTypeDetector::isTextMimeType()` which uses comprehensive `magic_numbers.hpp` database; added extension normalization (handles both `.js` and `js` formats)
+    - `src/extraction/plain_text_extractor.cpp`: 
+      - Removed hardcoded 50+ extension list, delegating to `FileTypeDetector` for dynamic detection
+      - Enhanced `isBinaryFile()` with UTF-8 BOM support and reduced false positives
+      - Added `isParseableText()` with proper UTF-8 validation (validates multi-byte sequences, continuation bytes)
+      - Baseline registration now includes common config/markup extensions (`.toml`, `.ini`, `.yml`, `.md`, `.rst`)
+    - `src/app/services/search_service.cpp`: Updated lightweight indexing to use `FileTypeDetector::isTextMimeType()`
 
 ### Changed
 - **Fuzzy Index Memory Optimization**: Enhanced BK-tree index building with intelligent document prioritization
@@ -140,7 +143,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Deprecated
 - **MCP `get_by_name` tool**: Use `get` tool with `name` parameter instead. The `get` tool now smartly handles both hash and name lookups with optimized pattern matching
 
-### Fixed
 - **Streaming Protocol Bug**: Fixed critical bug where `GetResponse`/`CatResponse` sent header-only frame (empty content) followed by data frame, causing CLI to process first frame and fail. Added `force_unary_response` check in request_handler.cpp to disable streaming for these response types, forcing single complete frame transmission
 - **Protobuf Schema**: Added missing `bool has_content = 6` field to `GetResponse` message in ipc_envelope.proto. Updated serialization to explicitly set/read flag instead of recalculating, preventing desync between daemon and CLI
 - **Daemon**: Fixed a regression in the plugin loader that prevented legacy model provider plugins (like the ONNX provider) from being correctly detected and adopted. The loader now includes a fallback to detect and register providers using the legacy `getProviderName`/`createProvider` symbols, restoring embedding generation functionality.
