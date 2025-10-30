@@ -9,6 +9,13 @@
 <img alt="last commit" src="https://img.shields.io/github/last-commit/trvon/yams?style=flat-square">
 </p>
 
+> [!WARNING]
+> **Experimental Software - Not Production Ready**
+> 
+> YAMS is under active development and should be considered **experimental**. The software may contain bugs, incomplete features, and breaking changes between versions. Use at your own risk.
+
+> For production workloads, please wait for a stable 1.0 release.
+
 
 ## Features
 - SHA‑256 content‑addressed storage
