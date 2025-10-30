@@ -2,17 +2,15 @@
 
 #include <filesystem>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
 #include <vector>
 #include <yams/extraction/text_extractor.h>
 
-// PDFium headers (types only)
-#include <fpdf_doc.h>
-#include <fpdf_text.h>
-#include <fpdfview.h>
+// Forward declarations for QPDF
+class QPDF;
+class QPDFPageObjectHelper;
 
 namespace yams::extraction {
 
@@ -101,79 +99,19 @@ public:
 
 private:
     /**
-     * @brief PDFium document wrapper for RAII
+     * @brief Internal extraction implementation using QPDF
      */
-    struct PdfDocument {
-        FPDF_DOCUMENT doc = nullptr;
-        ~PdfDocument();
-
-        PdfDocument() = default;
-        PdfDocument(const PdfDocument&) = delete;
-        PdfDocument& operator=(const PdfDocument&) = delete;
-        PdfDocument(PdfDocument&& other) noexcept : doc(other.doc) { other.doc = nullptr; }
-        PdfDocument& operator=(PdfDocument&& other) noexcept {
-            if (this != &other) {
-                if (doc)
-                    this->~PdfDocument();
-                doc = other.doc;
-                other.doc = nullptr;
-            }
-            return *this;
-        }
-    };
-
-    /**
-     * @brief PDFium page wrapper for RAII
-     */
-    struct PdfPage {
-        FPDF_PAGE page = nullptr;
-        FPDF_TEXTPAGE textPage = nullptr;
-        ~PdfPage();
-
-        PdfPage() = default;
-        PdfPage(const PdfPage&) = delete;
-        PdfPage& operator=(const PdfPage&) = delete;
-        PdfPage(PdfPage&& other) noexcept : page(other.page), textPage(other.textPage) {
-            other.page = nullptr;
-            other.textPage = nullptr;
-        }
-    };
-
-    /**
-     * @brief Initialize PDFium library (called once)
-     */
-    static void initializePdfium();
-
-    /**
-     * @brief Cleanup PDFium library (called at exit)
-     */
-    static void cleanupPdfium();
-
-    /**
-     * @brief Check if PDFium is initialized
-     */
-    static bool isPdfiumInitialized();
-
-    /**
-     * @brief Internal extraction implementation
-     */
-    Result<ExtractionResult> extractInternal(std::span<const std::byte> data,
-                                             const PdfExtractOptions& options);
+    Result<ExtractionResult> extractFromDocument(QPDF& pdf, const PdfExtractOptions& options);
 
     /**
      * @brief Extract metadata from PDF document
      */
-    void extractMetadata(FPDF_DOCUMENT doc, ExtractionResult& result);
+    void extractMetadata(QPDF& pdf, ExtractionResult& result);
 
     /**
      * @brief Extract text from a single page
      */
-    std::string extractPageText(FPDF_PAGE page);
-
-    /**
-     * @brief Convert UTF-16 to UTF-8
-     */
-    static std::string convertUtf16ToUtf8(const std::vector<unsigned short>& utf16);
+    std::string extractPageText(QPDFPageObjectHelper page);
 
     /**
      * @brief Clean extracted text
@@ -195,10 +133,6 @@ private:
      * @brief Detect language of extracted text
      */
     std::string detectLanguage(const std::string& text);
-
-    // Static initialization flag
-    static bool pdfiumInitialized;
-    static std::mutex pdfiumMutex;
 };
 
 /**

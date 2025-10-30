@@ -461,7 +461,7 @@ private:
             auto future = promise.get_future();
 
             boost::asio::co_spawn(
-                daemon::GlobalIOContext::global_executor(),
+                getExecutor(),
                 [&client, req,
                  promise = std::move(promise)]() mutable -> boost::asio::awaitable<void> {
                     auto result = co_await client.fileHistory(req);

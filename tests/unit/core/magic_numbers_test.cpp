@@ -2,15 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <array>
-#include <cstring> // for strlen
+#include <cstring>
 #include <span>
 #include <vector>
-#include <gtest/gtest.h>
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <yams/core/magic_numbers.hpp>
 
-namespace yams::magic {
+using namespace yams::magic;
 
-// Helper to create byte spans from hex strings
+// Helper to create byte vectors from hex strings
 std::vector<uint8_t> hex_to_vector(const std::string& hex) {
     std::vector<uint8_t> result;
     for (size_t i = 0; i < hex.length(); i += 2) {
@@ -24,370 +25,360 @@ std::vector<uint8_t> hex_to_vector(const std::string& hex) {
 // Pattern Matching Tests
 //=============================================================================
 
-TEST(MagicNumbersTest, JPEGDetection) {
-    auto jpeg_data = hex_to_vector("FFD8FF");
-    auto mime = detect_mime_type(std::span(jpeg_data));
-    EXPECT_EQ(mime, "image/jpeg");
+TEST_CASE("Image format detection", "[core][magic][image]") {
+    SECTION("JPEG detection") {
+        auto jpeg_data = hex_to_vector("FFD8FF");
+        REQUIRE(detect_mime_type(std::span(jpeg_data)) == "image/jpeg");
+    }
+
+    SECTION("PNG detection") {
+        auto png_data = hex_to_vector("89504E470D0A1A0A");
+        REQUIRE(detect_mime_type(std::span(png_data)) == "image/png");
+    }
+
+    SECTION("GIF87a detection") {
+        auto gif87_data = hex_to_vector("474946383761");
+        REQUIRE(detect_mime_type(std::span(gif87_data)) == "image/gif");
+    }
+
+    SECTION("GIF89a detection") {
+        auto gif89_data = hex_to_vector("474946383961");
+        REQUIRE(detect_mime_type(std::span(gif89_data)) == "image/gif");
+    }
+
+    SECTION("BMP detection") {
+        auto bmp_data = hex_to_vector("424D");
+        REQUIRE(detect_mime_type(std::span(bmp_data)) == "image/bmp");
+    }
+
+    SECTION("TIFF detection") {
+        auto tiff_data = hex_to_vector("49492A00");
+        REQUIRE(detect_mime_type(std::span(tiff_data)) == "image/tiff");
+    }
 }
 
-TEST(MagicNumbersTest, PNGDetection) {
-    auto png_data = hex_to_vector("89504E470D0A1A0A");
-    auto mime = detect_mime_type(std::span(png_data));
-    EXPECT_EQ(mime, "image/png");
+TEST_CASE("Archive format detection", "[core][magic][archive]") {
+    SECTION("PDF detection") {
+        auto pdf_data = hex_to_vector("255044462D");
+        REQUIRE(detect_mime_type(std::span(pdf_data)) == "application/pdf");
+    }
+
+    SECTION("ZIP detection") {
+        auto zip_data = hex_to_vector("504B0304");
+        REQUIRE(detect_mime_type(std::span(zip_data)) == "application/zip");
+    }
+
+    SECTION("GZIP detection") {
+        auto gzip_data = hex_to_vector("1F8B");
+        REQUIRE(detect_mime_type(std::span(gzip_data)) == "application/gzip");
+    }
+
+    SECTION("BZIP2 detection") {
+        auto bzip2_data = hex_to_vector("425A68");
+        REQUIRE(detect_mime_type(std::span(bzip2_data)) == "application/x-bzip2");
+    }
+
+    SECTION("7-Zip detection") {
+        auto sevenz_data = hex_to_vector("377ABCAF271C");
+        REQUIRE(detect_mime_type(std::span(sevenz_data)) == "application/x-7z-compressed");
+    }
+
+    SECTION("RAR detection") {
+        auto rar_data = hex_to_vector("526172211A0700");
+        REQUIRE(detect_mime_type(std::span(rar_data)) == "application/x-rar-compressed");
+    }
+
+    SECTION("XZ detection") {
+        auto xz_data = hex_to_vector("FD377A585A00");
+        REQUIRE(detect_mime_type(std::span(xz_data)) == "application/x-xz");
+    }
 }
 
-TEST(MagicNumbersTest, GIFDetection) {
-    // GIF87a
-    auto gif87_data = hex_to_vector("474946383761");
-    EXPECT_EQ(detect_mime_type(std::span(gif87_data)), "image/gif");
+TEST_CASE("Executable format detection", "[core][magic][executable]") {
+    SECTION("ELF detection") {
+        auto elf_data = hex_to_vector("7F454C46");
+        REQUIRE(detect_mime_type(std::span(elf_data)) == "application/x-executable");
+    }
 
-    // GIF89a
-    auto gif89_data = hex_to_vector("474946383961");
-    EXPECT_EQ(detect_mime_type(std::span(gif89_data)), "image/gif");
+    SECTION("Windows PE detection") {
+        auto pe_data = hex_to_vector("4D5A");
+        REQUIRE(detect_mime_type(std::span(pe_data)) == "application/x-msdownload");
+    }
+
+    SECTION("Java class file detection") {
+        auto class_data = hex_to_vector("CAFEBABE");
+        REQUIRE(detect_mime_type(std::span(class_data)) == "application/java-archive");
+    }
 }
 
-TEST(MagicNumbersTest, PDFDetection) {
-    auto pdf_data = hex_to_vector("255044462D");
-    auto mime = detect_mime_type(std::span(pdf_data));
-    EXPECT_EQ(mime, "application/pdf");
+TEST_CASE("Audio format detection", "[core][magic][audio]") {
+    SECTION("MP3 detection") {
+        auto mp3_data = hex_to_vector("494433");
+        REQUIRE(detect_mime_type(std::span(mp3_data)) == "audio/mpeg");
+    }
+
+    SECTION("FLAC detection") {
+        auto flac_data = hex_to_vector("664C6143");
+        REQUIRE(detect_mime_type(std::span(flac_data)) == "audio/flac");
+    }
+
+    SECTION("Ogg detection") {
+        auto ogg_data = hex_to_vector("4F676753");
+        REQUIRE(detect_mime_type(std::span(ogg_data)) == "audio/ogg");
+    }
 }
 
-TEST(MagicNumbersTest, ZIPDetection) {
-    auto zip_data = hex_to_vector("504B0304");
-    auto mime = detect_mime_type(std::span(zip_data));
-    EXPECT_EQ(mime, "application/zip");
+TEST_CASE("Video format detection", "[core][magic][video]") {
+    SECTION("MP4 detection") {
+        auto mp4_data = hex_to_vector("000000146674797069736F6D");
+        REQUIRE(detect_mime_type(std::span(mp4_data)) == "video/mp4");
+    }
+
+    SECTION("Matroska detection") {
+        auto mkv_data = hex_to_vector("1A45DFA3");
+        REQUIRE(detect_mime_type(std::span(mkv_data)) == "video/x-matroska");
+    }
+
+    SECTION("FLV detection") {
+        auto flv_data = hex_to_vector("464C56");
+        REQUIRE(detect_mime_type(std::span(flv_data)) == "video/x-flv");
+    }
 }
 
-TEST(MagicNumbersTest, GZIPDetection) {
-    auto gzip_data = hex_to_vector("1F8B");
-    auto mime = detect_mime_type(std::span(gzip_data));
-    EXPECT_EQ(mime, "application/gzip");
+TEST_CASE("Font format detection", "[core][magic][font]") {
+    SECTION("TrueType detection") {
+        auto ttf_data = hex_to_vector("0001000000");
+        REQUIRE(detect_mime_type(std::span(ttf_data)) == "font/ttf");
+    }
+
+    SECTION("OpenType detection") {
+        auto otf_data = hex_to_vector("4F54544F");
+        REQUIRE(detect_mime_type(std::span(otf_data)) == "font/otf");
+    }
+
+    SECTION("WOFF detection") {
+        auto woff_data = hex_to_vector("774F4646");
+        REQUIRE(detect_mime_type(std::span(woff_data)) == "font/woff");
+    }
 }
 
-TEST(MagicNumbersTest, ELFDetection) {
-    auto elf_data = hex_to_vector("7F454C46");
-    auto mime = detect_mime_type(std::span(elf_data));
-    EXPECT_EQ(mime, "application/x-executable");
-}
-
-TEST(MagicNumbersTest, MP3Detection) {
-    auto mp3_data = hex_to_vector("494433");
-    auto mime = detect_mime_type(std::span(mp3_data));
-    EXPECT_EQ(mime, "audio/mpeg");
-}
-
-TEST(MagicNumbersTest, SQLiteDetection) {
+TEST_CASE("Database format detection", "[core][magic][database]") {
     auto sqlite_data = hex_to_vector("53514C69746520666F726D6174");
-    auto mime = detect_mime_type(std::span(sqlite_data));
-    EXPECT_EQ(mime, "application/x-sqlite3");
+    REQUIRE(detect_mime_type(std::span(sqlite_data)) == "application/x-sqlite3");
+}
+
+TEST_CASE("Text encoding detection", "[core][magic][text]") {
+    SECTION("UTF-8 BOM detection") {
+        auto utf8_bom = hex_to_vector("EFBBBF");
+        REQUIRE(detect_mime_type(std::span(utf8_bom)) == "text/plain");
+    }
+
+    SECTION("UTF-16 BE BOM detection") {
+        auto utf16be_bom = hex_to_vector("FEFF");
+        REQUIRE(detect_mime_type(std::span(utf16be_bom)) == "text/plain");
+    }
+
+    SECTION("UTF-16 LE BOM detection") {
+        auto utf16le_bom = hex_to_vector("FFFE");
+        REQUIRE(detect_mime_type(std::span(utf16le_bom)) == "text/plain");
+    }
 }
 
 //=============================================================================
 // Pattern Structure Tests
 //=============================================================================
 
-TEST(MagicNumbersTest, PatternDatabaseNotEmpty) {
-    const auto& patterns = get_magic_patterns();
+TEST_CASE("Pattern database is valid", "[core][magic]") {
+    SECTION("Database is not empty") {
+        const auto& patterns = get_magic_patterns();
 #if YAMS_HAS_CONSTEXPR_CONTAINERS
-    EXPECT_GT(patterns.size(), 0);
-    EXPECT_EQ(patterns.size(),
-              86); // High-confidence patterns only (low-confidence code patterns omitted)
+        REQUIRE(patterns.size() > 0);
+        REQUIRE(patterns.size() == 86); // High-confidence patterns only
 #endif
-}
+    }
 
-TEST(MagicNumbersTest, MagicDatabaseInfo) {
-    size_t count = MagicDatabaseInfo::pattern_count();
-    const char* mode = MagicDatabaseInfo::mode();
+    SECTION("Magic database info is accessible") {
+        size_t count = MagicDatabaseInfo::pattern_count();
+        const char* mode = MagicDatabaseInfo::mode();
 
-    EXPECT_GT(count, 0);
-    EXPECT_NE(mode, nullptr);
-    EXPECT_GT(strlen(mode), 0); // Use ::strlen
+        REQUIRE(count > 0);
+        REQUIRE(mode != nullptr);
+        REQUIRE(strlen(mode) > 0);
 
 #if YAMS_HAS_CONSTEXPR_CONTAINERS
-    // In C++23 mode, should report compile-time
-    std::string mode_str(mode);
-    EXPECT_NE(mode_str.find("compile-time"), std::string::npos);
+        std::string mode_str(mode);
+        REQUIRE(mode_str.find("compile-time") != std::string::npos);
 #endif
-}
+    }
 
-TEST(MagicNumbersTest, PatternFieldsValid) {
-    const auto& patterns = get_magic_patterns();
+    SECTION("Pattern fields are valid") {
+        const auto& patterns = get_magic_patterns();
 #if YAMS_HAS_CONSTEXPR_CONTAINERS
-    ASSERT_GT(patterns.size(), 0);
+        REQUIRE(patterns.size() > 0);
 
-    // Check first pattern has valid fields
-    const auto& first = patterns[0];
-    EXPECT_GT(first.length, 0);
-    EXPECT_LE(first.length, 32);
-    EXPECT_FALSE(first.mime_type.empty());
-    EXPECT_FALSE(first.file_type.empty());
-    EXPECT_FALSE(first.description.empty());
-    EXPECT_GE(first.confidence, 0.0f);
-    EXPECT_LE(first.confidence, 1.0f);
+        const auto& first = patterns[0];
+        REQUIRE(first.length > 0);
+        REQUIRE(first.length <= 32);
+        REQUIRE_FALSE(first.mime_type.empty());
+        REQUIRE_FALSE(first.file_type.empty());
+        REQUIRE_FALSE(first.description.empty());
+        REQUIRE(first.confidence >= 0.0f);
+        REQUIRE(first.confidence <= 1.0f);
 #endif
+    }
 }
 
 //=============================================================================
 // Edge Cases
 //=============================================================================
 
-TEST(MagicNumbersTest, EmptyDataReturnsDefault) {
-    std::vector<uint8_t> empty;
-    auto mime = detect_mime_type(std::span(empty));
-    EXPECT_EQ(mime, "application/octet-stream");
-}
+TEST_CASE("Edge case handling", "[core][magic][edge]") {
+    SECTION("Empty data returns default") {
+        std::vector<uint8_t> empty;
+        REQUIRE(detect_mime_type(std::span(empty)) == "application/octet-stream");
+    }
 
-TEST(MagicNumbersTest, UnknownDataReturnsDefault) {
-    auto unknown_data = hex_to_vector("DEADBEEFCAFE");
-    auto mime = detect_mime_type(std::span(unknown_data));
-    EXPECT_EQ(mime, "application/octet-stream");
-}
+    SECTION("Unknown data returns default") {
+        auto unknown_data = hex_to_vector("DEADBEEFCAFE");
+        REQUIRE(detect_mime_type(std::span(unknown_data)) == "application/octet-stream");
+    }
 
-TEST(MagicNumbersTest, PartialMatchFails) {
-    // PNG signature is 8 bytes, provide only 4
-    auto partial_png = hex_to_vector("89504E47");
-    auto mime = detect_mime_type(std::span(partial_png));
-    // Should not match PNG (needs full 8 bytes)
-    EXPECT_NE(mime, "image/png");
-}
+    SECTION("Partial match fails") {
+        // PNG signature is 8 bytes, provide only 4
+        auto partial_png = hex_to_vector("89504E47");
+        auto mime = detect_mime_type(std::span(partial_png));
+        REQUIRE(mime != "image/png");
+    }
 
-TEST(MagicNumbersTest, ShortDataHandledGracefully) {
-    std::vector<uint8_t> short_data = {0x00};
-    auto mime = detect_mime_type(std::span(short_data));
-    EXPECT_EQ(mime, "application/octet-stream");
+    SECTION("Short data handled gracefully") {
+        std::vector<uint8_t> short_data = {0x00};
+        REQUIRE(detect_mime_type(std::span(short_data)) == "application/octet-stream");
+    }
 }
 
 //=============================================================================
 // Hex Conversion Tests
 //=============================================================================
 
-TEST(MagicNumbersTest, HexCharToByte) {
-    EXPECT_EQ(hex_char_to_byte('0'), 0x0);
-    EXPECT_EQ(hex_char_to_byte('9'), 0x9);
-    EXPECT_EQ(hex_char_to_byte('A'), 0xA);
-    EXPECT_EQ(hex_char_to_byte('F'), 0xF);
-    EXPECT_EQ(hex_char_to_byte('a'), 0xa);
-    EXPECT_EQ(hex_char_to_byte('f'), 0xf);
-}
+TEST_CASE("Hex conversion utilities", "[core][magic][hex]") {
+    SECTION("hex_char_to_byte") {
+        REQUIRE(hex_char_to_byte('0') == 0x0);
+        REQUIRE(hex_char_to_byte('9') == 0x9);
+        REQUIRE(hex_char_to_byte('A') == 0xA);
+        REQUIRE(hex_char_to_byte('F') == 0xF);
+        REQUIRE(hex_char_to_byte('a') == 0xa);
+        REQUIRE(hex_char_to_byte('f') == 0xf);
+    }
 
-TEST(MagicNumbersTest, HexToBytes) {
-    auto bytes = hex_to_bytes("FFD8FF");
-    EXPECT_EQ(bytes[0], 0xFF);
-    EXPECT_EQ(bytes[1], 0xD8);
-    EXPECT_EQ(bytes[2], 0xFF);
-}
+    SECTION("hex_to_bytes") {
+        auto bytes = hex_to_bytes("FFD8FF");
+        REQUIRE(bytes[0] == 0xFF);
+        REQUIRE(bytes[1] == 0xD8);
+        REQUIRE(bytes[2] == 0xFF);
+    }
 
-TEST(MagicNumbersTest, HexLength) {
-    EXPECT_EQ(hex_length("FF"), 1);
-    EXPECT_EQ(hex_length("FFD8"), 2);
-    EXPECT_EQ(hex_length("FFD8FF"), 3);
-    EXPECT_EQ(hex_length("89504E470D0A1A0A"), 8);
+    SECTION("hex_length") {
+        REQUIRE(hex_length("FF") == 1);
+        REQUIRE(hex_length("FFD8") == 2);
+        REQUIRE(hex_length("FFD8FF") == 3);
+        REQUIRE(hex_length("89504E470D0A1A0A") == 8);
+    }
 }
 
 //=============================================================================
 // Pattern Matching Logic Tests
 //=============================================================================
 
-TEST(MagicNumbersTest, PatternMatchesAtCorrectOffset) {
-    MagicPattern pattern{hex_to_bytes("7573746172"),
-                         hex_length("7573746172"),
-                         257, // TAR magic at offset 257
-                         "archive",
-                         "application/x-tar",
-                         "POSIX tar archive",
-                         1.0f};
+TEST_CASE("Pattern matching logic", "[core][magic][matching]") {
+    SECTION("Pattern matches at correct offset") {
+        MagicPattern pattern{hex_to_bytes("7573746172"),
+                             hex_length("7573746172"),
+                             257, // TAR magic at offset 257
+                             "archive",
+                             "application/x-tar",
+                             "POSIX tar archive",
+                             1.0f};
 
-    // Create buffer with pattern at offset 257
-    std::vector<uint8_t> buffer(300, 0x00);
-    auto tar_magic = hex_to_vector("7573746172");
-    std::copy(tar_magic.begin(), tar_magic.end(), buffer.begin() + 257);
+        // Create buffer with pattern at offset 257
+        std::vector<uint8_t> buffer(300, 0x00);
+        auto tar_magic = hex_to_vector("7573746172");
+        std::copy(tar_magic.begin(), tar_magic.end(), buffer.begin() + 257);
 
-    // Should NOT match at offset 0
-    EXPECT_FALSE(pattern.matches(std::span(buffer.data(), 10), 0));
+        // Should NOT match at offset 0
+        REQUIRE_FALSE(pattern.matches(std::span(buffer.data(), 10), 0));
 
-    // Should match at offset 257
-    EXPECT_TRUE(pattern.matches(std::span(buffer.data() + 257, 10), 257));
-}
+        // Should match at offset 257
+        REQUIRE(pattern.matches(std::span(buffer.data() + 257, 10), 257));
+    }
 
-TEST(MagicNumbersTest, PatternMatchFailsOnMismatch) {
-    MagicPattern pattern{hex_to_bytes("FFD8FF"), 3, 0, "image", "image/jpeg", "JPEG", 1.0f};
+    SECTION("Pattern match fails on mismatch") {
+        MagicPattern pattern{hex_to_bytes("FFD8FF"), 3, 0, "image", "image/jpeg", "JPEG", 1.0f};
 
-    auto wrong_data = hex_to_vector("89504E");
-    EXPECT_FALSE(pattern.matches(std::span(wrong_data), 0));
-}
+        auto wrong_data = hex_to_vector("89504E");
+        REQUIRE_FALSE(pattern.matches(std::span(wrong_data), 0));
+    }
 
-TEST(MagicNumbersTest, PatternMatchFailsOnInsufficientData) {
-    MagicPattern pattern{hex_to_bytes("89504E470D0A1A0A"), 8, 0, "image", "image/png", "PNG", 1.0f};
+    SECTION("Pattern match fails on insufficient data") {
+        MagicPattern pattern{
+            hex_to_bytes("89504E470D0A1A0A"), 8, 0, "image", "image/png", "PNG", 1.0f};
 
-    // Only 4 bytes provided, pattern needs 8
-    auto short_data = hex_to_vector("89504E47");
-    EXPECT_FALSE(pattern.matches(std::span(short_data), 0));
-}
-
-//=============================================================================
-// Comprehensive Format Tests
-//=============================================================================
-
-TEST(MagicNumbersTest, ArchiveFormats) {
-    struct TestCase {
-        const char* hex;
-        const char* expected_mime;
-    };
-
-    TestCase cases[] = {
-        {"504B0304", "application/zip"},
-        {"1F8B", "application/gzip"},
-        {"425A68", "application/x-bzip2"},
-        {"377ABCAF271C", "application/x-7z-compressed"},
-        {"526172211A0700", "application/x-rar-compressed"},
-        {"FD377A585A00", "application/x-xz"},
-    };
-
-    for (const auto& tc : cases) {
-        auto data = hex_to_vector(tc.hex);
-        EXPECT_EQ(detect_mime_type(std::span(data)), tc.expected_mime)
-            << "Failed for hex: " << tc.hex;
+        // Only 4 bytes provided, pattern needs 8
+        auto short_data = hex_to_vector("89504E47");
+        REQUIRE_FALSE(pattern.matches(std::span(short_data), 0));
     }
 }
 
-TEST(MagicNumbersTest, ImageFormats) {
-    struct TestCase {
-        const char* hex;
-        const char* expected_mime;
-    };
-
-    TestCase cases[] = {
-        {"FFD8FF", "image/jpeg"}, {"89504E470D0A1A0A", "image/png"}, {"474946383761", "image/gif"},
-        {"424D", "image/bmp"},    {"49492A00", "image/tiff"},
-    };
-
-    for (const auto& tc : cases) {
-        auto data = hex_to_vector(tc.hex);
-        EXPECT_EQ(detect_mime_type(std::span(data)), tc.expected_mime)
-            << "Failed for hex: " << tc.hex;
-    }
-}
-
-TEST(MagicNumbersTest, ExecutableFormats) {
-    struct TestCase {
-        const char* hex;
-        const char* expected_mime;
-    };
-
-    TestCase cases[] = {
-        {"4D5A", "application/x-msdownload"},
-        {"7F454C46", "application/x-executable"},
-        {"CAFEBABE", "application/java-archive"},
-    };
-
-    for (const auto& tc : cases) {
-        auto data = hex_to_vector(tc.hex);
-        EXPECT_EQ(detect_mime_type(std::span(data)), tc.expected_mime)
-            << "Failed for hex: " << tc.hex;
-    }
-}
-
-TEST(MagicNumbersTest, VideoFormats) {
-    auto mp4_data = hex_to_vector("000000146674797069736F6D");
-    EXPECT_EQ(detect_mime_type(std::span(mp4_data)), "video/mp4");
-
-    auto mkv_data = hex_to_vector("1A45DFA3");
-    EXPECT_EQ(detect_mime_type(std::span(mkv_data)), "video/x-matroska");
-
-    auto flv_data = hex_to_vector("464C56");
-    EXPECT_EQ(detect_mime_type(std::span(flv_data)), "video/x-flv");
-}
-
-TEST(MagicNumbersTest, AudioFormats) {
-    auto mp3_data = hex_to_vector("494433");
-    EXPECT_EQ(detect_mime_type(std::span(mp3_data)), "audio/mpeg");
-
-    auto flac_data = hex_to_vector("664C6143");
-    EXPECT_EQ(detect_mime_type(std::span(flac_data)), "audio/flac");
-
-    auto ogg_data = hex_to_vector("4F676753");
-    EXPECT_EQ(detect_mime_type(std::span(ogg_data)), "audio/ogg");
-}
-
-TEST(MagicNumbersTest, FontFormats) {
-    auto ttf_data = hex_to_vector("0001000000");
-    EXPECT_EQ(detect_mime_type(std::span(ttf_data)), "font/ttf");
-
-    auto otf_data = hex_to_vector("4F54544F");
-    EXPECT_EQ(detect_mime_type(std::span(otf_data)), "font/otf");
-
-    auto woff_data = hex_to_vector("774F4646");
-    EXPECT_EQ(detect_mime_type(std::span(woff_data)), "font/woff");
-}
-
-TEST(MagicNumbersTest, TextEncodingFormats) {
-    auto utf8_bom = hex_to_vector("EFBBBF");
-    EXPECT_EQ(detect_mime_type(std::span(utf8_bom)), "text/plain");
-
-    auto utf16be_bom = hex_to_vector("FEFF");
-    EXPECT_EQ(detect_mime_type(std::span(utf16be_bom)), "text/plain");
-
-    auto utf16le_bom = hex_to_vector("FFFE");
-    EXPECT_EQ(detect_mime_type(std::span(utf16le_bom)), "text/plain");
-}
-
 //=============================================================================
-// C++23 Constexpr Tests (only run in C++23 mode)
+// C++23 Constexpr Tests
 //=============================================================================
 
 #if YAMS_HAS_CONSTEXPR_CONTAINERS
+TEST_CASE("Constexpr magic number detection", "[core][magic][constexpr]") {
+    SECTION("Constexpr detection works") {
+        std::array<uint8_t, 3> jpeg_magic = {0xFF, 0xD8, 0xFF};
+        auto mime = detect_mime_type(std::span(jpeg_magic.data(), jpeg_magic.size()));
+        REQUIRE(mime == "image/jpeg");
+    }
 
-TEST(MagicNumbersTest, ConstexprDetection) {
-    // This test verifies detection works (avoid full constexpr due to GCC 15 limitations)
-    std::array<uint8_t, 3> jpeg_magic = {0xFF, 0xD8, 0xFF};
-    auto mime = detect_mime_type(std::span(jpeg_magic.data(), jpeg_magic.size()));
+    SECTION("Pattern count is compile-time") {
+        size_t count = MagicDatabaseInfo::pattern_count();
+        REQUIRE(count > 80);
+    }
 
-    EXPECT_EQ(mime, "image/jpeg");
+    SECTION("Patterns are accessible at compile-time") {
+        const auto& patterns = get_magic_patterns();
+        REQUIRE(patterns.size() > 0);
+
+        const auto& first = patterns[0];
+        REQUIRE(first.length > 0);
+    }
 }
-
-TEST(MagicNumbersTest, ConstexprPatternCount) {
-    // Pattern count is known at compile time
-    size_t count = MagicDatabaseInfo::pattern_count();
-    // Updated: pattern count reduced from 125 to 86 after removing low-confidence patterns
-    EXPECT_GT(count, 80); // Reduced from 90 to 80 to accommodate actual pattern count
-}
-
-TEST(MagicNumbersTest, ConstexprPatternsAccessible) {
-    // Can access patterns
-    const auto& patterns = get_magic_patterns();
-    EXPECT_GT(patterns.size(), 0);
-
-    // First pattern should be valid
-    const auto& first = patterns[0];
-    EXPECT_GT(first.length, 0);
-}
-
-#endif // YAMS_HAS_CONSTEXPR_CONTAINERS
+#endif
 
 //=============================================================================
 // Performance/Stress Tests
 //=============================================================================
 
-TEST(MagicNumbersTest, LargeDataHandled) {
-    // Create 1MB of data
-    std::vector<uint8_t> large_data(1024 * 1024, 0x00);
+TEST_CASE("Performance and stress testing", "[core][magic][performance]") {
+    SECTION("Large data handled efficiently") {
+        // Create 1MB of data
+        std::vector<uint8_t> large_data(1024 * 1024, 0x00);
 
-    // Put JPEG magic at start
-    large_data[0] = 0xFF;
-    large_data[1] = 0xD8;
-    large_data[2] = 0xFF;
+        // Put JPEG magic at start
+        large_data[0] = 0xFF;
+        large_data[1] = 0xD8;
+        large_data[2] = 0xFF;
 
-    // Should still detect correctly
-    EXPECT_EQ(detect_mime_type(std::span(large_data.data(), 100)), "image/jpeg");
-}
+        // Should still detect correctly
+        REQUIRE(detect_mime_type(std::span(large_data.data(), 100)) == "image/jpeg");
+    }
 
-TEST(MagicNumbersTest, MultipleDetectionsConsistent) {
-    auto jpeg_data = hex_to_vector("FFD8FF");
+    SECTION("Multiple detections are consistent") {
+        auto jpeg_data = hex_to_vector("FFD8FF");
 
-    // Run detection 100 times, should always return same result
-    for (int i = 0; i < 100; ++i) {
-        EXPECT_EQ(detect_mime_type(std::span(jpeg_data)), "image/jpeg");
+        // Run detection 100 times, should always return same result
+        for (int i = 0; i < 100; ++i) {
+            REQUIRE(detect_mime_type(std::span(jpeg_data)) == "image/jpeg");
+        }
     }
 }
-
-} // namespace yams::magic

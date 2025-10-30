@@ -13,7 +13,7 @@
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/progress_indicator.h>
 #include <yams/cli/yams_cli.h>
-#include <yams/daemon/client/global_io_context.h>
+
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/metadata/query_helpers.h>
 
@@ -76,7 +76,7 @@ public:
         std::promise<Result<void>> prom;
         auto fut = prom.get_future();
         boost::asio::co_spawn(
-            yams::daemon::GlobalIOContext::global_executor(),
+            getExecutor(),
             [this, &prom]() -> boost::asio::awaitable<void> {
                 auto r = co_await this->executeAsync();
                 prom.set_value(std::move(r));

@@ -319,6 +319,10 @@ struct GrepRequest {
     std::vector<std::string> tags; // filter by tags
     bool matchAllTags{false};      // require all specified tags
 
+    // Session scoping (controls hot/cold path behavior)
+    bool useSession{false};  // if true, allow hot path optimization for session-warmed docs
+    std::string sessionName; // optional explicit session name
+
     // Limits
     int maxCount{0}; // stop after N matches per file (0 => unlimited)
 };

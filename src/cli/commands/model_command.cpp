@@ -22,7 +22,6 @@
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_migration.h>
 #include <yams/daemon/client/daemon_client.h>
-#include <yams/daemon/client/global_io_context.h>
 #include <yams/downloader/downloader.hpp>
 #include <yams/integrity/repair_utils.h>
 #include <yams/profiling.h>
@@ -402,7 +401,7 @@ public:
         // model provider: print active backend and default/preferred model
         auto* sub_provider =
             cmd->add_subcommand("provider", "Show active model provider and preferred model");
-        sub_provider->callback([]() {
+        sub_provider->callback([this]() {
             try {
                 using namespace yams::daemon;
                 ClientConfig cfg;
@@ -418,7 +417,7 @@ public:
                 std::promise<Result<ModelStatusResponse>> prom;
                 auto fut = prom.get_future();
                 boost::asio::co_spawn(
-                    yams::daemon::GlobalIOContext::global_executor(),
+                    getExecutor(),
                     [leaseHandle, msr, &prom]() mutable -> boost::asio::awaitable<void> {
                         auto& client = **leaseHandle;
                         auto r = co_await client.call(msr);
@@ -631,7 +630,7 @@ private:
                     std::promise<Result<yams::daemon::ModelStatusResponse>> prom;
                     auto fut = prom.get_future();
                     boost::asio::co_spawn(
-                        yams::daemon::GlobalIOContext::global_executor(),
+                        getExecutor(),
                         [leaseHandle, msr, &prom]() mutable -> boost::asio::awaitable<void> {
                             auto& client = **leaseHandle;
                             auto r = co_await client.getModelStatus(msr);

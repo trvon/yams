@@ -151,6 +151,8 @@ struct Error {
     Error() : code(ErrorCode::Success), message("") {}
     Error(ErrorCode c, std::string msg) : code(c), message(std::move(msg)) {}
     Error(ErrorCode c) : code(c), message(errorToString(c)) {}
+    // Convenience constructor for message-only errors; defaults to Unknown code
+    Error(std::string msg) : code(ErrorCode::Unknown), message(std::move(msg)) {}
 
     // Comparison operators for ErrorCode
     bool operator==(ErrorCode c) const { return code == c; }

@@ -18,7 +18,6 @@
 #include <vector>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <yams/daemon/client/global_io_context.h>
 
 using json = nlohmann::json;
 
@@ -758,7 +757,7 @@ private:
                 dreq.limit = static_cast<std::size_t>(warmLimit_);
                 dreq.snippetLen = static_cast<std::size_t>(snippetLen_ > 0 ? snippetLen_ : 160);
                 boost::asio::co_spawn(
-                    yams::daemon::GlobalIOContext::global_executor(),
+                    getExecutor(),
                     [leaseHandle, dreq]() mutable -> boost::asio::awaitable<void> {
                         auto& client = **leaseHandle;
                         (void)co_await client.call<yams::daemon::PrepareSessionRequest>(dreq);

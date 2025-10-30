@@ -44,6 +44,7 @@ bool stream_trace_enabled() {
 } // namespace
 
 #include <spdlog/spdlog.h>
+#include <boost/asio/as_tuple.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
@@ -52,6 +53,7 @@ bool stream_trace_enabled() {
 #include <boost/asio/post.hpp>
 #include <boost/asio/read.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/use_future.hpp>
 #include <boost/asio/write.hpp>
 
 #include <atomic>
@@ -143,6 +145,12 @@ Result<void> SocketServer::start() {
 
         actualSocketPath_ = sockPath;
 
+        // Initialize bounded concurrency semaphore (PBI-066-42)
+        // Use maxConnections as the limit for natural backpressure
+        connectionSlots_ = std::make_unique<std::counting_semaphore<>>(config_.maxConnections);
+        spdlog::info("SocketServer: bounded concurrency enabled (max {} slots)",
+                     config_.maxConnections);
+
         // Seed writer budget prior to first connection
         std::size_t initialBudget = TuneAdvisor::serverWriterBudgetBytesPerTurn();
         if (initialBudget == 0)
@@ -209,24 +217,21 @@ Result<void> SocketServer::start() {
 }
 
 Result<void> SocketServer::stop() {
-    // Wrap entire shutdown sequence to ensure no exception escapes and triggers std::terminate.
     try {
         if (!running_.exchange(false)) {
             return Error{ErrorCode::InvalidState, "Socket server not running"};
         }
 
         spdlog::info("Stopping socket server");
-        stopping_ = true;
+        stopping_.store(true, std::memory_order_relaxed);
 
         // Request stop on all active connections via stop_source
-        // This will cause the token.stop_requested() checks to trigger
         try {
             stop_source_.request_stop();
         } catch (...) {
         }
 
         // Close all active sockets IMMEDIATELY for deterministic shutdown
-        // This is the C++ way: no timeouts, explicit resource cleanup
         try {
             std::vector<std::shared_ptr<boost::asio::local::stream_protocol::socket>> sockets;
             {
@@ -238,12 +243,10 @@ Result<void> SocketServer::stop() {
                 }
                 activeSockets_.clear();
             }
-            // Close outside the lock to avoid deadlock
             for (auto& sock : sockets) {
                 if (sock && sock->is_open()) {
                     boost::system::error_code ec;
                     sock->close(ec);
-                    // Ignore errors - socket may already be closed
                 }
             }
             spdlog::info("Closed {} active connections", sockets.size());
@@ -253,32 +256,69 @@ Result<void> SocketServer::stop() {
             spdlog::warn("Unknown exception while closing active sockets");
         }
 
+        // Wait for connection handlers to complete with timeout (PBI-066-41)
+        try {
+            std::vector<std::future<void>> futures;
+            {
+                std::lock_guard<std::mutex> lk(connectionFuturesMutex_);
+                futures = std::move(connectionFutures_);
+                connectionFutures_.clear();
+            }
+
+            if (!futures.empty()) {
+                spdlog::info("SocketServer: waiting for {} connection handlers to complete",
+                             futures.size());
+
+                const auto timeout = std::chrono::seconds(2);
+                const auto deadline = std::chrono::steady_clock::now() + timeout;
+                size_t completed = 0;
+
+                for (auto& fut : futures) {
+                    auto remaining = deadline - std::chrono::steady_clock::now();
+                    if (remaining <= std::chrono::seconds(0)) {
+                        spdlog::warn(
+                            "SocketServer: timeout waiting for connections ({}/{} completed)",
+                            completed, futures.size());
+                        break;
+                    }
+
+                    if (fut.wait_for(remaining) == std::future_status::ready) {
+                        try {
+                            fut.get(); // Get result, may throw
+                            ++completed;
+                        } catch (const std::exception& e) {
+                            spdlog::warn("Connection handler exception: {}", e.what());
+                            ++completed;
+                        }
+                    }
+                }
+
+                spdlog::info("SocketServer: {}/{} connection handlers completed gracefully",
+                             completed, futures.size());
+            }
+        } catch (const std::exception& e) {
+            spdlog::warn("Exception waiting for connection futures: {}", e.what());
+        }
+
+        // Close acceptor
         try {
             if (acceptor_ && acceptor_->is_open()) {
                 boost::system::error_code ec;
                 acceptor_->close(ec);
-                if (ec) {
-                    spdlog::warn("Error closing acceptor: {}", ec.message());
-                }
             }
-        } catch (const std::exception& e) {
-            spdlog::warn("Exception while closing acceptor: {}", e.what());
         } catch (...) {
-            spdlog::warn("Unknown exception while closing acceptor");
         }
 
-        // Simplified shutdown: reset work guard, stop io_context, RAII joins workers
-        spdlog::info("SocketServer: resetting work guard");
-        work_guard_.reset();
-
+        // Stop io_context BEFORE clearing workers
         spdlog::info("SocketServer: stopping io_context");
         try {
+            work_guard_.reset();
             io_context_.stop();
         } catch (...) {
         }
 
-        // jthread RAII: destructor automatically request_stop() + join()
-        // Workers exit naturally when io_context_.run() completes
+        // Now clear workers - jthread RAII will join
+        // Workers should exit quickly since io_context is stopped
         spdlog::info("SocketServer: clearing workers (RAII join)");
         workers_.clear();
         spdlog::info("SocketServer: workers joined");
@@ -287,12 +327,10 @@ Result<void> SocketServer::stop() {
             state_->readiness.ipcServerReady.store(false);
         }
 
+        // Cleanup socket file
         if (!actualSocketPath_.empty()) {
             std::error_code ec;
             std::filesystem::remove(actualSocketPath_, ec);
-            if (ec && ec != std::errc::no_such_file_or_directory) {
-                spdlog::warn("Failed to remove socket file: {}", ec.message());
-            }
             actualSocketPath_.clear();
         }
 
@@ -348,81 +386,23 @@ awaitable<void> SocketServer::accept_loop() {
 #if defined(TRACY_ENABLE)
         ZoneScopedN("SocketServer::accept_loop");
 #endif
-        bool need_delay = false;
-        auto backoff_ms = config_.acceptBackoffMs;
 
         try {
-            try {
-                uint32_t delay_ms = 0;
-                uint64_t maxWorkerQueue = 0;
-                uint64_t maxMuxBytes = TuneAdvisor::maxMuxBytes();
-                uint64_t maxActiveConn = TuneAdvisor::maxActiveConn();
-
-                if (maxWorkerQueue == 0 && dispatcher_) {
-                    try {
-                        if (auto sm = dispatcher_->getServiceManager()) {
-                            maxWorkerQueue = TuneAdvisor::maxWorkerQueue(sm->getWorkerThreads());
-                        }
-                    } catch (...) {
-                    }
-                }
-                if (maxMuxBytes == 0)
-                    maxMuxBytes = TuneAdvisor::maxMuxBytes();
-
-                uint64_t queued = 0;
-                try {
-                    if (dispatcher_ && dispatcher_->getServiceManager())
-                        queued = dispatcher_->getServiceManager()->getWorkerQueueDepth();
-                } catch (...) {
-                }
-                int64_t muxQueued = 0;
-                try {
-                    muxQueued = yams::daemon::MuxMetricsRegistry::instance().snapshot().queuedBytes;
-                } catch (...) {
-                }
-                uint64_t activeConn = state_ ? state_->stats.activeConnections.load() : 0;
-
-                bool bp_worker = (maxWorkerQueue > 0 && queued > maxWorkerQueue);
-                bool bp_mux = (maxMuxBytes > 0 && muxQueued > static_cast<int64_t>(maxMuxBytes));
-                bool bp_conn = (maxActiveConn > 0 && activeConn > maxActiveConn);
-
-                if (bp_worker || bp_mux || bp_conn) {
-                    uint32_t base = 5;
-                    uint32_t extra = 0;
-                    if (bp_worker)
-                        extra += 5;
-                    if (bp_mux)
-                        extra += 5;
-                    if (bp_conn)
-                        extra += 5;
-                    delay_ms = std::min<uint32_t>(base + extra, 20);
-                    if (state_) {
-                        state_->stats.acceptBackpressureDelays.fetch_add(1,
-                                                                         std::memory_order_relaxed);
-                    }
-                }
-
-                if (delay_ms > 0) {
-                    boost::asio::steady_timer timer(io_context_);
-                    timer.expires_after(std::chrono::milliseconds(delay_ms));
-                    co_await timer.async_wait(use_awaitable);
-                    continue;
-                }
-            } catch (...) {
-            }
-            if (activeConnections_.load() >= config_.maxConnections) {
+            // Acquire slot - blocks naturally when at capacity (PBI-066-42)
+            // This replaces ~70 lines of manual backpressure logic
+            if (connectionSlots_) {
+                connectionSlots_->acquire();
                 if (trace) {
-                    spdlog::info("stream-trace: accept throttled (active={} max={})",
-                                 activeConnections_.load(std::memory_order_relaxed),
-                                 config_.maxConnections);
+                    spdlog::debug("stream-trace: acquired connection slot");
                 }
-                if (state_) {
-                    state_->stats.acceptCapacityDelays.fetch_add(1, std::memory_order_relaxed);
+            }
+
+            // Check if we're shutting down after acquiring slot
+            if (!running_ || stopping_) {
+                if (connectionSlots_) {
+                    connectionSlots_->release(); // Release slot before exit
                 }
-                boost::asio::steady_timer timer(io_context_);
-                timer.expires_after(std::chrono::milliseconds(20));
-                co_await timer.async_wait(use_awaitable);
-                continue;
+                break;
             }
 
             if (trace) {
@@ -430,7 +410,98 @@ awaitable<void> SocketServer::accept_loop() {
                              activeConnections_.load(std::memory_order_relaxed),
                              totalConnections_.load(std::memory_order_relaxed));
             }
-            auto socket = co_await acceptor_->async_accept(use_awaitable);
+
+            // Use as_tuple to avoid exception overhead during shutdown
+            auto [ec, socket] =
+                co_await acceptor_->async_accept(boost::asio::as_tuple(use_awaitable));
+
+            // Handle errors without exception
+            if (ec) {
+                // Release semaphore on error paths
+                if (connectionSlots_) {
+                    connectionSlots_->release();
+                }
+
+                if (!running_ || stopping_) {
+                    break; // Clean shutdown
+                }
+
+                if (ec == boost::asio::error::operation_aborted) {
+                    break; // Acceptor closed
+                }
+
+                // Handle platform-specific errors
+                static int einval_streak = 0;
+                bool need_delay = false;
+                auto backoff_ms = config_.acceptBackoffMs;
+
+#if defined(__APPLE__)
+                if (ec.value() == EINVAL) {
+                    ++einval_streak;
+                    spdlog::debug("Accept error (EINVAL): {} (streak={})", ec.message(),
+                                  einval_streak);
+                    if (einval_streak >= 3) {
+                        try {
+                            boost::system::error_code rebuild_ec;
+                            if (acceptor_)
+                                acceptor_->close(rebuild_ec);
+                            auto rebuildPath = actualSocketPath_;
+                            if (rebuildPath.empty()) {
+                                rebuildPath = config_.socketPath;
+                            }
+                            std::filesystem::remove(rebuildPath, rebuild_ec);
+                            acceptor_ = std::make_unique<local::acceptor>(io_context_);
+                            local::endpoint endpoint(rebuildPath.string());
+                            acceptor_->open(endpoint.protocol());
+                            acceptor_->bind(endpoint);
+                            acceptor_->listen(boost::asio::socket_base::max_listen_connections);
+                            actualSocketPath_ = rebuildPath;
+                            static std::atomic<bool> s_warned_once{false};
+                            static const bool s_quiet = []() {
+                                if (const char* v = std::getenv("YAMS_QUIET_EINVAL_REBUILD")) {
+                                    return *v != '\0' && std::string(v) != "0" &&
+                                           strcasecmp(v, "false") != 0;
+                                }
+                                return true;
+                            }();
+                            if (!s_quiet && !s_warned_once.exchange(true)) {
+                                spdlog::warn("Rebuilt IPC acceptor after repeated EINVAL on {}",
+                                             config_.socketPath.string());
+                            } else {
+                                spdlog::debug("Rebuilt IPC acceptor after repeated EINVAL on {}",
+                                              config_.socketPath.string());
+                            }
+                            if (state_) {
+                                state_->stats.ipcEinvalRebuilds.fetch_add(
+                                    1, std::memory_order_relaxed);
+                            }
+                            einval_streak = 0;
+                        } catch (const std::exception& re) {
+                            spdlog::error("Failed to rebuild IPC acceptor: {}", re.what());
+                        }
+                    }
+                    need_delay = true;
+                    backoff_ms = std::chrono::milliseconds(100);
+                } else
+#endif
+                {
+                    einval_streak = 0;
+                    spdlog::warn("Accept error: {} ({})", ec.message(), ec.value());
+                    need_delay = true;
+                }
+
+                if (need_delay) {
+                    boost::asio::steady_timer timer(io_context_);
+                    timer.expires_after(backoff_ms);
+                    try {
+                        co_await timer.async_wait(use_awaitable);
+                    } catch (const boost::system::system_error&) {
+                    }
+                    if (!running_ || stopping_)
+                        break;
+                }
+                continue; // Retry accept
+            }
 
             if (trace) {
                 spdlog::info("stream-trace: accept completed (active={} total={})",
@@ -448,86 +519,47 @@ awaitable<void> SocketServer::accept_loop() {
                 state_->stats.activeConnections.store(current);
             }
 
-            co_spawn(acceptor_->get_executor(), handle_connection(std::move(socket)), detached);
-
-        } catch (const boost::system::system_error& e) {
-            if (!running_ || stopping_)
-                break;
-
-            if (e.code() == boost::asio::error::operation_aborted) {
-                break;
-            }
-
-            static int einval_streak = 0;
-#if defined(__APPLE__)
-            if (e.code().value() == EINVAL) {
-                ++einval_streak;
-                spdlog::debug("Accept error (EINVAL): {} (streak={})", e.what(), einval_streak);
-                if (einval_streak >= 3) {
-                    try {
-                        boost::system::error_code ec;
-                        if (acceptor_)
-                            acceptor_->close(ec);
-                        auto rebuildPath = actualSocketPath_;
-                        if (rebuildPath.empty()) {
-                            rebuildPath = config_.socketPath;
-                        }
-                        std::filesystem::remove(rebuildPath, ec);
-                        acceptor_ = std::make_unique<local::acceptor>(io_context_);
-                        local::endpoint endpoint(rebuildPath.string());
-                        acceptor_->open(endpoint.protocol());
-                        acceptor_->bind(endpoint);
-                        acceptor_->listen(boost::asio::socket_base::max_listen_connections);
-                        actualSocketPath_ = rebuildPath;
-                        static std::atomic<bool> s_warned_once{false};
-                        static const bool s_quiet = []() {
-                            if (const char* v = std::getenv("YAMS_QUIET_EINVAL_REBUILD")) {
-                                return *v != '\0' && std::string(v) != "0" &&
-                                       strcasecmp(v, "false") != 0;
-                            }
-                            return true;
-                        }();
-                        if (!s_quiet && !s_warned_once.exchange(true)) {
-                            spdlog::warn("Rebuilt IPC acceptor after repeated EINVAL on {}",
-                                         config_.socketPath.string());
-                        } else {
-                            spdlog::debug("Rebuilt IPC acceptor after repeated EINVAL on {}",
-                                          config_.socketPath.string());
-                        }
-                        if (state_) {
-                            state_->stats.ipcEinvalRebuilds.fetch_add(1, std::memory_order_relaxed);
-                        }
-                        einval_streak = 0;
-                    } catch (const std::exception& re) {
-                        spdlog::error("Failed to rebuild IPC acceptor: {}", re.what());
-                    }
-                }
-                backoff_ms = std::chrono::milliseconds(100);
-                need_delay = true;
-            } else
-#endif
+            // Spawn connection with use_future for graceful shutdown tracking (PBI-066-41)
+            // Pass semaphore for automatic release when connection completes (PBI-066-42)
             {
-                einval_streak = 0;
-                spdlog::warn("Accept error: {} ({})", e.what(), e.code().message());
-                need_delay = true;
+                std::lock_guard<std::mutex> lk(connectionFuturesMutex_);
+
+                // Prune completed futures before adding new one
+                prune_completed_futures();
+
+                // Create a capturing lambda that releases the semaphore on completion
+                auto wrapped_handler = [this,
+                                        socket = std::move(socket)]() mutable -> awaitable<void> {
+                    // RAII guard for semaphore - releases on any exit path
+                    struct SemaphoreGuard {
+                        std::counting_semaphore<>* sem;
+                        ~SemaphoreGuard() {
+                            if (sem) {
+                                sem->release();
+                            }
+                        }
+                    } guard{connectionSlots_.get()};
+
+                    // Handle the connection
+                    co_await handle_connection(std::move(socket));
+                };
+
+                // Spawn and track the connection
+                connectionFutures_.push_back(co_spawn(acceptor_->get_executor(), wrapped_handler(),
+                                                      boost::asio::use_future));
             }
+
         } catch (const std::exception& e) {
             if (!running_ || stopping_)
                 break;
-            spdlog::error("Unexpected accept error: {}", e.what());
-            break;
-        }
 
-        if (need_delay) {
-            boost::asio::steady_timer timer(io_context_);
-            timer.expires_after(backoff_ms);
-            try {
-                co_await timer.async_wait(use_awaitable);
-            } catch (const boost::system::system_error&) {
+            // Release semaphore on unexpected exception
+            if (connectionSlots_) {
+                connectionSlots_->release();
             }
 
-            if (!running_ || stopping_)
-                break;
+            spdlog::error("Unexpected error in accept loop: {}", e.what());
+            break;
         }
     }
 
@@ -652,6 +684,17 @@ void SocketServer::register_socket(
                                         [](const auto& weak) { return weak.expired(); }),
                          activeSockets_.end());
     activeSockets_.push_back(std::move(socket));
+}
+
+void SocketServer::prune_completed_futures() {
+    // Caller must hold connectionFuturesMutex_
+    // Remove futures that are ready (completed)
+    connectionFutures_.erase(std::remove_if(connectionFutures_.begin(), connectionFutures_.end(),
+                                            [](std::future<void>& f) {
+                                                return f.wait_for(std::chrono::seconds(0)) ==
+                                                       std::future_status::ready;
+                                            }),
+                             connectionFutures_.end());
 }
 
 } // namespace yams::daemon

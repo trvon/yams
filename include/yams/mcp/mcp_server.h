@@ -27,6 +27,7 @@
 #include <memory>
 #include <mutex>
 #include <regex>
+#include <semaphore>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -39,6 +40,17 @@ using json = nlohmann::json;
 // Custom protocol / server-specific error codes
 // Reserve a code for unsupported protocol version negotiation failures
 static constexpr int kErrUnsupportedProtocolVersion = -32901;
+
+/**
+ * MCP lifecycle states per 2025-06-18 specification
+ */
+enum class McpLifecycleState {
+    Uninitialized, // Server created, no initialize request yet
+    Initialized,   // Received initialize request, sent response
+    Ready,         // Received notifications/initialized, ready for operations
+    ShuttingDown,  // Received shutdown request
+    Disconnected   // Transport closed or error
+};
 
 /**
  * Transport interface for MCP communication with modern error handling
@@ -109,13 +121,14 @@ private:
 class MCPServer {
 public:
     MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* externalShutdown = nullptr,
-              std::filesystem::path overrideSocket = {});
+              std::filesystem::path overrideSocket = {},
+              std::optional<boost::asio::any_io_executor> executor = std::nullopt);
     ~MCPServer();
 
     void start();
-    // Async variant (preferred) when transport supports async stdio
     boost::asio::awaitable<void> startAsync();
     void stop();
+    void shutdown(std::chrono::milliseconds timeout = std::chrono::milliseconds{2000});
     bool isRunning() const { return running_.load(); }
 
 #if defined(YAMS_TESTING)
@@ -128,8 +141,7 @@ public:
     void setDaemonClientSocketPathForTest(const std::filesystem::path& p) {
         daemon_client_config_.socketPath = p;
         daemon_client_ = nullptr;
-        daemon_client_lease_.reset();
-        yams::cli::cli_pool_reset_for_test();
+        daemon_client_unique_.reset();
     }
 #endif
 
@@ -174,6 +186,8 @@ private:
     int autoReadyDelayMs_{150};   // YAMS_MCP_READY_DELAY_MS (minimum 20ms)
     bool strictProtocol_{
         false}; // YAMS_MCP_STRICT_PROTOCOL=1 to require explicit supported protocolVersion or fail
+    bool strictLifecycle_{
+        false}; // YAMS_MCP_STRICT_LIFECYCLE=1 to reject requests before initialized notification
     bool limitToolResultDup_{
         true}; // YAMS_MCP_LIMIT_DUP_CONTENT=0 to allow full data duplication for large tool results
     bool handshakeTrace_{
@@ -187,6 +201,7 @@ private:
     std::atomic<int> readyAutoCount_{0};
     std::atomic<int> readyClientCount_{0};
     std::atomic<bool> initializedNotificationSeen_{false};
+    std::atomic<McpLifecycleState> lifecycleState_{McpLifecycleState::Uninitialized};
     bool earlyFeatureUse_{
         false}; // Set when client invokes feature (tools/list, tools/call) pre-initialized
 
@@ -195,16 +210,15 @@ private:
     mutable std::mutex cancelMutex_;
     std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> cancelTokens_;
 
-    // Single multiplexed daemon client lease (shared transport context)
-    std::shared_ptr<yams::cli::DaemonClientPool::Lease> daemon_client_lease_;
+    // Daemon client (created fresh per-request for MCP stdio reliability)
+    std::unique_ptr<yams::daemon::DaemonClient> daemon_client_unique_;
     yams::daemon::DaemonClient* daemon_client_{nullptr};
     yams::daemon::ClientConfig daemon_client_config_{};
     std::filesystem::path daemonSocketOverride_;
     std::function<Result<void>(const yams::daemon::ClientConfig&)> testEnsureDaemonClientHook_{};
 
-    // Socket staleness tracking
+    // Client creation mutex
     std::mutex daemon_client_mutex_;
-    std::chrono::steady_clock::time_point last_daemon_use_;
     struct ClientInfo {
         std::string name;
         std::string version;
@@ -266,6 +280,13 @@ private:
     std::deque<std::string> outboundQueue_;
     std::atomic<bool> outboundDraining_{false};
     std::unique_ptr<boost::asio::strand<boost::asio::any_io_executor>> outboundStrand_;
+    std::optional<boost::asio::any_io_executor> executor_;
+    std::unique_ptr<std::counting_semaphore<>> outboundSemaphore_;
+
+    std::mutex backgroundFuturesMutex_;
+    std::vector<std::future<void>> backgroundFutures_;
+
+    void pruneCompletedFutures();
 
     // Notification routing for HTTP mode
     static thread_local std::string tlsSessionId_;
@@ -301,7 +322,7 @@ public:
     void testConfigureDaemonClient(const yams::daemon::ClientConfig& cfg) {
         daemon_client_config_ = cfg;
         daemon_client_ = nullptr;
-        daemon_client_lease_.reset();
+        daemon_client_unique_.reset();
     }
 
     // Expose modern handle* methods for testing
@@ -363,9 +384,9 @@ private:
     handleUpdateMetadata(const MCPUpdateMetadataRequest& req);
     boost::asio::awaitable<Result<MCPRestoreCollectionResponse>>
     handleRestoreCollection(const MCPRestoreCollectionRequest& req);
-    static boost::asio::awaitable<Result<MCPRestoreSnapshotResponse>>
+    boost::asio::awaitable<Result<MCPRestoreSnapshotResponse>>
     handleRestoreSnapshot(const MCPRestoreSnapshotRequest& req);
-    static boost::asio::awaitable<Result<MCPListCollectionsResponse>>
+    boost::asio::awaitable<Result<MCPListCollectionsResponse>>
     handleListCollections(const MCPListCollectionsRequest& req);
     boost::asio::awaitable<Result<MCPListSnapshotsResponse>>
     handleListSnapshots(const MCPListSnapshotsRequest& req);

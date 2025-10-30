@@ -2,84 +2,21 @@
 #include <spdlog/spdlog.h>
 #include <yams/extraction/text_extractor.h>
 
-// PDFium headers
-#include <fpdf_doc.h>
-#include <fpdf_save.h>
-#include <fpdf_text.h>
-#include <fpdfview.h>
+// QPDF headers
+#include <qpdf/QPDF.hh>
+#include <qpdf/QPDFObjectHandle.hh>
+#include <qpdf/QPDFPageDocumentHelper.hh>
+#include <qpdf/QPDFPageObjectHelper.hh>
 
 #include <algorithm>
-#include <codecvt>
 #include <fstream>
-#include <locale>
+#include <iterator>
 #include <map>
+#include <ranges>
 #include <regex>
 #include <sstream>
 
 namespace yams::extraction {
-
-// Static member definitions
-bool PdfExtractor::pdfiumInitialized = false;
-std::mutex PdfExtractor::pdfiumMutex;
-
-// Destructor implementations for RAII wrappers
-PdfExtractor::PdfDocument::~PdfDocument() {
-    if (doc) {
-        FPDF_CloseDocument(doc);
-        doc = nullptr;
-    }
-}
-
-PdfExtractor::PdfPage::~PdfPage() {
-    if (textPage) {
-        FPDFText_ClosePage(textPage);
-        textPage = nullptr;
-    }
-    if (page) {
-        FPDF_ClosePage(page);
-        page = nullptr;
-    }
-}
-
-// Static initialization/cleanup
-void PdfExtractor::initializePdfium() {
-    std::lock_guard<std::mutex> lock(pdfiumMutex);
-    if (!pdfiumInitialized) {
-        FPDF_LIBRARY_CONFIG config = {};
-        config.version = 2;
-        config.m_pUserFontPaths = nullptr;
-        config.m_pIsolate = nullptr;
-        config.m_v8EmbedderSlot = 0;
-        config.m_pPlatform = nullptr;
-
-        FPDF_InitLibraryWithConfig(&config);
-        pdfiumInitialized = true;
-
-        // Register cleanup at exit
-        std::atexit(cleanupPdfium);
-
-        spdlog::debug("PDFium library initialized");
-    }
-}
-
-void PdfExtractor::cleanupPdfium() {
-    std::lock_guard<std::mutex> lock(pdfiumMutex);
-    if (pdfiumInitialized) {
-        FPDF_DestroyLibrary();
-        pdfiumInitialized = false;
-        spdlog::debug("PDFium library cleaned up");
-    }
-}
-
-bool PdfExtractor::isPdfiumInitialized() {
-    std::lock_guard<std::mutex> lock(pdfiumMutex);
-    return pdfiumInitialized;
-}
-
-// Constructor/Destructor
-/* defaulted in header; PDFium initialized lazily in extractInternal() */
-
-/* destructor defaulted in header */
 
 // Main extraction methods
 Result<ExtractionResult> PdfExtractor::extract(const std::filesystem::path& path,
@@ -88,27 +25,17 @@ Result<ExtractionResult> PdfExtractor::extract(const std::filesystem::path& path
         return Error{ErrorCode::FileNotFound, "PDF file not found: " + path.string()};
     }
 
-    // Read file into memory
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file) {
-        return Error{ErrorCode::FileNotFound, "Cannot open PDF file: " + path.string()};
-    }
-
-    auto size = file.tellg();
-    file.seekg(0, std::ios::beg);
-
-    std::vector<std::byte> buffer(size);
-    file.read(reinterpret_cast<char*>(buffer.data()), size);
-
-    if (!file) {
-        return Error{ErrorCode::InvalidData, "Failed to read PDF file"};
-    }
-
     PdfExtractOptions options;
     options.extractAll = true;
     options.extractMetadata = true;
 
-    return extractInternal(buffer, options);
+    try {
+        QPDF pdf;
+        pdf.processFile(path.string().c_str());
+        return extractFromDocument(pdf, options);
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::InvalidData, "Failed to load PDF: " + std::string(e.what())};
+    }
 }
 
 Result<ExtractionResult>
@@ -118,97 +45,80 @@ PdfExtractor::extractFromBuffer(std::span<const std::byte> data,
     options.extractAll = true;
     options.extractMetadata = true;
 
-    return extractInternal(data, options);
+    try {
+        QPDF pdf;
+        pdf.processMemoryFile("input.pdf", reinterpret_cast<const char*>(data.data()), data.size());
+        return extractFromDocument(pdf, options);
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::InvalidData,
+                     "Failed to load PDF from buffer: " + std::string(e.what())};
+    }
 }
 
-Result<ExtractionResult> PdfExtractor::extractPage(const std::filesystem::path& path,
-                                                   [[maybe_unused]] int page) {
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file) {
-        return Error{ErrorCode::FileNotFound, "Cannot open PDF file"};
+Result<ExtractionResult> PdfExtractor::extractPage(const std::filesystem::path& path, int pageNum) {
+    if (!std::filesystem::exists(path)) {
+        return Error{ErrorCode::FileNotFound, "PDF file not found"};
     }
 
-    auto size = file.tellg();
-    file.seekg(0, std::ios::beg);
+    try {
+        QPDF pdf;
+        pdf.processFile(path.string().c_str());
 
-    std::vector<std::byte> buffer(size);
-    file.read(reinterpret_cast<char*>(buffer.data()), size);
+        QPDFPageDocumentHelper dh(pdf);
+        auto pages = dh.getAllPages();
 
-    PdfExtractOptions options;
-    options.extractAll = false;
-    options.maxPages = 1;
-    // Note: Would need to modify to support specific page extraction
+        if (pageNum < 0 || pageNum >= static_cast<int>(pages.size())) {
+            return Error{ErrorCode::InvalidData, "Page number out of range"};
+        }
 
-    return extractInternal(buffer, options);
+        ExtractionResult result;
+        result.extractionMethod = "qpdf";
+        result.metadata["content_type"] = "application/pdf";
+        result.text = extractPageText(pages[pageNum]);
+
+        return result;
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::InvalidData, "Failed to extract page: " + std::string(e.what())};
+    }
 }
 
 Result<ExtractionResult> PdfExtractor::extractWithOptions(const std::filesystem::path& path,
                                                           const PdfExtractOptions& options) {
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file) {
-        return Error{ErrorCode::FileNotFound, "Cannot open PDF file"};
+    if (!std::filesystem::exists(path)) {
+        return Error{ErrorCode::FileNotFound, "PDF file not found"};
     }
 
-    auto size = file.tellg();
-    file.seekg(0, std::ios::beg);
-
-    std::vector<std::byte> buffer(size);
-    file.read(reinterpret_cast<char*>(buffer.data()), size);
-
-    return extractInternal(buffer, options);
+    try {
+        QPDF pdf;
+        pdf.processFile(path.string().c_str());
+        return extractFromDocument(pdf, options);
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::InvalidData, "Failed to load PDF: " + std::string(e.what())};
+    }
 }
 
-// Internal implementation
-Result<ExtractionResult> PdfExtractor::extractInternal(std::span<const std::byte> data,
-                                                       const PdfExtractOptions& options) {
-    // Lock the entire extraction process to ensure thread safety
-    // PDFium is not thread-safe and requires global synchronization
-    std::lock_guard<std::mutex> lock(pdfiumMutex);
-
-    if (!pdfiumInitialized) {
-        FPDF_LIBRARY_CONFIG config = {};
-        config.version = 2;
-        config.m_pUserFontPaths = nullptr;
-        config.m_pIsolate = nullptr;
-        config.m_v8EmbedderSlot = 0;
-        config.m_pPlatform = nullptr;
-
-        FPDF_InitLibraryWithConfig(&config);
-        pdfiumInitialized = true;
-
-        // Register cleanup at exit
-        std::atexit(cleanupPdfium);
-
-        spdlog::debug("PDFium library initialized");
-    }
-
-    // Load PDF document
-    PdfDocument doc;
-    doc.doc = FPDF_LoadMemDocument(data.data(), static_cast<int>(data.size()),
-                                   nullptr // No password
-    );
-
-    if (!doc.doc) {
-        unsigned long error = FPDF_GetLastError();
-        std::string errorMsg = "Failed to load PDF document. Error code: " + std::to_string(error);
-        return Error{ErrorCode::InvalidData, errorMsg};
-    }
-
+// Internal implementation using QPDF
+Result<ExtractionResult> PdfExtractor::extractFromDocument(QPDF& pdf,
+                                                           const PdfExtractOptions& options) {
     ExtractionResult result;
-    result.extractionMethod = "pdfium";
+    result.extractionMethod = "qpdf";
     result.metadata["content_type"] = "application/pdf";
     result.metadata["encoding"] = "UTF-8";
 
     // Extract metadata if requested
     if (options.extractMetadata) {
-        extractMetadata(doc.doc, result);
+        extractMetadata(pdf, result);
     }
 
-    // Get page count
-    int pageCount = FPDF_GetPageCount(doc.doc);
+    // Get pages
+    QPDFPageDocumentHelper dh(pdf);
+    auto pages = dh.getAllPages();
+
+    int pageCount = static_cast<int>(pages.size());
     if (pageCount <= 0) {
         return Error{ErrorCode::InvalidData, "PDF has no pages"};
     }
+    result.metadata["page_count"] = std::to_string(pageCount);
 
     // Determine pages to extract
     int maxPages = (options.maxPages > 0) ? std::min(options.maxPages, pageCount) : pageCount;
@@ -217,38 +127,16 @@ Result<ExtractionResult> PdfExtractor::extractInternal(std::span<const std::byte
 
     // Extract text from pages
     for (int i = 0; i < maxPages; ++i) {
-        PdfPage page;
-        page.page = FPDF_LoadPage(doc.doc, i);
-        if (!page.page) {
-            spdlog::warn("Failed to load PDF page {}", i);
-            continue;
-        }
-
-        page.textPage = FPDFText_LoadPage(page.page);
-        if (!page.textPage) {
-            spdlog::warn("Failed to load text from PDF page {}", i);
-            continue;
-        }
-
-        // Get character count
-        int charCount = FPDFText_CountChars(page.textPage);
-        if (charCount > 0) {
-            // Allocate buffer for UTF-16 text (2 bytes per character + null terminator)
-            std::vector<unsigned short> buffer(charCount + 1, 0);
-
-            // Extract text
-            int extracted = FPDFText_GetText(page.textPage, 0, charCount, buffer.data());
-            if (extracted > 0) {
-                // Convert UTF-16 to UTF-8
-                std::string pageText = convertUtf16ToUtf8(buffer);
-
-                // Add page separator if not first page
+        try {
+            std::string pageText = extractPageText(pages[i]);
+            if (!pageText.empty()) {
                 if (i > 0) {
                     textStream << "\n\n--- Page " << (i + 1) << " ---\n\n";
                 }
-
                 textStream << pageText;
             }
+        } catch (const std::exception& e) {
+            spdlog::warn("Failed to extract text from page {}: {}", i, e.what());
         }
     }
 
@@ -256,11 +144,6 @@ Result<ExtractionResult> PdfExtractor::extractInternal(std::span<const std::byte
 
     // Clean the extracted text
     result.text = cleanText(result.text);
-
-    // Extract sections if text is substantial
-    if (result.text.length() > 100) {
-        // sections extraction skipped (ExtractionResult has no sections field)
-    }
 
     // Detect language
     result.language = detectLanguage(result.text);
@@ -287,99 +170,97 @@ Result<ExtractionResult> PdfExtractor::extractInternal(std::span<const std::byte
     return result;
 }
 
-// Extract metadata from PDF
-// Note: This function is called from within extractInternal() which already holds the PDFium mutex
-void PdfExtractor::extractMetadata(FPDF_DOCUMENT doc, ExtractionResult& result) {
-    // Helper to get metadata string
-    auto getMetaString = [doc](const std::string& tag) -> std::string {
-        // First call to get buffer size
-        unsigned long bufferLen = FPDF_GetMetaText(doc, tag.c_str(), nullptr, 0);
-        if (bufferLen <= 2)
-            return ""; // Empty or just null terminator
+// Extract metadata from PDF using QPDF
+void PdfExtractor::extractMetadata(QPDF& pdf, ExtractionResult& result) {
+    try {
+        auto trailer = pdf.getTrailer();
+        if (trailer.hasKey("/Info")) {
+            QPDFObjectHandle info = trailer.getKey("/Info");
 
-        // Allocate buffer and get text
-        std::vector<unsigned short> buffer(bufferLen / 2);
-        FPDF_GetMetaText(doc, tag.c_str(), buffer.data(), bufferLen);
+            auto getStringValue = [](QPDFObjectHandle obj, const std::string& key) -> std::string {
+                if (obj.hasKey(key)) {
+                    auto val = obj.getKey(key);
+                    if (val.isString()) {
+                        return val.getUTF8Value();
+                    }
+                }
+                return "";
+            };
 
-        // Convert UTF-16 to UTF-8
-        return convertUtf16ToUtf8(buffer);
-    };
+            std::string title = getStringValue(info, "/Title");
+            std::string author = getStringValue(info, "/Author");
+            std::string subject = getStringValue(info, "/Subject");
+            std::string keywords = getStringValue(info, "/Keywords");
+            std::string creator = getStringValue(info, "/Creator");
+            std::string producer = getStringValue(info, "/Producer");
 
-    // Extract standard metadata
-    std::string title = getMetaString("Title");
-    std::string author = getMetaString("Author");
-    std::string subject = getMetaString("Subject");
-    std::string keywords = getMetaString("Keywords");
-    std::string creator = getMetaString("Creator");
-    std::string producer = getMetaString("Producer");
-    std::string creationDate = getMetaString("CreationDate");
-    std::string modDate = getMetaString("ModDate");
+            if (!title.empty())
+                result.metadata["title"] = title;
+            if (!author.empty())
+                result.metadata["author"] = author;
+            if (!subject.empty())
+                result.metadata["subject"] = subject;
+            if (!keywords.empty())
+                result.metadata["keywords"] = keywords;
+            if (!creator.empty())
+                result.metadata["creator"] = creator;
+            if (!producer.empty())
+                result.metadata["producer"] = producer;
+        }
 
-    // Add to metadata map
-    if (!title.empty())
-        result.metadata["title"] = title;
-    if (!author.empty())
-        result.metadata["author"] = author;
-    if (!subject.empty())
-        result.metadata["subject"] = subject;
-    if (!keywords.empty())
-        result.metadata["keywords"] = keywords;
-    if (!creator.empty())
-        result.metadata["creator"] = creator;
-    if (!producer.empty())
-        result.metadata["producer"] = producer;
-    if (!creationDate.empty())
-        result.metadata["creation_date"] = creationDate;
-    if (!modDate.empty())
-        result.metadata["modification_date"] = modDate;
-
-    // Get page count
-    int pageCount = FPDF_GetPageCount(doc);
-    result.metadata["page_count"] = std::to_string(pageCount);
+        // PDF version
+        result.metadata["pdf_version"] = pdf.getPDFVersion();
+    } catch (const std::exception& e) {
+        spdlog::warn("Failed to extract PDF metadata: {}", e.what());
+    }
 }
 
-// Convert UTF-16 to UTF-8
-std::string PdfExtractor::convertUtf16ToUtf8(const std::vector<unsigned short>& utf16) {
-    if (utf16.empty())
-        return "";
+// Text extraction callback for QPDF parser
+class TextExtractorCallback : public QPDFObjectHandle::ParserCallbacks {
+public:
+    std::stringstream& text;
+    std::string lastOperator;
 
-    // Find actual string length (excluding null terminator)
-    size_t len = 0;
-    for (size_t i = 0; i < utf16.size(); ++i) {
-        if (utf16[i] == 0)
-            break;
-        len++;
-    }
+    explicit TextExtractorCallback(std::stringstream& t) : text(t) {}
 
-    if (len == 0)
-        return "";
-
-    // Use codecvt for conversion
-    try {
-#ifdef __clang__
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-#endif
-        std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t> converter;
-        std::u16string u16str(reinterpret_cast<const char16_t*>(utf16.data()), len);
-        return converter.to_bytes(u16str);
-#ifdef __clang__
-#pragma clang diagnostic pop
-#endif
-    } catch (const std::exception& e) {
-        spdlog::warn("UTF-16 to UTF-8 conversion failed: {}", e.what());
-
-        // Fallback: basic ASCII extraction
-        std::string result;
-        for (size_t i = 0; i < len; ++i) {
-            if (utf16[i] < 128) {
-                result += static_cast<char>(utf16[i]);
-            } else {
-                result += '?'; // Replace non-ASCII with placeholder
+    void handleObject(QPDFObjectHandle obj) override {
+        if (obj.isOperator()) {
+            lastOperator = obj.getOperatorValue();
+        } else if (lastOperator == "Tj" || lastOperator == "'" || lastOperator == "\"") {
+            // Text showing operators
+            if (obj.isString()) {
+                text << obj.getUTF8Value() << " ";
+            }
+        } else if (lastOperator == "TJ") {
+            // Array of strings and positioning info
+            if (obj.isArray()) {
+                auto arr = obj.getArrayAsVector();
+                for (auto& item : arr) {
+                    if (item.isString()) {
+                        text << item.getUTF8Value();
+                    }
+                }
+                text << " ";
             }
         }
-        return result;
     }
+
+    void handleEOF() override {}
+};
+
+// Extract text from a single page using QPDF
+std::string PdfExtractor::extractPageText(QPDFPageObjectHelper page) {
+    std::stringstream text;
+
+    try {
+        // Use QPDF's parser callback interface for proper text extraction
+        TextExtractorCallback callback(text);
+        page.parsePageContents(&callback);
+    } catch (const std::exception& e) {
+        spdlog::warn("Failed to extract page text: {}", e.what());
+    }
+
+    return text.str();
 }
 
 // Clean extracted text

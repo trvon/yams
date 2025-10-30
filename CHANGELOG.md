@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.7.7] - Unreleased
 
 ### Added
+- **ServiceManager & Daemon Lifecycle Improvements**
+  - **Structured Concurrency**: Replaced manual backpressure logic with `std::counting_semaphore` for natural bounded concurrency
+  - **SocketServer Improvements**: 
+    - Converted async_accept to `as_tuple` pattern, eliminating exception overhead during shutdown
+    - Connection future tracking for graceful shutdown with 2s timeout verification
+  - **Modern Error Handling**: Consistent use of `boost::asio::as_tuple(use_awaitable)` for error codes instead of exceptions
+  - **Future Tracking**: Replaced detached spawns with `use_future` for verifiable connection lifecycle management
 - **Doctor Prune Command**: Intelligent cleanup of build artifacts, logs, cache, and temporary files
   - Support for 9 build systems (CMake, Ninja, Meson, Make, Gradle, Maven, NPM/Yarn, Cargo, Go)
   - Detection across 10+ programming languages (C/C++, Java, Python, JavaScript, Rust, Go, OCaml, Haskell, Erlang, etc.)
@@ -45,6 +52,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Symbol context includes type, scope, caller/callee counts, and related symbols
 
 ### Fixed
+- **Worker Thread Premature Exit**: Fixed io_context workers exiting immediately on startup by adding `executor_work_guard` to keep the context alive until explicit shutdown.
+- **SocketServer Backpressure**: Manual backpressure polling with `std::counting_semaphore`, eliminating 5-20ms delay loops and providing natural bounded concurrency.
 - **Embedding Consumer Deadlock**: Fixed race condition causing embedding job consumer to stall
   - Added defensive retry mechanism with exponential backoff for queue state recovery
   - Impact: Embedding background processing now reliable under high load
@@ -167,6 +176,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **RPC/IPC exposure**: Added `ListTreeDiff` method to daemon protocol (protobuf + binary serialization).
 
 ### Changed
+- **Daemon Async Architecture**: Unified on modern Boost.Asio 1.82+ patterns with C++20 coroutines (`asio::awaitable`)
+  - Single io_context with work guard for all async operations
+  - Strands for logical separation (init, plugin, model domains)
+  - RAII cleanup guards for automatic resource management
+  - Error codes via `as_tuple` instead of exceptions for hot paths
+  - Semaphore-based bounded concurrency instead of manual atomic flags
 - **Compression-first retrieval** DocumentService, CLI, and daemon IPC now default to
   returning compressed payloads with full metadata (algorithm, CRC32s, sizes)
 - **Path query pipeline**: Replaced the legacy `findDocumentsByPath` helper with the normalized `queryDocuments` API and the shared `queryDocumentsByPattern` utility. All services (daemon, CLI, MCP, mobile bindings, repair tooling, vector ingestion) now issue structured queries that leverage the `path_prefix`, `reverse_path`, and `path_hash` indexes plus FTS5 for suffix matches, eliminating full-table LIKE scans.

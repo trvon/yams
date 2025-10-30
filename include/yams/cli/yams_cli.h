@@ -3,6 +3,7 @@
 #include <memory>
 #include <mutex>
 #include <vector>
+#include <boost/asio/any_io_executor.hpp>
 #include <CLI/CLI.hpp>
 #include <yams/api/content_store.h>
 #include <yams/app/services/services.hpp>
@@ -25,8 +26,13 @@ namespace yams::cli {
  */
 class YamsCLI {
 public:
-    YamsCLI();
+    explicit YamsCLI(boost::asio::any_io_executor executor = {});
     ~YamsCLI();
+
+    /**
+     * Get the executor for async operations
+     */
+    boost::asio::any_io_executor getExecutor() const { return executor_; }
 
     /**
      * Run the CLI with given arguments
@@ -178,6 +184,8 @@ private:
     void checkConfigMigration();
 
 private:
+    boost::asio::any_io_executor executor_;
+
     std::unique_ptr<CLI::App> app_;
     std::vector<std::unique_ptr<ICommand>> commands_;
 

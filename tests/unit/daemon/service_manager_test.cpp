@@ -218,4 +218,19 @@ TEST_F(ServiceManagerTest, MemoryCleanupVerification) {
     SUCCEED();
 }
 
+// Test 19 (PBI-066-38): Restart path reinitializes io_context after shutdown
+TEST_F(ServiceManagerTest, RestartCreatesFreshIoContext) {
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    // First init
+    auto r1 = sm->initialize();
+    ASSERT_TRUE(r1) << (r1 ? "" : r1.error().message);
+
+    // Stop services
+    sm->shutdown();
+
+    // Second init should succeed and not throw bad executor
+    auto r2 = sm->initialize();
+    ASSERT_TRUE(r2) << (r2 ? "" : r2.error().message);
+}
+
 } // namespace yams::daemon::test

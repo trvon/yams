@@ -194,6 +194,9 @@ private:
 
     // Version 16: Symbol metadata materialized view (derived from KG)
     static Migration createSymbolMetadataSchema();
+
+    // Version 17: Enable FTS5 Porter stemmer for better search
+    static Migration addFTS5PorterStemmer();
 };
 
 /**

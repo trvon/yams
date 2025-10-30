@@ -12,6 +12,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <boost/asio/use_future.hpp>
 
 #include <spdlog/spdlog.h>
 
@@ -39,6 +40,7 @@ using boost::asio::awaitable;
 using boost::asio::use_awaitable;
 namespace this_coro = boost::asio::this_coro;
 using boost::asio::as_tuple;
+using boost::asio::use_future;
 using namespace boost::asio::experimental::awaitable_operators;
 
 namespace {
@@ -57,28 +59,23 @@ async_connect_with_timeout(const TransportOptions& opts) {
     auto ex = co_await this_coro::executor;
     auto socket = std::make_unique<AsioConnection::socket_t>(ex);
     boost::asio::local::stream_protocol::endpoint endpoint(opts.socketPath.string());
-    try {
-        if (trace) {
-            spdlog::info("stream-trace: async_connect socket='{}'", opts.socketPath.string());
-        }
-        // Skip filesystem validation for performance - let connect() fail naturally if socket
-        // missing Connection errors are handled below and provide clear diagnostics This
-        // optimization is critical for high-concurrency scenarios (multi-agent systems)
-        boost::asio::steady_timer timer(ex);
-        timer.expires_after(opts.requestTimeout);
-        auto connect_result = co_await (socket->async_connect(endpoint, use_awaitable) ||
-                                        timer.async_wait(use_awaitable));
-        if (connect_result.index() == 1) {
-            socket->close();
-            co_return Error{ErrorCode::Timeout, "Connection timeout (pool connect)"};
-        }
-        if (trace) {
-            spdlog::info("stream-trace: async_connect succeeded socket='{}'",
-                         opts.socketPath.string());
-        }
-        co_return std::move(socket);
-    } catch (const boost::system::system_error& e) {
-        const auto ec = e.code();
+
+    if (trace) {
+        spdlog::info("stream-trace: async_connect socket='{}'", opts.socketPath.string());
+    }
+
+    boost::asio::steady_timer timer(ex);
+    timer.expires_after(opts.requestTimeout);
+    auto connect_result = co_await (socket->async_connect(endpoint, as_tuple(use_awaitable)) ||
+                                    timer.async_wait(as_tuple(use_awaitable)));
+
+    if (connect_result.index() == 1) {
+        socket->close();
+        co_return Error{ErrorCode::Timeout, "Connection timeout (pool connect)"};
+    }
+
+    auto& [ec] = std::get<0>(connect_result);
+    if (ec) {
         if (ec == boost::asio::error::connection_refused ||
             ec == make_error_code(boost::system::errc::connection_refused)) {
             co_return Error{ErrorCode::NetworkError,
@@ -88,27 +85,33 @@ async_connect_with_timeout(const TransportOptions& opts) {
         }
         co_return Error{ErrorCode::NetworkError,
                         std::string("Connection failed (pool): ") + ec.message()};
-    } catch (const std::exception& e) {
-        co_return Error{ErrorCode::NetworkError, e.what()};
     }
+
+    if (trace) {
+        spdlog::info("stream-trace: async_connect succeeded socket='{}'", opts.socketPath.string());
+    }
+    co_return std::move(socket);
 }
 
 awaitable<Result<std::vector<uint8_t>>>
 async_read_exact(AsioConnection::socket_t& socket, size_t size, std::chrono::milliseconds timeout) {
-    try {
-        std::vector<uint8_t> buffer(size);
-        boost::asio::steady_timer timer(co_await this_coro::executor);
-        timer.expires_after(timeout);
-        auto read_result =
-            co_await (boost::asio::async_read(socket, boost::asio::buffer(buffer), use_awaitable) ||
-                      timer.async_wait(use_awaitable));
-        if (read_result.index() == 1) {
-            co_return Error{ErrorCode::Timeout, "Read timeout"};
-        }
-        co_return buffer;
-    } catch (const std::exception& e) {
-        co_return Error{ErrorCode::NetworkError, e.what()};
+    std::vector<uint8_t> buffer(size);
+    boost::asio::steady_timer timer(co_await this_coro::executor);
+    timer.expires_after(timeout);
+    auto read_result = co_await (
+        boost::asio::async_read(socket, boost::asio::buffer(buffer), as_tuple(use_awaitable)) ||
+        timer.async_wait(as_tuple(use_awaitable)));
+
+    if (read_result.index() == 1) {
+        co_return Error{ErrorCode::Timeout, "Read timeout"};
     }
+
+    auto& [ec, bytes_read] = std::get<0>(read_result);
+    if (ec) {
+        co_return Error{ErrorCode::NetworkError, ec.message()};
+    }
+
+    co_return buffer;
 }
 
 } // namespace
@@ -231,6 +234,30 @@ void AsioConnectionPool::release(std::shared_ptr<AsioConnection> conn) {
     }
 }
 
+void AsioConnectionPool::shutdown(std::chrono::milliseconds timeout) {
+    std::lock_guard<std::mutex> lk(mutex_);
+
+    for (auto& weak : connection_pool_) {
+        if (auto conn = weak.lock()) {
+            conn->alive = false;
+            if (conn->socket && conn->socket->is_open()) {
+                boost::system::error_code ec;
+                conn->socket->close(ec);
+            }
+
+            if (conn->read_loop_future.valid()) {
+                auto status = conn->read_loop_future.wait_for(timeout);
+                if (status != std::future_status::ready) {
+                    spdlog::warn("Connection read loop did not complete within {}ms",
+                                 timeout.count());
+                }
+            }
+        }
+    }
+
+    connection_pool_.clear();
+}
+
 awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection() {
     auto conn = std::make_shared<AsioConnection>(opts_);
     auto socket_res = co_await async_connect_with_timeout(opts_);
@@ -253,8 +280,11 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
 
     // Start background read loop to receive responses
     if (!conn->read_started.exchange(true)) {
-        co_spawn(
-            GlobalIOContext::instance().get_io_context(),
+        auto executor = conn->opts.executor
+                            ? *conn->opts.executor
+                            : GlobalIOContext::instance().get_io_context().get_executor();
+        conn->read_loop_future = co_spawn(
+            executor,
             [weak_conn = std::weak_ptr(conn)]() -> awaitable<void> {
                 if (auto conn = weak_conn.lock()) {
                     co_await boost::asio::dispatch(conn->strand, use_awaitable);
@@ -418,7 +448,7 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                     }
                 }
             },
-            boost::asio::detached);
+            boost::asio::use_future);
     }
 
     co_return conn;

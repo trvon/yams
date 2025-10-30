@@ -85,9 +85,11 @@ if [[ "${COMPILER_OVERRIDE}" == clang ]] || { [[ -z "${COMPILER_OVERRIDE}" ]] &&
     LIBCXX="libc++"
   else
     LIBCXX="libstdc++11"
-    # Only add forced includes on Linux where they don't break Conan builds
-    export CXXFLAGS="${CXXFLAGS:-} -include cstdint"
-    export CFLAGS="${CFLAGS:-} -include stdint.h"
+    # NOTE: Forced includes (-include cstdint/stdint.h) have been disabled
+    # as they cause abseil build failures. If specific compilation issues
+    # arise, consider more targeted fixes or compiler-specific workarounds.
+    # export CXXFLAGS="${CXXFLAGS:-} -include cstdint"
+    # export CFLAGS="${CFLAGS:-} -include stdint.h"
   fi
   CLANG_VERSION=$(detect_version clang++)
   CLANG_MAJOR=$(COERCE_MAJOR "${CLANG_VERSION:-0}")
@@ -165,6 +167,13 @@ echo "Install Prefix:    ${INSTALL_PREFIX}"
 echo "C++ Std:           ${MESON_CPPSTD} (Conan: ${CPPSTD})"
 if [[ "${LIBCXX_HARDENING}" != "none" ]]; then
   echo "libc++ Hardening:  ${LIBCXX_HARDENING}"
+fi
+
+echo "--- Exporting custom Conan recipes... ---"
+# Export custom qpdf recipe if it exists
+if [[ -f "conan/qpdf/conanfile.py" ]]; then
+  echo "Exporting qpdf/11.9.0 from conan/qpdf/"
+  conan export conan/qpdf --name=qpdf --version=11.9.0
 fi
 
 echo "--- Running conan install... ---"

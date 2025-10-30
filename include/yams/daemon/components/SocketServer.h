@@ -9,9 +9,11 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <semaphore>
 #include <thread>
 #include <vector>
 #include <yams/compat/thread_stop_compat.h>
@@ -103,6 +105,14 @@ private:
     // Track active connections for deterministic shutdown
     std::mutex activeSocketsMutex_;
     std::vector<std::weak_ptr<boost::asio::local::stream_protocol::socket>> activeSockets_;
+
+    // Track connection futures for graceful shutdown (PBI-066-41)
+    std::mutex connectionFuturesMutex_;
+    std::vector<std::future<void>> connectionFutures_;
+
+    std::unique_ptr<std::counting_semaphore<>> connectionSlots_;
+
+    void prune_completed_futures();
 };
 
 } // namespace yams::daemon

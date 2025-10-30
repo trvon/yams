@@ -8,7 +8,6 @@
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/client/daemon_client.h>
-#include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 
 namespace yams::cli {
@@ -53,7 +52,7 @@ private:
             std::promise<Result<yams::daemon::GetStatsResponse>> prom;
             auto fut = prom.get_future();
             boost::asio::co_spawn(
-                yams::daemon::GlobalIOContext::global_executor(),
+                getExecutor(),
                 [leaseHandle, req, &prom]() mutable -> boost::asio::awaitable<void> {
                     auto& client = **leaseHandle;
                     auto r = co_await client.call(req);

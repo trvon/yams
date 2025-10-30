@@ -46,6 +46,7 @@ void set_current_thread_name(const std::string& name) {
 namespace yams::daemon {
 
 YamsDaemon::YamsDaemon(const DaemonConfig& config) : config_(config) {
+    spdlog::info("[YamsDaemon] Constructor entry");
     // Resolve paths if not explicitly set
     if (config_.socketPath.empty()) {
         // Keep centralized FSM-based resolution for consistency with client/CLI
@@ -60,9 +61,6 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config) : config_(config) {
 
     lifecycleManager_ = std::make_unique<LifecycleComponent>(this, config_.pidFile);
     serviceManager_ = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
-
-    // Start background task coroutines now that shared_ptr exists
-    serviceManager_->startBackgroundTasks();
 
     // Create metrics aggregator before the dispatcher so status can pull from a single snapshot
     metrics_ = std::make_unique<DaemonMetrics>(&lifecycleFsm_, &state_, serviceManager_.get());
@@ -297,6 +295,13 @@ Result<void> YamsDaemon::start() {
     }
     spdlog::info("[Startup] Phase: ServiceManager Init OK (async)");
 
+    // Launch background task coroutines after io_context is live (post-initialize)
+    try {
+        serviceManager_->startBackgroundTasks();
+    } catch (const std::exception& e) {
+        spdlog::warn("Failed to start background tasks: {}", e.what());
+    }
+
     // Defer RepairCoordinator start until lifecycle is Healthy/Ready to avoid competing with init
 
     // Bootstrapped event already dispatched before service initialization to prevent race.
@@ -459,37 +464,48 @@ Result<void> YamsDaemon::stop() {
 
     spdlog::info("Stopping YAMS daemon...");
 
-    // Stop socket server first to prevent new connections
+    // Signal stop request FIRST and wake up the daemon thread
+    stopRequested_.store(true, std::memory_order_release);
+    stop_cv_.notify_all();
+
+    // Stop socket server to prevent new connections
     if (socketServer_) {
         spdlog::debug("Stopping socket server...");
-        socketServer_->stop();
+        auto stopResult = socketServer_->stop();
+        if (!stopResult) {
+            spdlog::warn("Socket server stop returned error: {}", stopResult.error().message);
+        }
         socketServer_.reset();
         state_.readiness.ipcServerReady = false;
     }
 
-    // Stop tuning manager to cease pool adjustments before tearing down services
+    // Stop tuning manager
     if (tuningManager_) {
         try {
             tuningManager_->stop();
+        } catch (const std::exception& e) {
+            spdlog::warn("TuningManager stop exception: {}", e.what());
         } catch (...) {
         }
         tuningManager_.reset();
     }
 
-    stopRequested_ = true;
-    stop_cv_.notify_all();
-
+    // Wait for daemon thread to exit (should be quick since we notified stop_cv_)
     if (daemonThread_.joinable()) {
-        daemonThread_.join();
+        spdlog::debug("Waiting for daemon thread to exit...");
+        try {
+            daemonThread_.join();
+            spdlog::debug("Daemon thread exited");
+        } catch (const std::exception& e) {
+            spdlog::warn("Daemon thread join failed: {}", e.what());
+        }
     }
 
-    // Stop background coordinator before tearing down IPC/services it references
+    // Stop background coordinator
     if (repairCoordinator_) {
         repairCoordinator_->stop();
         repairCoordinator_.reset();
     }
-
-    // No in-process IPC server to stop
 
     if (serviceManager_) {
         serviceManager_->shutdown();
@@ -499,7 +515,13 @@ Result<void> YamsDaemon::stop() {
         lifecycleManager_->shutdown();
     }
 
-    // No socket file created by in-process server
+    // Reset GlobalIOContext for clean daemon restart
+    try {
+        yams::daemon::GlobalIOContext::reset();
+        spdlog::debug("GlobalIOContext reset for restart");
+    } catch (const std::exception& e) {
+        spdlog::warn("GlobalIOContext reset failed: {}", e.what());
+    }
 
     // Mark lifecycle stopped
     lifecycleFsm_.dispatch(StoppedEvent{});

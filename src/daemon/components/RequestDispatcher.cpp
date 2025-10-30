@@ -60,6 +60,61 @@
 
 namespace yams::daemon {
 
+// Trait to map request types to their handler methods
+template <typename T> struct RequestHandlerTraits;
+
+#define DEFINE_REQUEST_HANDLER(RequestType, HandlerMethod)                                         \
+    template <> struct RequestHandlerTraits<RequestType> {                                         \
+        static boost::asio::awaitable<Response> handle(RequestDispatcher* dispatcher,              \
+                                                       const RequestType& req) {                   \
+            return dispatcher->HandlerMethod(req);                                                 \
+        }                                                                                          \
+    }
+
+DEFINE_REQUEST_HANDLER(StatusRequest, handleStatusRequest);
+DEFINE_REQUEST_HANDLER(ShutdownRequest, handleShutdownRequest);
+DEFINE_REQUEST_HANDLER(PingRequest, handlePingRequest);
+DEFINE_REQUEST_HANDLER(SearchRequest, handleSearchRequest);
+DEFINE_REQUEST_HANDLER(GetRequest, handleGetRequest);
+DEFINE_REQUEST_HANDLER(GetInitRequest, handleGetInitRequest);
+DEFINE_REQUEST_HANDLER(GetChunkRequest, handleGetChunkRequest);
+DEFINE_REQUEST_HANDLER(GetEndRequest, handleGetEndRequest);
+DEFINE_REQUEST_HANDLER(CatRequest, handleCatRequest);
+DEFINE_REQUEST_HANDLER(ListSessionsRequest, handleListSessionsRequest);
+DEFINE_REQUEST_HANDLER(UseSessionRequest, handleUseSessionRequest);
+DEFINE_REQUEST_HANDLER(AddPathSelectorRequest, handleAddPathSelectorRequest);
+DEFINE_REQUEST_HANDLER(RemovePathSelectorRequest, handleRemovePathSelectorRequest);
+DEFINE_REQUEST_HANDLER(ListTreeDiffRequest, handleListTreeDiffRequest);
+DEFINE_REQUEST_HANDLER(FileHistoryRequest, handleFileHistoryRequest);
+DEFINE_REQUEST_HANDLER(PruneRequest, handlePruneRequest);
+DEFINE_REQUEST_HANDLER(ListCollectionsRequest, handleListCollectionsRequest);
+DEFINE_REQUEST_HANDLER(ListSnapshotsRequest, handleListSnapshotsRequest);
+DEFINE_REQUEST_HANDLER(RestoreCollectionRequest, handleRestoreCollectionRequest);
+DEFINE_REQUEST_HANDLER(RestoreSnapshotRequest, handleRestoreSnapshotRequest);
+DEFINE_REQUEST_HANDLER(AddDocumentRequest, handleAddDocumentRequest);
+DEFINE_REQUEST_HANDLER(ListRequest, handleListRequest);
+DEFINE_REQUEST_HANDLER(DeleteRequest, handleDeleteRequest);
+DEFINE_REQUEST_HANDLER(GetStatsRequest, handleGetStatsRequest);
+DEFINE_REQUEST_HANDLER(GenerateEmbeddingRequest, handleGenerateEmbeddingRequest);
+DEFINE_REQUEST_HANDLER(BatchEmbeddingRequest, handleBatchEmbeddingRequest);
+DEFINE_REQUEST_HANDLER(LoadModelRequest, handleLoadModelRequest);
+DEFINE_REQUEST_HANDLER(UnloadModelRequest, handleUnloadModelRequest);
+DEFINE_REQUEST_HANDLER(ModelStatusRequest, handleModelStatusRequest);
+DEFINE_REQUEST_HANDLER(UpdateDocumentRequest, handleUpdateDocumentRequest);
+DEFINE_REQUEST_HANDLER(GrepRequest, handleGrepRequest);
+DEFINE_REQUEST_HANDLER(DownloadRequest, handleDownloadRequest);
+DEFINE_REQUEST_HANDLER(PrepareSessionRequest, handlePrepareSessionRequest);
+DEFINE_REQUEST_HANDLER(PluginScanRequest, handlePluginScanRequest);
+DEFINE_REQUEST_HANDLER(PluginLoadRequest, handlePluginLoadRequest);
+DEFINE_REQUEST_HANDLER(PluginUnloadRequest, handlePluginUnloadRequest);
+DEFINE_REQUEST_HANDLER(PluginTrustListRequest, handlePluginTrustListRequest);
+DEFINE_REQUEST_HANDLER(PluginTrustAddRequest, handlePluginTrustAddRequest);
+DEFINE_REQUEST_HANDLER(PluginTrustRemoveRequest, handlePluginTrustRemoveRequest);
+DEFINE_REQUEST_HANDLER(CancelRequest, handleCancelRequest);
+DEFINE_REQUEST_HANDLER(EmbedDocumentsRequest, handleEmbedDocumentsRequest);
+
+#undef DEFINE_REQUEST_HANDLER
+
 namespace {
 boost::asio::any_io_executor dispatcher_fallback_executor() {
     static boost::asio::thread_pool pool(1);
@@ -226,84 +281,7 @@ boost::asio::awaitable<Response> RequestDispatcher::dispatch(const Request& req)
         out = co_await std::visit(
             [this](auto&& arg) -> boost::asio::awaitable<Response> {
                 using T = std::decay_t<decltype(arg)>;
-                if constexpr (std::is_same_v<T, StatusRequest>) {
-                    co_return co_await handleStatusRequest(arg);
-                } else if constexpr (std::is_same_v<T, ShutdownRequest>) {
-                    co_return co_await handleShutdownRequest(arg);
-                } else if constexpr (std::is_same_v<T, PingRequest>) {
-                    co_return co_await handlePingRequest(arg);
-                } else if constexpr (std::is_same_v<T, SearchRequest>) {
-                    co_return co_await handleSearchRequest(arg);
-                } else if constexpr (std::is_same_v<T, GetRequest>) {
-                    co_return co_await handleGetRequest(arg);
-                } else if constexpr (std::is_same_v<T, GetInitRequest>) {
-                    co_return co_await handleGetInitRequest(arg);
-                } else if constexpr (std::is_same_v<T, GetChunkRequest>) {
-                    co_return co_await handleGetChunkRequest(arg);
-                } else if constexpr (std::is_same_v<T, GetEndRequest>) {
-                    co_return co_await handleGetEndRequest(arg);
-                } else if constexpr (std::is_same_v<T, CatRequest>) {
-                    co_return co_await handleCatRequest(arg);
-                } else if constexpr (std::is_same_v<T, ListSessionsRequest>) {
-                    co_return co_await handleListSessionsRequest(arg);
-                } else if constexpr (std::is_same_v<T, UseSessionRequest>) {
-                    co_return co_await handleUseSessionRequest(arg);
-                } else if constexpr (std::is_same_v<T, AddPathSelectorRequest>) {
-                    co_return co_await handleAddPathSelectorRequest(arg);
-                } else if constexpr (std::is_same_v<T, RemovePathSelectorRequest>) {
-                    co_return co_await handleRemovePathSelectorRequest(arg);
-                } else if constexpr (std::is_same_v<T, ListTreeDiffRequest>) {
-                    co_return co_await handleListTreeDiffRequest(arg);
-                } else if constexpr (std::is_same_v<T, FileHistoryRequest>) {
-                    co_return co_await handleFileHistoryRequest(arg);
-                } else if constexpr (std::is_same_v<T, PruneRequest>) {
-                    co_return co_await handlePruneRequest(arg);
-                } else if constexpr (std::is_same_v<T, AddDocumentRequest>) {
-                    co_return co_await handleAddDocumentRequest(arg);
-                } else if constexpr (std::is_same_v<T, ListRequest>) {
-                    co_return co_await handleListRequest(arg);
-                } else if constexpr (std::is_same_v<T, DeleteRequest>) {
-                    co_return co_await handleDeleteRequest(arg);
-                } else if constexpr (std::is_same_v<T, GetStatsRequest>) {
-                    co_return co_await handleGetStatsRequest(arg);
-                } else if constexpr (std::is_same_v<T, GenerateEmbeddingRequest>) {
-                    co_return co_await handleGenerateEmbeddingRequest(arg);
-                } else if constexpr (std::is_same_v<T, BatchEmbeddingRequest>) {
-                    co_return co_await handleBatchEmbeddingRequest(arg);
-                } else if constexpr (std::is_same_v<T, LoadModelRequest>) {
-                    co_return co_await handleLoadModelRequest(arg);
-                } else if constexpr (std::is_same_v<T, UnloadModelRequest>) {
-                    co_return co_await handleUnloadModelRequest(arg);
-                } else if constexpr (std::is_same_v<T, ModelStatusRequest>) {
-                    co_return co_await handleModelStatusRequest(arg);
-                } else if constexpr (std::is_same_v<T, UpdateDocumentRequest>) {
-                    co_return co_await handleUpdateDocumentRequest(arg);
-                } else if constexpr (std::is_same_v<T, GrepRequest>) {
-                    co_return co_await handleGrepRequest(arg);
-                } else if constexpr (std::is_same_v<T, DownloadRequest>) {
-                    co_return co_await handleDownloadRequest(arg);
-                } else if constexpr (std::is_same_v<T, PrepareSessionRequest>) {
-                    co_return co_await handlePrepareSessionRequest(arg);
-                } else if constexpr (std::is_same_v<T, PluginScanRequest>) {
-                    co_return co_await handlePluginScanRequest(arg);
-                } else if constexpr (std::is_same_v<T, PluginLoadRequest>) {
-                    co_return co_await handlePluginLoadRequest(arg);
-                } else if constexpr (std::is_same_v<T, PluginUnloadRequest>) {
-                    co_return co_await handlePluginUnloadRequest(arg);
-                } else if constexpr (std::is_same_v<T, PluginTrustListRequest>) {
-                    co_return co_await handlePluginTrustListRequest(arg);
-                } else if constexpr (std::is_same_v<T, PluginTrustAddRequest>) {
-                    co_return co_await handlePluginTrustAddRequest(arg);
-                } else if constexpr (std::is_same_v<T, PluginTrustRemoveRequest>) {
-                    co_return co_await handlePluginTrustRemoveRequest(arg);
-                } else if constexpr (std::is_same_v<T, CancelRequest>) {
-                    co_return co_await handleCancelRequest(arg);
-                } else if constexpr (std::is_same_v<T, EmbedDocumentsRequest>) {
-                    co_return co_await handleEmbedDocumentsRequest(arg);
-                } else {
-                    co_return ErrorResponse{ErrorCode::NotImplemented,
-                                            "Request type not yet implemented"};
-                }
+                return RequestHandlerTraits<T>::handle(this, arg);
             },
             req);
     } catch (const std::exception& e) {

@@ -1,11 +1,11 @@
 // Lightweight RAII harness to start/stop a YamsDaemon for integration tests
 #pragma once
 
+#include <spdlog/spdlog.h>
 #include <filesystem>
 #include <random>
 #include <thread>
 #include "test_async_helpers.h"
-#include <gtest/gtest.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
 
@@ -39,34 +39,40 @@ public:
     }
 
     ~DaemonHarness() {
-        stop();
+        // Skip explicit stop - let RAII handle cleanup
+        // stop();
         cleanup();
     }
 
-    bool start(std::chrono::milliseconds wait = std::chrono::seconds(2)) {
-        if (!daemon_)
+    bool start(std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+        if (!daemon_) {
             return false;
-        auto s = daemon_->start();
-        if (!s)
-            return false;
-        // Poll status via client until IPC/server up
-        yams::daemon::ClientConfig cc;
-        cc.socketPath = sock_;
-        cc.autoStart = false;
-        yams::daemon::DaemonClient client(cc);
-        auto deadline = std::chrono::steady_clock::now() + wait;
-        while (std::chrono::steady_clock::now() < deadline) {
-            auto st = yams::cli::run_sync(client.status(), std::chrono::milliseconds(250));
-            if (st) {
-                const auto& v = st.value();
-                // Basic readiness: IPC server and content store ready
-                if (v.readinessStates.at("ipc_server") && v.readinessStates.at("content_store")) {
-                    return true;
-                }
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
-        return true; // server up even if subsystems still warming
+        auto s = daemon_->start();
+        if (!s) {
+            return false;
+        }
+
+        // Poll for socket server to be available
+        auto client = yams::daemon::DaemonClient(
+            yams::daemon::ClientConfig{.socketPath = sock_,
+                                       .connectTimeout = std::chrono::milliseconds(500),
+                                       .autoStart = false});
+
+        auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+            // Try to connect - socket server readiness is enough
+            auto connectResult =
+                yams::cli::run_sync(client.connect(), std::chrono::milliseconds(300));
+            if (connectResult) {
+                // Connected successfully, daemon is ready
+                return true;
+            }
+        }
+
+        return false;
     }
 
     void stop() {

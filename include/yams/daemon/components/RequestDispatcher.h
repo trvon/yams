@@ -23,6 +23,9 @@ class IContentStore;
 
 namespace yams::daemon {
 
+// Forward declare trait template for friend declaration
+template <typename T> struct RequestHandlerTraits;
+
 class RequestDispatcher {
 public:
     RequestDispatcher(YamsDaemon* daemon, ServiceManager* serviceManager, StateComponent* state);
@@ -54,6 +57,8 @@ public:
     int prepareSession(const PrepareSessionOptions& opts);
 
 private:
+    template <typename T> friend struct RequestHandlerTraits;
+
     // One handler for each request type
     boost::asio::awaitable<Response> handleStatusRequest(const StatusRequest& req);
     boost::asio::awaitable<Response> handleShutdownRequest(const ShutdownRequest& req);
@@ -90,6 +95,15 @@ private:
 
     // Prune handler (PBI-062)
     boost::asio::awaitable<Response> handlePruneRequest(const PruneRequest& req);
+
+    // Collection and snapshot handlers (PBI-066)
+    boost::asio::awaitable<Response>
+    handleListCollectionsRequest(const ListCollectionsRequest& req);
+    boost::asio::awaitable<Response> handleListSnapshotsRequest(const ListSnapshotsRequest& req);
+    boost::asio::awaitable<Response>
+    handleRestoreCollectionRequest(const RestoreCollectionRequest& req);
+    boost::asio::awaitable<Response>
+    handleRestoreSnapshotRequest(const RestoreSnapshotRequest& req);
 
     // Plugin management handlers
     boost::asio::awaitable<Response> handlePluginScanRequest(const PluginScanRequest& req);

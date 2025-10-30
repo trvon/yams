@@ -90,6 +90,10 @@ struct GrepOptions {
     int beforeContext = 0;
     int afterContext = 0;
     bool showDiff = false;
+
+    // Session scoping (controls hot/cold path behavior)
+    bool useSession = false; // if true, allow hot path optimization for session-warmed docs
+    std::string sessionName; // optional explicit session name
 };
 
 struct ListOptions {

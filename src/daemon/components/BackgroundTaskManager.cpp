@@ -29,10 +29,18 @@
 
 namespace yams::daemon {
 
+#include <yams/daemon/client/global_io_context.h>
+
 BackgroundTaskManager::BackgroundTaskManager(Dependencies deps)
     : deps_(std::move(deps)), stopRequested_(std::make_shared<std::atomic<bool>>(false)) {
+    // Ensure a valid executor; fall back to global executor to avoid bad_executor on restart paths.
     if (!deps_.executor) {
-        throw std::invalid_argument("BackgroundTaskManager: executor cannot be null");
+        try {
+            deps_.executor = yams::daemon::GlobalIOContext::global_executor();
+            spdlog::warn("[BackgroundTaskManager] No executor provided; using global executor");
+        } catch (...) {
+            throw std::invalid_argument("BackgroundTaskManager: executor cannot be null");
+        }
     }
 }
 

@@ -637,32 +637,17 @@ public:
         // Mode selection for tiered grep
         enum class Mode { Auto, HotOnly, ColdOnly };
         Mode mode = Mode::Auto;
-        // Thread-local override from streaming fast/full execution, if set
-        switch (get_grep_mode_tls()) {
-            case GrepExecMode::HotOnly:
-                mode = Mode::HotOnly;
-                break;
-            case GrepExecMode::ColdOnly:
-                mode = Mode::ColdOnly;
-                break;
-            default: {
-                yams::cli::HotColdMode grepMode = yams::cli::getGrepMode();
-                switch (get_grep_mode_tls()) {
-                    case GrepExecMode::HotOnly:
-                        mode = Mode::HotOnly;
-                        break;
-                    case GrepExecMode::ColdOnly:
-                        mode = Mode::ColdOnly;
-                        break;
-                    default:
-                        if (grepMode == yams::cli::HotColdMode::HotOnly)
-                            mode = Mode::HotOnly;
-                        else if (grepMode == yams::cli::HotColdMode::ColdOnly)
-                            mode = Mode::ColdOnly;
-                        break;
-                }
-                break;
-            }
+
+        // POLICY: Hot path (extracted text) is ONLY used within session context.
+        // For general queries, always use cold path (CAS) for comprehensive results.
+        if (!req.useSession) {
+            mode = Mode::ColdOnly;
+            spdlog::debug("[GrepService] Non-session query → forcing ColdOnly mode (CAS scan)");
+        } else {
+            // Session-scoped query: use Auto mode (allows hot path for warmed docs)
+            mode = Mode::Auto;
+            spdlog::debug(
+                "[GrepService] Session-scoped query → using Auto mode (hot path enabled)");
         }
 
         // Dynamic, bounded parallelism (config-free): cap to a conservative small number

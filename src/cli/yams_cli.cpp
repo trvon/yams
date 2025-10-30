@@ -95,9 +95,14 @@ void YamsCLI::setPendingCommand(ICommand* cmd) {
     pendingCommand_ = cmd;
 }
 
-YamsCLI::YamsCLI() {
+YamsCLI::YamsCLI(boost::asio::any_io_executor executor) : executor_(std::move(executor)) {
     // Set a conservative default; finalized after parsing flags in run()
     spdlog::set_level(spdlog::level::warn);
+
+    // Fall back to GlobalIOContext if no executor provided (for backwards compatibility)
+    if (!executor_) {
+        executor_ = yams::daemon::GlobalIOContext::instance().get_io_context().get_executor();
+    }
 
     app_ = std::make_unique<CLI::App>("YAMS", "yams");
     app_->prefix_command(); // Allow global options before and after subcommands
@@ -489,6 +494,7 @@ std::shared_ptr<app::services::AppContext> YamsCLI::getAppContext() {
         appContext_->searchExecutor = getSearchExecutor();
         appContext_->metadataRepo = getMetadataRepository();
         appContext_->kgStore = getKnowledgeGraphStore(); // PBI-043: tree diff KG integration
+        appContext_->workerExecutor = executor_;         // 066-59: Thread executor through services
 
         // Initialize HybridSearchEngine so SearchService can use hybrid search by default
         try {
@@ -932,6 +938,8 @@ void YamsCLI::registerBuiltinCommands() {
 }
 
 void YamsCLI::registerCommand(std::unique_ptr<ICommand> command) {
+    // Set executor on the command before registration
+    command->setExecutor(executor_);
     command->registerCommand(*app_, this);
     commands_.push_back(std::move(command));
 }

@@ -43,6 +43,7 @@
 
 namespace yams::daemon {
 
+using boost::asio::as_tuple;
 using boost::asio::awaitable;
 using boost::asio::co_spawn;
 using boost::asio::detached;
@@ -69,41 +70,42 @@ AsioTransportAdapter::get_or_create_connection(const Options& opts) {
 awaitable<Result<std::unique_ptr<boost::asio::local::stream_protocol::socket>>>
 AsioTransportAdapter::async_connect_with_timeout(const std::filesystem::path& path,
                                                  std::chrono::milliseconds timeout) {
-    auto& io_ctx = GlobalIOContext::instance().get_io_context();
-    auto socket = std::make_unique<boost::asio::local::stream_protocol::socket>(io_ctx);
+    auto executor = opts_.executor ? *opts_.executor
+                                   : GlobalIOContext::instance().get_io_context().get_executor();
+    auto socket = std::make_unique<boost::asio::local::stream_protocol::socket>(executor);
     boost::asio::local::stream_protocol::endpoint endpoint(path.string());
-    try {
-        if (!std::filesystem::exists(path)) {
-            std::string msg = "Daemon not started (socket not found at '" + path.string() +
-                              "'). Set YAMS_DAEMON_SOCKET or update config (daemon.socket_path).";
-            spdlog::debug("AsioTransportAdapter preflight: {}", msg);
-            co_return Error{ErrorCode::NetworkError, std::move(msg)};
-        }
+
+    if (!std::filesystem::exists(path)) {
+        std::string msg = "Daemon not started (socket not found at '" + path.string() +
+                          "'). Set YAMS_DAEMON_SOCKET or update config (daemon.socket_path).";
+        spdlog::debug("AsioTransportAdapter preflight: {}", msg);
+        co_return Error{ErrorCode::NetworkError, std::move(msg)};
+    }
 #ifndef _WIN32
-        {
-            struct stat st;
-            if (::stat(path.c_str(), &st) == 0) {
-                if (!S_ISSOCK(st.st_mode)) {
-                    std::string msg = "Path exists but is not a socket: '" + path.string() + "'";
-                    spdlog::debug("AsioTransportAdapter preflight: {}", msg);
-                    co_return Error{ErrorCode::NetworkError, std::move(msg)};
-                }
+    {
+        struct stat st;
+        if (::stat(path.c_str(), &st) == 0) {
+            if (!S_ISSOCK(st.st_mode)) {
+                std::string msg = "Path exists but is not a socket: '" + path.string() + "'";
+                spdlog::debug("AsioTransportAdapter preflight: {}", msg);
+                co_return Error{ErrorCode::NetworkError, std::move(msg)};
             }
         }
+    }
 #endif
-        // Bind timer to the same io_context as the socket to avoid cross-executor races
-        boost::asio::steady_timer timer(io_ctx);
-        timer.expires_after(timeout);
-        auto connect_result = co_await (socket->async_connect(endpoint, use_awaitable) ||
-                                        timer.async_wait(use_awaitable));
-        if (connect_result.index() == 1) {
-            socket->close();
-            co_return Error{ErrorCode::Timeout,
-                            yams::format("Connection timeout (socket='{}')", path.string())};
-        }
-        co_return std::move(socket);
-    } catch (const boost::system::system_error& e) {
-        const auto ec = e.code();
+    boost::asio::steady_timer timer(executor);
+    timer.expires_after(timeout);
+    auto connect_result = co_await (socket->async_connect(endpoint, as_tuple(use_awaitable)) ||
+                                    timer.async_wait(as_tuple(use_awaitable)));
+
+    if (connect_result.index() == 1) {
+        socket->close();
+        co_return Error{ErrorCode::Timeout,
+                        yams::format("Connection timeout (socket='{}')", path.string())};
+    }
+
+    auto& [ec] = std::get<0>(connect_result);
+    if (ec) {
         if (ec == boost::asio::error::connection_refused ||
             ec == make_error_code(boost::system::errc::connection_refused)) {
             co_return Error{ErrorCode::NetworkError,
@@ -112,48 +114,54 @@ AsioTransportAdapter::async_connect_with_timeout(const std::filesystem::path& pa
                                          path.string())};
         }
         co_return Error{ErrorCode::NetworkError,
-                        yams::format("Connection failed ({}): {}", ec.message(), e.what())};
-    } catch (const std::exception& e) {
-        co_return Error{ErrorCode::NetworkError, yams::format("Connection failed: {}", e.what())};
+                        yams::format("Connection failed: {}", ec.message())};
     }
+
+    co_return std::move(socket);
 }
 
 awaitable<Result<std::vector<uint8_t>>>
 AsioTransportAdapter::async_read_exact(boost::asio::local::stream_protocol::socket& socket,
                                        size_t size, std::chrono::milliseconds timeout) {
-    try {
-        std::vector<uint8_t> buffer(size);
-        boost::asio::steady_timer timer(co_await this_coro::executor);
-        timer.expires_after(timeout);
-        auto read_result =
-            co_await (boost::asio::async_read(socket, boost::asio::buffer(buffer), use_awaitable) ||
-                      timer.async_wait(use_awaitable));
-        if (read_result.index() == 1) {
-            co_return Error{ErrorCode::Timeout, "Read timeout"};
-        }
-        co_return buffer;
-    } catch (const std::exception& e) {
-        co_return Error{ErrorCode::NetworkError, yams::format("Read failed: {}", e.what())};
+    std::vector<uint8_t> buffer(size);
+    boost::asio::steady_timer timer(co_await this_coro::executor);
+    timer.expires_after(timeout);
+    auto read_result = co_await (
+        boost::asio::async_read(socket, boost::asio::buffer(buffer), as_tuple(use_awaitable)) ||
+        timer.async_wait(as_tuple(use_awaitable)));
+
+    if (read_result.index() == 1) {
+        co_return Error{ErrorCode::Timeout, "Read timeout"};
     }
+
+    auto& [ec, bytes_read] = std::get<0>(read_result);
+    if (ec) {
+        co_return Error{ErrorCode::NetworkError, yams::format("Read failed: {}", ec.message())};
+    }
+
+    co_return buffer;
 }
 
 awaitable<Result<void>>
 AsioTransportAdapter::async_write_all(boost::asio::local::stream_protocol::socket& socket,
                                       const std::vector<uint8_t>& data,
                                       std::chrono::milliseconds timeout) {
-    try {
-        boost::asio::steady_timer timer(co_await this_coro::executor);
-        timer.expires_after(timeout);
-        auto write_result =
-            co_await (boost::asio::async_write(socket, boost::asio::buffer(data), use_awaitable) ||
-                      timer.async_wait(use_awaitable));
-        if (write_result.index() == 1) {
-            co_return Error{ErrorCode::Timeout, "Write timeout"};
-        }
-        co_return Result<void>{};
-    } catch (const std::exception& e) {
-        co_return Error{ErrorCode::NetworkError, yams::format("Write failed: {}", e.what())};
+    boost::asio::steady_timer timer(co_await this_coro::executor);
+    timer.expires_after(timeout);
+    auto write_result = co_await (
+        boost::asio::async_write(socket, boost::asio::buffer(data), as_tuple(use_awaitable)) ||
+        timer.async_wait(as_tuple(use_awaitable)));
+
+    if (write_result.index() == 1) {
+        co_return Error{ErrorCode::Timeout, "Write timeout"};
     }
+
+    auto& [ec, bytes_written] = std::get<0>(write_result);
+    if (ec) {
+        co_return Error{ErrorCode::NetworkError, yams::format("Write failed: {}", ec.message())};
+    }
+
+    co_return Result<void>{};
 }
 
 boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(const Request& req) {
@@ -185,17 +193,17 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
     frame.reserve(MessageFramer::HEADER_SIZE + 4096);
     auto frame_res = framer.frame_message_into(msg, frame);
     if (!frame_res) {
-        // Release connection before returning error
         conn->in_use.store(false, std::memory_order_release);
         co_return Error{ErrorCode::InvalidData, "Frame build failed"};
     }
 
-    auto& io = GlobalIOContext::instance().get_io_context();
-    auto response_ch = std::make_shared<AsioConnection::response_channel_t>(io, 1);
+    auto executor = conn->opts.executor
+                        ? *conn->opts.executor
+                        : GlobalIOContext::instance().get_io_context().get_executor();
+    auto response_ch = std::make_shared<AsioConnection::response_channel_t>(executor, 1);
 
     co_await boost::asio::dispatch(conn->strand, use_awaitable);
     if (conn->handlers.size() >= conn->opts.maxInflight) {
-        // Release connection before returning error
         conn->in_use.store(false, std::memory_order_release);
         co_return Error{ErrorCode::ResourceExhausted, "Too many in-flight requests"};
     }
@@ -253,17 +261,17 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
     frame.reserve(MessageFramer::HEADER_SIZE + 4096);
     auto frame_res = framer.frame_message_into(msg, frame);
     if (!frame_res) {
-        // Release connection before returning error
         conn->in_use.store(false, std::memory_order_release);
         co_return Error{ErrorCode::InvalidData, "Frame build failed"};
     }
 
-    auto& io = GlobalIOContext::instance().get_io_context();
-    auto done_ch = std::make_shared<AsioConnection::void_channel_t>(io, 1);
+    auto executor = conn->opts.executor
+                        ? *conn->opts.executor
+                        : GlobalIOContext::instance().get_io_context().get_executor();
+    auto done_ch = std::make_shared<AsioConnection::void_channel_t>(executor, 1);
 
     co_await boost::asio::dispatch(conn->strand, use_awaitable);
     if (conn->handlers.size() >= conn->opts.maxInflight) {
-        // Release connection before returning error
         conn->in_use.store(false, std::memory_order_release);
         co_return Error{ErrorCode::ResourceExhausted, "Too many in-flight requests"};
     }

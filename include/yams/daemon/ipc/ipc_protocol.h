@@ -79,6 +79,10 @@ struct SearchRequest {
     int keywordStageTimeoutMs{0};
     int snippetHydrationTimeoutMs{0};
 
+    // Session scoping (controls hot/cold path behavior)
+    bool useSession = false;
+    std::string sessionName;
+
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
@@ -91,7 +95,7 @@ struct SearchRequest {
             << modifiedBefore << indexedAfter << indexedBefore
             << static_cast<int32_t>(vectorStageTimeoutMs)
             << static_cast<int32_t>(keywordStageTimeoutMs)
-            << static_cast<int32_t>(snippetHydrationTimeoutMs);
+            << static_cast<int32_t>(snippetHydrationTimeoutMs) << useSession << sessionName;
     }
 
     template <typename Deserializer>
@@ -271,6 +275,14 @@ struct SearchRequest {
             req.snippetHydrationTimeoutMs = sht.value();
         } else {
             return sht.error();
+        }
+
+        // Deserialize session fields
+        if (auto us = deser.template read<bool>(); us) {
+            req.useSession = us.value();
+        }
+        if (auto sn = deser.readString(); sn) {
+            req.sessionName = std::move(sn.value());
         }
 
         return req;
@@ -1683,6 +1695,10 @@ struct GrepRequest {
     int afterContext = 0;                     // Lines after match
     bool showDiff = false;
 
+    // Session scoping (controls hot/cold path behavior)
+    bool useSession = false; // if true, allow hot path optimization
+    std::string sessionName; // optional explicit session name
+
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
@@ -1692,7 +1708,7 @@ struct GrepRequest {
             << noFilename << countOnly << filesOnly << filesWithoutMatch << pathsOnly << literalText
             << regexOnly << static_cast<uint64_t>(semanticLimit) << filterTags << matchAllTags
             << colorMode << static_cast<int32_t>(beforeContext)
-            << static_cast<int32_t>(afterContext) << showDiff;
+            << static_cast<int32_t>(afterContext) << showDiff << useSession << sessionName;
     }
 
     template <typename Deserializer>
@@ -1810,6 +1826,16 @@ struct GrepRequest {
         auto showDiffResult = deser.template read<bool>();
         if (showDiffResult) {
             req.showDiff = showDiffResult.value();
+        }
+
+        // Deserialize session fields
+        auto usResult = deser.template read<bool>();
+        if (usResult) {
+            req.useSession = usResult.value();
+        }
+        auto snResult = deser.readString();
+        if (snResult) {
+            req.sessionName = std::move(snResult.value());
         }
 
         return req;
@@ -2125,6 +2151,167 @@ struct PruneRequest {
     }
 };
 
+// Collection and snapshot requests
+struct ListCollectionsRequest {
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize([[maybe_unused]] Serializer& ser) const {
+        // No fields to serialize
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<ListCollectionsRequest> deserialize([[maybe_unused]] Deserializer& deser) {
+        return ListCollectionsRequest{};
+    }
+};
+
+struct ListSnapshotsRequest {
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize([[maybe_unused]] Serializer& ser) const {
+        // No fields to serialize
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<ListSnapshotsRequest> deserialize([[maybe_unused]] Deserializer& deser) {
+        return ListSnapshotsRequest{};
+    }
+};
+
+struct RestoreCollectionRequest {
+    std::string collection;
+    std::string outputDirectory;
+    std::string layoutTemplate;
+    std::vector<std::string> includePatterns;
+    std::vector<std::string> excludePatterns;
+    bool overwrite{false};
+    bool createDirs{true};
+    bool dryRun{false};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << collection << outputDirectory << layoutTemplate << includePatterns << excludePatterns
+            << overwrite << createDirs << dryRun;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<RestoreCollectionRequest> deserialize(Deserializer& deser) {
+        RestoreCollectionRequest req;
+
+        if (auto r = deser.readString(); r)
+            req.collection = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            req.outputDirectory = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            req.layoutTemplate = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readStringVector(); r)
+            req.includePatterns = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readStringVector(); r)
+            req.excludePatterns = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readBool(); r)
+            req.overwrite = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.readBool(); r)
+            req.createDirs = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.readBool(); r)
+            req.dryRun = r.value();
+        else
+            return r.error();
+
+        return req;
+    }
+};
+
+struct RestoreSnapshotRequest {
+    std::string snapshotId;
+    std::string outputDirectory;
+    std::string layoutTemplate;
+    std::vector<std::string> includePatterns;
+    std::vector<std::string> excludePatterns;
+    bool overwrite{false};
+    bool createDirs{true};
+    bool dryRun{false};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << snapshotId << outputDirectory << layoutTemplate << includePatterns << excludePatterns
+            << overwrite << createDirs << dryRun;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<RestoreSnapshotRequest> deserialize(Deserializer& deser) {
+        RestoreSnapshotRequest req;
+
+        if (auto r = deser.readString(); r)
+            req.snapshotId = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            req.outputDirectory = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            req.layoutTemplate = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readStringVector(); r)
+            req.includePatterns = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readStringVector(); r)
+            req.excludePatterns = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readBool(); r)
+            req.overwrite = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.readBool(); r)
+            req.createDirs = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.readBool(); r)
+            req.dryRun = r.value();
+        else
+            return r.error();
+
+        return req;
+    }
+};
+
 // Plugin management requests
 struct PluginScanRequest {
     std::string dir;    // optional
@@ -2268,7 +2455,8 @@ using Request = std::variant<
     PrepareSessionRequest, EmbedDocumentsRequest, PluginScanRequest, PluginLoadRequest,
     PluginUnloadRequest, PluginTrustListRequest, PluginTrustAddRequest, PluginTrustRemoveRequest,
     CancelRequest, CatRequest, ListSessionsRequest, UseSessionRequest, AddPathSelectorRequest,
-    RemovePathSelectorRequest, ListTreeDiffRequest, FileHistoryRequest, PruneRequest>;
+    RemovePathSelectorRequest, ListTreeDiffRequest, FileHistoryRequest, PruneRequest,
+    ListCollectionsRequest, ListSnapshotsRequest, RestoreCollectionRequest, RestoreSnapshotRequest>;
 
 // ============================================================================
 // Response Types
@@ -4486,6 +4674,255 @@ struct PruneResponse {
     }
 };
 
+// Collection and snapshot responses
+struct ListCollectionsResponse {
+    std::vector<std::string> collections;
+    uint64_t totalCount{0};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << collections << totalCount;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<ListCollectionsResponse> deserialize(Deserializer& deser) {
+        ListCollectionsResponse res;
+
+        if (auto r = deser.readStringVector(); r)
+            res.collections = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.template read<uint64_t>(); r)
+            res.totalCount = r.value();
+        else
+            return r.error();
+
+        return res;
+    }
+};
+
+struct SnapshotInfo {
+    std::string id;
+    std::string label;
+    std::string createdAt;
+    uint64_t documentCount{0};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << id << label << createdAt << documentCount;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<SnapshotInfo> deserialize(Deserializer& deser) {
+        SnapshotInfo info;
+
+        if (auto r = deser.readString(); r)
+            info.id = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            info.label = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            info.createdAt = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.template read<uint64_t>(); r)
+            info.documentCount = r.value();
+        else
+            return r.error();
+
+        return info;
+    }
+};
+
+struct ListSnapshotsResponse {
+    std::vector<SnapshotInfo> snapshots;
+    uint64_t totalCount{0};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << static_cast<uint32_t>(snapshots.size());
+        for (const auto& snap : snapshots) {
+            snap.serialize(ser);
+        }
+        ser << totalCount;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<ListSnapshotsResponse> deserialize(Deserializer& deser) {
+        ListSnapshotsResponse res;
+
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            res.snapshots.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto snap = SnapshotInfo::deserialize(deser);
+                if (!snap)
+                    return snap.error();
+                res.snapshots.push_back(std::move(snap.value()));
+            }
+        } else
+            return cnt.error();
+
+        if (auto r = deser.template read<uint64_t>(); r)
+            res.totalCount = r.value();
+        else
+            return r.error();
+
+        return res;
+    }
+};
+
+struct RestoredFile {
+    std::string path;
+    std::string hash;
+    uint64_t size{0};
+    bool skipped{false};
+    std::string skipReason;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << path << hash << size << skipped << skipReason;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<RestoredFile> deserialize(Deserializer& deser) {
+        RestoredFile file;
+
+        if (auto r = deser.readString(); r)
+            file.path = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            file.hash = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.template read<uint64_t>(); r)
+            file.size = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.readBool(); r)
+            file.skipped = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            file.skipReason = std::move(r.value());
+        else
+            return r.error();
+
+        return file;
+    }
+};
+
+struct RestoreCollectionResponse {
+    uint64_t filesRestored{0};
+    std::vector<RestoredFile> files;
+    bool dryRun{false};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << filesRestored;
+        ser << static_cast<uint32_t>(files.size());
+        for (const auto& file : files) {
+            file.serialize(ser);
+        }
+        ser << dryRun;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<RestoreCollectionResponse> deserialize(Deserializer& deser) {
+        RestoreCollectionResponse res;
+
+        if (auto r = deser.template read<uint64_t>(); r)
+            res.filesRestored = r.value();
+        else
+            return r.error();
+
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            res.files.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto file = RestoredFile::deserialize(deser);
+                if (!file)
+                    return file.error();
+                res.files.push_back(std::move(file.value()));
+            }
+        } else
+            return cnt.error();
+
+        if (auto r = deser.readBool(); r)
+            res.dryRun = r.value();
+        else
+            return r.error();
+
+        return res;
+    }
+};
+
+struct RestoreSnapshotResponse {
+    uint64_t filesRestored{0};
+    std::vector<RestoredFile> files;
+    bool dryRun{false};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << filesRestored;
+        ser << static_cast<uint32_t>(files.size());
+        for (const auto& file : files) {
+            file.serialize(ser);
+        }
+        ser << dryRun;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<RestoreSnapshotResponse> deserialize(Deserializer& deser) {
+        RestoreSnapshotResponse res;
+
+        if (auto r = deser.template read<uint64_t>(); r)
+            res.filesRestored = r.value();
+        else
+            return r.error();
+
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            res.files.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto file = RestoredFile::deserialize(deser);
+                if (!file)
+                    return file.error();
+                res.files.push_back(std::move(file.value()));
+            }
+        } else
+            return cnt.error();
+
+        if (auto r = deser.readBool(); r)
+            res.dryRun = r.value();
+        else
+            return r.error();
+
+        return res;
+    }
+};
+
 // Plugin responses
 struct PluginRecord {
     std::string name;
@@ -5038,6 +5475,8 @@ using Response =
                  DownloadResponse, DeleteResponse, PrepareSessionResponse, EmbedDocumentsResponse,
                  PluginScanResponse, PluginLoadResponse, PluginTrustListResponse, CatResponse,
                  ListSessionsResponse, ListTreeDiffResponse, FileHistoryResponse, PruneResponse,
+                 ListCollectionsResponse, ListSnapshotsResponse, RestoreCollectionResponse,
+                 RestoreSnapshotResponse,
                  // Streaming events (progress/heartbeats)
                  EmbeddingEvent, ModelLoadEvent>;
 
@@ -5109,6 +5548,18 @@ enum class MessageType : uint8_t {
     FileHistoryRequest = 31,
     // Prune request (PBI-062)
     PruneRequest = 32,
+    // Collection and snapshot requests (PBI-066)
+    ListCollectionsRequest = 33,
+    ListSnapshotsRequest = 34,
+    RestoreCollectionRequest = 35,
+    RestoreSnapshotRequest = 36,
+    // Plugin requests
+    PluginScanRequest = 37,
+    PluginLoadRequest = 38,
+    PluginUnloadRequest = 39,
+    PluginTrustListRequest = 40,
+    PluginTrustAddRequest = 41,
+    PluginTrustRemoveRequest = 42,
 
     // Responses
     SearchResponse = 128,
@@ -5140,6 +5591,15 @@ enum class MessageType : uint8_t {
     FileHistoryResponse = 155,
     // Prune response (PBI-062)
     PruneResponse = 156,
+    // Collection and snapshot responses (PBI-066)
+    ListCollectionsResponse = 157,
+    ListSnapshotsResponse = 158,
+    RestoreCollectionResponse = 159,
+    RestoreSnapshotResponse = 160,
+    // Plugin responses
+    PluginScanResponse = 161,
+    PluginLoadResponse = 162,
+    PluginTrustListResponse = 163,
     // Events
     EmbeddingEvent = 149,
     ModelLoadEvent = 150,

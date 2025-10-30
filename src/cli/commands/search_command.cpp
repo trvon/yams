@@ -32,14 +32,11 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <yams/daemon/client/global_io_context.h>
 // Timers and coroutine executor helpers for guard race
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
 
-// Hot/Cold mode helpers (env-driven)
 #include <future>
-#include "hot_cold_utils.h"
 
 namespace yams::cli {
 
@@ -63,8 +60,6 @@ private:
     std::optional<std::string> resolvedLocalFilePath_{};
     size_t limit_ = 20;
     std::string searchType_ = "hybrid";
-    // Default list mode derived from env; currently not used directly here but kept for consistency
-    yams::cli::HotColdMode listMode_ = yams::cli::getListMode();
     bool fuzzySearch_ = false;
     float minSimilarity_ = 0.7f;
     bool pathsOnly_ = false;
@@ -105,8 +100,6 @@ private:
     // Session scoping controls
     std::optional<std::string> sessionOverride_{};
     bool noSession_{false};
-    // Force thorough, non-streaming execution (disables streaming guard)
-    bool cold_{false};
 
     // Grouping of multiple versions per path (UI-only feature)
     bool groupVersions_{true};           // default: enabled
@@ -384,9 +377,6 @@ public:
         cmd->add_option("--hash", hashQuery_,
                         "Search by file hash (full or partial, minimum 8 characters)");
 
-        // Execution mode
-        cmd->add_flag("--cold", cold_, "Force thorough (non-streaming) execution");
-
         // Tag filtering options
         cmd->add_option("--tags", filterTags_,
                         "Filter results by tags (comma-separated, e.g., work,important)");
@@ -424,10 +414,6 @@ public:
             // Capture extras for folding into the query string
             this->extraArgs_ = cmd->remaining();
             cli_->setPendingCommand(this);
-            if (cold_) {
-                // When --cold is provided, prefer non-streaming thorough execution
-                enableStreaming_ = false;
-            }
             // Apply local inversion flags captured above
             // Note: CLI11 stores flag states; re-fetch via app to avoid capture issues
             // but here we use simple locals and rely on evaluation order pre-callback.
@@ -652,6 +638,13 @@ public:
             dreq.modifiedBefore = modifiedBefore_;
             dreq.indexedAfter = indexedAfter_;
             dreq.indexedBefore = indexedBefore_;
+
+            // Session scoping: enable hot path optimization only when session is active
+            bool hasActiveSession = !noSession_ && !includeGlobsExpanded.empty();
+            dreq.useSession = hasActiveSession;
+            if (hasActiveSession && sessionOverride_) {
+                dreq.sessionName = *sessionOverride_;
+            }
 
             auto render = [&](const yams::daemon::SearchResponse& resp) -> Result<void> {
                 // No client-side filtering needed - daemon now handles multiple path patterns
@@ -947,7 +940,7 @@ public:
                 std::promise<Result<app::services::SearchResponse>> prom;
                 auto fut = prom.get_future();
                 boost::asio::co_spawn(
-                    yams::daemon::GlobalIOContext::global_executor(),
+                    getExecutor(),
                     [&]() -> boost::asio::awaitable<void> {
                         auto r = co_await searchService->search(sreq);
                         prom.set_value(std::move(r));
@@ -1229,8 +1222,7 @@ public:
                 done.set_value(r.error());
                 co_return;
             };
-            boost::asio::co_spawn(yams::daemon::GlobalIOContext::global_executor(), work(),
-                                  boost::asio::detached);
+            boost::asio::co_spawn(getExecutor(), work(), boost::asio::detached);
             if (fut.wait_for(std::chrono::seconds(30)) != std::future_status::ready) {
                 spdlog::warn("search: daemon call timed out; falling back to local execution");
                 auto fb = fallback();
@@ -1494,7 +1486,7 @@ public:
 
             // Launch streaming
             boost::asio::co_spawn(
-                yams::daemon::GlobalIOContext::global_executor(),
+                getExecutor(),
                 [&, decided, prom, leaseHandle]() -> boost::asio::awaitable<void> {
                     auto& cliRef = **leaseHandle;
                     auto sr = co_await cliRef.streamingSearch(dreq);
@@ -1506,7 +1498,7 @@ public:
 
             // Launch delayed unary fallback (2 seconds after start)
             boost::asio::co_spawn(
-                yams::daemon::GlobalIOContext::global_executor(),
+                getExecutor(),
                 [&, decided, prom, leaseHandle]() -> boost::asio::awaitable<void> {
                     boost::asio::steady_timer t(co_await boost::asio::this_coro::executor);
                     t.expires_after(std::chrono::seconds(2));

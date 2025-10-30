@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <string>
+#include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <CLI/CLI.hpp>
 #include <yams/core/types.h>
@@ -42,6 +43,21 @@ public:
      * Asynchronous execution (optional during migration). Default bridges to execute().
      */
     virtual boost::asio::awaitable<Result<void>> executeAsync() { co_return execute(); }
+
+    /**
+     * Set the executor for async operations
+     */
+    virtual void setExecutor(boost::asio::any_io_executor executor) {
+        executor_ = std::move(executor);
+    }
+
+    /**
+     * Get the executor
+     */
+    boost::asio::any_io_executor getExecutor() const { return executor_; }
+
+protected:
+    boost::asio::any_io_executor executor_;
 };
 
 } // namespace yams::cli

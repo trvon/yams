@@ -1,8 +1,10 @@
 from conan import ConanFile
-import os
+import os  # noqa: F401
 from conan.tools.layout import basic_layout
 from conan.tools.build import check_min_cppstd
 
+
+# type: ignore[assignment,attr-defined,import-error]
 
 class YamsConan(ConanFile):
     name = "yams"
@@ -21,12 +23,12 @@ class YamsConan(ConanFile):
         "build_benchmarks": [True, False],
         "enable_pdf": [True, False],
         "enable_tui": [True, False],  # Separate TUI from CLI
-        "enable_onnx": [True, False],  # Gate ONNX Runtime and its transitive graph
-        "enable_wasmtime": [True, False],  # Gate WASM host (wasmtime-cpp integration)
-        "enable_symbol_extraction": [
-            True,
-            False,
-        ],  # Gate symbol extraction features and deps
+        "enable_onnx": [True, False],  # Gate ONNX Runtime and its
+        # transitive graph
+        "enable_wasmtime": [True, False],  # Gate WASM host
+        # (wasmtime-cpp integration)
+        "enable_symbol_extraction": [True, False],  # Gate symbol extraction
+        # features and deps
     }
     default_options = {
         "build_cli": True,
@@ -75,63 +77,62 @@ class YamsConan(ConanFile):
         self.requires("boost/1.83.0")
 
         # TUI framework dependencies
-        if self.options.enable_tui:
+        if self.options.enable_tui:  # type: ignore
             self.requires("ftxui/5.0.0")
 
-        if self.options.enable_symbol_extraction:
+        if self.options.enable_symbol_extraction:  # type: ignore
             try:
                 self.requires("tree-sitter/0.25.9")
             except Exception:
                 pass
 
-        if self.options.enable_onnx:
-            self.requires("onnxruntime/1.18.1")
-            # Ensure ONNX Runtime's TBB runtime is available when system libtbb is missing
-            # Conan package name is onetbb (oneTBB)
-            # Using 2021.12.0 as 2022.x versions are not available in ConanCenter
+        if self.options.enable_onnx:  # type: ignore
+            # Build ONNX Runtime from source to ensure clang 19 compatibility
+            self.requires("onnxruntime/1.18.1", override=True)
+            # Set compiler flags for clang 19
+            self.conf.append("tools.build:cxxflags", "-Wno-unused-but-set-variable")
+            self.conf.append("tools.build:cxxflags", "-Wno-unused-function")
+            self.conf.append("tools.build:cxxflags", "-Wno-deprecated-declarations")
+            # Ensure TBB is available
             try:
                 self.requires("onetbb/2021.12.0")
             except Exception:
                 pass
         self.requires("xz_utils/5.4.5")
-        if self.options.enable_pdf:
-            self.requires("pdfium/95.0.4629")
+        if self.options.enable_pdf:  # type: ignore
+            # Build qpdf from source with proper fPIC flags using custom recipe
+            # This ensures PIC code generation for shared library linking
+            self.requires("qpdf/11.9.0")  # Custom recipe in conan/qpdf/
             self.requires("libmediainfo/22.03")
-            # macOS builds hit a CMake policy issue when pdfium resolves openjpeg/2.5.0.
-            # Prefer openjpeg/2.5.3 on macOS only (ConanCenter provides it), while leaving
-            # Linux/Docker unpinned to avoid remote-resolution failures.
-            try:
-                if str(self.settings.os) == "Macos":
-                    self.requires("openjpeg/2.5.3", override=True)
-            except Exception:
-                pass
 
     def build_requirements(self):
         # Use requires() instead of test_requires() to ensure pkg-config files
         # are generated for Meson to find gtest/benchmark dependencies
-        if self.options.build_tests:
+        if self.options.build_tests:  # type: ignore
             self.requires("gtest/1.15.0")
-        if self.options.build_benchmarks:
+            # Add Catch2 for modern test framework migration (PBI-050)
+            self.requires("catch2/3.5.2")
+        if self.options.build_benchmarks:  # type: ignore
             self.requires("benchmark/1.8.3")
-        if self.settings.build_type == "Debug":
+        if self.settings.build_type == "Debug":  # type: ignore
             self.requires("tracy/0.12.2")
 
     def configure(self):
         # Enable FTS extensions on sqlite3 across both legacy and modern option naming.
         try:
-            if hasattr(self.options["sqlite3"], "fts5"):
+            if hasattr(self.options["sqlite3"], "fts5"):  # type: ignore
                 self.options["sqlite3"].fts5 = True
-            if hasattr(self.options["sqlite3"], "enable_fts5"):
+            if hasattr(self.options["sqlite3"], "enable_fts5"):  # type: ignore
                 self.options["sqlite3"].enable_fts5 = True
-            if hasattr(self.options["sqlite3"], "fts4"):
+            if hasattr(self.options["sqlite3"], "fts4"):  # type: ignore
                 self.options["sqlite3"].fts4 = True
-            if hasattr(self.options["sqlite3"], "enable_fts4"):
+            if hasattr(self.options["sqlite3"], "enable_fts4"):  # type: ignore
                 self.options["sqlite3"].enable_fts4 = True
-            if hasattr(self.options["sqlite3"], "fts3_parenthesis"):
+            if hasattr(self.options["sqlite3"], "fts3_parenthesis"):  # type: ignore
                 self.options["sqlite3"].fts3_parenthesis = True
-            if hasattr(self.options["sqlite3"], "enable_fts3_parenthesis"):
+            if hasattr(self.options["sqlite3"], "enable_fts3_parenthesis"):  # type: ignore
                 self.options["sqlite3"].enable_fts3_parenthesis = True
-            if hasattr(self.options["sqlite3"], "json1"):
+            if hasattr(self.options["sqlite3"], "json1"):  # type: ignore
                 self.options["sqlite3"].json1 = True
         except Exception:
             pass
@@ -142,6 +143,12 @@ class YamsConan(ConanFile):
         self.options["libarchive"].shared = False
         self.options["taglib"].shared = False
         self.options["spdlog"].header_only = False
+        # Configure custom qpdf build with fPIC
+        if self.options.enable_pdf:  # type: ignore
+            self.options["qpdf"].fPIC = True
+            self.options["qpdf"].shared = False
+            self.options["qpdf"].with_jpeg = "libjpeg"
+            self.options["qpdf"].with_ssl = "openssl"
 
     def validate(self):
         check_min_cppstd(self, "20")

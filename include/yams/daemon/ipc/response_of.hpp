@@ -103,6 +103,20 @@ template <> struct ResponseOf<PruneRequest> {
     using type = PruneResponse;
 };
 
+// Collection and snapshot operations (PBI-066)
+template <> struct ResponseOf<ListCollectionsRequest> {
+    using type = ListCollectionsResponse;
+};
+template <> struct ResponseOf<ListSnapshotsRequest> {
+    using type = ListSnapshotsResponse;
+};
+template <> struct ResponseOf<RestoreCollectionRequest> {
+    using type = RestoreCollectionResponse;
+};
+template <> struct ResponseOf<RestoreSnapshotRequest> {
+    using type = RestoreSnapshotResponse;
+};
+
 // Helper alias
 template <typename Req> using ResponseOfT = typename ResponseOf<Req>::type;
 

@@ -94,8 +94,6 @@ private:
     bool regexOnly_ = false;
     // Streaming disabled by default for agent/automation compatibility; user can opt in
     bool enableStreaming_ = false;
-    // Force thorough (unary) mode: disables streaming and the guard
-    bool cold_{false};
     size_t semanticLimit_ = 10;
     std::string filterTags_;
     bool matchAllTags_ = false;
@@ -257,8 +255,6 @@ public:
         // Streaming control (disabled by default for reliability)
         cmd->add_flag("--streaming", enableStreaming_,
                       "Enable streaming responses from daemon (off by default)");
-        // Thorough (non-streaming) mode
-        cmd->add_flag("--cold", cold_, "Force thorough (non-streaming) execution");
 
         // Session scoping controls
         cmd->add_option("--session", sessionOverride_, "Use this session for scoping");
@@ -350,9 +346,6 @@ public:
             } else {
                 sessionPatterns_.clear();
             }
-            if (cold_) {
-                enableStreaming_ = false;
-            }
 
             auto result = execute();
             if (!result) {
@@ -423,6 +416,13 @@ public:
                 dreq.matchAllTags = matchAllTags_;
                 dreq.colorMode = colorMode_;
                 dreq.maxMatches = maxCount_;
+
+                // Session scoping: enable hot path optimization only when session is active
+                bool hasActiveSession = !noSession_ && !sessionPatterns_.empty();
+                dreq.useSession = hasActiveSession;
+                if (hasActiveSession && sessionOverride_) {
+                    dreq.sessionName = *sessionOverride_;
+                }
 
                 auto render = [&](const yams::daemon::GrepResponse& resp) -> Result<void> {
                     // Informative note: reflect the normalized command actually executed

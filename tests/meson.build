@@ -11,6 +11,28 @@ if gmock_dep.found()
   gmock_link_deps += [gmock_dep]
 endif
 
+# Catch2 dependency for modern test framework (PBI-050)
+catch2_dep = dependency('catch2', required: false)
+if not catch2_dep.found()
+  catch2_dep = dependency('Catch2', required: false, method: 'pkg-config')
+endif
+if not catch2_dep.found()
+  catch2_dep = dependency('Catch2', required: false, method: 'cmake')
+endif
+
+# Catch2 with main function (provides test runner entry point)
+catch2_main_dep = dependency('catch2-with-main', required: false)
+if not catch2_main_dep.found()
+  catch2_main_dep = dependency('Catch2WithMain', required: false, method: 'pkg-config')
+endif
+if not catch2_main_dep.found()
+  catch2_main_dep = dependency('Catch2WithMain', required: false, method: 'cmake')
+endif
+if not catch2_main_dep.found()
+  # Fallback: use Catch2 and assume it includes main
+  catch2_main_dep = catch2_dep
+endif
+
 # Normalize CLI11 discovery across environments (pkg-config -> Conan/CMake)
 # (touch) reconfigure to drop/accept test file changes [2]
 fs = import('fs')
@@ -593,4 +615,292 @@ if get_option('enable-stress-tests') and all_stress.length() > 0
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
     },
     timeout: 300)
+endif
+
+# ============================================================================
+# Catch2 Test Executables (PBI-068: Separated for isolation)
+# Each test suite gets its own executable to prevent resource conflicts
+# and enable parallel execution. This resolves SIGABRT crashes from shared
+# filesystem state and temp directory conflicts.
+# ============================================================================
+
+if catch2_dep.found()
+  
+  # Daemon Test Suites (6 consolidated executables)
+  # --------------------------------------------------------------------------
+  
+  catch2_daemon_fsm_exe = executable('catch2_daemon_fsm',
+    files('unit/daemon/daemon_fsm_suite_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  
+  catch2_daemon_metrics_exe = executable('catch2_daemon_metrics',
+    files('unit/daemon/daemon_metrics_status_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  
+  catch2_daemon_components_exe = executable('catch2_daemon_components',
+    files('unit/daemon/daemon_components_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  
+  catch2_daemon_protocol_exe = executable('catch2_daemon_protocol',
+    files('unit/daemon/daemon_protocol_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  
+  catch2_daemon_background_exe = executable('catch2_daemon_background',
+    files('unit/daemon/daemon_background_processing_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  
+  # Add plugin path for plugin harness tests
+  plugin_test_cpp_args = test_cpp_noerror_args + ['-DYAMS_TESTING=1']
+  if get_option('plugin-onnx')
+    # Pass the expected plugin location to the test
+    onnx_plugin_path = join_paths(meson.project_build_root(), 'plugins', 'onnx', 'libyams_onnx_plugin.so')
+    plugin_test_cpp_args += ['-Dyams_onnx_plugin_BUILT="' + onnx_plugin_path + '"']
+  endif
+  
+  catch2_daemon_plugin_exe = executable('catch2_daemon_plugin',
+    files('unit/daemon/onnx_plugin_harness_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: plugin_test_cpp_args,
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  
+  # Metadata Test Suites (4 executables)
+  # --------------------------------------------------------------------------
+  
+  catch2_metadata_retrieval_exe = executable('catch2_metadata_retrieval',
+    files('unit/app/services/retrieval_schema_validation_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  
+  catch2_metadata_search_exe = executable('catch2_metadata_search',
+    files('unit/metadata/search_metadata_interface_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  
+  catch2_metadata_symbol_exe = executable('catch2_metadata_symbol',
+    files('unit/metadata/symbol_metadata_schema_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  
+  catch2_metadata_migration_exe = executable('catch2_metadata_migration',
+    files('unit/metadata/migration_validation_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  
+  # Core tests (minimal dependencies - no daemon)
+  core_test_deps = [
+    dependency('spdlog'),
+    dependency('yams_core'),
+  ]
+  
+  core_cpp23_features_exe = executable('core_cpp23_features',
+    files('unit/core/cpp23_features_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + core_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  
+  core_magic_numbers_exe = executable('core_magic_numbers',
+    files('unit/core/magic_numbers_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + core_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  
+  # Content tests (depends on content, extraction, detection modules)
+  content_test_deps = [
+    dependency('spdlog'),
+    dependency('yams_core'),
+    dependency('yams_content'),
+    dependency('yams_extraction'),
+    dependency('yams_detection'),
+  ]
+  
+  content_handlers_exe = executable('content_handlers',
+    files('unit/content/content_handlers_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + content_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  
+  # Chunking tests (depends on chunking module)
+  chunking_test_deps = [
+    dependency('spdlog'),
+    dependency('yams_core'),
+    dependency('yams_chunking'),
+    dependency('yams_crypto'),
+  ]
+  
+  chunking_exe = executable('chunking',
+    files('unit/chunking/chunking_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + chunking_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  
+  # Crypto tests (depends on crypto module)
+  crypto_test_deps = [
+    dependency('spdlog'),
+    dependency('yams_core'),
+    dependency('yams_crypto'),
+  ]
+  
+  crypto_exe = executable('crypto',
+    files('unit/crypto/crypto_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + crypto_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  
+  # Test Registrations
+  # --------------------------------------------------------------------------
+  
+  # Metadata tests
+  test('metadata_retrieval_schema', catch2_metadata_retrieval_exe,
+    suite: ['catch2', 'unit', 'metadata', 'retrieval'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+  
+  test('metadata_search', catch2_metadata_search_exe,
+    suite: ['catch2', 'unit', 'metadata', 'search'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+  
+  test('metadata_symbol_schema', catch2_metadata_symbol_exe,
+    suite: ['catch2', 'unit', 'metadata', 'symbol'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+  
+  test('metadata_migration_validation', catch2_metadata_migration_exe,
+    suite: ['catch2', 'unit', 'metadata', 'migration'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+  
+  # Core tests
+  test('core_cpp23_features', core_cpp23_features_exe,
+    suite: ['catch2', 'unit', 'core', 'cpp23'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+  
+  test('core_magic_numbers', core_magic_numbers_exe,
+    suite: ['catch2', 'unit', 'core', 'magic'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+  
+  # Content tests
+  test('content_handlers', content_handlers_exe,
+    suite: ['catch2', 'unit', 'content', 'handlers'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+  
+  # Chunking tests
+  test('chunking', chunking_exe,
+    suite: ['catch2', 'unit', 'chunking'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+  
+  # Crypto tests
+  test('crypto', crypto_exe,
+    suite: ['catch2', 'unit', 'crypto'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+  
+  # Daemon tests
+  test('daemon_fsm_suite', catch2_daemon_fsm_exe,
+    suite: ['catch2', 'unit', 'daemon', 'fsm'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+  
+  test('daemon_metrics_status', catch2_daemon_metrics_exe,
+    suite: ['catch2', 'unit', 'daemon', 'metrics', 'status'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+  
+  test('daemon_components', catch2_daemon_components_exe,
+    suite: ['catch2', 'unit', 'daemon', 'components'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+  
+  test('daemon_protocol', catch2_daemon_protocol_exe,
+    suite: ['catch2', 'unit', 'daemon', 'protocol'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+  
+  test('daemon_background_processing', catch2_daemon_background_exe,
+    suite: ['catch2', 'unit', 'daemon', 'background'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+  
+  test('daemon_plugin_harness', catch2_daemon_plugin_exe,
+    suite: ['catch2', 'unit', 'daemon', 'plugin'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
 endif

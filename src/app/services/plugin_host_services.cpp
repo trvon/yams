@@ -459,7 +459,10 @@ static void free_search_response(yams_search_response_t* res) {
     free(res);
 }
 
-static boost::asio::any_io_executor g_executor = yams::daemon::GlobalIOContext::global_executor();
+// Fetch executor on-demand to avoid capturing stale executor on daemon restart
+static boost::asio::any_io_executor get_plugin_executor() {
+    return yams::daemon::GlobalIOContext::global_executor();
+}
 
 static int search_service_search(void* handle, const yams_search_request_t* req,
                                  yams_search_callback_t callback, void* user_data) {
@@ -469,7 +472,7 @@ static int search_service_search(void* handle, const yams_search_request_t* req,
     auto cpp_req = to_cpp_search_request(req);
 
     boost::asio::co_spawn(
-        g_executor,
+        get_plugin_executor(),
         [service, cpp_req, callback, user_data]() -> boost::asio::awaitable<void> {
             auto cpp_result = co_await service->search(cpp_req);
             yams_search_response_t* c_res = nullptr;

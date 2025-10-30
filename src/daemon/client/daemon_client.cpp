@@ -50,28 +50,6 @@ inline std::string sanitize_for_terminal(std::string_view in) {
     return out;
 }
 
-#ifndef _WIN32
-[[maybe_unused]] bool canWriteToDirectory(const std::filesystem::path& dir) {
-    namespace fs = std::filesystem;
-    if (!fs::exists(dir))
-        return false;
-    auto testFile = dir / (".yams-test-" + std::to_string(getpid()));
-    std::ofstream test(testFile);
-    if (test.good()) {
-        test.close();
-        std::error_code ec;
-        fs::remove(testFile, ec);
-        return true;
-    }
-    return false;
-}
-
-[[maybe_unused]] std::filesystem::path getXDGRuntimeDir() {
-    const char* xdgRuntime = std::getenv("XDG_RUNTIME_DIR");
-    return xdgRuntime ? std::filesystem::path(xdgRuntime) : std::filesystem::path();
-}
-#endif
-
 } // namespace
 
 // Implementation class
@@ -96,6 +74,7 @@ public:
         transportOptions_.requestTimeout = config_.requestTimeout;
         transportOptions_.maxInflight = config_.maxInflight;
         transportOptions_.poolEnabled = !config_.singleUseConnections;
+        transportOptions_.executor = config_.executor;
         pool_ = AsioConnectionPool::get_or_create(transportOptions_);
     }
 };
@@ -103,79 +82,6 @@ public:
 // DaemonClient implementation
 DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_unique<Impl>(config)) {
     if (pImpl->config_.socketPath.empty()) {
-        // Prefer config-first resolution without depending on IPC FSM
-        // Try env -> config.toml (daemon.socket_path) -> defaults
-        namespace fs = std::filesystem;
-        [[maybe_unused]] auto resolveSocketPathConfigFirstLocal = []() -> fs::path {
-            if (const char* env = std::getenv("YAMS_DAEMON_SOCKET"); env && *env) {
-                return fs::path(env);
-            }
-            // Minimal config reader for daemon.socket_path
-            fs::path cfgPath;
-            if (const char* cfgEnv = std::getenv("YAMS_CONFIG"); cfgEnv && *cfgEnv) {
-                cfgPath = fs::path(cfgEnv);
-            } else if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
-                cfgPath = fs::path(xdg) / "yams" / "config.toml";
-            } else if (const char* home = std::getenv("HOME")) {
-                cfgPath = fs::path(home) / ".config" / "yams" / "config.toml";
-            }
-            if (!cfgPath.empty() && fs::exists(cfgPath)) {
-                try {
-                    std::ifstream f(cfgPath);
-                    std::string line;
-                    bool in_daemon = false;
-                    auto ltrim = [](std::string& s) {
-                        s.erase(s.begin(), std::find_if(s.begin(), s.end(), [](unsigned char ch) {
-                                    return !std::isspace(ch);
-                                }));
-                    };
-                    auto rtrim = [](std::string& s) {
-                        s.erase(std::find_if(s.rbegin(), s.rend(),
-                                             [](unsigned char ch) { return !std::isspace(ch); })
-                                    .base(),
-                                s.end());
-                    };
-                    while (std::getline(f, line)) {
-                        ltrim(line);
-                        rtrim(line);
-                        if (line.empty() || line[0] == '#')
-                            continue;
-                        if (line.front() == '[') {
-                            in_daemon = (line == "[daemon]" || line == "[ daemon ]");
-                            continue;
-                        }
-                        auto pos = line.find('=');
-                        if (pos == std::string::npos)
-                            continue;
-                        std::string key = line.substr(0, pos);
-                        std::string val = line.substr(pos + 1);
-                        ltrim(key);
-                        rtrim(key);
-                        ltrim(val);
-                        rtrim(val);
-                        if (val.size() >= 2 && ((val.front() == '"' && val.back() == '"') ||
-                                                (val.front() == '\'' && val.back() == '\''))) {
-                            val = val.substr(1, val.size() - 2);
-                        }
-                        if (key == "daemon.socket_path" || (in_daemon && key == "socket_path")) {
-                            if (!val.empty())
-                                return fs::path(val);
-                        }
-                    }
-                } catch (...) {
-                }
-            }
-            // Fallbacks
-            if (const char* xdgRun = std::getenv("XDG_RUNTIME_DIR")) {
-                return fs::path(xdgRun) / "yams-daemon.sock";
-            }
-            // Non-root: temp dir; root: /var/run
-            if (::geteuid() == 0) {
-                return fs::path("/var/run/yams-daemon.sock");
-            }
-            // Use a user-specific socket path by default to match the PID file behavior
-            return fs::temp_directory_path() / "yams-daemon.sock";
-        };
         pImpl->config_.socketPath = yams::daemon::ConnectionFsm::resolve_socket_path_config_first();
     }
     // Normalize dataDir for all CLI/MCP callers: env > config.toml(core.data_dir) > XDG/HOME > cwd
@@ -1706,41 +1612,28 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
         // Use execlp to search PATH (or direct path if overridden) for yams-daemon
         // Pass socket and optional config/log-level arguments
         const char* ll = std::getenv("YAMS_LOG_LEVEL");
+        // Build args vector conditionally
+        std::vector<const char*> args;
+        args.push_back(exePath.c_str());
+        args.push_back("--socket");
+        args.push_back(socketPath.c_str());
+
         bool haveCfg = !configPath.empty() && std::filesystem::exists(configPath);
-        const char* dataArg = (!dataDir.empty() ? dataDir.c_str() : nullptr);
-        if (haveCfg && ll && *ll) {
-            if (dataArg) {
-                execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), "--config",
-                       configPath.c_str(), "--log-level", ll, "--data-dir", dataArg, nullptr);
-            } else {
-                execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), "--config",
-                       configPath.c_str(), "--log-level", ll, nullptr);
-            }
-        } else if (haveCfg) {
-            if (dataArg) {
-                execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), "--config",
-                       configPath.c_str(), "--data-dir", dataArg, nullptr);
-            } else {
-                execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), "--config",
-                       configPath.c_str(), nullptr);
-            }
-        } else if (ll && *ll) {
-            if (dataArg) {
-                execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(),
-                       "--log-level", ll, "--data-dir", dataArg, nullptr);
-            } else {
-                execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(),
-                       "--log-level", ll, nullptr);
-            }
-        } else {
-            // Basic args
-            if (dataArg) {
-                execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(),
-                       "--data-dir", dataArg, nullptr);
-            } else {
-                execlp(exePath.c_str(), exePath.c_str(), "--socket", socketPath.c_str(), nullptr);
-            }
+        if (haveCfg) {
+            args.push_back("--config");
+            args.push_back(configPath.c_str());
         }
+        if (ll && *ll) {
+            args.push_back("--log-level");
+            args.push_back(ll);
+        }
+        if (!dataDir.empty()) {
+            args.push_back("--data-dir");
+            args.push_back(dataDir.c_str());
+        }
+        args.push_back(nullptr);
+
+        execvp(exePath.c_str(), const_cast<char* const*>(args.data()));
 
         // If we get here, exec failed
         spdlog::error("Failed to exec yams-daemon: {}", strerror(errno));

@@ -3,7 +3,7 @@ json_dep = dependency('nlohmann_json', required: true)
 yams_core = dependency('yams_core', required: false)
 
 yams_config = static_library('yams_config',
-  [ 'config_migration.cpp' ],
+  [ 'config_migration.cpp', 'config_helpers.cpp' ],
   include_directories: include_directories('../../include'),
   dependencies: [spdlog_dep, json_dep, yams_core],
   install: true,

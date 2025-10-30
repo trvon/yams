@@ -1,15 +1,28 @@
 #pragma once
 
 #include <atomic>
+#include <exception>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <stop_token>
+#include <string>
+#include <thread>
 #include <unordered_map>
+#include <vector>
 #include "IComponent.h"
 #include <boost/asio/any_io_executor.hpp>
+#include <boost/asio/cancellation_signal.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/strand.hpp>
+#include <boost/asio/this_coro.hpp>
 #include <boost/asio/thread_pool.hpp>
+#include <boost/asio/use_awaitable.hpp>
+#include <boost/asio/use_future.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/core/types.h>
@@ -26,12 +39,11 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningConfig.h>
 #include <yams/daemon/components/WalMetricsProvider.h>
-#include <yams/daemon/daemon.h> // For DaemonConfig
+#include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/retrieval_session.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/daemon/resource/plugin_host.h>
-
 #include <yams/extraction/content_extractor.h>
 
 // Forward declarations for services
@@ -81,9 +93,10 @@ public:
     // IComponent interface
     const char* getName() const override { return "ServiceManager"; }
     Result<void> initialize() override;
+    boost::asio::awaitable<Result<void>> initialize_async(boost::asio::any_io_executor exec);
     void shutdown() override;
 
-    // Set callback to be invoked when async initialization completes
+    // Legacy initialization callback compatibility
     void setInitCompleteCallback(InitCompleteCallback callback) {
         initCompleteCallback_ = callback;
     }
@@ -108,7 +121,7 @@ public:
     }
     std::string getEmbeddingModelName() const { return embeddingModelName_; }
     std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const { return vectorDatabase_; }
-    std::shared_ptr<WorkerPool> getWorkerPool() const { return workerPool_; }
+    std::shared_ptr<WorkerPool> getWorkerPool() const { return nullptr; }
     // Resize the worker pool to a target size; creates pool on demand.
     bool resizeWorkerPool(std::size_t target);
     PostIngestQueue* getPostIngestQueue() const { return postIngest_.get(); }
@@ -298,10 +311,6 @@ public:
     ProviderSnapshot getEmbeddingProviderFsmSnapshot() const { return embeddingFsm_.snapshot(); }
     PluginHostSnapshot getPluginHostFsmSnapshot() const { return pluginHostFsm_.snapshot(); }
 
-    // DEPRECATED: Remove these methods - replaced by SearchEngineManager delegates above
-    // std::shared_ptr<yams::search::HybridSearchEngine> getCachedSearchEngine() const;
-    // void refreshSearchEngineSnapshot();
-
     // PBI-008-11: FSM hook scaffolds for session preparation lifecycle (no-op for now)
     void onPrepareSessionRequested() {};
     void onPrepareSessionCompleted() {};
@@ -409,12 +418,33 @@ private:
     // Returns true if this call fired the callback; false if it was already invoked.
     bool invokeInitCompleteOnce(bool success, const std::string& error);
 
-    // Awaitable phase helpers (coroutine-based)
+    // Modern async initialization phases
+    boost::asio::awaitable<yams::Result<void>>
+    co_initContentStore(boost::asio::any_io_executor exec,
+                        const boost::asio::cancellation_state& token);
+
+    boost::asio::awaitable<yams::Result<void>>
+    co_initDatabase(boost::asio::any_io_executor exec,
+                    const boost::asio::cancellation_state& token);
+
+    boost::asio::awaitable<yams::Result<void>>
+    co_initSearchEngine(boost::asio::any_io_executor exec,
+                        const boost::asio::cancellation_state& token);
+
+    boost::asio::awaitable<yams::Result<void>>
+    co_initVectorSystem(boost::asio::any_io_executor exec,
+                        const boost::asio::cancellation_state& token);
+
+    boost::asio::awaitable<yams::Result<void>>
+    co_initPluginSystem(boost::asio::any_io_executor exec,
+                        const boost::asio::cancellation_state& token);
+
+    // Awaitable phase helpers for modern architecture
     boost::asio::awaitable<bool> co_openDatabase(const std::filesystem::path& dbPath,
                                                  int timeout_ms, yams::compat::stop_token token);
     boost::asio::awaitable<bool> co_migrateDatabase(int timeout_ms, yams::compat::stop_token token);
     boost::asio::awaitable<std::shared_ptr<yams::search::HybridSearchEngine>>
-    co_buildEngine(int timeout_ms, yams::compat::stop_token token,
+    co_buildEngine(int timeout_ms, const boost::asio::cancellation_state& token,
                    bool includeEmbeddingGenerator = true);
     bool detectEmbeddingPreloadFlag() const;
 
@@ -434,10 +464,16 @@ private:
     std::shared_ptr<IModelProvider> modelProvider_;
 
     // Thread pools: declared early so they destruct LAST (after threads that use them)
-    std::unique_ptr<boost::asio::thread_pool> initPool_;
-    std::unique_ptr<boost::asio::thread_pool> modelLoadPool_;
-    std::unique_ptr<boost::asio::thread_pool> pluginLoadPool_;
-    std::shared_ptr<WorkerPool> workerPool_;
+    // (reverse order), ensuring coroutines are cancelled before executor dies
+    // Deprecated legacy pools removed – now using a single io_context with strands.
+    // std::unique_ptr<boost::asio::thread_pool> initPool_; // removed
+    // std::unique_ptr<boost::asio::thread_pool> modelLoadPool_; // removed
+    // std::unique_ptr<boost::asio::thread_pool> pluginLoadPool_; // removed
+    // std::shared_ptr<WorkerPool> workerPool_; // removed
+
+    // Legacy members retained for compatibility during transition
+    std::unique_ptr<IngestService> ingestService_;
+    yams::compat::jthread initThread_; // Retained for legacy async init (will be removed later)
 
     std::shared_ptr<EntityGraphService> entityGraphService_;
 
@@ -462,12 +498,32 @@ private:
 
     bool embeddingPreloadOnStartup_{false};
 
-    std::unique_ptr<IngestService> ingestService_;
     std::shared_ptr<yams::search::HybridSearchEngine> searchEngine_;
     mutable std::shared_mutex searchEngineMutex_; // Allow concurrent reads
 
+    // Modern async architecture (Phase 0b): Single io_context + strands for deterministic lifecycle
+    // Member declaration order is CRITICAL for correct destruction
+    // 1. Cancellation signal (destructs last among these) - signals all async ops to cancel
+    boost::asio::cancellation_signal shutdownSignal_;
+
+    // 2. Execution context (destructs after cancellation) - single context for all async work
+    std::shared_ptr<boost::asio::io_context> ioContext_;
+    std::optional<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>
+        workGuard_;
+
+    // 3. Execution domains for logical separation (lightweight strands) - optional for lazy init
+    std::optional<boost::asio::strand<boost::asio::any_io_executor>> initStrand_;
+    std::optional<boost::asio::strand<boost::asio::any_io_executor>> pluginStrand_;
+    std::optional<boost::asio::strand<boost::asio::any_io_executor>> modelStrand_;
+
+    // 4. Worker threads (MUST destruct first - declared before services)
+    //    Destructors join threads, ensuring no async work during cleanup
+    std::vector<std::thread> workers_;
+
+    // Legacy callback support (for transition period)
     InitCompleteCallback initCompleteCallback_;
     std::atomic<bool> initCompleteInvoked_{false};
+
     std::filesystem::path resolvedDataDir_;
 
     std::shared_ptr<WalMetricsProvider> walMetricsProvider_;
@@ -510,11 +566,10 @@ private:
     EmbeddingProviderFsm embeddingFsm_{};
     PluginHostFsm pluginHostFsm_{};
 
-    // jthreads: declared AFTER FSMs so they destruct FIRST (requesting stop and joining)
-    // CRITICAL: Threads must destruct before FSMs because the init lambda dispatches FSM events
-    // Their destructors automatically call request_stop() and join()
-    yams::compat::jthread initThread_;      // Uses initPool_ executor - may dispatch to serviceFsm_
-    yams::compat::jthread poolReconThread_; // Uses workerPool_ executor
+    // jthreads: deprecated – replaced by std::thread workers using ioContext_
+    // They are kept for compatibility but not used in the new shutdown flow.
+    // yams::compat::jthread initThread_;      // Retained for legacy async init (will be removed
+    // later) yams::compat::jthread poolReconThread_; // Retained for legacy pool reconciliation
 
     // Phase 2.4: Extracted managers (consolidate lifecycle management)
     SearchEngineManager searchEngineManager_;

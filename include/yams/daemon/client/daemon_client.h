@@ -14,29 +14,29 @@
 #include <optional>
 #include <unordered_map>
 #include <utility>
+#include <boost/asio/any_io_executor.hpp>
 
 namespace yams::daemon {
 
 struct ClientConfig {
-    std::filesystem::path socketPath; // Empty = auto-detect based on runtime environment
-    std::filesystem::path dataDir;    // Optional: pass data dir to daemon on auto-start
+    std::filesystem::path socketPath;
+    std::filesystem::path dataDir;
     std::chrono::milliseconds connectTimeout{1000};
-    std::chrono::milliseconds headerTimeout{30000}; // 30s timeout for receiving headers
-    std::chrono::milliseconds bodyTimeout{60000};   // 60s timeout for receiving response body
+    std::chrono::milliseconds headerTimeout{30000};
+    std::chrono::milliseconds bodyTimeout{60000};
     std::chrono::milliseconds requestTimeout{5000};
     size_t maxRetries = 3;
-    std::chrono::milliseconds retryBaseDelay{75}; // exponential backoff base
+    std::chrono::milliseconds retryBaseDelay{75};
     bool autoStart = true;
     bool enableCircuitBreaker = true;
     bool enableChunkedResponses = true;
-    size_t maxChunkSize = 512 * 1024; // increased default max chunk size
-    size_t maxInflight = 128; // multiplexing: cap concurrent in-flight requests per connection
+    size_t maxChunkSize = 512 * 1024;
+    size_t maxInflight = 128;
     bool progressiveOutput = true;
-    // Use pooled, multiplexed connections by default. Set to true only for
-    // specialized scenarios (debugging, isolation) where pooling is undesirable.
     bool singleUseConnections = false;
     bool disableStreamingForLargeQueries = false;
     bool acceptCompressed = false;
+    std::optional<boost::asio::any_io_executor> executor;
 };
 
 class DaemonClient {
@@ -77,6 +77,25 @@ public:
     boost::asio::awaitable<Result<ListResponse>> list(const ListRequest& req);
     boost::asio::awaitable<Result<GrepResponse>> grep(const GrepRequest& req);
     boost::asio::awaitable<Result<FileHistoryResponse>> fileHistory(const FileHistoryRequest& req);
+
+    // Collection and snapshot operations (PBI-066)
+    boost::asio::awaitable<Result<ListCollectionsResponse>>
+    listCollections(const ListCollectionsRequest& req) {
+        return call<ListCollectionsRequest>(req);
+    }
+    boost::asio::awaitable<Result<ListSnapshotsResponse>>
+    listSnapshots(const ListSnapshotsRequest& req) {
+        return call<ListSnapshotsRequest>(req);
+    }
+    boost::asio::awaitable<Result<RestoreCollectionResponse>>
+    restoreCollection(const RestoreCollectionRequest& req) {
+        return call<RestoreCollectionRequest>(req);
+    }
+    boost::asio::awaitable<Result<RestoreSnapshotResponse>>
+    restoreSnapshot(const RestoreSnapshotRequest& req) {
+        return call<RestoreSnapshotRequest>(req);
+    }
+
     // Streaming path for AddDocument (header-first, final-only chunk)
     boost::asio::awaitable<Result<AddDocumentResponse>>
     streamingAddDocument(const AddDocumentRequest& req);
@@ -386,7 +405,10 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
             std::is_same<Req, PluginUnloadRequest>, std::is_same<Req, PluginTrustListRequest>,
             std::is_same<Req, PluginTrustAddRequest>, std::is_same<Req, PluginTrustRemoveRequest>,
             // Doctor commands
-            std::is_same<Req, PruneRequest>>,
+            std::is_same<Req, PruneRequest>,
+            // Collection and snapshot operations (PBI-066)
+            std::is_same<Req, ListCollectionsRequest>, std::is_same<Req, ListSnapshotsRequest>,
+            std::is_same<Req, RestoreCollectionRequest>, std::is_same<Req, RestoreSnapshotRequest>>,
         "Req must be a valid daemon Request alternative");
 
     // Force streaming for streaming-capable requests

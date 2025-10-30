@@ -22,6 +22,7 @@
 #include <boost/asio/detached.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
+#include <boost/asio/use_future.hpp>
 
 #include <future>
 #include <iomanip>
@@ -108,36 +109,50 @@ void MCPServer::sendResponse(const nlohmann::json& message) {
 
 // Enqueue payload and start drain coroutine if idle
 void MCPServer::enqueueOutbound(std::string payload) {
+    outboundSemaphore_->acquire();
+
     {
         std::lock_guard<std::mutex> lk(outboundMutex_);
         outboundQueue_.push_back(std::move(payload));
-        // If not currently draining, start the drain coroutine
         bool expected = false;
         if (!outboundDraining_.compare_exchange_strong(expected, true)) {
-            return; // drain already active
+            return;
         }
     }
+
+    pruneCompletedFutures();
+
     if (outboundStrand_) {
-        boost::asio::co_spawn(*outboundStrand_, outboundDrainAsync(), boost::asio::detached);
+        std::lock_guard<std::mutex> lk(backgroundFuturesMutex_);
+        backgroundFutures_.push_back(
+            boost::asio::co_spawn(*outboundStrand_, outboundDrainAsync(), boost::asio::use_future));
     } else {
-        boost::asio::co_spawn(yams::daemon::GlobalIOContext::global_executor(),
-                              outboundDrainAsync(), boost::asio::detached);
+        auto executor = executor_ ? *executor_ : yams::daemon::GlobalIOContext::global_executor();
+        std::lock_guard<std::mutex> lk(backgroundFuturesMutex_);
+        backgroundFutures_.push_back(
+            boost::asio::co_spawn(executor, outboundDrainAsync(), boost::asio::use_future));
     }
 }
 
 // Drain queue sequentially; choose best transport per message
 boost::asio::awaitable<void> MCPServer::outboundDrainAsync() {
+    struct SemaphoreGuard {
+        std::counting_semaphore<>* sem;
+        ~SemaphoreGuard() {
+            if (sem)
+                sem->release();
+        }
+    } guard{outboundSemaphore_.get()};
+
     for (;;) {
         std::string next;
         {
             std::lock_guard<std::mutex> lk(outboundMutex_);
             if (outboundQueue_.empty()) {
-                // Mark not draining, but re-check in case a producer raced us
                 outboundDraining_.store(false);
                 if (outboundQueue_.empty()) {
                     break;
                 }
-                // New item arrived after store(false); claim draining again
                 outboundDraining_.store(true);
             }
             next = std::move(outboundQueue_.front());
@@ -145,10 +160,8 @@ boost::asio::awaitable<void> MCPServer::outboundDrainAsync() {
         }
 
         if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
-            // Synchronous path; next is a serialized JSON string. Use framed string sender
             stdio->sendFramedSerialized(next);
         } else {
-            // No supported transport for raw framed write; drop with error
             spdlog::error("outboundDrainAsync: unsupported transport type for framed write; "
                           "dropping message");
         }
@@ -431,10 +444,12 @@ void StdioTransport::resetErrorCount() noexcept {
 
 // MCPServer implementation
 MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* externalShutdown,
-                     std::filesystem::path overrideSocket)
+                     std::filesystem::path overrideSocket,
+                     std::optional<boost::asio::any_io_executor> executor)
     : transport_(std::move(transport)), externalShutdown_(externalShutdown),
       eagerReadyEnabled_(false), autoReadyEnabled_(false), strictProtocol_(false),
-      limitToolResultDup_(false), daemonSocketOverride_(std::move(overrideSocket)) {
+      limitToolResultDup_(false), daemonSocketOverride_(std::move(overrideSocket)),
+      executor_(executor) {
     // Ensure logging goes to stderr to keep stdout clean for MCP framing
     if (auto existing = spdlog::get("yams-mcp")) {
         spdlog::set_default_logger(existing);
@@ -447,7 +462,8 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
         stdioTransport->setShutdownFlag(externalShutdown_);
     }
 
-    // Initialize a single multiplexed daemon client; rely on DaemonClient defaults for dataDir
+    // Initialize daemon client configuration (no pre-connection or pooling)
+    // MCP stdio uses single-use connections for maximum reliability and simplicity
     {
         yams::daemon::ClientConfig cfg;
         if (!daemonSocketOverride_.empty()) {
@@ -456,32 +472,12 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
             cfg.socketPath = yams::daemon::socket_utils::resolve_socket_path_config_first();
         }
         cfg.enableChunkedResponses = true;
-        // Connection strategy: default pooled/multiplexed; allow overrides to match CLI behavior
-        // YAMS_MCP_CONN_MODE=single|fresh (fresh => new socket each request)
-        // or YAMS_MCP_SINGLE_USE_SOCKETS=1
-        // Default to single-use to mirror CLI behavior and avoid stale/half-open sockets
-        bool single_use = true;
-        if (const char* m = std::getenv("YAMS_MCP_CONN_MODE")) {
-            std::string v(m);
-            for (auto& c : v)
-                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            if (v == "fresh" || v == "single_use") {
-                single_use = true;
-            } else if (v == "pooled" || v == "pool" || v == "reuse") {
-                single_use = false;
-            }
-        }
-        if (const char* s = std::getenv("YAMS_MCP_SINGLE_USE_SOCKETS")) {
-            if (std::string(s) == "0" || std::string(s) == "false") {
-                single_use = false;
-            } else if (std::string(s) == "1" || std::string(s) == "true") {
-                single_use = true;
-            }
-        }
-        cfg.singleUseConnections = single_use;
-        cfg.requestTimeout = std::chrono::milliseconds(10000);
+        cfg.singleUseConnections = true;
+        cfg.requestTimeout = std::chrono::milliseconds(60000);
         cfg.headerTimeout = std::chrono::milliseconds(5000);
         cfg.bodyTimeout = std::chrono::milliseconds(15000);
+        cfg.executor = executor_;
+
         if (const char* mi = std::getenv("YAMS_MCP_MAX_INFLIGHT")) {
             long v = std::strtol(mi, nullptr, 10);
             if (v > 0)
@@ -489,6 +485,7 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
         } else {
             cfg.maxInflight = 128;
         }
+
         // Align dataDir resolution with CLI helpers if provided via env
         if (const char* ds = std::getenv("YAMS_STORAGE")) {
             if (*ds)
@@ -500,14 +497,11 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
                     cfg.dataDir = dd;
             }
         }
-        cfg.autoStart = false; // MCP server should not be responsible for starting the daemon
+
+        cfg.autoStart = false; // MCP server should not start the daemon
         daemon_client_config_ = cfg;
-        if (auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg); leaseRes) {
-            daemon_client_lease_ = leaseRes.value();
-            daemon_client_ = &(**daemon_client_lease_);
-        } else {
-            spdlog::warn("Failed to acquire daemon client for MCP: {}", leaseRes.error().message);
-        }
+
+        // No pre-connection - clients created on-demand per request
     }
     // Legacy pool config removed
 
@@ -529,6 +523,9 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
     if (const char* env = std::getenv("YAMS_MCP_STRICT_PROTOCOL")) {
         strictProtocol_ = (std::string(env) == "1" || std::string(env) == "true");
     }
+    if (const char* env = std::getenv("YAMS_MCP_STRICT_LIFECYCLE")) {
+        strictLifecycle_ = (std::string(env) == "1" || std::string(env) == "true");
+    }
     if (const char* env = std::getenv("YAMS_MCP_HANDSHAKE_TRACE")) {
         handshakeTrace_ = (std::string(env) == "1" || std::string(env) == "true");
     }
@@ -546,13 +543,13 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
         limitToolResultDup_ = !(std::string(env) == "0" || std::string(env) == "false");
     }
 
-    // Initialize outbound strand for serialized writes on the global IO context
     {
-        outboundStrand_ = std::make_unique<boost::asio::strand<boost::asio::any_io_executor>>(
-            yams::daemon::GlobalIOContext::global_executor());
+        auto executor = executor_ ? *executor_ : yams::daemon::GlobalIOContext::global_executor();
+        outboundStrand_ =
+            std::make_unique<boost::asio::strand<boost::asio::any_io_executor>>(executor);
+        outboundSemaphore_ = std::make_unique<std::counting_semaphore<>>(1024);
     }
 
-    // Resolve prompts directory (file-backed templates)
     try {
         // Highest priority: explicit env override
         if (const char* env = std::getenv("YAMS_MCP_PROMPTS_DIR"); env && *env) {
@@ -640,67 +637,56 @@ Result<void> MCPServer::ensureDaemonClient() {
         }
     }
 
-    // Re-evaluate connection mode per-request to bridge CLI helpers
-    bool single_use = daemon_client_config_.singleUseConnections;
-    if (const char* m = std::getenv("YAMS_MCP_CONN_MODE")) {
-        std::string v(m);
-        for (auto& c : v)
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        single_use = (v == "fresh" || v == "single_use");
-    }
-    if (const char* s = std::getenv("YAMS_MCP_SINGLE_USE_SOCKETS")) {
-        if (std::string(s) == "1" || std::string(s) == "true")
-            single_use = true;
-    }
-    daemon_client_config_.singleUseConnections = single_use;
-
-    // For pooled connections, check if socket is stale (idle > 30s) or broken
-    if (daemon_client_ && !single_use) {
-        auto now = std::chrono::steady_clock::now();
-        auto idle_duration =
-            std::chrono::duration_cast<std::chrono::seconds>(now - last_daemon_use_).count();
-
-        // Socket staleness threshold: 30 seconds (configurable via env)
-        int stale_threshold = 30;
-        if (const char* thresh = std::getenv("YAMS_MCP_SOCKET_STALE_SECONDS")) {
-            stale_threshold = std::max(5, std::atoi(thresh));
-        }
-
-        bool is_stale = idle_duration > stale_threshold;
-        bool is_connected = daemon_client_->isConnected();
-
-        if (is_stale || !is_connected) {
-            spdlog::debug("MCP daemon socket {} (idle={}s, connected={}), refreshing",
-                          is_stale ? "stale" : "disconnected", idle_duration, is_connected);
-            daemon_client_lease_.reset();
-            daemon_client_ = nullptr;
-        } else {
-            last_daemon_use_ = now;
-            return Result<void>();
-        }
-    }
-
-    auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(daemon_client_config_);
-    if (!leaseRes) {
-        // Augment error with actionable connection details for MCP clients
-        std::string hint = "Failed to establish connection to YAMS daemon";
+    // Always create a fresh client for each request (single-use)
+    // This is the simplest, most reliable approach for MCP stdio
+    try {
+        daemon_client_unique_ = std::make_unique<yams::daemon::DaemonClient>(daemon_client_config_);
+        daemon_client_ = daemon_client_unique_.get();
+        return Result<void>();
+    } catch (const std::exception& e) {
+        std::string hint = std::string("Failed to create daemon client: ") + e.what();
         try {
-            hint += std::string(" at '") + daemon_client_config_.socketPath.string() + "'";
+            hint += std::string(" (socket: '") + daemon_client_config_.socketPath.string() + "')";
         } catch (...) {
         }
-        hint +=
-            " set YAMS_DAEMON_SOCKET to explicit path or ensure XDG_RUNTIME_DIR is set on Linux.";
-        return yams::Error{leaseRes.error().code, hint};
+        return Error{ErrorCode::NetworkError, hint};
     }
-    daemon_client_lease_ = leaseRes.value();
-    daemon_client_ = &(**daemon_client_lease_);
-    last_daemon_use_ = std::chrono::steady_clock::now();
-
-    return Result<void>();
 }
 
 MCPServer::~MCPServer() {
     stop();
+    shutdown();
+}
+
+void MCPServer::pruneCompletedFutures() {
+    std::lock_guard<std::mutex> lk(backgroundFuturesMutex_);
+    backgroundFutures_.erase(std::remove_if(backgroundFutures_.begin(), backgroundFutures_.end(),
+                                            [](std::future<void>& f) {
+                                                return f.valid() &&
+                                                       f.wait_for(std::chrono::milliseconds(0)) ==
+                                                           std::future_status::ready;
+                                            }),
+                             backgroundFutures_.end());
+}
+
+void MCPServer::shutdown(std::chrono::milliseconds timeout) {
+    std::lock_guard<std::mutex> lk(backgroundFuturesMutex_);
+
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    for (auto& fut : backgroundFutures_) {
+        if (fut.valid()) {
+            auto remaining = deadline - std::chrono::steady_clock::now();
+            if (remaining > std::chrono::milliseconds(0)) {
+                auto status =
+                    fut.wait_for(std::chrono::duration_cast<std::chrono::milliseconds>(remaining));
+                if (status != std::future_status::ready) {
+                    spdlog::warn("MCP background task did not complete within timeout");
+                }
+            }
+        }
+    }
+
+    backgroundFutures_.clear();
 }
 
 void MCPServer::start() {
@@ -802,40 +788,45 @@ void MCPServer::start() {
                     }
                     this->sendProgress("tool", 0.0, std::string("calling ") + toolName,
                                        progressToken);
-                    boost::asio::co_spawn(
-                        yams::daemon::GlobalIOContext::global_executor(),
-                        [this, toolName, toolArgs, id_copy,
-                         progressToken]() -> boost::asio::awaitable<void> {
-                            if (progressToken)
-                                MCPServer::tlsProgressToken_ = *progressToken;
-                            try {
-                                json raw = co_await this->callToolAsync(toolName, toolArgs);
-                                if (raw.is_object() && raw.contains("error")) {
-                                    json err = raw["error"];
+                    auto executor =
+                        executor_ ? *executor_ : yams::daemon::GlobalIOContext::global_executor();
+                    {
+                        std::lock_guard<std::mutex> lk(backgroundFuturesMutex_);
+                        backgroundFutures_.push_back(boost::asio::co_spawn(
+                            executor,
+                            [this, toolName, toolArgs, id_copy,
+                             progressToken]() -> boost::asio::awaitable<void> {
+                                if (progressToken)
+                                    MCPServer::tlsProgressToken_ = *progressToken;
+                                try {
+                                    json raw = co_await this->callToolAsync(toolName, toolArgs);
+                                    if (raw.is_object() && raw.contains("error")) {
+                                        json err = raw["error"];
+                                        this->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
+                                                            {"error", err},
+                                                            {"id", id_copy}});
+                                    } else {
+                                        this->sendResponse(this->createResponse(id_copy, raw));
+                                    }
+                                    this->sendProgress("tool", 100.0,
+                                                       std::string("completed ") + toolName,
+                                                       progressToken);
+                                } catch (const std::exception& e) {
+                                    json err = {{"code", -32603}, {"message", e.what()}};
                                     this->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
                                                         {"error", err},
                                                         {"id", id_copy}});
-                                } else {
-                                    this->sendResponse(this->createResponse(id_copy, raw));
+                                } catch (...) {
+                                    json err = {{"code", -32603}, {"message", "Tool call failed"}};
+                                    this->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
+                                                        {"error", err},
+                                                        {"id", id_copy}});
                                 }
-                                this->sendProgress("tool", 100.0,
-                                                   std::string("completed ") + toolName,
-                                                   progressToken);
-                            } catch (const std::exception& e) {
-                                json err = {{"code", -32603}, {"message", e.what()}};
-                                this->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
-                                                    {"error", err},
-                                                    {"id", id_copy}});
-                            } catch (...) {
-                                json err = {{"code", -32603}, {"message", "Tool call failed"}};
-                                this->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
-                                                    {"error", err},
-                                                    {"id", id_copy}});
-                            }
-                            MCPServer::tlsProgressToken_ = nullptr;
-                            co_return;
-                        },
-                        boost::asio::detached);
+                                MCPServer::tlsProgressToken_ = nullptr;
+                                co_return;
+                            },
+                            boost::asio::use_future));
+                    }
                     return;
                 }
 
@@ -944,6 +935,7 @@ MessageResult MCPServer::handleRequest(const json& request) {
             // Just acknowledge the shutdown request
             spdlog::debug("Shutdown request received, preparing for exit");
             shutdownRequested_ = true;
+            lifecycleState_.store(McpLifecycleState::ShuttingDown);
             return createResponse(id2, json::object());
         } else if (method == "exit") {
             // Per LSP spec: exit only after shutdown was requested
@@ -951,12 +943,33 @@ MessageResult MCPServer::handleRequest(const json& request) {
             if (externalShutdown_)
                 *externalShutdown_ = true;
             running_ = false;
+            lifecycleState_.store(McpLifecycleState::Disconnected);
             // Exit is a notification (no response expected)
             return Error{ErrorCode::Success, "notification"};
         } else if (method == "tools/list") {
+            if (strictLifecycle_ && !initializedNotificationSeen_.load()) {
+                spdlog::warn("MCP: tools/list before initialized notification (strict mode)");
+                return json{
+                    {"jsonrpc", "2.0"},
+                    {"id", id},
+                    {"error",
+                     {{"code", -32002},
+                      {"message", "Server not ready. Send notifications/initialized first."},
+                      {"data", {{"phase", "awaiting_initialized"}}}}}};
+            }
             recordEarlyFeatureUse();
             return createResponse(id2, listTools());
         } else if (method == "tools/call") {
+            if (strictLifecycle_ && !initializedNotificationSeen_.load()) {
+                spdlog::warn("MCP: tools/call before initialized notification (strict mode)");
+                return json{
+                    {"jsonrpc", "2.0"},
+                    {"id", id},
+                    {"error",
+                     {{"code", -32002},
+                      {"message", "Server not ready. Send notifications/initialized first."},
+                      {"data", {{"phase", "awaiting_initialized"}}}}}};
+            }
             recordEarlyFeatureUse();
             const auto toolName = params.value("name", "");
             const auto toolArgs = params.value("arguments", json::object());
@@ -973,13 +986,53 @@ MessageResult MCPServer::handleRequest(const json& request) {
             sendProgress("tool", 100.0, std::string("completed ") + toolName);
             return createResponse(id, raw);
         } else if (method == "resources/list") {
+            if (strictLifecycle_ && !initializedNotificationSeen_.load()) {
+                spdlog::warn("MCP: resources/list before initialized notification (strict mode)");
+                return json{
+                    {"jsonrpc", "2.0"},
+                    {"id", id},
+                    {"error",
+                     {{"code", -32002},
+                      {"message", "Server not ready. Send notifications/initialized first."},
+                      {"data", {{"phase", "awaiting_initialized"}}}}}};
+            }
             return createResponse(id, listResources());
         } else if (method == "resources/read") {
+            if (strictLifecycle_ && !initializedNotificationSeen_.load()) {
+                spdlog::warn("MCP: resources/read before initialized notification (strict mode)");
+                return json{
+                    {"jsonrpc", "2.0"},
+                    {"id", id},
+                    {"error",
+                     {{"code", -32002},
+                      {"message", "Server not ready. Send notifications/initialized first."},
+                      {"data", {{"phase", "awaiting_initialized"}}}}}};
+            }
             std::string uri = params.value("uri", "");
             return createResponse(id, readResource(uri));
         } else if (method == "prompts/list") {
+            if (strictLifecycle_ && !initializedNotificationSeen_.load()) {
+                spdlog::warn("MCP: prompts/list before initialized notification (strict mode)");
+                return json{
+                    {"jsonrpc", "2.0"},
+                    {"id", id},
+                    {"error",
+                     {{"code", -32002},
+                      {"message", "Server not ready. Send notifications/initialized first."},
+                      {"data", {{"phase", "awaiting_initialized"}}}}}};
+            }
             return createResponse(id, listPrompts());
         } else if (method == "prompts/get") {
+            if (strictLifecycle_ && !initializedNotificationSeen_.load()) {
+                spdlog::warn("MCP: prompts/get before initialized notification (strict mode)");
+                return json{
+                    {"jsonrpc", "2.0"},
+                    {"id", id},
+                    {"error",
+                     {{"code", -32002},
+                      {"message", "Server not ready. Send notifications/initialized first."},
+                      {"data", {{"phase", "awaiting_initialized"}}}}}};
+            }
             std::string name = params.value("name", "");
             json args = params.value("arguments", json::object());
 
@@ -1212,12 +1265,13 @@ json MCPServer::initialize(const json& params) {
     // Supported protocol versions (latest first)
     // MCP spec versions: https://spec.modelcontextprotocol.io/specification/2024-11-05/
     static const std::vector<std::string> kSupported = {
+        "2025-06-18", // June 2025 update - elicitation, structured output, OAuth
         "2025-03-26", // March 2025 update
         "2025-01-15", // January 2025 update
         "2024-12-05", // December 2024 update
         "2024-11-05"  // Original MCP spec
     };
-    const std::string latest = "2025-03-26"; // Align with latest published MCP stdio spec
+    const std::string latest = "2025-06-18"; // Latest published MCP spec
 
     // Extract requested version (optional)
     std::string requested = latest;
@@ -1261,6 +1315,10 @@ json MCPServer::initialize(const json& params) {
     spdlog::debug("  - protocolVersion: {}", negotiated);
     spdlog::debug("  - serverInfo.name: {}", serverInfo_.name);
     spdlog::debug("  - serverInfo.version: {}", serverInfo_.version);
+
+    // Update lifecycle state
+    lifecycleState_.store(McpLifecycleState::Initialized);
+
     return result;
 }
 
@@ -2133,23 +2191,26 @@ json MCPServer::callTool(const std::string& name, const json& arguments) {
         return {{"error", {{"code", -32603}, {"message", "Tool registry not initialized"}}}};
     }
 
-    auto& ioc = yams::daemon::GlobalIOContext::instance().get_io_context();
+    auto executor = executor_ ? *executor_ : yams::daemon::GlobalIOContext::global_executor();
     auto task = toolRegistry_->callTool(name, arguments);
     auto promise = std::make_shared<std::promise<json>>();
     auto future = promise->get_future();
 
-    boost::asio::co_spawn(
-        ioc,
-        [task = std::move(task), promise]() mutable -> boost::asio::awaitable<void> {
-            try {
-                auto result = co_await std::move(task);
-                promise->set_value(result);
-            } catch (...) {
-                promise->set_exception(std::current_exception());
-            }
-            co_return;
-        },
-        boost::asio::detached);
+    {
+        std::lock_guard<std::mutex> lk(backgroundFuturesMutex_);
+        backgroundFutures_.push_back(boost::asio::co_spawn(
+            executor,
+            [task = std::move(task), promise]() mutable -> boost::asio::awaitable<void> {
+                try {
+                    auto result = co_await std::move(task);
+                    promise->set_value(result);
+                } catch (...) {
+                    promise->set_exception(std::current_exception());
+                }
+                co_return;
+            },
+            boost::asio::use_future));
+    }
 
     try {
         json result = future.get();
@@ -2354,15 +2415,18 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         }
         std::promise<Result<yams::daemon::SearchResponse>> prom;
         auto fut = prom.get_future();
-        auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
-        boost::asio::co_spawn(
-            io,
-            [&, pr = std::move(prom)]() mutable -> boost::asio::awaitable<void> {
-                auto sr = co_await daemon_client_->search(dreq);
-                pr.set_value(std::move(sr));
-                co_return;
-            },
-            boost::asio::detached);
+        auto executor = executor_ ? *executor_ : yams::daemon::GlobalIOContext::global_executor();
+        {
+            std::lock_guard<std::mutex> lk(backgroundFuturesMutex_);
+            backgroundFutures_.push_back(boost::asio::co_spawn(
+                executor,
+                [&, pr = std::move(prom)]() mutable -> boost::asio::awaitable<void> {
+                    auto sr = co_await daemon_client_->search(dreq);
+                    pr.set_value(std::move(sr));
+                    co_return;
+                },
+                boost::asio::use_future));
+        }
         if (fut.wait_for(std::chrono::milliseconds(wait_ms)) == std::future_status::ready) {
             res = fut.get();
         } else {
@@ -5153,171 +5217,46 @@ yams::mcp::MCPServer::handleCatDocument(const yams::mcp::MCPCatDocumentRequest& 
 boost::asio::awaitable<yams::Result<yams::mcp::MCPRestoreCollectionResponse>>
 yams::mcp::MCPServer::handleRestoreCollection(const yams::mcp::MCPRestoreCollectionRequest& req) {
     try {
-        if (!metadataRepo_) {
-            co_return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
-        }
-
-        if (!store_) {
-            co_return Error{ErrorCode::NotInitialized, "Content store not initialized"};
+        if (!daemon_client_) {
+            co_return Error{ErrorCode::NotInitialized, "Daemon client not initialized"};
         }
 
         if (req.collection.empty()) {
             co_return Error{ErrorCode::InvalidArgument, "Collection name is required"};
         }
 
-        spdlog::debug("MCP handleRestoreCollection: restoring collection '{}'", req.collection);
+        spdlog::debug("MCP handleRestoreCollection: restoring collection '{}' via daemon",
+                      req.collection);
 
-        // Get documents from collection
-        auto docsResult = metadataRepo_->findDocumentsByCollection(req.collection);
-        if (!docsResult) {
-            co_return Error{ErrorCode::InternalError,
-                            "Failed to find collection documents: " + docsResult.error().message};
-        }
+        daemon::RestoreCollectionRequest daemonReq;
+        daemonReq.collection = req.collection;
+        daemonReq.outputDirectory = req.outputDirectory;
+        daemonReq.layoutTemplate = req.layoutTemplate;
+        daemonReq.includePatterns = req.includePatterns;
+        daemonReq.excludePatterns = req.excludePatterns;
+        daemonReq.overwrite = req.overwrite;
+        daemonReq.createDirs = req.createDirs;
+        daemonReq.dryRun = req.dryRun;
 
-        const auto& documents = docsResult.value();
-        if (documents.empty()) {
-            MCPRestoreCollectionResponse response;
-            response.filesRestored = 0;
-            response.dryRun = req.dryRun;
-            spdlog::info("MCP handleRestoreCollection: no documents found in collection '{}'",
-                         req.collection);
-            co_return response;
+        auto daemonResp = co_await daemon_client_->restoreCollection(daemonReq);
+
+        if (!daemonResp) {
+            co_return Error{daemonResp.error().code,
+                            "Failed to restore collection: " + daemonResp.error().message};
         }
 
         MCPRestoreCollectionResponse response;
-        response.dryRun = req.dryRun;
+        response.filesRestored = daemonResp.value().filesRestored;
+        response.dryRun = daemonResp.value().dryRun;
 
-        // Create output directory if needed
-        std::filesystem::path outputDir(req.outputDirectory);
-        if (!req.dryRun && req.createDirs) {
-            std::error_code ec;
-            std::filesystem::create_directories(outputDir, ec);
-            if (ec) {
-                co_return Error{ErrorCode::IOError,
-                                "Failed to create output directory: " + ec.message()};
+        for (const auto& file : daemonResp.value().files) {
+            if (!file.skipped) {
+                response.restoredPaths.push_back(file.path);
             }
         }
 
-        // Process each document
-        for (const auto& doc : documents) {
-            // Apply include/exclude filters
-            bool shouldInclude = true;
-
-            // Check include patterns
-            if (!req.includePatterns.empty()) {
-                shouldInclude = false;
-                for (const auto& pattern : req.includePatterns) {
-                    // Simple wildcard matching (convert * to .*)
-                    std::string regexPattern = pattern;
-                    size_t pos = 0;
-                    while ((pos = regexPattern.find("*", pos)) != std::string::npos) {
-                        regexPattern.replace(pos, 1, ".*");
-                        pos += 2;
-                    }
-
-                    std::regex rx(regexPattern);
-                    if (std::regex_match(doc.fileName, rx)) {
-                        shouldInclude = true;
-                        break;
-                    }
-                }
-            }
-
-            // Check exclude patterns
-            if (shouldInclude && !req.excludePatterns.empty()) {
-                for (const auto& pattern : req.excludePatterns) {
-                    std::string regexPattern = pattern;
-                    size_t pos = 0;
-                    while ((pos = regexPattern.find("*", pos)) != std::string::npos) {
-                        regexPattern.replace(pos, 1, ".*");
-                        pos += 2;
-                    }
-
-                    std::regex rx(regexPattern);
-                    if (std::regex_match(doc.fileName, rx)) {
-                        shouldInclude = false;
-                        break;
-                    }
-                }
-            }
-
-            if (!shouldInclude) {
-                continue;
-            }
-
-            // Expand layout template
-            std::string outputPath = req.layoutTemplate;
-
-            // Replace {path} with original file path
-            size_t pos = outputPath.find("{path}");
-            if (pos != std::string::npos) {
-                outputPath.replace(pos, 6, doc.filePath);
-            }
-
-            // Replace {name} with file name
-            pos = outputPath.find("{name}");
-            if (pos != std::string::npos) {
-                outputPath.replace(pos, 6, doc.fileName);
-            }
-
-            // Replace {hash} with content hash
-            pos = outputPath.find("{hash}");
-            if (pos != std::string::npos) {
-                outputPath.replace(pos, 6, doc.sha256Hash);
-            }
-
-            // Replace {collection} with collection name
-            pos = outputPath.find("{collection}");
-            if (pos != std::string::npos) {
-                outputPath.replace(pos, 12, req.collection);
-            }
-
-            std::filesystem::path fullOutputPath = outputDir / outputPath;
-
-            // Check if file exists and handle overwrite
-            if (!req.dryRun && !req.overwrite && std::filesystem::exists(fullOutputPath)) {
-                spdlog::debug("MCP handleRestoreCollection: skipping existing file '{}'",
-                              fullOutputPath.string());
-                continue;
-            }
-
-            if (req.dryRun) {
-                response.restoredPaths.push_back(fullOutputPath.string());
-                response.filesRestored++;
-                spdlog::info("MCP handleRestoreCollection: [DRY-RUN] would restore '{}' to '{}'",
-                             doc.fileName, fullOutputPath.string());
-            } else {
-                // Retrieve content
-                auto contentResult = store_->retrieveBytes(doc.sha256Hash);
-                if (!contentResult) {
-                    continue;
-                }
-
-                // Create parent directories
-                std::error_code ec;
-                std::filesystem::create_directories(fullOutputPath.parent_path(), ec);
-                if (ec) {
-                    continue;
-                }
-
-                // Write file
-                std::ofstream outFile(fullOutputPath, std::ios::binary);
-                if (!outFile) {
-                    spdlog::error("MCP handleRestoreCollection: failed to open output file '{}'",
-                                  fullOutputPath.string());
-                    continue;
-                }
-
-                const auto& data = contentResult.value();
-                outFile.write(reinterpret_cast<const char*>(data.data()), data.size());
-                outFile.close();
-
-                response.restoredPaths.push_back(fullOutputPath.string());
-                response.filesRestored++;
-                spdlog::info("MCP handleRestoreCollection: restored '{}' to '{}'", doc.fileName,
-                             fullOutputPath.string());
-            }
-        }
+        spdlog::info("MCP handleRestoreCollection: restored {} files (dry_run={})",
+                     response.filesRestored, response.dryRun);
 
         co_return response;
     } catch (const std::exception& e) {
@@ -5329,20 +5268,106 @@ yams::mcp::MCPServer::handleRestoreCollection(const yams::mcp::MCPRestoreCollect
 
 boost::asio::awaitable<yams::Result<yams::mcp::MCPRestoreSnapshotResponse>>
 yams::mcp::MCPServer::handleRestoreSnapshot(const yams::mcp::MCPRestoreSnapshotRequest& req) {
-    co_return Error{ErrorCode::NotImplemented, "Restore snapshot not yet implemented"};
+    try {
+        if (!daemon_client_) {
+            co_return Error{ErrorCode::NotInitialized, "Daemon client not initialized"};
+        }
+
+        if (req.snapshotId.empty()) {
+            co_return Error{ErrorCode::InvalidArgument, "Snapshot ID is required"};
+        }
+
+        spdlog::debug("MCP handleRestoreSnapshot: restoring snapshot '{}' via daemon",
+                      req.snapshotId);
+
+        daemon::RestoreSnapshotRequest daemonReq;
+        daemonReq.snapshotId = req.snapshotId;
+        daemonReq.outputDirectory = req.outputDirectory;
+        daemonReq.layoutTemplate = req.layoutTemplate;
+        daemonReq.includePatterns = req.includePatterns;
+        daemonReq.excludePatterns = req.excludePatterns;
+        daemonReq.overwrite = req.overwrite;
+        daemonReq.createDirs = req.createDirs;
+        daemonReq.dryRun = req.dryRun;
+
+        auto daemonResp = co_await daemon_client_->restoreSnapshot(daemonReq);
+
+        if (!daemonResp) {
+            co_return Error{daemonResp.error().code,
+                            "Failed to restore snapshot: " + daemonResp.error().message};
+        }
+
+        MCPRestoreSnapshotResponse response;
+        response.filesRestored = daemonResp.value().filesRestored;
+        response.dryRun = daemonResp.value().dryRun;
+
+        for (const auto& file : daemonResp.value().files) {
+            if (!file.skipped) {
+                response.restoredPaths.push_back(file.path);
+            }
+        }
+
+        spdlog::info("MCP handleRestoreSnapshot: restored {} files (dry_run={})",
+                     response.filesRestored, response.dryRun);
+
+        co_return response;
+    } catch (const std::exception& e) {
+        spdlog::error("MCP handleRestoreSnapshot exception: {}", e.what());
+        co_return Error{ErrorCode::InternalError,
+                        std::string("Restore snapshot failed: ") + e.what()};
+    }
 }
 
 boost::asio::awaitable<Result<MCPListCollectionsResponse>>
-MCPServer::handleListCollections(const MCPListCollectionsRequest& req) {
+MCPServer::handleListCollections([[maybe_unused]] const MCPListCollectionsRequest& req) {
+    if (!daemon_client_) {
+        co_return Error{ErrorCode::NotInitialized, "Daemon client not initialized"};
+    }
+
+    daemon::ListCollectionsRequest daemonReq;
+    auto daemonResp = co_await daemon_client_->listCollections(daemonReq);
+
+    if (!daemonResp) {
+        co_return Error{daemonResp.error().code,
+                        "Failed to list collections: " + daemonResp.error().message};
+    }
+
     MCPListCollectionsResponse response;
-    // TODO: Implement collection listing
+    response.collections = daemonResp.value().collections;
+
     co_return response;
 }
 
 boost::asio::awaitable<Result<MCPListSnapshotsResponse>>
-MCPServer::handleListSnapshots(const MCPListSnapshotsRequest& req) {
+MCPServer::handleListSnapshots([[maybe_unused]] const MCPListSnapshotsRequest& req) {
+    if (!daemon_client_) {
+        co_return Error{ErrorCode::NotInitialized, "Daemon client not initialized"};
+    }
+
+    daemon::ListSnapshotsRequest daemonReq;
+    auto daemonResp = co_await daemon_client_->listSnapshots(daemonReq);
+
+    if (!daemonResp) {
+        co_return Error{daemonResp.error().code,
+                        "Failed to list snapshots: " + daemonResp.error().message};
+    }
+
     MCPListSnapshotsResponse response;
-    // TODO: Implement snapshot listing
+    for (const auto& snap : daemonResp.value().snapshots) {
+        json snapJson;
+        snapJson["id"] = snap.id;
+        if (!snap.label.empty()) {
+            snapJson["label"] = snap.label;
+        }
+        if (!snap.createdAt.empty()) {
+            snapJson["createdAt"] = snap.createdAt;
+        }
+        if (snap.documentCount > 0) {
+            snapJson["documentCount"] = snap.documentCount;
+        }
+        response.snapshots.push_back(std::move(snapJson));
+    }
+
     co_return response;
 }
 
@@ -5420,6 +5445,7 @@ void MCPServer::markClientInitialized() {
     spdlog::info("MCP marking client as initialized");
     initializedNotificationSeen_.store(true);
     initialized_.store(true);
+    lifecycleState_.store(McpLifecycleState::Ready);
 }
 
 void MCPServer::handleExitRequest() {

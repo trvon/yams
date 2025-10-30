@@ -126,6 +126,8 @@ Result<yams::daemon::GrepResponse> RetrievalService::grep(const GrepOptions& req
     req.beforeContext = req_opts.beforeContext;
     req.afterContext = req_opts.afterContext;
     req.showDiff = req_opts.showDiff;
+    req.useSession = req_opts.useSession;
+    req.sessionName = req_opts.sessionName;
 
     yams::daemon::DaemonClient client(makeClientConfig(opts));
     std::promise<Result<yams::daemon::GrepResponse>> p;
@@ -671,9 +673,9 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
         auto f = p.get_future();
         boost::asio::co_spawn(
             yams::daemon::GlobalIOContext::global_executor(),
-            [&client, sreq, pr = std::move(p)]() mutable -> boost::asio::awaitable<void> {
+            [&client, sreq, p = std::move(p)]() mutable -> boost::asio::awaitable<void> {
                 auto r = co_await client.streamingSearch(sreq);
-                pr.set_value(std::move(r));
+                p.set_value(std::move(r));
                 co_return;
             },
             boost::asio::detached);
@@ -718,9 +720,9 @@ bool RetrievalService::isFTS5Ready(const RetrievalOptions& opts) const {
         auto f = p.get_future();
         boost::asio::co_spawn(
             yams::daemon::GlobalIOContext::global_executor(),
-            [&client, pr = std::move(p)]() mutable -> boost::asio::awaitable<void> {
+            [&client, p = std::move(p)]() mutable -> boost::asio::awaitable<void> {
                 auto r = co_await client.status();
-                pr.set_value(std::move(r));
+                p.set_value(std::move(r));
                 co_return;
             },
             boost::asio::detached);

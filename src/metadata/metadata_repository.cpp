@@ -3819,9 +3819,9 @@ Result<void> MetadataRepository::buildFuzzyIndex() {
                     -- Prioritize documents with rich metadata
                     COALESCE((SELECT COUNT(*) FROM metadata m WHERE m.document_id = d.id AND m.key = 'tag'), 0) as tag_count,
                     -- Prioritize documents in knowledge graph (have symbols/entities)
-                    COALESCE((SELECT COUNT(DISTINCT kde.entity_id) 
+                    COALESCE((SELECT COUNT(DISTINCT kde.id) 
                               FROM kg_doc_entities kde 
-                              WHERE kde.document_hash = d.sha256_hash), 0) as entity_count,
+                              WHERE kde.document_id = d.id), 0) as entity_count,
                     -- Recency score
                     CASE 
                         WHEN d.indexed_time > datetime('now', '-7 days') THEN 4

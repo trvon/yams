@@ -637,11 +637,79 @@ message PruneResponse {
   uint64 files_deleted = 1;
   uint64 files_failed = 2;
   uint64 total_bytes_freed = 3;
-  map<string, uint64> category_counts = 4;  // Category name -> file count
-  map<string, uint64> category_sizes = 5;   // Category name -> total bytes
-  repeated string deleted_paths = 6;        // Paths that were deleted (if verbose)
-  repeated string failed_paths = 7;         // Paths that failed to delete
+  map<string, uint64> category_counts = 4;
+  map<string, uint64> category_sizes = 5;
+  repeated string deleted_paths = 6;
+  repeated string failed_paths = 7;
   string error_message = 8;
+}
+
+// Collection and snapshot operations
+message ListCollectionsRequest {
+  // No parameters needed - returns all collections
+}
+
+message ListCollectionsResponse {
+  repeated string collections = 1;
+  uint64 total_count = 2;
+}
+
+message ListSnapshotsRequest {
+  // No parameters
+}
+
+message SnapshotInfo {
+  string id = 1;
+  string label = 2;
+  string created_at = 3;
+  uint64 document_count = 4;
+}
+
+message ListSnapshotsResponse {
+  repeated SnapshotInfo snapshots = 1;
+  uint64 total_count = 2;
+}
+
+message RestoreCollectionRequest {
+  string collection = 1;
+  string output_directory = 2;
+  string layout_template = 3;
+  repeated string include_patterns = 4;
+  repeated string exclude_patterns = 5;
+  bool overwrite = 6;
+  bool create_dirs = 7;
+  bool dry_run = 8;
+}
+
+message RestoredFile {
+  string path = 1;
+  string hash = 2;
+  uint64 size = 3;
+  bool skipped = 4;
+  string skip_reason = 5;
+}
+
+message RestoreCollectionResponse {
+  uint64 files_restored = 1;
+  repeated RestoredFile files = 2;
+  bool dry_run = 3;
+}
+
+message RestoreSnapshotRequest {
+  string snapshot_id = 1;
+  string output_directory = 2;
+  string layout_template = 3;
+  repeated string include_patterns = 4;
+  repeated string exclude_patterns = 5;
+  bool overwrite = 6;
+  bool create_dirs = 7;
+  bool dry_run = 8;
+}
+
+message RestoreSnapshotResponse {
+  uint64 files_restored = 1;
+  repeated RestoredFile files = 2;
+  bool dry_run = 3;
 }
 
 // ENVELOPE
@@ -694,6 +762,11 @@ message Envelope {
     FileHistoryRequest file_history_request = 46;
     // Prune request
     PruneRequest prune_request = 47;
+    // Collection and snapshot requests
+    ListCollectionsRequest list_collections_request = 48;
+    ListSnapshotsRequest list_snapshots_request = 49;
+    RestoreCollectionRequest restore_collection_request = 50;
+    RestoreSnapshotRequest restore_snapshot_request = 51;
 
     // Responses
     SuccessResponse success_response = 100;
@@ -733,6 +806,11 @@ message Envelope {
     PathTreeResponse path_tree_response = 131;
     // Prune response
     PruneResponse prune_response = 132;
+    // Collection and snapshot responses
+    ListCollectionsResponse list_collections_response = 133;
+    ListSnapshotsResponse list_snapshots_response = 134;
+    RestoreCollectionResponse restore_collection_response = 135;
+    RestoreSnapshotResponse restore_snapshot_response = 136;
 
   }
 }

@@ -8,6 +8,7 @@
 #include <sstream>
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
 
 namespace yams::cli {
@@ -446,27 +447,9 @@ private:
         }
     }
 
-    fs::path getConfigPath() const {
-        if (!configPath_.empty()) {
-            return fs::path(configPath_);
-        }
+    fs::path getConfigPath() const { return yams::config::get_config_path(configPath_); }
 
-        const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME");
-        const char* homeEnv = std::getenv("HOME");
-
-        fs::path configHome;
-        if (xdgConfigHome) {
-            configHome = fs::path(xdgConfigHome);
-        } else if (homeEnv) {
-            configHome = fs::path(homeEnv) / ".config";
-        } else {
-            return fs::path("~/.config") / "yams" / "config.toml";
-        }
-
-        return configHome / "yams" / "config.toml";
-    }
-
-    // Simple TOML parser for reading config
+    // Parse all config values into a map (section.key format)
     std::map<std::string, std::string> parseSimpleToml(const fs::path& path) const {
         std::map<std::string, std::string> config;
         std::ifstream file(path);
@@ -478,6 +461,8 @@ private:
         std::string currentSection;
 
         while (std::getline(file, line)) {
+            yams::config::trim(line);
+
             // Skip comments and empty lines
             if (line.empty() || line[0] == '#')
                 continue;
@@ -487,6 +472,7 @@ private:
                 size_t end = line.find(']');
                 if (end != std::string::npos) {
                     currentSection = line.substr(1, end - 1);
+                    yams::config::trim(currentSection);
                     if (!currentSection.empty()) {
                         currentSection += ".";
                     }
@@ -500,25 +486,17 @@ private:
                 std::string key = line.substr(0, eq);
                 std::string value = line.substr(eq + 1);
 
-                // Trim whitespace
-                key.erase(0, key.find_first_not_of(" \t"));
-                key.erase(key.find_last_not_of(" \t") + 1);
-                value.erase(0, value.find_first_not_of(" \t"));
-                value.erase(value.find_last_not_of(" \t") + 1);
+                yams::config::trim(key);
+                yams::config::trim(value);
 
-                // Remove quotes if present
-                if (value.size() >= 2 && value[0] == '"' && value.back() == '"') {
-                    value = value.substr(1, value.size() - 2);
-                }
-
-                // Remove comments from value
+                // Remove inline comments
                 size_t comment = value.find('#');
                 if (comment != std::string::npos) {
                     value = value.substr(0, comment);
-                    // Trim again after removing comment
-                    value.erase(value.find_last_not_of(" \t") + 1);
+                    yams::config::trim(value);
                 }
 
+                value = yams::config::unquote(value);
                 config[currentSection + key] = value;
             }
         }

@@ -7,7 +7,6 @@
 #include <vector>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <yams/daemon/client/global_io_context.h>
 
 #ifdef __unix__
 #include <sys/stat.h>
@@ -78,7 +77,7 @@ public:
         std::promise<Result<void>> prom;
         auto fut = prom.get_future();
         boost::asio::co_spawn(
-            yams::daemon::GlobalIOContext::global_executor(),
+            getExecutor(),
             [this, &prom]() -> boost::asio::awaitable<void> {
                 auto r = co_await this->executeAsync();
                 prom.set_value(std::move(r));
@@ -711,8 +710,7 @@ private:
                 promProbe.set_value(std::move(sr));
                 co_return;
             };
-            boost::asio::co_spawn(yams::daemon::GlobalIOContext::global_executor(), workProbe(),
-                                  boost::asio::detached);
+            boost::asio::co_spawn(getExecutor(), workProbe(), boost::asio::detached);
             if (futProbe.wait_for(std::chrono::milliseconds(800)) == std::future_status::ready) {
                 auto sres = futProbe.get();
                 if (sres) {

@@ -282,7 +282,7 @@ TEST_F(DatabaseTest, Migrations) {
     currentVersion = mm.getCurrentVersion();
     ASSERT_TRUE(currentVersion.has_value());
     EXPECT_EQ(currentVersion.value(),
-              15); // Latest schema version (includes tree, diffs, v14 paths)
+              17); // Latest schema version (includes v17 FTS5 Porter stemmer)
 
     // Verify tables exist
     auto docExists = db.tableExists("documents");

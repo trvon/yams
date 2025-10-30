@@ -26,6 +26,7 @@ unit_app_services = files(
   'app/services/grep_service_unicode_test.cpp',
   'app/services/indexing_service_test.cpp',
   'app/services/search_service_test.cpp',
+  'app/services/search_service_comprehensive_test.cpp',  # PBI-071: Comprehensive search tests
   'app/services/search_hash_edge_cases_test.cpp',
   'app/services/session_service_test.cpp',
   'app/services/utils_test.cpp',
@@ -33,13 +34,15 @@ unit_app_services = files(
 )
 
 unit_chunking = files(
-  'chunking/rabin_chunker_test.cpp',
-  'chunking/streaming_chunker_test.cpp',
+  # Migrated to Catch2 - see tests/meson.build
+  # 'chunking/rabin_chunker_test.cpp',
+  # 'chunking/streaming_chunker_test.cpp',
 )
 
 unit_core = files(
-  'core/cpp23_features_test.cpp',
-  'core/magic_numbers_test.cpp',
+  # Migrated to Catch2 - see tests/meson.build
+  # 'core/cpp23_features_test.cpp',
+  # 'core/magic_numbers_test.cpp',
 )
 
 unit_cli = []
@@ -85,44 +88,37 @@ if lzma_dep.found() and lzma_opt.allowed()
 endif
 
 unit_daemon_base = files(
-  'daemon/connection_fsm_backpressure_test.cpp',
-  'daemon/connection_fsm_error_flow_test.cpp',
-  'daemon/connection_fsm_legality_test.cpp',
-  'daemon/connection_fsm_shutdown_test.cpp',
-  'daemon/connection_fsm_streaming_sequence_test.cpp',
-  'daemon/connection_fsm_test.cpp',
-  'daemon/connection_fsm_timeout_retry_test.cpp',
-  'daemon/daemon_lifecycle_fsm_test.cpp',
-  'daemon/service_manager_fsm_test.cpp',
+  # Daemon FSM tests migrated to Catch2 (see tests/meson.build catch2_test_sources)
+  # Previously: 14 FSM test files now consolidated in daemon_fsm_suite_test.cpp
+  
+  # Daemon metrics/status tests migrated to Catch2 (daemon_metrics_status_test.cpp)
+  # Removed: get_stats_wal_metrics_test.cpp, daemon_plugins_degraded_status_test.cpp,
+  #          daemon_plugins_recovery_status_test.cpp, status_response_proto_test.cpp
+  
+  # Daemon component tests migrated to Catch2 (daemon_components_test.cpp)
+  # Removed: ipc_server_test.cpp (empty), socket_server_lifecycle_test.cpp,
+  #          socket_utils_test.cpp, resource_pool_test.cpp
+  
+  # Daemon protocol tests migrated to Catch2 (daemon_protocol_test.cpp)
+  # Removed: download_protocol_test.cpp, message_framing_test.cpp, grep_response_proto_test.cpp,
+  #          response_of_test.cpp, ipc_message_type_test.cpp, proto_roundtrip_test.cpp
+  
+  # Daemon background processing tests migrated to Catch2 (daemon_background_processing_test.cpp)
+  # Removed: post_ingest_queue_test.cpp, post_ingest_queue_bus_stress_test.cpp,
+  #          internal_event_bus_concurrency_test.cpp
+  
+  # Daemon plugin harness migrated to Catch2 (onnx_plugin_harness_test.cpp)
+  # Now uses Catch2 with timeout handling and enhanced isolation
+  
+  # Legacy GTest tests (to be migrated)
   'daemon/daemon_test.cpp',
-  'daemon/daemon_fsm_status_test.cpp',
-  'daemon/download_protocol_test.cpp',
-  'daemon/get_stats_wal_metrics_test.cpp',
-  'daemon/ipc_server_test.cpp',
-  'daemon/message_framing_test.cpp',
-  'daemon/socket_utils_test.cpp',
   'daemon/plugin_host_test.cpp',
-  'daemon/plugin_host_fsm_failure_test.cpp',
-  'daemon/plugin_host_fsm_recovery_test.cpp',
-  'daemon/daemon_plugins_degraded_status_test.cpp',
-  'daemon/daemon_plugins_recovery_status_test.cpp',
-  'daemon/post_ingest_queue_test.cpp',
-  'daemon/grep_response_proto_test.cpp',
-  'daemon/internal_event_bus_concurrency_test.cpp',
-  'daemon/post_ingest_queue_bus_stress_test.cpp',
   'daemon/repair_coordinator_test.cpp',
   'daemon/repair_scheduling_adapter_test.cpp',
   'daemon/request_handler_io_edge_test.cpp',
-  'daemon/resource_pool_test.cpp',
-  'daemon/response_of_test.cpp',
   'daemon/service_manager_test.cpp',
-  'daemon/service_manager_fsm_status_test.cpp',
   'daemon/service_manager_shutdown_ownership_test.cpp',
-  'daemon/socket_server_lifecycle_test.cpp',
-  'daemon/status_response_proto_test.cpp',
   'daemon/service_manager_provider_degraded_test.cpp',
-  'daemon/ipc_message_type_test.cpp',
-  'daemon/proto_roundtrip_test.cpp',
   'daemon/streaming_processor_test.cpp',
   'daemon/entity_graph_service_test.cpp',
   # excluded: multiplex_client_test.cpp, request_dispatcher_plugin_test.cpp, onnx_*
@@ -132,9 +128,10 @@ unit_daemon_base = files(
 unit_daemon_embedding = []
 if get_option('enable-vector-tests')
   unit_daemon_embedding += files(
-    'daemon/embedding_provider_fsm_failure_test.cpp',
+    # EmbeddingProviderFSM tests migrated to Catch2 (daemon_fsm_suite_test.cpp)
+    # Embedding status tests migrated to Catch2 (daemon_metrics_status_test.cpp)
+    # Removed: status_embedding_test.cpp
     'daemon/embedding_provider_recovery_test.cpp',
-    'daemon/status_embedding_test.cpp',
   )
 endif
 

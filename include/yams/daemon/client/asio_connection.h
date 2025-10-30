@@ -4,6 +4,7 @@
 #include <chrono>
 #include <deque>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -31,15 +32,18 @@ struct AsioConnection {
         boost::asio::experimental::channel<void(boost::system::error_code, Result<void>)>;
 
     explicit AsioConnection(const TransportOptions& o)
-        : opts(o), strand(GlobalIOContext::instance().get_io_context()) {}
+        : opts(o),
+          strand(o.executor ? *o.executor
+                            : GlobalIOContext::instance().get_io_context().get_executor()) {}
 
     TransportOptions opts;
-    boost::asio::io_context::strand strand;
+    boost::asio::strand<boost::asio::any_io_executor> strand;
     std::unique_ptr<socket_t> socket;
     std::atomic<bool> read_started{false};
     std::atomic<bool> alive{false};
     std::atomic<bool> streaming_started{false};
-    std::atomic<bool> in_use{false}; // Track if connection is currently checked out
+    std::atomic<bool> in_use{false};
+    std::future<void> read_loop_future;
 
     struct UnaryHandler {
         std::shared_ptr<response_channel_t> channel;

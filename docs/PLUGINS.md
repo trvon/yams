@@ -1,236 +1,196 @@
-# YAMS Plugin ABI Specification
+# YAMS Plugin System
 
-This document provides an overview of the YAMS plugin system based on the stable C ABI. For detailed specifications, see `docs/spec/plugin_spec.md`.
+YAMS supports two plugin types:
+- **Native (C ABI)**: Shared libraries (.so, .dylib, .dll) for production use
+- **External (Python)**: JSON-RPC over stdio for prototyping and integration
 
-## Core Components
+**Reference**: `docs/spec/plugin_spec.md` for complete C ABI specification
 
-- **ABI Specification**: `docs/spec/plugin_spec.md` - Complete C ABI reference
-- **Core ABI Header**: `include/yams/plugins/abi.h` - Plugin entry points and constants
-- **Interface Headers**: 
-  - `include/yams/plugins/model_provider_v1.h` - Model provider interface
-  - `include/yams/plugins/content_extractor_v1.h` - Content extraction interface
-  - `include/yams/plugins/host_services_v1.h` - Host callback services (optional)
+## Quick Start
 
-## Plugin Architecture
-
-### C-ABI Native Plugins
-
-Plugins are native shared libraries (.so, .dylib, .dll) that implement the YAMS C ABI:
-
+### Native Plugin (C/C++)
 ```c
-// Required plugin entry points
-int yams_plugin_get_abi_version(void);
-const char* yams_plugin_get_name(void);
-const char* yams_plugin_get_version(void);
+#include "yams/plugins/abi.h"
+#include "yams/plugins/content_extractor_v1.h"
+
+int yams_plugin_get_abi_version(void) { return 1; }
+const char* yams_plugin_get_name(void) { return "my_plugin"; }
+// ... implement other entry points and interfaces
+```
+
+### External Plugin (Python)
+```python
+from yams_sdk import BasePlugin, rpc
+
+class MyPlugin(BasePlugin):
+    def manifest(self):
+        return {"name": "my_plugin", "version": "1.0.0", "interfaces": ["content_extractor_v1"]}
+    
+    @rpc("extract.content")
+    def extract(self, content: dict) -> dict:
+        return {"text": "...", "metadata": {}}
+
+if __name__ == "__main__":
+    MyPlugin().run()
+```
+
+## Native Plugins (C ABI)
+
+### Entry Points
+```c
+int yams_plugin_get_abi_version(void);        // Return 1
+const char* yams_plugin_get_name(void);       // Static string
+const char* yams_plugin_get_version(void);    // Static string
 const char* yams_plugin_get_manifest_json(void);
 int yams_plugin_get_interface(const char* iface_id, uint32_t version, void** out_iface);
 int yams_plugin_init(const char* config_json, const void* host_context);
 void yams_plugin_shutdown(void);
+int yams_plugin_get_health_json(char** out_json);  // Optional
 ```
 
-### Interface VTables
-
-Plugins expose functionality through versioned interface vtables:
-
+### Interface Pattern
+Plugins expose vtables for specific capabilities:
 ```c
-// Model provider interface example
-typedef struct model_provider_v1 {
+typedef struct content_extractor_v1 {
     void* handle;
-    int (*load_model)(void* handle, const char* model_id, const char* model_path, const char* options_json);
-    int (*generate_embedding)(void* handle, const char* model_id, const uint8_t* input, size_t input_len, float** out_vec, uint32_t* out_dim);
-    void (*free_embedding)(void* handle, float* vec, uint32_t dim);
-    // ... additional methods
-} model_provider_v1_t;
+    bool (*supports)(const char* mime_type, const char* extension);
+    int (*extract)(const uint8_t* content, size_t len, extraction_result_t** out);
+    void (*free_result)(extraction_result_t* result);
+} content_extractor_v1_t;
 ```
 
-## Plugin Discovery and Loading
+### Standard Interfaces
+| Interface | Header | Version | Purpose |
+|-----------|--------|---------|---------|
+| `model_provider_v1` | `model_provider_v1.h` | 2 | Embedding generation, model management |
+| `content_extractor_v1` | `content_extractor_v1.h` | 1 | Document text extraction |
+| `symbol_extractor_v1` | `symbol_extractor_v1.h` | 1 | Binary symbol extraction |
+| `graph_adapter_v1` | `graph_adapter_v1.h` | 1 | Graph storage backend |
+| `object_storage_v1` | `object_storage_v1.h` | 1 | Object storage backend |
+| `search_provider_v1` | `search_provider_v1.h` | 1 | Search backend |
 
-### Search Order (first match wins)
-
-1. **Configured directories**: `plugin_dir` or `plugin_dirs` from daemon config
-2. **Environment override**: `YAMS_PLUGIN_DIR` (deprecated)
-3. **User directory**: `$HOME/.local/lib/yams/plugins`
-4. **System directories**: `/usr/local/lib/yams/plugins`, `/usr/lib/yams/plugins`
-5. **Install prefix**: `${CMAKE_INSTALL_PREFIX}/lib/yams/plugins`
-
-### Trust Policy
-
-- **Default deny**: Only plugins from trusted directories are loaded
-- **Trust file**: `~/.config/yams/plugins_trust.txt` (one absolute path per line)
-- **CLI management**:
-  ```bash
-  yams plugin trust add /path/to/plugin.so
-  yams plugin trust list
-  yams plugin trust remove /path/to/plugin.so
-  ```
-- **Development override**: `YAMS_PLUGIN_TRUST_ALL=1` (use with caution)
-
-### Naming and Deduplication
-
-- **Filename preference**: Non-`lib` prefixed files preferred over `lib*` variants
-- **Logical name deduplication**: Only one implementation per provider type
-- **Priority order**: User dir > system dir > install prefix
-
-### Name Policy
-
-Configure how plugin names are displayed and selected:
-
-- **Relaxed** (default): Derive canonical name from filename when manifest doesn't specify
-- **Spec**: Use manifest `name` field verbatim
-
-```bash
-export YAMS_PLUGIN_NAME_POLICY=spec
-yams plugins list
-```
-
-## Standard Interfaces
-
-### Model Provider v1
-
-For embedding generation and model management:
-- **Header**: `include/yams/plugins/model_provider_v1.h`
-- **Version**: v1.2 (pre-stable)
-- **Key features**:
-  - Non-blocking model loading with progress callbacks
-  - Single and batch embedding generation
-  - Runtime info querying (backend, threading, model metadata)
-  - Dimension discovery without model loading
-
-### Content Extractor v1
-
-For document content extraction:
-- **Header**: `include/yams/plugins/content_extractor_v1.h`
-- **Purpose**: Extract text and metadata from various document formats
-- **Key methods**: `extract_content()`, `get_supported_extensions()`
-
-### Host Services v1 (Optional)
-
-For plugins that need to call back into YAMS:
-- **Header**: `include/yams/plugins/host_services_v1.h`
-- **Services**: Document service, search service, future extensions
-- **Usage**: Passed via `host_context` parameter in `yams_plugin_init()`
-
-## Memory Management Rules
-
-- **Plugin allocations**: Use `malloc()`/`calloc()`, host calls `free()`
-- **Host allocations**: Host manages memory for callback data
-- **Interface vtables**: Static lifetime during plugin load
-- **String returns**: Plugin allocates with `malloc()`, host frees with `free()`
-
-## Error Handling
-
-Plugins SHOULD use standard error codes:
-
+### Error Codes
 ```c
 #define YAMS_PLUGIN_OK 0
-#define YAMS_PLUGIN_ERR_INVALID 1
-#define YAMS_PLUGIN_ERR_INCOMPATIBLE 2
-#define YAMS_PLUGIN_ERR_NOT_FOUND 3
-#define YAMS_PLUGIN_ERR_IO 4
-#define YAMS_PLUGIN_ERR_INTERNAL 5
-#define YAMS_PLUGIN_ERR_UNSUPPORTED 6
+#define YAMS_PLUGIN_ERR_INVALID -4
+#define YAMS_PLUGIN_ERR_NOT_FOUND -2
+#define YAMS_PLUGIN_ERR_INCOMPATIBLE -1
 ```
 
-## Plugin Development
+### Memory Management
+- Plugin allocates with `malloc()`, host frees with `free()`
+- Host manages callback data
+- Vtables have static lifetime
+- Thread-safe unless documented otherwise
 
-### Basic Plugin Structure
+## External Plugins (Python)
 
-```c
-#include "yams/plugins/abi.h"
-#include "yams/plugins/model_provider_v1.h"
-
-static model_provider_v1_t g_model_provider = { /* implementation */ };
-
-int yams_plugin_get_abi_version(void) {
-    return 1;
-}
-
-const char* yams_plugin_get_name(void) {
-    return "my_model_provider";
-}
-
-const char* yams_plugin_get_version(void) {
-    return "1.0.0";
-}
-
-const char* yams_plugin_get_manifest_json(void) {
-    return "{"
-           "\"name\":\"my_model_provider\","
-           "\"version\":\"1.0.0\","
-           "\"interfaces\":[{\"id\":\"model_provider_v1\",\"version\":2}]"
-           "}";
-}
-
-int yams_plugin_get_interface(const char* iface_id, uint32_t version, void** out_iface) {
-    if (strcmp(iface_id, "model_provider_v1") == 0 && version == 2) {
-        *out_iface = &g_model_provider;
-        return YAMS_PLUGIN_OK;
-    }
-    return YAMS_PLUGIN_ERR_UNSUPPORTED;
-}
-
-int yams_plugin_init(const char* config_json, const void* host_context) {
-    // Initialize plugin resources
-    return YAMS_PLUGIN_OK;
-}
-
-void yams_plugin_shutdown(void) {
-    // Cleanup plugin resources
-}
+### SDK Installation
+```bash
+pip install yams-sdk
+# Or from source:
+pip install -e external/yams_sdk
 ```
 
-### Build Integration
+### Plugin Structure
+```python
+from yams_sdk import BasePlugin, rpc
 
-Use CMake integration from the plugin directory:
+class MyPlugin(BasePlugin):
+    def __init__(self):
+        super().__init__()
+        # Auto-register @rpc methods
+        for name in dir(self):
+            fn = getattr(self, name)
+            rpc_name = getattr(fn, "__rpc_name__", None)
+            if rpc_name:
+                self.register(rpc_name, fn)
+    
+    def manifest(self):
+        return {
+            "name": "my_plugin",
+            "version": "1.0.0",
+            "interfaces": ["my_interface_v1"]
+        }
+    
+    def init(self, config):
+        # Initialize from daemon config
+        pass
+    
+    def health(self):
+        return {"status": "ok"}
+    
+    @rpc("my.method")
+    def my_method(self, param: dict) -> dict:
+        return {"result": "..."}
 
-```cmake
-# In plugins/my_plugin/CMakeLists.txt
-add_library(yams_my_plugin SHARED
-    plugin.cpp
-    implementation.cpp
-)
-
-target_include_directories(yams_my_plugin PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-)
-
-# Install to standard plugin location
-install(TARGETS yams_my_plugin
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/yams/plugins
-)
+if __name__ == "__main__":
+    MyPlugin().run()
 ```
 
-## Runtime Notes
+### SDK Modules
+- **`yams_sdk.base`** - BasePlugin, JSON-RPC transport
+- **`yams_sdk.decorators`** - @rpc decorator
+- **`yams_sdk.abi`** - Error codes, interface constants, manifest helpers
+- **`yams_sdk.interfaces`** - Type-safe protocols for standard interfaces
+- **`yams_sdk.testing`** - PluginTestHarness, validation utilities
 
-- **Preferred provider selection**: Daemon prefers host-backed `model_provider_v1` plugins
-- **Async readiness**: Model loading is non-blocking; readiness indicated via callbacks
-- **Thread safety**: Interface methods may be called from multiple threads
-- **Health monitoring**: Optional health JSON via `yams_plugin_get_health_json()`
+### Testing
+```python
+from yams_sdk.testing import PluginTestHarness
 
-## Examples
+with PluginTestHarness(["python3", "my_plugin.py"]) as h:
+    manifest = h.handshake()
+    h.init({"config_key": "value"})
+    result = h.call("my.method", {"param": "data"})
+    health = h.health()
+```
 
-### Trust and Load Plugin
+## Plugin Loading
+
+### Search Paths (priority order)
+1. Configured directories (`plugin_dirs` in daemon config)
+2. `$YAMS_PLUGIN_DIR` environment variable
+3. `~/.local/lib/yams/plugins`
+4. `/usr/local/lib/yams/plugins`, `/usr/lib/yams/plugins`
+5. `${CMAKE_INSTALL_PREFIX}/lib/yams/plugins`
+
+### Trust Policy
+**Default deny**: Only explicitly trusted paths are loaded.
 
 ```bash
-# Build and install plugin
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-sudo cmake --install build
-
-# Trust the plugin directory
-yams plugin trust add /usr/local/lib/yams/plugins
-
-# Scan for available plugins
-yams plugin scan
-
-# Load specific plugin (daemon running)
-yams plugin load /usr/local/lib/yams/plugins/yams_my_plugin.so
+# Trust management
+yams plugin trust add /path/to/plugin.so
+yams plugin trust list
+yams plugin trust remove /path/to/plugin.so
 ```
 
-### Configuration Example
+**Trust file**: `~/.config/yams/plugins_trust.txt` (one path per line)  
+**Dev override**: `export YAMS_PLUGIN_TRUST_ALL=1`
 
+### CLI Commands
+```bash
+# Scan for plugins
+yams plugin scan                    # All search paths
+yams plugin scan --dir /custom/path
+yams plugin scan /path/to/plugin.so
+
+# List loaded plugins
+yams plugin list
+yams plugin list -v                 # Show skipped plugins
+
+# Load/unload
+yams plugin load /path/to/plugin.so
+yams plugin load plugin_name
+yams plugin unload plugin_name
+
+# Plugin info
+yams plugin info plugin_name        # Manifest and health
+```
+
+### Configuration
 ```toml
-# daemon config
+# ~/.yams/config/daemon.toml
 [plugins]
 plugin_dirs = ["/usr/local/lib/yams/plugins", "~/.local/lib/yams/plugins"]
 name_policy = "relaxed"  # or "spec"
@@ -239,29 +199,56 @@ name_policy = "relaxed"  # or "spec"
 preferred_model = "hf://sentence-transformers/all-MiniLM-L6-v2"
 ```
 
-## SDK and Testing
+## Development
 
-- **SDK location**: `external/yams-sdk`
-- **Python helpers**: JSON-RPC templates and conformance runners
-- **Test harness**: `yams/tests/sdk` for ABI validation
-- **Example implementations**: See `plugins/onnx` for reference
+### Building Native Plugins
+```bash
+# In plugins/my_plugin/
+add_library(yams_my_plugin SHARED plugin.cpp)
+target_include_directories(yams_my_plugin PRIVATE ${CMAKE_SOURCE_DIR}/include)
+install(TARGETS yams_my_plugin DESTINATION ${CMAKE_INSTALL_LIBDIR}/yams/plugins)
+```
 
-For complete interface specifications, error codes, and lifecycle details, refer to:
-- `docs/spec/plugin_spec.md`
-- Individual interface headers in `include/yams/plugins/`
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+sudo cmake --install build
+```
 
-## External Plugin Examples
+### Building Python Plugins
+```bash
+# In plugins/my_plugin/ with pyproject.toml
+uv build
+uv pip install dist/*.whl
+```
 
-While this specification focuses on the core C ABI, YAMS also supports external plugin examples for reference:
+### Testing Workflow
+```bash
+# 1. Trust plugin directory
+yams plugin trust add /usr/local/lib/yams/plugins
 
-### Ghidra Analysis Plugin
-- **Location**: `plugins/yams-ghidra-plugin/`
-- **Transport**: External process via JSON-RPC
-- **Purpose**: Demonstrates binary analysis integration using PyGhidra
-- **Note**: Example of external process communication, not core ABI
+# 2. Scan to verify
+yams plugin scan
 
-These examples showcase integration patterns but the primary plugin development should target the C ABI specification above for production use.
+# 3. Load plugin
+yams plugin load /usr/local/lib/yams/plugins/yams_my_plugin.so
 
-## Future Plugin Opportunities
+# 4. Verify loaded
+yams plugin list
+yams plugin info my_plugin
+```
 
-Binary/specialized file types currently fail text extraction and would benefit from dedicated extractor plugins.
+## Implementation Examples
+
+- **`plugins/onnx/`** - Model provider (C++, ONNX Runtime)
+- **`plugins/pdf_extractor/`** - Content extractor (C++, MuPDF)
+- **`plugins/symbol_extractor_treesitter/`** - Symbol extractor (C++, Tree-sitter)
+- **`plugins/yams-ghidra-plugin/`** - Binary analysis (Python, PyGhidra)
+- **`plugins/object_storage_s3/`** - Object storage (C++, AWS SDK)
+
+## Reference
+
+- **Spec**: `docs/spec/plugin_spec.md` - Complete C ABI specification
+- **Headers**: `include/yams/plugins/*.h` - Interface definitions
+- **Interface registry**: `docs/spec/interface_versions.json`
+- **SDK**: `external/yams_sdk/README.md` - Python SDK documentation

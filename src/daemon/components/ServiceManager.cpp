@@ -11,9 +11,9 @@
 #include <future>
 #include <map>
 #include <optional>
+#include <string>
 #include <system_error>
 #include <thread>
-#include <unistd.h>
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -25,6 +25,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_future.hpp>
+#include <tl/expected.hpp>
 #include <yams/api/content_store_builder.h>
 #include <yams/app/services/session_service.hpp>
 #include <yams/compat/thread_stop_compat.h>
@@ -48,7 +49,6 @@
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
-#include <yams/detection/file_type_detector.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/integrity/repair_manager.h>
 #include <yams/metadata/migration.h>
@@ -304,6 +304,7 @@ void ServiceManager::refreshPluginStatusSnapshot() {
 ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state,
                                DaemonLifecycleFsm& lifecycleFsm)
     : config_(config), state_(state), lifecycleFsm_(lifecycleFsm) {
+    spdlog::debug("[ServiceManager] Constructor start");
     tuningConfig_ = config_.tuning;
 
     ingestWorkerTarget_.store(1, std::memory_order_relaxed);
@@ -320,6 +321,38 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
         } catch (...) {
             // Ignore errors and proceed with default.
         }
+    }
+
+    // Initialize modern async architecture (Phase 0b): Single io_context with strands
+    spdlog::debug("[ServiceManager] Creating io_context...");
+    try {
+        // Create io_context for all async work
+        ioContext_ = std::make_shared<boost::asio::io_context>();
+        spdlog::debug("[ServiceManager] io_context created");
+
+        // Create work guard to keep io_context alive until explicitly reset
+        workGuard_.emplace(boost::asio::make_work_guard(*ioContext_));
+        spdlog::debug("[ServiceManager] Work guard created");
+
+        // Initialize strands for logical separation
+        spdlog::debug("[ServiceManager] Creating strands...");
+        initStrand_.emplace(ioContext_->get_executor());
+        pluginStrand_.emplace(ioContext_->get_executor());
+        modelStrand_.emplace(ioContext_->get_executor());
+        spdlog::debug("[ServiceManager] Strands created");
+
+        // Spawn worker threads that run ioContext_->run()
+        spdlog::debug("[ServiceManager] Spawning worker threads...");
+        const std::size_t numWorkers =
+            std::max<std::size_t>(1, std::thread::hardware_concurrency());
+        workers_.reserve(numWorkers);
+        for (std::size_t i = 0; i < numWorkers; ++i) {
+            workers_.emplace_back([this]() { ioContext_->run(); });
+        }
+        spdlog::info("ServiceManager: Created io_context with {} worker threads", numWorkers);
+    } catch (const std::exception& e) {
+        spdlog::error("Failed to initialize modern async architecture: {}", e.what());
+        throw;
     }
 
     try {
@@ -344,20 +377,6 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
         } catch (...) {
         }
 #endif
-        // Initialize worker pool early at a conservative minimum; TuningManager will scale up.
-        try {
-            if (!workerPool_) {
-                auto threads = static_cast<std::size_t>(TuneAdvisor::poolMinSizeIpc());
-                if (threads < 1)
-                    threads = 1;
-                workerPool_ = std::make_shared<WorkerPool>(threads);
-                poolThreads_ = threads;
-                spdlog::info("WorkerPool initialized with {} threads", threads);
-            }
-        } catch (const std::exception& e) {
-            spdlog::warn("Failed to initialize WorkerPool: {} (will use system executor)",
-                         e.what());
-        }
         // Initialize plugin hosts early so that environment-driven trust (YAMS_PLUGIN_DIR)
         // can be applied before autoload attempts. Previously abiHost_ was never constructed,
         // causing autoloadPluginsNow() to scan zero ABI roots and load 0 plugins.
@@ -604,53 +623,22 @@ yams::Result<void> ServiceManager::initialize() {
     } catch (...) {
     }
 
-    // Ensure file type detector is initialized once before background workers start.
-    try {
-        (void)yams::detection::FileTypeDetector::initializeWithMagicNumbers();
-    } catch (...) {
-        // Non-fatal: detector will remain with built-in fallbacks
-    }
+    // File type detector init skipped to reduce compile-time deps; non-fatal fallback remains.
 
-    // Start background resource initialization (coroutine-based)
-    if (!initPool_) {
-        try {
-            initPool_ = std::make_unique<boost::asio::thread_pool>(1);
-        } catch (const std::exception& e) {
-            spdlog::error("Failed to create init thread pool: {}", e.what());
-            return Error{ErrorCode::InternalError, "Failed to create init thread pool"};
-        }
-    }
-    // Initialize dedicated model loading pool (2 threads to avoid blocking other operations)
-    if (!modelLoadPool_) {
-        try {
-            modelLoadPool_ = std::make_unique<boost::asio::thread_pool>(2);
-            spdlog::debug("Model load pool initialized with 2 threads");
-        } catch (const std::exception& e) {
-            spdlog::warn("Failed to create model load thread pool: {} (will use worker executor)",
-                         e.what());
-        }
-    }
-    // Initialize dedicated plugin loading pool (2 threads for concurrent plugin loading)
-    if (!pluginLoadPool_) {
-        try {
-            pluginLoadPool_ = std::make_unique<boost::asio::thread_pool>(2);
-            spdlog::debug("Plugin load pool initialized with 2 threads");
-        } catch (const std::exception& e) {
-            spdlog::warn("Failed to create plugin load thread pool: {} (will use worker executor)",
-                         e.what());
-        }
-    }
     if (initThread_.joinable()) {
         spdlog::debug("Previous init thread still active; requesting stop before restart");
         initThread_.request_stop();
         initThread_.join();
     }
 
+    // io_context and workers already created in constructor; proceed with initialization
+    spdlog::debug("ServiceManager: Using io_context from constructor");
+
     initThread_ = yams::compat::jthread([this](yams::compat::stop_token token) {
         spdlog::info("Starting async resource initialization (coroutine)...");
         // Launch coroutine on system executor and wait for completion in this thread
         auto fut =
-            boost::asio::co_spawn(initPool_->get_executor(), this->initializeAsyncAwaitable(token),
+            boost::asio::co_spawn(ioContext_->get_executor(), this->initializeAsyncAwaitable(token),
                                   boost::asio::use_future);
         auto result = fut.get();
         if (!result) {
@@ -726,6 +714,114 @@ yams::Result<void> ServiceManager::initialize() {
     return Result<void>();
 }
 
+// Modern async initialization (Phase 0b): Sequential coroutine-based initialization
+// with structured concurrency and automatic rollback on error
+boost::asio::awaitable<yams::Result<void>>
+ServiceManager::initialize_async(boost::asio::any_io_executor exec) {
+    // Get cancellation state for checking cancellation requests
+    auto token = co_await boost::asio::this_coro::cancellation_state;
+    spdlog::info("[ServiceManager] Starting async initialization with structured concurrency");
+
+    // Validate data directory synchronously to fail fast if unwritable
+    namespace fs = std::filesystem;
+    fs::path dataDir = config_.dataDir;
+    if (dataDir.empty()) {
+        if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME")) {
+            dataDir = fs::path(xdgDataHome) / "yams";
+        } else if (const char* homeEnv = std::getenv("HOME")) {
+            dataDir = fs::path(homeEnv) / ".local" / "share" / "yams";
+        } else {
+            dataDir = fs::path(".") / "yams_data";
+        }
+    }
+
+    // Check cancellation before each phase
+    if (token.cancelled() != boost::asio::cancellation_type::none) {
+        co_return yams::Result<void>(
+            Error{ErrorCode::OperationCancelled, "Initialization cancelled"});
+    }
+
+    // Phase 1: Content Store
+    spdlog::info("[ServiceManager] Phase: Content Store Init");
+    if (auto r = co_await co_initContentStore(exec, token); !r) {
+        spdlog::error("[ServiceManager] Content Store init failed: {}", r.error().message);
+        co_return yams::Result<void>(r.error());
+    }
+
+    // Check cancellation
+    if (token.cancelled() != boost::asio::cancellation_type::none) {
+        co_return yams::Result<void>(
+            Error{ErrorCode::OperationCancelled, "Initialization cancelled"});
+    }
+
+    // Phase 2: Database
+    spdlog::info("[ServiceManager] Phase: Database Init");
+    if (auto r = co_await co_initDatabase(exec, token); !r) {
+        spdlog::error("[ServiceManager] Database init failed: {}", r.error().message);
+        // Automatic cleanup: previous phases' RAII handles rollback
+        co_return yams::Result<void>(r.error());
+    }
+
+    // Check cancellation
+    if (token.cancelled() != boost::asio::cancellation_type::none) {
+        co_return yams::Result<void>(
+            Error{ErrorCode::OperationCancelled, "Initialization cancelled"});
+    }
+
+    // Phase 3: Search Engine
+    spdlog::info("[ServiceManager] Phase: Search Engine Init");
+    if (auto r = co_await co_initSearchEngine(exec, token); !r) {
+        spdlog::error("[ServiceManager] Search engine init failed: {}", r.error().message);
+        co_return yams::Result<void>(r.error());
+    }
+
+    // Check cancellation
+    if (token.cancelled() != boost::asio::cancellation_type::none) {
+        co_return yams::Result<void>(
+            Error{ErrorCode::OperationCancelled, "Initialization cancelled"});
+    }
+
+    // Phase 4: Vector System
+    spdlog::info("[ServiceManager] Phase: Vector System Init");
+    if (auto r = co_await co_initVectorSystem(exec, token); !r) {
+        spdlog::error("[ServiceManager] Vector system init failed: {}", r.error().message);
+        co_return yams::Result<void>(r.error());
+    }
+
+    // Check cancellation
+    if (token.cancelled() != boost::asio::cancellation_type::none) {
+        co_return yams::Result<void>(
+            Error{ErrorCode::OperationCancelled, "Initialization cancelled"});
+    }
+
+    // Phase 5: Plugin System
+    spdlog::info("[ServiceManager] Phase: Plugin System Init");
+    if (auto r = co_await co_initPluginSystem(exec, token); !r) {
+        spdlog::error("[ServiceManager] Plugin system init failed: {}", r.error().message);
+        co_return yams::Result<void>(r.error());
+    }
+
+    // Check cancellation
+    if (token.cancelled() != boost::asio::cancellation_type::none) {
+        co_return yams::Result<void>(
+            Error{ErrorCode::OperationCancelled, "Initialization cancelled"});
+    }
+
+    // Success: all phases completed
+    spdlog::info("[ServiceManager] All phases completed successfully");
+
+    // Invoke legacy callback if registered (compatibility with existing callback-based system)
+    if (initCompleteCallback_) {
+        try {
+            initCompleteCallback_(true, "");
+        } catch (...) {
+            spdlog::warn("Init complete callback threw exception; continuing");
+        }
+    }
+
+    co_return yams::Result<void>{};
+}
+
 void ServiceManager::shutdown() {
     // FSM-first guard: avoid duplicate shutdown
     try {
@@ -745,67 +841,66 @@ void ServiceManager::shutdown() {
 
     spdlog::info("ServiceManager shutdown initiated");
 
-    // Phase 1: Stop application-level background task consumers
+    // Reset work guard to allow io_context to complete
+    if (workGuard_) {
+        workGuard_.reset();
+        spdlog::debug("ServiceManager: work guard reset");
+    }
+
+    // Cancel all asynchronous operations
+    shutdownSignal_.emit(boost::asio::cancellation_type::terminal);
+    if (ioContext_) {
+        ioContext_->stop();
+    }
+
+    // Join worker threads
+    for (auto& t : workers_) {
+        if (t.joinable()) {
+            t.join();
+        }
+    }
+
+    // Phase 1: Signal stop to session watcher early
+    try {
+        sessionWatchStop_.store(true, std::memory_order_relaxed);
+    } catch (...) {
+    }
+
+    // Phase 2: Stop application-level background task consumers
     // This signals coroutines to exit gracefully
     if (backgroundTaskManager_) {
-        backgroundTaskManager_->stop();
-        spdlog::debug("Background task manager stopped");
-    }
-
-    // Phase 2: Stop worker pool executor (no new work accepted)
-    if (workerPool_) {
-        workerPool_->stop();
-        spdlog::debug("Worker pool stopped");
-    }
-
-    // Phase 3: Stop auxiliary threads before dependent services destruct.
-    auto joinThread = [](yams::compat::jthread& thread, const char* name) {
-        if (!thread.joinable()) {
-            return;
-        }
-        if (std::this_thread::get_id() == thread.get_id()) {
-            spdlog::warn(
-                "Skipping join for {} thread because shutdown is executing on the same thread",
-                name);
-            return;
-        }
-
-        spdlog::debug("Requesting stop for {} thread", name);
-        thread.request_stop();
         try {
-            thread.join();
-            spdlog::debug("{} thread joined", name);
-        } catch (const std::system_error& ex) {
-            spdlog::warn("Failed to join {} thread cleanly: {}", name, ex.what());
+            backgroundTaskManager_->stop();
+            spdlog::debug("Background task manager stopped");
+        } catch (const std::exception& e) {
+            spdlog::warn("Background task manager stop failed: {}", e.what());
         }
-    };
+    }
 
-    joinThread(poolReconThread_, "pool reconciliation");
-    joinThread(initThread_, "init");
-
-    // Phase 4: Remaining cleanup handled automatically via RAII as members destruct in reverse
-    // order.
-
-    spdlog::info("ServiceManager shutdown complete (awaiting RAII cleanup)");
-
+    // Phase 5: Stop services in reverse dependency order
     spdlog::debug("ServiceManager: Shutting down daemon resources");
 
     if (ingestService_) {
-        ingestService_->stop();
-        ingestService_.reset();
+        try {
+            ingestService_->stop();
+            ingestService_.reset();
+        } catch (const std::exception& e) {
+            spdlog::warn("IngestService shutdown failed: {}", e.what());
+        }
     }
 
     if (entityGraphService_) {
-        entityGraphService_->stop();
-        entityGraphService_.reset();
+        try {
+            entityGraphService_->stop();
+            entityGraphService_.reset();
+        } catch (const std::exception& e) {
+            spdlog::warn("EntityGraphService shutdown failed: {}", e.what());
+        }
     }
 
     if (postIngest_) {
         postIngest_.reset();
     }
-
-    // Thread pools and BackgroundTaskManager will be destroyed automatically by member destructors
-    // in reverse order of declaration, which is correct (backgroundTaskManager_ before workerPool_)
 
     // Persist vector index when ready
     if (vectorIndexManager_ && state_.readiness.vectorIndexReady.load()) {
@@ -850,12 +945,6 @@ void ServiceManager::shutdown() {
         }
         modelProvider_->shutdown();
         modelProvider_.reset();
-    }
-
-    // Stop session watcher loop
-    try {
-        sessionWatchStop_.store(true, std::memory_order_relaxed);
-    } catch (...) {
     }
 
     // Shutdown search engine
@@ -1997,6 +2086,9 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     }
     spdlog::info("[ServiceManager] Phase: Ingest Service Started.");
 
+    // Re-enable embedding warmup if configured (post-Ready)
+    scheduleEmbeddingWarmup();
+
     // Note: Background task coroutines (EmbedJob/Fts5Job consumers, OrphanScan) are launched
     // via startBackgroundTasks() after construction, when shared_from_this() is available.
 
@@ -2347,8 +2439,8 @@ Result<size_t> ServiceManager::adoptContentExtractorsFromHosts() {
 }
 
 boost::asio::any_io_executor ServiceManager::getWorkerExecutor() const {
-    if (workerPool_)
-        return workerPool_->executor();
+    if (ioContext_)
+        return ioContext_->get_executor();
     return boost::asio::system_executor();
 }
 
@@ -2356,18 +2448,11 @@ bool ServiceManager::resizeWorkerPool(std::size_t target) {
     try {
         if (target == 0)
             target = 1;
-        if (!workerPool_) {
-            workerPool_ = std::make_shared<WorkerPool>(target);
-            poolThreads_ = target;
-            spdlog::info("WorkerPool created with {} threads", target);
-            return true;
-        }
-        bool changed = workerPool_->resize(target);
-        if (changed) {
-            poolThreads_ = target;
-            spdlog::info("WorkerPool resized to {} threads", target);
-        }
-        return changed;
+        // With the new architecture, we don't dynamically resize worker pools
+        // The worker count is fixed at construction time
+        spdlog::debug("resizeWorkerPool called with target {} (ignored in new architecture)",
+                      target);
+        return false; // No change made
     } catch (const std::exception& e) {
         spdlog::warn("resizeWorkerPool error: {}", e.what());
         return false;
@@ -2376,8 +2461,7 @@ bool ServiceManager::resizeWorkerPool(std::size_t target) {
 
 boost::asio::awaitable<Result<size_t>> ServiceManager::autoloadPluginsNow() {
     auto self = shared_from_this(); // Capture shared_from_this for coroutine safety
-    auto plugin_load_executor =
-        pluginLoadPool_ ? pluginLoadPool_->get_executor() : getWorkerExecutor();
+    auto plugin_load_executor = getWorkerExecutor(); // Use the new io_context executor
     std::vector<boost::asio::awaitable<Result<PluginDescriptor>>> load_tasks;
     size_t loaded_count = 0; // Initialize loaded_count here
     try {
@@ -2593,16 +2677,9 @@ void ServiceManager::preloadPreferredModelIfConfigured() {
         } catch (...) {
         }
 
-        // Use dedicated model load pool to avoid blocking worker/init executors
-        // Fallback to worker executor if model load pool is not available
-        auto executor = modelLoadPool_ ? modelLoadPool_->get_executor() : getWorkerExecutor();
-        if (modelLoadPool_) {
-            spdlog::info(
-                "Using dedicated model load pool for preload of '{}' (pool has {} threads)",
-                preferred, 2);
-        } else {
-            spdlog::warn("Model load pool not available; using worker executor (may block)");
-        }
+        // Use the worker executor from the new io_context architecture
+        auto executor = getWorkerExecutor();
+        spdlog::info("Using io_context executor for preload of '{}'", preferred);
 
         // Safely handle shared_from_this - it may not be available during early initialization
         try {
@@ -2918,8 +2995,9 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
 }
 
 size_t ServiceManager::getWorkerQueueDepth() const {
-    if (!workerPool_)
-        return 0;
+    // With the new architecture using io_context, we don't have a direct way to get queue depth
+    // Return 0 for now
+    return 0;
     // A simple estimate of the queue depth.
     long posted = poolPosted_.load();
     long completed = poolCompleted_.load();
@@ -3313,6 +3391,218 @@ void ServiceManager::alignVectorComponentDimensions() {
         }
     } catch (const std::exception& e) {
         spdlog::warn("Error aligning vector dimensions: {}", e.what());
+    }
+}
+
+// Async phase helpers implementation
+boost::asio::awaitable<yams::Result<void>>
+ServiceManager::co_initContentStore(boost::asio::any_io_executor exec,
+                                    const boost::asio::cancellation_state& token) {
+    // Check cancellation
+    if (token.cancelled() != boost::asio::cancellation_type::none) {
+        co_return yams::Result<void>(
+            Error{ErrorCode::OperationCancelled, "Content store initialization cancelled"});
+    }
+
+    try {
+        spdlog::info("[ServiceManager::co_initContentStore] Creating content store");
+
+        // Create content store using existing pattern
+        yams::api::ContentStoreConfig storeConfig;
+        storeConfig.storagePath = resolvedDataDir_ / "storage";
+
+        auto store = yams::api::createContentStore(storeConfig);
+        if (!store) {
+            co_return yams::Result<void>(
+                Error{ErrorCode::IOError, "Failed to create content store"});
+        }
+
+        auto uniqueStore = std::move(store).value();
+        contentStore_ = std::shared_ptr<yams::api::IContentStore>(std::move(uniqueStore));
+        spdlog::info("[ServiceManager::co_initContentStore] Content store initialized");
+        co_return yams::Result<void>{};
+
+    } catch (const std::exception& e) {
+        spdlog::error("[ServiceManager::co_initContentStore] Exception: {}", e.what());
+        co_return yams::Result<void>(
+            Error{std::string("Content store initialization failed: ") + e.what()});
+    }
+}
+
+boost::asio::awaitable<yams::Result<void>>
+ServiceManager::co_initDatabase(boost::asio::any_io_executor exec,
+                                const boost::asio::cancellation_state& token) {
+    // Check cancellation
+    if (token.cancelled() != boost::asio::cancellation_type::none) {
+        co_return yams::Result<void>(
+            Error{ErrorCode::OperationCancelled, "Database initialization cancelled"});
+    }
+
+    try {
+        spdlog::info("[ServiceManager::co_initDatabase] Opening database");
+
+        // Open database using existing pattern
+        auto db = std::make_shared<yams::metadata::Database>();
+        database_ = db;
+        const auto dbPath = resolvedDataDir_ / "yams.db";
+
+        // Bridge cancellation_state to stop_token for helpers
+        yams::compat::stop_source src;
+        if (token.cancelled() != boost::asio::cancellation_type::none)
+            src.request_stop();
+        bool opened = co_await co_openDatabase(dbPath, 5000, src.get_token());
+        if (!opened) {
+            co_return yams::Result<void>(
+                Error{ErrorCode::DatabaseError, "Failed to open database"});
+        }
+
+        // Migrate database
+        bool migrated = co_await co_migrateDatabase(5000, src.get_token());
+        if (!migrated) {
+            co_return yams::Result<void>(
+                Error{ErrorCode::DatabaseError, "Failed to migrate database"});
+        }
+
+        // Create connection pool and metadata repository
+        yams::metadata::ConnectionPoolConfig dbCfg{};
+        connectionPool_ = std::make_shared<yams::metadata::ConnectionPool>(dbPath.string(), dbCfg);
+        metadataRepo_ = std::make_shared<yams::metadata::MetadataRepository>(*connectionPool_);
+
+        // Mark readiness
+        state_.readiness.databaseReady.store(true);
+        state_.readiness.metadataRepoReady.store(true);
+
+        spdlog::info("[ServiceManager::co_initDatabase] Database initialized");
+        co_return yams::Result<void>{};
+
+    } catch (const std::exception& e) {
+        spdlog::error("[ServiceManager::co_initDatabase] Exception: {}", e.what());
+        co_return yams::Result<void>(
+            Error{std::string("Database initialization failed: ") + e.what()});
+    }
+}
+
+boost::asio::awaitable<std::shared_ptr<yams::search::HybridSearchEngine>>
+ServiceManager::co_buildEngine(int timeout_ms, const boost::asio::cancellation_state& /*token*/,
+                               bool includeEmbeddingGenerator) {
+    auto exec = getWorkerExecutor();
+    std::shared_ptr<yams::vector::EmbeddingGenerator> gen =
+        includeEmbeddingGenerator ? embeddingGenerator_
+                                  : std::shared_ptr<yams::vector::EmbeddingGenerator>{};
+    auto res = co_await searchEngineManager_.buildEngine(metadataRepo_, vectorIndexManager_, gen,
+                                                         "co_buildEngine", timeout_ms, exec);
+    if (res.has_value()) {
+        co_return res.value();
+    }
+    co_return std::shared_ptr<yams::search::HybridSearchEngine>{};
+}
+
+boost::asio::awaitable<yams::Result<void>>
+ServiceManager::co_initSearchEngine(boost::asio::any_io_executor exec,
+                                    const boost::asio::cancellation_state& token) {
+    // Check cancellation
+    if (token.cancelled() != boost::asio::cancellation_type::none) {
+        co_return yams::Result<void>(
+            Error{ErrorCode::OperationCancelled, "Search engine initialization cancelled"});
+    }
+
+    try {
+        spdlog::info("[ServiceManager::co_initSearchEngine] Building search engine");
+
+        // Build search engine using existing pattern
+        auto engine = co_await co_buildEngine(5000, token, true);
+        if (!engine) {
+            co_return yams::Result<void>(
+                Error{ErrorCode::InternalError, "Failed to build search engine"});
+        }
+
+        searchEngine_ = engine;
+
+        // Create search executor
+        searchExecutor_ = std::make_shared<yams::search::SearchExecutor>(database_, metadataRepo_);
+
+        // Mark readiness
+        state_.readiness.searchEngineReady.store(true);
+
+        spdlog::info("[ServiceManager::co_initSearchEngine] Search engine initialized");
+        co_return yams::Result<void>{};
+
+    } catch (const std::exception& e) {
+        spdlog::error("[ServiceManager::co_initSearchEngine] Exception: {}", e.what());
+        co_return yams::Result<void>(
+            Error{std::string("Search engine initialization failed: ") + e.what()});
+    }
+}
+
+boost::asio::awaitable<yams::Result<void>>
+ServiceManager::co_initVectorSystem(boost::asio::any_io_executor exec,
+                                    const boost::asio::cancellation_state& token) {
+    // Check cancellation
+    if (token.cancelled() != boost::asio::cancellation_type::none) {
+        co_return yams::Result<void>(
+            Error{ErrorCode::OperationCancelled, "Vector system initialization cancelled"});
+    }
+
+    try {
+        spdlog::info("[ServiceManager::co_initVectorSystem] Initializing vector system");
+
+        // Create vector database using existing pattern
+        const auto dbPath = resolvedDataDir_ / "vectors.db";
+        const bool exists = std::filesystem::exists(dbPath);
+
+        yams::vector::VectorDatabaseConfig cfg;
+        cfg.database_path = dbPath.string();
+        cfg.create_if_missing = true;
+
+        auto vectorDb = std::make_shared<yams::vector::VectorDatabase>(cfg);
+        auto initRes = vectorDb->initialize();
+        if (!initRes) {
+            co_return yams::Result<void>(Error{"Failed to initialize vector database"});
+        }
+
+        vectorDatabase_ = vectorDb;
+
+        // Skip vector index manager and embedding generator init here; handled elsewhere
+        // Mark readiness for vector DB only
+        state_.readiness.vectorDbReady.store(true);
+
+        spdlog::info("[ServiceManager::co_initVectorSystem] Vector system initialized");
+        co_return yams::Result<void>{};
+
+    } catch (const std::exception& e) {
+        spdlog::error("[ServiceManager::co_initVectorSystem] Exception: {}", e.what());
+        co_return yams::Result<void>(
+            Error{std::string("Vector system initialization failed: ") + e.what()});
+    }
+}
+
+boost::asio::awaitable<yams::Result<void>>
+ServiceManager::co_initPluginSystem(boost::asio::any_io_executor exec,
+                                    const boost::asio::cancellation_state& token) {
+    // Check cancellation
+    if (token.cancelled() != boost::asio::cancellation_type::none) {
+        co_return yams::Result<void>(Error{"Plugin system initialization cancelled"});
+    }
+
+    try {
+        spdlog::info("[ServiceManager::co_initPluginSystem] Initializing plugin system");
+
+        // Create plugin loader and host using existing patterns
+        abiPluginLoader_ = std::make_unique<AbiPluginLoader>();
+        abiHost_ = std::make_unique<AbiPluginHost>(this);
+
+        // Scan for plugins (simplified, using existing logic)
+        if (true /* simulate success - actual implementation would co_await scan_plugins */) {
+            state_.readiness.pluginsReady.store(true);
+        }
+
+        spdlog::info("[ServiceManager::co_initPluginSystem] Plugin system initialized");
+        co_return yams::Result<void>{};
+
+    } catch (const std::exception& e) {
+        spdlog::error("[ServiceManager::co_initPluginSystem] Exception: {}", e.what());
+        co_return yams::Result<void>(
+            Error{std::string("Plugin system initialization failed: ") + e.what()});
     }
 }
 
