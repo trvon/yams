@@ -181,7 +181,7 @@ tasks:
       conan --version
       conan profile detect --force || true
 
-      echo "Conan profile configured (clang):"
+      echo "Conan profile configured (default, overridden by setup.sh):"
       conan profile show -pr default || conan profile show || true
 
   - yams_semver_guard: |
@@ -216,24 +216,20 @@ tasks:
       CLEAN_VERSION_MESON="${YAMS_VERSION}"
       echo "Starting build (Meson version ${CLEAN_VERSION_MESON})"
 
-      # Use setup.sh for consistent build configuration
-      # Force GCC for SourceHut CI builds
+      # Use setup.sh with environment variables for consistent build configuration
       export YAMS_COMPILER=gcc
       export YAMS_CPPSTD=20
+      export YAMS_CONAN_HOST_PROFILE=./conan/profiles/host-linux-gcc
+      export YAMS_CONAN_ARCH=x86_64
       
-      # Apply FAST_MODE settings before setup.sh
+      # Configure FAST_MODE via extra Meson flags
       if [ "${FAST_MODE:-0}" = "1" ]; then
         echo "FAST_MODE=1: build will skip ONNX and tests"
-        # setup.sh doesn't expose these options; we'll reconfigure Meson after
+        export YAMS_EXTRA_MESON_FLAGS="-Denable-onnx=disabled -Dplugin-onnx=false -Dbuild-tests=false"
       fi
       
-      # Run setup.sh (Release build)
+      # Run setup.sh (Release build) - it now respects all YAMS_* environment variables
       ./setup.sh Release
-      
-      # Apply FAST_MODE settings by reconfiguring Meson
-      if [ "${FAST_MODE:-0}" = "1" ]; then
-        meson configure build/release -Denable-onnx=disabled -Dplugin-onnx=false -Dbuild-tests=false
-      fi
 
       # Build the project
       meson compile -C build/release

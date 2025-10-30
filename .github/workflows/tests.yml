@@ -252,7 +252,10 @@ jobs:
             mkdir -p "$XDG_RUNTIME_DIR" || true
             echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
           fi
-          # Use setup.sh for consistent build configuration
+          # Use setup.sh with CI environment variables for consistent build configuration
+          export YAMS_CONAN_HOST_PROFILE="${{ matrix.conan_host_profile }}"
+          export YAMS_CONAN_ARCH="${{ matrix.conan_arch }}"
+          export YAMS_EXTRA_MESON_FLAGS="${{ matrix.extra_meson_flags }}"
           $ARCH_PREFIX ./setup.sh Debug
           $ARCH_PREFIX meson compile -C builddir
 

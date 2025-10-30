@@ -511,65 +511,27 @@ jobs:
           echo "Optimized release build for ${{ matrix.suffix }}"
           # Align build directory with README (build/release)
           rm -rf build/release
+          
+          # Determine host profile and architecture based on platform
           if [ "$RUNNER_OS" = "macOS" ]; then
             HOST_PROFILE="./conan/profiles/host-macos-apple-clang"
             case "${{ matrix.suffix }}" in
-              macos-arm64)
-                sed -i '' -E 's/^arch=.*/arch=armv8/' "$HOST_PROFILE"
-                ;;
-              macos-x86_64)
-                cp "$HOST_PROFILE" "$HOST_PROFILE.x86_64"
-                sed -i '' -E 's/^arch=.*/arch=x86_64/' "$HOST_PROFILE.x86_64"
-                HOST_PROFILE="$HOST_PROFILE.x86_64"
-                ;;
+              macos-arm64) ARCH="armv8" ;;
+              macos-x86_64) ARCH="x86_64" ;;
             esac
           else
             HOST_PROFILE="./conan/profiles/host-linux-clang"
-          fi
-          BUILD_PROFILE="default"
-          CONAN_ARGS="-of build/release -pr:h=$HOST_PROFILE -pr:b=$BUILD_PROFILE -s build_type=Release -o \"sqlite3/*:fts5=True\" -b missing"
-          if [ "$RUNNER_OS" = "macOS" ]; then
             case "${{ matrix.suffix }}" in
-              macos-arm64) CONAN_ARGS="$CONAN_ARGS -s:h arch=armv8" ;;
-              macos-x86_64) CONAN_ARGS="$CONAN_ARGS -s:h arch=x86_64" ;;
-            esac
-          else
-            # Linux: set explicit host arch based on matrix suffix
-            case "${{ matrix.suffix }}" in
-              linux-arm64) CONAN_ARGS="$CONAN_ARGS -s:h arch=armv8" ;;
-              linux-x86_64) CONAN_ARGS="$CONAN_ARGS -s:h arch=x86_64" ;;
+              linux-arm64) ARCH="armv8" ;;
+              linux-x86_64) ARCH="x86_64" ;;
             esac
           fi
-          conan install . $CONAN_ARGS
-          # Find and source the Conan-generated environment script.
-          CONAN_RUN_SH=$(find build/release -name conanrun.sh -print -quit)
-          if [ -f "$CONAN_RUN_SH" ]; then
-            echo "Sourcing Conan environment from: $CONAN_RUN_SH"
-            source "$CONAN_RUN_SH"
-          fi
-
-          # Find the Meson toolchain file using a search.
-          TOOLCHAIN_FILE=$(find build/release -maxdepth 4 -type f \( -name 'conan_meson_native.ini' -o -name 'conan_meson_cross.ini' \) | head -n1)
-
-          if [ -z "$TOOLCHAIN_FILE" ]; then
-            echo "ERROR: Could not find Meson toolchain file in build/release" >&2
-            ls -R build/release >&2
-            exit 1
-          fi
-
-          echo "Found Meson toolchain file: $TOOLCHAIN_FILE"
-          case "$TOOLCHAIN_FILE" in
-            *native*) MESON_TOOL_ARG=(--native-file "$TOOLCHAIN_FILE") ;;
-            *cross*) MESON_TOOL_ARG=(--cross-file "$TOOLCHAIN_FILE") ;;
-          esac
-          # Ensure pkg-config is discoverable for Meson
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            export PKG_CONFIG=${PKG_CONFIG:-/opt/homebrew/bin/pkg-config}
-          else
-            export PKG_CONFIG=${PKG_CONFIG:-/usr/bin/pkg-config}
-          fi
-          meson setup build/release "${MESON_TOOL_ARG[@]}" \
-            -Dwerror=false -Dwarning_level=2 -Denable-lzma=auto ${{ matrix.meson_args }}
+          
+          # Use setup.sh with CI environment variables for consistent configuration
+          export YAMS_CONAN_HOST_PROFILE="$HOST_PROFILE"
+          export YAMS_CONAN_ARCH="$ARCH"
+          export YAMS_EXTRA_MESON_FLAGS="-Dwerror=false -Dwarning_level=2 -Denable-lzma=auto ${{ matrix.meson_args }}"
+          ./setup.sh Release
           meson compile -C build/release
           echo "BUILD_DIR=build/release" >> $GITHUB_ENV
 

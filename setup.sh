@@ -5,6 +5,15 @@
 # Usage: ./setup.sh [Debug|Release]
 #   build_type: Release (default) or Debug
 #
+# Environment variables (for CI/advanced use):
+#   YAMS_CONAN_HOST_PROFILE  - Path to Conan host profile (bypasses auto-detection)
+#   YAMS_CONAN_ARCH          - Target architecture (x86_64, armv8, etc.)
+#   YAMS_EXTRA_MESON_FLAGS   - Additional Meson setup flags
+#   YAMS_COMPILER            - Force compiler (clang or gcc)
+#   YAMS_CPPSTD              - C++ standard (17, 20, 23)
+#   YAMS_LIBCXX_HARDENING    - libc++ hardening mode (none, fast, extensive, debug)
+#   YAMS_INSTALL_PREFIX      - Installation prefix (default: /usr/local or Homebrew)
+#
 # The script prefers Clang when available, falling back to GCC otherwise. It
 # ensures Conan is given a concrete C++ standard so dependencies resolve cleanly
 # and keeps Meson in sync with the generated toolchain file.
@@ -55,7 +64,33 @@ MESON_CPPSTD="c++${CPPSTD}"
 # Override with YAMS_LIBCXX_HARDENING=fast|extensive|debug|none
 LIBCXX_HARDENING=${YAMS_LIBCXX_HARDENING:-none}
 
+# Check if using explicit Conan profile (CI mode)
+CONAN_HOST_PROFILE=${YAMS_CONAN_HOST_PROFILE:-}
+CONAN_ARCH=${YAMS_CONAN_ARCH:-}
+CONAN_EXTRA_OPTIONS=${YAMS_CONAN_EXTRA_OPTIONS:-}
+USE_PROFILE=false
+
+if [[ -n "${CONAN_HOST_PROFILE}" ]]; then
+  if [[ ! -f "${CONAN_HOST_PROFILE}" ]]; then
+    echo "ERROR: Conan host profile not found: ${CONAN_HOST_PROFILE}" >&2
+    exit 1
+  fi
+  USE_PROFILE=true
+  echo "Using explicit Conan host profile: ${CONAN_HOST_PROFILE}"
+fi
+
 CONAN_ARGS=(-s "build_type=${BUILD_TYPE}" -b missing --update)
+
+# Add common Conan options (sqlite3 with FTS5, etc.)
+CONAN_ARGS+=(-o "sqlite3/*:fts5=True")
+
+# Add extra Conan options from environment (for CI)
+if [[ -n "${CONAN_EXTRA_OPTIONS}" ]]; then
+  # shellcheck disable=SC2086
+  read -ra EXTRA_OPTS <<< "${CONAN_EXTRA_OPTIONS}"
+  CONAN_ARGS+=("${EXTRA_OPTS[@]}")
+  echo "Extra Conan options: ${CONAN_EXTRA_OPTIONS}"
+fi
 
 detect_version() {
   local bin="$1"
@@ -76,64 +111,85 @@ COERCE_MAJOR() {
 
 COMPILER_OVERRIDE=${YAMS_COMPILER:-}
 
-if [[ "${COMPILER_OVERRIDE}" == clang ]] || { [[ -z "${COMPILER_OVERRIDE}" ]] && command -v clang >/dev/null 2>&1 && command -v clang++ >/dev/null 2>&1; }; then
-  echo "--- Using Clang toolchain ---"
-  export CC="clang"
-  export CXX="clang++"
-  # macOS requires libc++, Linux can use libstdc++11
-  if [[ "$(uname -s)" == "Darwin" ]]; then
-    LIBCXX="libc++"
-  else
-    LIBCXX="libstdc++11"
-    # NOTE: Forced includes (-include cstdint/stdint.h) have been disabled
-    # as they cause abseil build failures. If specific compilation issues
-    # arise, consider more targeted fixes or compiler-specific workarounds.
-    # export CXXFLAGS="${CXXFLAGS:-} -include cstdint"
-    # export CFLAGS="${CFLAGS:-} -include stdint.h"
+# When using explicit profile, skip auto-detection of compiler settings
+if [[ "${USE_PROFILE}" == "true" ]]; then
+  echo "Skipping compiler auto-detection (using profile: ${CONAN_HOST_PROFILE})"
+  # Still set CC/CXX for Meson if not already set
+  if [[ -z "${CC:-}" ]] && command -v clang >/dev/null 2>&1; then
+    export CC="clang"
+    export CXX="clang++"
+  elif [[ -z "${CC:-}" ]] && command -v gcc >/dev/null 2>&1; then
+    export CC="gcc"
+    export CXX="g++"
   fi
-  CLANG_VERSION=$(detect_version clang++)
-  CLANG_MAJOR=$(COERCE_MAJOR "${CLANG_VERSION:-0}")
-  if [[ -z "${CLANG_MAJOR}" || "${CLANG_MAJOR}" == 0 ]]; then
-    echo "Unable to detect clang version." >&2
-    exit 1
-  fi
-  if [[ "$(uname -s)" == "Darwin" ]]; then
-    # On macOS use Conan's apple-clang compiler model
-    CONAN_ARGS+=(
-      -s "compiler=apple-clang"
-      -s "compiler.version=${CLANG_MAJOR}"
-      -s "compiler.libcxx=${LIBCXX}"
-      -s "compiler.cppstd=${CPPSTD}"
-    )
-  else
-    # Linux/other: vanilla clang
-    CONAN_ARGS+=(
-      -s "compiler=clang"
-      -s "compiler.version=${CLANG_MAJOR}"
-      -s "compiler.libcxx=${LIBCXX}"
-      -s "compiler.cppstd=${CPPSTD}"
-    )
+  # Add profile to Conan args
+  CONAN_ARGS+=(-pr:h "${CONAN_HOST_PROFILE}" -pr:b default)
+  # Add architecture if specified
+  if [[ -n "${CONAN_ARCH}" ]]; then
+    CONAN_ARGS+=(-s:h "arch=${CONAN_ARCH}")
+    echo "Target architecture: ${CONAN_ARCH}"
   fi
 else
-  echo "--- Using GCC toolchain ---"
-  export CC="gcc"
-  export CXX="g++"
-  if ! command -v g++ >/dev/null 2>&1; then
-    echo "g++ not found in PATH." >&2
-    exit 1
+  # Auto-detection mode (original behavior)
+  if [[ "${COMPILER_OVERRIDE}" == clang ]] || { [[ -z "${COMPILER_OVERRIDE}" ]] && command -v clang >/dev/null 2>&1 && command -v clang++ >/dev/null 2>&1; }; then
+    echo "--- Using Clang toolchain ---"
+    export CC="clang"
+    export CXX="clang++"
+    # macOS requires libc++, Linux can use libstdc++11
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+      LIBCXX="libc++"
+    else
+      LIBCXX="libstdc++11"
+      # NOTE: Forced includes (-include cstdint/stdint.h) have been disabled
+      # as they cause abseil build failures. If specific compilation issues
+      # arise, consider more targeted fixes or compiler-specific workarounds.
+      # export CXXFLAGS="${CXXFLAGS:-} -include cstdint"
+      # export CFLAGS="${CFLAGS:-} -include stdint.h"
+    fi
+    CLANG_VERSION=$(detect_version clang++)
+    CLANG_MAJOR=$(COERCE_MAJOR "${CLANG_VERSION:-0}")
+    if [[ -z "${CLANG_MAJOR}" || "${CLANG_MAJOR}" == 0 ]]; then
+      echo "Unable to detect clang version." >&2
+      exit 1
+    fi
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+      # On macOS use Conan's apple-clang compiler model
+      CONAN_ARGS+=(
+        -s "compiler=apple-clang"
+        -s "compiler.version=${CLANG_MAJOR}"
+        -s "compiler.libcxx=${LIBCXX}"
+        -s "compiler.cppstd=${CPPSTD}"
+      )
+    else
+      # Linux/other: vanilla clang
+      CONAN_ARGS+=(
+        -s "compiler=clang"
+        -s "compiler.version=${CLANG_MAJOR}"
+        -s "compiler.libcxx=${LIBCXX}"
+        -s "compiler.cppstd=${CPPSTD}"
+      )
+    fi
+  else
+    echo "--- Using GCC toolchain ---"
+    export CC="gcc"
+    export CXX="g++"
+    if ! command -v g++ >/dev/null 2>&1; then
+      echo "g++ not found in PATH." >&2
+      exit 1
+    fi
+    GCC_VERSION=$(detect_version g++)
+    GCC_MAJOR=$(COERCE_MAJOR "${GCC_VERSION:-0}")
+    if [[ -z "${GCC_MAJOR}" || "${GCC_MAJOR}" == 0 ]]; then
+      echo "Unable to detect gcc version." >&2
+      exit 1
+    fi
+    CONAN_ARGS+=(
+      -s "compiler=gcc"
+      -s "compiler.version=${GCC_MAJOR}"
+      -s "compiler.libcxx=libstdc++11"
+      -s "compiler.cppstd=${CPPSTD}"
+    )
   fi
-  GCC_VERSION=$(detect_version g++)
-  GCC_MAJOR=$(COERCE_MAJOR "${GCC_VERSION:-0}")
-  if [[ -z "${GCC_MAJOR}" || "${GCC_MAJOR}" == 0 ]]; then
-    echo "Unable to detect gcc version." >&2
-    exit 1
-  fi
-  CONAN_ARGS+=(
-    -s "compiler=gcc"
-    -s "compiler.version=${GCC_MAJOR}"
-    -s "compiler.libcxx=libstdc++11"
-    -s "compiler.cppstd=${CPPSTD}"
-  )
 fi
 
 if [[ "${BUILD_TYPE}" == "Debug" ]]; then
@@ -221,6 +277,14 @@ if [[ "${BUILD_TYPE}" == "Debug" ]]; then
     "-Dbuild-tests=true"
     "-Denable-bench-tests=true"
   )
+fi
+
+# Add extra Meson flags from environment (for CI)
+if [[ -n "${YAMS_EXTRA_MESON_FLAGS:-}" ]]; then
+  # shellcheck disable=SC2086
+  read -ra EXTRA_FLAGS <<< "${YAMS_EXTRA_MESON_FLAGS}"
+  MESON_OPTIONS+=("${EXTRA_FLAGS[@]}")
+  echo "Extra Meson flags: ${YAMS_EXTRA_MESON_FLAGS}"
 fi
 
 echo "--- Running meson setup... ---"
