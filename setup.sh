@@ -273,10 +273,20 @@ fi
 
 conan install . -of "${BUILD_DIR}" "${CONAN_ARGS[@]}"
 
+# Check for either native or cross file (Conan generates cross file for cross-compilation)
 NATIVE_FILE="${BUILD_DIR}/${CONAN_SUBDIR}/conan/conan_meson_native.ini"
+CROSS_FILE="${BUILD_DIR}/${CONAN_SUBDIR}/conan/conan_meson_cross.ini"
 
-if [[ ! -f "${NATIVE_FILE}" ]]; then
-  echo "Error: Conan native file not found at ${NATIVE_FILE}" >&2
+if [[ -f "${NATIVE_FILE}" ]]; then
+  MESON_TOOLCHAIN_ARG="--native-file"
+  MESON_TOOLCHAIN_FILE="${NATIVE_FILE}"
+elif [[ -f "${CROSS_FILE}" ]]; then
+  MESON_TOOLCHAIN_ARG="--cross-file"
+  MESON_TOOLCHAIN_FILE="${CROSS_FILE}"
+else
+  echo "Error: Conan meson toolchain file not found" >&2
+  echo "Expected either: ${NATIVE_FILE}" >&2
+  echo "          or: ${CROSS_FILE}" >&2
   echo "Please check the output path from 'conan install'." >&2
   exit 1
 fi
@@ -284,7 +294,7 @@ fi
 MESON_ARGS=(
   "${BUILD_DIR}"
   "--prefix" "${INSTALL_PREFIX}"
-  "--native-file" "${NATIVE_FILE}"
+  "${MESON_TOOLCHAIN_ARG}" "${MESON_TOOLCHAIN_FILE}"
   "--buildtype" "${BUILD_TYPE_LOWER}"
 )
 

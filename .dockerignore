@@ -1,5 +1,6 @@
 # Build artifacts
 build/
+builddir/
 cmake-build-*/
 out/
 dist/

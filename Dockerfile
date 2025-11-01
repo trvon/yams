@@ -59,6 +59,8 @@ RUN --mount=type=cache,target=/root/.conan2 \
   # Force GCC for Docker builds (consistent with profiles)
   export YAMS_COMPILER=gcc; \
   export YAMS_CPPSTD=${YAMS_CPPSTD}; \
+  # Disable symbol extraction to avoid tree-sitter dependency issues in Docker
+  export YAMS_CONAN_EXTRA_OPTIONS="-o yams/*:enable_symbol_extraction=False"; \
   # Run setup.sh for dependency resolution and build configuration
   if ! ./setup.sh Release; then \
   echo 'Initial setup.sh failed; attempting retry with cache clean.'; \
