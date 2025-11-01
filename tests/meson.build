@@ -197,6 +197,7 @@ if get_option('enable-integration-tests') or get_option('buildtype') == 'debug'
   subdir('integration/smoke')
   subdir('integration/daemon')
   subdir('integration/cli')
+  subdir('integration/search')
 endif
 if get_option('enable-mobile-tests')
   subdir('mobile')
@@ -690,7 +691,16 @@ if catch2_dep.found()
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
-  
+
+  catch2_plugin_infrastructure_exe = executable('catch2_plugin_infrastructure',
+    files('unit/daemon/plugin_infrastructure_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: plugin_test_cpp_args,
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # Metadata Test Suites (4 executables)
   # --------------------------------------------------------------------------
   
@@ -804,7 +814,68 @@ if catch2_dep.found()
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
-  
+
+  grep_service_exe = executable('grep_service',
+    files('unit/app/services/grep_service_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  indexing_service_exe = executable('indexing_service',
+    files('unit/app/services/indexing_service_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  document_service_exe = executable('document_service',
+    files('unit/app/services/document_service_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  service_utilities_exe = executable('service_utilities',
+    files('unit/app/services/service_utilities_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  search_test_deps = [
+    dependency('spdlog'),
+    dependency('yams_core'),
+    dependency('yams_search'),
+    dependency('yams_vector'),
+    dependency('yams_metadata'),
+    dependency('yams_app_services'),
+    dependency('yams_api'),
+    boost_dep,
+  ]
+
+  # Re-enabled with mock-based tests disabled, placeholder integration test added
+  # TODO PBI-071: Implement full integration tests with real components
+  hybrid_search_exe = executable('hybrid_search',
+    files('unit/search/hybrid_search_comprehensive_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + search_test_deps + [
+      dependency('yams_daemon'),
+      dependency('yams_daemon_client'),
+    ],
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # Test Registrations
   # --------------------------------------------------------------------------
   
@@ -866,7 +937,39 @@ if catch2_dep.found()
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
-  
+
+  # Service tests
+  test('grep_service', grep_service_exe,
+    suite: ['catch2', 'unit', 'services', 'grep'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
+  test('indexing_service', indexing_service_exe,
+    suite: ['catch2', 'unit', 'services', 'indexing'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 180
+  )
+
+  test('document_service', document_service_exe,
+    suite: ['catch2', 'unit', 'services', 'document'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 180
+  )
+
+  test('service_utilities', service_utilities_exe,
+    suite: ['catch2', 'unit', 'services', 'utilities'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  # Search tests
+  test('hybrid_search', hybrid_search_exe,
+    suite: ['catch2', 'unit', 'search', 'hybrid'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
   # Daemon tests
   test('daemon_fsm_suite', catch2_daemon_fsm_exe,
     suite: ['catch2', 'unit', 'daemon', 'fsm'],
@@ -900,6 +1003,12 @@ if catch2_dep.found()
   
   test('daemon_plugin_harness', catch2_daemon_plugin_exe,
     suite: ['catch2', 'unit', 'daemon', 'plugin'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('plugin_infrastructure', catch2_plugin_infrastructure_exe,
+    suite: ['catch2', 'unit', 'daemon', 'plugin', 'infrastructure'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )

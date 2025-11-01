@@ -66,16 +66,6 @@ struct KGScoringConfig {
 };
 
 /**
- * Symbol query detection hints
- */
-struct SymbolQueryHints {
-    bool looksLikeSymbol = false;          // camelCase, snake_case, qualified names
-    bool hasQualifiers = false;            // Contains :: or . namespace separators
-    std::vector<std::string> symbolTokens; // Extracted symbol-like tokens
-    std::string detectedLanguage;          // Inferred language (cpp, python, etc.)
-};
-
-/**
  * Interface for Knowledge Graph Scoring.
  *
  * Implementations should:
@@ -112,14 +102,6 @@ public:
      * Implementations may return an empty vector if explanations are disabled.
      */
     virtual std::vector<KGExplain> getLastExplanations() const { return {}; }
-
-    /**
-     * Detect if query looks like a symbol search (PBI-059).
-     * Returns hints about symbol patterns in the query.
-     */
-    virtual SymbolQueryHints detectSymbolQuery(const std::string& /*query_text*/) const {
-        return SymbolQueryHints{};
-    }
 };
 
 } // namespace yams::search

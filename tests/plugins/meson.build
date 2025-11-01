@@ -2,6 +2,7 @@
 plugin_tests = files(
   'symbol_extractor_all_langs_test.cpp',
   'symbol_extractor_edge_cases_test.cpp',
+  'symbol_extractor_solidity_test.cpp',
   'onnx_request_plugin_test.cpp',
   'onnx_provider_plugin_test.cpp',
   '../test_main.cpp',
@@ -10,7 +11,7 @@ plugin_tests = files(
 # Define plugin path based on build directory and platform
 plugin_build_dir = meson.project_build_root()
 plugin_ext = host_machine.system() == 'darwin' ? '.dylib' : '.so'
-plugin_path = join_paths(plugin_build_dir, 'plugins/symbol_extractor_treesitter/libsymbol_extractor_treesitter' + plugin_ext)
+plugin_path = join_paths(plugin_build_dir, 'plugins/symbol_extractor_treesitter/yams_symbol_extractor' + plugin_ext)
 
 plugin_exe = executable('yams_plugin_tests', plugin_tests,
   include_directories: incs,

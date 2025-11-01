@@ -466,56 +466,6 @@ private:
         return elapsed > cfg_.budget;
     }
 
-    // Symbol query detection (PBI-059): Just check if KG resolves query to symbol nodes
-    SymbolQueryHints detectSymbolQuery(const std::string& query_text) const override {
-        SymbolQueryHints hints;
-
-        if (!store_) {
-            return hints;
-        }
-
-        // Tokenize and try resolving
-        auto tokens = tokenize(query_text);
-        hints.symbolTokens.reserve(tokens.size());
-
-        for (const auto& token : tokens) {
-            auto exact = store_->resolveAliasExact(token, 5);
-            if (!exact || exact.value().empty()) {
-                continue;
-            }
-
-            // Check if any resolved nodes are symbol types
-            for (const auto& ar : exact.value()) {
-                auto nodeRes = store_->getNodeById(ar.nodeId);
-                if (!nodeRes || !nodeRes.value().has_value()) {
-                    continue;
-                }
-
-                const auto& node = nodeRes.value().value();
-
-                // Check if node type is a code symbol
-                if (node.type &&
-                    (node.type == "function" || node.type == "class" || node.type == "method" ||
-                     node.type == "variable" || node.type == "typedef" || node.type == "macro")) {
-                    hints.looksLikeSymbol = true;
-                    hints.symbolTokens.push_back(token);
-
-                    // Check for qualifiers in node key
-                    if (node.nodeKey.find("::") != std::string::npos) {
-                        hints.hasQualifiers = true;
-                        hints.detectedLanguage = "cpp";
-                    } else if (node.nodeKey.find('.') != std::string::npos) {
-                        hints.hasQualifiers = true;
-                        hints.detectedLanguage = "python";
-                    }
-                    break; // Found symbol node for this token
-                }
-            }
-        }
-
-        return hints;
-    }
-
 private:
     KGScoringConfig cfg_{};
     std::shared_ptr<KnowledgeGraphStore> store_;

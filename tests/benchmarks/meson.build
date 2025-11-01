@@ -139,3 +139,26 @@ daemon_socket_accept_bench = executable('daemon_socket_accept_bench', files('dae
 )
 
 alias_target('bench_socket_accept', daemon_socket_accept_bench)
+
+# PBI-073: Symbol extraction benchmark (Catch2-based)
+# Validates symbol extraction quality (Recall/Precision/F1) and performance
+symbol_extraction_bench = executable('symbol_extraction_bench',
+  files('symbol_extraction_bench.cpp'),
+  include_directories: incs,
+  dependencies: [
+    dependency('catch2-with-main'),
+    dependency('nlohmann_json'),
+    dependency('spdlog'),
+  ] + tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  install: false,
+)
+
+# Register as Catch2 test (not a standard test, only run manually or in nightly CI)
+test('symbol_extraction_bench', symbol_extraction_bench,
+     suite: ['bench', 'symbol_extraction'],
+     is_parallel: false,
+     timeout: 300,
+     env: {'YAMS_AUTO_DOWNLOAD_GRAMMARS': '1', 'YAMS_SKIP_MODEL_LOADING': '1'})
+
+alias_target('bench_symbol_extraction', symbol_extraction_bench)

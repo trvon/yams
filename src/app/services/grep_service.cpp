@@ -1,8 +1,8 @@
+#include "../../cli/hot_cold_utils.h"
 #include <yams/app/services/grep_mode_tls.h>
 #include <yams/app/services/services.hpp>
 #include <yams/common/utf8_utils.h>
-// Hot/Cold mode helpers (env-driven)
-#include "../../cli/hot_cold_utils.h"
+#include <yams/core/cpp23_features.hpp>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
 #include <yams/search/search_engine_builder.h>
@@ -36,13 +36,25 @@ namespace yams::app::services {
 
 namespace {
 
-// Helper function to escape regex special characters
-static std::string escapeRegex(const std::string& text) {
-    static const std::string specialChars = "\\^$.|?*+()[]{}";
+static constexpr std::string_view kRegexSpecialChars = "\\^$.|?*+()[]{}";
+
+#if __cpp_lib_string_contains >= 202011L
+template <typename StringType, typename SubType>
+constexpr bool string_contains(const StringType& str, const SubType& substr) noexcept {
+    return str.contains(substr);
+}
+#else
+template <typename StringType, typename SubType>
+constexpr bool string_contains(const StringType& str, const SubType& substr) noexcept {
+    return str.find(substr) != StringType::npos;
+}
+#endif
+
+static std::string escapeRegex(std::string_view text) {
     std::string escaped;
     escaped.reserve(text.size() * 2);
     for (char c : text) {
-        if (specialChars.find(c) != std::string::npos) {
+        if (kRegexSpecialChars.find(c) != std::string_view::npos) {
             escaped += '\\';
         }
         escaped += c;
@@ -55,9 +67,12 @@ struct PathTreeConfigSettings {
     std::string mode{"fallback"};
 };
 
+static constexpr auto toLower = [](unsigned char c) constexpr noexcept {
+    return static_cast<char>(std::tolower(c));
+};
+
 static std::string toLowerCopy(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::transform(value.begin(), value.end(), value.begin(), toLower);
     return value;
 }
 
@@ -161,8 +176,8 @@ static PathTreeConfigSettings loadPathTreeConfigSettings() {
     return cfg;
 }
 
-static bool hasWildcard(const std::string& s) {
-    return s.find('*') != std::string::npos || s.find('?') != std::string::npos;
+static constexpr bool hasWildcard(std::string_view s) noexcept {
+    return s.find('*') != std::string_view::npos || s.find('?') != std::string_view::npos;
 }
 
 static std::string normalizePathForCompare(const std::string& path) {
@@ -232,8 +247,7 @@ static std::string normalizeForGlobMatch(const std::string& value) {
     return out;
 }
 
-// Helper to check if document has required tags
-static bool isTransientMetadataError(const Error& err) {
+static bool isTransientMetadataError(const Error& err) noexcept {
     switch (err.code) {
         case ErrorCode::NotInitialized:
         case ErrorCode::DatabaseError:
@@ -243,9 +257,8 @@ static bool isTransientMetadataError(const Error& err) {
             return true;
         case ErrorCode::InternalError: {
             const auto& msg = err.message;
-            return msg.find("database is locked") != std::string::npos ||
-                   msg.find("readonly") != std::string::npos ||
-                   msg.find("busy") != std::string::npos;
+            return string_contains(msg, "database is locked") || string_contains(msg, "readonly") ||
+                   string_contains(msg, "busy");
         }
         default:
             return false;
@@ -320,7 +333,7 @@ static bool pathFilterMatch(const std::string& filePath, const std::vector<std::
             auto normalizedFilter = normalizePathForCompare(f);
             if (normalizedFilter.empty())
                 continue;
-            if (normalizedDoc.find(normalizedFilter) != std::string::npos)
+            if (string_contains(normalizedDoc, normalizedFilter))
                 return true;
         }
     }
@@ -549,7 +562,7 @@ public:
                         } else {
                             const auto normalizedPattern = normalizeForGlobMatch(pattern);
                             if (!normalizedPattern.empty() &&
-                                docGlobPath.find(normalizedPattern) != std::string::npos) {
+                                string_contains(docGlobPath, normalizedPattern)) {
                                 matches = true;
                                 break;
                             }
@@ -729,7 +742,7 @@ public:
                         } else {
                             const auto normalizedPattern = normalizeForGlobMatch(pattern);
                             if (!normalizedPattern.empty() &&
-                                docGlobPath.find(normalizedPattern) != std::string::npos) {
+                                string_contains(docGlobPath, normalizedPattern)) {
                                 ok = true;
                                 break;
                             }
@@ -1095,7 +1108,7 @@ public:
                                     } else {
                                         const auto normalized = normalizeForGlobMatch(p);
                                         if (!normalized.empty() &&
-                                            pathGlob.find(normalized) != std::string::npos) {
+                                            string_contains(pathGlob, normalized)) {
                                             ok = true;
                                             break;
                                         }

@@ -839,70 +839,109 @@ void ServiceManager::shutdown() {
         return;
     }
 
-    spdlog::info("ServiceManager shutdown initiated");
+    spdlog::info("[ServiceManager] Shutdown initiated");
+    auto shutdownStart = std::chrono::steady_clock::now();
 
-    // Reset work guard to allow io_context to complete
-    if (workGuard_) {
-        workGuard_.reset();
-        spdlog::debug("ServiceManager: work guard reset");
-    }
-
-    // Cancel all asynchronous operations
-    shutdownSignal_.emit(boost::asio::cancellation_type::terminal);
-    if (ioContext_) {
-        ioContext_->stop();
-    }
-
-    // Join worker threads
-    for (auto& t : workers_) {
-        if (t.joinable()) {
-            t.join();
-        }
-    }
-
-    // Phase 1: Signal stop to session watcher early
-    try {
-        sessionWatchStop_.store(true, std::memory_order_relaxed);
-    } catch (...) {
-    }
-
-    // Phase 2: Stop application-level background task consumers
-    // This signals coroutines to exit gracefully
+    // Phase 1: Stop background task consumers FIRST (before io_context stop)
+    // This signals coroutines to exit gracefully before we stop the io_context
+    spdlog::info("[ServiceManager] Phase 1: Stopping background task manager");
+    auto phase1Start = std::chrono::steady_clock::now();
     if (backgroundTaskManager_) {
         try {
             backgroundTaskManager_->stop();
-            spdlog::debug("Background task manager stopped");
+            auto phase1Duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - phase1Start);
+            spdlog::info("[ServiceManager] Phase 1: Background task manager stopped ({}ms)",
+                         phase1Duration.count());
         } catch (const std::exception& e) {
-            spdlog::warn("Background task manager stop failed: {}", e.what());
+            spdlog::warn("[ServiceManager] Phase 1: Background task manager stop failed: {}",
+                         e.what());
         }
+    } else {
+        spdlog::info("[ServiceManager] Phase 1: No background task manager to stop");
     }
 
-    // Phase 5: Stop services in reverse dependency order
-    spdlog::debug("ServiceManager: Shutting down daemon resources");
+    // Phase 2: Signal stop to session watcher
+    spdlog::info("[ServiceManager] Phase 2: Stopping session watcher");
+    try {
+        sessionWatchStop_.store(true, std::memory_order_relaxed);
+        spdlog::info("[ServiceManager] Phase 2: Session watcher stop signal sent");
+    } catch (...) {
+        spdlog::warn("[ServiceManager] Phase 2: Session watcher stop failed");
+    }
 
+    // Phase 3: Reset work guard to allow io_context to complete
+    spdlog::info("[ServiceManager] Phase 3: Resetting work guard");
+    if (workGuard_) {
+        workGuard_.reset();
+        spdlog::info("[ServiceManager] Phase 3: Work guard reset");
+    } else {
+        spdlog::info("[ServiceManager] Phase 3: No work guard to reset");
+    }
+
+    // Phase 4: Cancel all asynchronous operations
+    spdlog::info("[ServiceManager] Phase 4: Cancelling async operations");
+    shutdownSignal_.emit(boost::asio::cancellation_type::terminal);
+    if (ioContext_) {
+        ioContext_->stop();
+        spdlog::info("[ServiceManager] Phase 4: io_context stop() called");
+    }
+
+    // Phase 5: Join worker threads (should exit cleanly now that coroutines are stopped)
+    spdlog::info("[ServiceManager] Phase 5: Joining {} worker threads", workers_.size());
+    auto workerJoinStart = std::chrono::steady_clock::now();
+    for (size_t i = 0; i < workers_.size(); ++i) {
+        if (workers_[i].joinable()) {
+            spdlog::info("[ServiceManager] Joining worker thread {}/{}", i + 1, workers_.size());
+            workers_[i].join();
+            spdlog::info("[ServiceManager] Worker thread {}/{} joined", i + 1, workers_.size());
+        }
+    }
+    auto workerJoinDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - workerJoinStart);
+    spdlog::info("[ServiceManager] Phase 5: All worker threads joined ({}ms)",
+                 workerJoinDuration.count());
+
+    // Phase 6: Stop services in reverse dependency order
+    spdlog::info("[ServiceManager] Phase 6: Shutting down daemon services");
+
+    spdlog::info("[ServiceManager] Phase 6.1: Stopping ingest service");
     if (ingestService_) {
         try {
             ingestService_->stop();
             ingestService_.reset();
+            spdlog::info("[ServiceManager] Phase 6.1: Ingest service stopped");
         } catch (const std::exception& e) {
-            spdlog::warn("IngestService shutdown failed: {}", e.what());
+            spdlog::warn("[ServiceManager] Phase 6.1: IngestService shutdown failed: {}", e.what());
         }
+    } else {
+        spdlog::info("[ServiceManager] Phase 6.1: No ingest service to stop");
     }
 
+    spdlog::info("[ServiceManager] Phase 6.2: Stopping entity graph service");
     if (entityGraphService_) {
         try {
             entityGraphService_->stop();
             entityGraphService_.reset();
+            spdlog::info("[ServiceManager] Phase 6.2: Entity graph service stopped");
         } catch (const std::exception& e) {
-            spdlog::warn("EntityGraphService shutdown failed: {}", e.what());
+            spdlog::warn("[ServiceManager] Phase 6.2: EntityGraphService shutdown failed: {}",
+                         e.what());
         }
+    } else {
+        spdlog::info("[ServiceManager] Phase 6.2: No entity graph service to stop");
     }
 
+    spdlog::info("[ServiceManager] Phase 6.3: Resetting post-ingest queue");
     if (postIngest_) {
         postIngest_.reset();
+        spdlog::info("[ServiceManager] Phase 6.3: Post-ingest queue reset");
+    } else {
+        spdlog::info("[ServiceManager] Phase 6.3: No post-ingest queue to reset");
     }
 
     // Persist vector index when ready
+    spdlog::info("[ServiceManager] Phase 6.4: Saving vector index");
     if (vectorIndexManager_ && state_.readiness.vectorIndexReady.load()) {
         try {
             auto indexPath = config_.dataDir / "vector_index.bin";
@@ -911,92 +950,162 @@ void ServiceManager::shutdown() {
             std::error_code ec;
             std::filesystem::create_directories(indexPath.parent_path(), ec);
 
-            spdlog::info("Saving vector index to '{}'", indexPath.string());
+            spdlog::info("[ServiceManager] Phase 6.4: Saving vector index to '{}'",
+                         indexPath.string());
             auto saveRes = vectorIndexManager_->saveIndex(indexPath.string());
 
             if (!saveRes) {
-                spdlog::warn("Failed to save vector index: {}", saveRes.error().message);
+                spdlog::warn("[ServiceManager] Phase 6.4: Failed to save vector index: {}",
+                             saveRes.error().message);
             } else {
                 auto stats = vectorIndexManager_->getStats();
-                spdlog::info("Vector index saved successfully ({} vectors)", stats.num_vectors);
+                spdlog::info(
+                    "[ServiceManager] Phase 6.4: Vector index saved successfully ({} vectors)",
+                    stats.num_vectors);
             }
         } catch (const std::exception& e) {
-            spdlog::warn("Vector index save exception: {}", e.what());
+            spdlog::warn("[ServiceManager] Phase 6.4: Vector index save exception: {}", e.what());
         }
+    } else {
+        spdlog::info("[ServiceManager] Phase 6.4: No vector index to save or not ready");
     }
 
     // Shutdown embedding generator (if any)
+    spdlog::info("[ServiceManager] Phase 6.5: Shutting down embedding generator");
     if (embeddingGenerator_) {
         embeddingGenerator_->shutdown();
         embeddingGenerator_.reset();
+        spdlog::info("[ServiceManager] Phase 6.5: Embedding generator shut down");
+    } else {
+        spdlog::info("[ServiceManager] Phase 6.5: No embedding generator to shut down");
     }
 
     // Shutdown model provider (unload models first, then shutdown)
+    spdlog::info("[ServiceManager] Phase 6.6: Shutting down model provider");
     if (modelProvider_) {
         try {
+            spdlog::debug("[ServiceManager] Phase 6.6.1: Getting loaded models list");
             auto loaded = modelProvider_->getLoadedModels();
+            spdlog::info("[ServiceManager] Phase 6.6.2: Unloading {} models", loaded.size());
             for (const auto& name : loaded) {
+                spdlog::debug("[ServiceManager] Phase 6.6.2: Unloading model '{}'", name);
                 auto ur = modelProvider_->unloadModel(name);
                 if (!ur) {
-                    spdlog::debug("Unload model {} failed: {}", name, ur.error().message);
+                    spdlog::debug("[ServiceManager] Unload model {} failed: {}", name,
+                                  ur.error().message);
+                } else {
+                    spdlog::debug("[ServiceManager] Model '{}' unloaded successfully", name);
                 }
             }
+            spdlog::info("[ServiceManager] Phase 6.6.3: All models unloaded, calling shutdown()");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 6.6: Exception during model unloading: {}",
+                         e.what());
         } catch (...) {
+            spdlog::warn("[ServiceManager] Phase 6.6: Unknown exception during model unloading");
         }
-        modelProvider_->shutdown();
-        modelProvider_.reset();
+
+        try {
+            spdlog::debug("[ServiceManager] Phase 6.6.4: Calling modelProvider_->shutdown()");
+            modelProvider_->shutdown();
+            spdlog::debug("[ServiceManager] Phase 6.6.5: modelProvider_->shutdown() returned");
+            modelProvider_.reset();
+            spdlog::info("[ServiceManager] Phase 6.6: Model provider shut down successfully");
+        } catch (const std::exception& e) {
+            spdlog::error("[ServiceManager] Phase 6.6: Exception during shutdown(): {}", e.what());
+            modelProvider_.reset(); // Force reset even if shutdown fails
+        } catch (...) {
+            spdlog::error("[ServiceManager] Phase 6.6: Unknown exception during shutdown()");
+            modelProvider_.reset(); // Force reset even if shutdown fails
+        }
+    } else {
+        spdlog::info("[ServiceManager] Phase 6.6: No model provider to shut down");
     }
 
     // Shutdown search engine
+    spdlog::info("[ServiceManager] Phase 6.7: Resetting search engine");
     if (searchEngine_) {
         searchEngine_.reset();
+        spdlog::info("[ServiceManager] Phase 6.7: Search engine reset");
+    } else {
+        spdlog::info("[ServiceManager] Phase 6.7: No search engine to reset");
     }
 
     // Shutdown retrieval sessions
+    spdlog::info("[ServiceManager] Phase 6.8: Resetting retrieval sessions");
     if (retrievalSessions_) {
         retrievalSessions_.reset();
+        spdlog::info("[ServiceManager] Phase 6.8: Retrieval sessions reset");
+    } else {
+        spdlog::info("[ServiceManager] Phase 6.8: No retrieval sessions to reset");
     }
 
     // Shutdown plugins (prefer ABI host)
+    spdlog::info("[ServiceManager] Phase 6.9: Unloading plugins");
     try {
         if (abiHost_) {
-            for (const auto& d : abiHost_->listLoaded()) {
+            auto loaded = abiHost_->listLoaded();
+            spdlog::info("[ServiceManager] Phase 6.9: Unloading {} plugins", loaded.size());
+            for (const auto& d : loaded) {
                 (void)abiHost_->unload(d.name);
             }
+            spdlog::info("[ServiceManager] Phase 6.9: All plugins unloaded");
+        } else {
+            spdlog::info("[ServiceManager] Phase 6.9: No ABI host, no plugins to unload");
         }
     } catch (...) {
+        spdlog::warn("[ServiceManager] Phase 6.9: Exception during plugin unloading");
     }
 
     // Shutdown connection pool and database
+    spdlog::info("[ServiceManager] Phase 7: Shutting down database");
     if (connectionPool_) {
         connectionPool_->shutdown();
         connectionPool_.reset();
+        spdlog::info("[ServiceManager] Phase 6: Connection pool shut down");
     }
     if (database_) {
         database_->close();
         database_.reset();
+        spdlog::info("[ServiceManager] Phase 6: Database closed");
+    } else {
+        spdlog::info("[ServiceManager] Phase 6: No database to close");
     }
 
     // Release all remaining resources
+    spdlog::info("[ServiceManager] Phase 8: Releasing remaining resources");
     searchExecutor_.reset();
+    spdlog::info("[ServiceManager] Phase 9.1: Search executor reset");
     metadataRepo_.reset();
+    spdlog::info("[ServiceManager] Phase 9.2: Metadata repository reset");
     vectorIndexManager_.reset();
+    spdlog::info("[ServiceManager] Phase 8.3: Vector index manager reset");
     contentStore_.reset();
+    spdlog::info("[ServiceManager] Phase 8.4: Content store reset");
 
     // Small ownership alignment: ensure plugin loader/hosts are released at stop
+    spdlog::info("[ServiceManager] Phase 9: Releasing plugin infrastructure");
     try {
         abiPluginLoader_.reset();
+        spdlog::info("[ServiceManager] Phase 9.1: ABI plugin loader reset");
     } catch (...) {
+        spdlog::warn("[ServiceManager] Phase 9.1: Exception resetting ABI plugin loader");
     }
     try {
         abiHost_.reset();
+        spdlog::info("[ServiceManager] Phase 9.2: ABI host reset");
     } catch (...) {
+        spdlog::warn("[ServiceManager] Phase 9.2: Exception resetting ABI host");
     }
 
-    spdlog::info("ServiceManager: All services have been shut down.");
+    auto shutdownDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - shutdownStart);
+    spdlog::info("[ServiceManager] Shutdown complete ({}ms total)", shutdownDuration.count());
+
     try {
         serviceFsm_.dispatch(ServiceManagerStoppedEvent{});
     } catch (...) {
+        spdlog::warn("[ServiceManager] Failed to dispatch ServiceManagerStoppedEvent");
     }
 }
 

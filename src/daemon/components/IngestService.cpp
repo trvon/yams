@@ -111,6 +111,10 @@ void IngestService::workerLoop(yams::compat::stop_token token) {
                                 sm_->enqueuePostIngest(hash, std::string());
                             }
                         }
+                    } else if (sm_ && !sm_->getPostIngestQueue()) {
+                        spdlog::warn("IngestService: PostIngestQueue unavailable - {} documents "
+                                     "from {} will not be indexed",
+                                     serviceResp.results.size(), req.path);
                     }
                 }
             } else {

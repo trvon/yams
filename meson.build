@@ -175,3 +175,44 @@ summary({
   'build_mcp_server': yams_build_mcp,
   'enable_tui': yams_enable_tui,
 }, section: 'YAMS Meson configuration', bool_yn: true)
+
+if get_option('b_coverage')
+  gcovr = find_program('gcovr', required: false)
+  if gcovr.found()
+    coverage_report_target = custom_target('coverage-report',
+      output: 'coverage-report.stamp',
+      command: [
+        gcovr,
+        '--root', meson.project_source_root(),
+        '--filter', join_paths(meson.project_source_root(), 'src'),
+        '--filter', join_paths(meson.project_source_root(), 'include'),
+        '--exclude', join_paths(meson.project_source_root(), 'src', 'benchmarks'),
+        '--html', '--html-details',
+        '--output', join_paths(meson.project_build_root(), 'coverage', 'index.html'),
+        meson.project_build_root(),
+      ],
+      build_by_default: false,
+      build_always_stale: true,
+    )
+
+    coverage_txt_target = custom_target('coverage-summary',
+      output: 'coverage.txt',
+      command: [
+        gcovr,
+        '--root', meson.project_source_root(),
+        '--filter', join_paths(meson.project_source_root(), 'src'),
+        '--filter', join_paths(meson.project_source_root(), 'include'),
+        '--exclude', join_paths(meson.project_source_root(), 'src', 'benchmarks'),
+        '--print-summary',
+        '--output', '@OUTPUT@',
+        meson.project_build_root(),
+      ],
+      build_by_default: false,
+      build_always_stale: true,
+    )
+
+    message('Coverage reporting configured. Run tests then: ninja -C builddir coverage-report')
+  else
+    warning('gcovr not found. Install gcovr to generate coverage reports.')
+  endif
+endif

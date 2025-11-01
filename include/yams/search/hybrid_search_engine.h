@@ -1,6 +1,7 @@
 #pragma once
 
 #include <yams/core/types.h>
+#include <yams/search/search_results.h>
 #include <yams/vector/vector_index_manager.h>
 
 #include <algorithm>
@@ -15,6 +16,10 @@
 
 namespace yams::vector {
 class EmbeddingGenerator;
+}
+
+namespace yams::metadata {
+class KnowledgeGraphStore;
 }
 
 namespace yams::search {
@@ -33,6 +38,8 @@ struct HybridSearchConfig {
     // KG-related weights (optional; considered when enable_kg=true)
     float kg_entity_weight = 0.0f;  // Weight for KG entity similarity score
     float structural_weight = 0.0f; // Weight for structural prior score (e.g., Node2Vec)
+    // Symbol enrichment weight (PBI-074)
+    float symbol_weight = 0.15f; // Boost for symbol matches (multiplicative)
 
     // Search parameters
     size_t vector_top_k = 50;  // Number of vector results to retrieve
@@ -43,9 +50,7 @@ struct HybridSearchConfig {
     enum class FusionStrategy {
         LINEAR_COMBINATION, // Weighted sum of scores
         RECIPROCAL_RANK,    // Reciprocal Rank Fusion (RRF)
-        LEARNED_FUSION,     // ML-based fusion (future)
-        CASCADE,            // Use vector search to rerank keyword results
-        HYBRID_CASCADE      // Two-stage: keyword filter then vector rerank
+        LEARNED_FUSION      // ML-based fusion (future)
     };
     FusionStrategy fusion_strategy = FusionStrategy::RECIPROCAL_RANK;
 
@@ -161,6 +166,9 @@ struct HybridSearchResult {
     std::map<std::string, std::string> metadata;
     std::vector<std::string> matched_keywords;
     std::vector<std::string> expanded_terms;
+
+    // Symbol-aware enrichment (PBI-074)
+    std::optional<SymbolContext> symbolContext;
 
     // Explanation of ranking
     struct Explanation {
@@ -326,6 +334,8 @@ public:
     void updateWeights(float vector_weight, float keyword_weight);
     // Inject KG scorer implementation (optional; used when config.enable_kg is true)
     void setKGScorer(std::shared_ptr<class KGScorer> kg_scorer);
+    // Inject symbol enricher (PBI-074; optional; enriches results with symbol metadata)
+    void setSymbolEnricher(std::shared_ptr<yams::metadata::KnowledgeGraphStore> kg_store);
 
     // Performance metrics
     struct SearchMetrics {

@@ -116,38 +116,163 @@ SymbolExtractor::Result SymbolExtractor::extractFunctions(const ExtractionContex
             // Function definitions: int foo() { ... }
             "(function_definition declarator: (function_declarator declarator: (identifier) "
             "@name))",
-            // Method definitions: class::method() { ... }
+            // Method definitions with qualified names: class::method() { ... }
+            // This also captures constructors like MyClass::MyClass()
             "(function_definition declarator: (function_declarator declarator: "
             "(qualified_identifier name: (identifier) @name)))",
-            // Simple function declarations: int foo();
-            "(function_declaration declarator: (identifier) @name)",
+            // Method definitions with field_identifier: void method() { ... }
+            "(function_definition declarator: (function_declarator declarator: (field_identifier) "
+            "@name))",
+            // Method declarations inside class bodies: void method();
+            // Also captures constructor declarations: MyClass();
+            "(field_declaration declarator: (function_declarator declarator: (field_identifier) "
+            "@name))",
+            // Constructor declarations inside class (alternative pattern)
+            "(field_declaration declarator: (function_declarator declarator: (identifier) @name))",
+            // Function declarations in headers: int foo();
+            "(declaration declarator: (function_declarator declarator: (identifier) @name))",
+            // Destructor definitions: ~Foo() { ... }
+            "(function_definition declarator: (function_declarator declarator: (destructor_name) "
+            "@name))",
+            // Destructor declarations inside class
+            "(field_declaration declarator: (function_declarator declarator: (destructor_name) "
+            "@name))",
+            // Operator overload definitions: operator==, operator+, etc.
+            "(function_definition declarator: (function_declarator declarator: (operator_name) "
+            "@name))",
+            // Operator overload declarations
+            "(field_declaration declarator: (function_declarator declarator: (operator_name) "
+            "@name))",
+            // Template function definitions: template<typename T> void foo() { ... }
+            "(template_declaration (function_definition declarator: (function_declarator "
+            "declarator: (identifier) @name)))",
+            // Template method definitions
+            "(template_declaration (function_definition declarator: (function_declarator "
+            "declarator: (qualified_identifier name: (identifier) @name))))",
+            // Template method declarations in class
+            "(template_declaration (field_declaration declarator: (function_declarator declarator: "
+            "(field_identifier) @name)))",
         };
     } else if (language == "python") {
         queries = {
+            // Function definitions
             "(function_definition name: (identifier) @name)",
+            // Async function definitions (same AST node type)
+            // Decorated functions
+            "(decorated_definition (function_definition name: (identifier) @name))",
+            // Class methods (also function_definition)
+            // Lambda expressions are unnamed, skip
         };
     } else if (language == "rust") {
         queries = {
+            // Function items (standalone functions)
             "(function_item name: (identifier) @name)",
+            // Associated functions (in impl blocks)
+            "(function_signature_item name: (identifier) @name)",
+            // Methods in impl blocks
+            "(impl_item (function_item name: (identifier) @name))",
+            // Trait methods
+            "(trait_item (function_signature_item name: (identifier) @name))",
         };
     } else if (language == "go") {
         queries = {
+            // Function declarations
             "(function_declaration name: (identifier) @name)",
+            // Method declarations with receiver
             "(method_declaration name: (field_identifier) @name)",
         };
-    } else if (language == "javascript" || language == "js") {
+    } else if (language == "javascript" || language == "js" || language == "typescript" ||
+               language == "ts") {
         queries = {
+            // Function declarations: function foo() {}
             "(function_declaration name: (identifier) @name)",
+            // Method definitions in classes: class { method() {} }
             "(method_definition name: (property_identifier) @name)",
+            // Arrow functions assigned to variables: const foo = () => {}
+            "(variable_declarator name: (identifier) @name value: (arrow_function))",
+            // Function expressions: const foo = function() {}
+            "(variable_declarator name: (identifier) @name value: (function))",
+            // Generator functions: function* foo() {}
+            "(generator_function_declaration name: (identifier) @name)",
+            // Async functions: async function foo() {}
+            "(function_declaration name: (identifier) @name)",
+        };
+    } else if (language == "java") {
+        queries = {
+            // Method declarations
+            "(method_declaration name: (identifier) @name)",
+            // Constructor declarations
+            "(constructor_declaration name: (identifier) @name)",
+        };
+    } else if (language == "csharp" || language == "cs") {
+        queries = {
+            // Method declarations
+            "(method_declaration name: (identifier) @name)",
+            // Constructor declarations
+            "(constructor_declaration name: (identifier) @name)",
+            // Destructor declarations
+            "(destructor_declaration name: (identifier) @name)",
+            // Property declarations
+            "(property_declaration name: (identifier) @name)",
+        };
+    } else if (language == "php") {
+        queries = {
+            // Function definitions
+            "(function_definition name: (name) @name)",
+            // Method declarations
+            "(method_declaration name: (name) @name)",
+        };
+    } else if (language == "kotlin" || language == "kt") {
+        queries = {
+            // Function declarations: fun foo() {}
+            "(function_declaration (simple_identifier) @name)",
+            // Secondary/companion object functions
+            "(property_declaration (variable_declaration (simple_identifier) @name))",
+        };
+    } else if (language == "perl" || language == "pl") {
+        queries = {
+            // Subroutine definitions
+            "(subroutine_declaration_statement name: (identifier) @name)",
+        };
+    } else if (language == "r") {
+        queries = {
+            // Function definitions with <-
+            "(binary_operator lhs: (identifier) @name operator: \"<-\")",
+            // Function definitions with =
+            "(binary_operator lhs: (identifier) @name operator: \"=\")",
+        };
+    } else if (language == "sql") {
+        queries = {
+            // CREATE FUNCTION
+            "(create_function_statement name: (identifier) @name)",
+            // CREATE PROCEDURE
+            "(create_procedure_statement name: (identifier) @name)",
+        };
+    } else if (language == "sol" || language == "solidity") {
+        queries = {
+            // Regular functions
+            "(function_definition name: (identifier) @name)",
+            // Constructors (may have optional name)
+            "(constructor_definition)",
+            // Fallback/receive functions
+            "(fallback_receive_definition)",
+            // Modifiers
+            "(modifier_definition name: (identifier) @name)",
         };
     }
 
-    // Execute queries
+    // Execute queries - try all patterns to get comprehensive coverage
+    bool any_query_succeeded = false;
     for (auto query : queries) {
         if (executeQuery(ctx, query, "function", result.symbols)) {
-            // Query succeeded, don't try recursive traversal
-            return result;
+            any_query_succeeded = true;
+            // Continue trying other queries to capture all symbol types
         }
+    }
+
+    // If any query succeeded, return accumulated results
+    if (any_query_succeeded) {
+        return result;
     }
 
     // Fallback: recursive traversal
@@ -253,24 +378,117 @@ SymbolExtractor::Result SymbolExtractor::extractClasses(const ExtractionContext&
     std::string_view language = ctx.language;
     std::vector<std::string_view> queries;
 
-    if (language == "cpp" || language == "c++") {
+    if (language == "cpp" || language == "c++" || language == "c") {
         queries = {
+            // Class specifiers
             "(class_specifier name: (type_identifier) @name)",
+            // Struct specifiers
             "(struct_specifier name: (type_identifier) @name)",
+            // Union specifiers
+            "(union_specifier name: (type_identifier) @name)",
+            // Enum specifiers
+            "(enum_specifier name: (type_identifier) @name)",
+            // Template class declarations
+            "(template_declaration (class_specifier name: (type_identifier) @name))",
+            // Template struct declarations
+            "(template_declaration (struct_specifier name: (type_identifier) @name))",
         };
     } else if (language == "python") {
         queries = {
+            // Class definitions
             "(class_definition name: (identifier) @name)",
+            // Decorated class definitions
+            "(decorated_definition (class_definition name: (identifier) @name))",
+        };
+    } else if (language == "rust") {
+        queries = {
+            // Struct items
+            "(struct_item name: (type_identifier) @name)",
+            // Enum items
+            "(enum_item name: (type_identifier) @name)",
+            // Trait items
+            "(trait_item name: (type_identifier) @name)",
+        };
+    } else if (language == "go") {
+        queries = {
+            // Type declarations (structs, interfaces)
+            "(type_declaration (type_spec name: (type_identifier) @name))",
         };
     } else if (language == "java") {
         queries = {
+            // Class declarations
             "(class_declaration name: (identifier) @name)",
+            // Interface declarations
             "(interface_declaration name: (identifier) @name)",
+            // Enum declarations
+            "(enum_declaration name: (identifier) @name)",
+            // Annotation type declarations
+            "(annotation_type_declaration name: (identifier) @name)",
+        };
+    } else if (language == "javascript" || language == "js" || language == "typescript" ||
+               language == "ts") {
+        queries = {
+            // Class declarations
+            "(class_declaration name: (identifier) @name)",
+            // Class expressions
+            "(class name: (identifier) @name)",
+        };
+    } else if (language == "typescript" || language == "ts") {
+        queries = {
+            // Interface declarations
+            "(interface_declaration name: (type_identifier) @name)",
+            // Type alias declarations
+            "(type_alias_declaration name: (type_identifier) @name)",
+            // Enum declarations
             "(enum_declaration name: (identifier) @name)",
         };
-    } else if (language == "javascript" || language == "js" || language == "js") {
+    } else if (language == "csharp" || language == "cs") {
         queries = {
+            // Class declarations
             "(class_declaration name: (identifier) @name)",
+            // Struct declarations
+            "(struct_declaration name: (identifier) @name)",
+            // Interface declarations
+            "(interface_declaration name: (identifier) @name)",
+            // Enum declarations
+            "(enum_declaration name: (identifier) @name)",
+            // Record declarations
+            "(record_declaration name: (identifier) @name)",
+        };
+    } else if (language == "php") {
+        queries = {
+            // Class declarations
+            "(class_declaration name: (name) @name)",
+            // Interface declarations
+            "(interface_declaration name: (name) @name)",
+            // Trait declarations
+            "(trait_declaration name: (name) @name)",
+            // Enum declarations (PHP 8.1+)
+            "(enum_declaration name: (name) @name)",
+        };
+    } else if (language == "kotlin" || language == "kt") {
+        queries = {
+            // Class declarations
+            "(class_declaration (type_identifier) @name)",
+            // Object declarations
+            "(object_declaration (type_identifier) @name)",
+            // Interface declarations
+            "(interface_declaration (type_identifier) @name)",
+        };
+    } else if (language == "sol" || language == "solidity") {
+        queries = {
+            // Contract declarations
+            "(contract_declaration name: (identifier) @name)",
+            // Interface declarations
+            "(interface_declaration name: (identifier) @name)",
+            // Library declarations
+            "(library_declaration name: (identifier) @name)",
+            // Struct declarations
+            "(struct_declaration name: (identifier) @name)",
+            // Enum declarations
+            "(enum_declaration name: (identifier) @name)",
+            // Event declarations
+            "(event_definition name: (identifier) @name)",
         };
     }
 
@@ -398,22 +616,53 @@ SymbolExtractor::extractCallRelations(const ExtractionContext& ctx,
 
     if (lang == "cpp" || lang == "c++" || lang == "c") {
         call_patterns = {
+            // Direct function calls: foo()
             "(call_expression function: (identifier) @callee)",
+            // Method calls: obj.method()
             "(call_expression function: (field_expression field: (field_identifier) @callee))",
+            // Qualified calls: Class::method()
             "(call_expression function: (qualified_identifier name: (identifier) @callee))",
         };
     } else if (lang == "python") {
         call_patterns = {
-            "(call_expression function: (identifier) @callee)",
-            "(call_expression function: (attribute attribute: (identifier) @callee))",
+            // Direct function calls: foo()
+            "(call function: (identifier) @callee)",
+            // Attribute calls: obj.method()
+            "(call function: (attribute attribute: (identifier) @callee))",
         };
     } else if (lang == "rust") {
         call_patterns = {
+            // Direct function calls: foo()
             "(call_expression function: (identifier) @callee)",
+            // Method calls: obj.method()
+            "(call_expression function: (field_expression field: (field_identifier) @callee))",
         };
     } else if (lang == "go") {
         call_patterns = {
+            // Direct function calls: foo()
             "(call_expression function: (identifier) @callee)",
+            // Method calls: obj.method()
+            "(call_expression function: (selector_expression field: (field_identifier) @callee))",
+        };
+    } else if (lang == "javascript" || lang == "js" || lang == "typescript" || lang == "ts") {
+        call_patterns = {
+            // Direct function calls: foo()
+            "(call_expression function: (identifier) @callee)",
+            // Method calls: obj.method()
+            "(call_expression function: (member_expression property: (property_identifier) "
+            "@callee))",
+        };
+    } else if (lang == "java") {
+        call_patterns = {
+            // Method calls
+            "(method_invocation name: (identifier) @callee)",
+        };
+    } else if (lang == "sol" || lang == "solidity") {
+        call_patterns = {
+            // Direct function calls: foo()
+            "(call_expression function: (identifier) @callee)",
+            // Method calls: obj.method()
+            "(call_expression function: (member_expression property: (identifier) @callee))",
         };
     }
 

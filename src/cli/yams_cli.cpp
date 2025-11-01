@@ -406,7 +406,7 @@ int YamsCLI::run(int argc, char* argv[]) {
             std::promise<Result<void>> prom;
             auto fut = prom.get_future();
             boost::asio::co_spawn(
-                yams::daemon::GlobalIOContext::global_executor(),
+                executor_,
                 [this, &prom]() -> boost::asio::awaitable<void> {
                     auto r = co_await pendingCommand_->executeAsync();
                     prom.set_value(std::move(r));

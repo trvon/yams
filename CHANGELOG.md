@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
-## [v0.7.7] - Unreleased
+## [v0.7.7] - November 1, 2025
 
 ### Added
 - **ServiceManager & Daemon Lifecycle Improvements**
@@ -33,7 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Usage: `yams doctor prune --category build-artifacts --older-than 30d --apply`
 - Started C++23 Compatibility support expansion
 - Migrated vectordb to [https://github.com/trvon/sqlite-vec-cpp](https://github.com/trvon/sqlite-vec-cpp)
-- **Tree-sitter Symbol Extraction Plugin**: C-ABI based plugin system for multi-language symbol extraction
+- **Tree-sitter Symbol Extraction Plugin** (PBI-073): Enhanced multi-language symbol extraction with Solidity support
+  - **Solidity Support**: Added complete Solidity language support with 4 query patterns (functions, constructors, modifiers, fallback/receive)
+  - **Enhanced C++ Patterns**: 16 function patterns + 6 class patterns including templates, constructors, destructors, operator overloads, method declarations inside class bodies
+  - **Multi-Language Improvements**: Enhanced patterns for Python (decorated functions), Rust (impl/trait methods), JavaScript/TypeScript (arrow functions, generators, async), Kotlin (property declarations) across all 15 supported languages
+  - **Critical Bug Fix**: Fixed query execution early-return bug that caused pattern short-circuiting - now executes all patterns resulting in **2.2x recall improvement** (20.6% → 45.1%)
+  - **Benchmark Infrastructure**: Catch2-based benchmark suite with quality metrics (Recall/Precision/F1), performance metrics (Throughput/Latency), and JSON output for CI integration
+  - **GTest Suite**: 7 Solidity tests covering ERC20 tokens, inheritance, interfaces, events, and modifiers (372 lines, all passing)
   - Plugin auto-downloads tree-sitter grammars on first use (configurable via `plugins.symbol_extraction.auto_download_grammars`)
   - CLI commands: `yams config grammar list/download/path/auto-enable/auto-disable`
   - Supports tree-sitter v13-15 grammar versions
@@ -48,8 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Migration includes tests for both schema changes and symbol metadata storage
 - **Symbol-Aware Search Infrastructure**: Enhanced search with symbol/entity detection and enrichment
   - `SymbolEnricher` class extracts rich metadata from Knowledge Graph (definitions, references, call graphs)
-  - `KGScorer::detectSymbolQuery()` uses KG queries to identify symbol searches (no pattern matching)
   - Symbol context includes type, scope, caller/callee counts, and related symbols
+  - **Hybrid Search Symbol Integration**: Symbol metadata now actively boosts search ranking
+    - Added `symbol_weight` configuration field (default: 0.15 = 15% multiplicative boost)
+    - `HybridSearchEngine::setSymbolEnricher()` method wires SymbolEnricher into search pipeline
+    - Symbol matches receive score boost when `isSymbolQuery && symbolScore > 0.3`
 
 ### Fixed
 - **Worker Thread Premature Exit**: Fixed io_context workers exiting immediately on startup by adding `executor_work_guard` to keep the context alive until explicit shutdown.
@@ -88,11 +97,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Improved load diagnostics: detailed logs for ABI table pointers, phases, and timeout causes
 - **Search Service Path Heuristic**: Tightened path-first detection to only trigger for single-token or quoted path-like queries (slashes, wildcards, or extensions). Multi-word queries now proceed to hybrid/metadata search, restoring results for phrases such as `"docs/delivery backlog prd tasks PBI"` while preserving fast path lookups for actual paths.
 
-### Fixed
 - Daemon stop reliability: `yams daemon stop` now only reports success after the process actually exits and will fall back to PID-based termination (and orphan cleanup) when the socket path is unresponsive.
 - Prompt termination on signals: the daemon now handles SIGTERM/SIGINT to exit promptly when graceful shutdown isn't possible, addressing lingering yams-daemon processes after stop.
+- **Hybrid Search Simplification**: Removed complexity and environment variable overrides
+  - Removed 6 environment variables: `YAMS_DISABLE_KEYWORD`, `YAMS_DISABLE_ONNX`, `YAMS_DISABLE_KG`, `YAMS_ADAPTIVE_TUNING`, `YAMS_FUSION_WEIGHTS`, `YAMS_OVERRELIANCE_PENALTY`
+  - Kept `YAMS_DISABLE_VECTOR` for CI compatibility
+  - Removed adaptive weight tuning logic (~30 LOC)
+  - Removed over-reliance penalty mechanism
+  - Keyword search now always executes (controlled by `config.keyword_weight`)
+  - Fixed fusion weights for `LEARNED_FUSION` strategy: `{-2.0f, 3.0f, 2.0f, 1.5f, 1.0f}`
 
-## Removed
+### Removed
 - Removed WASM, and legacy plugin system from codebase and ServiceManager
 
 ## [v0.7.6] - 10-13-2025
@@ -131,71 +146,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Database Schema Compatibility**: Fixed "constraint failed" errors during document insertion on databases with migration v12 (pre-path-indexing schema). The `insertDocument()` function now conditionally builds INSERT statements based on the `hasPathIndexing_` flag, supporting both legacy (13-column) and modern (17-column with path indexing) schemas. This allows YAMS to work correctly regardless of whether migration v13 has been applied. (`src/metadata/metadata_repository.cpp:318-380`)
 - **MCP Protocol Version Negotiation**: Fixed "Unsupported protocol version requested by client" error (code -32901) by making protocol version negotiation permissive by default (`strictProtocol_ = false`). The server now gracefully accepts any protocol version requested by clients, falling back to the latest supported version (`2025-03-26`) if the requested version is not in the supported list. Also added intermediate MCP protocol versions (`2024-12-05`, `2025-01-15`) to the supported list. This ensures maximum compatibility with MCP clients regardless of which spec version they implement. (`src/mcp/mcp_server.cpp:560,1254-1260`)
 
-
-## [v0.7.4] - 2025-10-010
-
-### Changed
-- **MetadataRepository**: Added atomic counters (`cachedDocumentCount_`, `cachedIndexedCount_`, `cachedExtractedCount_`) updated on every insert/delete/update operation. Eliminated 3 `COUNT(*)` queries from hot path (220-400ms → <1μs)
-- **VectorDatabase**: Added `cachedVectorCount_` atomic counter updated on insert/delete operations. Eliminated `COUNT(*)` query from `getVectorCount()` 
-- **ServiceManager Concurrency**: Converted `searchEngineMutex_` from `std::mutex` to `std::shared_mutex` enabling N concurrent readers with single exclusive writer. Allows parallel status requests without serialization bottleneck
-- **Status Request Optimization**: Removed blocking VectorDatabase initialization from hot path. Status handler now reports readiness accurately without attempting to "fix" uninitialized state, eliminating 1-5s blocking operations
-- **Performance**: Sequential request throughput improved to ~1960 req/s with sub-millisecond latency (avg: 0.02ms, max: 1ms). First connection latency: 2ms. Daemon readiness validation added to prevent test methodology races with initialization
-- **Document Retrieval Optimization**: Replaced O(n) full table scans with O(log n) indexed lookups in `cat`/`get` operations. Changed from `queryDocumentsByPattern('%')` → `getDocumentByHash(hash)` eliminating 120K+ document scans per retrieval (lines 850, 934 in document_service.cpp)
-- **Name Resolution Fix**: Fixed pattern generation for basename-only queries. Now generates `'%/basename'` pattern FIRST to use `containsFragment` query instead of failing `exactPath` (path_hash) match. `yams get --name` and `yams cat <name>` now work correctly
-- **Grep FTS-First**: Optimized grep to START with FTS5 index search for literal patterns before falling back to full document scan. Regex patterns still use full scan. Significantly improves grep performance on large repositories
-- **ONNX Plugin**: Upgraded the ONNX plugin to conform to the modern `model_provider_v1` (v1.2) interface specification.
-- Enhanced `ui_helpers.hpp` with 30+ new utilities: value formatters (`format_bytes`, `format_number`, `format_duration`, `format_percentage`), status indicators (`status_ok`, `status_warning`, `status_error`), table rendering (`Table`, `render_table`), progress bars, text utilities (word wrap, centering, indentation)
-- Improved `yams status` with color-coded severity indicators, human-readable formatting, and sectioned layout
-- Enhanced `yams daemon status` with humanized counter names (CAS, IPC, EMA, DB acronyms preserved), smart byte/number formatting
-- Added `yams daemon status -d` detailed view with storage overhead breakdown showing disk usage by component (CAS blocks, ref counter DB, metadata DB, vector DB, vector index) with overhead percentage relative to content
-
-### Deprecated
-- **MCP `get_by_name` tool**: Use `get` tool with `name` parameter instead. The `get` tool now smartly handles both hash and name lookups with optimized pattern matching
-
-- **Streaming Protocol Bug**: Fixed critical bug where `GetResponse`/`CatResponse` sent header-only frame (empty content) followed by data frame, causing CLI to process first frame and fail. Added `force_unary_response` check in request_handler.cpp to disable streaming for these response types, forcing single complete frame transmission
-- **Protobuf Schema**: Added missing `bool has_content = 6` field to `GetResponse` message in ipc_envelope.proto. Updated serialization to explicitly set/read flag instead of recalculating, preventing desync between daemon and CLI
-- **Daemon**: Fixed a regression in the plugin loader that prevented legacy model provider plugins (like the ONNX provider) from being correctly detected and adopted. The loader now includes a fallback to detect and register providers using the legacy `getProviderName`/`createProvider` symbols, restoring embedding generation functionality.
-- **Grep Service**: Fixed critical bug where `--paths-only` mode returned all candidate documents without checking pattern matches, causing incorrect "(no results)" responses. Removed premature fast-exit optimization; grep now properly runs pattern matching and returns only files that match. (Issue: 135K docs indexed but grep returned empty, audit revealed fast-exit bypassed validation)
-- **Grep CLI**: Fixed session pattern handling bug where session include patterns were incorrectly used as document selectors instead of result filters. Session patterns now properly merged into `includePatterns` for filtering, not `paths` for selection. This prevented grep from finding any results when a session was active.
-
-## [v0.7.3] - 2025-10-08
-
-### Added
-- Bench: minimal daemon warm-start latency check moved to an opt-in bench target and suite.
-  - New standalone binary `tests/yams_bench_daemon_warm` executes a bounded start/sleep/stop
-    cycle with vectors disabled and tight init timeouts; asserts <5s end-to-end.
-  - Meson test registered as `bench_daemon_warm_latency` in the `yams:bench` suite.
-  - Disabled by default in CI; enable by setting `RUN_DAEMON_WARM_BENCH=true` (workflow env)
-    and `YAMS_ENABLE_DAEMON_BENCH=1` (step env) to run only this bench.
-- Tree-Diff Metadata & Retrieval Modernization🎉
-  - **Tree-based snapshot comparison**: Implemented Merkle tree-based diff algorithm for efficient snapshot comparison with O(log n) subtree hash optimization for unchanged directories.
-  - **Rename detection**: Hash-based rename/move detection with ≥99% accuracy, enabled by default in `yams diff` command.
-  - **Knowledge Graph integration**: Path and blob nodes with version edges and rename tracking via `fetchPathHistory()` API.
-  - **Enhanced graph command**: `yams graph` now queries KG store for same-content relationships and rename chains.
-  - **Tree diff as default**: `yams diff` uses tree-based comparison by default; `--flat-diff` flag available for legacy behavior.
-  - **RPC/IPC exposure**: Added `ListTreeDiff` method to daemon protocol (protobuf + binary serialization).
-
-### Changed
-- **Daemon Async Architecture**: Unified on modern Boost.Asio 1.82+ patterns with C++20 coroutines (`asio::awaitable`)
-  - Single io_context with work guard for all async operations
-  - Strands for logical separation (init, plugin, model domains)
-  - RAII cleanup guards for automatic resource management
-  - Error codes via `as_tuple` instead of exceptions for hot paths
-  - Semaphore-based bounded concurrency instead of manual atomic flags
-- **Compression-first retrieval** DocumentService, CLI, and daemon IPC now default to
-  returning compressed payloads with full metadata (algorithm, CRC32s, sizes)
-- **Path query pipeline**: Replaced the legacy `findDocumentsByPath` helper with the normalized `queryDocuments` API and the shared `queryDocumentsByPattern` utility. All services (daemon, CLI, MCP, mobile bindings, repair tooling, vector ingestion) now issue structured queries that leverage the `path_prefix`, `reverse_path`, and `path_hash` indexes plus FTS5 for suffix matches, eliminating full-table LIKE scans.
-- **Schema migration**: Migration v13 (`Add path indexing schema`) continues to govern the derived columns/indices; applying this release replays the up hook in place (normalizing existing rows and rebuilding the FTS table), so existing deployments automatically benefit from the optimized lookups after the usual migration step.
-- **CLI Retrieval (get/cat)**: partial-hash resolution now routes through `RetrievalService`
-  using the daemon’s streaming search and the metadata-layer hash-prefix index.
-  - `yams get` and `yams cat` accept 6–64 hex prefixes; ambiguity can be resolved via
-    `--latest/--oldest`. No more local metadata table scans; latency improves especially on
-    large catalogs.
-  - Internals: `RetrievalService::resolveHashPrefix` consumes `SearchService` hash results and applies newest/oldest selection hints; `GetCommand` validates and normalizes hash input before issuing a daemon `Get`.
-
-### Fixed
-- **Daemon IPC:** Fixed a regression in the `grep` IPC protocol where `GrepRequest` and `GrepResponse` messages were not fully serialized, causing data loss. The protocol definitions and serializers have been updated to correctly handle all fields, including `show_diff` in requests and detailed statistics in responses.
-- **Indexing**: Fixed an issue where updated files were not being re-indexed. The change detection logic now correctly considers file modification time and size, in addition to content hash, to reliably identify changes.
-- **Indexing**: Corrected the document update process to prevent duplicate records for the same file path when a file is updated. The indexer now properly distinguishes between new documents and updates to existing ones.
-- **Daemon IPC**: Fixed an issue where `search` and `grep` commands could time out without producing output by improving the efficiency of the daemon's streaming response mechanism.
-- **Daemon IPC**: Optimized non-multiplexed communication paths to prevent performance issues and potential timeouts with large responses from commands like `get` and `cat`.

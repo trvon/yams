@@ -84,9 +84,9 @@ void assert_has_kind(yams_symbol_extraction_result_v1* out, const char* kind,
 std::optional<PluginAPI> loadPlugin() {
 #ifndef PLUGIN_PATH
 #ifdef __APPLE__
-    const char* libname = "libsymbol_extractor_treesitter.dylib";
+    const char* libname = "yams_symbol_extractor.dylib";
 #else
-    const char* libname = "libsymbol_extractor_treesitter.so";
+    const char* libname = "yams_symbol_extractor.so";
 #endif
     const char* buildroot_env = std::getenv("MESON_BUILD_ROOT");
     std::vector<std::string> paths;
@@ -110,9 +110,9 @@ std::optional<PluginAPI> loadPlugin() {
     std::optional<PluginAPI> plug = load_extractor(PLUGIN_PATH);
     if (!plug.has_value()) {
 #ifdef __APPLE__
-        const char* libname = "libsymbol_extractor_treesitter.dylib";
+        const char* libname = "yams_symbol_extractor.dylib";
 #else
-        const char* libname = "libsymbol_extractor_treesitter.so";
+        const char* libname = "yams_symbol_extractor.so";
 #endif
         const char* buildroot_env = std::getenv("MESON_BUILD_ROOT");
         std::vector<std::string> paths;

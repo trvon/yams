@@ -345,11 +345,20 @@ Result<void> YamsDaemon::start() {
                 }
                 reloadRequested_.store(false, std::memory_order_relaxed);
             }
-            // Deferred background tasks: require FSM Ready and searchEngineReady
+            // Deferred background tasks: require FSM Ready
+            // Note: RepairCoordinator triggers lazy-loading of embeddings/vector DB,
+            // so we start it when FSM is Ready rather than waiting for searchEngineReady.
+            // This breaks the circular dependency where search engine waits for embeddings
+            // which wait for RepairCoordinator which waits for search engine.
             auto snap = lifecycleFsm_.snapshot();
-            if (snap.state == LifecycleState::Ready && state_.readiness.searchEngineReady.load()) {
+            spdlog::debug(
+                "[DaemonLoop] FSM state={}, enableAutoRepair={}, repairCoordinator_exists={}",
+                static_cast<int>(snap.state), config_.enableAutoRepair,
+                (repairCoordinator_ != nullptr));
+            if (snap.state == LifecycleState::Ready) {
                 // Start RepairCoordinator if enabled
                 if (config_.enableAutoRepair && !repairCoordinator_) {
+                    spdlog::info("[DaemonLoop] Starting RepairCoordinator...");
                     try {
                         RepairCoordinator::Config rcfg;
                         rcfg.enable = true;

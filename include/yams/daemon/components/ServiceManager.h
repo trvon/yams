@@ -208,6 +208,11 @@ public:
                 hash, mime, /*session*/ "", {}, PostIngestQueue::Task::Stage::Metadata};
             postIngest_->enqueue(std::move(t));
             postIngest_->notifyWorkers();
+        } else {
+            // Warn if PostIngestQueue is not yet initialized (async init not complete)
+            spdlog::warn("PostIngestQueue not available - document {} will not be indexed. "
+                         "Async initialization may not be complete.",
+                         hash);
         }
     }
     // Phase 2.4: Delegate to SearchEngineManager

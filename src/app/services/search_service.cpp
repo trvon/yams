@@ -495,38 +495,16 @@ public:
         }
 
         if (type == "hybrid" || type == "semantic") {
-            if (degraded_) {
-                spdlog::warn("SearchService: degraded mode active{}",
+            if (degraded_ || !ctx_.hybridEngine) {
+                spdlog::warn("SearchService: hybrid/semantic search not ready{}",
                              repairDetails_.empty() ? "" : (std::string(": ") + repairDetails_));
-                result = metadataSearch(normalizedReq, &metadataTelemetry);
-                if (result) {
-                    auto resp = std::move(result).value();
-                    resp.queryInfo =
-                        std::string("degraded mode — using metadata fallback") +
-                        (repairDetails_.empty() ? "" : (std::string(" (") + repairDetails_ + ")"));
-                    resp.searchStats["mode"] = "degraded";
-                    if (!repairDetails_.empty())
-                        resp.searchStats["repair_details"] = repairDetails_;
-                    if (ctx_.searchRepairProgress > 0)
-                        resp.searchStats["repair_progress"] =
-                            std::to_string(ctx_.searchRepairProgress);
-                    maybeEmitJson(req, resp);
-                    result = Result<SearchResponse>(std::move(resp));
-                }
-            } else if (ctx_.hybridEngine) {
-                result = hybridSearch(normalizedReq, parsed.scope, &metadataTelemetry,
-                                      normalizedReq.pathPattern);
-            } else {
-                spdlog::warn("Hybrid engine unavailable, using metadata fallback");
-                result = metadataSearch(normalizedReq, &metadataTelemetry);
-                if (result) {
-                    auto resp = std::move(result).value();
-                    resp.searchStats["mode"] = "degraded";
-                    resp.queryInfo = "hybrid unavailable — metadata fallback";
-                    maybeEmitJson(req, resp);
-                    result = Result<SearchResponse>(std::move(resp));
-                }
+                co_return Error{
+                    ErrorCode::InvalidState,
+                    "Hybrid/semantic search not ready" +
+                        (repairDetails_.empty() ? std::string{} : (" - " + repairDetails_))};
             }
+            result = hybridSearch(normalizedReq, parsed.scope, &metadataTelemetry,
+                                  normalizedReq.pathPattern);
         } else {
             result = metadataSearch(normalizedReq, &metadataTelemetry);
         }

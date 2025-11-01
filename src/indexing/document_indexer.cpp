@@ -147,6 +147,8 @@ public:
             docInfo.filePath = path.string();
             docInfo.fileName = path.filename().string();
             docInfo.fileExtension = path.extension().string();
+            docInfo.mimeType =
+                signatureResult.value().mimeType; // Use detected MIME type from magic numbers
             docInfo.fileSize = static_cast<int64_t>(fileSize);
             {
                 auto derived = metadata::computePathDerivedValues(docInfo.filePath);

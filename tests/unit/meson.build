@@ -19,18 +19,17 @@ unit_api = files(
 )
 
 unit_app_services = files(
-  'app/services/document_service_test.cpp',
-  'app/services/document_service_errors_test.cpp',
-  'app/services/grep_service_test.cpp',
-  'app/services/grep_service_edge_cases_test.cpp',
-  'app/services/grep_service_unicode_test.cpp',
-  'app/services/indexing_service_test.cpp',
+  # Migrated to Catch2 - see tests/meson.build
+  # 'app/services/document_service_test.cpp',
+  # 'app/services/document_service_errors_test.cpp',
   'app/services/search_service_test.cpp',
-  'app/services/search_service_comprehensive_test.cpp',  # PBI-071: Comprehensive search tests
+  # Migrated to Catch2 - see tests/meson.build (hybrid_search_comprehensive_test.cpp)
+  # 'app/services/search_service_comprehensive_test.cpp',
   'app/services/search_hash_edge_cases_test.cpp',
-  'app/services/session_service_test.cpp',
-  'app/services/utils_test.cpp',
-  'app/services/download_service_smoke_test.cpp',
+  # Migrated to Catch2 - see tests/meson.build (service_utilities_test.cpp)
+  # 'app/services/session_service_test.cpp',
+  # 'app/services/utils_test.cpp',
+  # 'app/services/download_service_smoke_test.cpp',
 )
 
 unit_chunking = files(
@@ -112,7 +111,8 @@ unit_daemon_base = files(
   
   # Legacy GTest tests (to be migrated)
   'daemon/daemon_test.cpp',
-  'daemon/plugin_host_test.cpp',
+  # Migrated to Catch2 - see tests/meson.build (plugin_infrastructure_test.cpp)
+  # 'daemon/plugin_host_test.cpp',
   'daemon/repair_coordinator_test.cpp',
   'daemon/repair_scheduling_adapter_test.cpp',
   'daemon/request_handler_io_edge_test.cpp',
@@ -121,7 +121,8 @@ unit_daemon_base = files(
   'daemon/service_manager_provider_degraded_test.cpp',
   'daemon/streaming_processor_test.cpp',
   'daemon/entity_graph_service_test.cpp',
-  # excluded: multiplex_client_test.cpp, request_dispatcher_plugin_test.cpp, onnx_*
+  # Migrated to Catch2: plugin_host_test.cpp, request_dispatcher_plugin_test.cpp → plugin_infrastructure_test.cpp
+  # Excluded: multiplex_client_test.cpp, onnx_*
 )
 
 # Daemon embedding tests - requires ONNX/model support

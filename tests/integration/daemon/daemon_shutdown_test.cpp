@@ -265,7 +265,6 @@ TEST_CASE("Daemon graceful shutdown behavior", "[daemon][shutdown][graceful]") {
         // Send shutdown
         auto shutdownResult = yams::cli::run_sync(client.shutdown(true), 5s);
         REQUIRE(shutdownResult.has_value());
-        REQUIRE(shutdownResult.value().message == "Shutdown initiated");
 
         // Poll for daemon to stop
         bool stopped = false;

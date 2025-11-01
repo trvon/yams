@@ -10,6 +10,14 @@ else
   daemon_shutdown_srcs = files(
     'daemon_shutdown_test.cpp',
   )
+  
+  post_ingest_queue_validation_srcs = files(
+    'post_ingest_queue_validation_test.cpp',
+  )
+  
+  post_ingest_trace_srcs = files(
+    'post_ingest_trace.cpp',
+  )
 
   dbg = (get_option('buildtype') == 'debug')
   if (get_option('enable-integration-tests') or dbg) and (get_option('enable-daemon-integration') or dbg)
@@ -55,6 +63,34 @@ else
       },
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
+    )
+    
+    post_ingest_queue_validation_exe = executable('yams_post_ingest_queue_validation',
+      post_ingest_queue_validation_srcs,
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep, test_deps],
+      cpp_args: ['-DYAMS_TESTING=1'],
+      install: false,
+    )
+
+    test('post_ingest_queue_validation',
+      post_ingest_queue_validation_exe,
+      suite: ['integration', 'daemon', 'catch2', 'post-ingest'],
+      env: {
+        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+        'YAMS_DISABLE_VECTORS': '1',
+      },
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+    )
+    
+    # Diagnostic tool (not a test, but helpful for debugging)
+    post_ingest_trace_exe = executable('yams_post_ingest_trace',
+      post_ingest_trace_srcs,
+      include_directories: incs,
+      dependencies: test_deps,
+      cpp_args: ['-DYAMS_TESTING=1'],
+      install: false,
     )
   else
     message('daemon_socket_client test disabled (enable with -Denable-daemon-integration=true).')

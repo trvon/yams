@@ -2,8 +2,9 @@
 
 # Unified build script for YAMS
 #
-# Usage: ./setup.sh [Debug|Release]
+# Usage: ./setup.sh [Debug|Release] [--coverage]
 #   build_type: Release (default) or Debug
+#   --coverage: Enable code coverage instrumentation (Debug builds only)
 #
 # Environment variables (for CI/advanced use):
 #   YAMS_CONAN_HOST_PROFILE  - Path to Conan host profile (bypasses auto-detection)
@@ -20,12 +21,31 @@
 
 set -euo pipefail
 
-if [[ $# -gt 1 ]]; then
-  echo "Usage: $0 [Debug|Release]" >&2
-  exit 1
-fi
+ENABLE_COVERAGE=false
+BUILD_TYPE_INPUT=""
 
-BUILD_TYPE_INPUT=${1:-Release}
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --coverage)
+      ENABLE_COVERAGE=true
+      shift
+      ;;
+    Debug|Release|debug|release)
+      if [[ -n "${BUILD_TYPE_INPUT}" ]]; then
+        echo "Error: Build type specified multiple times" >&2
+        exit 1
+      fi
+      BUILD_TYPE_INPUT="$1"
+      shift
+      ;;
+    *)
+      echo "Usage: $0 [Debug|Release] [--coverage]" >&2
+      exit 1
+      ;;
+  esac
+done
+
+BUILD_TYPE_INPUT=${BUILD_TYPE_INPUT:-Release}
 BUILD_TYPE_LOWER=$(echo "${BUILD_TYPE_INPUT}" | tr '[:upper:]' '[:lower:]')
 
 case "${BUILD_TYPE_LOWER}" in
@@ -41,6 +61,11 @@ case "${BUILD_TYPE_LOWER}" in
     ;;
 
 esac
+
+if [[ "${ENABLE_COVERAGE}" == "true" ]] && [[ "${BUILD_TYPE}" != "Debug" ]]; then
+  echo "Error: --coverage flag requires Debug build type" >&2
+  exit 1
+fi
 
 # Select desired C++ standard (defaults to C++23). Override with YAMS_CPPSTD=20/23.
 CPPSTD_INPUT=${YAMS_CPPSTD:-23}
@@ -140,11 +165,6 @@ else
       LIBCXX="libc++"
     else
       LIBCXX="libstdc++11"
-      # NOTE: Forced includes (-include cstdint/stdint.h) have been disabled
-      # as they cause abseil build failures. If specific compilation issues
-      # arise, consider more targeted fixes or compiler-specific workarounds.
-      # export CXXFLAGS="${CXXFLAGS:-} -include cstdint"
-      # export CFLAGS="${CFLAGS:-} -include stdint.h"
     fi
     CLANG_VERSION=$(detect_version clang++)
     CLANG_MAJOR=$(COERCE_MAJOR "${CLANG_VERSION:-0}")
@@ -161,13 +181,18 @@ else
         -s "compiler.cppstd=${CPPSTD}"
       )
     else
-      # Linux/other: vanilla clang
+      # Linux/other: vanilla clang with new ABI for C++23
       CONAN_ARGS+=(
         -s "compiler=clang"
         -s "compiler.version=${CLANG_MAJOR}"
         -s "compiler.libcxx=${LIBCXX}"
         -s "compiler.cppstd=${CPPSTD}"
       )
+      # Force new ABI in Conan's generated toolchain for C++23
+      if [[ "${CPPSTD}" == "23" ]]; then
+        CONAN_ARGS+=(-c "tools.build:cxxflags+=['-D_GLIBCXX_USE_CXX11_ABI=1']")
+        echo "Forcing new libstdc++ ABI for C++23 compatibility"
+      fi
     fi
   else
     echo "--- Using GCC toolchain ---"
@@ -241,6 +266,11 @@ if [[ -n "${DOCKERFILE_CONF_REV:-}" ]] || [[ -n "${CI:-}" ]]; then
   CONAN_ARGS+=(-c "tools.cmake.cmaketoolchain:user_toolchain+=${POLICY_TC}")
 fi
 
+# Enable tests for Debug builds in Conan (needed for Catch2/gtest dependencies)
+if [[ "${BUILD_TYPE}" == "Debug" ]]; then
+  CONAN_ARGS+=(-o build_tests=True)
+fi
+
 conan install . -of "${BUILD_DIR}" "${CONAN_ARGS[@]}"
 
 NATIVE_FILE="${BUILD_DIR}/${CONAN_SUBDIR}/conan/conan_meson_native.ini"
@@ -277,6 +307,11 @@ if [[ "${BUILD_TYPE}" == "Debug" ]]; then
     "-Dbuild-tests=true"
     "-Denable-bench-tests=true"
   )
+fi
+
+if [[ "${ENABLE_COVERAGE}" == "true" ]]; then
+  MESON_OPTIONS+=("-Db_coverage=true")
+  echo "Coverage instrumentation enabled"
 fi
 
 # Add extra Meson flags from environment (for CI)

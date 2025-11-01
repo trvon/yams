@@ -3,6 +3,7 @@
 #include <yams/search/hybrid_search_engine.h>
 #include <yams/search/kg_scorer.h>
 #include <yams/search/query_qualifiers.hpp>
+#include <yams/search/symbol_enrichment.h>
 #include <yams/vector/embedding_generator.h>
 
 #include <spdlog/spdlog.h>
@@ -619,24 +620,13 @@ public:
             }
         }
 
-        // Perform parallel or sequential search (with runtime gates via env)
-        const bool env_disable_keyword = (std::getenv("YAMS_DISABLE_KEYWORD") != nullptr);
+        // Perform parallel or sequential search
         const bool env_disable_vector = (std::getenv("YAMS_DISABLE_VECTOR") != nullptr);
-        const bool env_disable_onnx = (std::getenv("YAMS_DISABLE_ONNX") != nullptr);
-        const bool env_disable_kg = (std::getenv("YAMS_DISABLE_KG") != nullptr);
 
         // Effective config reflects runtime gates
         HybridSearchConfig effective = config_;
-        if (env_disable_keyword) {
-            effective.keyword_weight = 0.0f;
-        }
         if (env_disable_vector) {
             effective.vector_weight = 0.0f;
-        }
-        if (env_disable_kg) {
-            effective.kg_entity_weight = 0.0f;
-            effective.structural_weight = 0.0f;
-            effective.enable_kg = false;
         }
         // Heuristics: prefer speed and exactness for single-term and structured expressions
         if (is_single_term || looks_structured) {
@@ -647,46 +637,6 @@ public:
             effective.structural_weight = 0.0f;
         }
 
-        // Optional adaptive weight tuning (env-gated; no new config fields)
-        // When embeddings are low-dimension and the query appears complex, boost keyword weight
-        // slightly to improve recall without changing persisted configuration. Default OFF.
-        auto env_truthy = [](const char* v) {
-            if (!v)
-                return false;
-            std::string_view s(v);
-            return !(s == "0" || s == "false" || s == "FALSE" || s == "off" || s == "OFF");
-        };
-        const bool adaptive_enabled = env_truthy(std::getenv("YAMS_ADAPTIVE_TUNING"));
-        if (adaptive_enabled) {
-            size_t emb_dim = 0;
-            if (embedding_generator_) {
-                try {
-                    emb_dim = embedding_generator_->getConfig().embedding_dim;
-                } catch (...) {
-                    emb_dim = 0;
-                }
-            }
-            // Complexity heuristic: already computed tokens; reuse
-            bool complex_query = false;
-            {
-                if (tokens.size() >= 8)
-                    complex_query = true;
-                if (!complex_query) {
-                    auto lower2 = normalizedQuery;
-                    std::transform(lower2.begin(), lower2.end(), lower2.begin(), ::tolower);
-                    complex_query = lower2.find('"') != std::string::npos ||
-                                    lower2.find(':') != std::string::npos ||
-                                    lower2.find(" and ") != std::string::npos ||
-                                    lower2.find(" or ") != std::string::npos;
-                }
-            }
-            const bool low_dim = (emb_dim > 0 && emb_dim < 384);
-            if (low_dim && complex_query) {
-                const float delta = 0.15f;
-                effective.keyword_weight = std::clamp(effective.keyword_weight + delta, 0.0f, 1.0f);
-                effective.vector_weight = std::clamp(effective.vector_weight - delta, 0.0f, 1.0f);
-            }
-        }
         effective.normalizeWeights();
 
         const size_t request_limit = std::max<size_t>(1, k);
@@ -706,8 +656,7 @@ public:
         std::future<Result<std::vector<KeywordSearchResult>>> keyword_future;
 
         // Determine if vector path should be attempted at all
-        const bool vector_enabled =
-            !env_disable_vector && !env_disable_onnx && embeddings_ready && vector_index_ready_;
+        const bool vector_enabled = !env_disable_vector && embeddings_ready && vector_index_ready_;
 
         if (config_.parallel_search) {
             // Launch searches in parallel honoring gates
@@ -724,13 +673,12 @@ public:
                     return vector_index_->search(query_vector, limit, flt);
                 });
             }
-            if (!env_disable_keyword) {
-                auto eq = std::string(expanded_query);
-                auto flt = filter;          // copy
-                auto limit = keyword_limit; // copy for lambda capture
-                keyword_future = pool_.submit(
-                    [this, eq, flt, limit]() { return keyword_engine_->search(eq, limit, &flt); });
-            }
+            // Launch keyword search
+            auto eq = std::string(expanded_query);
+            auto flt = filter;          // copy
+            auto limit = keyword_limit; // copy for lambda capture
+            keyword_future = pool_.submit(
+                [this, eq, flt, limit]() { return keyword_engine_->search(eq, limit, &flt); });
         }
 
         // Get results
@@ -788,12 +736,10 @@ public:
                     }
                 }
             }
-            if (!env_disable_keyword) {
-                auto keyword_result =
-                    keyword_engine_->search(expanded_query, keyword_limit, &filter);
-                if (keyword_result.has_value()) {
-                    keyword_results = keyword_result.value();
-                }
+            // Sequential keyword search
+            auto keyword_result = keyword_engine_->search(expanded_query, keyword_limit, &filter);
+            if (keyword_result.has_value()) {
+                keyword_results = keyword_result.value();
             }
         }
 
@@ -968,6 +914,43 @@ public:
             cacheResult(cache_key, fused_results);
         }
 
+        // PBI-074: Enrich results with symbol metadata
+        if (symbol_enricher_) {
+            for (auto& result : fused_results) {
+                // Create temporary SearchResultItem for enrichment
+                SearchResultItem temp_item;
+                auto pathIt = result.metadata.find("path");
+                if (pathIt != result.metadata.end()) {
+                    temp_item.path = pathIt->second;
+                }
+                auto hashIt = result.metadata.find("sha256_hash");
+                if (hashIt != result.metadata.end()) {
+                    temp_item.metadata["sha256_hash"] = hashIt->second;
+                }
+
+                // Enrich and transfer symbol context
+                if (symbol_enricher_->enrichResult(temp_item, query)) {
+                    result.symbolContext = temp_item.symbolContext;
+
+                    // Apply symbol score boost if this is a symbol query
+                    if (result.symbolContext && result.symbolContext->isSymbolQuery &&
+                        result.symbolContext->symbolScore > 0.3f) {
+                        float boost =
+                            1.0f + (config_.symbol_weight * result.symbolContext->symbolScore);
+                        result.hybrid_score *= boost;
+                    }
+                }
+            }
+
+            // Re-sort after boosting symbol scores
+            std::sort(fused_results.begin(), fused_results.end());
+
+            // Update final ranks after re-sorting
+            for (size_t i = 0; i < fused_results.size(); ++i) {
+                fused_results[i].final_rank = i;
+            }
+        }
+
         return Result<std::vector<HybridSearchResult>>(fused_results);
     }
 
@@ -1023,79 +1006,35 @@ public:
         std::unordered_map<std::string, HybridSearchResult> result_map;
         result_map.reserve(vector_results.size() + keyword_results.size());
 
-        // Guarded document-level grouping: disabled by default; enable when using
-        // cascade-style strategies that benefit from doc aggregation without adding
-        // new config fields.
-        const bool enable_doc_grouping =
-            (config.fusion_strategy == HybridSearchConfig::FusionStrategy::CASCADE ||
-             config.fusion_strategy == HybridSearchConfig::FusionStrategy::HYBRID_CASCADE);
-
-        if (enable_doc_grouping && !vector_results.empty()) {
-            // Remember first metadata per base id
-            std::unordered_map<std::string, std::map<std::string, std::string>> base_meta;
-            base_meta.reserve(vector_results.size());
+        // Per-chunk processing
+        std::unordered_map<std::string, float> normalized_vector_scores;
+        if (!vector_results.empty()) {
+            std::vector<float> raw_scores;
+            raw_scores.reserve(vector_results.size());
             for (const auto& vr : vector_results) {
-                const auto base = baseIdFromChunkId(vr.id);
-                if (base_meta.find(base) == base_meta.end()) {
-                    base_meta.emplace(base, vr.metadata);
-                }
+                raw_scores.push_back(vr.similarity);
             }
-
-            // Group and pool by MAX (conservative default for cascade behavior)
-            auto groups = groupAndAggregate(vector_results, Pooling::MAX);
-
-            // Normalize pooled scores across groups
-            std::vector<float> pooled;
-            pooled.reserve(groups.size());
-            for (const auto& g : groups)
-                pooled.push_back(g.pooled_score);
-            auto norm = fusion::normalizeScores(pooled);
-
-            for (size_t i = 0; i < groups.size(); ++i) {
-                const auto& g = groups[i];
-                auto& res = result_map[g.base_id];
-                res.id = g.base_id;
-                res.vector_score = norm[i];
-                res.vector_rank = i;
-                res.found_by_vector = true;
-                auto it = base_meta.find(g.base_id);
-                if (it != base_meta.end()) {
-                    res.metadata = it->second;
-                }
-                // Optional: annotate contributing count for debugging/rerank features later
-                res.metadata["vector_contributing_chunks"] = std::to_string(g.contributing_chunks);
-            }
-        } else {
-            // Default: per-chunk processing
-            std::unordered_map<std::string, float> normalized_vector_scores;
-            if (!vector_results.empty()) {
-                std::vector<float> raw_scores;
-                raw_scores.reserve(vector_results.size());
-                for (const auto& vr : vector_results) {
-                    raw_scores.push_back(vr.similarity);
-                }
-                auto normalized = fusion::normalizeScores(raw_scores);
-                normalized_vector_scores.reserve(vector_results.size());
-                for (size_t i = 0; i < vector_results.size(); ++i) {
-                    normalized_vector_scores.emplace(vector_results[i].id, normalized[i]);
-                }
-            }
-
+            auto normalized = fusion::normalizeScores(raw_scores);
+            normalized_vector_scores.reserve(vector_results.size());
             for (size_t i = 0; i < vector_results.size(); ++i) {
-                const auto& vr = vector_results[i];
-                auto& result = result_map[vr.id];
-                result.id = vr.id;
-                if (!normalized_vector_scores.empty()) {
-                    auto itNorm = normalized_vector_scores.find(vr.id);
-                    result.vector_score =
-                        itNorm != normalized_vector_scores.end() ? itNorm->second : vr.similarity;
-                } else {
-                    result.vector_score = vr.similarity;
-                }
-                result.vector_rank = i;
-                result.found_by_vector = true;
-                result.metadata = vr.metadata;
+                normalized_vector_scores.emplace(vector_results[i].id, normalized[i]);
             }
+        }
+
+        for (size_t i = 0; i < vector_results.size(); ++i) {
+            const auto& vr = vector_results[i];
+            auto& result = result_map[vr.id];
+            result.id = vr.id;
+            if (!normalized_vector_scores.empty()) {
+                auto itNorm = normalized_vector_scores.find(vr.id);
+                result.vector_score =
+                    itNorm != normalized_vector_scores.end() ? itNorm->second : vr.similarity;
+            } else {
+                result.vector_score = vr.similarity;
+            }
+            result.vector_rank = i;
+            result.found_by_vector = true;
+            result.metadata = vr.metadata;
         }
 
         // Process keyword results
@@ -1160,24 +1099,9 @@ public:
                     break;
 
                 case HybridSearchConfig::FusionStrategy::LEARNED_FUSION: {
-                    // Logistic fusion using core components. Environment overrides, no config
-                    // changes.
-                    auto weights = []() {
-                        std::array<float, 5> w{-2.0f, 3.0f, 2.0f, 1.5f, 1.0f};
-                        if (const char* env = std::getenv("YAMS_FUSION_WEIGHTS")) {
-                            std::stringstream ss(env);
-                            std::string tok;
-                            size_t i = 0;
-                            while (std::getline(ss, tok, ',') && i < w.size()) {
-                                try {
-                                    w[i] = std::stof(tok);
-                                } catch (...) {
-                                }
-                                ++i;
-                            }
-                        }
-                        return w;
-                    }();
+                    // Logistic fusion using core components
+                    std::array<float, 5> weights{-2.0f, 3.0f, 2.0f, 1.5f, 1.0f};
+
                     auto sigmoid = [](float x) {
                         if (x > 20.f)
                             return 1.0f;
@@ -1205,19 +1129,6 @@ public:
                                   weights[4] * result.structural_score;
                     result.hybrid_score = sigmoid(logit);
 
-                    // Over-reliance penalty (single-chunk vector only)
-                    float penalty = 0.05f;
-                    if (const char* p = std::getenv("YAMS_OVERRELIANCE_PENALTY")) {
-                        try {
-                            penalty = std::clamp(std::stof(p), 0.0f, 1.0f);
-                        } catch (...) {
-                        }
-                    }
-                    auto itcc = result.metadata.find("vector_contributing_chunks");
-                    if (penalty > 0.0f && itcc != result.metadata.end() && itcc->second == "1" &&
-                        result.found_by_vector && !result.found_by_keyword) {
-                        result.hybrid_score *= (1.0f - penalty);
-                    }
                     if (!std::isfinite(result.hybrid_score)) {
                         // Fallback if numerical issues occur
                         result.hybrid_score = fusion::reciprocalRankFusion(
@@ -1336,6 +1247,11 @@ public:
     }
 
     void setKGScorer(std::shared_ptr<KGScorer> kg_scorer) { kg_scorer_ = std::move(kg_scorer); }
+
+    void setSymbolEnricher(std::shared_ptr<SymbolEnricher> enricher) {
+        symbol_enricher_ = std::move(enricher);
+    }
+
     void setConfig(const HybridSearchConfig& cfg) {
         config_ = cfg;
         config_.normalizeWeights();
@@ -1433,6 +1349,7 @@ private:
     HybridSearchConfig config_;
     std::shared_ptr<KGScorer> kg_scorer_;
     std::unordered_map<std::string, KGScore> last_kg_scores_;
+    std::shared_ptr<SymbolEnricher> symbol_enricher_; // PBI-074: Symbol enrichment
     bool initialized_ = false;
 
     // Cache
@@ -1679,6 +1596,14 @@ std::vector<std::string> HybridSearchEngine::expandQuery(const std::string& quer
 
 void HybridSearchEngine::setKGScorer(std::shared_ptr<KGScorer> kg_scorer) {
     pImpl->setKGScorer(std::move(kg_scorer));
+}
+
+// PBI-074: Set symbol enricher
+void HybridSearchEngine::setSymbolEnricher(
+    std::shared_ptr<yams::metadata::KnowledgeGraphStore> kg_store) {
+    if (kg_store) {
+        pImpl->setSymbolEnricher(std::make_shared<SymbolEnricher>(std::move(kg_store)));
+    }
 }
 
 void HybridSearchEngine::setConfig(const HybridSearchConfig& config) {

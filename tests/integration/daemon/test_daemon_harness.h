@@ -39,8 +39,8 @@ public:
     }
 
     ~DaemonHarness() {
-        // Skip explicit stop - let RAII handle cleanup
-        // stop();
+        // Explicitly stop daemon before cleanup to avoid crashes
+        stop();
         cleanup();
     }
 

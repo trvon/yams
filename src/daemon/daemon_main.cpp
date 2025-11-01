@@ -815,7 +815,8 @@ int main(int argc, char* argv[]) {
                     spdlog::warn("On-demand plugin autoload exception: {}", e.what());
                 }
             }
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            // Check stop flag every 100ms for responsive shutdown (was 1s)
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
 
         // Ensure proper cleanup

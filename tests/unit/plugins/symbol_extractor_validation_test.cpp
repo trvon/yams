@@ -30,10 +30,10 @@ protected:
         // Load the plugin from build directory
 #ifdef __APPLE__
         const char* so_path =
-            "builddir/plugins/symbol_extractor_treesitter/libsymbol_extractor_treesitter.dylib";
+            "builddir/plugins/symbol_extractor_treesitter/yams_symbol_extractor.dylib";
 #else
         const char* so_path =
-            "builddir/plugins/symbol_extractor_treesitter/libsymbol_extractor_treesitter.so";
+            "builddir/plugins/symbol_extractor_treesitter/yams_symbol_extractor.so";
 #endif
         pluginHandle_ = dlopen(so_path, RTLD_LAZY | RTLD_LOCAL);
         ASSERT_NE(pluginHandle_, nullptr) << "Failed to load plugin: " << dlerror();
