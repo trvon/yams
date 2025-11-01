@@ -142,16 +142,18 @@ jobs:
           else
             export CONAN_CPU_COUNT=4
           fi
+          
+          # Use setup.sh for consistent Conan recipe handling
+          export YAMS_CONAN_HOST_PROFILE="${{ matrix.conan_host_profile }}"
+          export YAMS_CONAN_ARCH="${{ matrix.conan_arch }}"
+          
+          # Set ONNX option via environment
           ONNX=$([ "${{ inputs.enable_onnx }}" = 'true' ] && echo True || echo False)
-            conan install . \
-              -of build/warm-${{ inputs.build_type }} \
-              -pr:b=default \
-              -pr:h=${{ matrix.conan_host_profile }} \
-              -s build_type=${{ inputs.build_type }} \
-              -s:h arch=${{ matrix.conan_arch }} \
-              -o "sqlite3/*:fts5=True" \
-              -o "yams/*:enable_onnx=${ONNX}" \
-              --build=missing
+          export YAMS_CONAN_EXTRA_OPTIONS="-o yams/*:enable_onnx=${ONNX}"
+          
+          # Run setup.sh to export custom recipes and install dependencies
+          # Note: This will run meson setup, but that's okay - it's cached and fast
+          ./setup.sh ${{ inputs.build_type }}
 
       - name: Warm summary
         shell: bash

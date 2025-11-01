@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      BUILD_DIR: build/yams-release
+      BUILD_DIR: build/release
       # Opt-in switch to run the daemon warm-latency bench (off by default)
       RUN_DAEMON_WARM_BENCH: 'false'
     steps:
@@ -57,25 +57,18 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf "$BUILD_DIR"
-          conan profile detect --force
-          conan install . -of "$BUILD_DIR" -pr:b=default -pr:h=./conan/profiles/host-linux-clang -s build_type=Release -o "sqlite3/*:fts5=True" --build=missing
-          # Use Conan-generated Meson toolchain when present
-          TOOLCHAIN_DIR="$BUILD_DIR/build-release/conan"
-          NATIVE_FILE=$(find "$TOOLCHAIN_DIR" "$BUILD_DIR" -name 'conan_meson_native.ini' -print -quit 2>/dev/null || true)
-          CROSS_FILE=$(find "$TOOLCHAIN_DIR" "$BUILD_DIR" -name 'conan_meson_cross.ini' -print -quit 2>/dev/null || true)
-          if [ -n "$NATIVE_FILE" ]; then
-            TOOL_ARG=(--native-file "$NATIVE_FILE")
-          elif [ -n "$CROSS_FILE" ]; then
-            TOOL_ARG=(--cross-file "$CROSS_FILE")
-          else
-            echo '::warning:: Conan Meson toolchain not found; relying on system toolchain'
-            TOOL_ARG=()
-          fi
+          
           # Keep AF_UNIX socket path short
           export XDG_RUNTIME_DIR="/run/user/$(id -u)"
           mkdir -p "$XDG_RUNTIME_DIR" || true
-          meson setup "$BUILD_DIR" "${TOOL_ARG[@]}" -Dbuildtype=release -Dbuild-tests=true -Denable-onnx=disabled
-          meson compile -C "$BUILD_DIR"
+          
+          # Use setup.sh with CI environment variables for consistent configuration
+          export YAMS_CONAN_HOST_PROFILE="./conan/profiles/host-linux-clang"
+          export YAMS_CONAN_ARCH="x86_64"
+          export YAMS_EXTRA_MESON_FLAGS="-Dbuild-tests=true -Denable-onnx=disabled"
+          
+          ./setup.sh Release
+          meson compile -C build/release
 
       - name: Run Bench Test Suite
         shell: bash
