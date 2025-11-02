@@ -1,7 +1,7 @@
 #pragma once
 
-#include <expected>
 #include <unordered_map>
+#include <tl/expected.hpp>
 
 #include <filesystem>
 #include <span>
@@ -45,7 +45,7 @@ public:
      * @return Language factory function or error
      */
     using GrammarHandle = std::pair<void*, TSLanguage*>;
-    std::expected<GrammarHandle, GrammarLoadError> loadGrammar(std::string_view language);
+    tl::expected<GrammarHandle, GrammarLoadError> loadGrammar(std::string_view language);
 
     /**
      * @brief Get all search paths that will be checked
@@ -108,7 +108,7 @@ public:
      * @brief Download and build grammar for a language
      * @return Path to built library or error
      */
-    static std::expected<std::filesystem::path, std::string>
+    static tl::expected<std::filesystem::path, std::string>
     downloadGrammar(std::string_view language);
 
     /**

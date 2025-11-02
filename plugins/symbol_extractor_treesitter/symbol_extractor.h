@@ -6,7 +6,6 @@ extern "C" {
 #include <tree_sitter/api.h>
 }
 
-#include <expected>
 #include <memory>
 #include <optional>
 #include <source_location>
@@ -14,6 +13,7 @@ extern "C" {
 #include <string>
 #include <string_view>
 #include <vector>
+#include <tl/expected.hpp>
 
 namespace yams::plugins::treesitter {
 
@@ -129,7 +129,7 @@ struct ExtractionResult {
  */
 class SymbolExtractor {
 public:
-    using Result = std::expected<ExtractionResult, std::string>;
+    using Result = tl::expected<ExtractionResult, std::string>;
 
     explicit SymbolExtractor(TSLanguage* language);
     ~SymbolExtractor() = default;

@@ -184,7 +184,7 @@ std::vector<std::string> GrammarLoader::getLibraryCandidates(std::string_view la
     return candidates;
 }
 
-std::expected<GrammarLoader::GrammarHandle, GrammarLoadError>
+tl::expected<GrammarLoader::GrammarHandle, GrammarLoadError>
 GrammarLoader::loadGrammar(std::string_view language) {
     const auto* spec = findSpec(language);
     if (!spec) {
@@ -260,7 +260,7 @@ bool GrammarLoader::grammarExists(std::string_view language) const {
 }
 
 // GrammarDownloader Implementation
-std::expected<std::filesystem::path, std::string>
+tl::expected<std::filesystem::path, std::string>
 GrammarDownloader::downloadGrammar(std::string_view language) {
     if (!canAutoDownload()) {
         return std::unexpected(
