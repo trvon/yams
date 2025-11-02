@@ -31,17 +31,17 @@ SymbolExtractor::Result SymbolExtractor::extract(std::string_view content,
                                                  std::string_view file_path, bool enable_call_graph,
                                                  std::source_location loc) {
     if (!language_) {
-        return std::unexpected(std::format("No tree-sitter language loaded for {} (at {}:{})",
-                                           language, loc.file_name(), loc.line()));
+        return tl::unexpected(std::format("No tree-sitter language loaded for {} (at {}:{})",
+                                          language, loc.file_name(), loc.line()));
     }
 
     if (content.empty()) {
-        return std::unexpected("Empty content provided");
+        return tl::unexpected("Empty content provided");
     }
 
     // Defensive: verify parser language set successfully
     if (ts_parser_language(parser_.get()) == nullptr) {
-        return std::unexpected("Parser has no language set");
+        return tl::unexpected("Parser has no language set");
     }
 
     ExtractionResult result;
@@ -52,13 +52,13 @@ SymbolExtractor::Result SymbolExtractor::extract(std::string_view content,
 
     // Parse the content (guard against null pointers)
     if (!parser_.get() || content.data() == nullptr) {
-        return std::unexpected("Invalid parser or content");
+        return tl::unexpected("Invalid parser or content");
     }
     // Use ts_parser_set_language already set in ctor. Extra guard around parse.
     ctx.tree =
         ts_parser_parse_string(parser_.get(), nullptr, content.data(), (uint32_t)content.length());
     if (!ctx.tree) {
-        return std::unexpected("Failed to parse content");
+        return tl::unexpected("Failed to parse content");
     }
     ctx.root = ts_tree_root_node(ctx.tree);
 
@@ -96,7 +96,7 @@ SymbolExtractor::Result SymbolExtractor::extract(std::string_view content,
     } catch (const std::exception& e) {
         if (ctx.tree)
             ts_tree_delete(ctx.tree);
-        return std::unexpected(std::format("Extraction exception: {}", e.what()));
+        return tl::unexpected(std::format("Extraction exception: {}", e.what()));
     }
 
     if (ctx.tree)

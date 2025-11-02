@@ -188,13 +188,13 @@ tl::expected<GrammarLoader::GrammarHandle, GrammarLoadError>
 GrammarLoader::loadGrammar(std::string_view language) {
     const auto* spec = findSpec(language);
     if (!spec) {
-        return std::unexpected(GrammarLoadError{
+        return tl::unexpected(GrammarLoadError{
             GrammarLoadError::NOT_FOUND, std::format("Language '{}' not supported", language)});
     }
 
     auto candidates = getLibraryCandidates(language);
     if (candidates.empty()) {
-        return std::unexpected(
+        return tl::unexpected(
             GrammarLoadError{GrammarLoadError::NOT_FOUND,
                              std::format("No library candidates for language '{}'", language)});
     }
@@ -232,7 +232,7 @@ GrammarLoader::loadGrammar(std::string_view language) {
         if (i + 1 < tried_paths.size())
             tried_join += ", ";
     }
-    return std::unexpected(GrammarLoadError{
+    return tl::unexpected(GrammarLoadError{
         GrammarLoadError::LOAD_FAILED,
         std::format("Failed to load grammar for '{}'. Tried: {}", language, tried_join)});
 }
@@ -263,8 +263,7 @@ bool GrammarLoader::grammarExists(std::string_view language) const {
 tl::expected<std::filesystem::path, std::string>
 GrammarDownloader::downloadGrammar(std::string_view language) {
     if (!canAutoDownload()) {
-        return std::unexpected(
-            std::string{"Auto-download tools not available (git, gcc required)"});
+        return tl::unexpected(std::string{"Auto-download tools not available (git, gcc required)"});
     }
 
     // Find grammar repository
@@ -273,7 +272,7 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
                      [language](const auto& repo) { return repo.language == language; });
 
     if (repo_info == std::end(kGrammarRepos)) {
-        return std::unexpected(std::format("Language '{}' auto-download not supported", language));
+        return tl::unexpected(std::format("Language '{}' auto-download not supported", language));
     }
 
     auto grammar_path =
@@ -302,7 +301,7 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
         std::cout << "🔄 Cloning grammar repository..." << std::endl;
         if (std::system(clone_cmd.c_str()) != 0) {
             cleanup();
-            return std::unexpected(std::string{"Failed to clone grammar repository"});
+            return tl::unexpected(std::string{"Failed to clone grammar repository"});
         }
 
         // Build grammar (portable)
@@ -328,7 +327,7 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
         std::string compiler = use_cxx ? (cxx.empty() ? cc : cxx) : (cc.empty() ? cxx : cc);
         if (compiler.empty()) {
             cleanup();
-            return std::unexpected(std::string{"No suitable compiler found"});
+            return tl::unexpected(std::string{"No suitable compiler found"});
         }
 
 #ifdef __APPLE__
@@ -391,7 +390,7 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
         std::cout << "🛠️  Building grammar..." << std::endl;
         if (std::system(cmd.str().c_str()) != 0) {
             cleanup();
-            return std::unexpected(std::string{"Failed to build grammar"});
+            return tl::unexpected(std::string{"Failed to build grammar"});
         }
 
         // Find built library
@@ -403,7 +402,7 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
 
         if (!std::filesystem::exists(built_lib)) {
             cleanup();
-            return std::unexpected(std::string{"Built library not found"});
+            return tl::unexpected(std::string{"Built library not found"});
         }
 
         // Copy to final location
@@ -418,7 +417,7 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
 
     } catch (const std::exception& e) {
         cleanup();
-        return std::unexpected(std::string{"Download failed: "} + e.what());
+        return tl::unexpected(std::string{"Download failed: "} + e.what());
     }
 }
 
