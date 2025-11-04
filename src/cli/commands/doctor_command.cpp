@@ -22,6 +22,8 @@
 #include <sqlite3.h>
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+
+extern "C" int sqlite3_vec_init(sqlite3* db, char** pzErrMsg, const sqlite3_api_routines* pApi);
 #include <cstdlib>
 #include <dlfcn.h>
 #include <filesystem>
@@ -1396,10 +1398,12 @@ private:
         if (!daemon_up) {
             // Only local checks when daemon is unavailable
             checkInstalledModels(cli_);
+            checkVec0Module(); // Check vec0 module even when daemon is down
             checkEmbeddingDimMismatch(cachedStatus);
             return;
         }
         checkInstalledModels(cli_);
+        checkVec0Module(); // Check vec0 module availability and schema
         checkEmbeddingDimMismatch(cachedStatus);
         // Show embedding runtime from daemon status (best-effort, use cached data)
         try {
@@ -1739,7 +1743,7 @@ private:
         for (const auto& entry : fs::directory_iterator(base, ec)) {
             if (!entry.is_directory())
                 continue;
-            const auto dir = entry.path();
+            const auto& dir = entry.path();
             const auto name = dir.filename().string();
 
             const bool hasOnnx = fs::exists(dir / "model.onnx", ec);
@@ -1809,8 +1813,101 @@ private:
         }
     }
 
-    void checkEmbeddingDimMismatch(std::optional<yams::daemon::StatusResponse>& cachedStatus) {
+    // Check if vec0 module is available and vector DB schema is valid
+    void checkVec0Module() {
         namespace fs = std::filesystem;
+        printHeader("Vector DB Schema (vec0 module)");
+
+        fs::path dbPath =
+            cli_ ? cli_->getDataPath() / "vectors.db"
+                 : fs::path(std::getenv("HOME") ?: "/tmp") / ".local/share/yams/vectors.db";
+
+        if (!fs::exists(dbPath)) {
+            printWarn("Vector database does not exist yet: " + dbPath.string());
+            std::cout << "  → Database will be created automatically when daemon starts.\n";
+            return;
+        }
+
+        sqlite3* db = nullptr;
+        int rc = sqlite3_open(dbPath.string().c_str(), &db);
+        if (rc != SQLITE_OK) {
+            printError("Failed to open vector database: " + std::string(sqlite3_errmsg(db)));
+            if (db)
+                sqlite3_close(db);
+            return;
+        }
+
+        char* error_msg = nullptr;
+        rc = sqlite3_vec_init(db, &error_msg, nullptr);
+        if (rc != SQLITE_OK) {
+            printError("Failed to initialize vec0 module: " +
+                       std::string(error_msg ? error_msg : "unknown"));
+            if (error_msg)
+                sqlite3_free(error_msg);
+            sqlite3_close(db);
+            return;
+        }
+
+        const char* vec0_check = "SELECT 1 FROM pragma_module_list WHERE name='vec0'";
+        sqlite3_stmt* stmt = nullptr;
+        bool vec0_available = false;
+
+        if (sqlite3_prepare_v2(db, vec0_check, -1, &stmt, nullptr) == SQLITE_OK) {
+            vec0_available = (sqlite3_step(stmt) == SQLITE_ROW);
+            sqlite3_finalize(stmt);
+        }
+
+        if (!vec0_available) {
+            printError("vec0 module failed to load");
+            sqlite3_close(db);
+            return;
+        }
+
+        printSuccess("vec0 module is available");
+
+        // Test 2: Check if doc_embeddings table uses vec0 virtual table
+        const char* schema_check =
+            "SELECT sql FROM sqlite_master WHERE name='doc_embeddings' AND type='table'";
+        std::string schema_ddl;
+
+        if (sqlite3_prepare_v2(db, schema_check, -1, &stmt, nullptr) == SQLITE_OK) {
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                const unsigned char* txt = sqlite3_column_text(stmt, 0);
+                if (txt)
+                    schema_ddl = reinterpret_cast<const char*>(txt);
+            }
+            sqlite3_finalize(stmt);
+        }
+
+        if (schema_ddl.empty()) {
+            printWarn("doc_embeddings table does not exist yet");
+            std::cout << "  → Table will be created automatically when daemon starts.\n";
+        } else if (schema_ddl.find("USING vec0") == std::string::npos) {
+            printError("doc_embeddings table not using vec0 virtual table");
+            std::cout << "\nSchema: " << schema_ddl.substr(0, 100) << "...\n\n";
+            std::cout << "This table was created without the vec0 module.\n";
+            std::cout << "Vector search will not work correctly.\n\n";
+            std::cout << "Fix options:\n";
+            std::cout << "  1. Recreate the vector tables:\n";
+            std::cout << "     yams doctor --recreate-vectors --stop-daemon\n\n";
+        } else {
+            printSuccess("doc_embeddings table correctly uses vec0 virtual table");
+
+            // Extract dimension from schema
+            auto pos = schema_ddl.find("float[");
+            if (pos != std::string::npos) {
+                auto end = schema_ddl.find(']', pos);
+                if (end != std::string::npos) {
+                    std::string dim_str = schema_ddl.substr(pos + 6, end - (pos + 6));
+                    std::cout << "  Schema dimension: " << dim_str << "\n";
+                }
+            }
+        }
+
+        sqlite3_close(db);
+    }
+
+    void checkEmbeddingDimMismatch(std::optional<yams::daemon::StatusResponse>& cachedStatus) {
         printHeader("Vectors Database");
 
         // Use cached status if available, otherwise fetch
@@ -1920,7 +2017,7 @@ private:
     // Non-interactive fix flags
     bool fixConfigDims_{false};
     bool recreateVectors_{false};
-    std::optional<size_t> recreateDim_{};
+    std::optional<size_t> recreateDim_;
     bool stopDaemon_{false};
     // Dedupe state
     bool dedupeApply_{false};

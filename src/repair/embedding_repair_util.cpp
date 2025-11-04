@@ -1,3 +1,4 @@
+#include <yams/daemon/resource/model_provider.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/extraction/text_extractor.h>
 #include <yams/ingest/ingest_helpers.h>
@@ -69,28 +70,36 @@ private:
 Result<EmbeddingRepairStats>
 repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
                         std::shared_ptr<metadata::IMetadataRepository> metadataRepo,
-                        std::shared_ptr<vector::EmbeddingGenerator> embeddingGenerator,
-                        const EmbeddingRepairConfig& config,
+                        std::shared_ptr<daemon::IModelProvider> modelProvider,
+                        const std::string& modelName, const EmbeddingRepairConfig& config,
                         const std::vector<std::string>& documentHashes,
                         EmbeddingRepairProgressCallback progressCallback,
                         const yams::extraction::ContentExtractorList& extractors) {
     EmbeddingRepairStats stats;
 
-    if (!contentStore || !metadataRepo || !embeddingGenerator) {
+    if (!contentStore || !metadataRepo || !modelProvider) {
         return Error{ErrorCode::InvalidArgument, "Missing required components"};
     }
 
-    // Ensure embedding generator is initialized
-    if (!embeddingGenerator->isInitialized()) {
-        if (!embeddingGenerator->initialize()) {
-            return Error{ErrorCode::InternalError, "Failed to initialize embedding generator"};
-        }
+    if (modelName.empty()) {
+        return Error{ErrorCode::InvalidArgument, "Model name is required"};
     }
 
-    // Initialize vector database. If missing, create with the generator's dimension.
+    if (!modelProvider->isAvailable()) {
+        return Error{ErrorCode::InternalError, "Model provider not available"};
+    }
+
+    // Get embedding dimension from model provider
+    size_t embeddingDim = modelProvider->getEmbeddingDim(modelName);
+    if (embeddingDim == 0) {
+        return Error{ErrorCode::InternalError,
+                     "Could not determine embedding dimension for model: " + modelName};
+    }
+
+    // Initialize vector database. If missing, create with the model's dimension.
     vector::VectorDatabaseConfig vdbConfig;
     vdbConfig.database_path = (config.dataPath / "vectors.db").string();
-    vdbConfig.embedding_dim = embeddingGenerator->getEmbeddingDimension();
+    vdbConfig.embedding_dim = embeddingDim;
     // Allow creation on first repair run so CLI can bootstrap the DB without a daemon race.
     vdbConfig.create_if_missing = true;
 
@@ -103,15 +112,14 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
                      "Vector database initialization failed: " + vectorDb->getLastError()};
     }
 
-    // Guard: if an existing DB has a fixed dimension that does not match the embedding generator,
+    // Guard: if an existing DB has a fixed dimension that does not match the model provider,
     // abort early with a clear diagnostic instead of failing during batch insert.
     try {
         size_t existing = vectorDb->getConfig().embedding_dim;
-        size_t genDim = embeddingGenerator->getEmbeddingDimension();
-        if (existing > 0 && genDim > 0 && existing != genDim) {
+        if (existing > 0 && embeddingDim > 0 && existing != embeddingDim) {
             std::string msg = "Embedding dimension mismatch: vector DB expects " +
-                              std::to_string(existing) + ", but generator produces " +
-                              std::to_string(genDim) +
+                              std::to_string(existing) + ", but model '" + modelName +
+                              "' produces " + std::to_string(embeddingDim) +
                               ". Install/select a model with dim=" + std::to_string(existing) +
                               " (e.g., all-MiniLM-L6-v2 for 384) or recreate the vector DB.";
             spdlog::error("[repair] {}", msg);
@@ -233,8 +241,8 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
                     if (vlock.isLocked()) {
                         yams::vector::ChunkingConfig ccfg{};
                         auto r = yams::ingest::embed_and_insert_document(
-                            *embeddingGenerator, *vectorDb, *metadataRepo, doc.sha256Hash, text,
-                            doc.fileName, doc.filePath, doc.mimeType, ccfg);
+                            *modelProvider, modelName, *vectorDb, *metadataRepo, doc.sha256Hash,
+                            text, doc.fileName, doc.filePath, doc.mimeType, ccfg);
                         if (r) {
                             stats.embeddingsGenerated += r.value();
                             done = true;
@@ -271,6 +279,142 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
                  stats.embeddingsGenerated, stats.embeddingsSkipped, stats.failedOperations);
 
     return stats;
+}
+
+// CLI overload - wraps the daemon version but extracts model info from EmbeddingGenerator
+Result<EmbeddingRepairStats>
+repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
+                        std::shared_ptr<metadata::IMetadataRepository> metadataRepo,
+                        std::shared_ptr<vector::EmbeddingGenerator> embeddingGenerator,
+                        const EmbeddingRepairConfig& config,
+                        const std::vector<std::string>& documentHashes,
+                        EmbeddingRepairProgressCallback progressCallback,
+                        const yams::extraction::ContentExtractorList& extractors) {
+    if (!embeddingGenerator) {
+        return Error{ErrorCode::InvalidArgument, "EmbeddingGenerator is required"};
+    }
+
+    // For CLI usage, EmbeddingGenerator talks to the daemon via IPC.
+    // We need to wrap it as an IModelProvider for the shared implementation.
+    // Create a simple adapter that forwards to the generator.
+    class GeneratorModelProvider : public daemon::IModelProvider {
+        std::shared_ptr<vector::EmbeddingGenerator> gen_;
+
+    public:
+        explicit GeneratorModelProvider(std::shared_ptr<vector::EmbeddingGenerator> g)
+            : gen_(std::move(g)) {}
+
+        bool isAvailable() const override { return gen_ && gen_->isInitialized(); }
+
+        std::string getProviderName() const override { return "cli-generator"; }
+
+        // Single embedding
+        Result<std::vector<float>> generateEmbedding(const std::string& text) override {
+            try {
+                auto result = gen_->generateEmbeddings({text});
+                if (result.empty()) {
+                    return Error{ErrorCode::InternalError, "No embedding generated"};
+                }
+                return result[0];
+            } catch (const std::exception& e) {
+                return Error{ErrorCode::InternalError,
+                             std::string("Failed to generate embedding: ") + e.what()};
+            }
+        }
+
+        // Batch embeddings
+        Result<std::vector<std::vector<float>>>
+        generateBatchEmbeddings(const std::vector<std::string>& texts) override {
+            try {
+                auto result = gen_->generateEmbeddings(texts);
+                return result;
+            } catch (const std::exception& e) {
+                return Error{ErrorCode::InternalError,
+                             std::string("Failed to generate embeddings: ") + e.what()};
+            }
+        }
+
+        // Named model versions
+        Result<std::vector<float>> generateEmbeddingFor(const std::string& /*modelName*/,
+                                                        const std::string& text) override {
+            return generateEmbedding(text);
+        }
+
+        Result<std::vector<std::vector<float>>>
+        generateBatchEmbeddingsFor(const std::string& /*modelName*/,
+                                   const std::vector<std::string>& texts) override {
+            return generateBatchEmbeddings(texts);
+        }
+
+        size_t getEmbeddingDim(const std::string& /*modelName*/) const override {
+            return gen_->getEmbeddingDimension();
+        }
+
+        Result<daemon::ModelInfo> getModelInfo(const std::string& modelName) const override {
+            daemon::ModelInfo info;
+            info.name = modelName;
+            info.embeddingDim = gen_->getEmbeddingDimension();
+            return info;
+        }
+
+        // Stubs for other required methods
+        Result<void> loadModel(const std::string& /*modelName*/) override {
+            return {}; // Already loaded via generator
+        }
+
+        Result<void> unloadModel(const std::string& /*modelName*/) override {
+            return Error{ErrorCode::NotImplemented, "Unload not supported in CLI mode"};
+        }
+
+        bool isModelLoaded(const std::string& /*modelName*/) const override {
+            return isAvailable();
+        }
+
+        std::vector<std::string> getLoadedModels() const override {
+            return isAvailable() ? std::vector<std::string>{"default"} : std::vector<std::string>{};
+        }
+
+        size_t getLoadedModelCount() const override { return isAvailable() ? 1 : 0; }
+
+        std::vector<std::string> getAvailableModels() const { return {"default"}; }
+
+        Result<std::vector<daemon::ModelInfo>> listModels() const {
+            daemon::ModelInfo info;
+            info.name = "default";
+            info.embeddingDim = gen_->getEmbeddingDimension();
+            return std::vector<daemon::ModelInfo>{info};
+        }
+
+        std::string getProviderVersion() const override { return "cli-1.0"; }
+
+        size_t getMemoryUsage() const override {
+            return 0; // Unknown in CLI mode
+        }
+
+        void releaseUnusedResources() override {
+            // No-op in CLI mode
+        }
+
+        void shutdown() override {
+            // No-op in CLI mode - daemon handles lifecycle
+        }
+
+        std::shared_ptr<vector::EmbeddingGenerator>
+        getEmbeddingGenerator(const std::string& /*modelName*/) override {
+            return gen_; // Return the wrapped generator
+        }
+    };
+
+    auto provider = std::make_shared<GeneratorModelProvider>(embeddingGenerator);
+
+    // Use a placeholder model name since EmbeddingGenerator doesn't expose it
+    std::string modelName = "default";
+    if (const char* env = std::getenv("YAMS_PREFERRED_MODEL")) {
+        modelName = env;
+    }
+
+    return repairMissingEmbeddings(contentStore, metadataRepo, provider, modelName, config,
+                                   documentHashes, progressCallback, extractors);
 }
 
 bool hasEmbedding(const std::string& documentHash, const std::filesystem::path& dataPath) {

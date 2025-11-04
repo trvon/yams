@@ -1,4 +1,5 @@
 #include <spdlog/spdlog.h>
+#include <yams/daemon/resource/model_provider.h>
 #include <yams/extraction/text_extractor.h>
 #include <yams/ingest/ingest_helpers.h>
 #include <yams/metadata/metadata_repository.h>
@@ -41,11 +42,13 @@ Result<void> persist_content_and_index(metadata::IMetadataRepository& meta, int6
     }
 }
 
-Result<size_t>
-embed_and_insert_document(vector::EmbeddingGenerator& gen, vector::VectorDatabase& vdb,
-                          metadata::IMetadataRepository& meta, const std::string& hash,
-                          const std::string& text, const std::string& name, const std::string& path,
-                          const std::string& mime, const yams::vector::ChunkingConfig& cfg) {
+Result<size_t> embed_and_insert_document(yams::daemon::IModelProvider& provider,
+                                         const std::string& modelName, vector::VectorDatabase& vdb,
+                                         metadata::IMetadataRepository& meta,
+                                         const std::string& hash, const std::string& text,
+                                         const std::string& name, const std::string& path,
+                                         const std::string& mime,
+                                         const yams::vector::ChunkingConfig& cfg) {
     try {
         // Chunk
         auto chunker = yams::vector::createChunker(yams::vector::ChunkingStrategy::SENTENCE_BASED,
@@ -64,7 +67,16 @@ embed_and_insert_document(vector::EmbeddingGenerator& gen, vector::VectorDatabas
         texts.reserve(chunks.size());
         for (auto& c : chunks)
             texts.push_back(c.content);
-        auto embeds = gen.generateEmbeddings(texts);
+
+        // Generate embeddings using IModelProvider directly
+        auto embedResult = provider.generateBatchEmbeddingsFor(modelName, texts);
+        if (!embedResult) {
+            return Result<size_t>(
+                Error{ErrorCode::InternalError, std::string("Failed to generate embeddings: ") +
+                                                    embedResult.error().message});
+        }
+        auto& embeds = embedResult.value();
+
         size_t n = std::min(embeds.size(), chunks.size());
         if (n == 0) {
             return Result<size_t>(Error{ErrorCode::InternalError, "no embeddings generated"});
@@ -88,7 +100,7 @@ embed_and_insert_document(vector::EmbeddingGenerator& gen, vector::VectorDatabas
         if (!vdb.insertVectorsBatch(recs)) {
             return Result<size_t>(Error{ErrorCode::DatabaseError, vdb.getLastError()});
         }
-        (void)meta.updateDocumentEmbeddingStatusByHash(hash, true, gen.getConfig().model_name);
+        (void)meta.updateDocumentEmbeddingStatusByHash(hash, true, modelName);
         return Result<size_t>(recs.size());
     } catch (const std::exception& e) {
         return Result<size_t>(Error{ErrorCode::InternalError, e.what()});

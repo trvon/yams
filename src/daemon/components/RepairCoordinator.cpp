@@ -558,27 +558,13 @@ boost::asio::awaitable<void> RepairCoordinator::runAsync() {
                     missingEmbeddings.push_back(hash);
             }
 
-            // Proactively initialize embedding generator if documents need it
-            // This triggers model loading and makes EmbeddingProvider FSM transition to Ready
+            // Check if model provider is available for embedding generation
             if (!missingEmbeddings.empty()) {
-                auto embGen = services_ ? services_->getEmbeddingGenerator() : nullptr;
-                if (embGen && !embGen->isInitialized()) {
-                    spdlog::info("RepairCoordinator: {} docs need embeddings, initializing "
-                                 "embedding generator",
-                                 missingEmbeddings.size());
-                    try {
-                        if (embGen->initialize()) {
-                            spdlog::info(
-                                "RepairCoordinator: embedding generator initialized successfully");
-                        } else {
-                            spdlog::warn(
-                                "RepairCoordinator: embedding generator initialization failed");
-                        }
-                    } catch (const std::exception& e) {
-                        spdlog::warn(
-                            "RepairCoordinator: exception initializing embedding generator: {}",
-                            e.what());
-                    }
+                auto provider = services_ ? services_->getModelProvider() : nullptr;
+                if (provider && provider->isAvailable()) {
+                    spdlog::debug(
+                        "RepairCoordinator: {} docs need embeddings, model provider ready",
+                        missingEmbeddings.size());
                 }
             }
         }
@@ -636,8 +622,10 @@ boost::asio::awaitable<void> RepairCoordinator::runAsync() {
             }
         }
 
-        // Queue FTS5 repair job with backpressure handling (only during maintenance windows)
-        if (!missingFts5.empty() && maintenance_allowed()) {
+        // Queue FTS5 repair job (allow during light load if degraded mode enabled)
+        bool allowFts5 = maintenance_allowed() || (cfg_.allowDegraded && activeConnFn_ &&
+                                                   activeConnFn_() <= cfg_.maxActiveDuringDegraded);
+        if (!missingFts5.empty() && allowFts5) {
             InternalEventBus::Fts5Job ftsJob{missingFts5, static_cast<uint32_t>(cfg_.maxBatch),
                                              InternalEventBus::Fts5Operation::ExtractAndIndex};
 

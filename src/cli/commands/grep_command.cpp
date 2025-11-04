@@ -100,7 +100,7 @@ private:
     std::string colorMode_ = "auto";
     size_t maxCount_ = 20;
     // Session scoping
-    std::optional<std::string> sessionOverride_{};
+    std::optional<std::string> sessionOverride_;
     bool noSession_{false};
     std::vector<std::string> sessionPatterns_;
 
@@ -949,7 +949,7 @@ private:
 
                 auto engRes = builder.buildEmbedded(opts);
                 if (engRes) {
-                    auto eng = engRes.value();
+                    const auto& eng = engRes.value();
                     auto hres = eng->search(pattern_, semanticLimit_ * 3);
                     if (hres) {
                         // Filter semantic results to only include files from searched paths
@@ -1135,7 +1135,6 @@ private:
         return Result<void>();
     }
 
-private:
     struct Match {
         size_t lineNumber;
         size_t columnStart;

@@ -217,7 +217,6 @@ void PostIngestQueue::workerLoop() {
             return;
         }
         cv_.notify_one();
-        haveTask = true;
     }
 
     bool processedOk = true;
@@ -420,23 +419,19 @@ void PostIngestQueue::workerLoop() {
             // Embedding stage: generate vectors as soon as text is available
             if (task.stage == Task::Stage::Embeddings) {
                 try {
-                    std::shared_ptr<yams::vector::EmbeddingGenerator> gen;
+                    std::shared_ptr<IModelProvider> provider;
+                    std::string modelName;
                     std::shared_ptr<yams::vector::VectorDatabase> vdb;
                     {
                         std::lock_guard<std::mutex> lk(mtx_);
-                        if (getEmbeddingGenerator_)
-                            gen = getEmbeddingGenerator_();
+                        if (getModelProvider_)
+                            provider = getModelProvider_();
+                        if (getPreferredModel_)
+                            modelName = getPreferredModel_();
                         if (getVectorDatabase_)
                             vdb = getVectorDatabase_();
                     }
-                    if (gen && vdb) {
-                        // Proactively initialize embedding generator if not already done
-                        // This triggers model loading and vector DB initialization
-                        if (!gen->isInitialized()) {
-                            spdlog::info("PostIngestQueue: initializing embedding generator for {}",
-                                         task.hash);
-                            (void)gen->initialize();
-                        }
+                    if (provider && !modelName.empty() && vdb) {
                         if (docId >= 0) {
                             auto contentOpt = meta_->getContent(docId);
                             if (contentOpt && contentOpt.value().has_value()) {
@@ -453,19 +448,27 @@ void PostIngestQueue::workerLoop() {
                                             mimeMeta = d.mimeType;
                                     }
                                     yams::vector::ChunkingConfig ccfg{};
+                                    spdlog::debug(
+                                        "PostIngest: generating embeddings for {} using model '{}'",
+                                        task.hash, modelName);
                                     auto r = yams::ingest::embed_and_insert_document(
-                                        *gen, *vdb, *meta_, task.hash, text, nameMeta, pathMeta,
-                                        mimeMeta, ccfg);
+                                        *provider, modelName, *vdb, *meta_, task.hash, text,
+                                        nameMeta, pathMeta, mimeMeta, ccfg);
                                     if (!r) {
                                         spdlog::warn("PostIngest: embed/insert failed for {}: {}",
                                                      task.hash, r.error().message);
+                                    } else {
+                                        spdlog::debug("PostIngest: successfully generated {} "
+                                                      "embeddings for {}",
+                                                      r.value(), task.hash);
                                     }
                                 }
                             }
                         }
                     } else {
-                        spdlog::debug("PostIngest: embedding providers unavailable for {}",
-                                      task.hash);
+                        spdlog::debug("PostIngest: embedding providers unavailable for {} "
+                                      "(provider={}, model='{}', vdb={})",
+                                      task.hash, provider != nullptr, modelName, vdb != nullptr);
                     }
                 } catch (const std::exception& e) {
                     spdlog::debug("PostIngest: embedding stage error for {}: {}", task.hash,

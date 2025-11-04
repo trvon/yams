@@ -151,10 +151,10 @@ inline VectorDiag collect_vector_diag(ServiceManager* sm) {
     try {
         // Phase 2.2: Use non-blocking cached snapshot instead of getSearchEngineSnapshot()
         auto cachedEngine = sm->getCachedSearchEngine();
-        auto gen = sm->getEmbeddingGenerator();
-        if (gen) {
+        auto provider = sm->getModelProvider();
+        if (provider) {
             try {
-                d.embeddingsAvailable = gen->isInitialized();
+                d.embeddingsAvailable = provider->isAvailable();
             } catch (...) {
             }
         }

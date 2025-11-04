@@ -278,34 +278,34 @@ struct ProviderSingleton {
                 st = ProviderCtx::State::Loading;
             }
             emit_progress(c, model_id, YAMS_MODEL_PHASE_PROBE, "probe");
-            // Launch async background loader; publish events
-            std::thread([c, mid = std::string(model_id)]() {
-                auto r = c->pool->loadModel(mid);
-                if (r) {
-                    {
-                        std::lock_guard<std::mutex> lk(c->mu);
-                        c->model_states[mid] = ProviderCtx::State::Ready;
-                    }
-                    emit_progress(c, mid.c_str(), YAMS_MODEL_PHASE_READY, "ready");
-                    auto q =
-                        yams::daemon::InternalEventBus::instance()
-                            .get_or_create_channel<yams::daemon::InternalEventBus::ModelReadyEvent>(
-                                "model.events", 256);
-                    (void)q->try_push({mid});
-                } else {
-                    {
-                        std::lock_guard<std::mutex> lk(c->mu);
-                        c->model_states[mid] = ProviderCtx::State::Failed;
-                    }
-                    emit_progress(c, mid.c_str(), YAMS_MODEL_PHASE_UNKNOWN, "error");
-                    auto q = yams::daemon::InternalEventBus::instance()
-                                 .get_or_create_channel<
-                                     yams::daemon::InternalEventBus::ModelLoadFailedEvent>(
-                                     "model.events", 256);
-                    (void)q->try_push({mid, r.error().message});
+
+            // Simply call loadModel synchronously - it returns immediately since the pool uses lazy
+            // loading
+            auto r = c->pool->loadModel(model_id);
+            if (r) {
+                {
+                    std::lock_guard<std::mutex> lk(c->mu);
+                    c->model_states[model_id] = ProviderCtx::State::Ready;
                 }
-            }).detach();
-            return YAMS_OK; // non-blocking
+                emit_progress(c, model_id, YAMS_MODEL_PHASE_READY, "ready");
+                auto q =
+                    yams::daemon::InternalEventBus::instance()
+                        .get_or_create_channel<yams::daemon::InternalEventBus::ModelReadyEvent>(
+                            "model.events", 256);
+                (void)q->try_push({std::string(model_id)});
+            } else {
+                {
+                    std::lock_guard<std::mutex> lk(c->mu);
+                    c->model_states[model_id] = ProviderCtx::State::Failed;
+                }
+                emit_progress(c, model_id, YAMS_MODEL_PHASE_UNKNOWN, r.error().message.c_str());
+                auto q = yams::daemon::InternalEventBus::instance()
+                             .get_or_create_channel<
+                                 yams::daemon::InternalEventBus::ModelLoadFailedEvent>(
+                                 "model.events", 256);
+                (void)q->try_push({std::string(model_id), r.error().message});
+            }
+            return YAMS_OK;
         };
 
         vtable.unload_model = [](void* self, const char* model_id) -> yams_status_t {

@@ -846,7 +846,6 @@ private:
         return false;
     }
 
-private:
     YamsCLI* cli_ = nullptr;
     bool nonInteractive_ = false;
     bool force_ = false;

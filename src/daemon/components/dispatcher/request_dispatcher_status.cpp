@@ -250,6 +250,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             res.readinessStates["search_engine"] = state_->readiness.searchEngineReady.load();
             res.readinessStates["model_provider"] = state_->readiness.modelProviderReady.load();
             res.readinessStates["vector_index"] = state_->readiness.vectorIndexReady.load();
+            res.readinessStates["vector_db"] = state_->readiness.vectorDbReady.load();
             res.readinessStates["plugins"] = state_->readiness.pluginsReady.load();
             try {
                 if (state_) {

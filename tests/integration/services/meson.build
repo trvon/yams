@@ -9,6 +9,7 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
     'ui_cli_expectations_test.cpp',
     'grep_service_expectations_test.cpp',
     'sync_indexing_test.cpp',
+    'content_extraction_test.cpp',
   )
 
   services_integ_exe = executable('yams_integration_services_tests', services_integration_srcs + files('../../test_main.cpp'),

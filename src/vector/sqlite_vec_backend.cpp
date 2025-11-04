@@ -370,47 +370,61 @@ bool SqliteVecBackend::tablesExist() const {
         return false;
     }
 
-    spdlog::debug("Checking if tables exist...");
-
-    // For virtual tables created by vec0, we need to check sqlite_master differently
-    // Virtual tables show up in sqlite_master but we need to be careful with the query
-
-    // Simple approach: Try to select from the tables with LIMIT 0
-    // This won't return any data but will fail if the table doesn't exist
-
-    // Check existence in sqlite_master (virtual tables included)
-    const char* vector_check_sql =
-        "SELECT name FROM sqlite_master WHERE name='doc_embeddings' LIMIT 1";
     sqlite3_stmt* stmt;
-    spdlog::debug("Checking vector table existence via sqlite_master...");
-    if (sqlite3_prepare_v2(db_, vector_check_sql, -1, &stmt, nullptr) != SQLITE_OK) {
-        spdlog::debug("Failed to prepare sqlite_master check for vector table: {}",
-                      sqlite3_errmsg(db_));
+
+    const char* vec0_check = "SELECT 1 FROM pragma_module_list WHERE name='vec0'";
+    if (sqlite3_prepare_v2(db_, vec0_check, -1, &stmt, nullptr) == SQLITE_OK) {
+        bool vec0_available = (sqlite3_step(stmt) == SQLITE_ROW);
+        sqlite3_finalize(stmt);
+        if (!vec0_available) {
+            spdlog::warn("vec0 module not available - tables cannot be vec0 virtual tables");
+            return false;
+        }
+    } else {
+        spdlog::debug("Failed to check vec0 module: {}", sqlite3_errmsg(db_));
         return false;
     }
-    bool vector_exists = (sqlite3_step(stmt) == SQLITE_ROW);
+
+    const char* vector_check_sql =
+        "SELECT sql FROM sqlite_master WHERE name='doc_embeddings' AND type='table' LIMIT 1";
+    if (sqlite3_prepare_v2(db_, vector_check_sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        spdlog::debug("Failed to check vector table: {}", sqlite3_errmsg(db_));
+        return false;
+    }
+
+    bool vector_exists = false;
+    bool is_vec0_table = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        vector_exists = true;
+        const unsigned char* sql_text = sqlite3_column_text(stmt, 0);
+        if (sql_text) {
+            std::string ddl(reinterpret_cast<const char*>(sql_text));
+            is_vec0_table = (ddl.find("USING vec0") != std::string::npos);
+            if (!is_vec0_table) {
+                spdlog::warn("doc_embeddings exists but is NOT a vec0 virtual table");
+            }
+        }
+    }
     sqlite3_finalize(stmt);
-    if (!vector_exists) {
-        spdlog::debug("Vector table doc_embeddings not found in sqlite_master");
+
+    if (!vector_exists || !is_vec0_table) {
         return false;
     }
 
     const char* metadata_check_sql =
         "SELECT name FROM sqlite_master WHERE name='doc_metadata' LIMIT 1";
-    spdlog::debug("Checking metadata table existence via sqlite_master...");
     if (sqlite3_prepare_v2(db_, metadata_check_sql, -1, &stmt, nullptr) != SQLITE_OK) {
-        spdlog::debug("Failed to prepare sqlite_master check for metadata table: {}",
-                      sqlite3_errmsg(db_));
+        spdlog::debug("Failed to check metadata table: {}", sqlite3_errmsg(db_));
         return false;
     }
     bool metadata_exists = (sqlite3_step(stmt) == SQLITE_ROW);
     sqlite3_finalize(stmt);
+
     if (!metadata_exists) {
-        spdlog::debug("Metadata table doc_metadata not found in sqlite_master");
         return false;
     }
 
-    spdlog::debug("Both tables exist and are accessible");
+    spdlog::debug("Tables exist and doc_embeddings is a valid vec0 virtual table");
     return true;
 }
 

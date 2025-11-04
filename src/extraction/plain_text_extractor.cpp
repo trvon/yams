@@ -7,11 +7,8 @@
 
 namespace yams::extraction {
 
-// Register the extractor with common text extensions as a baseline
-// Additional extensions are handled dynamically via FileTypeDetector
-REGISTER_EXTRACTOR(PlainTextExtractor, ".txt", ".md", ".log", ".csv", ".json", ".xml", ".yml",
-                   ".yaml", ".toml", ".ini", ".conf", ".cfg", ".rst", ".adoc", ".org", ".tex",
-                   ".bib");
+// Note: PlainTextExtractor registration now happens in TextExtractorFactory constructor
+// to avoid static initialization order issues.
 
 Result<ExtractionResult> PlainTextExtractor::extract(const std::filesystem::path& path,
                                                      const ExtractionConfig& config) {

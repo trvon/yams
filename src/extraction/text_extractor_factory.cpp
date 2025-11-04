@@ -1,22 +1,43 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <cctype>
+#include <memory>
+#include <yams/detection/file_type_detector.h>
+#include <yams/extraction/plain_text_extractor.h>
 #include <yams/extraction/text_extractor.h>
 
 namespace yams::extraction {
 
 // Constructor - built-in extractors are registered by their own TUs via REGISTER_EXTRACTOR
 TextExtractorFactory::TextExtractorFactory() {
+    // Register PlainTextExtractor for all text extensions dynamically
+    // This must happen in the constructor to ensure proper initialization order
+    try {
+        auto textExtensions = detection::FileTypeDetector::instance().getTextExtensions();
+
+        if (!textExtensions.empty()) {
+            registerExtractor(textExtensions,
+                              []() { return std::make_unique<PlainTextExtractor>(); });
+            spdlog::debug(
+                "TextExtractorFactory: Registered PlainTextExtractor for {} text extensions",
+                textExtensions.size());
+        }
+    } catch (const std::exception& e) {
+        spdlog::error("TextExtractorFactory: Failed to register PlainTextExtractor: {}", e.what());
+    }
+
     // Log all registered extensions
     auto exts = supportedExtensions();
-    if (!exts.empty()) {
+    spdlog::debug("TextExtractorFactory initialized with {} extensions", exts.size());
+
+    if (!exts.empty() && spdlog::should_log(spdlog::level::debug)) {
         std::string extList;
         for (const auto& e : exts) {
             if (!extList.empty())
                 extList += ", ";
             extList += e;
         }
-        spdlog::debug("TextExtractorFactory initialized with extensions: {}", extList);
+        spdlog::debug("TextExtractorFactory extensions: {}", extList);
     }
 }
 

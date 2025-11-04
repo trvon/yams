@@ -307,7 +307,7 @@ Result<void> YamsDaemon::start() {
     // Bootstrapped event already dispatched before service initialization to prevent race.
 
     // Start lightweight main loop thread; no in-process IPC acceptor
-    daemonThread_ = yams::compat::jthread([this](yams::compat::stop_token token) {
+    daemonThread_ = yams::compat::jthread([this](const yams::compat::stop_token& token) {
         set_current_thread_name("yams-daemon-main");
         spdlog::debug("Daemon main loop started.");
         // Drive lifecycle FSM periodically
@@ -375,13 +375,8 @@ Result<void> YamsDaemon::start() {
                     }
                 }
 
-                if (serviceManager_ && serviceManager_->shouldPreloadEmbeddings()) {
-                    serviceManager_->scheduleEmbeddingWarmup();
-                }
-
-                // Model preload disabled - models will load on-demand when first embedding is
-                // requested This avoids complexity with thread pool executors and ensures fast
-                // daemon startup
+                // Model provider will load models on-demand when first embedding is requested
+                // This ensures fast daemon startup and no blocking during initialization
                 static bool modelPreloadSkipped = false;
                 if (!modelPreloadSkipped) {
                     modelPreloadSkipped = true;

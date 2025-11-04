@@ -19,7 +19,7 @@ public:
     static std::shared_ptr<AsioConnectionPool> get_or_create(const TransportOptions& opts);
 
     boost::asio::awaitable<std::shared_ptr<AsioConnection>> acquire();
-    void release(std::shared_ptr<AsioConnection> conn);
+    void release(const std::shared_ptr<AsioConnection>& conn);
     void shutdown(std::chrono::milliseconds timeout = std::chrono::milliseconds{2000});
 
     AsioConnectionPool(const TransportOptions& opts, bool shared);

@@ -988,7 +988,7 @@ private:
             auto gr = rsvc.get(greq, ropts);
             if (!gr)
                 return Result<void>();
-            auto indexed = gr.value();
+            const auto& indexed = gr.value();
 
             // Read local file (limit size for safety)
             std::ifstream ifs(abs);
@@ -1254,7 +1254,6 @@ private:
         return Result<void>();
     }
 
-private:
     bool applyTimeFilters(const metadata::DocumentInfo& doc) {
         // Parse and apply created time filters
         if (!createdAfter_.empty()) {

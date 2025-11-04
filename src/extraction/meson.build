@@ -1,6 +1,8 @@
 spdlog_dep = dependency('spdlog', required: true)
 yams_core = dependency('yams_core', required: false)
 
+nlohmann_json_dep = dependency('nlohmann_json', required: true)
+
 yams_extraction = static_library('yams_extraction',
   [
     'text_extractor_factory.cpp',
@@ -9,9 +11,12 @@ yams_extraction = static_library('yams_extraction',
     'html_text_extractor.cpp',
     'format_handlers/format_handler.cpp',
     '../extraction/extraction_util.cpp',
+    'plugin_process.cpp',
+    'jsonrpc_client.cpp',
+    'external_plugin_extractor.cpp',
   ],
   include_directories: include_directories('../../include'),
-  dependencies: [spdlog_dep, yams_core],
+  dependencies: [spdlog_dep, yams_core, nlohmann_json_dep],
   install: true,
 )
 

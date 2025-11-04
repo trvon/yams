@@ -103,7 +103,7 @@ private:
 
 private:
     // KG population helper: builds rich multi-layered symbol graph
-    bool populateKnowledgeGraph(std::shared_ptr<yams::metadata::KnowledgeGraphStore> kg,
+    bool populateKnowledgeGraph(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
                                 const Job& job, const yams_symbol_extraction_result_v1* result);
 
     struct ContextNodes {
@@ -113,25 +113,24 @@ private:
     };
 
     yams::Result<ContextNodes>
-    resolveContextNodes(std::shared_ptr<yams::metadata::KnowledgeGraphStore> kg, const Job& job,
-                        std::optional<std::int64_t>& documentDbId);
+    resolveContextNodes(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
+                        const Job& job, std::optional<std::int64_t>& documentDbId);
 
     yams::Result<std::vector<std::int64_t>>
-    createSymbolNodes(std::shared_ptr<yams::metadata::KnowledgeGraphStore> kg, const Job& job,
-                      const yams_symbol_extraction_result_v1* result,
+    createSymbolNodes(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
+                      const Job& job, const yams_symbol_extraction_result_v1* result,
                       std::vector<std::string>& outSymbolKeys);
 
-    yams::Result<void> createSymbolEdges(std::shared_ptr<yams::metadata::KnowledgeGraphStore> kg,
-                                         const Job& job,
-                                         const yams_symbol_extraction_result_v1* result,
-                                         const ContextNodes& contextNodes,
-                                         const std::vector<std::int64_t>& symbolNodeIds,
-                                         const std::vector<std::string>& symbolKeys);
+    yams::Result<void> createSymbolEdges(
+        const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg, const Job& job,
+        const yams_symbol_extraction_result_v1* result, const ContextNodes& contextNodes,
+        const std::vector<std::int64_t>& symbolNodeIds, const std::vector<std::string>& symbolKeys);
 
-    yams::Result<void> createDocEntities(std::shared_ptr<yams::metadata::KnowledgeGraphStore> kg,
-                                         std::optional<std::int64_t> documentDbId,
-                                         const yams_symbol_extraction_result_v1* result,
-                                         const std::vector<std::int64_t>& symbolNodeIds);
+    yams::Result<void>
+    createDocEntities(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
+                      std::optional<std::int64_t> documentDbId,
+                      const yams_symbol_extraction_result_v1* result,
+                      const std::vector<std::int64_t>& symbolNodeIds);
 
     ServiceManager* services_{}; // not owning
     std::vector<std::thread> threads_;

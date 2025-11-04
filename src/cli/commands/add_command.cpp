@@ -240,24 +240,24 @@ public:
                 auto sanitizedTagsRes = sanitizeStringList(tags_, "Tag", kMaxTagLength);
                 if (!sanitizedTagsRes)
                     return sanitizedTagsRes.error();
-                const auto sanitizedTags = sanitizedTagsRes.value();
+                const auto& sanitizedTags = sanitizedTagsRes.value();
 
                 auto sanitizedIncludeRes =
                     sanitizeStringList(includePatterns_, "Include pattern", kMaxPatternLength);
                 if (!sanitizedIncludeRes)
                     return sanitizedIncludeRes.error();
-                const auto sanitizedInclude = sanitizedIncludeRes.value();
+                const auto& sanitizedInclude = sanitizedIncludeRes.value();
 
                 auto sanitizedExcludeRes =
                     sanitizeStringList(excludePatterns_, "Exclude pattern", kMaxPatternLength);
                 if (!sanitizedExcludeRes)
                     return sanitizedExcludeRes.error();
-                const auto sanitizedExclude = sanitizedExcludeRes.value();
+                const auto& sanitizedExclude = sanitizedExcludeRes.value();
 
                 auto sanitizedMetadataRes = sanitizeMetadata(metadata_);
                 if (!sanitizedMetadataRes)
                     return sanitizedMetadataRes.error();
-                const auto sanitizedMetadata = sanitizedMetadataRes.value();
+                const auto& sanitizedMetadata = sanitizedMetadataRes.value();
 
                 std::string sanitizedCollection = trimCopy(collection_);
                 if (hasUnsupportedControlChars(sanitizedCollection)) {
@@ -712,7 +712,7 @@ private:
     std::string formatSize(uint64_t bytes) const {
         const char* units[] = {"B", "KB", "MB", "GB", "TB"};
         int unitIndex = 0;
-        double size = static_cast<double>(bytes);
+        auto size = static_cast<double>(bytes);
         while (size >= 1024 && unitIndex < 4) {
             size /= 1024;
             unitIndex++;

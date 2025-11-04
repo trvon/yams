@@ -85,7 +85,8 @@ private:
         std::atomic<bool> stopping{false};
     };
 
-    void worker_thread(std::shared_ptr<ThreadPoolState> state, yams::compat::stop_token token);
+    void worker_thread(std::shared_ptr<ThreadPoolState> state,
+                       const yams::compat::stop_token& token);
 
     std::vector<yams::compat::jthread> workers_;
     std::shared_ptr<ThreadPoolState> state_;

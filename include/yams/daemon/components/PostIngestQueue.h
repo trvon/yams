@@ -24,12 +24,12 @@ namespace extraction {
 class IContentExtractor;
 }
 namespace vector {
-class EmbeddingGenerator;
 class VectorDatabase;
 } // namespace vector
 } // namespace yams
 
 namespace yams::daemon {
+class IModelProvider;
 
 class PostIngestQueue {
 public:
@@ -92,11 +92,13 @@ public:
     // Configure providers for embedding stage (optional). These are invoked at run-time to
     // retrieve the current instances; allows ServiceManager to wire dependencies without
     // tight coupling or lifetime issues.
-    void setEmbeddingProviders(
-        std::function<std::shared_ptr<yams::vector::EmbeddingGenerator>()> genGetter,
-        std::function<std::shared_ptr<yams::vector::VectorDatabase>()> dbGetter) {
+    void
+    setEmbeddingProviders(std::function<std::shared_ptr<IModelProvider>()> providerGetter,
+                          std::function<std::string()> modelNameGetter,
+                          std::function<std::shared_ptr<yams::vector::VectorDatabase>()> dbGetter) {
         std::lock_guard<std::mutex> lk(mtx_);
-        getEmbeddingGenerator_ = std::move(genGetter);
+        getModelProvider_ = std::move(providerGetter);
+        getPreferredModel_ = std::move(modelNameGetter);
         getVectorDatabase_ = std::move(dbGetter);
     }
 
@@ -154,7 +156,8 @@ private:
     bool popNextTaskLocked(Task& out);
 
     // Embedding stage providers (set by ServiceManager)
-    std::function<std::shared_ptr<yams::vector::EmbeddingGenerator>()> getEmbeddingGenerator_;
+    std::function<std::shared_ptr<IModelProvider>()> getModelProvider_;
+    std::function<std::string()> getPreferredModel_;
     std::function<std::shared_ptr<yams::vector::VectorDatabase>()> getVectorDatabase_;
 
     // Helper: enqueue KG and Embeddings stages for a document and bump inflight counter.

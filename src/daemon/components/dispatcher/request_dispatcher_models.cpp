@@ -90,28 +90,20 @@ RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
             }
             co_return makeError(r.error().code, r.error().message);
         }
+        // Model is now loaded via provider, embeddings are ready
         try {
-            if (serviceManager_) {
-                auto egRes = serviceManager_->ensureEmbeddingGeneratorFor(req.modelName);
-                if (egRes) {
-                    if (daemon_) {
-                        daemon_->setSubsystemDegraded("embedding", false, "");
-                    }
-                    try {
-                        auto exec = serviceManager_->getWorkerExecutor();
-                        auto self = serviceManager_;
-                        boost::asio::co_spawn(
-                            exec,
-                            [self]() -> boost::asio::awaitable<void> {
-                                co_await self->co_enableEmbeddingsAndRebuild();
-                            },
-                            boost::asio::detached);
-                    } catch (...) {
-                    }
-                } else {
-                    if (daemon_) {
-                        daemon_->setSubsystemDegraded("embedding", true, "generator_init_failed");
-                    }
+            if (serviceManager_ && daemon_) {
+                daemon_->setSubsystemDegraded("embedding", false, "");
+                try {
+                    auto exec = serviceManager_->getWorkerExecutor();
+                    auto self = serviceManager_;
+                    boost::asio::co_spawn(
+                        exec,
+                        [self]() -> boost::asio::awaitable<void> {
+                            co_await self->co_enableEmbeddingsAndRebuild();
+                        },
+                        boost::asio::detached);
+                } catch (...) {
                 }
             }
         } catch (...) {

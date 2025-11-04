@@ -45,7 +45,7 @@ std::string humanReadableBytes(std::size_t bytes) {
         return std::to_string(bytes) + " B";
     }
     static const char* suffixes[] = {"KB", "MB", "GB", "TB"};
-    double count = static_cast<double>(bytes);
+    auto count = static_cast<double>(bytes);
     int index = 0;
     while (count >= kUnit && index < 4) {
         count /= static_cast<double>(kUnit);
@@ -291,9 +291,9 @@ private:
 Result<void> BrowseCommand::Impl::ensureTerminalReady() {
     const char* termEnv = std::getenv("TERM");
     if (!termEnv || std::string_view(termEnv).empty() || std::string_view(termEnv) == "dumb") {
-        return Result<void>(
-            Error(ErrorCode::InvalidOperation, "Current terminal does not expose capabilities "
-                                               "required for the TUI (TERM is unset or 'dumb')."));
+        return Result<void>(Error(ErrorCode::InvalidOperation,
+                                  "Current terminal does not expose capabilities "
+                                  "required for the TUI (TERM is unset or 'dumb')."));
     }
 
     struct winsize ws{};

@@ -20,7 +20,8 @@ void IngestService::start() {
     if (threads_.empty()) { // Start threads only once
         size_t num_threads = threads_.capacity();
         for (size_t i = 0; i < num_threads; ++i) {
-            threads_.emplace_back([this](yams::compat::stop_token token) { workerLoop(token); });
+            threads_.emplace_back(
+                [this](const yams::compat::stop_token& token) { workerLoop(token); });
         }
     }
 }
@@ -36,7 +37,7 @@ void IngestService::stop() {
     }
 }
 
-void IngestService::workerLoop(yams::compat::stop_token token) {
+void IngestService::workerLoop(const yams::compat::stop_token& token) {
     auto appContext = sm_->getAppContext();
     auto docService = yams::app::services::makeDocumentService(appContext);
     auto indexingService = yams::app::services::makeIndexingService(appContext);

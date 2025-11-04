@@ -16,8 +16,6 @@
 
 namespace yams::cli {
 
-using yams::app::services::utils::normalizeLookupPath;
-
 namespace {
 
 bool looksLikeHashPrefix(const std::string& input) {

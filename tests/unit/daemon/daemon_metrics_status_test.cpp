@@ -113,8 +113,7 @@ TEST_CASE("DaemonMetrics: Embedding provider status", "[daemon][metrics][embeddi
         svc.__test_setModelProvider(provider);
         svc.__test_setAdoptedProviderPluginName("stub");
 
-        // Try to ensure generator (may fail without real model, but status should be consistent)
-        auto r = svc.ensureEmbeddingGeneratorFor("stub-model");
+        // Model provider is now directly used - no need to ensure generator
 
         DaemonMetrics metrics(nullptr, &state, &svc);
         auto snap = metrics.getSnapshot();

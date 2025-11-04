@@ -513,8 +513,8 @@ boost::asio::awaitable<Result<void>> DaemonClient::shutdown(bool graceful) {
     auto r = co_await sendRequestStreaming(req, h);
     if (!r)
         co_return r.error();
-    if (h->error)
-        co_return h->error.value();
+    if (h->error.has_value())
+        co_return *h->error;
     co_return Result<void>();
 }
 
@@ -545,8 +545,8 @@ boost::asio::awaitable<Result<void>> DaemonClient::ping() {
     auto r = co_await sendRequestStreaming(req, h);
     if (!r)
         co_return r.error();
-    if (h->error)
-        co_return h->error.value();
+    if (h->error.has_value())
+        co_return *h->error;
     if (h->pong)
         co_return Result<void>();
     co_return Error{ErrorCode::InvalidData, "Unexpected response type for ping"};
@@ -601,7 +601,7 @@ void DaemonClient::StreamingListHandler::onHeaderReceived(const Response& header
 
             // Print result immediately if progressive output is enabled
             if (pathsOnly_) {
-                std::cout << item.path << std::endl;
+                std::cout << item.path << '\n';
             }
         }
     } else if (auto* errRes = std::get_if<ErrorResponse>(&headerResponse)) {
@@ -641,7 +641,7 @@ void DaemonClient::StreamingSearchHandler::onHeaderReceived(const Response& head
 
             // Print result immediately if progressive output is enabled
             if (pathsOnly_) {
-                std::cout << result.path << std::endl;
+                std::cout << result.path << '\n';
             }
         }
     } else if (auto* errRes = std::get_if<ErrorResponse>(&headerResponse)) {
@@ -671,7 +671,7 @@ bool DaemonClient::StreamingListHandler::onChunkReceived(const Response& chunkRe
 
             // Print result immediately if progressive output is enabled
             if (pathsOnly_) {
-                std::cout << item.path << std::endl;
+                std::cout << item.path << '\n';
             }
         }
     } else if (auto* errRes = std::get_if<ErrorResponse>(&chunkResponse)) {
@@ -707,11 +707,11 @@ bool DaemonClient::StreamingSearchHandler::onChunkReceived(const Response& chunk
                 const std::string* p = &result.path;
                 auto it = result.metadata.find("path");
                 if ((p->empty()) && it != result.metadata.end()) {
-                    std::cout << it->second << std::endl;
+                    std::cout << it->second << '\n';
                 } else if (!p->empty()) {
-                    std::cout << *p << std::endl;
+                    std::cout << *p << '\n';
                 } else if (!result.id.empty()) {
-                    std::cout << result.id << std::endl;
+                    std::cout << result.id << '\n';
                 }
             }
         }
@@ -737,7 +737,7 @@ void DaemonClient::StreamingListHandler::onComplete() {
         spdlog::debug("List complete: found {} items (of {} total)", count_, totalCount_);
     }
     if (!error_ && pathsOnly_ && count_ == 0) {
-        std::cout << "(no results)" << std::endl;
+        std::cout << "(no results)\n";
     }
 }
 
@@ -769,7 +769,7 @@ void DaemonClient::StreamingSearchHandler::onComplete() {
     }
     if (!error_ && pathsOnly_ && count_ == 0) {
         // Explicitly indicate no results for paths-only output
-        std::cout << "(no results)" << std::endl;
+        std::cout << "(no results)\n";
     }
 }
 
@@ -825,7 +825,7 @@ void DaemonClient::StreamingGrepHandler::onHeaderReceived(const Response& header
             }
             matches_.push_back(m);
             if (pathsOnly_) {
-                std::cout << m.file << std::endl;
+                std::cout << m.file << '\n';
             }
         }
     } else if (auto* errRes = std::get_if<ErrorResponse>(&headerResponse)) {
@@ -854,7 +854,7 @@ bool DaemonClient::StreamingGrepHandler::onChunkReceived(const Response& chunkRe
             }
             matches_.push_back(m);
             if (pathsOnly_) {
-                std::cout << m.file << std::endl;
+                std::cout << m.file << '\n';
             }
         }
     } else if (auto* errRes = std::get_if<ErrorResponse>(&chunkResponse)) {
@@ -874,7 +874,7 @@ void DaemonClient::StreamingGrepHandler::onComplete() {
         spdlog::debug("Grep complete: {} matches across {} files", totalMatches_, filesSearched_);
     }
     if (!error_ && pathsOnly_ && matches_.empty()) {
-        std::cout << "(no results)" << std::endl;
+        std::cout << "(no results)\n";
     }
 }
 
@@ -1058,10 +1058,10 @@ DaemonClient::generateEmbedding(const GenerateEmbeddingRequest& req) {
                  r.has_value(), r ? 0 : 1);
     if (!r)
         co_return r.error();
-    if (h->error)
-        co_return h->error.value();
-    if (h->value)
-        co_return h->value.value();
+    if (h->error.has_value())
+        co_return *h->error;
+    if (h->value.has_value())
+        co_return *h->value;
     co_return Error{ErrorCode::InvalidData, "Missing EmbeddingResponse in stream"};
 }
 
@@ -1141,10 +1141,10 @@ DaemonClient::streamingBatchEmbeddings(const BatchEmbeddingRequest& req) {
     auto result = co_await sendRequestStreaming(req, handler);
     if (!result)
         co_return result.error();
-    if (handler->error)
-        co_return handler->error.value();
-    if (handler->value)
-        co_return handler->value.value();
+    if (handler->error.has_value())
+        co_return *handler->error;
+    if (handler->value.has_value())
+        co_return *handler->value;
     if (handler->initResp.has_value()) {
         // Download to memory, reconstruct BatchEmbeddingResponse
         auto ir = handler->initResp.value();
@@ -1264,10 +1264,10 @@ DaemonClient::streamingEmbedDocuments(const EmbedDocumentsRequest& req) {
     auto result = co_await sendRequestStreaming(req, handler);
     if (!result)
         co_return result.error();
-    if (handler->error)
-        co_return handler->error.value();
-    if (handler->value)
-        co_return handler->value.value();
+    if (handler->error.has_value())
+        co_return *handler->error;
+    if (handler->value.has_value())
+        co_return *handler->value;
     co_return Error{ErrorCode::InvalidData, "Missing EmbedDocumentsResponse in stream"};
 }
 
@@ -1307,8 +1307,8 @@ DaemonClient::callEvents(const EmbedDocumentsRequest& req) {
     auto result = co_await sendRequestStreaming(req, handler);
     if (!result)
         co_return result.error();
-    if (handler->error)
-        co_return handler->error.value();
+    if (handler->error.has_value())
+        co_return *handler->error;
     co_return handler->events;
 }
 
@@ -1350,10 +1350,10 @@ DaemonClient::loadModel(const LoadModelRequest& req) {
     auto r = co_await sendRequestStreaming(req, h);
     if (!r)
         co_return r.error();
-    if (h->error)
-        co_return h->error.value();
-    if (h->value)
-        co_return h->value.value();
+    if (h->error.has_value())
+        co_return *h->error;
+    if (h->value.has_value())
+        co_return *h->value;
     co_return Error{ErrorCode::InvalidData, "Missing ModelLoadResponse in stream"};
 }
 
@@ -1383,10 +1383,10 @@ DaemonClient::unloadModel(const UnloadModelRequest& req) {
     auto r = co_await sendRequestStreaming(req, h);
     if (!r)
         co_return r.error();
-    if (h->error)
-        co_return h->error.value();
-    if (h->value)
-        co_return h->value.value();
+    if (h->error.has_value())
+        co_return *h->error;
+    if (h->value.has_value())
+        co_return *h->value;
     co_return Error{ErrorCode::InvalidData, "Missing SuccessResponse in stream"};
 }
 
@@ -1416,10 +1416,10 @@ DaemonClient::getModelStatus(const ModelStatusRequest& req) {
     auto r = co_await sendRequestStreaming(req, h);
     if (!r)
         co_return r.error();
-    if (h->error)
-        co_return h->error.value();
-    if (h->value)
-        co_return h->value.value();
+    if (h->error.has_value())
+        co_return *h->error;
+    if (h->value.has_value())
+        co_return *h->value;
     co_return Error{ErrorCode::InvalidData, "Missing ModelStatusResponse in stream"};
 }
 

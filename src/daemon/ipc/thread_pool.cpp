@@ -20,7 +20,7 @@ ThreadPool::ThreadPool(size_t num_threads) : state_(std::make_shared<ThreadPoolS
 
     for (size_t i = 0; i < num_threads; ++i) {
         // Capture shared state by value so threads have their own shared_ptr
-        workers_.emplace_back([this, state = state_](yams::compat::stop_token token) {
+        workers_.emplace_back([this, state = state_](const yams::compat::stop_token& token) {
             worker_thread(state, token);
         });
     }
@@ -65,7 +65,7 @@ size_t ThreadPool::queue_size() const {
 }
 
 void ThreadPool::worker_thread(std::shared_ptr<ThreadPoolState> state,
-                               yams::compat::stop_token token) {
+                               const yams::compat::stop_token& token) {
     // Work with the shared state - safe even if ThreadPool object is destroyed
     while (!token.stop_requested()) {
         std::function<void()> task;

@@ -18,7 +18,7 @@ WorkerPool::WorkerPool(std::size_t threads) : io_(static_cast<int>(threads)) {
     guard_ = std::make_unique<WorkGuard>(boost::asio::make_work_guard(io_));
     threads_.reserve(threads);
     for (std::size_t i = 0; i < threads; ++i) {
-        threads_.emplace_back([this](yams::compat::stop_token st) { run_thread(st); });
+        threads_.emplace_back([this](const yams::compat::stop_token& st) { run_thread(st); });
         active_.fetch_add(1, std::memory_order_relaxed);
     }
     desired_.store(threads, std::memory_order_relaxed);
@@ -76,7 +76,7 @@ void WorkerPool::stop() {
     }
 }
 
-void WorkerPool::run_thread(yams::compat::stop_token st) {
+void WorkerPool::run_thread(const yams::compat::stop_token& st) {
     using namespace std::chrono_literals;
     try {
 #if defined(TRACY_ENABLE)
@@ -115,7 +115,8 @@ bool WorkerPool::resize(std::size_t target) noexcept {
         try {
             threads_.reserve(threads_.size() + to_add);
             for (std::size_t i = 0; i < to_add; ++i) {
-                threads_.emplace_back([this](yams::compat::stop_token st) { run_thread(st); });
+                threads_.emplace_back(
+                    [this](const yams::compat::stop_token& st) { run_thread(st); });
                 active_.fetch_add(1, std::memory_order_relaxed);
             }
             desired_.store(target, std::memory_order_relaxed);

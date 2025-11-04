@@ -543,7 +543,7 @@ private:
         for (const auto& entry : fs::directory_iterator(base, ec)) {
             if (!entry.is_directory())
                 continue;
-            auto dir = entry.path();
+            const auto& dir = entry.path();
             auto onnx = dir / "model.onnx";
             if (fs::exists(onnx, ec)) {
                 size_t size_mb = 0;

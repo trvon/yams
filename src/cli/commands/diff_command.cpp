@@ -25,7 +25,6 @@ namespace yamsfmt = fmt;
 
 namespace yams::cli {
 
-namespace fs = std::filesystem;
 using json = nlohmann::json;
 
 class DiffCommand : public ICommand {

@@ -342,19 +342,8 @@ public:
 
                                     bool storageOk = (physical > 0 || logical > 0 || docs > 0);
 
-                                    auto humanSize = [&](uint64_t b) {
-                                        const char* u[] = {"B", "KB", "MB", "GB", "TB"};
-                                        double v = static_cast<double>(b);
-                                        int i = 0;
-                                        while (v >= 1024.0 && i < 4) {
-                                            v /= 1024.0;
-                                            ++i;
-                                        }
-                                        std::ostringstream os;
-                                        os << std::fixed << std::setprecision(v < 10 ? 1 : 0) << v
-                                           << u[i];
-                                        return os.str();
-                                    };
+                                    // Use shared UI helper for byte formatting
+                                    using yams::cli::ui::format_bytes;
 
                                     uint64_t saved = 0ULL;
                                     int pct = 0;
@@ -365,11 +354,11 @@ public:
                                     }
                                     std::cout << "STOR : " << (storageOk ? "ok" : "unknown")
                                               << ", docs=" << docs
-                                              << ", logical=" << humanSize(logical);
+                                              << ", logical=" << format_bytes(logical);
                                     if (physical > 0) {
-                                        std::cout << ", physical=" << humanSize(physical)
-                                                  << ", saved=" << humanSize(saved) << " (" << pct
-                                                  << "%)";
+                                        std::cout << ", physical=" << format_bytes(physical)
+                                                  << ", saved=" << format_bytes(saved) << " ("
+                                                  << pct << "%)";
                                     }
                                     std::cout << "\n";
 
@@ -430,19 +419,8 @@ public:
                                     return it != s.requestCounts.end() ? it->second : 0;
                                 };
 
-                                auto humanSize = [&](uint64_t b) {
-                                    const char* u[] = {"B", "KB", "MB", "GB", "TB"};
-                                    double v = static_cast<double>(b);
-                                    int i = 0;
-                                    while (v >= 1024.0 && i < 4) {
-                                        v /= 1024.0;
-                                        ++i;
-                                    }
-                                    std::ostringstream os;
-                                    os << std::fixed << std::setprecision(v < 10 ? 1 : 0) << v
-                                       << u[i];
-                                    return os.str();
-                                };
+                                // Use shared UI helper for byte formatting
+                                using yams::cli::ui::format_bytes;
 
                                 // Post-ingest pipeline
                                 {
@@ -485,24 +463,24 @@ public:
 
                                     std::cout << "--- Storage Breakdown ---\n";
                                     std::cout << "CAS (Content Store):\n";
-                                    std::cout << "  Ingested (logical) : " << humanSize(casRaw)
+                                    std::cout << "  Ingested (logical) : " << format_bytes(casRaw)
                                               << "\n";
-                                    std::cout << "  Physical           : " << humanSize(casPhys)
+                                    std::cout << "  Physical           : " << format_bytes(casPhys)
                                               << "\n";
-                                    std::cout << "  Savings            : " << humanSize(casSaved)
-                                              << " (dedup=" << humanSize(dedupSaved)
-                                              << ", compress=" << humanSize(compSaved) << ")\n";
+                                    std::cout << "  Savings            : " << format_bytes(casSaved)
+                                              << " (dedup=" << format_bytes(dedupSaved)
+                                              << ", compress=" << format_bytes(compSaved) << ")\n";
                                     std::cout << "Overhead:\n";
-                                    std::cout << "  Metadata DB        : " << humanSize(meta)
+                                    std::cout << "  Metadata DB        : " << format_bytes(meta)
                                               << "\n";
-                                    std::cout << "  Search Index       : " << humanSize(idx)
+                                    std::cout << "  Search Index       : " << format_bytes(idx)
                                               << "\n";
-                                    std::cout << "  Vector Store       : " << humanSize(vec)
+                                    std::cout << "  Vector Store       : " << format_bytes(vec)
                                               << "\n";
-                                    std::cout << "  Logs & Temp        : " << humanSize(tmp)
+                                    std::cout << "  Logs & Temp        : " << format_bytes(tmp)
                                               << "\n";
                                     std::cout << "-------------------------\n";
-                                    std::cout << "Total Physical Usage : " << humanSize(total)
+                                    std::cout << "Total Physical Usage : " << format_bytes(total)
                                               << "\n";
                                 }
 
@@ -517,7 +495,7 @@ public:
                                 std::string line = "VECDB: ";
                                 uint64_t vecBytes = getU64("vector_physical_bytes");
                                 if (vecBytes > 0) {
-                                    line += "Initialized - " + humanSize(vecBytes);
+                                    line += "Initialized - " + format_bytes(vecBytes);
                                 } else {
                                     line += vecReady ? "Initialized" : "Not initialized";
                                 }
@@ -863,7 +841,6 @@ private:
         };
 
         const bool configWarn = info.configMigrationNeeded;
-        const bool embeddingsWarn = !info.autoGenerationEnabled;
         const bool modelsWarn = !info.hasModels;
         const bool vectorWarn = !info.vectorDbHealthy;
         const bool storageOk = info.storageHealthy;
@@ -985,7 +962,7 @@ private:
     std::string formatSize(uint64_t bytes) const {
         const char* units[] = {"B", "KB", "MB", "GB", "TB"};
         int unitIndex = 0;
-        double size = static_cast<double>(bytes);
+        auto size = static_cast<double>(bytes);
 
         while (size >= 1024 && unitIndex < 4) {
             size /= 1024;

@@ -540,7 +540,12 @@ private:
         return std::make_tuple(std::move(storage), std::move(refCounter), std::move(manifestMgr));
     }
 
+    // Simple byte formatter - matches ui_helpers.hpp::format_bytes() behavior
+    // but kept inline to avoid C++20 dependency issues in yams-tools
     std::string formatBytes(uint64_t bytes) const {
+        if (bytes == 0)
+            return "0 B";
+
         const char* units[] = {"B", "KB", "MB", "GB", "TB"};
         int unitIndex = 0;
         double size = static_cast<double>(bytes);
@@ -551,7 +556,12 @@ private:
         }
 
         std::ostringstream oss;
-        oss << std::fixed << std::setprecision(2) << size << " " << units[unitIndex];
+        if (unitIndex == 0) {
+            oss << bytes << " B"; // No decimal for bytes
+        } else {
+            int precision = (size < 10.0) ? 1 : 0; // Match ui_helpers behavior
+            oss << std::fixed << std::setprecision(precision) << size << " " << units[unitIndex];
+        }
         return oss.str();
     }
 

@@ -142,7 +142,7 @@ private:
                 if (!out.empty() && out.back() != ' ')
                     out.push_back(' ');
                 for (size_t i = 0; i < word.size(); ++i) {
-                    unsigned char uch = static_cast<unsigned char>(word[i]);
+                    auto uch = static_cast<unsigned char>(word[i]);
                     out.push_back(
                         static_cast<char>(i == 0 ? std::toupper(uch) : std::tolower(uch)));
                 }
@@ -1213,7 +1213,7 @@ private:
             if (!s.running) {
                 stateSeverity = Severity::Bad;
             } else if (!s.ready) {
-                stateSeverity = anyDegraded ? Severity::Warn : Severity::Warn;
+                stateSeverity = Severity::Warn;
             }
             if (!s.lastError.empty())
                 stateSeverity = Severity::Bad;
@@ -1301,32 +1301,41 @@ private:
 
             std::cout << "\n" << section_header("Data Plane") << "\n\n";
             std::vector<Row> dataRows;
-            const bool vectorReady = s.vectorDbReady;
-            Severity vecSeverity =
-                vectorReady ? Severity::Good
-                            : (s.vectorDbInitAttempted ? Severity::Warn : Severity::Warn);
-            std::string vecText =
-                vectorReady ? "Ready"
-                            : (s.vectorDbInitAttempted ? "Initializing" : "Not initialized");
-            dataRows.push_back({"Vector DB", paint(vecSeverity, vecText),
-                                s.vectorDbDim > 0 ? "dim " + std::to_string(s.vectorDbDim) : ""});
 
-            Severity embSeverity = s.embeddingAvailable ? Severity::Good : Severity::Warn;
-            std::string embText = s.embeddingAvailable ? "Available" : "Unavailable";
-            std::string embExtra;
-            if (!s.embeddingModel.empty())
-                embExtra += s.embeddingModel;
-            if (!s.embeddingBackend.empty()) {
-                if (!embExtra.empty())
-                    embExtra += " · ";
-                embExtra += s.embeddingBackend;
+            auto getReadiness = [&](const char* key) -> bool {
+                auto it = s.readinessStates.find(key);
+                return it != s.readinessStates.end() && it->second;
+            };
+
+            // Vector DB
+            {
+                bool ready = getReadiness("vector_db");
+                Severity sev = ready ? Severity::Good : Severity::Warn;
+                std::string text = ready ? "Ready" : "Not initialized";
+                std::string extra = s.vectorDbDim > 0 ? "dim " + std::to_string(s.vectorDbDim) : "";
+                dataRows.push_back({"Vector DB", paint(sev, text), extra});
             }
-            if (s.embeddingDim > 0) {
-                if (!embExtra.empty())
-                    embExtra += " · ";
-                embExtra += "dim " + std::to_string(s.embeddingDim);
+
+            // Embeddings
+            {
+                bool available = s.embeddingAvailable;
+                Severity sev = available ? Severity::Good : Severity::Warn;
+                std::string text = available ? "Available" : "Unavailable";
+                std::string extra;
+                if (!s.embeddingModel.empty())
+                    extra += s.embeddingModel;
+                if (!s.embeddingBackend.empty()) {
+                    if (!extra.empty())
+                        extra += " · ";
+                    extra += s.embeddingBackend;
+                }
+                if (s.embeddingDim > 0) {
+                    if (!extra.empty())
+                        extra += " · ";
+                    extra += "dim " + std::to_string(s.embeddingDim);
+                }
+                dataRows.push_back({"Embeddings", paint(sev, text), extra});
             }
-            dataRows.push_back({"Embeddings", paint(embSeverity, embText), embExtra});
 
             if (!s.contentStoreRoot.empty()) {
                 dataRows.push_back({"Content Root", s.contentStoreRoot, ""});
@@ -1374,8 +1383,7 @@ private:
                 const std::size_t limit = std::min<std::size_t>(s.providers.size(), 6);
                 for (std::size_t i = 0; i < limit; ++i) {
                     const auto& p = s.providers[i];
-                    Severity provSeverity =
-                        p.ready ? Severity::Good : (p.degraded ? Severity::Warn : Severity::Warn);
+                    Severity provSeverity = p.ready ? Severity::Good : Severity::Warn;
                     std::string name = p.name.empty() ? "(unnamed)" : p.name;
                     std::string extra;
                     if (p.modelsLoaded > 0)
@@ -1486,10 +1494,9 @@ private:
                                                    : (status.ready ? std::string{"Ready"}
                                                                    : std::string{"Initializing"}));
 
-                Severity stateSeverity =
-                    status.running ? (status.ready ? Severity::Good
-                                                   : (degraded ? Severity::Warn : Severity::Warn))
-                                   : Severity::Bad;
+                Severity stateSeverity = status.running
+                                             ? (status.ready ? Severity::Good : Severity::Warn)
+                                             : Severity::Bad;
                 if (!status.lastError.empty())
                     stateSeverity = Severity::Bad;
 
@@ -1644,7 +1651,7 @@ private:
                 const uint64_t comp = findCount("cas_compress_saved_bytes");
                 auto humanBytes = [](uint64_t b) {
                     const char* units[] = {"B", "KB", "MB", "GB", "TB"};
-                    double val = static_cast<double>(b);
+                    auto val = static_cast<double>(b);
                     int idx = 0;
                     while (val >= 1024.0 && idx < 4) {
                         val /= 1024.0;
@@ -1720,35 +1727,43 @@ private:
                     }
                 }
 
-                Severity vecSeverity =
-                    status.vectorDbReady
-                        ? Severity::Good
-                        : (status.vectorDbInitAttempted ? Severity::Warn : Severity::Warn);
-                std::string vecText =
-                    status.vectorDbReady
-                        ? "Ready"
-                        : (status.vectorDbInitAttempted ? "Initializing" : "Not initialized");
-                std::string vecExtra;
-                if (status.vectorDbDim > 0)
-                    vecExtra = "dim " + std::to_string(status.vectorDbDim);
-                storageRows.push_back({"Vector DB", paint(vecSeverity, vecText), vecExtra});
+                auto getReadiness = [&](const char* key) -> bool {
+                    auto it = status.readinessStates.find(key);
+                    return it != status.readinessStates.end() && it->second;
+                };
 
-                Severity embSeverity = status.embeddingAvailable ? Severity::Good : Severity::Warn;
-                std::string embText = status.embeddingAvailable ? "Available" : "Unavailable";
-                std::string embExtra;
-                if (!status.embeddingModel.empty())
-                    embExtra += status.embeddingModel;
-                if (!status.embeddingBackend.empty()) {
-                    if (!embExtra.empty())
-                        embExtra += " · ";
-                    embExtra += status.embeddingBackend;
+                // Vector DB
+                {
+                    bool ready = getReadiness("vector_db");
+                    Severity sev = ready ? Severity::Good : Severity::Warn;
+                    std::string text = ready ? "Ready" : "Not initialized";
+                    std::string extra;
+                    if (status.vectorDbDim > 0) {
+                        extra = "dim=" + std::to_string(status.vectorDbDim);
+                    }
+                    storageRows.push_back({"Vector DB", paint(sev, text), extra});
                 }
-                if (status.embeddingDim > 0) {
-                    if (!embExtra.empty())
-                        embExtra += " · ";
-                    embExtra += "dim " + std::to_string(status.embeddingDim);
+
+                // Embeddings
+                {
+                    bool available = status.embeddingAvailable;
+                    Severity sev = available ? Severity::Good : Severity::Warn;
+                    std::string text = available ? "Available" : "Unavailable";
+                    std::string extra;
+                    if (!status.embeddingModel.empty())
+                        extra += status.embeddingModel;
+                    if (!status.embeddingBackend.empty()) {
+                        if (!extra.empty())
+                            extra += " · ";
+                        extra += status.embeddingBackend;
+                    }
+                    if (status.embeddingDim > 0) {
+                        if (!extra.empty())
+                            extra += " · ";
+                        extra += "dim " + std::to_string(status.embeddingDim);
+                    }
+                    storageRows.push_back({"Embeddings", paint(sev, text), extra});
                 }
-                storageRows.push_back({"Embeddings", paint(embSeverity, embText), embExtra});
 
                 if (!status.contentStoreRoot.empty()) {
                     storageRows.push_back(
@@ -1756,18 +1771,26 @@ private:
                 }
                 render_rows(std::cout, storageRows);
 
-                std::cout << "\n" << section_header("Readiness") << "\n\n";
-                std::vector<Row> readinessRows;
-                auto readinessSorted = readinessList;
-                std::sort(readinessSorted.begin(), readinessSorted.end(),
-                          [](const ReadinessDisplay& a, const ReadinessDisplay& b) {
-                              return a.label < b.label;
-                          });
-                for (const auto& rd : readinessSorted) {
-                    readinessRows.push_back({rd.label, paint(rd.severity, rd.text), ""});
+                // Only show Readiness section if there are issues or non-ready components
+                std::vector<Row> issueRows;
+                for (const auto& rd : readinessList) {
+                    // Skip "degraded" flags (inverses of ready flags) and items already shown
+                    // elsewhere
+                    std::string lowerLabel = rd.label;
+                    std::transform(lowerLabel.begin(), lowerLabel.end(), lowerLabel.begin(),
+                                   ::tolower);
+                    bool isDegraded = lowerLabel.find("degraded") != std::string::npos;
+                    bool isAlreadyShown = lowerLabel.find("vector db") != std::string::npos ||
+                                          lowerLabel.find("embedding") != std::string::npos;
+
+                    if (!isDegraded && !isAlreadyShown && rd.issue) {
+                        issueRows.push_back({rd.label, paint(rd.severity, rd.text), ""});
+                    }
                 }
-                if (!readinessRows.empty())
-                    render_rows(std::cout, readinessRows);
+                if (!issueRows.empty()) {
+                    std::cout << "\n" << section_header("Components Not Ready") << "\n\n";
+                    render_rows(std::cout, issueRows);
+                }
 
                 if (!status.initProgress.empty()) {
                     std::cout << "\n" << section_header("Initialization progress") << "\n\n";
@@ -1786,11 +1809,8 @@ private:
                 }
 
                 if (!status.requestCounts.empty()) {
-                    std::cout << "\n" << section_header("Top request counters") << "\n\n";
-
                     auto formatCountValue = [](const std::string& key,
                                                uint64_t value) -> std::string {
-                        // Check if this is a byte counter
                         std::string lowerKey = key;
                         std::transform(lowerKey.begin(), lowerKey.end(), lowerKey.begin(),
                                        ::tolower);
@@ -1801,7 +1821,7 @@ private:
 
                         if (isBytes && value > 1024) {
                             const char* units[] = {"B", "KB", "MB", "GB", "TB"};
-                            double val = static_cast<double>(value);
+                            auto val = static_cast<double>(value);
                             int idx = 0;
                             while (val >= 1024.0 && idx < 4) {
                                 val /= 1024.0;
@@ -1813,14 +1833,12 @@ private:
                             return oss.str();
                         }
 
-                        // For non-byte large numbers, use thousand separators or "k" notation
                         if (value >= 100000) {
                             std::ostringstream oss;
                             oss << std::fixed << std::setprecision(value < 1000000 ? 0 : 1)
                                 << (static_cast<double>(value) / 1000.0) << "k";
                             return oss.str();
                         } else if (value >= 10000) {
-                            // Use comma separator for readability
                             std::string num = std::to_string(value);
                             std::string formatted;
                             int count = 0;
@@ -1836,18 +1854,38 @@ private:
                         return std::to_string(value);
                     };
 
-                    std::vector<std::pair<std::string, size_t>> counts(status.requestCounts.begin(),
-                                                                       status.requestCounts.end());
-                    std::sort(counts.begin(), counts.end(),
-                              [](const auto& a, const auto& b) { return a.second > b.second; });
-                    std::vector<Row> countRows;
-                    const std::size_t limit = std::min<std::size_t>(counts.size(), 10);
-                    for (std::size_t i = 0; i < limit; ++i) {
-                        countRows.push_back({humanizeToken(counts[i].first),
-                                             formatCountValue(counts[i].first, counts[i].second),
-                                             counts[i].first});
+                    // Filter out internal/tuning counters - show user-facing metrics only
+                    std::vector<std::pair<std::string, size_t>> counts;
+                    for (const auto& [key, value] : status.requestCounts) {
+                        std::string lowerKey = key;
+                        std::transform(lowerKey.begin(), lowerKey.end(), lowerKey.begin(),
+                                       ::tolower);
+
+                        // Skip internal state/tuning counters
+                        bool isInternal = lowerKey.find("tuning_") == 0 ||
+                                          lowerKey.find("_fsm_state") != std::string::npos ||
+                                          lowerKey.find("service_fsm") != std::string::npos ||
+                                          lowerKey.find("embedding_state") != std::string::npos ||
+                                          lowerKey.find("plugin_host_state") != std::string::npos;
+
+                        if (!isInternal) {
+                            counts.emplace_back(key, value);
+                        }
                     }
-                    render_rows(std::cout, countRows);
+
+                    if (!counts.empty()) {
+                        std::sort(counts.begin(), counts.end(),
+                                  [](const auto& a, const auto& b) { return a.second > b.second; });
+                        std::cout << "\n" << section_header("Top Metrics") << "\n\n";
+                        std::vector<Row> countRows;
+                        const std::size_t limit = std::min<std::size_t>(counts.size(), 10);
+                        for (std::size_t i = 0; i < limit; ++i) {
+                            countRows.push_back(
+                                {humanizeToken(counts[i].first),
+                                 formatCountValue(counts[i].first, counts[i].second), ""});
+                        }
+                        render_rows(std::cout, countRows);
+                    }
                 }
 
                 if (!status.providers.empty()) {
@@ -1856,9 +1894,7 @@ private:
                     const std::size_t limit = std::min<std::size_t>(status.providers.size(), 8);
                     for (std::size_t i = 0; i < limit; ++i) {
                         const auto& p = status.providers[i];
-                        Severity provSeverity =
-                            p.ready ? Severity::Good
-                                    : (p.degraded ? Severity::Warn : Severity::Warn);
+                        Severity provSeverity = p.ready ? Severity::Good : Severity::Warn;
                         std::string extra;
                         if (p.modelsLoaded > 0)
                             extra += std::to_string(p.modelsLoaded) + " models";

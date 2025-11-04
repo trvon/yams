@@ -244,7 +244,6 @@ size_t adoptPluginInterface(yams::daemon::AbiPluginHost* host, const std::string
 // Open the daemon namespace for all following member definitions.
 namespace yams::daemon {
 
-extern std::vector<std::string> getRegisteredProviders();
 using yams::Error;
 using yams::ErrorCode;
 using yams::Result;
@@ -970,15 +969,8 @@ void ServiceManager::shutdown() {
         spdlog::info("[ServiceManager] Phase 6.4: No vector index to save or not ready");
     }
 
-    // Shutdown embedding generator (if any)
-    spdlog::info("[ServiceManager] Phase 6.5: Shutting down embedding generator");
-    if (embeddingGenerator_) {
-        embeddingGenerator_->shutdown();
-        embeddingGenerator_.reset();
-        spdlog::info("[ServiceManager] Phase 6.5: Embedding generator shut down");
-    } else {
-        spdlog::info("[ServiceManager] Phase 6.5: No embedding generator to shut down");
-    }
+    // Model provider manages embedding lifecycle, no separate shutdown needed
+    spdlog::info("[ServiceManager] Phase 6.5: Embedding lifecycle managed by model provider");
 
     // Shutdown model provider (unload models first, then shutdown)
     spdlog::info("[ServiceManager] Phase 6.6: Shutting down model provider");
@@ -1278,8 +1270,8 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
         try {
             spdlog::info("[VectorInit] probe: generator dim={}", (dim ? *dim : 0));
 
-            if (embeddingGenerator_) {
-                size_t g = embeddingGenerator_->getEmbeddingDimension();
+            {
+                size_t g = getEmbeddingDimension();
                 if (g > 0)
                     dim = g;
             }
@@ -1907,12 +1899,13 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             }
         } catch (...) {
         }
-        std::size_t qcap = static_cast<std::size_t>(TA::postIngestQueueMax());
+        auto qcap = static_cast<std::size_t>(TA::postIngestQueueMax());
         postIngest_ = std::make_unique<PostIngestQueue>(
             contentStore_, metadataRepo_, contentExtractors_, kgStore_, threads, qcap);
         // Wire embedding providers so PostIngestQueue can run the Embeddings stage
         try {
-            postIngest_->setEmbeddingProviders([this]() { return this->embeddingGenerator_; },
+            postIngest_->setEmbeddingProviders([this]() { return this->modelProvider_; },
+                                               [this]() { return this->resolvePreferredModel(); },
                                                [this]() { return this->vectorDatabase_; });
         } catch (...) {
         }
@@ -1961,8 +1954,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         }
         if (derivedIdxDim == 0) {
             try {
-                if (embeddingGenerator_)
-                    derivedIdxDim = embeddingGenerator_->getEmbeddingDimension();
+                derivedIdxDim = getEmbeddingDimension();
             } catch (...) {
             }
         }
@@ -2004,6 +1996,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             if (v == "0" || v == "false" || v == "off")
                 enableAutoload = false;
         }
+
+        // Detect embedding preload flag early so we can use it during plugin adoption
+        embeddingPreloadOnStartup_ = detectEmbeddingPreloadFlag();
+        spdlog::info("ServiceManager: embeddingPreloadOnStartup={}", embeddingPreloadOnStartup_);
+
         if (enableAutoload) {
             auto loadResult = co_await init::await_step(
                 "plugin_autoload_now",
@@ -2027,9 +2024,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             }
             if (adoptResult && adoptResult.value()) {
                 spdlog::info("ServiceManager: Adopted model provider from plugins.");
-                // Model initialization and preload deferred until after daemon reaches Ready state
-                // This ensures fast startup and immediate responsiveness
-                // See daemon.cpp main loop for deferred model preload trigger
+                spdlog::info(
+                    "ServiceManager: Model provider ready, embeddings will be generated on-demand");
             } else {
                 spdlog::warn("ServiceManager: No model provider adopted from plugins.");
                 if (config_.enableModelProvider) {
@@ -2041,35 +2037,35 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             auto extractorResult = init::step<size_t>(
                 "adopt_extractors", [&]() { return adoptContentExtractorsFromHosts(); });
             if (extractorResult) {
-                spdlog::info("ServiceManager: Adopted {} content extractors.",
+                spdlog::info("ServiceManager: Adopted {} content extractors from plugins.",
                              extractorResult.value());
+                // Note: Binary extraction via Ghidra is provided by the yams_ghidra plugin
+                // which implements content_extractor_v1 and is adopted above
+            }
 
-                // Respect config flag plugins.symbol_extraction.enable (default: true)
-                bool enableSymbols = true;
-                try {
-                    auto cfgPath = resolveDefaultConfigPath();
-                    if (!cfgPath.empty()) {
-                        auto flat = parseSimpleTomlFlat(cfgPath);
-                        auto it = flat.find("plugins.symbol_extraction.enable");
-                        if (it != flat.end()) {
-                            std::string v = it->second;
-                            std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                            enableSymbols = !(v == "0" || v == "false" || v == "off" || v == "no");
-                        }
+            // Respect config flag plugins.symbol_extraction.enable (default: true)
+            bool enableSymbols = true;
+            try {
+                auto cfgPath = resolveDefaultConfigPath();
+                if (!cfgPath.empty()) {
+                    auto flat = parseSimpleTomlFlat(cfgPath);
+                    auto it = flat.find("plugins.symbol_extraction.enable");
+                    if (it != flat.end()) {
+                        std::string v = it->second;
+                        std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                        enableSymbols = !(v == "0" || v == "false" || v == "off" || v == "no");
                     }
-                } catch (...) {
                 }
-                if (enableSymbols) {
-                    auto symRes = init::step<size_t>("adopt_symbol_extractors", [&]() {
-                        return adoptSymbolExtractorsFromHosts();
-                    });
-                    if (symRes) {
-                        spdlog::info("ServiceManager: Adopted {} symbol extractors.",
-                                     symRes.value());
-                    }
-                } else {
-                    spdlog::info("ServiceManager: symbol extractor plugins disabled by config");
+            } catch (...) {
+            }
+            if (enableSymbols) {
+                auto symRes = init::step<size_t>(
+                    "adopt_symbol_extractors", [&]() { return adoptSymbolExtractorsFromHosts(); });
+                if (symRes) {
+                    spdlog::info("ServiceManager: Adopted {} symbol extractors.", symRes.value());
                 }
+            } else {
+                spdlog::info("ServiceManager: symbol extractor plugins disabled by config");
             }
         }
         // If autoload is disabled but model provider is enabled, defer initialization
@@ -2086,7 +2082,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     state_.readiness.pluginsReady = true;
     refreshPluginStatusSnapshot();
 
-    embeddingPreloadOnStartup_ = detectEmbeddingPreloadFlag();
+    // embeddingPreloadOnStartup_ already detected earlier before plugin autoload
     // Now initialize Vector DB synchronously so embedding flow sees correct dim
     spdlog::info("[ServiceManager] Phase: Vector DB Init (post-plugins, sync).");
     {
@@ -2155,14 +2151,20 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         }
 
         // Phase 2.4: Use SearchEngineManager instead of co_buildEngine
-        // Pass embeddingGenerator_ even if not initialized - SearchEngineManager will check vector
-        // DB data
+        // Get embedding generator from model provider if available
+        std::shared_ptr<vector::EmbeddingGenerator> embGen;
+        if (modelProvider_ && modelProvider_->isAvailable() && !embeddingModelName_.empty()) {
+            try {
+                embGen = modelProvider_->getEmbeddingGenerator(embeddingModelName_);
+            } catch (...) {
+            }
+        }
         auto buildResult = co_await searchEngineManager_.buildEngine(
-            metadataRepo_, vectorIndexManager_, embeddingGenerator_, "initial", build_timeout,
+            metadataRepo_, vectorIndexManager_, embGen, "initial", build_timeout,
             getWorkerExecutor());
 
         if (buildResult.has_value()) {
-            auto built = buildResult.value();
+            const auto& built = buildResult.value();
             std::lock_guard<std::shared_mutex> lk(searchEngineMutex_); // Exclusive write
             searchEngine_ = built;
             state_.readiness.searchEngineReady = true;
@@ -2195,8 +2197,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     }
     spdlog::info("[ServiceManager] Phase: Ingest Service Started.");
 
-    // Re-enable embedding warmup if configured (post-Ready)
-    scheduleEmbeddingWarmup();
+    // Model provider manages embedding initialization on-demand
 
     // Note: Background task coroutines (EmbedJob/Fts5Job consumers, OrphanScan) are launched
     // via startBackgroundTasks() after construction, when shared_from_this() is available.
@@ -2304,7 +2305,7 @@ boost::asio::awaitable<bool> ServiceManager::co_migrateDatabase(int timeout_ms,
     auto pres1 = std::get<1>(tup1);
     if (ec1)
         co_return false;
-    co_return static_cast<bool>(pres1 && (*pres1));
+    co_return pres1 && (*pres1);
 }
 
 Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& preferredName) {
@@ -2373,6 +2374,24 @@ Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& pref
                     embeddingFsm_.dispatch(ProviderAdoptedEvent{pluginName});
                 } catch (...) {
                 }
+
+                // With IModelProvider, check availability immediately after adoption
+                // (no explicit model loading step needed - provider handles it internally)
+                try {
+                    if (modelProvider_ && modelProvider_->isAvailable()) {
+                        std::string modelName = resolvePreferredModel();
+                        size_t dimension = modelProvider_->getEmbeddingDim(modelName);
+                        spdlog::info("[Provider] Model provider ready: model='{}', dim={}",
+                                     modelName, dimension);
+                        embeddingFsm_.dispatch(ModelLoadedEvent{modelName, dimension});
+                        lifecycleFsm_.setSubsystemDegraded("embeddings", false);
+                    } else {
+                        spdlog::warn("[Provider] Model provider not available after adoption");
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::warn("[Provider] Failed to check provider availability: {}", e.what());
+                }
+
                 // Embedding generator initialization happens in the caller after all plugins are
                 // processed
 
@@ -2815,8 +2834,7 @@ void ServiceManager::preloadPreferredModelIfConfigured() {
                         try {
                             std::size_t dim = 0;
                             try {
-                                if (self->embeddingGenerator_)
-                                    dim = self->embeddingGenerator_->getEmbeddingDimension();
+                                dim = self->getEmbeddingDimension();
                             } catch (...) {
                             }
                             self->embeddingFsm_.dispatch(
@@ -2854,8 +2872,7 @@ void ServiceManager::preloadPreferredModelIfConfigured() {
                             try {
                                 std::size_t dim = 0;
                                 try {
-                                    if (self->embeddingGenerator_)
-                                        dim = self->embeddingGenerator_->getEmbeddingDimension();
+                                    dim = self->getEmbeddingDimension();
                                 } catch (...) {
                                 }
                                 self->embeddingFsm_.dispatch(
@@ -2906,8 +2923,7 @@ void ServiceManager::preloadPreferredModelIfConfigured() {
                         try {
                             std::size_t dim = 0;
                             try {
-                                if (this->embeddingGenerator_)
-                                    dim = this->embeddingGenerator_->getEmbeddingDimension();
+                                dim = this->getEmbeddingDimension();
                             } catch (...) {
                             }
                             this->embeddingFsm_.dispatch(
@@ -2964,30 +2980,10 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
     }
 
     try {
-        spdlog::info("[Rebuild] start reason=embeddings_ready");
-        auto res = ensureEmbeddingGeneratorReady();
-        if (!res) {
-            spdlog::warn("[Rebuild] embedding init failed: {}", res.error().message);
-            try {
-                embeddingFsm_.dispatch(LoadFailureEvent{res.error().message});
-                lifecycleFsm_.setSubsystemDegraded("embeddings", true, res.error().message);
-            } catch (...) {
-            }
-            co_return;
-        }
+        spdlog::info("[Rebuild] Embedding generator will initialize on first use (lazy)");
 
-        // Model is already loaded by ensureEmbeddingGeneratorReady(); update FSM snapshot
-        try {
-            std::size_t dim = 0;
-            try {
-                if (embeddingGenerator_)
-                    dim = embeddingGenerator_->getEmbeddingDimension();
-            } catch (...) {
-            }
-            embeddingFsm_.dispatch(ModelLoadedEvent{embeddingModelName_, dim});
-            lifecycleFsm_.setSubsystemDegraded("embeddings", false); // Clear degradation
-        } catch (...) {
-        }
+        // Don't initialize embeddings here - let it happen lazily on first search request
+        // This avoids blocking the rebuild process
 
         // Protect against concurrent rebuilds
         bool buildingAlready = false;
@@ -3000,13 +2996,22 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
             spdlog::info("[Rebuild] search engine rebuild begin (enable vector scoring)");
             int build_timeout = 15000; // Generous timeout for rebuild
 
+            // Get embedding generator from model provider if available
+            std::shared_ptr<vector::EmbeddingGenerator> embGen;
+            if (modelProvider_ && modelProvider_->isAvailable() && !embeddingModelName_.empty()) {
+                try {
+                    embGen = modelProvider_->getEmbeddingGenerator(embeddingModelName_);
+                } catch (...) {
+                }
+            }
+
             // Phase 2.4: Use SearchEngineManager instead of co_buildEngine
             auto rebuildResult = co_await searchEngineManager_.buildEngine(
-                metadataRepo_, vectorIndexManager_, embeddingGenerator_, "rebuild", build_timeout,
+                metadataRepo_, vectorIndexManager_, embGen, "rebuild", build_timeout,
                 getWorkerExecutor());
 
             if (rebuildResult.has_value()) {
-                auto rebuilt = rebuildResult.value();
+                const auto& rebuilt = rebuildResult.value();
                 {
                     std::lock_guard<std::shared_mutex> lk(searchEngineMutex_); // Exclusive write
                     searchEngine_ = rebuilt;
@@ -3058,7 +3063,7 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
     ctx.contentExtractors = contentExtractors_;
 
     // Log vector capability status
-    bool vectorCapable = (embeddingGenerator_ != nullptr);
+    bool vectorCapable = (modelProvider_ && modelProvider_->isAvailable());
     spdlog::debug("AppContext: vector_capabilities={}", vectorCapable ? "active" : "unavailable");
 
     // Populate degraded/repair flags for search.
@@ -3150,52 +3155,6 @@ bool ServiceManager::applySearchConcurrencyTarget(std::size_t target) {
 
 // (Namespace yams::daemon remains open for subsequent member definitions)
 
-Result<void> ServiceManager::ensureEmbeddingGeneratorReady() {
-    spdlog::info("[EmbedGen] ensureEmbeddingGeneratorReady() called");
-
-    // Verify plugin provider is available
-    if (!modelProvider_ || !modelProvider_->isAvailable()) {
-        return Error{ErrorCode::NotInitialized, "Model provider not available"};
-    }
-
-    // Determine preferred model
-    std::string preferred = resolvePreferredModel();
-    if (preferred.empty()) {
-        return Error{ErrorCode::NotFound, "No preferred model configured or installed"};
-    }
-
-    // Check if model is already loaded
-    if (modelProvider_->isModelLoaded(preferred)) {
-        spdlog::debug("[EmbedGen] Model '{}' already loaded", preferred);
-        return Result<void>();
-    }
-
-    spdlog::info("[EmbedGen] Triggering non-blocking model load for '{}'", preferred);
-
-    // Trigger non-blocking load via plugin (plugin handles async loading internally)
-    auto loadResult = modelProvider_->loadModel(preferred);
-    if (!loadResult) {
-        const std::string errorMsg =
-            std::string("load '") + preferred + "' failed: " + loadResult.error().message;
-        spdlog::warn("[EmbedGen] Model load trigger failed: {}", errorMsg);
-        try {
-            embeddingFsm_.dispatch(ProviderDegradedEvent{errorMsg});
-            lifecycleFsm_.setSubsystemDegraded("embeddings", true, errorMsg);
-        } catch (...) {
-        }
-        return loadResult;
-    }
-
-    // Plugin is now loading asynchronously - FSM will be updated via InternalEventBus
-    spdlog::info("[EmbedGen] Model load triggered successfully (async)");
-    try {
-        embeddingFsm_.dispatch(ModelLoadStartedEvent{preferred});
-    } catch (...) {
-    }
-
-    return Result<void>();
-}
-
 bool ServiceManager::detectEmbeddingPreloadFlag() const {
     bool flag = false;
 
@@ -3226,102 +3185,16 @@ bool ServiceManager::detectEmbeddingPreloadFlag() const {
     return flag;
 }
 
-void ServiceManager::scheduleEmbeddingWarmup() {
-    if (!embeddingPreloadOnStartup_)
-        return;
-
-    // Use FSM state to avoid duplicate warmup if already loading/ready
-    if (embeddingFsm_.isLoadingOrReady()) {
-        spdlog::debug("[Warmup] skipping: embedding already loading or ready (FSM)");
-        return;
-    }
-
-    spdlog::info("[Warmup] scheduling embedding preload task");
-    auto exec = getWorkerExecutor();
-    ServiceManager* raw = this;
-    boost::asio::co_spawn(
-        exec,
-        [raw]() -> boost::asio::awaitable<void> {
-            try {
-                co_await raw->co_enableEmbeddingsAndRebuild();
-            } catch (const std::exception& e) {
-                spdlog::warn("[Warmup] embedding preload coroutine failed: {}", e.what());
-            } catch (...) {
-                spdlog::warn("[Warmup] embedding preload coroutine failed with unknown error");
-            }
-            co_return;
-        },
-        boost::asio::detached);
-}
-
-bool ServiceManager::shouldPreloadEmbeddings() const {
-    return embeddingPreloadOnStartup_;
-}
-
-Result<void> ServiceManager::ensureEmbeddingGeneratorFor(const std::string& modelName) {
+size_t ServiceManager::getEmbeddingDimension() const {
+    if (!modelProvider_ || !modelProvider_->isAvailable())
+        return 0;
     try {
-        if (modelName.empty()) {
-            return Error{ErrorCode::InvalidArgument, "Model name is empty"};
-        }
-        if (!modelProvider_ || !modelProvider_->isAvailable()) {
-            return Error{ErrorCode::NotInitialized, "Model provider not available"};
-        }
-        // Create and initialize embedding generator bound to the provider-loaded model via daemon
-        size_t providerDim = 0;
-        size_t providerMaxSeq = 0;
-        try {
-            providerDim = modelProvider_->getEmbeddingDim(modelName);
-            if (auto mi = modelProvider_->getModelInfo(modelName)) {
-                providerMaxSeq = mi.value().maxSequenceLength;
-            }
-        } catch (...) {
-        }
-        // Ensure only the selected model remains loaded in the provider
-        try {
-            auto loaded = modelProvider_->getLoadedModels();
-            for (const auto& name : loaded) {
-                if (name != modelName) {
-                    auto ur = modelProvider_->unloadModel(name);
-                    if (!ur) {
-                        spdlog::debug("Unload extra model '{}' failed: {}", name,
-                                      ur.error().message);
-                    }
-                }
-            }
-        } catch (...) {
-        }
-
-        vector::EmbeddingConfig ecfg;
-        ecfg.backend = vector::EmbeddingConfig::Backend::Daemon;
-        ecfg.model_name = modelName;
-        if (providerDim > 0)
-            ecfg.embedding_dim = providerDim;
-        if (providerMaxSeq > 0)
-            ecfg.max_sequence_length = providerMaxSeq;
-        ecfg.daemon_auto_start = false;
-        auto eg = std::make_shared<vector::EmbeddingGenerator>(ecfg);
-        if (!eg->initialize()) {
-            const std::string errorMsg = "embedding_generator_init_failed";
-            try {
-                embeddingFsm_.dispatch(ProviderDegradedEvent{errorMsg});
-                lifecycleFsm_.setSubsystemDegraded("embeddings", true, errorMsg);
-            } catch (...) {
-            }
-            return Error{ErrorCode::InternalError, "Failed to initialize embedding generator"};
-        }
-        // Gracefully shutdown any previous generator before replacement
-        if (embeddingGenerator_) {
-            try {
-                embeddingGenerator_->shutdown();
-            } catch (...) {
-            }
-        }
-        embeddingGenerator_ = std::move(eg);
-        clearModelProviderError();
-        alignVectorComponentDimensions();
-        return Result<void>();
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::InternalError, e.what()};
+        std::string modelName = resolvePreferredModel();
+        if (modelName.empty())
+            return 0;
+        return modelProvider_->getEmbeddingDim(modelName);
+    } catch (...) {
+        return 0;
     }
 }
 
@@ -3457,52 +3330,6 @@ std::string ServiceManager::resolvePreferredModel() const {
     return preferred;
 }
 
-void ServiceManager::alignVectorComponentDimensions() {
-    try {
-        if (!embeddingGenerator_)
-            return;
-
-        // Prefer the persistent Vector DB dimension when present to avoid downshifts.
-        size_t genDim = embeddingGenerator_->getEmbeddingDimension();
-        if (genDim == 0)
-            genDim = 768; // fallback default
-        size_t dbDim = 0;
-        try {
-            if (vectorDatabase_)
-                dbDim = vectorDatabase_->getConfig().embedding_dim;
-        } catch (...) {
-        }
-        size_t targetDim = dbDim > 0 ? dbDim : genDim;
-
-        spdlog::debug("Aligning vector components to dimension: {} (generator={}, db={})",
-                      targetDim, genDim, dbDim);
-
-        // Align VectorIndexManager dimension
-        if (vectorIndexManager_) {
-            if (vectorIndexManager_->getConfig().dimension != targetDim) {
-                auto cfg = vectorIndexManager_->getConfig();
-                cfg.dimension = targetDim;
-                vectorIndexManager_->setConfig(cfg);
-                auto rr = vectorIndexManager_->rebuildIndex();
-                if (!rr) {
-                    spdlog::warn("VectorIndexManager rebuild with dim {} failed: {}", targetDim,
-                                 rr.error().message);
-                } else {
-                    spdlog::info("VectorIndexManager dimension aligned to {}", targetDim);
-                }
-            }
-        }
-
-        // Log vector database dimension for diagnostics
-        if (vectorDatabase_) {
-            spdlog::info("Vector database dimension check: generator={}, database={}", genDim,
-                         vectorDatabase_->getConfig().embedding_dim);
-        }
-    } catch (const std::exception& e) {
-        spdlog::warn("Error aligning vector dimensions: {}", e.what());
-    }
-}
-
 // Async phase helpers implementation
 boost::asio::awaitable<yams::Result<void>>
 ServiceManager::co_initContentStore(boost::asio::any_io_executor exec,
@@ -3595,9 +3422,14 @@ boost::asio::awaitable<std::shared_ptr<yams::search::HybridSearchEngine>>
 ServiceManager::co_buildEngine(int timeout_ms, const boost::asio::cancellation_state& /*token*/,
                                bool includeEmbeddingGenerator) {
     auto exec = getWorkerExecutor();
-    std::shared_ptr<yams::vector::EmbeddingGenerator> gen =
-        includeEmbeddingGenerator ? embeddingGenerator_
-                                  : std::shared_ptr<yams::vector::EmbeddingGenerator>{};
+    std::shared_ptr<yams::vector::EmbeddingGenerator> gen;
+    if (includeEmbeddingGenerator && modelProvider_ && modelProvider_->isAvailable() &&
+        !embeddingModelName_.empty()) {
+        try {
+            gen = modelProvider_->getEmbeddingGenerator(embeddingModelName_);
+        } catch (...) {
+        }
+    }
     auto res = co_await searchEngineManager_.buildEngine(metadataRepo_, vectorIndexManager_, gen,
                                                          "co_buildEngine", timeout_ms, exec);
     if (res.has_value()) {
@@ -3657,7 +3489,6 @@ ServiceManager::co_initVectorSystem(boost::asio::any_io_executor exec,
 
         // Create vector database using existing pattern
         const auto dbPath = resolvedDataDir_ / "vectors.db";
-        const bool exists = std::filesystem::exists(dbPath);
 
         yams::vector::VectorDatabaseConfig cfg;
         cfg.database_path = dbPath.string();

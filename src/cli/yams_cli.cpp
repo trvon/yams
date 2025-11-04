@@ -999,7 +999,8 @@ std::filesystem::path YamsCLI::findMagicNumbersFile() {
         }
     }
 
-    spdlog::warn("magic_numbers.json not found in any standard location");
+    spdlog::debug(
+        "magic_numbers.json not found (using compiled-in patterns from magic_numbers.hpp)");
     return fs::path(); // Return empty path if not found
 }
 

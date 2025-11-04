@@ -146,7 +146,7 @@ bool EntityGraphService::process(Job& job) {
 }
 
 bool EntityGraphService::populateKnowledgeGraph(
-    std::shared_ptr<yams::metadata::KnowledgeGraphStore> kg, const Job& job,
+    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg, const Job& job,
     const yams_symbol_extraction_result_v1* result) {
     if (!result || result->symbol_count == 0) {
         return true; // No symbols to process
@@ -195,9 +195,9 @@ bool EntityGraphService::populateKnowledgeGraph(
     }
 }
 
-yams::Result<EntityGraphService::ContextNodes>
-EntityGraphService::resolveContextNodes(std::shared_ptr<yams::metadata::KnowledgeGraphStore> kg,
-                                        const Job& job, std::optional<std::int64_t>& documentDbId) {
+yams::Result<EntityGraphService::ContextNodes> EntityGraphService::resolveContextNodes(
+    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg, const Job& job,
+    std::optional<std::int64_t>& documentDbId) {
     ContextNodes contextNodes;
 
     if (!job.documentHash.empty()) {
@@ -286,7 +286,7 @@ EntityGraphService::resolveContextNodes(std::shared_ptr<yams::metadata::Knowledg
 }
 
 yams::Result<std::vector<std::int64_t>> EntityGraphService::createSymbolNodes(
-    std::shared_ptr<yams::metadata::KnowledgeGraphStore> kg, const Job& job,
+    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg, const Job& job,
     const yams_symbol_extraction_result_v1* result, std::vector<std::string>& outSymbolKeys) {
     std::vector<yams::metadata::KGNode> symbolNodes;
     symbolNodes.reserve(result->symbol_count);
@@ -341,7 +341,7 @@ yams::Result<std::vector<std::int64_t>> EntityGraphService::createSymbolNodes(
 }
 
 yams::Result<void> EntityGraphService::createSymbolEdges(
-    std::shared_ptr<yams::metadata::KnowledgeGraphStore> kg, const Job& job,
+    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg, const Job& job,
     const yams_symbol_extraction_result_v1* result, const ContextNodes& contextNodes,
     const std::vector<std::int64_t>& symbolNodeIds, const std::vector<std::string>& symbolKeys) {
     // Aliases
@@ -475,11 +475,10 @@ yams::Result<void> EntityGraphService::createSymbolEdges(
     return yams::Result<void>();
 }
 
-yams::Result<void>
-EntityGraphService::createDocEntities(std::shared_ptr<yams::metadata::KnowledgeGraphStore> kg,
-                                      std::optional<std::int64_t> documentDbId,
-                                      const yams_symbol_extraction_result_v1* result,
-                                      const std::vector<std::int64_t>& symbolNodeIds) {
+yams::Result<void> EntityGraphService::createDocEntities(
+    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
+    std::optional<std::int64_t> documentDbId, const yams_symbol_extraction_result_v1* result,
+    const std::vector<std::int64_t>& symbolNodeIds) {
     if (documentDbId.has_value()) {
         std::vector<yams::metadata::DocEntity> docEntities;
         docEntities.reserve(symbolNodeIds.size());

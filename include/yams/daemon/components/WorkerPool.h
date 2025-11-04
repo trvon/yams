@@ -27,7 +27,7 @@ public:
     std::size_t threads() const noexcept { return active_.load(std::memory_order_relaxed); }
 
 private:
-    void run_thread(yams::compat::stop_token st);
+    void run_thread(const yams::compat::stop_token& st);
 
     mutable boost::asio::io_context io_;
     using WorkGuard = boost::asio::executor_work_guard<boost::asio::io_context::executor_type>;

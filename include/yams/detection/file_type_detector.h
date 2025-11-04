@@ -187,6 +187,17 @@ public:
     bool isBinaryMimeType(const std::string& mimeType) const;
 
     /**
+     * @brief Get all file extensions that map to text MIME types
+     *
+     * Queries the extension-to-MIME mapping and returns all extensions
+     * that correspond to text files (text/star, application/json, etc.)
+     * This is used by text extractors to dynamically register supported extensions.
+     *
+     * @return Vector of text file extensions (e.g., ".txt", ".cpp", ".py")
+     */
+    std::vector<std::string> getTextExtensions() const;
+
+    /**
      * @brief Get file type category from MIME type
      * @param mimeType MIME type to categorize
      * @return File type category (image, document, text, binary, etc.)

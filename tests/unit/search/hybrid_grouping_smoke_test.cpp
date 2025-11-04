@@ -62,9 +62,9 @@ static vector::SearchResult vr(const std::string& id, float sim) {
 } // namespace
 
 TEST(HybridGroupingSmoke, GroupsChunksByBaseAndPoolsMax) {
-    // Prepare engine with CASCADE strategy to enable doc-level grouping (guarded path)
+    // Prepare engine with RRF strategy to enable doc-level grouping (guarded path)
     HybridSearchConfig cfg;
-    cfg.fusion_strategy = HybridSearchConfig::FusionStrategy::CASCADE;
+    cfg.fusion_strategy = HybridSearchConfig::FusionStrategy::RECIPROCAL_RANK;
     auto dummyKeyword = std::make_shared<DummyKeywordEngine>();
     HybridSearchEngine eng(nullptr, dummyKeyword, cfg, nullptr);
 

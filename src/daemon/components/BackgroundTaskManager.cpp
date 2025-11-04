@@ -125,11 +125,20 @@ void BackgroundTaskManager::launchEmbedJobConsumer() {
             while (!stopFlag->load(std::memory_order_acquire)) {
                 Bus::EmbedJob job;
                 if (channel && channel->try_pop(job)) {
-                    const auto [store, meta, vecDb, gen] =
-                        std::tuple{self->getContentStore(), self->getMetadataRepo(),
-                                   self->getVectorDatabase(), self->getEmbeddingGenerator()};
+                    auto store = self->getContentStore();
+                    auto meta = self->getMetadataRepo();
+                    auto vecDb = self->getVectorDatabase();
+                    auto provider = self->getModelProvider();
 
-                    if (!meta || !vecDb || !gen) {
+                    std::string modelName;
+                    if (provider && provider->isAvailable()) {
+                        try {
+                            modelName = self->getEmbeddingModelName();
+                        } catch (...) {
+                        }
+                    }
+
+                    if (!meta || !vecDb || !provider || modelName.empty()) {
                         spdlog::debug("[EmbedJob] Services not ready, dropping {} docs",
                                       job.hashes.size());
                         Bus::instance().incEmbedDropped();
@@ -145,7 +154,7 @@ void BackgroundTaskManager::launchEmbedJobConsumer() {
                         }
 
                         auto result = yams::repair::repairMissingEmbeddings(
-                            store, meta, gen, cfg, job.hashes, nullptr, extractors);
+                            store, meta, provider, modelName, cfg, job.hashes, nullptr, extractors);
 
                         if (result) {
                             spdlog::debug("[EmbedJob] Processed {} docs (gen={}, skip={}, fail={})",

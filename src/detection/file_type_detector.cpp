@@ -848,6 +848,69 @@ bool FileTypeDetector::isBinaryMimeType(const std::string& mimeType) const {
     return !isTextMimeType(mimeType);
 }
 
+std::vector<std::string> FileTypeDetector::getTextExtensions() const {
+    std::vector<std::string> textExtensions;
+
+    // Iterate through the extension-to-MIME mapping
+    for (const auto& [ext, mime] : EXTENSION_MIME_MAP) {
+        if (isTextMimeType(mime)) {
+            textExtensions.push_back(ext);
+        }
+    }
+
+    // Add common code extensions not in the basic map
+    const std::vector<std::string> additionalCodeExtensions = {
+        ".tsx",        ".jsx",  ".ts",   ".mjs", ".cjs", // Modern JavaScript variants
+        ".cc",         ".cxx",  ".hh",   ".hxx",         // C++ variants
+        ".kt",         ".kts",                           // Kotlin
+        ".swift",                                        // Swift
+        ".rb",                                           // Ruby
+        ".pl",         ".pm",                            // Perl
+        ".php",                                          // PHP
+        ".scala",                                        // Scala
+        ".cs",                                           // C#
+        ".fs",         ".fsx",                           // F#
+        ".vb",                                           // Visual Basic
+        ".lua",                                          // Lua
+        ".r",          ".R",                             // R
+        ".m",                                            // Objective-C/MATLAB
+        ".mm",                                           // Objective-C++
+        ".asm",        ".s",                             // Assembly
+        ".sql",                                          // SQL
+        ".toml",                                         // TOML config
+        ".ini",        ".cfg",  ".conf",                 // Config files
+        ".vim",                                          // Vim script
+        ".el",                                           // Emacs Lisp
+        ".scm",        ".lisp",                          // Lisp variants
+        ".clj",        ".cljs",                          // Clojure
+        ".erl",        ".hrl",                           // Erlang
+        ".ex",         ".exs",                           // Elixir
+        ".hs",         ".lhs",                           // Haskell
+        ".ml",         ".mli",                           // OCaml
+        ".tcl",                                          // Tcl
+        ".awk",                                          // AWK
+        ".sed",                                          // sed
+        ".make",       ".mk",                            // Makefile variants
+        ".cmake",                                        // CMake
+        ".dockerfile",                                   // Dockerfile
+        ".proto",                                        // Protocol Buffers
+        ".graphql",    ".gql",                           // GraphQL
+        ".rst",                                          // reStructuredText
+        ".adoc",                                         // AsciiDoc
+        ".tex",        ".bib",                           // LaTeX
+        ".org"                                           // Org-mode
+    };
+
+    for (const auto& ext : additionalCodeExtensions) {
+        // Only add if not already in the list
+        if (std::find(textExtensions.begin(), textExtensions.end(), ext) == textExtensions.end()) {
+            textExtensions.push_back(ext);
+        }
+    }
+
+    return textExtensions;
+}
+
 std::string FileTypeDetector::getFileTypeCategory(const std::string& mimeType) const {
     // First check our loaded patterns
     auto it = pImpl->mimeToFileType.find(mimeType);

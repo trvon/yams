@@ -6,8 +6,6 @@
 
 namespace yams::cli {
 
-namespace fs = std::filesystem;
-
 class MigrateCommand : public ICommand {
 public:
     std::string getName() const override { return "migrate"; }
@@ -163,7 +161,6 @@ private:
         std::exit(0);
     }
 
-private:
     YamsCLI* cli_ = nullptr;
     std::string destination_;
     std::string archivePath_;

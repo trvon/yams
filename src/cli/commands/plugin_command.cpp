@@ -266,9 +266,6 @@ void PluginCommand::listPlugins() {
         // Try once
         auto sres = fetch_status();
         auto res = fetch_stats();
-        bool have_typed = sres && !sres.value().providers.empty();
-        bool have_json = res && res.value().additionalStats.contains("plugins_json") &&
-                         res.value().additionalStats.at("plugins_json") != "[]";
         // Do not trigger scans or poll; rely on daemon-provided status/stats only
         if (!sres && !res) {
             std::cout << "Failed to query daemon for plugins\n";

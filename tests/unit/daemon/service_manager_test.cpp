@@ -71,7 +71,7 @@ TEST_F(ServiceManagerTest, ServiceAccessorsAfterConstruction) {
     // Other services are initialized during initialize(), not in constructor
     EXPECT_EQ(sm.getContentStore(), nullptr);
     EXPECT_EQ(sm.getMetadataRepo(), nullptr);
-    EXPECT_EQ(sm.getEmbeddingGenerator(), nullptr);
+    EXPECT_EQ(sm.getModelProvider(), nullptr);
 }
 
 // Test 4: Multiple construction is idempotent

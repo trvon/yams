@@ -2,7 +2,6 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
-#include <regex>
 #include <sstream>
 #include <yams/extraction/html_text_extractor.h>
 #include <yams/extraction/text_extractor.h>
@@ -115,6 +114,21 @@ std::string HtmlTextExtractor::extractTextFromHtml(const std::string& html) {
         return "";
     }
 
+    // Safety limit: Skip regex processing on very large HTML to avoid stack overflow
+    // Regex backtracking can cause exponential time complexity on large strings
+    constexpr size_t MAX_REGEX_SIZE = 5 * 1024 * 1024; // 5MB limit for regex operations
+    if (html.size() > MAX_REGEX_SIZE) {
+        spdlog::warn(
+            "HTML file too large for regex processing ({} bytes), using simple tag stripping",
+            html.size());
+        // Fallback to simple stripping without regex
+        std::string text = html;
+        text = removeScriptAndStyle(text);
+        text = stripHtmlTags(text); // This doesn't use regex
+        text = cleanWhitespace(text);
+        return text;
+    }
+
     std::string text = html;
 
     // 1. Remove script and style blocks
@@ -200,28 +214,60 @@ std::string HtmlTextExtractor::removeScriptAndStyle(const std::string& html) {
 }
 
 std::string HtmlTextExtractor::convertBlockTagsToNewlines(const std::string& html) {
-    std::string result = html;
+    // Use robust string parsing instead of regex to avoid stack overflow on large HTML
+    std::string result;
+    result.reserve(html.size() + html.size() / 10); // Reserve extra space for newlines
 
     // List of block-level tags that should be converted to newlines
     const std::vector<std::string> blockTags = {
-        "p",       "div",     "h1",         "h2",     "h3",  "h4",    "h5",  "h6", "ul",
-        "ol",      "li",      "blockquote", "pre",    "hr",  "table", "tr",  "td", "th",
-        "section", "article", "header",     "footer", "nav", "aside", "main"};
+        "p",       "div",     "h1",         "h2",     "h3",  "h4",    "h5",   "h6", "ul",
+        "ol",      "li",      "blockquote", "pre",    "hr",  "table", "tr",   "td", "th",
+        "section", "article", "header",     "footer", "nav", "aside", "main", "br"};
 
-    // Add newlines before and after block tags
-    for (const auto& tag : blockTags) {
-        // Opening tags
-        std::regex openRegex("<" + tag + R"(\s[^>]*>|>)", std::regex::icase);
-        result = std::regex_replace(result, openRegex, "\n");
+    size_t pos = 0;
+    while (pos < html.size()) {
+        if (html[pos] != '<') {
+            result += html[pos];
+            pos++;
+            continue;
+        }
 
-        // Closing tags
-        std::regex closeRegex("</" + tag + ">", std::regex::icase);
-        result = std::regex_replace(result, closeRegex, "\n");
+        // Found a tag, check if it's a block tag
+        size_t tag_end = html.find('>', pos);
+        if (tag_end == std::string::npos) {
+            result += html[pos];
+            pos++;
+            continue;
+        }
+
+        // Extract the tag content
+        std::string tag_content = html.substr(pos + 1, tag_end - pos - 1);
+
+        // Check if it's a closing tag
+        bool is_closing = !tag_content.empty() && tag_content[0] == '/';
+        if (is_closing) {
+            tag_content = tag_content.substr(1);
+        }
+
+        // Get the tag name (first word, case-insensitive)
+        size_t space_pos = tag_content.find_first_of(" \t\n\r/");
+        std::string tag_name = tag_content.substr(0, space_pos);
+
+        // Convert to lowercase for comparison
+        std::string tag_lower = tag_name;
+        std::transform(tag_lower.begin(), tag_lower.end(), tag_lower.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+
+        // Check if this is a block tag
+        bool is_block_tag =
+            std::find(blockTags.begin(), blockTags.end(), tag_lower) != blockTags.end();
+
+        if (is_block_tag) {
+            result += '\n';
+        }
+
+        pos = tag_end + 1;
     }
-
-    // Convert <br> tags to newlines
-    std::regex brRegex(R"(<br\s*/?>)", std::regex::icase);
-    result = std::regex_replace(result, brRegex, "\n");
 
     return result;
 }
@@ -243,7 +289,8 @@ std::string HtmlTextExtractor::stripHtmlTags(const std::string& html) {
 }
 
 std::string HtmlTextExtractor::decodeHtmlEntities(const std::string& text) {
-    std::string result = text;
+    std::string result;
+    result.reserve(text.size());
 
     // Common HTML entities
     const std::vector<std::pair<std::string, std::string>> entities = {
@@ -253,49 +300,72 @@ std::string HtmlTextExtractor::decodeHtmlEntities(const std::string& text) {
         {"&hellip;", "..."}, {"&bull;", "•"}, {"&ldquo;", "\""}, {"&rdquo;", "\""},
         {"&lsquo;", "'"},    {"&rsquo;", "'"}};
 
-    for (const auto& [entity, replacement] : entities) {
-        size_t pos = 0;
-        while ((pos = result.find(entity, pos)) != std::string::npos) {
-            result.replace(pos, entity.length(), replacement);
-            pos += replacement.length();
+    size_t pos = 0;
+    while (pos < text.size()) {
+        if (text[pos] != '&') {
+            result += text[pos];
+            pos++;
+            continue;
         }
-    }
 
-    // Decode numeric entities (&#123;)
-    std::regex numericRegex(R"(&#(\d+);)");
-    std::smatch numMatch;
-    std::string temp = result;
-    result.clear();
-    auto searchStart = temp.cbegin();
-    while (std::regex_search(searchStart, temp.cend(), numMatch, numericRegex)) {
-        result.append(searchStart, numMatch[0].first);
-        int code = std::stoi(numMatch[1]);
-        if (code < 128) {
-            result += static_cast<char>(code);
-        } else {
-            result += numMatch[0].str(); // Keep as-is if not ASCII
-        }
-        searchStart = numMatch[0].second;
-    }
-    result.append(searchStart, temp.cend());
+        // Found '&', check for entity
+        bool decoded = false;
 
-    // Decode hex entities (&#xABC;)
-    std::regex hexRegex(R"(&#x([0-9A-Fa-f]+);)");
-    std::smatch hexMatch;
-    temp = result;
-    result.clear();
-    searchStart = temp.cbegin();
-    while (std::regex_search(searchStart, temp.cend(), hexMatch, hexRegex)) {
-        result.append(searchStart, hexMatch[0].first);
-        int code = std::stoi(hexMatch[1], nullptr, 16);
-        if (code < 128) {
-            result += static_cast<char>(code);
-        } else {
-            result += hexMatch[0].str(); // Keep as-is if not ASCII
+        // Check for named entities
+        for (const auto& [entity, replacement] : entities) {
+            if (text.compare(pos, entity.length(), entity) == 0) {
+                result += replacement;
+                pos += entity.length();
+                decoded = true;
+                break;
+            }
         }
-        searchStart = hexMatch[0].second;
+
+        if (decoded) {
+            continue;
+        }
+
+        // Check for numeric entities &#123;
+        if (pos + 2 < text.size() && text[pos + 1] == '#' && std::isdigit(text[pos + 2])) {
+            size_t end = text.find(';', pos + 2);
+            if (end != std::string::npos && end - pos < 10) { // Reasonable length
+                std::string num_str = text.substr(pos + 2, end - pos - 2);
+                try {
+                    int code = std::stoi(num_str);
+                    if (code > 0 && code < 128) {
+                        result += static_cast<char>(code);
+                        pos = end + 1;
+                        continue;
+                    }
+                } catch (...) {
+                    // Invalid number, keep as-is
+                }
+            }
+        }
+
+        // Check for hex entities &#x1A;
+        if (pos + 3 < text.size() && text[pos + 1] == '#' &&
+            (text[pos + 2] == 'x' || text[pos + 2] == 'X') && std::isxdigit(text[pos + 3])) {
+            size_t end = text.find(';', pos + 3);
+            if (end != std::string::npos && end - pos < 12) { // Reasonable length
+                std::string hex_str = text.substr(pos + 3, end - pos - 3);
+                try {
+                    int code = std::stoi(hex_str, nullptr, 16);
+                    if (code > 0 && code < 128) {
+                        result += static_cast<char>(code);
+                        pos = end + 1;
+                        continue;
+                    }
+                } catch (...) {
+                    // Invalid hex, keep as-is
+                }
+            }
+        }
+
+        // Not a recognized entity, keep the '&'
+        result += text[pos];
+        pos++;
     }
-    result.append(searchStart, temp.cend());
 
     return result;
 }
@@ -346,40 +416,92 @@ std::string HtmlTextExtractor::cleanWhitespace(const std::string& text) {
 }
 
 std::string HtmlTextExtractor::extractTitle(const std::string& html) {
-    std::regex titleRegex(R"(<title[^>]*>(.*?)</title>)", std::regex::icase);
-    std::smatch match;
-
-    if (std::regex_search(html, match, titleRegex)) {
-        std::string title = match[1];
-        // Clean up the title
-        title = stripHtmlTags(title);
-        title = decodeHtmlEntities(title);
-        title = cleanWhitespace(title);
-        return title;
+    // Use robust string parsing instead of regex to avoid stack overflow
+    size_t title_start = find_caseless(html, "<title");
+    if (title_start == std::string::npos) {
+        return "";
     }
 
-    return "";
+    // Find the end of the opening tag
+    size_t content_start = html.find('>', title_start);
+    if (content_start == std::string::npos) {
+        return "";
+    }
+    content_start++; // Move past the '>'
+
+    // Find the closing tag
+    size_t content_end = find_caseless(html, "</title>", content_start);
+    if (content_end == std::string::npos) {
+        return "";
+    }
+
+    // Extract title content
+    std::string title = html.substr(content_start, content_end - content_start);
+
+    // Clean up the title
+    title = stripHtmlTags(title);
+    title = decodeHtmlEntities(title);
+    title = cleanWhitespace(title);
+
+    return title;
 }
 
 std::string HtmlTextExtractor::extractMetaDescription(const std::string& html) {
-    // Try different meta description patterns
-    std::vector<std::regex> patterns = {
-        std::regex(R"(<meta\s+name=["']description["']\s+content=["']([^"']+)["'])",
-                   std::regex::icase),
-        std::regex(R"(<meta\s+content=["']([^"']+)["']\s+name=["']description["'])",
-                   std::regex::icase),
-        std::regex(R"(<meta\s+property=["']og:description["']\s+content=["']([^"']+)["'])",
-                   std::regex::icase),
-        std::regex(R"(<meta\s+content=["']([^"']+)["']\s+property=["']og:description["'])",
-                   std::regex::icase)};
-
-    for (const auto& pattern : patterns) {
-        std::smatch match;
-        if (std::regex_search(html, match, pattern)) {
-            std::string description = match[1];
-            description = decodeHtmlEntities(description);
-            return description;
+    // Use robust string parsing to find meta tags
+    // Look for: <meta name="description" content="..."> or variations
+    size_t pos = 0;
+    while (pos < html.size()) {
+        size_t meta_start = find_caseless(html, "<meta", pos);
+        if (meta_start == std::string::npos) {
+            break;
         }
+
+        // Find the end of this meta tag
+        size_t meta_end = html.find('>', meta_start);
+        if (meta_end == std::string::npos) {
+            break;
+        }
+
+        std::string meta_tag = html.substr(meta_start, meta_end - meta_start + 1);
+        std::string meta_lower = meta_tag;
+        std::transform(meta_lower.begin(), meta_lower.end(), meta_lower.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+
+        // Check if this is a description meta tag
+        bool is_description =
+            (meta_lower.find("name=\"description\"") != std::string::npos ||
+             meta_lower.find("name='description'") != std::string::npos ||
+             meta_lower.find("property=\"og:description\"") != std::string::npos ||
+             meta_lower.find("property='og:description'") != std::string::npos);
+
+        if (is_description) {
+            // Extract the content attribute value
+            size_t content_pos = meta_lower.find("content=");
+            if (content_pos != std::string::npos) {
+                content_pos += 8; // Skip "content="
+
+                // Find the quote character
+                while (content_pos < meta_tag.size() && std::isspace(meta_tag[content_pos])) {
+                    content_pos++;
+                }
+
+                if (content_pos < meta_tag.size()) {
+                    char quote = meta_tag[content_pos];
+                    if (quote == '"' || quote == '\'') {
+                        content_pos++; // Skip opening quote
+                        size_t end_quote = meta_tag.find(quote, content_pos);
+                        if (end_quote != std::string::npos) {
+                            std::string description =
+                                meta_tag.substr(content_pos, end_quote - content_pos);
+                            description = decodeHtmlEntities(description);
+                            return description;
+                        }
+                    }
+                }
+            }
+        }
+
+        pos = meta_end + 1;
     }
 
     return "";

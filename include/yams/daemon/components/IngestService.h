@@ -17,7 +17,7 @@ public:
     void stop();
 
 private:
-    void workerLoop(yams::compat::stop_token token);
+    void workerLoop(const yams::compat::stop_token& token);
 
     ServiceManager* sm_;
     std::vector<yams::compat::jthread> threads_;

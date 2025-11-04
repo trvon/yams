@@ -2733,10 +2733,6 @@ MCPServer::handleGrepDocuments(const MCPGrepRequest& req) {
 
 boost::asio::awaitable<Result<MCPDownloadResponse>>
 MCPServer::handleDownload(const MCPDownloadRequest& req) {
-    const bool verbose =
-        (std::getenv("YAMS_POOL_VERBOSE") && std::string(std::getenv("YAMS_POOL_VERBOSE")) != "0" &&
-         std::string(std::getenv("YAMS_POOL_VERBOSE")) != "false");
-
     // Perform download locally using downloader manager (store into CAS), then optionally
     // post-index.
     MCPDownloadResponse mcp_response;

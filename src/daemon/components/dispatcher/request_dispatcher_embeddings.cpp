@@ -212,19 +212,25 @@ RequestDispatcher::handleEmbedDocumentsRequest(const EmbedDocumentsRequest& req)
                           std::optional<yams::Result<yams::repair::EmbeddingRepairStats>>> {
             auto contentStore = serviceManager_->getContentStore();
             auto metadataRepo = serviceManager_->getMetadataRepo();
-            auto embeddingGenerator = serviceManager_->getEmbeddingGenerator();
+            auto modelProvider = serviceManager_->getModelProvider();
             auto contentExtractors = serviceManager_->getContentExtractors();
-            if (!embeddingGenerator) {
-                auto ensure = serviceManager_->ensureEmbeddingGeneratorReady();
-                if (ensure) {
-                    embeddingGenerator = serviceManager_->getEmbeddingGenerator();
-                }
-            }
-            if (!embeddingGenerator) {
+
+            if (!modelProvider || !modelProvider->isAvailable()) {
                 co_return std::optional<yams::Result<yams::repair::EmbeddingRepairStats>>{
-                    Error{ErrorCode::NotInitialized, "Embedding generator not available (provider "
-                                                     "not adopted or model not loaded)"}};
+                    Error{ErrorCode::NotInitialized, "Model provider not available"}};
             }
+
+            // Get the preferred model name
+            std::string modelName;
+            try {
+                modelName = serviceManager_->getEmbeddingModelName();
+            } catch (...) {
+            }
+            if (modelName.empty()) {
+                co_return std::optional<yams::Result<yams::repair::EmbeddingRepairStats>>{
+                    Error{ErrorCode::NotInitialized, "No embedding model configured"}};
+            }
+
             if (!contentStore) {
                 co_return std::optional<yams::Result<yams::repair::EmbeddingRepairStats>>{
                     Error{ErrorCode::NotInitialized, "Content store not available"}};
@@ -241,8 +247,8 @@ RequestDispatcher::handleEmbedDocumentsRequest(const EmbedDocumentsRequest& req)
             } catch (...) {
             }
             auto stats = yams::repair::repairMissingEmbeddings(
-                contentStore, metadataRepo, embeddingGenerator, repairConfig, req.documentHashes,
-                nullptr, contentExtractors);
+                contentStore, metadataRepo, modelProvider, modelName, repairConfig,
+                req.documentHashes, nullptr, contentExtractors);
             co_return std::optional<yams::Result<yams::repair::EmbeddingRepairStats>>{
                 std::move(stats)};
         },

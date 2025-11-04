@@ -57,7 +57,7 @@ private:
     std::string queryFile_;
     std::vector<std::string> extraArgs_;
     std::string pathFilter_;
-    std::optional<std::string> resolvedLocalFilePath_{};
+    std::optional<std::string> resolvedLocalFilePath_;
     size_t limit_ = 20;
     std::string searchType_ = "hybrid";
     bool fuzzySearch_ = false;
@@ -98,7 +98,7 @@ private:
     std::string indexedBefore_;
 
     // Session scoping controls
-    std::optional<std::string> sessionOverride_{};
+    std::optional<std::string> sessionOverride_;
     bool noSession_{false};
 
     // Grouping of multiple versions per path (UI-only feature)
@@ -121,7 +121,7 @@ private:
                 inTag = false;
             } else if (!inTag) {
                 // Replace newlines and multiple spaces with single space
-                if (c == ' ' || c == ' ' || c == '\t') {
+                if (c == ' ' || c == '\t') {
                     if (!cleaned.empty() && cleaned.back() != ' ') {
                         cleaned += ' ';
                     }
@@ -1184,7 +1184,7 @@ public:
                     }
                 }
                 if (r) {
-                    auto resp = r.value();
+                    const auto& resp = r.value();
                     bool noResults = resp.results.empty() || resp.totalCount == 0;
                     if (noResults && !fuzzyFlag) {
                         auto retryReq = dreq;
@@ -1588,7 +1588,7 @@ public:
             }
         }
         if (r) {
-            auto resp = r.value();
+            const auto& resp = r.value();
             bool noResults = resp.results.empty() || resp.totalCount == 0;
             if (noResults && !fuzzySearch_) {
                 auto retryReq = dreq;

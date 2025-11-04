@@ -118,6 +118,11 @@ class YamsConan(ConanFile):
             self.requires("tracy/0.12.2")
 
     def configure(self):
+        # Force new C++11 ABI globally for consistency (Ubuntu 24.04 compatibility)
+        # This ensures all dependencies use the same ABI as the main project
+        if self.settings.compiler == "gcc" or (self.settings.compiler == "clang" and self.settings.compiler.libcxx == "libstdc++11"):  # type: ignore
+            self.settings.compiler.libcxx = "libstdc++11"  # type: ignore
+
         # Enable FTS extensions on sqlite3 across both legacy and modern option naming.
         try:
             if hasattr(self.options["sqlite3"], "fts5"):  # type: ignore

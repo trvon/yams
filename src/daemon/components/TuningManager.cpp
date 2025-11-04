@@ -27,7 +27,7 @@ TuningManager::~TuningManager() {
 void TuningManager::start() {
     if (running_.exchange(true))
         return;
-    thread_ = yams::compat::jthread([this](yams::compat::stop_token st) {
+    thread_ = yams::compat::jthread([this](const yams::compat::stop_token& st) {
         spdlog::debug("TuningManager thread started");
         while (!st.stop_requested() && running_.load()) {
 #if defined(TRACY_ENABLE)

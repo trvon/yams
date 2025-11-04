@@ -97,6 +97,10 @@ int main(int argc, char* argv[]) {
     // Install fatal handlers as early as possible
     setup_fatal_handlers();
 
+    // Set YAMS_IN_DAEMON=1 to signal we're running inside the daemon process
+    // This prevents EmbeddingGenerator from trying to connect back to us via IPC
+    setenv("YAMS_IN_DAEMON", "1", 1);
+
     yams::daemon::DaemonConfig config;
     std::string configPath;
     // Capture CLI-provided data dir separately to enforce precedence (config > env > CLI)
@@ -757,25 +761,25 @@ int main(int argc, char* argv[]) {
     if (!foreground) {
         pid_t pid = fork();
         if (pid < 0) {
-            std::cerr << "Failed to fork daemon process" << std::endl;
+            std::cerr << "Failed to fork daemon process\n";
             return 1;
         }
         if (pid > 0) {
             // Parent process exits
-            std::cout << "Daemon started with PID: " << pid << std::endl;
+            std::cout << "Daemon started with PID: " << pid << '\n';
             return 0;
         }
 
         // Child process continues as daemon
         // Create new session
         if (setsid() < 0) {
-            std::cerr << "Failed to create new session" << std::endl;
+            std::cerr << "Failed to create new session\n";
             return 1;
         }
 
         // Change working directory to root
         if (chdir("/") < 0) {
-            std::cerr << "Failed to change working directory" << std::endl;
+            std::cerr << "Failed to change working directory\n";
             return 1;
         }
 

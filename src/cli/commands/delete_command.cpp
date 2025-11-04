@@ -671,7 +671,7 @@ private:
     std::string formatSize(uint64_t bytes) {
         const char* units[] = {"B", "KB", "MB", "GB", "TB"};
         int unitIndex = 0;
-        double size = static_cast<double>(bytes);
+        auto size = static_cast<double>(bytes);
 
         while (size >= 1024 && unitIndex < 4) {
             size /= 1024;

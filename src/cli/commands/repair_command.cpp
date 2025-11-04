@@ -1157,9 +1157,9 @@ private:
                 ereq.documentHashes = hashes; // stream a single request with all docs
                 Result<std::vector<yams::daemon::EmbeddingEvent>> evres = Error{ErrorCode::Unknown};
                 for (int attempt = 1; attempt <= std::max(1, embedRetries_); ++attempt) {
-                    auto req = ereq;
                     evres = yams::cli::run_result<std::vector<yams::daemon::EmbeddingEvent>>(
-                        client.callEvents(req), std::chrono::milliseconds(embedTimeoutMs_ + 10000));
+                        client.callEvents(ereq),
+                        std::chrono::milliseconds(embedTimeoutMs_ + 10000));
                     if (evres)
                         break; // success
                     if (!evres)
@@ -1209,7 +1209,7 @@ private:
     std::string formatSize(uint64_t bytes) const {
         const char* units[] = {"B", "KB", "MB", "GB", "TB"};
         int unitIndex = 0;
-        double size = static_cast<double>(bytes);
+        auto size = static_cast<double>(bytes);
 
         while (size >= 1024 && unitIndex < 4) {
             size /= 1024;
@@ -1253,9 +1253,18 @@ Result<void> RepairCommand::rebuildFts5Index(const app::services::AppContext& ct
             auto extractedOpt = yams::extraction::util::extractDocumentText(
                 ctx.store, d.sha256Hash, d.mimeType, ext, ctx.contentExtractors);
             if (extractedOpt && !extractedOpt->empty()) {
+                // Store the extracted content so it's available for snippets
+                metadata::DocumentContent content;
+                content.documentId = d.id;
+                content.contentText = *extractedOpt;
+                content.extractionMethod = "repair";
+                content.language = ""; // Could detect language if needed
+                auto contentResult = ctx.metadataRepo->insertContent(content);
+
+                // Index in FTS5
                 auto ir = ctx.metadataRepo->indexDocumentContent(d.id, d.fileName, *extractedOpt,
                                                                  d.mimeType);
-                if (ir) {
+                if (ir && contentResult) {
                     (void)ctx.metadataRepo->updateFuzzyIndex(d.id);
                     ++ok;
                 } else {

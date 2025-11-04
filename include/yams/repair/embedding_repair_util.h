@@ -13,6 +13,12 @@
 #include <memory>
 #include <vector>
 
+namespace yams {
+namespace daemon {
+class IModelProvider;
+}
+} // namespace yams
+
 namespace yams::repair {
 
 // Progress callback for repair operations
@@ -36,11 +42,33 @@ struct EmbeddingRepairConfig {
 
 /**
  * Repair missing embeddings for all documents or specific document hashes.
- * This is a shared utility function that can be used by both CLI and daemon.
+ * Daemon version that uses IModelProvider directly.
  *
  * @param contentStore The content store to retrieve document content
  * @param metadataRepo The metadata repository to query documents
- * @param embeddingGenerator The embedding generator (must be initialized)
+ * @param modelProvider The model provider (daemon direct access)
+ * @param modelName The embedding model name to use
+ * @param config Configuration for the repair operation
+ * @param documentHashes Optional list of specific document hashes to repair (empty = all)
+ * @param progressCallback Optional callback for progress updates
+ * @return Result containing repair statistics or error
+ */
+Result<EmbeddingRepairStats>
+repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
+                        std::shared_ptr<metadata::IMetadataRepository> metadataRepo,
+                        std::shared_ptr<daemon::IModelProvider> modelProvider,
+                        const std::string& modelName, const EmbeddingRepairConfig& config,
+                        const std::vector<std::string>& documentHashes = {},
+                        EmbeddingRepairProgressCallback progressCallback = nullptr,
+                        const yams::extraction::ContentExtractorList& extractors = {});
+
+/**
+ * Repair missing embeddings for all documents or specific document hashes.
+ * CLI version that uses EmbeddingGenerator (IPC wrapper).
+ *
+ * @param contentStore The content store to retrieve document content
+ * @param metadataRepo The metadata repository to query documents
+ * @param embeddingGenerator The embedding generator (CLI IPC wrapper)
  * @param config Configuration for the repair operation
  * @param documentHashes Optional list of specific document hashes to repair (empty = all)
  * @param progressCallback Optional callback for progress updates

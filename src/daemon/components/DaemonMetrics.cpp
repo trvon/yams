@@ -511,6 +511,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         out.readinessStates["search_engine"] = state_->readiness.searchEngineReady.load();
         out.readinessStates["model_provider"] = state_->readiness.modelProviderReady.load();
         out.readinessStates["vector_index"] = state_->readiness.vectorIndexReady.load();
+        out.readinessStates["vector_db"] = state_->readiness.vectorDbReady.load();
         out.readinessStates["plugins"] = state_->readiness.pluginsReady.load();
         // Only include search init progress while not fully ready or when progress < 100%
         const bool searchReady = state_->readiness.searchEngineReady.load();
@@ -865,15 +866,19 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
     // Embedding runtime details (best-effort)
     try {
         if (services_) {
-            auto gen = services_->getEmbeddingGenerator();
-            if (gen) {
+            auto provider = services_->getModelProvider();
+            if (provider) {
                 try {
-                    out.embeddingAvailable = gen->isInitialized();
+                    out.embeddingAvailable = provider->isAvailable();
                 } catch (...) {
-                    out.embeddingAvailable = true; // best-effort
+                    out.embeddingAvailable = false;
                 }
                 try {
-                    out.embeddingDim = static_cast<uint32_t>(gen->getEmbeddingDimension());
+                    std::string modelName = services_->getEmbeddingModelName();
+                    if (!modelName.empty()) {
+                        out.embeddingDim =
+                            static_cast<uint32_t>(provider->getEmbeddingDim(modelName));
+                    }
                 } catch (...) {
                 }
             }
@@ -882,7 +887,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             try {
                 auto prov = services_->getModelProvider();
                 if (prov && prov->isAvailable()) {
-                    out.embeddingBackend = "provider";
+                    out.embeddingBackend = std::string("plugin:") + prov->getProviderName();
                     // Try to get model path via provider v1.2 JSON
                     if (!out.embeddingModel.empty()) {
                         try {
@@ -894,14 +899,6 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                             }
                         } catch (...) {
                         }
-                    }
-                } else if (gen) {
-                    // Prefer generator's own backend name for clarity (e.g., LocalONNX(GenAI),
-                    // Hybrid, Daemon)
-                    try {
-                        out.embeddingBackend = gen->getBackendName();
-                    } catch (...) {
-                        out.embeddingBackend = "local";
                     }
                     // Best-effort local model path resolution
                     if (out.embeddingModelPath.empty() && !out.embeddingModel.empty()) {

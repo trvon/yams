@@ -228,7 +228,7 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::acquire() {
     co_return fresh;
 }
 
-void AsioConnectionPool::release(std::shared_ptr<AsioConnection> conn) {
+void AsioConnectionPool::release(const std::shared_ptr<AsioConnection>& conn) {
     if (conn) {
         conn->in_use.store(false, std::memory_order_release);
     }
@@ -280,7 +280,7 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
 
     // Start background read loop to receive responses
     if (!conn->read_started.exchange(true)) {
-        auto executor = conn->opts.executor
+        auto executor = conn->opts.executor.has_value()
                             ? *conn->opts.executor
                             : GlobalIOContext::instance().get_io_context().get_executor();
         conn->read_loop_future = co_spawn(

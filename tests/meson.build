@@ -782,6 +782,59 @@ if catch2_dep.found()
     install: false,
   )
   
+  html_extractor_robust_exe = executable('html_extractor_robust',
+    files('unit/extraction/html_extractor_robust_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + content_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  
+  # Plugin process tests (external plugin infrastructure)
+  plugin_process_test_deps = [
+    dependency('spdlog'),
+    dependency('yams_core'),
+    dependency('yams_extraction'),
+    dependency('nlohmann_json'),
+  ]
+  
+  plugin_process_exe = executable('plugin_process',
+    files('unit/extraction/plugin_process_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + plugin_process_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  plugin_process_minimal_exe = executable('plugin_process_minimal',
+    files('unit/extraction/plugin_process_minimal_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + plugin_process_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  jsonrpc_client_exe = executable('jsonrpc_client',
+    files('unit/extraction/jsonrpc_client_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + plugin_process_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  external_plugin_extractor_exe = executable('external_plugin_extractor',
+    files('unit/extraction/external_plugin_extractor_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + plugin_process_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # Chunking tests (depends on chunking module)
   chunking_test_deps = [
     dependency('spdlog'),
@@ -876,6 +929,17 @@ if catch2_dep.found()
     install: false,
   )
 
+  # Ghidra plugin integration test (PBI-075)
+  # Tests plugin spawning and JSON-RPC communication without requiring Ghidra installed
+  ghidra_plugin_exe = executable('ghidra_plugin_communication',
+    files('integration/ghidra_plugin_communication_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep, dependency('nlohmann_json'), dependency('spdlog')],
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # Test Registrations
   # --------------------------------------------------------------------------
   
@@ -924,6 +988,36 @@ if catch2_dep.found()
     timeout: 60
   )
   
+  test('html_extractor_robust', html_extractor_robust_exe,
+    suite: ['catch2', 'unit', 'extraction', 'html'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120  # Allow longer timeout for large file tests
+  )
+  
+  test('plugin_process', plugin_process_exe,
+    suite: ['catch2', 'unit', 'extraction', 'plugin'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
+  test('plugin_process_minimal', plugin_process_minimal_exe,
+    suite: ['catch2', 'unit', 'extraction', 'plugin', 'debug'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
+  )
+
+  test('jsonrpc_client', jsonrpc_client_exe,
+    suite: ['catch2', 'unit', 'extraction', 'jsonrpc'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('external_plugin_extractor', external_plugin_extractor_exe,
+    suite: ['catch2', 'unit', 'extraction', 'plugin'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
   # Chunking tests
   test('chunking', chunking_exe,
     suite: ['catch2', 'unit', 'chunking'],
@@ -968,6 +1062,13 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'search', 'hybrid'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
+  )
+
+  # Plugin integration tests
+  test('ghidra_plugin_communication', ghidra_plugin_exe,
+    suite: ['catch2', 'integration', 'plugin', 'ghidra'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
   )
 
   # Daemon tests

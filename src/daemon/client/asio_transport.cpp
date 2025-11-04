@@ -197,7 +197,7 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
         co_return Error{ErrorCode::InvalidData, "Frame build failed"};
     }
 
-    auto executor = conn->opts.executor
+    auto executor = conn->opts.executor.has_value()
                         ? *conn->opts.executor
                         : GlobalIOContext::instance().get_io_context().get_executor();
     auto response_ch = std::make_shared<AsioConnection::response_channel_t>(executor, 1);
@@ -265,7 +265,7 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
         co_return Error{ErrorCode::InvalidData, "Frame build failed"};
     }
 
-    auto executor = conn->opts.executor
+    auto executor = conn->opts.executor.has_value()
                         ? *conn->opts.executor
                         : GlobalIOContext::instance().get_io_context().get_executor();
     auto done_ch = std::make_shared<AsioConnection::void_channel_t>(executor, 1);

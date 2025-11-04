@@ -1219,7 +1219,11 @@ private:
         auto hres = ctx_.hybridEngine->search(req.query, effectiveLimit, filter,
                                               budgetsActive ? &stageBudgets : nullptr);
         if (!hres) {
-            return Error{ErrorCode::InternalError, "Hybrid search failed: " + hres.error().message};
+            // Graceful degradation: if hybrid search fails (e.g., embeddings unavailable),
+            // fall back to keyword-only search
+            spdlog::warn("Hybrid search failed ({}), falling back to keyword-only search",
+                         hres.error().message);
+            return metadataSearch(req, telemetry);
         }
 
         const auto& vec = hres.value();

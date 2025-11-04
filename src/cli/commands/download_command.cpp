@@ -316,14 +316,14 @@ public:
 
 private:
     YamsCLI* cli_{nullptr};
-    std::optional<std::string> url_{};
-    std::optional<fs::path> listPath_{};
+    std::optional<std::string> url_;
+    std::optional<fs::path> listPath_;
 
     // Headers and auth
-    std::vector<std::string> headers_{};
+    std::vector<std::string> headers_;
 
     // Integrity
-    std::optional<std::string> checksum_{}; // "<algo>:<hex>"
+    std::optional<std::string> checksum_; // "<algo>:<hex>"
 
     // Concurrency and performance
     int concurrency_{4};
@@ -338,14 +338,14 @@ private:
 
     // Resume and networking
     bool noResume_{false};
-    std::optional<std::string> proxy_{};
+    std::optional<std::string> proxy_;
     bool tlsInsecure_{false};
-    std::optional<std::string> tlsCaPath_{};
+    std::optional<std::string> tlsCaPath_;
     bool noFollowRedirects_{false};
 
     // Export policy
-    std::optional<fs::path> exportPath_{};
-    std::optional<fs::path> exportDir_{};
+    std::optional<fs::path> exportPath_;
+    std::optional<fs::path> exportDir_;
     std::string overwritePolicy_{"never"};
 
     // Output / UX
@@ -354,8 +354,8 @@ private:
     bool quiet_{false};
 
     // Annotations
-    std::vector<std::string> tags_{};
-    std::vector<std::string> metadataKVs_{}; // raw key=value pairs
+    std::vector<std::string> tags_;
+    std::vector<std::string> metadataKVs_; // raw key=value pairs
 };
 
 // Factory function for registry

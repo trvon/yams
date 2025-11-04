@@ -116,9 +116,6 @@ public:
     std::shared_ptr<vector::VectorIndexManager> getVectorIndexManager() const {
         return vectorIndexManager_;
     }
-    std::shared_ptr<vector::EmbeddingGenerator> getEmbeddingGenerator() const {
-        return embeddingGenerator_;
-    }
     std::string getEmbeddingModelName() const { return embeddingModelName_; }
     std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const { return vectorDatabase_; }
     std::shared_ptr<WorkerPool> getWorkerPool() const { return nullptr; }
@@ -333,13 +330,6 @@ public:
     Result<size_t> adoptSymbolExtractorsFromHosts();
     bool isEmbeddingsAutoOnAdd() const { return embeddingsAutoOnAdd_; }
 
-    // Ensure an embedding generator is available by adopting a provider and loading
-    // the preferred model if necessary. Preferred model is resolved from config or
-    // environment (YAMS_PREFERRED_MODEL), with a fallback to the first installed
-    Result<void> ensureEmbeddingGeneratorReady();
-    bool shouldPreloadEmbeddings() const;
-    void scheduleEmbeddingWarmup();
-
     // Explicit, on-demand plugin autoload: scans trusted roots and default directories,
     // loads plugins via ABI hosts, and attempts to adopt model providers and content extractors.
     // Returns number of plugins loaded during this invocation.
@@ -423,6 +413,9 @@ private:
     // Returns true if this call fired the callback; false if it was already invoked.
     bool invokeInitCompleteOnce(bool success, const std::string& error);
 
+    // Helper: Get embedding dimension from model provider (returns 0 if unavailable)
+    size_t getEmbeddingDimension() const;
+
     // Modern async initialization phases
     boost::asio::awaitable<yams::Result<void>>
     co_initContentStore(boost::asio::any_io_executor exec,
@@ -464,7 +457,6 @@ private:
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_; // PBI-043: tree diff KG integration
     std::shared_ptr<search::SearchExecutor> searchExecutor_;
     std::shared_ptr<vector::VectorIndexManager> vectorIndexManager_;
-    std::shared_ptr<vector::EmbeddingGenerator> embeddingGenerator_;
     std::shared_ptr<vector::VectorDatabase> vectorDatabase_;
     std::shared_ptr<IModelProvider> modelProvider_;
 

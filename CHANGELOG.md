@@ -14,7 +14,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.3.x archive: docs/changelogs/v0.3.md
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
-
 ## [v0.7.7] - November 1, 2025
 
 ### Added
@@ -61,6 +60,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Symbol matches receive score boost when `isSymbolQuery && symbolScore > 0.3`
 
 ### Fixed
+- **Embedding System Architecture Simplification**: Simplified FSM readiness logic to check provider availability directly instead of waiting for model load events
+  - IModelProvider checks `isAvailable()` immediately after plugin adoption
+  - Eliminates unnecessary ModelLoading state transition
+  - Fixes "Embedding Ready: Waiting" status showing incorrectly when embeddings were actually available
+  - Model dimension retrieved via `getEmbeddingDim()` at adoption time
+- **Database Schema Recovery**: Manual creation of missing `kg_doc_entities` table from migration 7
+  - Table includes 8 columns with foreign keys to documents and kg_nodes
+  - Created indexes: `idx_kg_doc_entities_document`, `idx_kg_doc_entities_node`
+  - Fixes search query errors: "no such table: kg_doc_entities"
 - **Worker Thread Premature Exit**: Fixed io_context workers exiting immediately on startup by adding `executor_work_guard` to keep the context alive until explicit shutdown.
 - **SocketServer Backpressure**: Manual backpressure polling with `std::counting_semaphore`, eliminating 5-20ms delay loops and providing natural bounded concurrency.
 - **Embedding Consumer Deadlock**: Fixed race condition causing embedding job consumer to stall
@@ -81,6 +89,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - `src/app/services/search_service.cpp`: Updated lightweight indexing to use `FileTypeDetector::isTextMimeType()`
 
 ### Changed
+- **Embedding Provider Lifecycle**: Transitioned from event-driven model loading to direct availability checking
+  - Provider adoption now immediately dispatches `ModelLoadedEvent` if `isAvailable()` returns true
+  - Simplified from 4-state FSM (Unavailable → ProviderAdopted → ModelLoading → ModelReady) to immediate ready transition
+  - Aligns FSM with IModelProvider on-demand model loading architecture
+
+### Removed
+- **Comprehensive Dead Code Cleanup** (90+ lines removed via clang-tidy analysis):
+  - **ServiceManager.cpp** (85 lines): Removed `launchModelEventConsumer()` function and its background event polling loop (obsolete with synchronous provider availability checking)
+  - **PostIngestQueue.cpp**: Removed unused `haveTask` boolean assignment
+  - **plugin_command.cpp**: Removed unused `have_typed` and `have_json` boolean calculations
+  - **status_command.cpp**: Removed unused `embeddingsWarn` variable
+  - **mcp_server.cpp**: Removed unused `verbose` environment variable check in `handleDownload()`
+  - All dead stores identified through static analysis with `clang-tidy --checks=clang-analyzer-deadcode.DeadStores`
 - **Fuzzy Index Memory Optimization**: Enhanced BK-tree index building with intelligent document prioritization
   - Uses metadata and Knowledge Graph to rank documents by relevance (tagged > KG-connected > recent > code files)
   - Limits index to 50,000 documents by default (configurable via `YAMS_FUZZY_INDEX_LIMIT` environment variable)
