@@ -60,6 +60,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Symbol matches receive score boost when `isSymbolQuery && symbolScore > 0.3`
 
 ### Fixed
+- **Migration System Crash (macOS)**: Fixed SIGSEGV crash in `MigrationManager::recordMigration()` during daemon startup
+  - **Root Cause**: `ServiceManager::co_migrateDatabase()` called `mm.initialize()` but ignored its return value. If initialization failed to create the `migration_history` table, migrations would continue and crash when attempting to INSERT into the non-existent table.
+  - **Fix**: Added error checking for `mm.initialize()` with early return and proper error logging in `ServiceManager.cpp`
+  - **Enhanced Error Handling**: Added error logging when `recordMigration()` fails after migration/rollback errors to improve diagnostics
+  - **Impact**: Daemon now fails gracefully during startup if database initialization fails instead of crashing with SIGSEGV
+  - Files: `src/daemon/components/ServiceManager.cpp`, `src/metadata/migration.cpp`
 - **Embedding System Architecture Simplification**: Simplified FSM readiness logic to check provider availability directly instead of waiting for model load events
   - IModelProvider checks `isAvailable()` immediately after plugin adoption
   - Eliminates unnecessary ModelLoading state transition

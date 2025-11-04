@@ -69,7 +69,7 @@ RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
         auto provRes = yams::daemon::dispatch::ensure_provider_available(serviceManager_);
         if (!provRes)
             co_return makeError(provRes.error().code, provRes.error().message);
-        auto provider = provRes.value();
+        const auto& provider = provRes.value();
         if (req.modelName.empty()) {
             co_return makeError(ErrorCode::InvalidData, "modelName is required");
         }
@@ -127,7 +127,7 @@ RequestDispatcher::handleUnloadModelRequest(const UnloadModelRequest& req) {
             auto provRes = yams::daemon::dispatch::ensure_provider_available(serviceManager_);
             if (!provRes)
                 co_return ErrorResponse{provRes.error().code, provRes.error().message};
-            auto provider = provRes.value();
+            const auto& provider = provRes.value();
             if (req.modelName.empty()) {
                 co_return ErrorResponse{ErrorCode::InvalidData, "modelName is required"};
             }

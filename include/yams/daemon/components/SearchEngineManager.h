@@ -89,7 +89,8 @@ public:
      * Set search engine from external source (e.g., during initialization).
      * Updates FSM state and cached snapshot.
      */
-    void setEngine(std::shared_ptr<yams::search::HybridSearchEngine> engine, bool vectorEnabled);
+    void setEngine(const std::shared_ptr<yams::search::HybridSearchEngine>& engine,
+                   bool vectorEnabled);
 
     /**
      * Check if engine is currently building.

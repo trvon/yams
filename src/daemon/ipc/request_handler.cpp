@@ -1840,7 +1840,7 @@ boost::asio::awaitable<Response> MiddlewarePipeline::process(const Request& requ
     std::function<boost::asio::awaitable<Response>(const Request&)> chain = final_handler_;
 
     for (auto it = middleware_.rbegin(); it != middleware_.rend(); ++it) {
-        auto middleware = *it;
+        const auto& middleware = *it;
         auto next = chain;
         chain = [middleware, next](const Request& req) -> boost::asio::awaitable<Response> {
             co_return co_await middleware->process(req, next);

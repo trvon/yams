@@ -182,7 +182,7 @@ Result<void> SocketServer::start() {
         // Simple worker pool: blocking io_context_.run(), no polling, deterministic shutdown
         workers_.reserve(config_.workerThreads);
         for (size_t i = 0; i < config_.workerThreads; ++i) {
-            workers_.emplace_back([this, i](yams::compat::stop_token /*token*/) {
+            workers_.emplace_back([this, i](const yams::compat::stop_token& /*token*/) {
                 set_current_thread_name("yams-ipc-" + std::to_string(i));
                 spdlog::info("SocketServer: worker {} starting (blocking run)", i);
                 try {

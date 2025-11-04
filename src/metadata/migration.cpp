@@ -105,6 +105,10 @@ Result<void> MigrationManager::migrateTo(int targetVersion) {
             if (!result) {
                 auto recordResult = recordMigration(version, migration.name, duration, false,
                                                     result.error().message);
+                if (!recordResult) {
+                    spdlog::error("Failed to record migration failure for version {}: {}", version,
+                                  recordResult.error().message);
+                }
                 return result;
             }
 
@@ -147,6 +151,10 @@ Result<void> MigrationManager::rollbackTo(int targetVersion) {
             if (!result) {
                 auto recordResult = recordMigration(-it->first, "Rollback: " + it->second.name,
                                                     duration, false, result.error().message);
+                if (!recordResult) {
+                    spdlog::error("Failed to record rollback failure for version {}: {}", it->first,
+                                  recordResult.error().message);
+                }
                 return result;
             }
 

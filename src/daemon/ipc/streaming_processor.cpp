@@ -100,8 +100,8 @@ StreamingRequestProcessor::compute_item_chunk_count(std::size_t approx_bytes_per
 
 // -------------------- process (non-streaming immediate) --------------------
 boost::asio::awaitable<Response> StreamingRequestProcessor::process(const Request& request) {
-    Request req_copy = request; // ensure stable lifetime in coroutine frame
-    co_return co_await delegate_->process(req_copy);
+    // Directly process without copying
+    co_return co_await delegate_->process(request);
 }
 
 // -------------------- process_streaming (decide whether to defer) ----------

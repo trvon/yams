@@ -74,7 +74,7 @@ RequestDispatcher::handleGenerateEmbeddingRequest(const GenerateEmbeddingRequest
                 daemon_->setSubsystemDegraded("embedding", true, "provider_unavailable");
             co_return makeError(provRes.error().code, provRes.error().message);
         }
-        auto provider = provRes.value();
+        const auto& provider = provRes.value();
         spdlog::info("Embedding request: model='{}' normalize={} text_len={}", req.modelName,
                      req.normalize ? "true" : "false", req.text.size());
         if (!req.modelName.empty() && !provider->isModelLoaded(req.modelName)) {
@@ -132,7 +132,7 @@ RequestDispatcher::handleBatchEmbeddingRequest(const BatchEmbeddingRequest& req)
         auto provRes = yams::daemon::dispatch::ensure_provider_available(serviceManager_);
         if (!provRes)
             co_return makeError(provRes.error().code, provRes.error().message);
-        auto provider = provRes.value();
+        const auto& provider = provRes.value();
         spdlog::info("Batch embedding request: model='{}' count={} normalize={} batchSize={}",
                      req.modelName, req.texts.size(), req.normalize ? "true" : "false",
                      req.batchSize);

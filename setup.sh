@@ -181,18 +181,12 @@ else
         -s "compiler.cppstd=${CPPSTD}"
       )
     else
-      # Linux/other: vanilla clang with new ABI for C++23
       CONAN_ARGS+=(
         -s "compiler=clang"
         -s "compiler.version=${CLANG_MAJOR}"
         -s "compiler.libcxx=${LIBCXX}"
         -s "compiler.cppstd=${CPPSTD}"
       )
-      # Force new ABI in Conan's generated toolchain for C++23
-      if [[ "${CPPSTD}" == "23" ]]; then
-        CONAN_ARGS+=(-c "tools.build:cxxflags+=['-D_GLIBCXX_USE_CXX11_ABI=1']")
-        echo "Forcing new libstdc++ ABI for C++23 compatibility"
-      fi
     fi
   else
     echo "--- Using GCC toolchain ---"

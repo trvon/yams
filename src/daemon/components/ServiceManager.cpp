@@ -73,7 +73,10 @@ std::optional<size_t> read_db_embedding_dim(const std::filesystem::path& dbPath)
         backend.close();
         if (dimOpt && *dimOpt > 0)
             return dimOpt;
+    } catch (const std::exception& e) {
+        spdlog::debug("Failed to read embedding dimension from {}: {}", dbPath.string(), e.what());
     } catch (...) {
+        spdlog::debug("Failed to read embedding dimension from {}: unknown error", dbPath.string());
     }
     return std::nullopt;
 }
@@ -90,7 +93,10 @@ void write_vector_sentinel(const std::filesystem::path& dataDir, size_t dim,
         std::ofstream out(dataDir / "vectors_sentinel.json");
         if (out)
             out << j.dump(2);
+    } catch (const std::exception& e) {
+        spdlog::debug("Failed to write vector sentinel: {}", e.what());
     } catch (...) {
+        spdlog::debug("Failed to write vector sentinel: unknown error");
     }
 }
 
@@ -116,7 +122,10 @@ std::optional<size_t> read_vector_sentinel_dim(const std::filesystem::path& data
         in >> j;
         if (j.contains("embedding_dim"))
             return j["embedding_dim"].get<size_t>();
+    } catch (const std::exception& e) {
+        spdlog::debug("Failed to read vector sentinel: {}", e.what());
     } catch (...) {
+        spdlog::debug("Failed to read vector sentinel: unknown error");
     }
     return std::nullopt;
 }
@@ -189,10 +198,11 @@ std::map<std::string, std::string> parseSimpleTomlFlat(const std::filesystem::pa
 
 // Template-based plugin adoption helper to reduce code duplication
 template <typename AbiTableType, typename AdapterType, typename ContainerValueType>
-size_t adoptPluginInterface(yams::daemon::AbiPluginHost* host, const std::string& interfaceName,
-                            int interfaceVersion,
-                            std::vector<std::shared_ptr<ContainerValueType>>& targetContainer,
-                            std::function<bool(const AbiTableType*)> validateTable = nullptr) {
+size_t
+adoptPluginInterface(yams::daemon::AbiPluginHost* host, const std::string& interfaceName,
+                     int interfaceVersion,
+                     std::vector<std::shared_ptr<ContainerValueType>>& targetContainer,
+                     const std::function<bool(const AbiTableType*)>& validateTable = nullptr) {
     size_t adopted = 0;
     if (!host)
         return adopted;
@@ -263,7 +273,10 @@ void ServiceManager::refreshPluginStatusSnapshot() {
             auto es = embeddingFsm_.snapshot();
             providerDegraded = (es.state == EmbeddingProviderState::Degraded ||
                                 es.state == EmbeddingProviderState::Failed);
+        } catch (const std::exception& e) {
+            spdlog::debug("Failed to snapshot embedding FSM state: {}", e.what());
         } catch (...) {
+            spdlog::debug("Failed to snapshot embedding FSM state: unknown error");
         }
         const bool providerReady = state_.readiness.modelProviderReady.load();
         const auto providerError =
@@ -374,6 +387,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                 spdlog::debug("YAMS_TESTING: defaulting embeddingsAutoOnAdd_=true");
             }
         } catch (...) {
+            // Intentionally ignored - test-only environment variable parsing
         }
 #endif
         // Initialize plugin hosts early so that environment-driven trust (YAMS_PLUGIN_DIR)
@@ -409,7 +423,12 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                                          penv.string(), tr1.error().message);
                             try {
                                 pluginHostFsm_.dispatch(PluginLoadFailedEvent{tr1.error().message});
+                            } catch (const std::exception& e) {
+                                spdlog::debug("FSM dispatch failed for PluginLoadFailedEvent: {}",
+                                              e.what());
                             } catch (...) {
+                                spdlog::debug(
+                                    "FSM dispatch failed for PluginLoadFailedEvent: unknown error");
                             }
                         }
                     }
@@ -419,7 +438,12 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                                          penv.string(), tr2.error().message);
                             try {
                                 pluginHostFsm_.dispatch(PluginLoadFailedEvent{tr2.error().message});
+                            } catch (const std::exception& e) {
+                                spdlog::debug("FSM dispatch failed for PluginLoadFailedEvent: {}",
+                                              e.what());
                             } catch (...) {
+                                spdlog::debug(
+                                    "FSM dispatch failed for PluginLoadFailedEvent: unknown error");
                             }
                         }
                     }
@@ -440,14 +464,24 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                                      trc.error().message);
                         try {
                             pluginHostFsm_.dispatch(PluginLoadFailedEvent{trc.error().message});
+                        } catch (const std::exception& e) {
+                            spdlog::debug("FSM dispatch failed for PluginLoadFailedEvent: {}",
+                                          e.what());
                         } catch (...) {
+                            spdlog::debug(
+                                "FSM dispatch failed for PluginLoadFailedEvent: unknown error");
                         }
                     } else {
                         spdlog::debug("Trusted configured pluginDir {} for ABI host",
                                       pconf.string());
                         try {
                             pluginHostFsm_.dispatch(PluginTrustVerifiedEvent{});
+                        } catch (const std::exception& e) {
+                            spdlog::debug("FSM dispatch failed for PluginTrustVerifiedEvent: {}",
+                                          e.what());
                         } catch (...) {
+                            spdlog::debug(
+                                "FSM dispatch failed for PluginTrustVerifiedEvent: unknown error");
                         }
                     }
                 }
@@ -458,7 +492,12 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                             pconf.string(), trc2.error().message);
                         try {
                             pluginHostFsm_.dispatch(PluginLoadFailedEvent{trc2.error().message});
+                        } catch (const std::exception& e) {
+                            spdlog::debug("FSM dispatch failed for PluginLoadFailedEvent: {}",
+                                          e.what());
                         } catch (...) {
+                            spdlog::debug(
+                                "FSM dispatch failed for PluginLoadFailedEvent: unknown error");
                         }
                     } else {
                         spdlog::debug("Trusted configured pluginDir {} for legacy plugin loader",
@@ -619,7 +658,10 @@ yams::Result<void> ServiceManager::initialize() {
             dirs += d.string();
         }
         spdlog::info("Plugin scan directories: {}", dirs);
+    } catch (const std::exception& e) {
+        spdlog::debug("Failed to log plugin directories: {}", e.what());
     } catch (...) {
+        spdlog::debug("Failed to log plugin directories: unknown error");
     }
 
     // File type detector init skipped to reduce compile-time deps; non-fatal fallback remains.
@@ -633,7 +675,7 @@ yams::Result<void> ServiceManager::initialize() {
     // io_context and workers already created in constructor; proceed with initialization
     spdlog::debug("ServiceManager: Using io_context from constructor");
 
-    initThread_ = yams::compat::jthread([this](yams::compat::stop_token token) {
+    initThread_ = yams::compat::jthread([this](const yams::compat::stop_token& token) {
         spdlog::info("Starting async resource initialization (coroutine)...");
         // Launch coroutine on system executor and wait for completion in this thread
         auto fut =
@@ -830,7 +872,10 @@ void ServiceManager::shutdown() {
             return;
         }
         serviceFsm_.dispatch(ShutdownEvent{});
+    } catch (const std::exception& e) {
+        spdlog::debug("FSM dispatch failed for ShutdownEvent: {}", e.what());
     } catch (...) {
+        spdlog::debug("FSM dispatch failed for ShutdownEvent: unknown error");
     }
     // Ensure shutdown is executed at most once to avoid double-free/use-after-free
     if (shutdownInvoked_.exchange(true, std::memory_order_acq_rel)) {
@@ -1112,6 +1157,7 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
         try {
             state_.readiness.vectorDbInitAttempted = true;
         } catch (...) {
+            // Intentionally ignored - best-effort state update
         }
         return Result<bool>(false);
     }
@@ -1156,9 +1202,15 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
                 dim = *ddlDim;
             try {
                 spdlog::info("[VectorInit] probe: ddl dim={}", ddlDim ? *ddlDim : 0);
+            } catch (const std::exception& e) {
+                spdlog::debug("Failed to log DDL dimension: {}", e.what());
             } catch (...) {
+                spdlog::debug("Failed to log DDL dimension: unknown error");
             }
+        } catch (const std::exception& e) {
+            spdlog::debug("Failed to read DDL dimension: {}", e.what());
         } catch (...) {
+            spdlog::debug("Failed to read DDL dimension: unknown error");
         }
     }
     // Config file (only if no provider available)
@@ -2269,7 +2321,12 @@ boost::asio::awaitable<bool> ServiceManager::co_migrateDatabase(int timeout_ms,
     using namespace boost::asio::experimental::awaitable_operators;
     auto ex = co_await boost::asio::this_coro::executor;
     metadata::MigrationManager mm(*database_);
-    mm.initialize();
+    auto initResult = mm.initialize();
+    if (!initResult) {
+        spdlog::error("[ServiceManager] Failed to initialize migration system: {}",
+                      initResult.error().message);
+        co_return false;
+    }
     mm.registerMigrations(metadata::YamsMetadataMigrations::getAllMigrations());
 
     boost::asio::experimental::channel<void(boost::system::error_code,

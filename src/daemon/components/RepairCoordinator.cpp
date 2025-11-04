@@ -82,7 +82,7 @@ std::unordered_map<std::string, std::string> buildExtensionLanguageMap(
 bool canExtractDocument(
     const std::string& mimeType, const std::string& extension,
     const std::vector<std::shared_ptr<extraction::IContentExtractor>>& customExtractors,
-    std::shared_ptr<yams::api::IContentStore> contentStore, const std::string& hash) {
+    const std::shared_ptr<yams::api::IContentStore>& contentStore, const std::string& hash) {
     // 1) Check if any custom plugin extractor supports this format
     for (const auto& extractor : customExtractors) {
         if (extractor && extractor->supports(mimeType, extension)) {
@@ -168,8 +168,8 @@ boost::asio::awaitable<bool> queueWithBackoff(std::shared_ptr<SpscQueue<JobT>> q
 
 RepairCoordinator::RepairCoordinator(ServiceManager* services, StateComponent* state,
                                      std::function<size_t()> activeConnFn, Config cfg)
-    : services_(services), state_(state), activeConnFn_(std::move(activeConnFn)), cfg_(cfg),
-      shutdownState_(std::make_shared<ShutdownState>()) {}
+    : services_(services), state_(state), activeConnFn_(std::move(activeConnFn)),
+      cfg_(std::move(cfg)), shutdownState_(std::make_shared<ShutdownState>()) {}
 
 RepairCoordinator::~RepairCoordinator() {
     stop();
@@ -207,7 +207,7 @@ void RepairCoordinator::start() {
             }
             co_return;
         },
-        [shutdownState](std::exception_ptr eptr) {
+        [shutdownState](const std::exception_ptr& eptr) {
             // Completion handler - signal that coroutine has fully exited
             if (eptr) {
                 try {

@@ -1012,10 +1012,10 @@ DaemonClient::streamingAddDocument(const AddDocumentRequest& req) {
         co_return result.error();
     }
     if (handler->error.has_value()) {
-        co_return handler->error.value();
+        co_return *handler->error;
     }
     if (handler->value.has_value()) {
-        co_return handler->value.value();
+        co_return *handler->value;
     }
     co_return Error{ErrorCode::InvalidData, "Missing AddDocumentResponse in stream"};
 }
@@ -1147,7 +1147,7 @@ DaemonClient::streamingBatchEmbeddings(const BatchEmbeddingRequest& req) {
         co_return *handler->value;
     if (handler->initResp.has_value()) {
         // Download to memory, reconstruct BatchEmbeddingResponse
-        auto ir = handler->initResp.value();
+        auto ir = *handler->initResp;
         // Fetch bytes
         std::string data;
         data.reserve(static_cast<size_t>(ir.totalSize));
@@ -1449,10 +1449,10 @@ DaemonClient::getStats(const GetStatsRequest& req) {
     auto r = co_await sendRequestStreaming(req, h);
     if (!r)
         co_return r.error();
-    if (h->error)
-        co_return h->error.value();
-    if (h->value)
-        co_return h->value.value();
+    if (h->error.has_value())
+        co_return *h->error;
+    if (h->value.has_value())
+        co_return *h->value;
     co_return Error{ErrorCode::InvalidData, "Missing GetStatsResponse in stream"};
 }
 
@@ -1482,10 +1482,10 @@ DaemonClient::updateDocument(const UpdateDocumentRequest& req) {
     auto r = co_await sendRequestStreaming(req, h);
     if (!r)
         co_return r.error();
-    if (h->error)
-        co_return h->error.value();
-    if (h->value)
-        co_return h->value.value();
+    if (h->error.has_value())
+        co_return *h->error;
+    if (h->value.has_value())
+        co_return *h->value;
     co_return Error{ErrorCode::InvalidData, "Missing UpdateDocumentResponse in stream"};
 }
 
@@ -1740,10 +1740,10 @@ boost::asio::awaitable<Result<SuccessResponse>> DaemonClient::remove(const Delet
     auto r = co_await sendRequestStreaming(req, h);
     if (!r)
         co_return r.error();
-    if (h->error)
-        co_return h->error.value();
-    if (h->value)
-        co_return h->value.value();
+    if (h->error.has_value())
+        co_return *h->error;
+    if (h->value.has_value())
+        co_return *h->value;
     co_return Error{ErrorCode::InvalidData, "Missing SuccessResponse in stream"};
 }
 

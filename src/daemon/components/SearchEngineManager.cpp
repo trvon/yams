@@ -31,7 +31,7 @@ std::shared_ptr<yams::search::HybridSearchEngine> SearchEngineManager::getEngine
     return engine_;
 }
 
-void SearchEngineManager::setEngine(std::shared_ptr<yams::search::HybridSearchEngine> engine,
+void SearchEngineManager::setEngine(const std::shared_ptr<yams::search::HybridSearchEngine>& engine,
                                     bool vectorEnabled) {
     {
         std::unique_lock lock(engineMutex_);
@@ -122,7 +122,7 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         // Fallback to synchronous build
         auto r = builder->buildEmbedded(opts);
         if (r) {
-            auto newEngine = r.value();
+            const auto& newEngine = r.value();
             {
                 std::unique_lock lock(engineMutex_);
                 engine_ = newEngine;

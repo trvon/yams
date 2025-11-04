@@ -346,7 +346,7 @@ static std::unordered_map<std::string, ModelProviderFactory>& getProviderRegistr
 }
 
 void registerModelProvider(const std::string& name, ModelProviderFactory factory) {
-    getProviderRegistry()[name] = factory;
+    getProviderRegistry()[name] = std::move(factory);
 }
 
 std::vector<std::string> getRegisteredProviders() {
