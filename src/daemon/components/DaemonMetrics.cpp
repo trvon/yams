@@ -976,7 +976,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             if (bp_mux) {
                 // scale by MiB over budget
                 uint64_t over = static_cast<uint64_t>(muxQueuedBytesLocal) - maxMuxBytes;
-                extra += static_cast<uint32_t>(std::min<uint64_t>(over / (256 * 1024), 4000));
+                extra += static_cast<uint32_t>(std::min<uint64_t>(over / (256ULL * 1024), 4000));
             }
             if (bp_conn) {
                 extra += 200; // flat 200ms if over conn cap

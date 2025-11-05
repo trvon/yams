@@ -21,7 +21,19 @@ Out-of-source builds under `builddir/`:
 conan profile detect --force
 ```
 
-## 4. Quick Loop (Conan + Meson)
+## 4. Quick Loop
+
+**Using setup script (recommended):**
+```bash
+# Debug build (includes tests)
+./setup.sh Debug
+meson compile -C builddir
+
+# Test
+meson test -C builddir
+```
+
+**Manual (Conan + Meson):**
 ```bash
 # Debug dependencies
 conan install . -of build/debug -s build_type=Debug -b missing
@@ -29,12 +41,7 @@ conan install . -of build/debug -s build_type=Debug -b missing
 # Initial configure
 meson setup builddir \
   --prefix /usr/local \
-  --native-file build/debug/conan_meson_native.ini
-
-# Reconfigure after option changes (idempotent)
-meson setup builddir --reconfigure \
-  --prefix /usr/local \
-  --native-file build/debug/conan_meson_native.ini
+  --native-file build/debug/build-debug/conan/conan_meson_native.ini
 
 # Build
 ninja -C builddir
@@ -43,7 +50,7 @@ ninja -C builddir
 meson test -C builddir
 ```
 
-Release variant: swap output folder + `-s build_type=Release`.
+See [setup.sh](../../setup.sh) for environment variables and advanced options (coverage, cross-compilation, compiler selection).
 
 ## 5. ONNX / GenAI Paths
 Options (Conan scope):

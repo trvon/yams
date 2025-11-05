@@ -26,16 +26,14 @@ nav:
           - Overview: api/README.md
           - MCP Tools: api/mcp_tools.md
       - Cloud:
-          - Hosting: hosting/README.md
-          - Early Access: hosting/early-access.md
+          - Managed Hosting: hosting/managed.md
+          - Self-hosting: hosting/self_hosting.md
           - Pricing (Preview): hosting/pricing.md
           - Services: services/README.md
           - Support Plans: services/support_plans.md
           - Contact: services/contact.md
       - Admin:
-          - Configuration: admin/configuration.md
-          - Performance Tuning: admin/performance_tuning.md
-          - Tuning Profiles: admin/tuning_profiles.md
+          - Operations: admin/operations.md
       - Roadmap: roadmap.md
       - Architecture:
           - Daemon and Services: architecture/daemon_architecture.md
@@ -103,7 +101,7 @@ extra:
     - icon: fontawesome/solid/envelope
       link: mailto:support@yamsmemory.ai
       name: Email
-  announcement: '<a href="/hosting/early-access/">Join Hosting Early Access →</a>'
+  announcement: '<a href="/hosting/managed/">Join Hosting Early Access →</a>'
 
 extra_css:
   - assets/retro.css

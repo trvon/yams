@@ -687,8 +687,8 @@ int main(int argc, char* argv[]) {
     // Configure logging (default to file to preserve logs after daemonizing)
     try {
         // Use rotating file sink to preserve logs across crashes
-        const size_t max_size = 10 * 1024 * 1024; // 10MB per file
-        const size_t max_files = 5;               // Keep 5 rotated files
+        const size_t max_size = 10ULL * 1024 * 1024; // 10MB per file
+        const size_t max_files = 5;                  // Keep 5 rotated files
         auto rotating_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
             config.logFile.string(), max_size, max_files);
         auto logger = std::make_shared<spdlog::logger>("yams-daemon", rotating_sink);

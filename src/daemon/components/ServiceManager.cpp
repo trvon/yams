@@ -1249,14 +1249,21 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
                                 dim = static_cast<size_t>(std::stoul(v));
                                 spdlog::info("[VectorInit] probe: config dim={}", *dim);
 
+                            } catch (const std::exception& e) {
+                                spdlog::debug("Failed to parse config embedding_dim: {}", e.what());
                             } catch (...) {
+                                spdlog::debug(
+                                    "Failed to parse config embedding_dim: unknown error");
                             }
                         }
                         break;
                     }
                 }
             }
+        } catch (const std::exception& e) {
+            spdlog::debug("Failed to read config file for embedding dimension: {}", e.what());
         } catch (...) {
+            spdlog::debug("Failed to read config file for embedding dimension: unknown error");
         }
     }
     // Env (only if no provider available)
@@ -1282,7 +1289,12 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
                     if (const char* s = std::getenv("YAMS_PROVIDER_LOAD_DIM_TIMEOUT_MS")) {
                         try {
                             load_ms = std::max(0, std::stoi(s));
+                        } catch (const std::exception& e) {
+                            spdlog::debug("Failed to parse YAMS_PROVIDER_LOAD_DIM_TIMEOUT_MS: {}",
+                                          e.what());
                         } catch (...) {
+                            spdlog::debug(
+                                "Failed to parse YAMS_PROVIDER_LOAD_DIM_TIMEOUT_MS: unknown error");
                         }
                     }
                     if (load_ms > 0) {
@@ -1314,7 +1326,10 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
                                  preferred);
                 }
             }
+        } catch (const std::exception& e) {
+            spdlog::debug("Failed to probe model provider dimension: {}", e.what());
         } catch (...) {
+            spdlog::debug("Failed to probe model provider dimension: unknown error");
         }
     }
     // Generator (only if no provider available)
@@ -1327,7 +1342,10 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
                 if (g > 0)
                     dim = g;
             }
+        } catch (const std::exception& e) {
+            spdlog::debug("Failed to get embedding dimension from generator: {}", e.what());
         } catch (...) {
+            spdlog::debug("Failed to get embedding dimension from generator: unknown error");
         }
     }
     if (!dim) {
@@ -1335,10 +1353,12 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
         try {
             state_.readiness.vectorDbInitAttempted = false;
         } catch (...) {
+            // Intentionally ignored - best-effort state reset
         }
         try {
             vectorDbInitAttempted_.store(false, std::memory_order_release);
         } catch (...) {
+            // Intentionally ignored - best-effort atomic reset
         }
         return Result<bool>(false);
     }
@@ -1383,6 +1403,7 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
                     (void)::write(lock_fd, stamp.data(), stamp.size());
                     (void)lseek(lock_fd, 0, SEEK_SET);
                 } catch (...) {
+                    // Intentionally ignored - best-effort lock file update
                 }
             }
         } else {
@@ -1411,7 +1432,12 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
                     if (const char* e = std::getenv("YAMS_VECTOR_DB_INIT_TIMEOUT_MS")) {
                         try {
                             ms = std::max(500, std::stoi(e));
+                        } catch (const std::exception& ex) {
+                            spdlog::debug("Failed to parse YAMS_VECTOR_DB_INIT_TIMEOUT_MS: {}",
+                                          ex.what());
                         } catch (...) {
+                            spdlog::debug(
+                                "Failed to parse YAMS_VECTOR_DB_INIT_TIMEOUT_MS: unknown error");
                         }
                     }
                     return ms;
@@ -1460,7 +1486,10 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
                 // Initialize component-owned metrics (sync with DB once at startup)
                 try {
                     vectorDatabase_->initializeCounter();
+                } catch (const std::exception& e) {
+                    spdlog::debug("Failed to initialize vector database counter: {}", e.what());
                 } catch (...) {
+                    spdlog::debug("Failed to initialize vector database counter: unknown error");
                 }
                 spdlog::info("[VectorInit] end pid={} tid={} path={} dim={} attempts={}",
                              static_cast<long long>(::getpid()), (void*)(&tid), cfg.database_path,
@@ -1469,20 +1498,26 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
                     state_.readiness.vectorDbReady = true;
                     state_.readiness.vectorDbDim = static_cast<uint32_t>(cfg.embedding_dim);
                 } catch (...) {
+                    // Intentionally ignored - best-effort state update
                 }
                 try {
                     serviceFsm_.dispatch(VectorsInitializedEvent{cfg.embedding_dim});
+                } catch (const std::exception& e) {
+                    spdlog::debug("FSM dispatch failed for VectorsInitializedEvent: {}", e.what());
                 } catch (...) {
+                    spdlog::debug("FSM dispatch failed for VectorsInitializedEvent: unknown error");
                 }
                 // Sentinel write & quick health probes (best-effort)
                 try {
                     write_vector_sentinel(dataDir, cfg.embedding_dim, "vec0", 1);
                 } catch (...) {
+                    // Intentionally ignored - best-effort sentinel write
                 }
                 try {
                     std::size_t rows = vectorDatabase_->getVectorCount();
                     spdlog::debug("[VectorInit] current row count={} (initial, cached)", rows);
                 } catch (...) {
+                    // Intentionally ignored - best-effort row count probe
                 }
                 try {
                     auto sdim = read_vector_sentinel_dim(dataDir);
@@ -1492,6 +1527,7 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
                                      *sdim, cfg.embedding_dim);
                     }
                 } catch (...) {
+                    // Intentionally ignored - best-effort sentinel dimension check
                 }
                 break; // success
             }

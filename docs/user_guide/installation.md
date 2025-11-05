@@ -72,24 +72,23 @@ conan install --requires=yams/[>=1.0.0]
 ## Build from Source
 
 ### Requirements
-- Compiler: C++20 (Clang 14+/GCC 11+/MSVC 2022)
-- CMake: 3.20+
-- Libraries: OpenSSL 3.x, SQLite3, Protocol Buffers 3.x
-- Optional: Pandoc (for manpages and embedded verbose help when YAMS_BUILD_DOCS=ON)
+- Compiler: C++23 (Clang 14+/GCC 11+)
+- Build System: Meson 1.0+, Conan 2.0+
 - OS: macOS 12+ or Linux (Windows experimental)
 
 ### Quick Setup
 
 #### macOS
 ```bash
-brew install cmake openssl@3 sqlite3 protobuf
-export OPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"
+brew install meson conan
+pip3 install --user meson  # If not using Homebrew
 ```
 
 #### Ubuntu/Debian
 ```bash
 sudo apt update
-sudo apt install -y build-essential cmake git libssl-dev libsqlite3-dev protobuf-compiler
+sudo apt install -y python3-pip build-essential git
+pip3 install --user meson conan
 ```
 
 ## Get the Source
@@ -98,19 +97,38 @@ git clone https://github.com/trvon/yams.git
 cd yams
 ```
 
-## Build (Release)
+## Build
+
+**Using setup script (recommended):**
 ```bash
-mkdir -p build && cd build
-cmake -DYAMS_BUILD_PROFILE=release ..
-cmake --build . -j
-# Optional
-cmake --install . --prefix /usr/local
+# Release build
+./setup.sh Release
+meson compile -C build/release
+
+# Debug build with tests
+./setup.sh Debug
+meson compile -C builddir
+
+# Install (optional)
+meson install -C build/release --prefix /usr/local
 ```
 
-Notes:
-- Disable MCP server if needed: cmake -DYAMS_BUILD_PROFILE=custom -DYAMS_BUILD_MCP_SERVER=OFF ..
-- Development build (tests, debug): cmake -DYAMS_BUILD_PROFILE=dev ..
-- Optional docs: If Pandoc is installed and -DYAMS_BUILD_DOCS=ON, manpages are generated and verbose help is embedded (yams --help-all, yams <command> --help --verbose). Without Pandoc, builds still succeed without these assets.
+**Advanced options:**
+```bash
+# Coverage (Debug only)
+./setup.sh Debug --coverage
+
+# Cross-compilation
+YAMS_CONAN_HOST_PROFILE=path/to/profile ./setup.sh Release
+
+# Custom C++ standard
+YAMS_CPPSTD=20 ./setup.sh Release
+
+# Custom install prefix
+YAMS_INSTALL_PREFIX=/opt/yams ./setup.sh Release
+```
+
+See [setup.sh](https://github.com/trvon/yams/blob/main/setup.sh) for all environment variables and options.
 
 ## Initialize Storage (XDG paths)
 Defaults:

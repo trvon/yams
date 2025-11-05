@@ -36,6 +36,7 @@ ARG BUILD_TESTS=false
 ARG BUILD_BENCHMARKS=false
 ARG BUILD_DOCS=false
 ARG YAMS_CPPSTD=20
+ARG BUILD_JOBS=2
 
 COPY . .
 
@@ -59,8 +60,9 @@ RUN --mount=type=cache,target=/root/.conan2 \
   # Force GCC for Docker builds (consistent with profiles)
   export YAMS_COMPILER=gcc; \
   export YAMS_CPPSTD=${YAMS_CPPSTD}; \
-  # Disable symbol extraction to avoid tree-sitter dependency issues in Docker
-  export YAMS_CONAN_EXTRA_OPTIONS="-o yams/*:enable_symbol_extraction=False"; \
+  # Disable optional features to avoid missing dependencies in Docker
+  export YAMS_DISABLE_SYMBOL_EXTRACTION=true; \
+  export YAMS_DISABLE_ONNX=true; \
   # Run setup.sh for dependency resolution and build configuration
   if ! ./setup.sh Release; then \
   echo 'Initial setup.sh failed; attempting retry with cache clean.'; \
@@ -69,8 +71,9 @@ RUN --mount=type=cache,target=/root/.conan2 \
   conan search tree-sitter/0.25.9 -r=conancenter || true; \
   ./setup.sh Release; \
   fi; \
-  # Build the project
-  meson compile -C build/release && \
+  # Build the project with limited parallelism to avoid OOM
+  # Use BUILD_JOBS arg to control parallelism (default: 2)
+  meson compile -C build/release -j${BUILD_JOBS} && \
   meson install -C build/release --destdir /opt/yams
 
 FROM debian:trixie-slim AS runtime
@@ -88,9 +91,12 @@ ENV PATH="${YAMS_PREFIX}/bin:${PATH}"
 # Backward compatibility: retain standalone yams symlink
 RUN ln -sf ${YAMS_PREFIX}/bin/yams /usr/local/bin/yams && \
   if [ -f ${YAMS_PREFIX}/bin/yams-daemon ]; then ln -sf ${YAMS_PREFIX}/bin/yams-daemon /usr/local/bin/yams-daemon; fi && \
-  mkdir -p /usr/local/share/yams/data && \
-  [ -f /src/data/magic_numbers.json ] || true
-COPY --from=builder /src/data/magic_numbers.json /usr/local/share/yams/data
+  mkdir -p /usr/local/share/yams/data
+# Copy data files if they exist (optional)
+RUN --mount=type=bind,from=builder,source=/src/data,target=/tmp/data \
+  if [ -f /tmp/data/magic_numbers.json ]; then \
+    cp /tmp/data/magic_numbers.json /usr/local/share/yams/data/; \
+  fi
 RUN mkdir -p /home/yams/.local/share/yams /home/yams/.config/yams && chown -R yams:yams /home/yams
 USER yams
 WORKDIR /home/yams

@@ -182,12 +182,12 @@ int YamsCLI::run(int argc, char* argv[]) {
 
         // Known subcommands (kept in sync with CommandRegistry)
         static const std::vector<std::string> kCommands = {
-            "init",   "add",        "get",         "delete",    "list",    "search",
-            "config", "auth",       "stats",       "uninstall", "migrate", "update",
+            "init",   "add",        "get",   "delete",    "list",    "search",
+            "config", "auth",       "stats", "uninstall", "migrate", "update",
 #ifdef YAMS_ENABLE_TUI
             "browse",
 #endif
-            "serve",  "completion", "repair-mime", "model"};
+            "serve",  "completion", "model"};
 
         auto hasArg = [&](std::string_view needle) {
             for (int i = 1; i < argc; ++i) {
@@ -315,14 +315,34 @@ int YamsCLI::run(int argc, char* argv[]) {
                 injectDaemonStatus = true;
         }
 
+        // Handle deprecated command aliases
         std::vector<char*> argvVec;
-        if (injectDaemonStatus) {
+        bool needsAliasRewrite = false;
+        static std::string repairStr = std::string("repair");
+        static std::string mimeFlag = std::string("--mime");
+
+        if (argc > 1 && std::string(argv[1]) == "repair-mime") {
+            // Rewrite "repair-mime" to "repair --mime"
+            needsAliasRewrite = true;
+            argvVec.reserve(argc + 1);
+            argvVec.push_back(argv[0]); // program name
+            argvVec.push_back(const_cast<char*>(repairStr.c_str()));
+            argvVec.push_back(const_cast<char*>(mimeFlag.c_str()));
+            for (int i = 2; i < argc; ++i)
+                argvVec.push_back(argv[i]);
+            argvVec.push_back(nullptr);
+        } else if (injectDaemonStatus) {
             argvVec.reserve(argc + 1);
             for (int i = 0; i < argc; ++i)
                 argvVec.push_back(argv[i]);
             static std::string statusStr = std::string("status");
             argvVec.push_back(const_cast<char*>(statusStr.c_str()));
             argvVec.push_back(nullptr);
+        }
+
+        if (needsAliasRewrite) {
+            app_->parse(static_cast<int>(argvVec.size() - 1), argvVec.data());
+        } else if (injectDaemonStatus) {
             app_->parse(argc + 1, argvVec.data());
         } else {
             // Parse command line

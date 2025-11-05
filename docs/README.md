@@ -2,88 +2,56 @@
 
 Content-addressed storage with deduplication and semantic search.
 
-## Quick Start
+## Quick Links
 
-- [Installation](user_guide/installation.md) - Setup YAMS
-- [CLI Guide](user_guide/cli.md) - Command reference
-- [API Docs](api/README.md) - Integration reference
-- [Examples](user_guide/tutorials/README.md) - Usage examples
+- [Installation](user_guide/installation.md)
+- [CLI Reference](user_guide/cli.md)
+- [MCP Server](user_guide/mcp.md)
+- [Admin: Operations](admin/operations.md)
 
-## User Docs
+## Documentation Structure
 
-- [Installation](user_guide/installation.md) - Setup instructions
-- [User Guide](user_guide/README.md) - Usage and configuration
-- [CLI Reference](user_guide/cli.md) - Command documentation
-- [Tutorials](user_guide/tutorials/README.md) - Step-by-step guides
+- **Get Started:** Installation, CLI, MCP integration
+- **User Guides:** Tutorials, embeddings, search
+- **Admin:** Operations, configuration, tuning
+- **Developer:** Contributing, build system, architecture
+- **API:** MCP tools, plugin specs
+- **Hosting:** Managed hosting, self-hosting
 
-## Developer Docs
+## Plugin System
 
-- [Contributing](developer/contributing.md) - Development workflow
-- [Architecture](developer/architecture/README.md) - System design
-- [API Reference](api/README.md) - Integration guide
- - [Testing](testing/coverage_report.md) - Test coverage and strategy
+YAMS supports C-ABI plugins loaded from trusted directories.
 
-## Operations
+**Trust file:** `~/.config/yams/plugins_trust.txt`
 
-- [Deployment](operations/deployment.md) - Production setup
-- [Monitoring](operations/monitoring.md) - Performance tracking
-- [Troubleshooting](troubleshooting/search_issues.md) - Common issues
-- [Performance Tuning](admin/performance_tuning.md) - Optimization
+**Discovery paths:**
+- `YAMS_PLUGIN_DIR` (exclusive if set)
+- `$HOME/.local/lib/yams/plugins`
+- `/usr/local/lib/yams/plugins`, `/usr/lib/yams/plugins`
 
-## Features
-
-- [Content Storage](developer/architecture/README.md) - SHA-256 deduplication
-- [Search](user_guide/search_guide.md) - Full-text and semantic
-- [MCP Server](user_guide/mcp.md) - AI agent integration
-- [REST API](api/README.md) - HTTP interface
-
-## Plugin System (C‑ABI)
-
-YAMS supports optional plugins discovered and managed by the daemon. Plugins use a stable C‑ABI (`include/yams/plugins/abi.h`) and are loaded only from trusted directories.
-
-- Trust file: `~/.config/yams/plugins_trust.txt` (one path per line; default deny until trusted)
-- Discovery order:
-  - `YAMS_PLUGIN_DIR` (exclusive if set)
-  - `$HOME/.local/lib/yams/plugins`
-  - `/usr/local/lib/yams/plugins`, `/usr/lib/yams/plugins`
-  - `${CMAKE_INSTALL_PREFIX}/lib/yams/plugins` (if installed)
-- Disable plugin subsystem: run daemon with `--no-plugins`.
-
-CLI quickstart:
-
-```
-# Scan default paths (no load)
+**CLI:**
+```bash
 yams plugin scan
-
-# Trust a directory, then load the ONNX plugin by path
 yams plugin trust add /usr/local/lib/yams/plugins
-yams plugin load /usr/local/lib/yams/plugins/libyams_onnx_plugin.so
+yams plugin load /path/to/plugin.so
 ```
 
-ONNX model provider (host‑backed): when built and trusted, the ONNX plugin advertises `model_provider_v1` and is preferred by the daemon; otherwise it falls back to legacy registry or mock/null providers.
+See [PLUGINS.md](PLUGINS.md) for details.
 
 ## Build Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `YAMS_USE_CONAN` | OFF | Use Conan package manager |
-| `YAMS_BUILD_CLI` | ON | CLI with optional TUI browser |
+| `YAMS_BUILD_CLI` | ON | CLI with TUI browser |
 | `YAMS_BUILD_MCP_SERVER` | ON | MCP server |
-| `YAMS_BUILD_TESTS` | OFF | Unit and integration tests |
-| `YAMS_BUILD_BENCHMARKS` | OFF | Performance benchmarks |
-| `YAMS_ENABLE_PDF` | ON | PDF text extraction support (may download PDFium via FetchContent) |
-| `YAMS_ENABLE_TUI` | ON | Enables the FTXUI-based TUI browser (pass `-Denable-tui=false` to skip) |
-| `YAMS_ENABLE_ONNX` | ON | Enables ONNX Runtime features (pulls onnxruntime; may pull Boost transitively) |
-| `CMAKE_BUILD_TYPE` | Release | Debug/Release/RelWithDebInfo |
+| `YAMS_BUILD_TESTS` | OFF | Tests |
+| `YAMS_ENABLE_PDF` | ON | PDF extraction |
+| `YAMS_ENABLE_TUI` | ON | TUI browser |
+| `YAMS_ENABLE_ONNX` | ON | ONNX Runtime |
 
-## Resources
+## Links
 
-- [SourceHut](https://sr.ht/~trvon/yams/) - Primary repo
-- [GitHub (mirror)](https://github.com/trvon/yams)
-- [Releases](https://github.com/trvon/yams/releases) - Downloads
-- [Issues](https://github.com/trvon/yams/issues) - Bug reports
-- [Discussions](https://github.com/trvon/yams/discussions) - Community
-
-## Ecosystem
-
-- [Plugins & Projects](ecosystem/README.md) - Community and maintained plugins, projects using YAMS
+- [SourceHut](https://sr.ht/~trvon/yams/)
+- [GitHub](https://github.com/trvon/yams)
+- [Releases](https://github.com/trvon/yams/releases)
+- [Issues](https://github.com/trvon/yams/issues)

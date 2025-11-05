@@ -65,22 +65,9 @@
 
 namespace yams::mcp {
 
-thread_local std::string MCPServer::tlsSessionId_;
-thread_local nlohmann::json MCPServer::tlsProgressToken_ = nullptr;
-
-// Unified send helper: prefers non-blocking transports and posts async sends when possible
+// Stdio send helper: sends JSON-RPC messages via stdio transport
 void MCPServer::sendResponse(const nlohmann::json& message) {
     spdlog::debug("MCP server sending response: {}", message.dump());
-    // HTTP publish path (notifications). Do not short-circuit stdio delivery.
-    if (!tlsSessionId_.empty() && httpPublisher_) {
-        try {
-            if (message.is_object() && message.contains("method")) {
-                httpPublisher_(tlsSessionId_, message);
-            }
-        } catch (...) {
-            // best effort; always continue to stdio
-        }
-    }
 
     // Serialize once for both telemetry and transport
     std::string payload;
@@ -97,76 +84,12 @@ void MCPServer::sendResponse(const nlohmann::json& message) {
         telemetryIntegrityFailures_.fetch_add(1);
     }
 
-    // Prefer immediate synchronous flush for stdio transport; fallback to queue
+    // MCP stdio spec: always output NDJSON (newline-delimited JSON)
     if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
-        // MCP stdio spec: always output NDJSON (newline-delimited JSON)
         stdio->send(message);
-        return;
-    }
-
-    enqueueOutbound(std::move(payload));
-}
-
-// Enqueue payload and start drain coroutine if idle
-void MCPServer::enqueueOutbound(std::string payload) {
-    outboundSemaphore_->acquire();
-
-    {
-        std::lock_guard<std::mutex> lk(outboundMutex_);
-        outboundQueue_.push_back(std::move(payload));
-        bool expected = false;
-        if (!outboundDraining_.compare_exchange_strong(expected, true)) {
-            return;
-        }
-    }
-
-    pruneCompletedFutures();
-
-    if (outboundStrand_) {
-        std::lock_guard<std::mutex> lk(backgroundFuturesMutex_);
-        backgroundFutures_.push_back(
-            boost::asio::co_spawn(*outboundStrand_, outboundDrainAsync(), boost::asio::use_future));
     } else {
-        auto executor = executor_ ? *executor_ : yams::daemon::GlobalIOContext::global_executor();
-        std::lock_guard<std::mutex> lk(backgroundFuturesMutex_);
-        backgroundFutures_.push_back(
-            boost::asio::co_spawn(executor, outboundDrainAsync(), boost::asio::use_future));
+        spdlog::error("sendResponse: transport is not stdio, cannot send");
     }
-}
-
-// Drain queue sequentially; choose best transport per message
-boost::asio::awaitable<void> MCPServer::outboundDrainAsync() {
-    struct SemaphoreGuard {
-        std::counting_semaphore<>* sem;
-        ~SemaphoreGuard() {
-            if (sem)
-                sem->release();
-        }
-    } guard{outboundSemaphore_.get()};
-
-    for (;;) {
-        std::string next;
-        {
-            std::lock_guard<std::mutex> lk(outboundMutex_);
-            if (outboundQueue_.empty()) {
-                outboundDraining_.store(false);
-                if (outboundQueue_.empty()) {
-                    break;
-                }
-                outboundDraining_.store(true);
-            }
-            next = std::move(outboundQueue_.front());
-            outboundQueue_.pop_front();
-        }
-
-        if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
-            stdio->sendFramedSerialized(next);
-        } else {
-            spdlog::error("outboundDrainAsync: unsupported transport type for framed write; "
-                          "dropping message");
-        }
-    }
-    co_return;
 }
 
 // StdioTransport implementation
@@ -448,8 +371,8 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
                      std::optional<boost::asio::any_io_executor> executor)
     : transport_(std::move(transport)), externalShutdown_(externalShutdown),
       eagerReadyEnabled_(false), autoReadyEnabled_(false), strictProtocol_(false),
-      limitToolResultDup_(false), daemonSocketOverride_(std::move(overrideSocket)),
-      executor_(executor) {
+      limitToolResultDup_(false), daemonSocketOverride_(std::move(overrideSocket)) {
+    (void)executor; // Unused in stdio-only mode
     // Ensure logging goes to stderr to keep stdout clean for MCP framing
     if (auto existing = spdlog::get("yams-mcp")) {
         spdlog::set_default_logger(existing);
@@ -476,7 +399,7 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
         cfg.requestTimeout = std::chrono::milliseconds(60000);
         cfg.headerTimeout = std::chrono::milliseconds(5000);
         cfg.bodyTimeout = std::chrono::milliseconds(15000);
-        cfg.executor = executor_;
+        // No executor for stdio-only mode
 
         if (const char* mi = std::getenv("YAMS_MCP_MAX_INFLIGHT")) {
             long v = std::strtol(mi, nullptr, 10);
@@ -541,13 +464,6 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
 
     if (const char* env = std::getenv("YAMS_MCP_LIMIT_DUP_CONTENT")) {
         limitToolResultDup_ = !(std::string(env) == "0" || std::string(env) == "false");
-    }
-
-    {
-        auto executor = executor_ ? *executor_ : yams::daemon::GlobalIOContext::global_executor();
-        outboundStrand_ =
-            std::make_unique<boost::asio::strand<boost::asio::any_io_executor>>(executor);
-        outboundSemaphore_ = std::make_unique<std::counting_semaphore<>>(1024);
     }
 
     try {
@@ -658,35 +574,9 @@ MCPServer::~MCPServer() {
     shutdown();
 }
 
-void MCPServer::pruneCompletedFutures() {
-    std::lock_guard<std::mutex> lk(backgroundFuturesMutex_);
-    backgroundFutures_.erase(std::remove_if(backgroundFutures_.begin(), backgroundFutures_.end(),
-                                            [](std::future<void>& f) {
-                                                return f.valid() &&
-                                                       f.wait_for(std::chrono::milliseconds(0)) ==
-                                                           std::future_status::ready;
-                                            }),
-                             backgroundFutures_.end());
-}
-
 void MCPServer::shutdown(std::chrono::milliseconds timeout) {
-    std::lock_guard<std::mutex> lk(backgroundFuturesMutex_);
-
-    auto deadline = std::chrono::steady_clock::now() + timeout;
-    for (auto& fut : backgroundFutures_) {
-        if (fut.valid()) {
-            auto remaining = deadline - std::chrono::steady_clock::now();
-            if (remaining > std::chrono::milliseconds(0)) {
-                auto status =
-                    fut.wait_for(std::chrono::duration_cast<std::chrono::milliseconds>(remaining));
-                if (status != std::future_status::ready) {
-                    spdlog::warn("MCP background task did not complete within timeout");
-                }
-            }
-        }
-    }
-
-    backgroundFutures_.clear();
+    // Stdio transport shutdown - nothing async to wait for
+    (void)timeout; // Unused in stdio-only mode
 }
 
 void MCPServer::start() {
@@ -772,63 +662,7 @@ void MCPServer::start() {
                     return;
                 }
 
-                if (method == "tools/call") {
-                    const auto toolName = params.value("name", "");
-                    const auto toolArgs = params.value("arguments", json::object());
-                    auto id_copy = request.value("id", json{});
-                    std::optional<json> progressToken;
-                    try {
-                        if (params.contains("_meta") && params["_meta"].is_object()) {
-                            const auto& meta = params["_meta"];
-                            if (meta.contains("progressToken")) {
-                                progressToken = meta["progressToken"];
-                            }
-                        }
-                    } catch (...) {
-                    }
-                    this->sendProgress("tool", 0.0, std::string("calling ") + toolName,
-                                       progressToken);
-                    auto executor =
-                        executor_ ? *executor_ : yams::daemon::GlobalIOContext::global_executor();
-                    {
-                        std::lock_guard<std::mutex> lk(backgroundFuturesMutex_);
-                        backgroundFutures_.push_back(boost::asio::co_spawn(
-                            executor,
-                            [this, toolName, toolArgs, id_copy,
-                             progressToken]() -> boost::asio::awaitable<void> {
-                                if (progressToken)
-                                    MCPServer::tlsProgressToken_ = *progressToken;
-                                try {
-                                    json raw = co_await this->callToolAsync(toolName, toolArgs);
-                                    if (raw.is_object() && raw.contains("error")) {
-                                        json err = raw["error"];
-                                        this->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
-                                                            {"error", err},
-                                                            {"id", id_copy}});
-                                    } else {
-                                        this->sendResponse(this->createResponse(id_copy, raw));
-                                    }
-                                    this->sendProgress("tool", 100.0,
-                                                       std::string("completed ") + toolName,
-                                                       progressToken);
-                                } catch (const std::exception& e) {
-                                    json err = {{"code", -32603}, {"message", e.what()}};
-                                    this->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
-                                                        {"error", err},
-                                                        {"id", id_copy}});
-                                } catch (...) {
-                                    json err = {{"code", -32603}, {"message", "Tool call failed"}};
-                                    this->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
-                                                        {"error", err},
-                                                        {"id", id_copy}});
-                                }
-                                MCPServer::tlsProgressToken_ = nullptr;
-                                co_return;
-                            },
-                            boost::asio::use_future));
-                    }
-                    return;
-                }
+                // tools/call is handled by enqueueTask like other requests in stdio mode
 
                 this->enqueueTask([this, req = request]() mutable {
                     if (auto response = this->handleRequest(req)) {
@@ -2191,29 +2025,16 @@ json MCPServer::callTool(const std::string& name, const json& arguments) {
         return {{"error", {{"code", -32603}, {"message", "Tool registry not initialized"}}}};
     }
 
-    auto executor = executor_ ? *executor_ : yams::daemon::GlobalIOContext::global_executor();
+    // Stdio mode: run tool synchronously via callToolAsync in current context
+    auto executor = yams::daemon::GlobalIOContext::global_executor();
     auto task = toolRegistry_->callTool(name, arguments);
-    auto promise = std::make_shared<std::promise<json>>();
-    auto future = promise->get_future();
 
-    {
-        std::lock_guard<std::mutex> lk(backgroundFuturesMutex_);
-        backgroundFutures_.push_back(boost::asio::co_spawn(
-            executor,
-            [task = std::move(task), promise]() mutable -> boost::asio::awaitable<void> {
-                try {
-                    auto result = co_await std::move(task);
-                    promise->set_value(result);
-                } catch (...) {
-                    promise->set_exception(std::current_exception());
-                }
-                co_return;
-            },
-            boost::asio::use_future));
-    }
-
+    // Synchronously execute the async task
+    json result;
     try {
-        json result = future.get();
+        boost::asio::io_context io;
+        result = boost::asio::co_spawn(io, std::move(task), boost::asio::use_future).get();
+        io.run();
 
         spdlog::debug("MCP tool '{}' returned: {}", name, result.dump());
 
@@ -2413,22 +2234,18 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             } catch (...) {
             }
         }
-        std::promise<Result<yams::daemon::SearchResponse>> prom;
-        auto fut = prom.get_future();
-        auto executor = executor_ ? *executor_ : yams::daemon::GlobalIOContext::global_executor();
-        {
-            std::lock_guard<std::mutex> lk(backgroundFuturesMutex_);
-            backgroundFutures_.push_back(boost::asio::co_spawn(
-                executor,
-                [&, pr = std::move(prom)]() mutable -> boost::asio::awaitable<void> {
-                    auto sr = co_await daemon_client_->search(dreq);
-                    pr.set_value(std::move(sr));
-                    co_return;
-                },
-                boost::asio::use_future));
-        }
-        if (fut.wait_for(std::chrono::milliseconds(wait_ms)) == std::future_status::ready) {
-            res = fut.get();
+        // Stdio mode: execute search synchronously with timeout
+        boost::asio::io_context io;
+        auto future = boost::asio::co_spawn(
+            io,
+            [&]() -> boost::asio::awaitable<Result<yams::daemon::SearchResponse>> {
+                co_return co_await daemon_client_->search(dreq);
+            },
+            boost::asio::use_future);
+
+        io.run();
+        if (future.wait_for(std::chrono::milliseconds(wait_ms)) == std::future_status::ready) {
+            res = future.get();
         } else {
             res = Error{ErrorCode::Timeout, "Search timed out"};
         }
@@ -5528,8 +5345,6 @@ void MCPServer::sendProgress(const std::string& /*phase*/, double percent,
     nlohmann::json token = nullptr;
     if (progressToken)
         token = *progressToken;
-    else if (!MCPServer::tlsProgressToken_.is_null())
-        token = MCPServer::tlsProgressToken_;
 
     if (token.is_null()) {
         return; // No valid token available; skip
@@ -5549,19 +5364,6 @@ void MCPServer::sendProgress(const std::string& /*phase*/, double percent,
 
 bool MCPServer::shouldAutoInitialize() {
     return false;
-}
-
-// --- HTTP mode session context helpers ---
-void MCPServer::beginSessionContext(
-    std::string sessionId,
-    std::function<void(const std::string&, const nlohmann::json&)> publisher) {
-    tlsSessionId_ = std::move(sessionId);
-    httpPublisher_ = std::move(publisher);
-}
-
-void MCPServer::endSessionContext() {
-    tlsSessionId_.clear();
-    httpPublisher_ = nullptr;
 }
 
 } // namespace yams::mcp

@@ -25,7 +25,6 @@ std::unique_ptr<ICommand> createSessionCommand();
 std::unique_ptr<ICommand> createBrowseCommand();
 #endif
 std::unique_ptr<ICommand> createCompletionCommand();
-std::unique_ptr<ICommand> createRepairMimeCommand();
 std::unique_ptr<ICommand> createRepairCommand();
 std::unique_ptr<ICommand> createModelCommand();
 std::unique_ptr<ICommand> createDaemonCommand();
@@ -62,7 +61,6 @@ void CommandRegistry::registerAllCommands(YamsCLI* cli) {
     cli->registerCommand(CommandRegistry::createBrowseCommand());
 #endif
     cli->registerCommand(CommandRegistry::createCompletionCommand());
-    cli->registerCommand(CommandRegistry::createRepairMimeCommand());
     cli->registerCommand(CommandRegistry::createRepairCommand());
     cli->registerCommand(CommandRegistry::createModelCommand());
     cli->registerCommand(CommandRegistry::createDaemonCommand());
@@ -155,10 +153,6 @@ std::unique_ptr<ICommand> CommandRegistry::createBrowseCommand() {
 
 std::unique_ptr<ICommand> CommandRegistry::createCompletionCommand() {
     return ::yams::cli::createCompletionCommand();
-}
-
-std::unique_ptr<ICommand> CommandRegistry::createRepairMimeCommand() {
-    return ::yams::cli::createRepairMimeCommand();
 }
 
 std::unique_ptr<ICommand> CommandRegistry::createRepairCommand() {

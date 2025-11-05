@@ -56,7 +56,8 @@ public:
     Result<std::string> health(const std::string& name) override;
 
     // Retrieve a raw interface pointer from a loaded plugin
-    Result<void*> getInterface(const std::string& name, const std::string& ifaceId,
+    Result<void*> getInterface(const std::string& name,    // plugin name
+                               const std::string& ifaceId, // interface ID
                                uint32_t version);
 
     // Diagnostics for last scan

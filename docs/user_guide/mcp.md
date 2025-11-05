@@ -1,5 +1,4 @@
 # YAMS MCP Server Guide
- # YAMS MCP Server Guide
 
 A comprehensive guide for using YAMS as a Model Context Protocol (MCP) server with AI assistants.
 
@@ -11,19 +10,63 @@ The YAMS MCP server exposes content-addressable storage and search capabilities 
 - Perform regex searches across indexed content
 - Access file type analytics and statistics
 
+The server uses **stdio transport exclusively**, implementing the MCP specification's newline-delimited JSON (NDJSON) protocol for maximum compatibility with MCP clients.
+
 ## Quick Start
 
 ### Running the MCP Server
 
 ```bash
-# Stdio transport (for Claude Desktop and similar)
+# Stdio transport (standard MCP protocol)
 yams serve
+
+# With verbose logging (logs go to stderr)
+yams serve --verbose
 
 # Docker (stdio transport)
 docker run -i ghcr.io/trvon/yams:latest serve
 ```
 
 After updating the configuration, restart Claude Desktop to load the MCP server.
+
+### Configuration for Claude Desktop
+
+Add to your Claude Desktop configuration file:
+
+**macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+**Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+**Linux:** `~/.config/Claude/claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "yams": {
+      "command": "yams",
+      "args": ["serve"],
+      "env": {
+        "YAMS_STORAGE": "/path/to/your/data"
+      }
+    }
+  }
+}
+```
+
+### Configuration for Continue.dev
+
+```json
+{
+  "models": [...],
+  "contextProviders": [
+    {
+      "name": "mcp",
+      "params": {
+        "serverCommand": "yams",
+        "serverArgs": ["serve"]
+      }
+    }
+  ]
+}
+```
 
 ## Prompt Templates
 
@@ -382,6 +425,26 @@ main().catch(console.error);
 
 ## Troubleshooting
 
+### Connection Issues
+
+If clients can't connect, enable debug logging:
+```bash
+export SPLOG_LEVEL=debug
+yams serve --verbose 2>debug.log
+```
+
+**Common issues:**
+1. Client doesn't send `notifications/initialized` after `initialize` response
+2. Protocol version mismatch (supported: 2024-11-05 through 2025-06-18)
+3. Daemon connection timeout - pre-start with `yams status`
+
+**Test manually:**
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' | yams serve --verbose
+```
+
+See [include/yams/mcp/mcp_server.h](../../include/yams/mcp/mcp_server.h) for protocol implementation details.
+
 ### Server doesn't respond to Ctrl+C
 
 The server should respond immediately to Ctrl+C. If it doesn't:
@@ -391,18 +454,13 @@ The server should respond immediately to Ctrl+C. If it doesn't:
 
 ### "No startup message" when running serve
 
-You should see startup messages on stderr:
+By default, the server runs quietly. Use `--verbose` to see startup messages on stderr:
 ```
-=== YAMS MCP Server ===
+=== YAMS MCP Server (stdio) ===
 Transport: stdio (JSON-RPC over stdin/stdout)
 Status: Waiting for client connection...
 Press Ctrl+C to stop the server
 ```
-
-If not visible:
-1. Check stderr isn't being redirected
-2. Ensure you're not in a non-interactive environment
-
 
 ### Claude Desktop doesn't show YAMS tools
 
@@ -425,10 +483,8 @@ docker run ghcr.io/trvon/yams:latest serve     # Wrong - will exit
 
 ### Stdio Transport
 - Runs with the permissions of the calling process
-- No network exposure
+- No network exposure - communication only via stdin/stdout
 - Ideal for local AI assistants
-
-
 
 ### Docker Deployment
 - Use read-only mounts where possible

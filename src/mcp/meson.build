@@ -3,7 +3,6 @@
 yams_mcp_sources = [
   'mcp_server.cpp',
   'tool_registry.cpp',
-  'http_server.cpp',
 ]
 
 yams_mcp_lib = static_library('yams_mcp',

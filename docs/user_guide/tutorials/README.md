@@ -104,7 +104,7 @@ YAMS_STORAGE="$PWD/.yams-projectA" yams add ./notes.txt
 ## See also
 - CLI Reference: [../cli.md](../cli.md)
 - Search Guides: [../search_guide.md](../search_guide.md), [../vector_search_guide.md](../vector_search_guide.md)
-- Admin/Config: [../../admin/configuration.md](../../admin/configuration.md)
+- Admin/Operations: [../../admin/operations.md](../../admin/operations.md)
 - MCP: [../mcp.md](../mcp.md)
 
 ---

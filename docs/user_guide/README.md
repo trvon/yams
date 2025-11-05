@@ -39,8 +39,7 @@ Tips:
   - Semantic & hybrid search: [vector_search_guide.md](./vector_search_guide.md)
   - Embedding models: see notes below
 - Configuration (advanced)
-  - Admin/Config Overview: [../admin/configuration.md](../admin/configuration.md)
-  - Performance Tuning: [../admin/performance_tuning.md](../admin/performance_tuning.md)
+  - Admin/Operations: [../admin/operations.md](../admin/operations.md)
 - Troubleshooting
   - Search issues: [../troubleshooting/search_issues.md](../troubleshooting/search_issues.md)
 
@@ -79,7 +78,7 @@ See also:
 - Auto‑embeddings on add are load‑aware:
   - By default, embeddings generate on add only when the daemon is idle.
   - When busy, embeddings are deferred to the background repair coordinator.
-- For deeper guidance (embedding batch safety/doc‑cap/pause, worker scaling), see the Admin guide: [Performance Tuning](../admin/performance_tuning.md).
+- For deeper guidance (embedding batch safety/doc‑cap/pause, worker scaling), see the Admin guide: [Operations](../admin/operations.md).
 
 ## See also
 

@@ -38,4 +38,4 @@ We’ll only use your information to respond to your inquiry. You can unsubscrib
 
 ---
 
-Looking for managed hosting? Join the [Early Access](../hosting/early-access.md) list or read the [Hosting Overview](../hosting/README.md).
+Looking for managed hosting? See [Managed Hosting](../hosting/managed.md).

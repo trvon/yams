@@ -265,6 +265,26 @@ if [[ "${BUILD_TYPE}" == "Debug" ]]; then
   CONAN_ARGS+=(-o build_tests=True)
 fi
 
+# Handle optional feature flags from environment
+if [[ "${YAMS_DISABLE_ONNX:-}" == "true" ]]; then
+  echo "ONNX support disabled (YAMS_DISABLE_ONNX=true)"
+  CONAN_ARGS+=(-o "yams/*:enable_onnx=False")
+fi
+
+if [[ "${YAMS_DISABLE_SYMBOL_EXTRACTION:-}" == "true" ]]; then
+  echo "Symbol extraction disabled (YAMS_DISABLE_SYMBOL_EXTRACTION=true)"
+  CONAN_ARGS+=(-o "yams/*:enable_symbol_extraction=False")
+fi
+
+if [[ "${YAMS_DISABLE_PDF:-}" == "true" ]]; then
+  echo "PDF support disabled (YAMS_DISABLE_PDF=true)"
+  CONAN_ARGS+=(-o "yams/*:enable_pdf=False")
+fi
+
+# Force building missing packages to ensure ABI compatibility
+# This is especially important for C++23 with Clang + libstdc++
+CONAN_ARGS+=(--build=missing)
+
 conan install . -of "${BUILD_DIR}" "${CONAN_ARGS[@]}"
 
 # Check for either native or cross file (Conan generates cross file for cross-compilation)
@@ -304,6 +324,21 @@ MESON_OPTIONS=("-Dbuild-cli=true" "-Dcpp_std=${MESON_CPPSTD}")
 # Add libc++ hardening mode if specified
 if [[ "${LIBCXX_HARDENING}" != "none" ]]; then
   MESON_OPTIONS+=("-Dlibcxx-hardening=${LIBCXX_HARDENING}")
+fi
+
+# Handle optional feature flags for Meson (must match Conan options)
+if [[ "${YAMS_DISABLE_ONNX:-}" == "true" ]]; then
+  MESON_OPTIONS+=("-Denable-onnx=disabled")
+  MESON_OPTIONS+=("-Dplugin-onnx=false")
+fi
+
+if [[ "${YAMS_DISABLE_SYMBOL_EXTRACTION:-}" == "true" ]]; then
+  MESON_OPTIONS+=("-Denable-symbol-extraction=false")
+  MESON_OPTIONS+=("-Dplugin-symbols=false")
+fi
+
+if [[ "${YAMS_DISABLE_PDF:-}" == "true" ]]; then
+  MESON_OPTIONS+=("-Dplugin-pdf=false")
 fi
 
 if [[ "${BUILD_TYPE}" == "Debug" ]]; then

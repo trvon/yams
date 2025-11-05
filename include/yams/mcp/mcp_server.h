@@ -112,10 +112,22 @@ private:
     void resetErrorCount() noexcept;
 };
 
-// WebSocket transport removed - not needed for current implementation
-// TODO: Add back if WebSocket support is required in the future
-
 /**
+ * MCP Server implementation (stdio-only)
+ *
+ * This server implements the Model Context Protocol (MCP) specification
+ * using stdio transport exclusively. HTTP/WebSocket transports have been
+ * removed to simplify the implementation and focus on the core stdio use case.
+ *
+ * Transport: stdio (JSON-RPC over stdin/stdout with NDJSON framing)
+ * Spec version: 2025-03-26 (with 2025-06-18 protocol enhancements)
+ *
+ * Key features:
+ * - Newline-delimited JSON (NDJSON) message framing
+ * - Synchronous request/response handling
+ * - All logging directed to stderr (stdout reserved for protocol messages)
+ * - Direct integration with YAMS daemon for search/storage operations
+ *
  * MCP Server implementation
  */
 class MCPServer {
@@ -145,27 +157,16 @@ public:
     }
 #endif
 
-    // Public wrappers for HTTP mode (bridge to internal handlers)
+#ifdef YAMS_TESTING
+public:
+    // Testing-only wrappers (stdio-only mode doesn't use these)
     MessageResult handleRequestPublic(const nlohmann::json& request) {
         return handleRequest(request);
     }
     nlohmann::json callToolPublic(const std::string& name, const nlohmann::json& arguments) {
         return callTool(name, arguments);
     }
-
-    // HTTP mode: per-request session context to route notifications via SSE
-    class SessionContext {
-    public:
-        SessionContext(MCPServer& server, std::string sessionId,
-                       std::function<void(const std::string&, const nlohmann::json&)> publisher)
-            : server_(server) {
-            server_.beginSessionContext(std::move(sessionId), std::move(publisher));
-        }
-        ~SessionContext() { server_.endSessionContext(); }
-
-    private:
-        MCPServer& server_;
-    };
+#endif
 
 private:
     // Refactored members: No direct backend components
@@ -265,34 +266,6 @@ private:
 
     // YAMS extensions toggle (independent of strict mode which has been removed)
     bool areYamsExtensionsEnabled() const { return enableYamsExtensions_; }
-
-    // HTTP session context controls
-    void
-    beginSessionContext(std::string sessionId,
-                        std::function<void(const std::string&, const nlohmann::json&)> publisher);
-    void endSessionContext();
-
-    // --- Unified outbound mechanism (strand-like ordering on IO context) ---
-    void enqueueOutbound(std::string payload);
-    boost::asio::awaitable<void> outboundDrainAsync();
-
-    std::mutex outboundMutex_;
-    std::deque<std::string> outboundQueue_;
-    std::atomic<bool> outboundDraining_{false};
-    std::unique_ptr<boost::asio::strand<boost::asio::any_io_executor>> outboundStrand_;
-    std::optional<boost::asio::any_io_executor> executor_;
-    std::unique_ptr<std::counting_semaphore<>> outboundSemaphore_;
-
-    std::mutex backgroundFuturesMutex_;
-    std::vector<std::future<void>> backgroundFutures_;
-
-    void pruneCompletedFutures();
-
-    // Notification routing for HTTP mode
-    static thread_local std::string tlsSessionId_;
-    // Spec-compliant progress token associated with the current in-flight request (if any)
-    static thread_local nlohmann::json tlsProgressToken_;
-    std::function<void(const std::string&, const nlohmann::json&)> httpPublisher_;
 
     // Telemetry counters (FSM-integrated)
     std::atomic<uint64_t> telemetrySentBytes_{0};

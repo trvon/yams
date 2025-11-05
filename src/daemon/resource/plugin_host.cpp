@@ -112,7 +112,8 @@ Result<std::string> AbiPluginHost::health(const std::string& name) {
     return pImpl->loader.health(name);
 }
 
-Result<void*> AbiPluginHost::getInterface(const std::string& name, const std::string& ifaceId,
+Result<void*> AbiPluginHost::getInterface(const std::string& name,    // plugin name
+                                          const std::string& ifaceId, // interface ID
                                           uint32_t version) {
     return pImpl->loader.getInterface(name, ifaceId, version);
 }

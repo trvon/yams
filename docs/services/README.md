@@ -7,7 +7,7 @@ title: Services & Offerings
 We’re an open source project. For expert help adopting YAMS or SLA-backed support, we offer services and support plans.
 
 !!! note
-    Managed hosting is in private preview. If you prefer zero‑ops and built‑in reliability, see the [Hosting Overview](../hosting/README.md) and join the [Early Access](../hosting/early-access.md).
+    Managed hosting is in private preview. If you prefer zero‑ops and built‑in reliability, see [Managed Hosting](../hosting/managed.md).
 
 ---
 
@@ -52,7 +52,7 @@ We’ll recommend the lightest‑weight model.
 
 Ready to talk?
 - Contact us → [Services Contact](contact.md)
-- If hosting interests you: [Early Access](../hosting/early-access.md)
+- If hosting interests you: [Managed Hosting](../hosting/managed.md)
 
 ---
 

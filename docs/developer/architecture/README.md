@@ -31,9 +31,7 @@ This index points to architecture references that mirror the live implementation
 
 ## Operations and Performance Guides
 
-- [Admin Configuration](../../admin/configuration.md)
-- [Performance Tuning](../../admin/performance_tuning.md)
-- [Vector Search Tuning](../../admin/vector_search_tuning.md)
+- [Admin: Operations](../../admin/operations.md)
 - [Deployment Guide](../../operations/deployment.md)
 - [Monitoring Guide](../../operations/monitoring.md)
 - [Backup Procedures](../../operations/backup.md)

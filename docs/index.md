@@ -62,22 +62,19 @@ document.addEventListener('DOMContentLoaded', function () {
 docker run --rm -it ghcr.io/trvon/yams:latest --version
 ```
 
-### Build from Source (Meson)
+### Build from Source
 
 ```bash
-# 1. Install dependencies (Debug)
-conan install . -of build/debug -s build_type=Debug -b missing
+# Using setup script (recommended)
+./setup.sh Release
+meson compile -C build/release
 
-# 2. Configure (first time)
-meson setup build/debug \
-  --native-file build/debug/build-debug/conan/conan_meson_native.ini
-
-# 3. Build
-meson compile -C build/debug
-
-# 4. Install (optional)
-meson install -C build/debug
+# Or for Debug with tests
+./setup.sh Debug
+meson compile -C builddir
 ```
+
+See [setup.sh](https://github.com/trvon/yams/blob/main/setup.sh) for advanced options (coverage, cross-compilation, etc.).
 
 ## Quick start
 

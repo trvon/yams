@@ -156,7 +156,7 @@ Result<void> SocketServer::start() {
         if (initialBudget == 0)
             initialBudget = TuneAdvisor::writerBudgetBytesPerTurn();
         if (initialBudget == 0)
-            initialBudget = 256 * 1024;
+            initialBudget = 256ULL * 1024;
         setWriterBudget(initialBudget);
 
         co_spawn(
@@ -350,7 +350,7 @@ void SocketServer::setWriterBudget(std::size_t bytes) {
     if (bytes == 0)
         bytes = TuneAdvisor::writerBudgetBytesPerTurn();
     if (bytes == 0)
-        bytes = 256 * 1024;
+        bytes = 256ULL * 1024;
     if (!writerBudget_)
         writerBudget_ = std::make_shared<std::atomic<std::size_t>>(bytes);
     else
@@ -600,7 +600,7 @@ awaitable<void> SocketServer::handle_connection(local::socket socket) {
             if (initialBudget == 0)
                 initialBudget = TuneAdvisor::writerBudgetBytesPerTurn();
             if (initialBudget == 0)
-                initialBudget = 256 * 1024;
+                initialBudget = 256ULL * 1024;
             writerBudget_ = std::make_shared<std::atomic<std::size_t>>(initialBudget);
         }
 
@@ -640,7 +640,7 @@ awaitable<void> SocketServer::handle_connection(local::socket socket) {
                 handlerConfig.writer_budget_bytes_per_turn =
                     TuneAdvisor::writerBudgetBytesPerTurn();
             if (handlerConfig.writer_budget_bytes_per_turn == 0)
-                handlerConfig.writer_budget_bytes_per_turn = 256 * 1024;
+                handlerConfig.writer_budget_bytes_per_turn = 256ULL * 1024;
             if (writerBudget_)
                 writerBudget_->store(handlerConfig.writer_budget_bytes_per_turn,
                                      std::memory_order_relaxed);

@@ -42,11 +42,11 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
             last_adjust = now;
             auto avg = total_bytes_written.load(std::memory_order_relaxed) /
                        std::max<uint64_t>(total_batches.load(std::memory_order_relaxed), 1);
-            if (avg > cap && cap < (4 * 1024 * 1024)) {
-                batch_cap.store(std::min<std::size_t>(cap * 2, 4 * 1024 * 1024),
+            if (avg > cap && cap < (4ULL * 1024 * 1024)) {
+                batch_cap.store(std::min<std::size_t>(cap * 2, 4ULL * 1024 * 1024),
                                 std::memory_order_relaxed);
-            } else if (avg < (cap / 4) && cap > (64 * 1024)) {
-                batch_cap.store(std::max<std::size_t>(cap / 2, 64 * 1024),
+            } else if (avg < (cap / 4) && cap > (64ULL * 1024)) {
+                batch_cap.store(std::max<std::size_t>(cap / 2, 64ULL * 1024),
                                 std::memory_order_relaxed);
             }
             total_bytes_written.store(0, std::memory_order_relaxed);

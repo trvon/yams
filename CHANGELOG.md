@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.3.x archive: docs/changelogs/v0.3.md
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
-## [v0.7.7] - November 1, 2025
+
+## [v0.7.7] - Unreleased
 
 ### Added
 - **ServiceManager & Daemon Lifecycle Improvements**
@@ -63,9 +64,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Migration System Crash (macOS)**: Fixed SIGSEGV crash in `MigrationManager::recordMigration()` during daemon startup
   - **Root Cause**: `ServiceManager::co_migrateDatabase()` called `mm.initialize()` but ignored its return value. If initialization failed to create the `migration_history` table, migrations would continue and crash when attempting to INSERT into the non-existent table.
   - **Fix**: Added error checking for `mm.initialize()` with early return and proper error logging in `ServiceManager.cpp`
-  - **Enhanced Error Handling**: Added error logging when `recordMigration()` fails after migration/rollback errors to improve diagnostics
-  - **Impact**: Daemon now fails gracefully during startup if database initialization fails instead of crashing with SIGSEGV
-  - Files: `src/daemon/components/ServiceManager.cpp`, `src/metadata/migration.cpp`
 - **Embedding System Architecture Simplification**: Simplified FSM readiness logic to check provider availability directly instead of waiting for model load events
   - IModelProvider checks `isAvailable()` immediately after plugin adoption
   - Eliminates unnecessary ModelLoading state transition
@@ -101,13 +99,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Aligns FSM with IModelProvider on-demand model loading architecture
 
 ### Removed
-- **Comprehensive Dead Code Cleanup** (90+ lines removed via clang-tidy analysis):
-  - **ServiceManager.cpp** (85 lines): Removed `launchModelEventConsumer()` function and its background event polling loop (obsolete with synchronous provider availability checking)
-  - **PostIngestQueue.cpp**: Removed unused `haveTask` boolean assignment
-  - **plugin_command.cpp**: Removed unused `have_typed` and `have_json` boolean calculations
-  - **status_command.cpp**: Removed unused `embeddingsWarn` variable
-  - **mcp_server.cpp**: Removed unused `verbose` environment variable check in `handleDownload()`
-  - All dead stores identified through static analysis with `clang-tidy --checks=clang-analyzer-deadcode.DeadStores`
 - **Fuzzy Index Memory Optimization**: Enhanced BK-tree index building with intelligent document prioritization
   - Uses metadata and Knowledge Graph to rank documents by relevance (tagged > KG-connected > recent > code files)
   - Limits index to 50,000 documents by default (configurable via `YAMS_FUZZY_INDEX_LIMIT` environment variable)

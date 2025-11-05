@@ -11,7 +11,7 @@ Open source first. For guaranteed response times and guidance, we offer paid sup
 
 See also:
 - Services: [Services & Offerings](README.md)
-- Managed Hosting: [Hosting Overview](../hosting/README.md) · [Early Access](../hosting/early-access.md)
+- Managed Hosting: [Managed Hosting](../hosting/managed.md)
 
 ---
 
@@ -129,7 +129,7 @@ See also:
 ## Get started
 
 - Contact: [Services Contact](contact.md)
-- Want zero‑ops? Join [Hosting Early Access](../hosting/early-access.md)
+- Want zero‑ops? See [Managed Hosting](../hosting/managed.md)
 
 ---
 

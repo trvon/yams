@@ -1,6 +1,7 @@
 #pragma once
 
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 #include <boost/asio/any_io_executor.hpp>

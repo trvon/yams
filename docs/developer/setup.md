@@ -33,7 +33,20 @@ Initialize Conan profile (one-time):
 conan profile detect --force
 ```
 
-## Quick start (Meson + Conan)
+## Quick start
+
+**Using setup script (recommended):**
+```bash
+# Release build
+./setup.sh Release
+meson compile -C build/release
+
+# Debug build (includes tests)
+./setup.sh Debug
+meson compile -C builddir
+```
+
+**Manual Conan + Meson:**
 ```bash
 # Release
 conan install . -of build/release -s build_type=Release -b missing
@@ -51,6 +64,8 @@ meson setup build/debug \
   --buildtype=debug
 meson compile -C build/debug
 ```
+
+See [setup.sh](../../setup.sh) for environment variables (compiler override, C++ standard, cross-compilation, etc.).
 
 ### Fast Mode
 For quicker iteration (disables ONNX plugin/features & tests):

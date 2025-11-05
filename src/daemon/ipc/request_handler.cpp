@@ -731,7 +731,7 @@ RequestHandler::write_message(boost::asio::local::stream_protocol::socket& socke
         }
 
         // Check frame size doesn't exceed reasonable limits
-        constexpr size_t MAX_FRAME_SIZE = 100 * 1024 * 1024; // 100MB
+        constexpr size_t MAX_FRAME_SIZE = 100ULL * 1024 * 1024; // 100MB
         if (frame.size() > MAX_FRAME_SIZE) {
             spdlog::error("write_message: frame size {} exceeds maximum {}", frame.size(),
                           MAX_FRAME_SIZE);
@@ -1526,7 +1526,7 @@ RequestHandler::writer_drain(boost::asio::local::stream_protocol::socket& socket
         if (base_budget == 0)
             base_budget = TuneAdvisor::writerBudgetBytesPerTurn();
         if (base_budget == 0)
-            base_budget = 256 * 1024; // defensively cap to a sane minimum
+            base_budget = 256ULL * 1024; // defensively cap to a sane minimum
         size_t budget = base_budget;
         const size_t active = rr_active_.size();
         const size_t queued_bytes = total_queued_bytes_;

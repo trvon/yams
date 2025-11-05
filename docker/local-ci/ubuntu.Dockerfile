@@ -51,6 +51,9 @@ RUN set -euxo pipefail; \
       apt-get -y dist-upgrade && \
       apt-get install -y --no-install-recommends \
         build-essential \
+        clang-18 \
+        libc++-18-dev \
+        libc++abi-18-dev \
         ccache \
         cmake \
         ninja-build \
@@ -82,12 +85,31 @@ RUN set -euxo pipefail; \
 # Ensure venv tools (including conan) are on PATH
 ENV PATH="/opt/venv/bin:${PATH}"
 
+# Set Clang as default compiler
+ENV CC=clang-18 \
+    CXX=clang++-18
+
+# Create symlinks for clang/clang++ to version 18
+RUN ln -sf /usr/bin/clang-18 /usr/bin/clang && \
+    ln -sf /usr/bin/clang++-18 /usr/bin/clang++
+
 WORKDIR /work
 
 # Quick sanity check of core tools
 RUN echo "gcc: $(gcc --version | head -n1)" && \
+    echo "clang: $(clang --version | head -n1)" && \
     echo "cmake: $(cmake --version | head -n1)" && \
     echo "ninja: $(ninja --version || true)" && \
     echo "git: $(git --version)" && \
     echo "conan: $(conan --version)" && \
     echo "ccache: $(ccache --version | head -n1)"
+
+# Configure Conan on container startup
+RUN conan profile detect --force && \
+    conan remote list || conan remote add conancenter https://center.conan.io && \
+    conan remote update conancenter https://center.conan.io || true
+
+# Set environment variables to disable optional features that have missing dependencies
+# These can be overridden when running the container
+ENV YAMS_DISABLE_ONNX="true" \
+    YAMS_DISABLE_SYMBOL_EXTRACTION="true"

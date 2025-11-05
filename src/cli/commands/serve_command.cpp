@@ -17,7 +17,6 @@
 #include <boost/asio/io_context.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
-#include <yams/mcp/http_server.h>
 #include <yams/mcp/mcp_server.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/vector/vector_index_manager.h>
@@ -53,12 +52,6 @@ public:
         cmd->add_flag(
             "--verbose", verbose_,
             "Show startup banner and enable info-level logging (overrides default quiet mode)");
-
-        cmd->add_flag("--http", http_, "Use HTTP+SSE transport instead of stdio");
-        cmd->add_option("--host", http_host_, "HTTP host to bind to (default: 127.0.0.1)")
-            ->envname("YAMS_MCP_HTTP_HOST");
-        cmd->add_option("--port", http_port_, "HTTP port to bind to (default: 8757)")
-            ->envname("YAMS_MCP_HTTP_PORT");
 
         cmd->callback([this]() {
             auto result = execute();
@@ -174,11 +167,7 @@ public:
 
             effectiveQuiet_ = quiet; // store for server methods
 
-            if (http_) {
-                return runHttpServer();
-            } else {
-                return runStdioServer();
-            }
+            return runStdioServer();
 
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string("Server error: ") + e.what()};
@@ -210,37 +199,11 @@ private:
         return {};
     }
 
-    Result<void> runHttpServer() {
-        if (!effectiveQuiet_) {
-            std::cerr << "\n=== YAMS MCP Server (HTTP) ===\n";
-            std::cerr << "Transport: HTTP+SSE\n";
-            std::cerr << "Listening on: " << http_host_ << ":" << http_port_ << "\n";
-            std::cerr << "Press Ctrl+C to stop the server\n\n";
-        }
-
-        auto server = std::make_shared<mcp::MCPServer>(nullptr, &g_shutdown, daemonSocket_);
-
-        mcp::HttpMcpServer::Config cfg;
-        cfg.bindAddress = http_host_;
-        cfg.bindPort = http_port_;
-
-        boost::asio::io_context io;
-        mcp::HttpMcpServer http(io, server, cfg);
-
-        http.run();
-
-        spdlog::info("MCP HTTP server stopped");
-        return {};
-    }
-
     YamsCLI* cli_ = nullptr;
 
     // Flags / options
     bool quietFlag_ = true; // kept for backward compatibility (default quiet)
     bool verbose_ = false;  // new flag: enables banner & info logging
-    bool http_ = false;
-    std::string http_host_ = "127.0.0.1";
-    uint16_t http_port_ = 8757;
 
     // Derived effective quiet state after env + flags
     bool effectiveQuiet_ = true;
