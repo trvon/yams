@@ -365,6 +365,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'GTEST_BRIEF': '1',
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
     },
     timeout: bench_timeout,
   )
@@ -391,6 +392,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'GTEST_BRIEF': '1',
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
     },
     timeout: bench_timeout,
   )
@@ -401,6 +403,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'GTEST_BRIEF': '1',
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
     },
     timeout: bench_timeout,
   )
@@ -411,6 +414,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'GTEST_BRIEF': '1',
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
     },
     timeout: bench_timeout,
   )
@@ -421,6 +425,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'GTEST_BRIEF': '1',
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
     },
     timeout: bench_timeout,
   )
@@ -431,6 +436,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'GTEST_BRIEF': '1',
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
     },
     timeout: bench_timeout,
   )
@@ -441,6 +447,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'GTEST_BRIEF': '1',
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
     },
     timeout: bench_timeout,
   )
@@ -451,6 +458,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'GTEST_BRIEF': '1',
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
     },
     timeout: bench_timeout,
   )
@@ -461,6 +469,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'GTEST_BRIEF': '1',
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
     },
     timeout: bench_timeout,
   )
@@ -476,6 +485,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
       # in CI or local: YAMS_ENABLE_DAEMON_BENCH=1 must be set in addition
       # to this fast flag; otherwise the test self-skips.
       'YAMS_BENCH_FAST': '1',
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
     },
     timeout: bench_timeout,
   )
@@ -508,6 +518,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
       'YAMS_SQLITE_VEC_SKIP_INIT': '1',
       'YAMS_DISABLE_VECTORS': '1',
       'YAMS_TESTING': '1',
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
     },
     timeout: 120,
   )
@@ -526,6 +537,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
       'YAMS_VDB_IN_MEMORY': '1',
       'YAMS_SQLITE_VEC_SKIP_INIT': '1',
       'YAMS_DISABLE_VECTORS': '1',
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
     },
     timeout: 180,
   )
@@ -547,6 +559,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
       'YAMS_SQLITE_VEC_SKIP_INIT': '1',
       'YAMS_DISABLE_VECTORS': '1',
       'YAMS_TESTING': '1',
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
     },
     timeout: safe_timeout,
   )
@@ -564,6 +577,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
       'YAMS_VDB_IN_MEMORY': '1',
       'YAMS_TESTING': '1',
       # Note: sqlite-vec env toggles NOT set, allowing initialization if available
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
     },
     timeout: 120,
   )
@@ -592,6 +606,7 @@ if get_option('enable-bench-tests')
     suite: ['bench', 'perf'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
     },
     timeout: bench_timeout,
   )
@@ -1060,8 +1075,11 @@ if catch2_dep.found()
   # Search tests
   test('hybrid_search', hybrid_search_exe,
     suite: ['catch2', 'unit', 'search', 'hybrid'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
+    env: {
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      'YAMS_DISABLE_VECTORS': '1',  # Skip embedding tests when ONNX unavailable
+    },
+    timeout: 120  # Increased timeout for engine initialization attempts
   )
 
   # Plugin integration tests

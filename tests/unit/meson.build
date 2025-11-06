@@ -49,6 +49,7 @@ if tests_has_cli
   unit_cli += files(
     'cli/config_command_test.cpp',
     'cli/daemon_command_test.cpp',
+    'cli/doctor_command_test.cpp',
     'cli/model_command_test.cpp',
     'cli/recommendation_util_test.cpp',
     'cli/session_command_test.cpp',
@@ -133,6 +134,7 @@ if get_option('enable-vector-tests')
     # Embedding status tests migrated to Catch2 (daemon_metrics_status_test.cpp)
     # Removed: status_embedding_test.cpp
     'daemon/embedding_provider_recovery_test.cpp',
+    'daemon/abi_model_provider_dimension_test.cpp',  # Dimension validation (27 tests total across 3 layers)
   )
 endif
 
@@ -247,6 +249,14 @@ if get_option('enable-vector-tests')
     'vector/document_chunker_test.cpp',
     'vector/embedding_genai_selection_test.cpp',
     'vector/sqlite_vec_c_api_smoke_test.cpp',
+    'vector/vector_dimension_validation_test.cpp',  # Dimension validation - Vector DB layer
+  )
+endif
+
+unit_ingest = []
+if get_option('enable-vector-tests')
+  unit_ingest += files(
+    'ingest/ingest_dimension_validation_test.cpp',  # Dimension validation - Ingest integration layer
   )
 endif
 
@@ -274,6 +284,7 @@ unit_srcs += unit_resolve
 unit_srcs += unit_search
 unit_srcs += unit_storage
 unit_srcs += unit_vector
+unit_srcs += unit_ingest
 unit_srcs += unit_wal
 unit_srcs += unit_plugins
 

@@ -251,6 +251,12 @@ if [[ -f "conan/qpdf/conanfile.py" ]]; then
   conan export conan/qpdf --name=qpdf --version=11.9.0
 fi
 
+# Export custom onnxruntime recipe if it exists
+if [[ -f "conan/onnxruntime/conanfile.py" ]]; then
+  echo "Exporting onnxruntime/1.23.2 from conan/onnxruntime/"
+  conan export conan/onnxruntime --name=onnxruntime --version=1.23.2
+fi
+
 echo "--- Running conan install... ---"
 # Add policy toolchain for legacy recipes if in Docker or CI
 POLICY_TC=""

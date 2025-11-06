@@ -159,6 +159,10 @@ test('symbol_extraction_bench', symbol_extraction_bench,
      suite: ['bench', 'symbol_extraction'],
      is_parallel: false,
      timeout: 300,
-     env: {'YAMS_AUTO_DOWNLOAD_GRAMMARS': '1', 'YAMS_SKIP_MODEL_LOADING': '1'})
+     env: {
+       'YAMS_AUTO_DOWNLOAD_GRAMMARS': '1',
+       'YAMS_SKIP_MODEL_LOADING': '1',
+       'LD_LIBRARY_PATH': _test_env_ld_library_path,
+     })
 
 alias_target('bench_symbol_extraction', symbol_extraction_bench)
