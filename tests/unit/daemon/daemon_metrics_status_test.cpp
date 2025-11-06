@@ -120,10 +120,9 @@ TEST_CASE("DaemonMetrics: Embedding provider status", "[daemon][metrics][embeddi
 
         REQUIRE(snap != nullptr);
 
-        // Backend should be one of known values
+        // Backend should be "plugin:<name>" format or "unknown"
         bool validBackend =
-            (snap->embeddingBackend == "provider" || snap->embeddingBackend == "local" ||
-             snap->embeddingBackend == "unknown");
+            (snap->embeddingBackend == "unknown" || snap->embeddingBackend.starts_with("plugin:"));
         REQUIRE(validBackend);
     }
 
