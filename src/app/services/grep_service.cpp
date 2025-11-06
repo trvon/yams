@@ -1043,8 +1043,10 @@ public:
         if (!req.regexOnly && req.semanticLimit > 0) {
             try {
                 auto semantic_start_time = std::chrono::steady_clock::now();
-                std::shared_ptr<yams::search::HybridSearchEngine> eng = ctx_.hybridEngine;
                 size_t topk = static_cast<size_t>(std::max(1, req.semanticLimit)) * 3;
+
+                // Use cached engine if available, build fresh if needed
+                std::shared_ptr<yams::search::HybridSearchEngine> eng = ctx_.hybridEngine;
                 if (!eng) {
                     auto build_start_time = std::chrono::steady_clock::now();
                     auto vecMgr = std::make_shared<yams::vector::VectorIndexManager>();
@@ -1059,10 +1061,11 @@ public:
                     auto build_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
                                               std::chrono::steady_clock::now() - build_start_time)
                                               .count();
-                    spdlog::debug("[GrepTrace] Built temporary HybridSearchEngine for semantic "
+                    spdlog::debug("[GrepTrace] Built fresh HybridSearchEngine for semantic "
                                   "search in {}ms.",
                                   build_duration);
                 }
+
                 if (eng) {
                     auto hres = eng->search(req.pattern, topk);
                     if (hres) {

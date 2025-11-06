@@ -390,6 +390,15 @@ public:
 
     Result<void> checkpointWal() override;
 
+    /**
+     * @brief Refresh all idle connections in the pool (PBI-079)
+     *
+     * Discards all idle connections, forcing new connections to be created.
+     * This invalidates cached SQLite query plans and prepared statements,
+     * ensuring queries see the latest database state after WAL checkpoint.
+     */
+    void refreshAllConnections();
+
     // Path tree operations (PBI-051 scaffold)
     Result<std::optional<PathTreeNode>> findPathTreeNode(int64_t parentId,
                                                          std::string_view pathSegment) override;

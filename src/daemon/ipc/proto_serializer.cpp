@@ -2044,6 +2044,34 @@ template <> struct ProtoBinding<FileHistoryResponse> {
     }
 };
 
+template <> struct ProtoBinding<PruneRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kPruneRequest;
+    static void set(Envelope& env, const PruneRequest& r) {
+        auto* o = env.mutable_prune_request();
+        set_string_list(r.categories, o->mutable_categories());
+        set_string_list(r.extensions, o->mutable_extensions());
+        o->set_older_than(r.olderThan);
+        o->set_larger_than(r.largerThan);
+        o->set_smaller_than(r.smallerThan);
+        set_string_list(r.excludePatterns, o->mutable_exclude_patterns());
+        o->set_dry_run(r.dryRun);
+        o->set_verbose(r.verbose);
+    }
+    static PruneRequest get(const Envelope& env) {
+        const auto& i = env.prune_request();
+        PruneRequest r{};
+        r.categories = get_string_list(i.categories());
+        r.extensions = get_string_list(i.extensions());
+        r.olderThan = i.older_than();
+        r.largerThan = i.larger_than();
+        r.smallerThan = i.smaller_than();
+        r.excludePatterns = get_string_list(i.exclude_patterns());
+        r.dryRun = i.dry_run();
+        r.verbose = i.verbose();
+        return r;
+    }
+};
+
 template <> struct ProtoBinding<PruneResponse> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kPruneResponse;
     static void set(Envelope& env, const PruneResponse& r) {
@@ -2371,6 +2399,11 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
         }
         case Envelope::kFileHistoryRequest: {
             auto v = ProtoBinding<FileHistoryRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
+        case Envelope::kPruneRequest: {
+            auto v = ProtoBinding<PruneRequest>::get(env);
             m.payload = Request{std::move(v)};
             break;
         }

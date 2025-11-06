@@ -193,4 +193,5 @@ executable('yams-daemon',
   ],
   install: true,
   install_dir: get_option('bindir'),
+  install_rpath: '$ORIGIN/../lib',
 )

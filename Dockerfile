@@ -93,10 +93,11 @@ RUN ln -sf ${YAMS_PREFIX}/bin/yams /usr/local/bin/yams && \
   if [ -f ${YAMS_PREFIX}/bin/yams-daemon ]; then ln -sf ${YAMS_PREFIX}/bin/yams-daemon /usr/local/bin/yams-daemon; fi && \
   mkdir -p /usr/local/share/yams/data
 # Copy data files if they exist (optional)
-RUN --mount=type=bind,from=builder,source=/src/data,target=/tmp/data \
-  if [ -f /tmp/data/magic_numbers.json ]; then \
-    cp /tmp/data/magic_numbers.json /usr/local/share/yams/data/; \
-  fi
+# Note: Disabled because /src/data/magic_numbers.json doesn't exist yet
+# RUN --mount=type=bind,from=builder,source=/src/data,target=/tmp/data \
+#   if [ -f /tmp/data/magic_numbers.json ]; then \
+#     cp /tmp/data/magic_numbers.json /usr/local/share/yams/data/; \
+#   fi
 RUN mkdir -p /home/yams/.local/share/yams /home/yams/.config/yams && chown -R yams:yams /home/yams
 USER yams
 WORKDIR /home/yams

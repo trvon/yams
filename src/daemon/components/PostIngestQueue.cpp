@@ -703,13 +703,29 @@ bool PostIngestQueue::indexDocumentSync(const std::string& hash, const std::stri
 
         spdlog::info("[PBI-040-4] FTS5 indexing completed successfully for {}", hash);
 
-        // PBI-040-4: Force a WAL checkpoint to ensure FTS5 updates are visible to other connections
-        // immediately. This is critical for synchronous indexing tests.
-        // if (meta_) {
-        //     if (auto res = meta_->checkpointWal(); !res) {
-        //         spdlog::warn("PostIngest(sync): WAL checkpoint failed: {}", res.error().message);
-        //     }
-        // }
+        // PBI-040-4 + PBI-079: Force WAL checkpoint and refresh connections
+        // to ensure FTS5/documents table updates are visible immediately.
+        // This is critical for synchronous indexing tests.
+        if (meta_) {
+            spdlog::info("PostIngest(sync): attempting WAL checkpoint for {}", hash);
+            if (auto res = meta_->checkpointWal(); !res) {
+                spdlog::warn("PostIngest(sync): WAL checkpoint failed: {}", res.error().message);
+            } else {
+                spdlog::info("PostIngest(sync): WAL checkpoint successful for {}", hash);
+
+                // PBI-079: Refresh all idle connections to invalidate stale query plans
+                // This forces subsequent queries to see the checkpointed data
+                spdlog::info("PostIngest(sync): about to refresh connections for {}", hash);
+                try {
+                    meta_->refreshAllConnections();
+                    spdlog::info("PostIngest(sync): refreshed all idle connections for {}", hash);
+                } catch (const std::exception& e) {
+                    spdlog::error("PostIngest(sync): refresh failed: {}", e.what());
+                }
+            }
+        } else {
+            spdlog::warn("PostIngest(sync): meta_ is null, cannot checkpoint WAL for {}", hash);
+        }
 
         // Queue KG and embedding stages asynchronously (non-blocking)
         // These are less urgent for grep responsiveness

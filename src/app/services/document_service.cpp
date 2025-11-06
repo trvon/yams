@@ -1641,6 +1641,14 @@ public:
         // Always try basename (filename only) match
         std::filesystem::path inputPath(name);
         std::string basename = inputPath.filename().string();
+
+        // If input is just a basename (no path separators), try suffix match
+        if (!basename.empty() && name.find('/') == std::string::npos &&
+            name.find('\\') == std::string::npos) {
+            candidatePatterns.push_back("%/" + basename);
+        }
+
+        // If input is a path, add basename separately
         if (!basename.empty() && basename != name) {
             candidatePatterns.push_back(basename);
         }

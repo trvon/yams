@@ -82,17 +82,18 @@ class YamsConan(ConanFile):
             except Exception:
                 pass
 
-        # Always require ONNX Runtime for vector/embedding support
-        self.requires("onnxruntime/1.23.2")
-        # Set compiler flags for clang 19
-        self.conf.append("tools.build:cxxflags", "-Wno-unused-but-set-variable")
-        self.conf.append("tools.build:cxxflags", "-Wno-unused-function")
-        self.conf.append("tools.build:cxxflags", "-Wno-deprecated-declarations")
-        # Ensure TBB is available (required by ONNX Runtime)
-        try:
-            self.requires("onetbb/2021.12.0")
-        except Exception:
-            pass
+        # ONNX Runtime for vector/embedding support (optional)
+        if self.options.enable_onnx:  # type: ignore
+            self.requires("onnxruntime/1.23.2")
+            # Set compiler flags for clang 19
+            self.conf.append("tools.build:cxxflags", "-Wno-unused-but-set-variable")
+            self.conf.append("tools.build:cxxflags", "-Wno-unused-function")
+            self.conf.append("tools.build:cxxflags", "-Wno-deprecated-declarations")
+            # Ensure TBB is available (required by ONNX Runtime)
+            try:
+                self.requires("onetbb/2021.12.0")
+            except Exception:
+                pass
         
         self.requires("xz_utils/5.4.5")
         if self.options.enable_pdf:  # type: ignore
@@ -137,9 +138,10 @@ class YamsConan(ConanFile):
             self.options["qpdf"].with_jpeg = "libjpeg"
             self.options["qpdf"].with_ssl = "openssl"
         
-        # Always configure ONNX Runtime
-        self.options["onnxruntime"].fPIC = True
-        self.options["onnxruntime"].shared = False
+        # Configure ONNX Runtime if enabled
+        if self.options.enable_onnx:  # type: ignore
+            self.options["onnxruntime"].fPIC = True
+            self.options["onnxruntime"].shared = False
 
     def validate(self):
         check_min_cppstd(self, "20")

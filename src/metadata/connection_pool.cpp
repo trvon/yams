@@ -483,6 +483,25 @@ void ConnectionPool::returnConnection(PooledConnection* conn) {
     cv_.notify_one();
 }
 
+void ConnectionPool::refreshNext() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!available_.empty()) {
+        available_.pop();
+        totalConnections_--;
+    }
+}
+
+void ConnectionPool::refreshAll() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    size_t discarded = 0;
+    while (!available_.empty()) {
+        available_.pop();
+        totalConnections_--;
+        discarded++;
+    }
+    spdlog::debug("ConnectionPool::refreshAll discarded {} idle connections", discarded);
+}
+
 bool ConnectionPool::isConnectionValid(const Database& db) const {
     if (!db.isOpen()) {
         return false;

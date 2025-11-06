@@ -2380,6 +2380,14 @@ Result<void> MetadataRepository::checkpointWal() {
     });
 }
 
+void MetadataRepository::refreshAllConnections() {
+    // PBI-079: Discard all idle connections to force SQLite to invalidate
+    // cached query plans and prepared statements. This ensures queries see
+    // the latest database state after WAL checkpoint.
+    pool_.refreshAll();
+    spdlog::debug("[PBI-079] MetadataRepository: refreshed all idle connections");
+}
+
 Result<std::optional<PathTreeNode>>
 MetadataRepository::findPathTreeNode(int64_t parentId, std::string_view pathSegment) {
     return executeQuery<std::optional<PathTreeNode>>(

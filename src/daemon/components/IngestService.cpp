@@ -147,10 +147,13 @@ void IngestService::workerLoop(const yams::compat::stop_token& token) {
                                  serviceResp.hash, serviceResp.bytesStored,
                                  serviceResp.bytesDeduped);
 
+                    // PBI-040-4: Use sync indexing for single document adds
+                    // This makes grep results immediately available
                     if (sm_ && serviceResp.bytesStored > 0) {
-                        spdlog::debug("Enqueuing post-ingest task for new document {}",
+                        spdlog::debug("Using sync FTS5 indexing for single document {}",
                                       serviceResp.hash);
-                        sm_->enqueuePostIngest(serviceResp.hash, req.mimeType);
+                        sm_->getPostIngestQueue()->indexDocumentSync(serviceResp.hash,
+                                                                     req.mimeType);
                     } else if (sm_) {
                         spdlog::debug("Skipping post-ingest for existing document {}",
                                       serviceResp.hash);

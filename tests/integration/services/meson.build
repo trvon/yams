@@ -47,3 +47,25 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
 elif get_option('enable-integration-tests')
   message('integration_services suite disabled (enable with -Denable-integration-services=true).')
 endif
+
+# Catch2 migration: Sync Indexing tests
+if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-services') or dbg) and tests_has_cli
+  catch2_sync_indexing_exe = executable('catch2_sync_indexing',
+    files('sync_indexing_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: ['-DYAMS_TESTING=1'],
+    install: false,
+  )
+
+  test('sync_indexing_catch2', catch2_sync_indexing_exe,
+    suite: ['catch2', 'integration', 'sync', 'indexing'],
+    env: {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'YAMS_DISABLE_VECTORS': '1',
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
+    },
+    is_parallel: false,
+    timeout: 120,
+  )
+endif

@@ -123,6 +123,8 @@ Cflags: -I${{includedir}}
         # Runtime library path
         if self.settings.os in ["Linux", "Macos"]:
             self.cpp_info.libdirs = ["lib"]
+            # Add RPATH for runtime library discovery
+            self.cpp_info.rpath_dirs = ["lib"]
         
         # CMake properties
         self.cpp_info.set_property("cmake_file_name", "onnxruntime")
