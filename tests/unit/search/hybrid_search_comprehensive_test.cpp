@@ -22,8 +22,10 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 #include <yams/search/hybrid_search_engine.h>
+#include <yams/search/search_engine_builder.h>
 #include <yams/search/search_executor.h>
 #include <yams/vector/embedding_generator.h>
+#include <yams/vector/vector_database.h>
 #include <yams/vector/vector_index_manager.h>
 
 #include <boost/asio/awaitable.hpp>
@@ -224,8 +226,48 @@ private:
         appContext_.store = contentStore_;
         appContext_.metadataRepo = metadataRepo_;
         appContext_.searchExecutor = nullptr; // Optional
-        appContext_.hybridEngine = nullptr;   // Optional
         appContext_.workerExecutor = boost::asio::system_executor();
+
+        // Initialize hybrid search engine for integration testing
+        // Note: This requires vector DB and embeddings to be available
+        // Tests will skip when YAMS_DISABLE_VECTORS is set or embeddings unavailable
+        const bool skipVectors = (std::getenv("YAMS_DISABLE_VECTORS") != nullptr);
+
+        if (!skipVectors) {
+            try {
+                yams::search::SearchEngineBuilder builder;
+                builder.withMetadataRepo(metadataRepo_);
+
+                // Create vector index manager
+                yams::vector::IndexConfig indexCfg;
+                indexCfg.dimension = 384;
+                indexCfg.index_path = (testDir_ / "vector_index.bin").string();
+                indexCfg.enable_persistence = true;
+                indexCfg.max_elements = 10000;
+
+                auto vectorMgr = std::make_shared<yams::vector::VectorIndexManager>(indexCfg);
+                if (vectorMgr->initialize()) {
+                    builder.withVectorIndex(vectorMgr);
+
+                    // Try to create embedding generator (may fail if ONNX not available)
+                    yams::vector::EmbeddingConfig embCfg;
+                    embCfg.model_name = "all-MiniLM-L6-v2";
+                    embCfg.embedding_dim = 384;
+                    auto embGen = std::make_shared<yams::vector::EmbeddingGenerator>(embCfg);
+                    if (embGen->initialize()) {
+                        builder.withEmbeddingGenerator(embGen);
+                    }
+
+                    auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
+                    auto engineResult = builder.buildEmbedded(opts);
+                    if (engineResult) {
+                        appContext_.hybridEngine = engineResult.value();
+                    }
+                }
+            } catch (...) {
+                // Hybrid engine initialization failed - tests will expect InvalidState errors
+            }
+        }
 
         searchService_ = makeSearchService(appContext_);
         REQUIRE(searchService_);

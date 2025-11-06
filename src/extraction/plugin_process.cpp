@@ -1,3 +1,4 @@
+#include <yams/compat/thread_stop_compat.h>
 #include <yams/extraction/plugin_process.hpp>
 
 #include <spdlog/spdlog.h>
@@ -82,8 +83,8 @@ private:
     mutable std::mutex stdin_mutex_;
 
     // I/O threads
-    std::jthread stdout_thread_; // C++20: auto-join on destruction
-    std::jthread stderr_thread_;
+    yams::compat::jthread stdout_thread_; // C++20: auto-join on destruction
+    yams::compat::jthread stderr_thread_;
 
 #ifdef _WIN32
     // Windows-specific handles
@@ -473,11 +474,13 @@ size_t PluginProcess::Impl::write_stdin(std::span<const std::byte> data) {
 
 void PluginProcess::Impl::start_io_threads() {
     // Stdout pump thread (C++20 jthread with stop_token)
-    stdout_thread_ = std::jthread{[this](std::stop_token /*stop*/) { read_stdout_loop(); }};
+    stdout_thread_ =
+        yams::compat::jthread{[this](yams::compat::stop_token /*stop*/) { read_stdout_loop(); }};
 
     // Stderr pump thread
     if (config_.redirect_stderr) {
-        stderr_thread_ = std::jthread{[this](std::stop_token /*stop*/) { read_stderr_loop(); }};
+        stderr_thread_ = yams::compat::jthread{
+            [this](yams::compat::stop_token /*stop*/) { read_stderr_loop(); }};
     }
 }
 

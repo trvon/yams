@@ -58,8 +58,8 @@ public:
         // Only run default doctor if no subcommand was invoked
         // Subcommands set their own flags and handle execution themselves
         if (!fixEmbeddings_ && !fixFts5_ && !fixGraph_ && !fixAll_ && !fixAllTop_ &&
-            !dedupeApply_ && pruneCategories_.empty() && pruneExtensions_.empty() &&
-            pluginArg_.empty() && !fixConfigDims_ && !recreateVectors_) {
+            !dedupeApply_ && !pruneInvoked_ && pluginArg_.empty() && !fixConfigDims_ &&
+            !recreateVectors_) {
             // No subcommand flags set, run default doctor summary
             try {
                 runAll();
@@ -2035,6 +2035,7 @@ private:
     std::string pruneLargerThan_;
     std::string pruneSmallerThan_;
     bool pruneVerbose_{false};
+    bool pruneInvoked_{false}; // Track if prune subcommand was actually invoked
     void runPrune();
     // Tuning helpers
     Result<void> applyTuningBaseline(bool apply);
@@ -2139,7 +2140,10 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
     prune->add_option("--smaller-than", pruneSmallerThan_,
                       "Only prune files smaller than size (e.g., 1KB)");
     prune->add_flag("-v,--verbose", pruneVerbose_, "Verbose output");
-    prune->callback([this]() { runPrune(); });
+    prune->callback([this]() {
+        pruneInvoked_ = true;
+        runPrune();
+    });
 
     // Auto-tuning baseline
     auto* tsub =
