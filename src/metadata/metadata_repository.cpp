@@ -1107,7 +1107,6 @@ Result<void> MetadataRepository::indexDocumentContent(int64_t documentId, const 
         if (!deleteResult)
             return deleteResult.error();
 
-        // Insert new FTS entry
         const std::string sanitizedContent = common::sanitizeUtf8(content);
         const std::string sanitizedTitle = common::sanitizeUtf8(title);
 
@@ -1124,7 +1123,8 @@ Result<void> MetadataRepository::indexDocumentContent(int64_t documentId, const 
         if (!bindResult)
             return bindResult.error();
 
-        return stmt.execute();
+        auto execResult = stmt.execute();
+        return execResult;
     });
 
     if (result)
@@ -1391,7 +1391,6 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
         spec.offset = offset;
         auto sql = yams::metadata::sql::buildSelect(spec);
 
-        // Try FTS search first
         bool ftsSearchSucceeded = false;
         auto stmtResult = db.prepare(sql);
 
@@ -1411,6 +1410,7 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
             }
             {
                 // Try to execute the FTS5 search
+                size_t rowCount = 0;
                 while (true) {
                     auto stepResult = stmt.step();
                     if (!stepResult) {
@@ -1421,10 +1421,11 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
                         break;
                     }
                     if (!stepResult.value()) {
-                        // Successfully completed FTS5 search
                         ftsSearchSucceeded = true;
                         break;
                     }
+
+                    rowCount++;
 
                     SearchResult result;
 
@@ -2374,18 +2375,17 @@ Result<void> MetadataRepository::updateDocumentEmbeddingStatusByHash(const std::
 
 Result<void> MetadataRepository::checkpointWal() {
     return executeQuery<void>([](Database& db) -> Result<void> {
-        // Using TRUNCATE is more aggressive and ensures data is written to the main db file.
-        // This is what we want for tests to pass reliably.
-        return db.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+        auto result = db.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+        if (!result) {
+            return result;
+        }
+
+        return db.execute("PRAGMA optimize");
     });
 }
 
 void MetadataRepository::refreshAllConnections() {
-    // PBI-079: Discard all idle connections to force SQLite to invalidate
-    // cached query plans and prepared statements. This ensures queries see
-    // the latest database state after WAL checkpoint.
     pool_.refreshAll();
-    spdlog::debug("[PBI-079] MetadataRepository: refreshed all idle connections");
 }
 
 Result<std::optional<PathTreeNode>>

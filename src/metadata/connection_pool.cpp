@@ -6,9 +6,10 @@ namespace yams::metadata {
 
 // PooledConnection implementation
 PooledConnection::PooledConnection(std::unique_ptr<Database> db,
-                                   std::function<void(PooledConnection*)> returnFunc)
-    : db_(std::move(db)), returnFunc_(returnFunc), lastAccessed_(std::chrono::steady_clock::now()) {
-}
+                                   std::function<void(PooledConnection*)> returnFunc,
+                                   std::uint64_t generation)
+    : db_(std::move(db)), returnFunc_(returnFunc), lastAccessed_(std::chrono::steady_clock::now()),
+      generation_(generation) {}
 
 PooledConnection::~PooledConnection() {
     if (db_ && returnFunc_ && !returned_) {
@@ -18,7 +19,8 @@ PooledConnection::~PooledConnection() {
 
 PooledConnection::PooledConnection(PooledConnection&& other) noexcept
     : db_(std::move(other.db_)), returnFunc_(std::move(other.returnFunc_)),
-      lastAccessed_(other.lastAccessed_), returned_(other.returned_) {
+      lastAccessed_(other.lastAccessed_), returned_(other.returned_),
+      generation_(other.generation_) {
     other.returned_ = true; // Prevent double return
 }
 
@@ -65,7 +67,7 @@ Result<void> ConnectionPool::initialize() {
 
         auto pooledConn = std::make_unique<PooledConnection>(
             std::move(connResult).value(),
-            [this](PooledConnection* conn) { returnConnection(conn); });
+            [this](PooledConnection* conn) { returnConnection(conn); }, currentGeneration_.load());
 
         available_.push(std::move(pooledConn));
         totalConnections_++;
@@ -174,7 +176,8 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout) {
             if (connResult) {
                 auto pooledConn = std::make_unique<PooledConnection>(
                     std::move(connResult).value(),
-                    [this](PooledConnection* conn) { returnConnection(conn); });
+                    [this](PooledConnection* conn) { returnConnection(conn); },
+                    currentGeneration_.load());
 
                 totalConnections_++;
                 activeConnections_++;
@@ -213,10 +216,22 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout) {
     std::unique_ptr<PooledConnection> conn;
     bool foundValid = false;
 
+    // PBI-079: Get current generation for staleness check
+    const uint64_t currentGen = currentGeneration_.load();
+
     // Try up to 3 connections from the pool before creating a new one
     for (int attempt = 0; attempt < 3 && !available_.empty() && !foundValid; ++attempt) {
         conn = std::move(available_.front());
         available_.pop();
+
+        // PBI-079: Check if connection is from an old generation (stale)
+        if (conn->generation_ < currentGen) {
+            totalConnections_--;
+            spdlog::debug("[PBI-079] Discarded stale connection (gen {}, current {})",
+                          conn->generation_, currentGen);
+            conn.reset();
+            continue;
+        }
 
         if (isConnectionValid(**conn)) {
             foundValid = true;
@@ -241,7 +256,8 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout) {
         }
 
         conn = std::make_unique<PooledConnection>(
-            std::move(connResult).value(), [this](PooledConnection* c) { returnConnection(c); });
+            std::move(connResult).value(), [this](PooledConnection* c) { returnConnection(c); },
+            currentGeneration_.load());
         totalConnections_++;
     }
 
@@ -298,7 +314,7 @@ Result<void> ConnectionPool::healthCheck() {
 
         auto pooledConn = std::make_unique<PooledConnection>(
             std::move(connResult).value(),
-            [this](PooledConnection* conn) { returnConnection(conn); });
+            [this](PooledConnection* conn) { returnConnection(conn); }, currentGeneration_.load());
 
         available_.push(std::move(pooledConn));
         totalConnections_++;
@@ -471,9 +487,9 @@ void ConnectionPool::returnConnection(PooledConnection* conn) {
     // Move the database out of the PooledConnection
     auto db = std::move(conn->db_);
 
-    // Create new PooledConnection with the database
+    // Create new PooledConnection with the database (preserve generation)
     auto newConn = std::make_unique<PooledConnection>(
-        std::move(db), [this](PooledConnection* c) { returnConnection(c); });
+        std::move(db), [this](PooledConnection* c) { returnConnection(c); }, conn->generation_);
 
     newConn->touch();
     available_.push(std::move(newConn));
@@ -493,13 +509,27 @@ void ConnectionPool::refreshNext() {
 
 void ConnectionPool::refreshAll() {
     std::lock_guard<std::mutex> lock(mutex_);
+
+    // PBI-079: Increment generation to mark all existing connections as stale
+    uint64_t oldGen = currentGeneration_.load();
+    currentGeneration_.fetch_add(1);
+    uint64_t newGen = currentGeneration_.load();
+
+    spdlog::debug("[PBI-079] refreshAll: generation {} -> {}, discarding {} idle connections",
+                  oldGen, newGen, available_.size());
+
     size_t discarded = 0;
     while (!available_.empty()) {
+        auto conn = std::move(available_.front());
         available_.pop();
+
+        // Mark as returned to prevent destructor from calling returnConnection()
+        // which would deadlock (we already hold the mutex)
+        conn->returned_ = true;
+
         totalConnections_--;
         discarded++;
     }
-    spdlog::debug("ConnectionPool::refreshAll discarded {} idle connections", discarded);
 }
 
 bool ConnectionPool::isConnectionValid(const Database& db) const {

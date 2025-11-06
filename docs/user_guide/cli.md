@@ -4,62 +4,78 @@ A practical, task-focused reference for the `yams` command-line interface.
 
 This document covers global flags, environment variables, and each subcommand with usage notes and examples. It is structured so tools can extract command-specific sections.
 
-If your build supports verbose help, you can run:
-- yams --help-all          to print the full CLI reference
-- yams <command> --help --verbose  to print command-specific verbose help
-
-Note: If verbose help isn’t available in your build, use yams --help and yams <command> --help for concise usage.
+For help:
+- `yams --help` - Show all available commands
+- `yams <command> --help` - Show command-specific help
 
 ## Synopsis
 
-- yams [--storage <path>] [--json] [--verbose] <command> [options]
-- yams <command> --help [--verbose]
+```bash
+yams [OPTIONS] <command> [command-options]
+```
 
-## Environment
+## Environment Variables
 
-Precedence: configuration file > environment (YAMS_STORAGE, XDG_*) > CLI flag (--storage/--data-dir). This prevents CLI defaults from masking configured storage roots defined in your config file.
+**Precedence:** configuration file > environment variables > CLI flags
 
-- YAMS_STORAGE
-  - Storage root directory. When set, overrides the CLI flag unless a configuration file explicitly sets a storage root (configuration takes precedence).
-- XDG_DATA_HOME
-  - Used to derive the default storage directory when YAMS_STORAGE is not set (defaults to ~/.local/share if unset).
-- XDG_CONFIG_HOME
-  - Used to derive the default config location (defaults to ~/.config if unset).
-- HOME
-  - Used as a fallback when XDG paths are not set.
+- **YAMS_STORAGE** - Storage root directory (overrides `--data-dir` unless config specifies otherwise)
+- **XDG_DATA_HOME** - Default storage location (`~/.local/share` if unset)
+- **XDG_CONFIG_HOME** - Default config location (`~/.config` if unset)
+- **HOME** - Fallback when XDG paths are not set
 
 ## Global Options
 
-- --storage, --data-dir <path>
-  - Override the storage root directory (default: $XDG_DATA_HOME/yams or ~/.local/share/yams).
-- --json
-  - Request JSON output where supported.
-- -v, --verbose
-  - Enable verbose logging.
-- --version
-  - Print the CLI version.
+- `--data-dir, --storage <path>` - Override storage root (default: `$XDG_DATA_HOME/yams`)
+- `--json` - Output in JSON format where supported
+- `-v, --verbose` - Enable verbose output
+- `--version` - Display program version
+- `-h, --help` - Print help message
 
 ## Commands
 
-- init
-- add
-- get
-- graph
-- cat
-- delete
-- list
-- search
-- grep
-- completion
-- config (subcommands: get, set, list, validate, export)
-- auth
-- stats
-- doctor
-- uninstall
-- migrate
-- update
-- browse
-- serve (only when built with YAMS_BUILD_MCP_SERVER=ON)
+### Core Operations
+- `init` - Initialize YAMS storage and configuration
+- `add` - Add document(s) or directory to content store
+- `get` - Retrieve a document from content store
+- `cat` - Display document content to stdout
+- `delete, rm` - Delete documents by hash, name, or pattern
+- `list, ls` - List stored documents
+- `update` - Update metadata for existing document
+
+### Search & Discovery
+- `search` - Search documents by query (semantic + keyword)
+- `grep` - Search for regex patterns within file contents
+- `tree` - Inspect aggregated path tree statistics
+- `graph` - Inspect knowledge graph relationships
+
+### Collections & Snapshots
+- `restore` - Restore documents from collections/snapshots to filesystem
+- `diff` - Compare two snapshots and show file changes
+
+### System Management
+- `daemon` - Manage YAMS daemon process (start/stop/restart/status)
+- `doctor` - Diagnose system health, connectivity, and repair issues
+- `status` - Show quick system status and health overview
+- `stats` - Show detailed system statistics
+- `config` - Manage YAMS configuration settings
+- `auth` - Manage authentication keys and tokens
+
+### Advanced Features
+- `model` - Download and manage ONNX embedding models
+- `plugin, plugins` - Manage plugins (list/scan/load/unload/trust)
+- `session` - Manage interactive session pins and warming
+- `download` - Download artifacts and store directly into YAMS
+- `repair` - Repair and maintain storage integrity
+- `migrate` - Migrate YAMS data and configuration
+- `dr` - Disaster recovery operations (plugin-gated)
+
+### User Interface
+- `browse` - Browse documents with FTXUI interface
+- `serve` - Start MCP (Model Context Protocol) server
+- `completion` - Generate shell completion scripts (bash/zsh/fish)
+
+### Utilities
+- `uninstall` - Remove YAMS from your system
 
 ---
 

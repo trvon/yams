@@ -719,6 +719,10 @@ bool PostIngestQueue::indexDocumentSync(const std::string& hash, const std::stri
                 try {
                     meta_->refreshAllConnections();
                     spdlog::info("PostIngest(sync): refreshed all idle connections for {}", hash);
+
+                    // PBI-079: Additional synchronization - brief sleep to ensure
+                    // connection pool has fully cycled and new connections are ready
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 } catch (const std::exception& e) {
                     spdlog::error("PostIngest(sync): refresh failed: {}", e.what());
                 }

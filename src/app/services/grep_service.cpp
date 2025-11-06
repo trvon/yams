@@ -340,6 +340,32 @@ static bool pathFilterMatch(const std::string& filePath, const std::vector<std::
     return false;
 }
 
+// Check if pattern is likely to work well with FTS5 tokenization
+// FTS5 works best with natural language words, not regex patterns or special chars
+static bool isLikelyFtsPattern(const std::string& pattern) {
+    if (pattern.empty() || pattern.length() < 3) {
+        return false; // Too short for FTS5 to be useful
+    }
+
+    // Check for regex metacharacters that indicate this is a regex pattern
+    const std::string regexChars = "[](){}*+?|^$\\.";
+    for (char c : pattern) {
+        if (regexChars.find(c) != std::string::npos) {
+            return false; // Contains regex special chars, use regex scan instead
+        }
+    }
+
+    // Check if pattern contains only word characters, spaces, and basic punctuation
+    // This heuristic identifies natural language queries that FTS5 handles well
+    for (char c : pattern) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != ' ' && c != '_' && c != '-') {
+            return false;
+        }
+    }
+
+    return true; // Looks like a good candidate for FTS5
+}
+
 } // namespace
 
 class GrepServiceImpl final : public IGrepService {
@@ -424,8 +450,6 @@ public:
             }
         };
 
-        // Stage 1: Initial candidate selection based on tags, FTS, or all documents.
-        // PERFORMANCE OPTIMIZATION: Prefer FTS index over full document scan when possible.
         bool usedFtsForInitialCandidates = false;
 
         if (!req.tags.empty()) {
@@ -437,8 +461,8 @@ public:
             if (tRes) {
                 addDocs(std::move(tRes.value()));
             }
-        } else if (req.literalText && !req.pattern.empty()) {
-            // PERFORMANCE: Start with FTS search for literal patterns instead of full scan
+        } else if (!req.pattern.empty() && isLikelyFtsPattern(req.pattern)) {
+            // Try FTS5 first for patterns that are likely to work well with FTS tokenization
             auto sRes = retryMetadataOp(
                 [&]() { return ctx_.metadataRepo->search(req.pattern, max_docs_hot * 2); }, 4,
                 std::chrono::milliseconds(25), &metadataTelemetry);
@@ -450,32 +474,21 @@ public:
                 }
                 addDocs(std::move(ftsHits));
                 usedFtsForInitialCandidates = true;
-            } else {
-                // FTS failed or returned nothing; fall back to pattern-filtered or full scan
-                if (!req.includePatterns.empty()) {
-                    auto patternDocsRes = retryMetadataOp(
-                        [&]() {
-                            return metadata::queryDocumentsByGlobPatterns(*ctx_.metadataRepo,
-                                                                          req.includePatterns, 0);
-                        },
-                        4, std::chrono::milliseconds(25), &metadataTelemetry);
-                    if (patternDocsRes) {
-                        addDocs(std::move(patternDocsRes.value()));
-                    }
-                } else {
-                    auto allDocsRes = retryMetadataOp(
-                        [&]() {
-                            return metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%");
-                        },
-                        4, std::chrono::milliseconds(25), &metadataTelemetry);
-                    if (allDocsRes) {
-                        addDocs(std::move(allDocsRes.value()));
-                    }
+            } else if (!req.includePatterns.empty()) {
+                // FTS5 failed or returned nothing - fall back to path-filtered scan
+                auto patternDocsRes = retryMetadataOp(
+                    [&]() {
+                        return metadata::queryDocumentsByGlobPatterns(*ctx_.metadataRepo,
+                                                                      req.includePatterns, 0);
+                    },
+                    4, std::chrono::milliseconds(25), &metadataTelemetry);
+                if (patternDocsRes) {
+                    addDocs(std::move(patternDocsRes.value()));
                 }
             }
+            // If FTS5 fails and no includePatterns, return empty (don't scan everything)
         } else {
-            // No tags, no literal text: must scan documents for regex match
-            // PERFORMANCE: If includePatterns provided, query only matching documents
+            // Pattern doesn't look like FTS5 will work - require includePatterns for scoping
             if (!req.includePatterns.empty()) {
                 auto patternDocsRes = retryMetadataOp(
                     [&]() {

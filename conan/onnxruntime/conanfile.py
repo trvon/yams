@@ -77,25 +77,39 @@ class OnnxRuntimeConan(ConanFile):
         get(self, url, strip_root=True, destination=self.source_folder)
     
     def package(self):
-        # Copy headers
-        copy(self, "*.h", src=os.path.join(self.source_folder, "include"),
-             dst=os.path.join(self.package_folder, "include"), keep_path=True)
+        # Copy all headers recursively - ONNX Runtime has nested structure
+        copy(self, "*.h", 
+             src=os.path.join(self.source_folder, "include"),
+             dst=os.path.join(self.package_folder, "include"), 
+             keep_path=True)
         
         # Copy libraries
-        copy(self, "*.so*", src=os.path.join(self.source_folder, "lib"),
-             dst=os.path.join(self.package_folder, "lib"), keep_path=False)
-        copy(self, "*.a", src=os.path.join(self.source_folder, "lib"),
-             dst=os.path.join(self.package_folder, "lib"), keep_path=False)
-        copy(self, "*.dylib*", src=os.path.join(self.source_folder, "lib"),
-             dst=os.path.join(self.package_folder, "lib"), keep_path=False)
-        copy(self, "*.dll", src=os.path.join(self.source_folder, "lib"),
-             dst=os.path.join(self.package_folder, "bin"), keep_path=False)
-        copy(self, "*.lib", src=os.path.join(self.source_folder, "lib"),
-             dst=os.path.join(self.package_folder, "lib"), keep_path=False)
+        copy(self, "*.so*", 
+             src=os.path.join(self.source_folder, "lib"),
+             dst=os.path.join(self.package_folder, "lib"), 
+             keep_path=False)
+        copy(self, "*.a", 
+             src=os.path.join(self.source_folder, "lib"),
+             dst=os.path.join(self.package_folder, "lib"), 
+             keep_path=False)
+        copy(self, "*.dylib*", 
+             src=os.path.join(self.source_folder, "lib"),
+             dst=os.path.join(self.package_folder, "lib"), 
+             keep_path=False)
+        copy(self, "*.dll", 
+             src=os.path.join(self.source_folder, "lib"),
+             dst=os.path.join(self.package_folder, "bin"), 
+             keep_path=False)
+        copy(self, "*.lib", 
+             src=os.path.join(self.source_folder, "lib"),
+             dst=os.path.join(self.package_folder, "lib"), 
+             keep_path=False)
         
         # Copy license
-        copy(self, "LICENSE", src=self.source_folder,
-             dst=os.path.join(self.package_folder, "licenses"), keep_path=False)
+        copy(self, "LICENSE", 
+             src=self.source_folder,
+             dst=os.path.join(self.package_folder, "licenses"), 
+             keep_path=False)
         
         # Generate pkg-config file manually
         pc_content = f"""prefix={self.package_folder}

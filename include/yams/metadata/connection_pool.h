@@ -40,7 +40,8 @@ struct ConnectionPoolConfig {
 class PooledConnection {
 public:
     explicit PooledConnection(std::unique_ptr<Database> db,
-                              std::function<void(PooledConnection*)> returnFunc);
+                              std::function<void(PooledConnection*)> returnFunc,
+                              std::uint64_t generation = 0);
     ~PooledConnection();
 
     // Move-only
@@ -87,6 +88,7 @@ private:
     std::chrono::steady_clock::time_point lastAccessed_;
     std::chrono::steady_clock::time_point createdAt_{std::chrono::steady_clock::now()};
     bool returned_ = false;
+    uint64_t generation_ = 0; // PBI-079: Track which refresh generation this connection is from
 };
 
 /**
@@ -194,6 +196,7 @@ private:
     std::atomic<size_t> totalReleased_{0};
     std::atomic<size_t> failedAcquisitions_{0};
     std::atomic<bool> shutdown_{false};
+    std::atomic<uint64_t> currentGeneration_{0}; // PBI-079: Incremented on refreshAll()
 
 #if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
     std::jthread maintenanceThread_;

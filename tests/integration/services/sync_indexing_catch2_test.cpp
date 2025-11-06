@@ -197,8 +197,9 @@ TEST_CASE("SyncIndexing: Minimal queue growth", "[integration][sync][indexing]")
         testFiles.push_back(file);
     }
 
-    // Add files via DocumentIngestionService
+    // Add files via DocumentIngestionService and track hashes
     yams::app::services::DocumentIngestionService ing;
+    std::vector<std::string> hashes;
     for (const auto& file : testFiles) {
         yams::app::services::AddOptions opts;
         opts.socketPath = fixture.harness_->socketPath();
@@ -208,6 +209,8 @@ TEST_CASE("SyncIndexing: Minimal queue growth", "[integration][sync][indexing]")
 
         auto addResult = ing.addViaDaemon(opts);
         REQUIRE(addResult);
+        hashes.push_back(addResult.value().hash);
+        INFO("Added " << file.filename().string() << " -> " << addResult.value().hash);
     }
 
     std::this_thread::sleep_for(500ms);
@@ -223,6 +226,7 @@ TEST_CASE("SyncIndexing: Minimal queue growth", "[integration][sync][indexing]")
 
     // Verify all content is searchable
     for (int i = 0; i < 5; i++) {
+        INFO("Searching for QUEUETEST" << i << " (hash: " << hashes[i] << ")");
         bool found = fixture.grepFindsContent("QUEUETEST" + std::to_string(i), 1, 3000ms, 100ms);
         REQUIRE(found);
     }
