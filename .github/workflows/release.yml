@@ -517,10 +517,15 @@ jobs:
           
           # Determine host profile and architecture based on platform
           if [ "$RUNNER_OS" = "macOS" ]; then
-            HOST_PROFILE="./conan/profiles/host-macos-apple-clang"
             case "${{ matrix.suffix }}" in
-              macos-arm64) ARCH="armv8" ;;
-              macos-x86_64) ARCH="x86_64" ;;
+              macos-arm64) 
+                HOST_PROFILE="./conan/profiles/host-macos-apple-clang"
+                ARCH="armv8" 
+                ;;
+              macos-x86_64) 
+                HOST_PROFILE="./conan/profiles/host-macos-apple-clang-x86"
+                ARCH="x86_64" 
+                ;;
             esac
           else
             HOST_PROFILE="./conan/profiles/host-linux-clang"
@@ -534,6 +539,11 @@ jobs:
           export YAMS_CONAN_HOST_PROFILE="$HOST_PROFILE"
           export YAMS_CONAN_ARCH="$ARCH"
           export YAMS_EXTRA_MESON_FLAGS="-Dwerror=false -Dwarning_level=2 -Denable-lzma=auto ${{ matrix.meson_args }}"
+          
+          # For cross-compilation, ensure pkg-config is available
+          export PKG_CONFIG="$(command -v pkg-config)"
+          echo "Using pkg-config: $PKG_CONFIG"
+          
           ./setup.sh Release
           meson compile -C build/release
           echo "BUILD_DIR=build/release" >> $GITHUB_ENV
