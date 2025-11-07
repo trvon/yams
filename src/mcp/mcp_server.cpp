@@ -397,8 +397,9 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
         cfg.enableChunkedResponses = true;
         cfg.singleUseConnections = true;
         cfg.requestTimeout = std::chrono::milliseconds(60000);
-        cfg.headerTimeout = std::chrono::milliseconds(5000);
-        cfg.bodyTimeout = std::chrono::milliseconds(15000);
+        // Use generous timeouts to handle large directory adds and busy daemon
+        cfg.headerTimeout = std::chrono::milliseconds(120000); // 2 minutes
+        cfg.bodyTimeout = std::chrono::milliseconds(120000);   // 2 minutes
         // No executor for stdio-only mode
 
         if (const char* mi = std::getenv("YAMS_MCP_MAX_INFLIGHT")) {

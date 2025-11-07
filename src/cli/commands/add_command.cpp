@@ -311,12 +311,12 @@ public:
                         std::cout << "From " << path.string() << ": added=" << resp.documentsAdded
                                   << ", updated=" << resp.documentsUpdated
                                   << ", skipped=" << resp.documentsSkipped << std::endl;
-                    } else {
-                        std::cout << "No new or updated documents from " << path.string()
-                                  << std::endl;
                         if (!resp.message.empty()) {
                             std::cout << "  Note: " << resp.message << std::endl;
                         }
+                    } else {
+                        std::cout << "No new or updated documents from " << path.string()
+                                  << std::endl;
                     }
 
                     if (resp.documentsAdded > 0) {
