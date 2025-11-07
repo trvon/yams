@@ -440,7 +440,21 @@ enum class PruneCategory {
     Coverage, // Code coverage data
 
     // IDE
-    IdeProject, // IDE project files and caches
+    IdeProject,  // IDE project files and caches
+    IdeVSCode,   // .vscode/ workspace cache
+    IdeIntelliJ, // .idea/ IntelliJ project cache
+    IdeEclipse,  // .metadata/, .settings/
+
+    // Package manager dependencies and caches
+    PackageNodeModules,    // node_modules/ (npm/yarn/pnpm)
+    PackagePythonCache,    // __pycache__/, .pyc, pip cache
+    PackageCargoTarget,    // target/ (Rust)
+    PackageMavenRepo,      // .m2/repository/ (Maven)
+    PackageGradleCache,    // .gradle/caches/ (Gradle)
+    PackageComposerVendor, // vendor/ (PHP Composer)
+    PackageGoCache,        // Go build/module cache
+    PackageGemCache,       // Ruby gem cache
+    PackageNuGetCache,     // .nuget/packages/ (.NET)
 
     // Distribution (careful!)
     Packages, // .deb, .rpm, .apk, .msi
@@ -489,6 +503,30 @@ inline constexpr const char* getPruneCategoryName(PruneCategory cat) {
             return "coverage";
         case PruneCategory::IdeProject:
             return "ide";
+        case PruneCategory::IdeVSCode:
+            return "ide-vscode";
+        case PruneCategory::IdeIntelliJ:
+            return "ide-intellij";
+        case PruneCategory::IdeEclipse:
+            return "ide-eclipse";
+        case PruneCategory::PackageNodeModules:
+            return "package-node-modules";
+        case PruneCategory::PackagePythonCache:
+            return "package-python-cache";
+        case PruneCategory::PackageCargoTarget:
+            return "package-cargo-target";
+        case PruneCategory::PackageMavenRepo:
+            return "package-maven-repo";
+        case PruneCategory::PackageGradleCache:
+            return "package-gradle-cache";
+        case PruneCategory::PackageComposerVendor:
+            return "package-composer-vendor";
+        case PruneCategory::PackageGoCache:
+            return "package-go-cache";
+        case PruneCategory::PackageGemCache:
+            return "package-gem-cache";
+        case PruneCategory::PackageNuGetCache:
+            return "package-nuget-cache";
         case PruneCategory::Packages:
             return "packages";
         case PruneCategory::None:
@@ -538,6 +576,30 @@ inline constexpr const char* getPruneCategoryDescription(PruneCategory cat) {
             return "Code coverage data (.gcda, .gcno, .coverage)";
         case PruneCategory::IdeProject:
             return "IDE files (.idea/, .vs/, .vscode/, .DS_Store)";
+        case PruneCategory::IdeVSCode:
+            return "VSCode workspace cache (.vscode/)";
+        case PruneCategory::IdeIntelliJ:
+            return "IntelliJ project cache (.idea/)";
+        case PruneCategory::IdeEclipse:
+            return "Eclipse workspace (.metadata/, .settings/)";
+        case PruneCategory::PackageNodeModules:
+            return "Node.js dependencies (node_modules/)";
+        case PruneCategory::PackagePythonCache:
+            return "Python bytecode and caches (__pycache__/, .pyc, pip cache)";
+        case PruneCategory::PackageCargoTarget:
+            return "Rust Cargo build output (target/)";
+        case PruneCategory::PackageMavenRepo:
+            return "Maven local repository (.m2/repository/)";
+        case PruneCategory::PackageGradleCache:
+            return "Gradle build cache (.gradle/caches/)";
+        case PruneCategory::PackageComposerVendor:
+            return "PHP Composer dependencies (vendor/)";
+        case PruneCategory::PackageGoCache:
+            return "Go module and build cache";
+        case PruneCategory::PackageGemCache:
+            return "Ruby gem cache";
+        case PruneCategory::PackageNuGetCache:
+            return ".NET NuGet package cache (.nuget/packages/)";
         case PruneCategory::Packages:
             return "Distribution packages (.deb, .rpm, .apk, .msi)";
         case PruneCategory::None:
@@ -657,6 +719,80 @@ inline PruneCategory getPruneCategory(std::string_view filename, std::string_vie
         return PruneCategory::IdeProject;
     }
 
+    // === IDE Specific (directory-based detection via path) ===
+    // Check if path contains these directory names
+    if (filename.find("/.vscode/") != std::string_view::npos || filename.find(".vscode/") == 0) {
+        return PruneCategory::IdeVSCode;
+    }
+    if (filename.find("/.idea/") != std::string_view::npos || filename.find(".idea/") == 0) {
+        return PruneCategory::IdeIntelliJ;
+    }
+    if (filename.find("/.metadata/") != std::string_view::npos ||
+        filename.find(".metadata/") == 0 ||
+        filename.find("/.settings/") != std::string_view::npos ||
+        filename.find(".settings/") == 0) {
+        return PruneCategory::IdeEclipse;
+    }
+
+    // === Package Manager Dependencies and Caches ===
+    // Node.js
+    if (filename.find("/node_modules/") != std::string_view::npos ||
+        filename.find("node_modules/") == 0) {
+        return PruneCategory::PackageNodeModules;
+    }
+
+    // Python
+    if (filename.find("/__pycache__/") != std::string_view::npos ||
+        filename.find("__pycache__/") == 0) {
+        return PruneCategory::PackagePythonCache;
+    }
+    if (extLower == "pyc" || extLower == "pyo") {
+        return PruneCategory::PackagePythonCache;
+    }
+
+    // Rust Cargo
+    if ((filename.find("/target/debug/") != std::string_view::npos ||
+         filename.find("/target/release/") != std::string_view::npos ||
+         filename.find("target/debug/") == 0 || filename.find("target/release/") == 0) &&
+        filename.find("/src/") == std::string_view::npos) {
+        return PruneCategory::PackageCargoTarget;
+    }
+
+    // Maven
+    if (filename.find("/.m2/repository/") != std::string_view::npos) {
+        return PruneCategory::PackageMavenRepo;
+    }
+
+    // Gradle
+    if (filename.find("/.gradle/caches/") != std::string_view::npos ||
+        filename.find(".gradle/caches/") == 0) {
+        return PruneCategory::PackageGradleCache;
+    }
+
+    // PHP Composer
+    if (filename.find("/vendor/") != std::string_view::npos &&
+        filename.find("/composer.") != std::string_view::npos) {
+        return PruneCategory::PackageComposerVendor;
+    }
+
+    // Go cache
+    if (filename.find("/go-build/") != std::string_view::npos ||
+        filename.find("/pkg/mod/") != std::string_view::npos) {
+        return PruneCategory::PackageGoCache;
+    }
+
+    // Ruby gems
+    if (filename.find("/.bundle/") != std::string_view::npos || filename.find(".bundle/") == 0 ||
+        (filename.find("/gems/") != std::string_view::npos && extLower == "gem")) {
+        return PruneCategory::PackageGemCache;
+    }
+
+    // NuGet
+    if (filename.find("/.nuget/packages/") != std::string_view::npos ||
+        filename.find(".nuget/packages/") == 0) {
+        return PruneCategory::PackageNuGetCache;
+    }
+
     // === Build System Patterns ===
     // CMake
     if (filenameLower == "cmakecache.txt" || filenameLower == "cmake_install.cmake" ||
@@ -724,6 +860,29 @@ inline bool matchesPruneGroup(PruneCategory cat, std::string_view group) {
 
     if (group == "build") {
         return matchesPruneGroup(cat, "build-artifacts") || matchesPruneGroup(cat, "build-system");
+    }
+
+    // IDE categories
+    if (group == "ide-all") {
+        return cat == PruneCategory::IdeProject || cat == PruneCategory::IdeVSCode ||
+               cat == PruneCategory::IdeIntelliJ || cat == PruneCategory::IdeEclipse;
+    }
+
+    // Package manager dependencies and caches
+    if (group == "package-deps") {
+        return cat == PruneCategory::PackageNodeModules ||
+               cat == PruneCategory::PackageComposerVendor ||
+               cat == PruneCategory::PackageCargoTarget;
+    }
+
+    if (group == "package-cache") {
+        return cat == PruneCategory::PackagePythonCache || cat == PruneCategory::PackageMavenRepo ||
+               cat == PruneCategory::PackageGradleCache || cat == PruneCategory::PackageGoCache ||
+               cat == PruneCategory::PackageGemCache || cat == PruneCategory::PackageNuGetCache;
+    }
+
+    if (group == "packages") {
+        return matchesPruneGroup(cat, "package-deps") || matchesPruneGroup(cat, "package-cache");
     }
 
     // Direct category name match

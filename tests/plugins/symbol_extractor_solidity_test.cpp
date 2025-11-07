@@ -186,7 +186,7 @@ contract MyToken {
             hasBalanceOf, hasTransfer, hasPrivateTransfer);
 
     // At least the contract should be there
-    EXPECT_GT(result->symbol_count, 0) << "Should extract at least the contract";
+    EXPECT_GT(result->symbol_count, 0UL) << "Should extract at least the contract";
 
     plugin->api->free_result(plugin->api->self, result);
 }
@@ -280,7 +280,7 @@ contract DataTypes {
     }
 
     // At least the contract should be extracted
-    EXPECT_GT(result->symbol_count, 0) << "Should extract at least the contract";
+    EXPECT_GT(result->symbol_count, 0UL) << "Should extract at least the contract";
 
     plugin->api->free_result(plugin->api->self, result);
 }

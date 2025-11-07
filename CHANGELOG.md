@@ -18,22 +18,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.7.7] - Unreleased
 
 ### Added
-- PBI-080 (in progress): Hierarchical Embedding Architecture & Two-Stage Hybrid Search
-  - Phase 1 complete: Data model extensions for hierarchical embeddings
+- Hierarchical Embedding Architecture & Two-Stage Hybrid Search
+  - Data model extensions for hierarchical embeddings
     - Added `EmbeddingLevel` enum (CHUNK, DOCUMENT) to distinguish embedding granularity
     - Extended `VectorRecord` with `level`, `source_chunk_ids`, `parent_document_hash`, `child_document_hashes` fields
     - Modified `embed_and_insert_document` to generate document-level embeddings (normalized mean of chunk vectors)
     - Document-level embeddings stored alongside chunk-level for two-stage search readiness
-  - Phase 2 complete: Two-stage hybrid search implementation
     - Added `twoStageVectorSearch` method that retrieves broader candidate set and applies hierarchical boosting
     - Configuration fields: `enable_two_stage`, `doc_stage_limit`, `chunk_stage_limit`, `hierarchy_boost`
     - Groups results by document and boosts scores based on document-level similarity
     - Wired into both parallel and sequential search paths for transparent operation
-  - Performance analysis complete: Two-stage search adds ~10-20% overhead for significant relevance improvements
-    - See `docs/delivery/080/performance-analysis.md` for detailed analysis and recommendations
-    - Single vector search with in-memory grouping/boosting minimizes overhead
-    - Runtime configurable via `enable_two_stage` flag for A/B testing
-  - Tracking docs: `docs/delivery/080/prd.md`, `docs/delivery/080/tasks.md`
+  - Profiling build support for performance analysis
+    - New build type: `./setup.sh Profiling` enables instrumentation for Tracy, Valgrind, Perf
+    - Builds to `build/profiling` directory with debug symbols + profiling hooks
+    - Fuzzing build stub: `./setup.sh Fuzzing` reserved for future AFL++/libFuzzer integration
+    - See `docs/developer/profiling.md` for comprehensive profiling guide
 - **EmbeddingService Architecture**
   - **Problem**: PostIngestQueue workers were blocking on slow embedding generation, causing:
     - Documents not searchable until embeddings complete
@@ -56,11 +55,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Support for 9 build systems (CMake, Ninja, Meson, Make, Gradle, Maven, NPM/Yarn, Cargo, Go)
   - Detection across 10+ programming languages (C/C++, Java, Python, JavaScript, Rust, Go, OCaml, Haskell, Erlang, etc.)
   - Hierarchical category system: build-artifacts, build-system, logs, cache, temp, coverage, IDE
+  - **Extended package manager support**: Added 9 new categories for package dependencies and caches
+    - IDE-specific: `ide-vscode`, `ide-intellij`, `ide-eclipse` for workspace caches
+    - Dependencies: `package-node-modules` (npm/yarn/pnpm), `package-composer-vendor` (PHP), `package-cargo-target` (Rust)
+    - Caches: `package-python-cache` (__pycache__/), `package-maven-repo`, `package-gradle-cache`, `package-go-cache`, `package-gem-cache`, `package-nuget-cache`
+    - Composite groups: `package-deps`, `package-cache`, `packages` (all), `ide-all`
+    - Path-based detection for directories: node_modules/, __pycache__/, .vscode/, target/, vendor/, etc.
   - Dry-run by default with `--apply` flag for execution
   - Usage: `yams doctor prune --category build-artifacts --older-than 30d --apply`
+  - Usage: `yams doctor prune --category packages --apply` (clean all package artifacts)
 - Started C++23 Compatibility support expansion
 - Migrated vectordb to [https://github.com/trvon/sqlite-vec-cpp](https://github.com/trvon/sqlite-vec-cpp)
-- **Tree-sitter Symbol Extraction Plugin** (PBI-073): Enhanced multi-language symbol extraction with Solidity support
+- **Tree-sitter Symbol Extraction Plugin** Enhanced multi-language symbol extraction with Solidity support
   - **Solidity Support**: Added complete Solidity language support with 4 query patterns (functions, constructors, modifiers, fallback/receive)
   - **Enhanced C++ Patterns**: 16 function patterns + 6 class patterns including templates, constructors, destructors, operator overloads, method declarations inside class bodies
   - **Multi-Language Improvements**: Enhanced patterns for Python (decorated functions), Rust (impl/trait methods), JavaScript/TypeScript (arrow functions, generators, async), Kotlin (property declarations) across all 15 supported languages
@@ -88,6 +94,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Symbol matches receive score boost when `isSymbolQuery && symbolScore > 0.3`
 
 ### Fixed
+- **Grep Command Duplicate Output**: Fixed `yams grep` printing results twice when stderr is redirected
 - **Migration System Crash (macOS)**: Fixed SIGSEGV crash in `MigrationManager::recordMigration()` during daemon startup
   - **Root Cause**: `ServiceManager::co_migrateDatabase()` called `mm.initialize()` but ignored its return value. If initialization failed to create the `migration_history` table, migrations would continue and crash when attempting to INSERT into the non-existent table.
   - **Fix**: Added error checking for `mm.initialize()` with early return and proper error logging in `ServiceManager.cpp`

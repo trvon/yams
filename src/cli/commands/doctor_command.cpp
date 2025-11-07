@@ -2127,7 +2127,8 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
     prune
         ->add_option("--category,-c", pruneCategories_,
                      "Categories to prune (comma-separated): build-artifacts, build-system, "
-                     "build (both), logs, cache, temp, coverage, ide, all")
+                     "build (both), logs, cache, temp, coverage, ide, ide-all, "
+                     "package-deps, package-cache, packages, all")
         ->delimiter(',');
     prune
         ->add_option("--extension,-e", pruneExtensions_,

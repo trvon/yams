@@ -219,6 +219,7 @@ unit_search = files(
   'search/bk_tree_test.cpp',
   'search/chunk_coverage_test.cpp',
   'search/entity_linker_test.cpp',
+  'search/hierarchical_search_test.cpp',
   'search/hybrid_grouping_smoke_test.cpp',
   'search/hybrid_search_engine_test.cpp',
   'search/kg_scorer_simple_test.cpp',

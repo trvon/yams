@@ -9,6 +9,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <array>
+#include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -86,9 +87,12 @@ bool spawnPlugin(PluginProcess& proc, const fs::path& pluginPath, const fs::path
         close(stderrPipe[0]);
         close(stderrPipe[1]);
 
-        // Set PYTHONPATH
-        std::string pythonPath = "PYTHONPATH=" + sdkPath.string() + ":$PYTHONPATH";
-        char* envp[] = {const_cast<char*>(pythonPath.c_str()), nullptr};
+        // Set PYTHONPATH environment variable
+        std::string pythonPath = sdkPath.string();
+        if (const char* existing = getenv("PYTHONPATH")) {
+            pythonPath += ":" + std::string(existing);
+        }
+        setenv("PYTHONPATH", pythonPath.c_str(), 1);
 
         // Execute plugin
         execlp("python3", "python3", pluginPath.c_str(), nullptr);

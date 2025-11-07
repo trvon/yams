@@ -35,35 +35,23 @@
 ## Install
 Supported platforms: Linux x86_64/ARM64, macOS x86_64/ARM64
 
-### Build with Meson (Recommended)
-
 ```bash
-# Configure dependencies + Meson in one step
-./setup.sh    # or ./setup.sh Debug
+# Quick build (auto-detects Clang/GCC, configures Conan + Meson)
+./setup.sh Release
 
-# Build / test
-meson compile -C builddir          # Debug output
-meson test -C builddir --print-errorlogs
-meson compile -C build/release     # Release output
+# Build
+meson compile -C build/release
 
-# (Optional) Install
+# Optional: Install system-wide
 meson install -C build/release
 ```
 
-The setup script prefers Clang when available, falling back to GCC. Debug artifacts live under `builddir/`, release
-under `build/release/`.
+**Prerequisites:**
+- Compiler: GCC 13+ or Clang 16+ (C++20 minimum)
+- Build tools: meson, ninja-build, cmake, pkg-config, conan
+- System libs: libssl-dev, libsqlite3-dev, protobuf-compiler
 
-
-Dependencies quick ref:
-
-- Linux: libssl-dev sqlite3 libsqlite3-dev protobuf-compiler ninja-build cmake (TUI enabled by default)
-- macOS (Homebrew): openssl@3 protobuf sqlite3 ninja cmake (TUI enabled by default)
-  - Export `OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)` if CMake cannot locate OpenSSL
-- ONNX runtime (plugins): requires oneTBB at runtime. Provide via system packages (e.g., libtbb12/libtbb-dev) or Conan (`onetbb`).
-
-Further build documentation:
-- GCC specifics / quick reference: `docs/BUILD-GCC.md`
-- Developer build system & internal ONNX Runtime path: `docs/developer/build_system.md`
+See [docs/BUILD-GCC.md](docs/BUILD-GCC.md) for detailed build instructions, compiler configuration, Conan profiles, and troubleshooting.
 
 ## Quick Start
 ```bash
@@ -82,9 +70,7 @@ yams list --format minimal --limit 1
 
 ### Path-Tree Search (Experimental)
 
-The CLI and daemon can bias path-aware traversals when `[search.path_tree]` is enabled in
-`config.toml`. This instructs the metadata layer to reuse the hierarchical index that powers the
-PBI-051 benchmarks, yielding significantly faster prefix and diff scans. Toggle it by adding:
+Enable hierarchical index for faster prefix/path scans in `config.toml`:
 
 ```toml
 [search.path_tree]
@@ -92,10 +78,8 @@ enable = true
 mode = "preferred" # or "fallback" to keep legacy scans as backup
 ```
 
-When enabled, `yams grep` accepts tag or path filters (it defaults the pattern to `.*` for pure
-filters) and, when you specify explicit path prefixes, the service seeds candidates through
-`MetadataRepository::listPathTreeChildren`—the same engine exercised by
-`tests/benchmarks/search_tree_bench.cpp`. citetests/benchmarks/search_tree_bench.cpp:188src/app/services/grep_service.cpp:247
+
+Optimizes `yams grep` with explicit path prefixes via `listPathTreeChildren` index.
 
 ## MCP
 ```bash
@@ -110,20 +94,15 @@ MCP config (example):
 ```
 
 ## Troubleshooting
-Conan: create default profile
-```bash
-conan profile detect --force
-```
 
-PDF support issues: build with `-DYAMS_ENABLE_PDF=OFF`.
+**Build issues:** See [docs/BUILD-GCC.md](docs/BUILD-GCC.md) for compiler setup, Conan profiles, and dependency resolution.
 
-Plugins not listed by `yams plugin list`:
-- Ensure the ONNX plugin exists in a scanned directory (install prefix or `~/.local/lib/yams/plugins`).
-- Ensure the directory is trusted (`yams plugin trust add <dir>` or via `yams init`).
-- Ensure onnxruntime shared libs are resolvable by the loader (e.g., `ldd libyams_onnx_plugin.so`).
-- Check the daemon startup log for: `Plugin scan directories: dir1;dir2;...` to confirm discovery paths.
+**Plugin discovery:** Verify with `yams plugin list`. If empty:
+- Check trusted directories: `yams plugin trust list`
+- Add plugin path: `yams plugin trust add ~/.local/lib/yams/plugins`
+- Verify shared libs: `ldd libyams_onnx_plugin.so`
 
-Monitor with `yams stats --verbose` and `yams doctor`.
+**Monitor:** `yams stats --verbose` and `yams doctor` for diagnostics.
 
 ### Cite
 ```aiignore
