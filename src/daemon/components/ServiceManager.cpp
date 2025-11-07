@@ -32,6 +32,7 @@
 #include <yams/core/types.h>
 #include <yams/daemon/components/BackgroundTaskManager.h>
 #include <yams/daemon/components/DaemonMetrics.h>
+#include <yams/daemon/components/EmbeddingService.h>
 #include <yams/daemon/components/EntityGraphService.h>
 #include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/init_utils.hpp>
@@ -982,6 +983,15 @@ void ServiceManager::shutdown() {
         spdlog::info("[ServiceManager] Phase 6.3: Post-ingest queue reset");
     } else {
         spdlog::info("[ServiceManager] Phase 6.3: No post-ingest queue to reset");
+    }
+
+    spdlog::info("[ServiceManager] Phase 6.3.5: Shutting down embedding service");
+    if (embeddingService_) {
+        embeddingService_->shutdown();
+        embeddingService_.reset();
+        spdlog::info("[ServiceManager] Phase 6.3.5: Embedding service shutdown complete");
+    } else {
+        spdlog::info("[ServiceManager] Phase 6.3.5: No embedding service to shutdown");
     }
 
     // Persist vector index when ready
@@ -1990,13 +2000,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         auto qcap = static_cast<std::size_t>(TA::postIngestQueueMax());
         postIngest_ = std::make_unique<PostIngestQueue>(
             contentStore_, metadataRepo_, contentExtractors_, kgStore_, threads, qcap);
-        // Wire embedding providers so PostIngestQueue can run the Embeddings stage
-        try {
-            postIngest_->setEmbeddingProviders([this]() { return this->modelProvider_; },
-                                               [this]() { return this->resolvePreferredModel(); },
-                                               [this]() { return this->vectorDatabase_; });
-        } catch (...) {
-        }
+        // PostIngestQueue no longer handles embeddings directly - removed setEmbeddingProviders()
         // Apply daemon tuning config (capacity/min threads) now that queue exists
         try {
             if (config_.tuning.postIngestCapacity > 0)
@@ -2012,6 +2016,42 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         spdlog::warn("Post-ingest queue init failed (unknown)");
     }
     spdlog::info("[ServiceManager] Phase: Post-Ingest Queue Initialized.");
+
+    // Initialize EmbeddingService for async embedding generation
+    try {
+        using TA = yams::daemon::TuneAdvisor;
+        uint32_t taThreads = 0;
+        try {
+            taThreads = TA::postIngestThreads();
+        } catch (...) {
+        }
+        std::size_t postIngestThreads = taThreads
+                                            ? static_cast<std::size_t>(taThreads)
+                                            : static_cast<std::size_t>(TA::postIngestThreads());
+        std::size_t embedThreads =
+            std::max<std::size_t>(2, postIngestThreads / 2); // Half of ingest threads
+        embeddingService_ =
+            std::make_unique<EmbeddingService>(contentStore_, metadataRepo_, embedThreads);
+
+        auto initRes = embeddingService_->initialize();
+        if (initRes) {
+            // Wire embedding providers
+            embeddingService_->setProviders([this]() { return this->modelProvider_; },
+                                            [this]() { return this->resolvePreferredModel(); },
+                                            [this]() { return this->vectorDatabase_; });
+            spdlog::info("EmbeddingService initialized with {} workers", embedThreads);
+        } else {
+            spdlog::warn("EmbeddingService initialization failed: {}", initRes.error().message);
+            embeddingService_.reset();
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("EmbeddingService init failed: {}", e.what());
+        embeddingService_.reset();
+    } catch (...) {
+        spdlog::warn("EmbeddingService init failed (unknown)");
+        embeddingService_.reset();
+    }
+    spdlog::info("[ServiceManager] Phase: EmbeddingService Initialized.");
 
     // Defer Vector DB initialization until after plugin adoption (provider dim)
     spdlog::info("[ServiceManager] Phase: Vector DB Init (deferred until after plugins).");

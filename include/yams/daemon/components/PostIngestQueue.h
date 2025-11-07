@@ -38,7 +38,7 @@ public:
         std::string mime;
         std::string session; // optional client/session identifier for fairness (empty => default)
         std::chrono::steady_clock::time_point enqueuedAt;
-        enum class Stage : uint8_t { Metadata = 0, KnowledgeGraph = 1, Embeddings = 2 } stage;
+        enum class Stage : uint8_t { Metadata = 0, KnowledgeGraph = 1 } stage;
     };
 
     PostIngestQueue(std::shared_ptr<api::IContentStore> store,
@@ -67,11 +67,10 @@ public:
 
     // Adaptive tuning hooks
     void setCapacity(std::size_t cap) { capacity_ = cap > 0 ? cap : capacity_; }
-    void setWeights(uint32_t wMeta, uint32_t wKg, uint32_t wEmb) {
+    void setWeights(uint32_t wMeta, uint32_t wKg) {
         std::lock_guard<std::mutex> lk(mtx_);
         wMeta_ = std::max<uint32_t>(1, wMeta);
         wKg_ = std::max<uint32_t>(1, wKg);
-        wEmb_ = std::max<uint32_t>(1, wEmb);
         schedCounter_ = 0;
     }
     void setTokenBucket(uint32_t ratePerSec, uint32_t burst) {
@@ -86,20 +85,7 @@ public:
     };
     QueueGauges gauges() const {
         std::lock_guard<std::mutex> lk(mtx_);
-        return QueueGauges{qMeta_.size() + qKg_.size() + qEmb_.size(), inflight_.size(), capacity_};
-    }
-
-    // Configure providers for embedding stage (optional). These are invoked at run-time to
-    // retrieve the current instances; allows ServiceManager to wire dependencies without
-    // tight coupling or lifetime issues.
-    void
-    setEmbeddingProviders(std::function<std::shared_ptr<IModelProvider>()> providerGetter,
-                          std::function<std::string()> modelNameGetter,
-                          std::function<std::shared_ptr<yams::vector::VectorDatabase>()> dbGetter) {
-        std::lock_guard<std::mutex> lk(mtx_);
-        getModelProvider_ = std::move(providerGetter);
-        getPreferredModel_ = std::move(modelNameGetter);
-        getVectorDatabase_ = std::move(dbGetter);
+        return QueueGauges{qMeta_.size() + qKg_.size(), inflight_.size(), capacity_};
     }
 
     // PBI-040-4: Synchronous FTS5 indexing for small adds
@@ -125,7 +111,6 @@ private:
     // Multi-queue buffers (front-of-queue fairness respected by WFS scheduler)
     std::deque<Task> qMeta_;
     std::deque<Task> qKg_;
-    std::deque<Task> qEmb_;
     // Track outstanding stage count per document hash so dedupe spans all stages.
     std::unordered_map<std::string, uint32_t> inflight_;
     std::size_t capacity_{1000};
@@ -137,8 +122,8 @@ private:
     std::chrono::steady_clock::time_point lastCompleteTs_{};
     static constexpr double kAlpha_ = 0.2; // EMA smoothing
 
-    // Weighted-fair scheduler
-    uint32_t wMeta_{3}, wKg_{2}, wEmb_{1};
+    // Weighted-fair scheduler (2-stage: Metadata, KnowledgeGraph)
+    uint32_t wMeta_{3}, wKg_{2};
     uint32_t schedCounter_{0};
     // Per-session token buckets
     struct Bucket {
@@ -155,12 +140,8 @@ private:
     bool admitSessionLocked(const std::string& session);
     bool popNextTaskLocked(Task& out);
 
-    // Embedding stage providers (set by ServiceManager)
-    std::function<std::shared_ptr<IModelProvider>()> getModelProvider_;
-    std::function<std::string()> getPreferredModel_;
-    std::function<std::shared_ptr<yams::vector::VectorDatabase>()> getVectorDatabase_;
-
-    // Helper: enqueue KG and Embeddings stages for a document and bump inflight counter.
+    // Helper: enqueue KG stage for a document and bump inflight counter.
+    // Also enqueues EmbedJob to InternalBus for async embedding generation.
     void addNextStagesLocked(const std::string& hash, const std::string& mime,
                              const std::string& session);
 };

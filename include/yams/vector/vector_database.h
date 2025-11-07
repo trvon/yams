@@ -12,6 +12,8 @@
 
 namespace yams::vector {
 
+enum class EmbeddingLevel { CHUNK, DOCUMENT };
+
 /**
  * Configuration for the vector database
  */
@@ -55,6 +57,11 @@ struct VectorRecord {
     std::string content_hash_at_embedding; // SHA-256 of content when embedded
     std::chrono::system_clock::time_point embedded_at; // When embedding was generated
     bool is_stale = false;                             // Mark for re-embedding
+
+    EmbeddingLevel level = EmbeddingLevel::CHUNK;
+    std::vector<std::string> source_chunk_ids;
+    std::string parent_document_hash;
+    std::vector<std::string> child_document_hashes;
 
     // Default constructor
     VectorRecord() = default;

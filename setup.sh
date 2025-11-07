@@ -2,8 +2,8 @@
 
 # Unified build script for YAMS
 #
-# Usage: ./setup.sh [Debug|Release] [--coverage]
-#   build_type: Release (default) or Debug
+# Usage: ./setup.sh [Debug|Release|Profiling] [--coverage]
+#   build_type: Release (default), Debug, or Profiling
 #   --coverage: Enable code coverage instrumentation (Debug builds only)
 #
 # Environment variables (for CI/advanced use):
@@ -30,7 +30,7 @@ while [[ $# -gt 0 ]]; do
       ENABLE_COVERAGE=true
       shift
       ;;
-    Debug|Release|debug|release)
+    Debug|Release|Profiling|debug|release|profiling)
       if [[ -n "${BUILD_TYPE_INPUT}" ]]; then
         echo "Error: Build type specified multiple times" >&2
         exit 1
@@ -39,7 +39,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     *)
-      echo "Usage: $0 [Debug|Release] [--coverage]" >&2
+      echo "Usage: $0 [Debug|Release|Profiling] [--coverage]" >&2
       exit 1
       ;;
   esac
@@ -55,11 +55,14 @@ case "${BUILD_TYPE_LOWER}" in
   release)
     BUILD_TYPE="Release"
     ;;
+  profiling)
+    BUILD_TYPE="Debug"  # Use Debug as base for Conan/Meson
+    ENABLE_PROFILING=true
+    ;;
   *)
-    echo "Unknown build type: ${BUILD_TYPE_INPUT}. Expected Debug or Release." >&2
+    echo "Unknown build type: ${BUILD_TYPE_INPUT}. Expected Debug, Release, or Profiling." >&2
     exit 1
     ;;
-
 esac
 
 if [[ "${ENABLE_COVERAGE}" == "true" ]] && [[ "${BUILD_TYPE}" != "Debug" ]]; then
@@ -214,6 +217,9 @@ fi
 if [[ "${BUILD_TYPE}" == "Debug" ]]; then
   BUILD_DIR="builddir"
   CONAN_SUBDIR="build-debug"
+elif [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
+  BUILD_DIR="build/profiling"
+  CONAN_SUBDIR="build-profiling"
 else
   BUILD_DIR="build/${BUILD_TYPE_LOWER}"
   CONAN_SUBDIR="build-${BUILD_TYPE_LOWER}"
@@ -236,7 +242,10 @@ fi
 # Allow override via environment
 INSTALL_PREFIX="${YAMS_INSTALL_PREFIX:-${INSTALL_PREFIX}}"
 
-echo "Build Type:        ${BUILD_TYPE}"
+echo "Build Type:        ${BUILD_TYPE_INPUT}"
+if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
+  echo "Profiling:         Tracy enabled"
+fi
 echo "Build Dir:         ${BUILD_DIR}"
 echo "Install Prefix:    ${INSTALL_PREFIX}"
 echo "C++ Std:           ${MESON_CPPSTD} (Conan: ${CPPSTD})"
@@ -267,8 +276,14 @@ if [[ -n "${DOCKERFILE_CONF_REV:-}" ]] || [[ -n "${CI:-}" ]]; then
 fi
 
 # Enable tests for Debug builds in Conan (needed for Catch2/gtest dependencies)
-if [[ "${BUILD_TYPE}" == "Debug" ]]; then
+if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
   CONAN_ARGS+=(-o build_tests=True)
+fi
+
+# Enable Tracy profiling for profiling builds
+if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
+  echo "Tracy profiling enabled"
+  CONAN_ARGS+=(-o "tracy/*:enable=True")
 fi
 
 # Handle optional feature flags from environment
@@ -347,11 +362,18 @@ if [[ "${YAMS_DISABLE_PDF:-}" == "true" ]]; then
   MESON_OPTIONS+=("-Dplugin-pdf=false")
 fi
 
-if [[ "${BUILD_TYPE}" == "Debug" ]]; then
+if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
   MESON_OPTIONS+=(
     "-Dbuild-tests=true"
     "-Denable-bench-tests=true"
   )
+fi
+
+if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
+  MESON_OPTIONS+=(
+    "-Denable-profiling=true"
+  )
+  echo "Tracy profiling enabled for Meson build"
 fi
 
 if [[ "${ENABLE_COVERAGE}" == "true" ]]; then

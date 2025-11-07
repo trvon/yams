@@ -18,6 +18,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.7.7] - Unreleased
 
 ### Added
+- PBI-080 (in progress): Hierarchical Embedding Architecture & Two-Stage Hybrid Search
+  - Phase 1 complete: Data model extensions for hierarchical embeddings
+    - Added `EmbeddingLevel` enum (CHUNK, DOCUMENT) to distinguish embedding granularity
+    - Extended `VectorRecord` with `level`, `source_chunk_ids`, `parent_document_hash`, `child_document_hashes` fields
+    - Modified `embed_and_insert_document` to generate document-level embeddings (normalized mean of chunk vectors)
+    - Document-level embeddings stored alongside chunk-level for two-stage search readiness
+  - Phase 2 complete: Two-stage hybrid search implementation
+    - Added `twoStageVectorSearch` method that retrieves broader candidate set and applies hierarchical boosting
+    - Configuration fields: `enable_two_stage`, `doc_stage_limit`, `chunk_stage_limit`, `hierarchy_boost`
+    - Groups results by document and boosts scores based on document-level similarity
+    - Wired into both parallel and sequential search paths for transparent operation
+  - Performance analysis complete: Two-stage search adds ~10-20% overhead for significant relevance improvements
+    - See `docs/delivery/080/performance-analysis.md` for detailed analysis and recommendations
+    - Single vector search with in-memory grouping/boosting minimizes overhead
+    - Runtime configurable via `enable_two_stage` flag for A/B testing
+  - Tracking docs: `docs/delivery/080/prd.md`, `docs/delivery/080/tasks.md`
+- **EmbeddingService Architecture**
+  - **Problem**: PostIngestQueue workers were blocking on slow embedding generation, causing:
+    - Documents not searchable until embeddings complete
+    - Add commands hanging/timing out
+    - Ingest pipeline stalled waiting for embedding models
+  - **Solution**: Separated embedding generation into dedicated `EmbeddingService` that consumes from `InternalBus`
+    - PostIngestQueue now 2-stage pipeline (Metadata + KnowledgeGraph) - embeddings removed
+    - Documents searchable immediately after FTS5 indexing (~milliseconds)
+    - Embeddings generated asynchronously in background by EmbeddingService workers
+    - Better resource isolation: ingest and embedding workers independently tunable
+    - No more blocking: add commands return immediately, documents queryable right away
 - **ServiceManager & Daemon Lifecycle Improvements**
   - **Structured Concurrency**: Replaced manual backpressure logic with `std::counting_semaphore` for natural bounded concurrency
   - **SocketServer Improvements**: 

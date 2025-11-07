@@ -425,8 +425,9 @@ public:
                 }
 
                 auto render = [&](const yams::daemon::GrepResponse& resp) -> Result<void> {
-                    // Informative note: reflect the normalized command actually executed
-                    {
+                    // Informative note: reflect the normalized command actually executed (debug
+                    // only)
+                    if (spdlog::get_level() <= spdlog::level::debug) {
                         std::ostringstream ran;
                         ran << "Ran yams grep \"" << pattern_ << "\"";
                         if (!includePatterns_.empty())
@@ -441,7 +442,7 @@ public:
                             ran << " -i";
                         if (pathsOnly_)
                             ran << " --paths-only";
-                        std::cerr << ran.str() << std::endl;
+                        spdlog::debug(ran.str());
                     }
                     // Handle different output modes
                     if (pathsOnly_ || filesOnly_) {

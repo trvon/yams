@@ -12,6 +12,8 @@
 
 namespace yams::vector {
 
+enum class EmbeddingLevel;
+
 /**
  * Types of vector indices supported
  */
@@ -110,6 +112,9 @@ struct SearchFilter {
     // Document filters
     std::vector<std::string> document_hashes; // Include only these documents
     std::vector<std::string> exclude_ids;     // Exclude these vector IDs
+
+    // Level filter (PBI-080)
+    std::optional<EmbeddingLevel> level_filter;
 
     // Score threshold
     std::optional<float> min_similarity; // Minimum similarity score

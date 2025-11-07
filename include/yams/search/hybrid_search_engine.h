@@ -41,6 +41,12 @@ struct HybridSearchConfig {
     // Symbol enrichment weight (PBI-074)
     float symbol_weight = 0.15f; // Boost for symbol matches (multiplicative)
 
+    // Two-stage search (PBI-080)
+    bool enable_two_stage = true;
+    size_t doc_stage_limit = 20;
+    size_t chunk_stage_limit = 10;
+    float hierarchy_boost = 0.10f;
+
     // Search parameters
     size_t vector_top_k = 50;  // Number of vector results to retrieve
     size_t keyword_top_k = 50; // Number of keyword results to retrieve

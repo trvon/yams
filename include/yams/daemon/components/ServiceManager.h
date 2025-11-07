@@ -28,6 +28,7 @@
 #include <yams/core/types.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/EmbeddingProviderFsm.h>
+#include <yams/daemon/components/EmbeddingService.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PluginHostFsm.h>
 #include <yams/daemon/components/PoolManager.h>
@@ -526,6 +527,7 @@ private:
     std::shared_ptr<WalMetricsProvider> walMetricsProvider_;
     std::shared_ptr<yams::integrity::RepairManager> repairManager_;
     std::unique_ptr<PostIngestQueue> postIngest_;
+    std::unique_ptr<EmbeddingService> embeddingService_;
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors_;
     std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> symbolExtractors_;
     bool embeddingsAutoOnAdd_{false};

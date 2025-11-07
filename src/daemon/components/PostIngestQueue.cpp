@@ -89,9 +89,7 @@ void PostIngestQueue::enqueue(Task t) {
         std::unique_lock<std::mutex> lk(mtx_);
         // Bounded queue with backpressure: wait while full
         // total queued used only for wait predicate below
-        cv_.wait(lk, [&] {
-            return stop_.load() || (qMeta_.size() + qKg_.size() + qEmb_.size()) < capacity_;
-        });
+        cv_.wait(lk, [&] { return stop_.load() || (qMeta_.size() + qKg_.size()) < capacity_; });
         if (stop_.load())
             return; // shutdown requested
         if (inflight_.find(t.hash) != inflight_.end()) {
@@ -105,9 +103,6 @@ void PostIngestQueue::enqueue(Task t) {
         switch (t.stage) {
             case Task::Stage::KnowledgeGraph:
                 qKg_.push_back(std::move(t));
-                break;
-            case Task::Stage::Embeddings:
-                qEmb_.push_back(std::move(t));
                 break;
             default:
                 qMeta_.push_back(std::move(t));
@@ -125,7 +120,7 @@ bool PostIngestQueue::tryEnqueue(Task&& t) {
     std::unique_lock<std::mutex> lk(mtx_);
     if (stop_.load())
         return false;
-    if ((qMeta_.size() + qKg_.size() + qEmb_.size()) >= capacity_)
+    if ((qMeta_.size() + qKg_.size()) >= capacity_)
         return false;
     if (inflight_.find(t.hash) != inflight_.end()) {
         return false; // duplicate suppressed
@@ -137,9 +132,6 @@ bool PostIngestQueue::tryEnqueue(Task&& t) {
     switch (t.stage) {
         case Task::Stage::KnowledgeGraph:
             qKg_.push_back(std::move(t));
-            break;
-        case Task::Stage::Embeddings:
-            qEmb_.push_back(std::move(t));
             break;
         default:
             qMeta_.push_back(std::move(t));
@@ -156,7 +148,7 @@ void PostIngestQueue::notifyWorkers() {
 
 std::size_t PostIngestQueue::size() const {
     std::lock_guard<std::mutex> lk(mtx_);
-    return qMeta_.size() + qKg_.size() + qEmb_.size();
+    return qMeta_.size() + qKg_.size();
 }
 
 void PostIngestQueue::workerLoop() {
@@ -192,9 +184,7 @@ void PostIngestQueue::workerLoop() {
 #endif
     if (!haveTask) {
         std::unique_lock<std::mutex> lk(mtx_);
-        auto predicate = [&] {
-            return stop_.load() || (!qMeta_.empty() || !qKg_.empty() || !qEmb_.empty());
-        };
+        auto predicate = [&] { return stop_.load() || (!qMeta_.empty() || !qKg_.empty()); };
         if (busEnabled) {
 #if YAMS_INTERNAL_BUS_MPMC
             cv_.wait_for(lk, std::chrono::milliseconds(50), predicate);
@@ -416,67 +406,8 @@ void PostIngestQueue::workerLoop() {
             } catch (...) {
             }
 
-            // Embedding stage: generate vectors as soon as text is available
-            if (task.stage == Task::Stage::Embeddings) {
-                try {
-                    std::shared_ptr<IModelProvider> provider;
-                    std::string modelName;
-                    std::shared_ptr<yams::vector::VectorDatabase> vdb;
-                    {
-                        std::lock_guard<std::mutex> lk(mtx_);
-                        if (getModelProvider_)
-                            provider = getModelProvider_();
-                        if (getPreferredModel_)
-                            modelName = getPreferredModel_();
-                        if (getVectorDatabase_)
-                            vdb = getVectorDatabase_();
-                    }
-                    if (provider && !modelName.empty() && vdb) {
-                        if (docId >= 0) {
-                            auto contentOpt = meta_->getContent(docId);
-                            if (contentOpt && contentOpt.value().has_value()) {
-                                const auto& text = contentOpt.value().value().contentText;
-                                if (!text.empty()) {
-                                    auto infoRes3 = meta_->getDocumentByHash(task.hash);
-                                    std::string pathMeta, nameMeta;
-                                    std::string mimeMeta = mime;
-                                    if (infoRes3 && infoRes3.value().has_value()) {
-                                        const auto& d = *infoRes3.value();
-                                        nameMeta = d.fileName;
-                                        pathMeta = d.filePath;
-                                        if (!d.mimeType.empty())
-                                            mimeMeta = d.mimeType;
-                                    }
-                                    yams::vector::ChunkingConfig ccfg{};
-                                    spdlog::debug(
-                                        "PostIngest: generating embeddings for {} using model '{}'",
-                                        task.hash, modelName);
-                                    auto r = yams::ingest::embed_and_insert_document(
-                                        *provider, modelName, *vdb, *meta_, task.hash, text,
-                                        nameMeta, pathMeta, mimeMeta, ccfg);
-                                    if (!r) {
-                                        spdlog::warn("PostIngest: embed/insert failed for {}: {}",
-                                                     task.hash, r.error().message);
-                                    } else {
-                                        spdlog::debug("PostIngest: successfully generated {} "
-                                                      "embeddings for {}",
-                                                      r.value(), task.hash);
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        spdlog::debug("PostIngest: embedding providers unavailable for {} "
-                                      "(provider={}, model='{}', vdb={})",
-                                      task.hash, provider != nullptr, modelName, vdb != nullptr);
-                    }
-                } catch (const std::exception& e) {
-                    spdlog::debug("PostIngest: embedding stage error for {}: {}", task.hash,
-                                  e.what());
-                } catch (...) {
-                    spdlog::debug("PostIngest: embedding stage unknown error for {}", task.hash);
-                }
-            }
+            // Embedding stage removed: now handled asynchronously by EmbeddingService
+            // PostIngestQueue enqueues EmbedJob to InternalBus in addNextStagesLocked()
         }
     } catch (const std::exception& e) {
         spdlog::warn("PostIngest: exception: {}", e.what());
@@ -552,11 +483,11 @@ bool PostIngestQueue::admitSessionLocked(const std::string& session) {
 
 bool PostIngestQueue::popNextTaskLocked(Task& out) {
     // Weighted-fair selection order cycles through a flattened schedule
-    // Build a small static pattern based on weights: [M x wMeta][K x wKg][E x wEmb]
-    auto nonEmpty = [&]() { return !qMeta_.empty() || !qKg_.empty() || !qEmb_.empty(); };
+    // Build a small static pattern based on weights: [M x wMeta][K x wKg]
+    auto nonEmpty = [&]() { return !qMeta_.empty() || !qKg_.empty(); };
     if (!nonEmpty())
         return false;
-    const uint32_t period = wMeta_ + wKg_ + wEmb_;
+    const uint32_t period = wMeta_ + wKg_;
     for (uint32_t i = 0; i < period; ++i) {
         uint32_t idx = (schedCounter_ + i) % period;
         // map idx to a queue band
@@ -570,22 +501,12 @@ bool PostIngestQueue::popNextTaskLocked(Task& out) {
                     return true;
                 }
             }
-        } else if (idx < wMeta_ + wKg_) {
+        } else {
             if (!qKg_.empty()) {
                 const auto& cand = qKg_.front();
                 if (admitSessionLocked(cand.session)) {
                     out = cand;
                     qKg_.pop_front();
-                    schedCounter_ = (idx + 1) % period;
-                    return true;
-                }
-            }
-        } else {
-            if (!qEmb_.empty()) {
-                const auto& cand = qEmb_.front();
-                if (admitSessionLocked(cand.session)) {
-                    out = cand;
-                    qEmb_.pop_front();
                     schedCounter_ = (idx + 1) % period;
                     return true;
                 }
@@ -642,16 +563,36 @@ bool PostIngestQueue::resize(std::size_t target) {
 void PostIngestQueue::addNextStagesLocked(const std::string& hash, const std::string& mime,
                                           const std::string& session) {
     std::lock_guard<std::mutex> lk(mtx_);
+
+    // Enqueue KG stage to internal queue
     Task tKg{hash, mime, session, std::chrono::steady_clock::now(), Task::Stage::KnowledgeGraph};
-    Task tEmb{hash, mime, session, std::chrono::steady_clock::now(), Task::Stage::Embeddings};
     qKg_.push_back(std::move(tKg));
-    qEmb_.push_back(std::move(tEmb));
+
     auto it = inflight_.find(hash);
     if (it != inflight_.end()) {
-        it->second += 2u;
+        it->second += 1u; // Only KG stage now, embeddings handled by EmbeddingService
     } else {
-        inflight_[hash] = 2u; // edge case: ensure consistency if missing
+        inflight_[hash] = 1u;
     }
+
+    // Enqueue embedding job to InternalBus for async processing by EmbeddingService
+    InternalEventBus::EmbedJob embedJob;
+    embedJob.hashes = {hash};
+    embedJob.batchSize = 1;
+    embedJob.skipExisting = true;
+    embedJob.modelName = ""; // Will use preferred model
+
+    auto embedChannel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>("embed_jobs",
+                                                                                       2048);
+    if (embedChannel && embedChannel->try_push(std::move(embedJob))) {
+        spdlog::debug("PostIngest: enqueued embedding job for {}", hash);
+    } else {
+        spdlog::warn(
+            "PostIngest: failed to enqueue embedding job for {} (channel full or unavailable)",
+            hash);
+    }
+
     cv_.notify_one();
 }
 
@@ -731,19 +672,31 @@ bool PostIngestQueue::indexDocumentSync(const std::string& hash, const std::stri
             spdlog::warn("PostIngest(sync): meta_ is null, cannot checkpoint WAL for {}", hash);
         }
 
-        // Queue KG and embedding stages asynchronously (non-blocking)
-        // These are less urgent for grep responsiveness
+        // Queue KG stage asynchronously and enqueue embedding job to InternalBus
         {
             std::lock_guard<std::mutex> lk(mtx_);
             if (inflight_.find(hash) == inflight_.end()) {
                 Task tKg{hash, resolvedMime, "", std::chrono::steady_clock::now(),
                          Task::Stage::KnowledgeGraph};
-                Task tEmb{hash, resolvedMime, "", std::chrono::steady_clock::now(),
-                          Task::Stage::Embeddings};
                 qKg_.push_back(std::move(tKg));
-                qEmb_.push_back(std::move(tEmb));
-                inflight_[hash] = 2u;
+                inflight_[hash] = 1u;
                 cv_.notify_one();
+
+                // Enqueue embedding job to InternalBus
+                InternalEventBus::EmbedJob embedJob;
+                embedJob.hashes = {hash};
+                embedJob.batchSize = 1;
+                embedJob.skipExisting = true;
+                embedJob.modelName = "";
+
+                auto embedChannel =
+                    InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
+                        "embed_jobs", 2048);
+                if (embedChannel && embedChannel->try_push(std::move(embedJob))) {
+                    spdlog::debug("PostIngest(sync): enqueued embedding job for {}", hash);
+                } else {
+                    spdlog::warn("PostIngest(sync): failed to enqueue embedding job for {}", hash);
+                }
             }
         }
 

@@ -5,6 +5,7 @@
 #include <yams/search/query_qualifiers.hpp>
 #include <yams/search/symbol_enrichment.h>
 #include <yams/vector/embedding_generator.h>
+#include <yams/vector/vector_database.h>
 
 #include <spdlog/spdlog.h>
 #include <algorithm>
@@ -534,6 +535,54 @@ public:
         return {};
     }
 
+    Result<std::vector<vector::SearchResult>>
+    twoStageVectorSearch(const std::vector<float>& query_vector, size_t final_limit,
+                         const vector::SearchFilter& filter) {
+        if (!config_.enable_two_stage || query_vector.empty()) {
+            return vector_index_->search(query_vector, final_limit, filter);
+        }
+
+        auto all_results =
+            vector_index_->search(query_vector, config_.doc_stage_limit + final_limit, filter);
+        if (!all_results.has_value()) {
+            return all_results;
+        }
+
+        auto& results = all_results.value();
+
+        std::unordered_map<std::string, float> doc_best_scores;
+        for (const auto& res : results) {
+            auto doc_hash =
+                res.metadata.count("document_hash") ? res.metadata.at("document_hash") : res.id;
+
+            auto it = doc_best_scores.find(doc_hash);
+            if (it == doc_best_scores.end() || res.similarity > it->second) {
+                doc_best_scores[doc_hash] = res.similarity;
+            }
+        }
+
+        for (auto& res : results) {
+            auto doc_hash =
+                res.metadata.count("document_hash") ? res.metadata.at("document_hash") : res.id;
+
+            auto it = doc_best_scores.find(doc_hash);
+            if (it != doc_best_scores.end()) {
+                res.similarity *= (1.0f + config_.hierarchy_boost * (it->second / 1.0f));
+            }
+        }
+
+        std::sort(results.begin(), results.end(),
+                  [](const vector::SearchResult& a, const vector::SearchResult& b) {
+                      return a.similarity > b.similarity;
+                  });
+
+        if (results.size() > final_limit) {
+            results.resize(final_limit);
+        }
+
+        return Result<std::vector<vector::SearchResult>>(std::move(results));
+    }
+
     bool isInitialized() const { return initialized_; }
 
     void shutdown() {
@@ -670,7 +719,7 @@ public:
                         return Result<std::vector<vector::SearchResult>>(
                             std::vector<vector::SearchResult>{});
                     }
-                    return vector_index_->search(query_vector, limit, flt);
+                    return twoStageVectorSearch(query_vector, limit, flt);
                 });
             }
             // Launch keyword search
@@ -730,7 +779,7 @@ public:
                 // Generate embedding for normalized query
                 auto query_vector = generateQueryEmbedding(normalizedQuery);
                 if (!query_vector.empty()) {
-                    auto vector_result = vector_index_->search(query_vector, vector_limit, filter);
+                    auto vector_result = twoStageVectorSearch(query_vector, vector_limit, filter);
                     if (vector_result.has_value()) {
                         vector_results = vector_result.value();
                     }

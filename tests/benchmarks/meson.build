@@ -166,3 +166,4 @@ test('symbol_extraction_bench', symbol_extraction_bench,
      })
 
 alias_target('bench_symbol_extraction', symbol_extraction_bench)
+
