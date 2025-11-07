@@ -47,12 +47,20 @@ if get_option('build-mcp-server')
   yams_cli_exe_deps += dependency('yams_mcp')
 endif
 
+# Set platform-specific rpath
+# macOS uses @executable_path, Linux uses $ORIGIN
+if host_machine.system() == 'darwin'
+  cli_install_rpath = '@executable_path/../lib'
+else
+  cli_install_rpath = '$ORIGIN/../lib'
+endif
+
 yams_cli_exe = executable('yams-cli',
   'main.cpp',
   dependencies: yams_cli_exe_deps,
   install: true,
   install_dir: get_option('bindir'),
-  install_rpath: '$ORIGIN/../lib',
+  install_rpath: cli_install_rpath,
 )
 
 # Install shared libraries from conan dependencies

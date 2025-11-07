@@ -176,6 +176,14 @@ yams_daemon_dep = declare_dependency(
 
 meson.override_dependency('yams_daemon', yams_daemon_dep)
 
+# Set platform-specific rpath for daemon
+# macOS uses @executable_path, Linux uses $ORIGIN
+if host_machine.system() == 'darwin'
+  daemon_install_rpath = '@executable_path/../lib'
+else
+  daemon_install_rpath = '$ORIGIN/../lib'
+endif
+
 executable('yams-daemon',
   'daemon_main.cpp',
   dependencies: [
@@ -193,5 +201,5 @@ executable('yams-daemon',
   ],
   install: true,
   install_dir: get_option('bindir'),
-  install_rpath: '$ORIGIN/../lib',
+  install_rpath: daemon_install_rpath,
 )

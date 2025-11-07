@@ -1,5 +1,5 @@
 from conan import ConanFile
-from conan.tools.files import get, copy, save
+from conan.tools.files import get, copy, save, mkdir
 import os
 
 
@@ -74,44 +74,75 @@ class OnnxRuntimeConan(ConanFile):
         # Download prebuilt binaries in build step (settings available here)
         url = self._get_download_url()
         self.output.info(f"Downloading ONNX Runtime from: {url}")
-        get(self, url, strip_root=True, destination=self.source_folder)
+        # Extract to a temp location, then we'll find the extracted directory
+        get(self, url, destination=self.build_folder, strip_root=False)
     
     def package(self):
-        # Copy all headers recursively - ONNX Runtime has nested structure
+        # The prebuilt archive extracts to a subdirectory like onnxruntime-osx-arm64-1.23.2
+        # Find the extracted directory
+        extracted_dir = None
+        for item in os.listdir(self.build_folder):
+            item_path = os.path.join(self.build_folder, item)
+            if os.path.isdir(item_path) and item.startswith("onnxruntime-"):
+                extracted_dir = item_path
+                break
+        
+        if not extracted_dir:
+            self.output.error(f"Could not find extracted onnxruntime directory")
+            self.output.info(f"Build folder contents: {os.listdir(self.build_folder)}")
+            raise Exception("ONNX Runtime directory not found after extraction")
+        
+        include_src = os.path.join(extracted_dir, "include")
+        if not os.path.exists(include_src):
+            self.output.error(f"Include directory not found at {include_src}")
+            self.output.info(f"Extracted dir contents: {os.listdir(extracted_dir)}")
+            raise Exception("ONNX Runtime headers not found in expected location")
+        
+        # Copy headers directly, not preserving the parent directory name
         copy(self, "*.h", 
-             src=os.path.join(self.source_folder, "include"),
+             src=include_src,
+             dst=os.path.join(self.package_folder, "include"), 
+             keep_path=True)
+        
+        copy(self, "*.hpp", 
+             src=include_src,
              dst=os.path.join(self.package_folder, "include"), 
              keep_path=True)
         
         # Copy libraries
+        lib_src = os.path.join(extracted_dir, "lib")
         copy(self, "*.so*", 
-             src=os.path.join(self.source_folder, "lib"),
+             src=lib_src,
              dst=os.path.join(self.package_folder, "lib"), 
              keep_path=False)
         copy(self, "*.a", 
-             src=os.path.join(self.source_folder, "lib"),
+             src=lib_src,
              dst=os.path.join(self.package_folder, "lib"), 
              keep_path=False)
         copy(self, "*.dylib*", 
-             src=os.path.join(self.source_folder, "lib"),
+             src=lib_src,
              dst=os.path.join(self.package_folder, "lib"), 
              keep_path=False)
         copy(self, "*.dll", 
-             src=os.path.join(self.source_folder, "lib"),
+             src=lib_src,
              dst=os.path.join(self.package_folder, "bin"), 
              keep_path=False)
         copy(self, "*.lib", 
-             src=os.path.join(self.source_folder, "lib"),
+             src=lib_src,
              dst=os.path.join(self.package_folder, "lib"), 
              keep_path=False)
         
-        # Copy license
-        copy(self, "LICENSE", 
-             src=self.source_folder,
-             dst=os.path.join(self.package_folder, "licenses"), 
-             keep_path=False)
+        # Copy license if present
+        license_path = os.path.join(extracted_dir, "LICENSE")
+        if os.path.exists(license_path):
+            copy(self, "LICENSE", 
+                 src=extracted_dir,
+                 dst=os.path.join(self.package_folder, "licenses"), 
+                 keep_path=False)
         
-        # Generate pkg-config file manually
+        # Generate pkg-config file to ensure proper include path resolution
+        pc_dir = os.path.join(self.package_folder, "lib", "pkgconfig")
+        mkdir(self, pc_dir)
         pc_content = f"""prefix={self.package_folder}
 libdir=${{prefix}}/lib
 includedir=${{prefix}}/include
@@ -119,10 +150,11 @@ includedir=${{prefix}}/include
 Name: onnxruntime
 Description: ONNX Runtime - cross-platform ML inference
 Version: {self.version}
-Libs: -L${{libdir}} -lonnxruntime -lpthread -ldl -lm
+Libs: -L${{libdir}} -lonnxruntime
+Libs.private: -lpthread -ldl -lm
 Cflags: -I${{includedir}}
 """
-        save(self, os.path.join(self.package_folder, "lib", "pkgconfig", "onnxruntime.pc"), pc_content)
+        save(self, os.path.join(pc_dir, "onnxruntime.pc"), pc_content)
     
     def package_info(self):
         self.cpp_info.libs = ["onnxruntime"]
