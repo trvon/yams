@@ -225,8 +225,13 @@ tasks:
       # Configure FAST_MODE via extra Meson flags
       if [ "${FAST_MODE:-0}" = "1" ]; then
         echo "FAST_MODE=1: build will skip ONNX and tests"
-        export YAMS_EXTRA_MESON_FLAGS="-Denable-onnx=disabled -Dplugin-onnx=false -Dbuild-tests=false"
+        export YAMS_EXTRA_MESON_FLAGS="-Dyams-version=${CLEAN_VERSION_MESON} -Denable-onnx=disabled -Dplugin-onnx=false -Dbuild-tests=false"
+      else
+        export YAMS_EXTRA_MESON_FLAGS="-Dyams-version=${CLEAN_VERSION_MESON}"
       fi
+      
+      # Set install prefix to /usr for Linux packages (matches GitHub workflow)
+      export YAMS_INSTALL_PREFIX="/usr"
       
       # Run setup.sh (Release build) - it now respects all YAMS_* environment variables
       ./setup.sh Release

@@ -326,16 +326,32 @@ boost::asio::awaitable<Response>
 RequestDispatcher::handleShutdownRequest(const ShutdownRequest& req) {
     spdlog::info("Received shutdown request (graceful={})", req.graceful);
 
-    // Ask daemon to stop; don't detach unnecessarily to avoid losing the request in high load.
+    // Detach thread to perform clean shutdown then force process exit.
+    // This prevents orphaned daemon processes (see PBI-070).
     if (daemon_) {
         bool graceful = req.graceful;
         std::thread([d = daemon_, graceful]() {
             try {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+                spdlog::info("Initiating daemon shutdown sequence...");
+                auto result = d->stop();
+                if (!result) {
+                    spdlog::error("Daemon shutdown encountered error: {}", result.error().message);
+                }
+            } catch (const std::exception& e) {
+                spdlog::error("Exception during daemon shutdown: {}", e.what());
             } catch (...) {
+                spdlog::error("Unknown exception during daemon shutdown");
             }
+
             d->requestStop();
-            (void)graceful; // reserved for future policy differences
+
+            // Force exit after clean shutdown to prevent orphaned processes
+            spdlog::info("Daemon shutdown complete, exiting process");
+            std::exit(0);
+
+            (void)graceful;
         }).detach();
     }
 

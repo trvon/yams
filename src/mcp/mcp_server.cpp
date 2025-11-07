@@ -400,7 +400,8 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
         // Use generous timeouts to handle large directory adds and busy daemon
         cfg.headerTimeout = std::chrono::milliseconds(120000); // 2 minutes
         cfg.bodyTimeout = std::chrono::milliseconds(120000);   // 2 minutes
-        // No executor for stdio-only mode
+        // Use GlobalIOContext executor for async operations
+        cfg.executor = yams::daemon::GlobalIOContext::global_executor();
 
         if (const char* mi = std::getenv("YAMS_MCP_MAX_INFLIGHT")) {
             long v = std::strtol(mi, nullptr, 10);
@@ -2026,16 +2027,17 @@ json MCPServer::callTool(const std::string& name, const json& arguments) {
         return {{"error", {{"code", -32603}, {"message", "Tool registry not initialized"}}}};
     }
 
-    // Stdio mode: run tool synchronously via callToolAsync in current context
-    auto executor = yams::daemon::GlobalIOContext::global_executor();
+    // Stdio mode: run tool synchronously using the global io_context
+    // The daemon client and all async operations use GlobalIOContext,
+    // which already has worker threads running, so we just spawn and wait
+    auto& global_io = yams::daemon::GlobalIOContext::instance().get_io_context();
     auto task = toolRegistry_->callTool(name, arguments);
 
-    // Synchronously execute the async task
+    // Spawn on global io_context (which is already running) and wait for result
     json result;
     try {
-        boost::asio::io_context io;
-        result = boost::asio::co_spawn(io, std::move(task), boost::asio::use_future).get();
-        io.run();
+        auto future = boost::asio::co_spawn(global_io, std::move(task), boost::asio::use_future);
+        result = future.get();
 
         spdlog::debug("MCP tool '{}' returned: {}", name, result.dump());
 
@@ -2222,35 +2224,8 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         }
     }
 
-    // Streaming-only path for search to match CLI and reduce protocol complexity.
-    // Body timeout may be overridden via env YAMS_MCP_SEARCH_BODY_TIMEOUT_MS (default 60000).
-    Result<yams::daemon::SearchResponse> res(Error{ErrorCode::Unknown, "uninitialized"});
-    {
-        int wait_ms = 60000;
-        if (const char* env = std::getenv("YAMS_MCP_SEARCH_BODY_TIMEOUT_MS")) {
-            try {
-                int v = std::stoi(env);
-                if (v > 100)
-                    wait_ms = v;
-            } catch (...) {
-            }
-        }
-        // Stdio mode: execute search synchronously with timeout
-        boost::asio::io_context io;
-        auto future = boost::asio::co_spawn(
-            io,
-            [&]() -> boost::asio::awaitable<Result<yams::daemon::SearchResponse>> {
-                co_return co_await daemon_client_->search(dreq);
-            },
-            boost::asio::use_future);
-
-        io.run();
-        if (future.wait_for(std::chrono::milliseconds(wait_ms)) == std::future_status::ready) {
-            res = future.get();
-        } else {
-            res = Error{ErrorCode::Timeout, "Search timed out"};
-        }
-    }
+    // Execute search directly using co_await (already in coroutine context)
+    auto res = co_await daemon_client_->search(dreq);
     // Clear after call
     if (!__session.empty()) {
         ::setenv("YAMS_SESSION_CURRENT", "", 1);

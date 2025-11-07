@@ -538,7 +538,14 @@ jobs:
           # Use setup.sh with CI environment variables for consistent configuration
           export YAMS_CONAN_HOST_PROFILE="$HOST_PROFILE"
           export YAMS_CONAN_ARCH="$ARCH"
-          export YAMS_EXTRA_MESON_FLAGS="-Dwerror=false -Dwarning_level=2 -Denable-lzma=auto ${{ matrix.meson_args }}"
+          export YAMS_EXTRA_MESON_FLAGS="-Dyams-version=${{ steps.meta.outputs.version }} -Dwerror=false -Dwarning_level=2 -Denable-lzma=auto ${{ matrix.meson_args }}"
+          
+          # Set install prefix: /usr for Linux packages, /usr/local for macOS
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            export YAMS_INSTALL_PREFIX="/usr"
+          else
+            export YAMS_INSTALL_PREFIX="/usr/local"
+          fi
           
           # For cross-compilation, ensure pkg-config is available
           export PKG_CONFIG="$(command -v pkg-config)"
@@ -929,37 +936,49 @@ jobs:
           cd assets
           # Resolve bucket name: prefer secret R2_BUCKET, else parse wrangler.toml if present
           BUCKET="${R2_BUCKET:-}"
-          if [ -z "$BUCKET" ] && [ -f "$GITHUB_WORKSPACE/cloudflare/worker/wrangler.toml" ]; then
-            BUCKET=$(sed -E -n 's/^bucket_name\s*=\s*"(.*)"/\1/p' "$GITHUB_WORKSPACE/cloudflare/worker/wrangler.toml" | head -1)
+          if [ -z "$BUCKET" ] && [ -f "$GITHUB_WORKSPACE/external/yams-repo/worker/wrangler.toml" ]; then
+            BUCKET=$(sed -E -n 's/^bucket_name\s*=\s*"(.*)"/\1/p' "$GITHUB_WORKSPACE/external/yams-repo/worker/wrangler.toml" | head -1)
           fi
           if [ -z "$BUCKET" ]; then
             echo "Skipping R2 upload: no R2_BUCKET secret and wrangler.toml missing or without bucket_name." >&2
             exit 0
           fi
           echo "Uploading to R2 bucket: $BUCKET (prefix='${R2_PREFIX:-}')"
-          # Upload distributable assets
-          shopt -s nullglob
-          for f in *.tar.gz *.zip *.deb *.rpm *.AppImage; do
-            [ -f "$f" ] || continue
-            case "$f" in
-              *.deb)
-                DEST="${BUCKET}/${R2_PREFIX:-}apt/${f}"
-                wrangler r2 object put "$DEST" --file="$f" --content-type application/vnd.debian.binary-package
-                ;;
-              *.rpm)
-                DEST="${BUCKET}/${R2_PREFIX:-}yum/${f}"
-                wrangler r2 object put "$DEST" --file="$f" --content-type application/x-rpm
-                ;;
-              *)
-                DEST="${BUCKET}/${R2_PREFIX:-}${f}"
-                wrangler r2 object put "$DEST" --file="$f"
-                ;;
-            esac
-          done
-          # Upload latest.json with JSON content-type
+          
+          # Upload latest.json manifest with JSON content-type
           if [ -f latest.json ]; then
             wrangler r2 object put "${BUCKET}/${R2_PREFIX:-}latest.json" --file=latest.json --content-type application/json
           fi
+          
+          # Upload complete APT repository structure if available
+          if [ -d "$GITHUB_WORKSPACE/aptrepo" ]; then
+            echo "Uploading APT repository to R2..."
+            cd "$GITHUB_WORKSPACE/aptrepo"
+            find . -type f | while read -r f; do
+              key="${R2_PREFIX:-}aptrepo/${f#./}"
+              wrangler r2 object put "${BUCKET}/${key}" --file="$f"
+            done
+            cd "$GITHUB_WORKSPACE/assets"
+          fi
+          
+          # Upload complete YUM repository structure if available
+          if [ -d "$GITHUB_WORKSPACE/yumrepo" ]; then
+            echo "Uploading YUM repository to R2..."
+            cd "$GITHUB_WORKSPACE/yumrepo"
+            find . -type f | while read -r f; do
+              key="${R2_PREFIX:-}yumrepo/${f#./}"
+              wrangler r2 object put "${BUCKET}/${key}" --file="$f"
+            done
+            cd "$GITHUB_WORKSPACE/assets"
+          fi
+          
+          # Upload distributable assets (archives for direct download)
+          shopt -s nullglob
+          for f in *.tar.gz *.zip *.AppImage; do
+            [ -f "$f" ] || continue
+            DEST="${BUCKET}/${R2_PREFIX:-}${f}"
+            wrangler r2 object put "$DEST" --file="$f"
+          done
 
       - name: (Optional) Import GPG key and sign checksums
         if: env.GPG_PRIVATE_KEY && env.GPG_PRIVATE_KEY != ''
