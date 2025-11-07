@@ -474,19 +474,30 @@ public:
                 }
                 addDocs(std::move(ftsHits));
                 usedFtsForInitialCandidates = true;
-            } else if (!req.includePatterns.empty()) {
-                // FTS5 failed or returned nothing - fall back to path-filtered scan
-                auto patternDocsRes = retryMetadataOp(
-                    [&]() {
-                        return metadata::queryDocumentsByGlobPatterns(*ctx_.metadataRepo,
-                                                                      req.includePatterns, 0);
-                    },
-                    4, std::chrono::milliseconds(25), &metadataTelemetry);
-                if (patternDocsRes) {
-                    addDocs(std::move(patternDocsRes.value()));
+            } else {
+                // FTS5 failed or empty - fall back to document scan
+                if (!req.includePatterns.empty()) {
+                    auto patternDocsRes = retryMetadataOp(
+                        [&]() {
+                            return metadata::queryDocumentsByGlobPatterns(*ctx_.metadataRepo,
+                                                                          req.includePatterns, 0);
+                        },
+                        4, std::chrono::milliseconds(25), &metadataTelemetry);
+                    if (patternDocsRes) {
+                        addDocs(std::move(patternDocsRes.value()));
+                    }
+                } else {
+                    // Safe FTS-like pattern with no path filter - do full scan as fallback
+                    auto allDocsRes = retryMetadataOp(
+                        [&]() {
+                            return metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%");
+                        },
+                        4, std::chrono::milliseconds(25), &metadataTelemetry);
+                    if (allDocsRes) {
+                        addDocs(std::move(allDocsRes.value()));
+                    }
                 }
             }
-            // If FTS5 fails and no includePatterns, return empty (don't scan everything)
         } else {
             // Pattern doesn't look like FTS5 will work - require includePatterns for scoping
             if (!req.includePatterns.empty()) {
