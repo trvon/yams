@@ -49,14 +49,6 @@ jobs:
             build_type: Debug
             coverage: false
             extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled"
-          - suffix: macos-x86_64
-            runs_on: macos-15
-            conan_host_profile: ./conan/profiles/host-macos-apple-clang-x86
-            conan_arch: x86_64
-            needs_rosetta: false
-            build_type: Debug
-            coverage: false
-            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled"
     runs-on: ${{ matrix.runs_on }}
     # Allow extra time for safety across runners.
     timeout-minutes: 70

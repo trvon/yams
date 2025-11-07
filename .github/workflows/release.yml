@@ -232,6 +232,9 @@ jobs:
             else
               channel="nightly"
             fi
+          elif [ "$EVENT" = "workflow_run" ]; then
+            # workflow_run triggers from main branch after Tests complete
+            channel="nightly"
           else
             channel="stable"
           fi
@@ -683,6 +686,14 @@ jobs:
           # Use BASE_VERSION to generate Debian/RPM policy-compliant versions for nightly/weekly
           chmod +x scripts/build-deb.sh
           scripts/build-deb.sh package_only "${{ steps.meta.outputs.version }}" "${{ env.BUILD_DIR }}" "stage"
+          
+          # Move packages to root directory for artifact upload
+          if ls "${{ env.BUILD_DIR }}"/yams-*.deb 1> /dev/null 2>&1; then
+            mv "${{ env.BUILD_DIR }}"/yams-*.deb ./ || true
+          fi
+          if ls "${{ env.BUILD_DIR }}"/yams-*.rpm 1> /dev/null 2>&1; then
+            mv "${{ env.BUILD_DIR }}"/yams-*.rpm ./ || true
+          fi
 
       # Release notes are sourced directly from CHANGELOG.md during release creation
 
@@ -781,6 +792,9 @@ jobs:
             else
               channel="nightly"
             fi
+          elif [ "$EVENT" = "workflow_run" ]; then
+            # workflow_run triggers from main branch after Tests complete
+            channel="nightly"
           else
             channel="stable"
           fi
