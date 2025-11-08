@@ -1015,12 +1015,21 @@ jobs:
           VERSION="${{ steps.meta.outputs.version }}"
           FORMULA_DIR="homebrew"
           mkdir -p "$FORMULA_DIR"
-          ARCHIVE_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${TAG}.tar.gz"
-          echo "Downloading source tarball: $ARCHIVE_URL" >&2
-          TARBALL="${TAG}.tar.gz"
-          curl -Ls -o "$TARBALL" "$ARCHIVE_URL"
-          SHA256=$(shasum -a 256 "$TARBALL" | awk '{print $1}')
-          echo "Computed sha256: $SHA256" >&2
+          
+          # Download macOS binaries and compute SHA256s
+          ARM64_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/yams-${VERSION}-macos-arm64.zip"
+          X86_64_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/yams-${VERSION}-macos-x86_64.zip"
+          
+          echo "Downloading macOS ARM64 binary: $ARM64_URL" >&2
+          curl -Ls -o "yams-macos-arm64.zip" "$ARM64_URL"
+          SHA256_ARM64=$(shasum -a 256 "yams-macos-arm64.zip" | awk '{print $1}')
+          echo "Computed ARM64 sha256: $SHA256_ARM64" >&2
+          
+          echo "Downloading macOS x86_64 binary: $X86_64_URL" >&2
+          curl -Ls -o "yams-macos-x86_64.zip" "$X86_64_URL"
+          SHA256_X86_64=$(shasum -a 256 "yams-macos-x86_64.zip" | awk '{print $1}')
+          echo "Computed x86_64 sha256: $SHA256_X86_64" >&2
+          
           TEMPLATE_PATH="packaging/homebrew/yams.rb.template"
           if [ ! -f "$TEMPLATE_PATH" ]; then
             echo "ERROR: Homebrew template not found at $TEMPLATE_PATH" >&2
@@ -1030,7 +1039,8 @@ jobs:
           # Replace template placeholders with release metadata
           sed \
             -e "s|__VERSION__|$VERSION|g" \
-            -e "s|__SHA256__|$SHA256|g" \
+            -e "s|__SHA256_ARM64__|$SHA256_ARM64|g" \
+            -e "s|__SHA256_X86_64__|$SHA256_X86_64|g" \
             "$TEMPLATE_PATH" > "$OUT_FORMULA"
           echo "Updated formula at $OUT_FORMULA:" >&2
           grep -E 'version\s+"|sha256 "' "$OUT_FORMULA" >&2 || true
