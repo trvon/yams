@@ -4,12 +4,10 @@ class Yams < Formula
   version "__VERSION__"
   license "MIT"
 
-  on_arm do
+  if Hardware::CPU.arm?
     url "https://github.com/trvon/yams/releases/download/v#{version}/yams-#{version}-macos-arm64.zip"
     sha256 "__SHA256_ARM64__"
-  end
-
-  on_intel do
+  else
     url "https://github.com/trvon/yams/releases/download/v#{version}/yams-#{version}-macos-x86_64.zip"
     sha256 "__SHA256_X86_64__"
   end
@@ -20,25 +18,15 @@ class Yams < Formula
   end
 
   def install
-    # Pre-built binaries are extracted to usr/local/
-    # Copy binaries
-    (buildpath/"usr/local/bin").glob("*").each do |f|
-      bin.install f
-    end
+    # Homebrew strips the 'usr' prefix from archives
+    # So files are at local/bin, local/include, local/lib
+    bin.install Dir["local/bin/*"]
     
-    # Copy includes if present
-    if (buildpath/"usr/local/include").exist?
-      (buildpath/"usr/local/include").glob("*").each do |f|
-        include.install f
-      end
-    end
+    # Skip spdlog to avoid conflicts with homebrew's spdlog
+    (buildpath/"local/include/spdlog").rmtree if (buildpath/"local/include/spdlog").exist?
     
-    # Copy libraries if present
-    if (buildpath/"usr/local/lib").exist?
-      (buildpath/"usr/local/lib").glob("*").each do |f|
-        lib.install f
-      end
-    end
+    include.install Dir["local/include/*"] if Dir.exist?("local/include")
+    lib.install Dir["local/lib/*"] if Dir.exist?("local/lib")
   end
 
   def caveats
