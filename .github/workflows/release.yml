@@ -916,6 +916,12 @@ jobs:
             touch SHA256SUMS
           fi
 
+      - name: Initialize yams-repo submodule (for R2 bucket config)
+        if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.upload_r2 == 'true'))
+        shell: bash
+        run: |
+          git submodule update --init external/yams-repo || echo "Failed to initialize yams-repo submodule"
+
       - name: Install Wrangler CLI
         if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.upload_r2 == 'true')) && env.CLOUDFLARE_ACCOUNT_ID != '' && env.CLOUDFLARE_API_TOKEN != ''
         shell: bash
