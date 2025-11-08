@@ -198,8 +198,8 @@ get_base_version() {
     echo "${BASE_VERSION}"
     return
   fi
-  if git -C "${REPO_ROOT}" describe --tags --abbrev=0 >/dev/null 2>&1; then
-    git -C "${REPO_ROOT}" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//'
+  if git -C "${REPO_ROOT}" describe --tags --abbrev=0 --match='v*' >/dev/null 2>&1; then
+    git -C "${REPO_ROOT}" describe --tags --abbrev=0 --match='v*' 2>/dev/null | sed 's/^v//'
     return
   fi
   echo "0.0.0"

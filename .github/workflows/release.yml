@@ -259,7 +259,7 @@ jobs:
             RELEASE_NAME="YAMS Weekly ${YEAR}-w${WEEK} (${SHORT_HASH})"
           fi
 
-          BASE_NUMERIC_VERSION="$(git describe --tags --abbrev=0 2>/dev/null || echo 0.0.0)"
+          BASE_NUMERIC_VERSION="$(git describe --tags --abbrev=0 --match='v*' 2>/dev/null || echo 0.0.0)"
           BASE_NUMERIC_VERSION="${BASE_NUMERIC_VERSION#v}"
 
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
@@ -836,7 +836,7 @@ jobs:
             RELEASE_NAME="YAMS Weekly ${YEAR}-w${WEEK} (${SHORT_HASH})"
           fi
 
-          BASE_NUMERIC_VERSION="$(git describe --tags --abbrev=0 2>/dev/null || echo 0.0.0)"
+          BASE_NUMERIC_VERSION="$(git describe --tags --abbrev=0 --match='v*' 2>/dev/null || echo 0.0.0)"
           BASE_NUMERIC_VERSION="${BASE_NUMERIC_VERSION#v}"
 
           echo "channel=$channel" >> "$GITHUB_OUTPUT"

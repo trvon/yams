@@ -62,13 +62,18 @@ onnx_opt = get_option('enable-onnx')
 # Enforce sqlite3 FTS5 presence at configure time (configurable)
 require_fts5 = get_option('require-fts5')
 sqlite_dep = dependency('sqlite3', required: true)
-fts5_prog = cpp.run(files('meson/fts5_check.cpp'), dependencies: sqlite_dep, name: 'sqlite3 FTS5 check')
-if fts5_prog.returncode() != 0
-  msg = 'SQLite3 built without FTS5 support. Enable FTS5 in your package manager or Conan (e.g., -o "sqlite3/*:fts5=True").'
-  if require_fts5
-    error(msg)
-  else
-    warning(msg)
+# Skip runtime test when cross-compiling
+if meson.is_cross_build()
+  warning('Cross-compiling: skipping SQLite FTS5 runtime check. Ensure FTS5 is enabled in your target SQLite build.')
+else
+  fts5_prog = cpp.run(files('meson/fts5_check.cpp'), dependencies: sqlite_dep, name: 'sqlite3 FTS5 check')
+  if fts5_prog.returncode() != 0
+    msg = 'SQLite3 built without FTS5 support. Enable FTS5 in your package manager or Conan (e.g., -o "sqlite3/*:fts5=True").'
+    if require_fts5
+      error(msg)
+    else
+      warning(msg)
+    endif
   endif
 endif
 
