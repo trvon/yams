@@ -20,10 +20,25 @@ class Yams < Formula
   end
 
   def install
-    # Pre-built binaries are in usr/local/
-    bin.install Dir["usr/local/bin/*"]
-    include.install Dir["usr/local/include/*"] if Dir.exist?("usr/local/include")
-    lib.install Dir["usr/local/lib/*"] if Dir.exist?("usr/local/lib")
+    # Pre-built binaries are extracted to usr/local/
+    # Copy binaries
+    (buildpath/"usr/local/bin").glob("*").each do |f|
+      bin.install f
+    end
+    
+    # Copy includes if present
+    if (buildpath/"usr/local/include").exist?
+      (buildpath/"usr/local/include").glob("*").each do |f|
+        include.install f
+      end
+    end
+    
+    # Copy libraries if present
+    if (buildpath/"usr/local/lib").exist?
+      (buildpath/"usr/local/lib").glob("*").each do |f|
+        lib.install f
+      end
+    end
   end
 
   def caveats
