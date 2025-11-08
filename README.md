@@ -35,6 +35,18 @@
 ## Install
 Supported platforms: Linux x86_64/ARM64, macOS x86_64/ARM64
 
+### macOS (Homebrew)
+```bash
+brew install trvon/yams/yams
+
+# If linking fails due to conflicts, force link
+brew link --overwrite yams
+
+# Verify installation
+yams --version
+```
+
+### Build from Source
 ```bash
 # Quick build (auto-detects Clang/GCC, configures Conan + Meson)
 ./setup.sh Release
@@ -55,16 +67,20 @@ See [docs/BUILD-GCC.md](docs/BUILD-GCC.md) for detailed build instructions, comp
 
 ## Quick Start
 ```bash
-export YAMS_STORAGE="$HOME/.local/share/yams"
-yams init --non-interactive
+# Initialize YAMS storage in current directory
+yams init .
 
-# add
+# Or specify custom location
+export YAMS_STORAGE="$HOME/.local/share/yams"
+yams init
+
+# Add content
 echo hello | yams add - --tags demo
 
-# search
+# Search
 yams search hello --limit 5
 
-# get
+# List
 yams list --format minimal --limit 1 
 ```
 

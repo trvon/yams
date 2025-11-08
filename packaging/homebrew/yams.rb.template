@@ -31,15 +31,15 @@ class Yams < Formula
 
   def caveats
     <<~EOS
-      To initialize YAMS storage:
-        yams init --non-interactive
+      Initialize YAMS storage:
+        yams init .
 
-      For custom storage location:
+      Or specify custom location:
         export YAMS_STORAGE="$HOME/.local/share/yams"
-        yams init --non-interactive
+        yams init
 
-      Documentation and examples:
-        https://github.com/trvon/yams/tree/main/docs
+      Documentation: https://yamsmemory.ai
+      Repository: https://github.com/trvon/yams
     EOS
   end
 
