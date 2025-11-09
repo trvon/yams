@@ -551,6 +551,11 @@ jobs:
           export PKG_CONFIG="$(command -v pkg-config)"
           echo "Using pkg-config: $PKG_CONFIG"
           
+          # Pass version to Meson via extra flags
+          VERSION="${{ steps.meta.outputs.version }}"
+          export YAMS_EXTRA_MESON_FLAGS="-Dyams-version=${VERSION}"
+          echo "Setting version: ${VERSION}"
+          
           ./setup.sh Release
           meson compile -C build/release
           echo "BUILD_DIR=build/release" >> $GITHUB_ENV

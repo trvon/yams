@@ -31,6 +31,13 @@ search_bench = executable('yams_search_benchmarks', files('search_benchmarks.cpp
   install: false,
 )
 
+grep_bench = executable('yams_grep_benchmarks', files('grep_benchmarks.cpp'),
+  include_directories: incs,
+  dependencies: [test_deps, dependency('yams_benchmarks')] + tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  install: false,
+)
+
 search_tree_bench = executable('search_tree_bench', files('search_tree_bench.cpp'),
   include_directories: incs,
   dependencies: [
