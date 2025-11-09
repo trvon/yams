@@ -8,6 +8,7 @@ yams_search = static_library('yams_search',
   [
     'query_tokenizer.cpp',
     'query_parser.cpp',
+    'query_literal_extractor.cpp',
     'search_results.cpp',
     'search_filters.cpp',
     'result_ranker.cpp',

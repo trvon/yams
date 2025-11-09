@@ -9,20 +9,17 @@
 namespace yams {
 namespace search {
 
-ParallelPostProcessor::ProcessingResult ParallelPostProcessor::process(
-    std::vector<SearchResultItem> results,
-    const SearchFilters* filters,
-    const std::vector<std::string>& facetFields,
-    const QueryNode* queryAst,
-    size_t snippetLength,
-    size_t maxHighlights) {
-    
+ParallelPostProcessor::ProcessingResult
+ParallelPostProcessor::process(std::vector<SearchResultItem> results, const SearchFilters* filters,
+                               const std::vector<std::string>& facetFields,
+                               const QueryNode* queryAst, size_t snippetLength,
+                               size_t maxHighlights) {
     ProcessingResult result;
     const bool useParallel = results.size() >= PARALLEL_THRESHOLD;
 
     if (useParallel) {
         // Parallel path: launch independent operations concurrently
-        
+
         // 1. Apply filtering first (facets need filtered results)
         if (filters && filters->hasFilters()) {
             result.filteredResults = filters->apply(results);
@@ -43,8 +40,8 @@ ParallelPostProcessor::ProcessingResult ParallelPostProcessor::process(
         std::future<void> highlightFuture;
         if (queryAst) {
             auto queryTerms = extractQueryTerms(queryAst);
-            highlightFuture = std::async(std::launch::async,
-                [&result, queryTerms = std::move(queryTerms), maxHighlights]() {
+            highlightFuture = std::async(
+                std::launch::async, [&result, queryTerms = std::move(queryTerms), maxHighlights]() {
                     generateHighlightsParallel(result.filteredResults, queryTerms, maxHighlights);
                 });
         }
@@ -98,10 +95,9 @@ ParallelPostProcessor::ProcessingResult ParallelPostProcessor::process(
     return result;
 }
 
-std::vector<SearchFacet> ParallelPostProcessor::generateFacetsParallel(
-    const std::vector<SearchResultItem>& results,
-    const std::vector<std::string>& facetFields) {
-    
+std::vector<SearchFacet>
+ParallelPostProcessor::generateFacetsParallel(const std::vector<SearchResultItem>& results,
+                                              const std::vector<std::string>& facetFields) {
     std::vector<SearchFacet> facets;
     facets.reserve(facetFields.size());
 
@@ -159,11 +155,9 @@ std::vector<SearchFacet> ParallelPostProcessor::generateFacetsParallel(
     return facets;
 }
 
-void ParallelPostProcessor::generateHighlightsParallel(
-    std::vector<SearchResultItem>& results,
-    const std::vector<std::string>& queryTerms,
-    size_t maxHighlights) {
-    
+void ParallelPostProcessor::generateHighlightsParallel(std::vector<SearchResultItem>& results,
+                                                       const std::vector<std::string>& queryTerms,
+                                                       size_t maxHighlights) {
     for (auto& result : results) {
         // Generate highlights for content preview
         if (!result.contentPreview.empty()) {
@@ -209,10 +203,8 @@ void ParallelPostProcessor::generateHighlightsParallel(
     }
 }
 
-void ParallelPostProcessor::generateSnippetsParallel(
-    std::vector<SearchResultItem>& results,
-    size_t snippetLength) {
-    
+void ParallelPostProcessor::generateSnippetsParallel(std::vector<SearchResultItem>& results,
+                                                     size_t snippetLength) {
     for (auto& result : results) {
         if (result.contentPreview.length() > snippetLength) {
             result.contentPreview = result.contentPreview.substr(0, snippetLength) + "...";
@@ -223,7 +215,7 @@ void ParallelPostProcessor::generateSnippetsParallel(
 
 std::vector<std::string> ParallelPostProcessor::extractQueryTerms(const QueryNode* queryAst) {
     std::vector<std::string> terms;
-    
+
     if (!queryAst) {
         return terms;
     }

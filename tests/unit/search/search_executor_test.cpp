@@ -588,19 +588,18 @@ TEST(ParallelPostProcessorTest, BelowThreshold_UsesSequentialPath) {
     }
 
     // Process without filters or facets (just highlights and snippets)
-    auto result = ParallelPostProcessor::process(
-        std::move(results),
-        nullptr,  // No filters
-        {},       // No facet fields
-        nullptr,  // No query AST (no highlights)
-        100,      // Snippet length
-        3         // Max highlights
+    auto result = ParallelPostProcessor::process(std::move(results),
+                                                 nullptr, // No filters
+                                                 {},      // No facet fields
+                                                 nullptr, // No query AST (no highlights)
+                                                 100,     // Snippet length
+                                                 3        // Max highlights
     );
 
     // Verify results were processed
     EXPECT_EQ(result.filteredResults.size(), 50);
     EXPECT_TRUE(result.snippetsGenerated);
-    EXPECT_FALSE(result.highlightsGenerated);  // No query AST provided
+    EXPECT_FALSE(result.highlightsGenerated); // No query AST provided
     EXPECT_TRUE(result.facets.empty());
 }
 
@@ -612,27 +611,22 @@ TEST(ParallelPostProcessorTest, AboveThreshold_UsesParallelPath) {
         item.documentId = i;
         item.title = "Document " + std::to_string(i);
         item.contentPreview = "Content for document " + std::to_string(i);
-        item.contentType = (i % 3 == 0) ? "text/plain" : 
-                          (i % 3 == 1) ? "text/markdown" : "text/html";
+        item.contentType = (i % 3 == 0)   ? "text/plain"
+                           : (i % 3 == 1) ? "text/markdown"
+                                          : "text/html";
         item.detectedLanguage = (i % 2 == 0) ? "en" : "es";
         results.push_back(item);
     }
 
     // Process with facets
     std::vector<std::string> facetFields = {"contentType", "language"};
-    auto result = ParallelPostProcessor::process(
-        std::move(results),
-        nullptr,
-        facetFields,
-        nullptr,
-        100,
-        3
-    );
+    auto result =
+        ParallelPostProcessor::process(std::move(results), nullptr, facetFields, nullptr, 100, 3);
 
     // Verify parallel processing occurred
     EXPECT_EQ(result.filteredResults.size(), 150);
-    EXPECT_EQ(result.facets.size(), 2);  // contentType and language
-    
+    EXPECT_EQ(result.facets.size(), 2); // contentType and language
+
     // Verify facet generation worked
     bool foundContentTypeFacet = false;
     bool foundLanguageFacet = false;
@@ -645,7 +639,7 @@ TEST(ParallelPostProcessorTest, AboveThreshold_UsesParallelPath) {
         }
         if (facet.name == "language") {
             foundLanguageFacet = true;
-            EXPECT_EQ(facet.values.size(), 2);  // en and es
+            EXPECT_EQ(facet.values.size(), 2); // en and es
         }
     }
     EXPECT_TRUE(foundContentTypeFacet);
@@ -657,20 +651,16 @@ TEST(ParallelPostProcessorTest, SnippetGeneration) {
     SearchResultItem item;
     item.documentId = 1;
     item.title = "Test Document";
-    item.contentPreview = "This is a very long content preview that should be truncated to the specified snippet length for display purposes.";
+    item.contentPreview = "This is a very long content preview that should be truncated to the "
+                          "specified snippet length for display purposes.";
     results.push_back(item);
 
-    auto result = ParallelPostProcessor::process(
-        std::move(results),
-        nullptr,
-        {},
-        nullptr,
-        50,  // Truncate to 50 chars
-        3
-    );
+    auto result = ParallelPostProcessor::process(std::move(results), nullptr, {}, nullptr,
+                                                 50, // Truncate to 50 chars
+                                                 3);
 
     ASSERT_EQ(result.filteredResults.size(), 1);
-    EXPECT_LE(result.filteredResults[0].contentPreview.length(), 53);  // 50 + "..."
+    EXPECT_LE(result.filteredResults[0].contentPreview.length(), 53); // 50 + "..."
     EXPECT_TRUE(result.snippetsGenerated);
 }
 
@@ -693,14 +683,9 @@ TEST(ParallelPostProcessorTest, FacetValueCounts) {
     }
 
     std::vector<std::string> facetFields = {"contentType"};
-    auto result = ParallelPostProcessor::process(
-        std::move(results),
-        nullptr,
-        facetFields,
-        nullptr,
-        0,  // No snippets
-        0
-    );
+    auto result = ParallelPostProcessor::process(std::move(results), nullptr, facetFields, nullptr,
+                                                 0, // No snippets
+                                                 0);
 
     ASSERT_EQ(result.facets.size(), 1);
     const auto& facet = result.facets[0];
@@ -709,28 +694,21 @@ TEST(ParallelPostProcessorTest, FacetValueCounts) {
 
     // Verify facet values are sorted by count (descending)
     for (size_t i = 1; i < facet.values.size(); ++i) {
-        EXPECT_GE(facet.values[i-1].count, facet.values[i].count);
+        EXPECT_GE(facet.values[i - 1].count, facet.values[i].count);
     }
 
     // Verify counts
-    EXPECT_EQ(facet.values[0].count, 60);   // text/plain (most common)
-    EXPECT_EQ(facet.values[1].count, 40);   // text/markdown
-    EXPECT_EQ(facet.values[2].count, 20);   // text/html (least common)
+    EXPECT_EQ(facet.values[0].count, 60); // text/plain (most common)
+    EXPECT_EQ(facet.values[1].count, 40); // text/markdown
+    EXPECT_EQ(facet.values[2].count, 20); // text/html (least common)
 }
 
 TEST(ParallelPostProcessorTest, EmptyResults) {
-    std::vector<SearchResultItem> results;  // Empty
+    std::vector<SearchResultItem> results; // Empty
 
-    auto result = ParallelPostProcessor::process(
-        std::move(results),
-        nullptr,
-        {"contentType"},
-        nullptr,
-        100,
-        3
-    );
+    auto result = ParallelPostProcessor::process(std::move(results), nullptr, {"contentType"},
+                                                 nullptr, 100, 3);
 
     EXPECT_TRUE(result.filteredResults.empty());
     EXPECT_TRUE(result.facets.empty());
 }
-

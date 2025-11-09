@@ -9,6 +9,7 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <yams/app/services/literal_extractor.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/daemon/client/global_io_context.h>
@@ -588,10 +589,28 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
                     // Prefer exact basename match first within the session
                     std::vector<yams::daemon::ListEntry> eq;
                     eq.reserve(items.size());
-                    for (const auto& item : items) {
-                        if (item.name == name && !item.hash.empty())
-                            eq.push_back(item);
+
+                    // Optimization: Parallel filtering for large session lists (>100 items)
+                    if (items.size() > 100) {
+                        auto basenameFuture = std::async(std::launch::async, [&items, &name]() {
+                            std::vector<yams::daemon::ListEntry> results;
+                            results.reserve(items.size() / 10); // Reserve some space
+                            for (const auto& item : items) {
+                                if (item.name == name && !item.hash.empty()) {
+                                    results.push_back(item);
+                                }
+                            }
+                            return results;
+                        });
+                        eq = basenameFuture.get();
+                    } else {
+                        // Sequential path for small lists
+                        for (const auto& item : items) {
+                            if (item.name == name && !item.hash.empty())
+                                eq.push_back(item);
+                        }
                     }
+
                     if (!eq.empty()) {
                         auto chosen = pick_by_time(eq);
                         if (chosen) {
@@ -605,12 +624,30 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
                     // If no exact match, allow session-scoped suffix matching on paths
                     if (looksPathLike) {
                         std::vector<yams::daemon::ListEntry> suffix;
-                        for (const auto& item : items) {
-                            if (!item.path.empty() && (item.path.size() >= name.size()) &&
-                                item.path.rfind(name) == item.path.size() - name.size()) {
-                                suffix.push_back(item);
+
+                        // Optimization: Use BMH for suffix matching when >100 candidates
+                        if (items.size() > 100 && name.size() >= 3) {
+                            // BMH is faster for repeated pattern matching
+                            yams::app::services::BMHSearcher bmh(name, false);
+                            for (const auto& item : items) {
+                                if (!item.path.empty() && item.path.size() >= name.size()) {
+                                    size_t pos = bmh.find(item.path);
+                                    if (pos != std::string::npos &&
+                                        pos == item.path.size() - name.size()) {
+                                        suffix.push_back(item);
+                                    }
+                                }
+                            }
+                        } else {
+                            // Sequential path for small candidate sets
+                            for (const auto& item : items) {
+                                if (!item.path.empty() && (item.path.size() >= name.size()) &&
+                                    item.path.rfind(name) == item.path.size() - name.size()) {
+                                    suffix.push_back(item);
+                                }
                             }
                         }
+
                         if (!suffix.empty()) {
                             auto chosen = pick_by_time(suffix);
                             if (chosen) {

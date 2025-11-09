@@ -108,17 +108,16 @@ Result<SearchResults> SearchExecutor::search(const SearchRequest& request) {
 
     // Use ParallelPostProcessor for filtering, faceting, highlights, and snippets
     auto postProcessResult = ParallelPostProcessor::process(
-        std::move(results),
-        request.filters.hasFilters() ? &request.filters : nullptr,
-        (request.includeFacets && config_.enableFaceting) ? request.facetFields : std::vector<std::string>{},
+        std::move(results), request.filters.hasFilters() ? &request.filters : nullptr,
+        (request.includeFacets && config_.enableFaceting) ? request.facetFields
+                                                          : std::vector<std::string>{},
         queryAst.get(),
         (request.includeSnippets && config_.enableSnippets) ? config_.snippetLength : 0,
-        config_.maxHighlights
-    );
+        config_.maxHighlights);
 
     // Extract processed results and facets
     results = std::move(postProcessResult.filteredResults);
-    
+
     // Add facets to response
     for (auto& facet : postProcessResult.facets) {
         response.addFacet(std::move(facet));
