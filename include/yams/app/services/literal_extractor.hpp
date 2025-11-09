@@ -15,8 +15,8 @@ struct LiteralExtractor {
     /// Result of literal extraction from a pattern
     struct ExtractionResult {
         std::vector<std::string> literals; ///< Extracted literal strings
-        bool isComplete;                    ///< True if pattern is purely literal
-        size_t longestLength;               ///< Length of longest extracted literal
+        bool isComplete;                   ///< True if pattern is purely literal
+        size_t longestLength;              ///< Length of longest extracted literal
 
         bool empty() const { return literals.empty(); }
         const std::string& longest() const;

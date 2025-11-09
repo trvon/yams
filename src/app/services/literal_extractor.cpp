@@ -1,6 +1,6 @@
-#include <yams/app/services/literal_extractor.hpp>
 #include <algorithm>
 #include <cctype>
+#include <yams/app/services/literal_extractor.hpp>
 
 namespace yams {
 namespace app {
@@ -22,14 +22,14 @@ const std::string& LiteralExtractor::ExtractionResult::longest() const {
     if (literals.empty())
         return empty;
 
-    auto maxElem =
-        std::max_element(literals.begin(), literals.end(),
-                         [](const std::string& a, const std::string& b) { return a.size() < b.size(); });
+    auto maxElem = std::max_element(
+        literals.begin(), literals.end(),
+        [](const std::string& a, const std::string& b) { return a.size() < b.size(); });
     return *maxElem;
 }
 
 LiteralExtractor::ExtractionResult LiteralExtractor::extract(std::string_view pattern,
-                                                              bool ignoreCase) {
+                                                             bool ignoreCase) {
     ExtractionResult result;
     result.isComplete = true;
     result.longestLength = 0;
@@ -41,7 +41,8 @@ LiteralExtractor::ExtractionResult LiteralExtractor::extract(std::string_view pa
         char c = pattern[i];
 
         if (escaped) {
-            // After backslash, most chars become literals (except special sequences like \d, \s, etc)
+            // After backslash, most chars become literals (except special sequences like \d, \s,
+            // etc)
             if (std::isalnum(static_cast<unsigned char>(c))) {
                 // Special sequences like \d, \w, \s, \D, \W, \S, \b, \B
                 result.isComplete = false;

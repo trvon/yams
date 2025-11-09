@@ -18,8 +18,7 @@ class LiteralExtractionBenchmark : public BenchmarkBase {
 public:
     LiteralExtractionBenchmark(const std::string& name, std::vector<std::string> patterns,
                                const Config& config = Config())
-        : BenchmarkBase("Grep_LiteralExtraction_" + name, config),
-          patterns_(std::move(patterns)) {}
+        : BenchmarkBase("Grep_LiteralExtraction_" + name, config), patterns_(std::move(patterns)) {}
 
 protected:
     size_t runIteration() override {
@@ -48,7 +47,7 @@ public:
         text_.reserve(textSize);
         std::mt19937 rng(42);
         std::uniform_int_distribution<int> charDist('a', 'z');
-        
+
         for (size_t i = 0; i < textSize; ++i) {
             // Insert needle every ~1000 chars
             if (i > 0 && i % 1000 == 0 && i + needle_.size() < textSize) {
@@ -57,9 +56,8 @@ public:
             }
             text_ += static_cast<char>(charDist(rng));
         }
-        
-        bmhSearcher_ =
-            std::make_unique<yams::app::services::BMHSearcher>(needle_, false);
+
+        bmhSearcher_ = std::make_unique<yams::app::services::BMHSearcher>(needle_, false);
     }
 
 protected:
@@ -89,7 +87,7 @@ public:
         text_.reserve(textSize);
         std::mt19937 rng(42);
         std::uniform_int_distribution<int> charDist('a', 'z');
-        
+
         for (size_t i = 0; i < textSize; ++i) {
             if (i > 0 && i % 1000 == 0 && i + needle_.size() < textSize) {
                 text_ += needle_;
@@ -126,7 +124,7 @@ public:
         std::mt19937 rng(42);
         std::uniform_int_distribution<int> charDist('a', 'z');
         size_t charsPerLine = textSize / linesCount;
-        
+
         text_.reserve(textSize);
         for (size_t i = 0; i < linesCount; ++i) {
             for (size_t j = 0; j < charsPerLine; ++j) {
@@ -167,7 +165,7 @@ public:
         std::mt19937 rng(42);
         std::uniform_int_distribution<int> charDist('a', 'z');
         size_t charsPerLine = textSize / linesCount;
-        
+
         text_.reserve(textSize);
         for (size_t i = 0; i < linesCount; ++i) {
             for (size_t j = 0; j < charsPerLine; ++j) {
@@ -183,8 +181,8 @@ protected:
         const char* p = text_.data();
         const char* end = p + text_.size();
         while (p < end) {
-            const char* nl = static_cast<const char*>(
-                memchr(p, '\n', static_cast<size_t>(end - p)));
+            const char* nl =
+                static_cast<const char*>(memchr(p, '\n', static_cast<size_t>(end - p)));
             if (!nl) {
                 break;
             }
@@ -209,18 +207,18 @@ int main() {
     // Literal Extraction Benchmark
     {
         std::vector<std::string> patterns = {
-            R"(class\s+(\w+))",        // class definition
-            R"(function\s+\w+\s*\()",  // function declaration
-            R"(import\s+.*from)",      // import statement
-            R"(\b\d{3}-\d{2}-\d{4}\b)", // SSN pattern
+            R"(class\s+(\w+))",                                  // class definition
+            R"(function\s+\w+\s*\()",                            // function declaration
+            R"(import\s+.*from)",                                // import statement
+            R"(\b\d{3}-\d{2}-\d{4}\b)",                          // SSN pattern
             R"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})", // email
         };
-        
+
         BenchmarkBase::Config config;
         config.benchmark_iterations = 10000;
         config.warmup_iterations = 100;
         config.verbose = true;
-        
+
         LiteralExtractionBenchmark bench("Common_Patterns", patterns, config);
         bench.run();
     }
@@ -230,12 +228,12 @@ int main() {
         BenchmarkBase::Config config;
         config.benchmark_iterations = 1000;
         config.warmup_iterations = 10;
-        
+
         std::cout << std::endl;
         std::cout << "--- Short Pattern (3 chars, 1MB text) ---" << std::endl;
         BMHSearchBenchmark bmhBench("ShortPattern", "foo", 1024 * 1024, config);
         bmhBench.run();
-        
+
         StdFindBenchmark stdBench("ShortPattern", "foo", 1024 * 1024, config);
         stdBench.run();
     }
@@ -245,12 +243,12 @@ int main() {
         BenchmarkBase::Config config;
         config.benchmark_iterations = 1000;
         config.warmup_iterations = 10;
-        
+
         std::cout << std::endl;
         std::cout << "--- Medium Pattern (8 chars, 1MB text) ---" << std::endl;
         BMHSearchBenchmark bmhBench("MediumPattern", "function", 1024 * 1024, config);
         bmhBench.run();
-        
+
         StdFindBenchmark stdBench("MediumPattern", "function", 1024 * 1024, config);
         stdBench.run();
     }
@@ -260,12 +258,12 @@ int main() {
         BenchmarkBase::Config config;
         config.benchmark_iterations = 1000;
         config.warmup_iterations = 10;
-        
+
         std::cout << std::endl;
         std::cout << "--- Long Pattern (16 chars, 1MB text) ---" << std::endl;
         BMHSearchBenchmark bmhBench("LongPattern", "class_definition", 1024 * 1024, config);
         bmhBench.run();
-        
+
         StdFindBenchmark stdBench("LongPattern", "class_definition", 1024 * 1024, config);
         stdBench.run();
     }
@@ -275,12 +273,12 @@ int main() {
         BenchmarkBase::Config config;
         config.benchmark_iterations = 5000;
         config.warmup_iterations = 50;
-        
+
         std::cout << std::endl;
         std::cout << "--- Newline Scanning: Small File (100KB, 1000 lines) ---" << std::endl;
         SimdNewlineBenchmark simdBench("SmallFile", 100 * 1024, 1000, config);
         simdBench.run();
-        
+
         MemchrNewlineBenchmark memchrBench("SmallFile", 100 * 1024, 1000, config);
         memchrBench.run();
     }
@@ -291,12 +289,12 @@ int main() {
         config.benchmark_iterations = 100;
         config.warmup_iterations = 5;
         config.verbose = true;
-        
+
         std::cout << std::endl;
         std::cout << "--- Newline Scanning: Large File (10MB, 100K lines) ---" << std::endl;
         SimdNewlineBenchmark simdBench("LargeFile", 10 * 1024 * 1024, 100000, config);
         simdBench.run();
-        
+
         MemchrNewlineBenchmark memchrBench("LargeFile", 10 * 1024 * 1024, 100000, config);
         memchrBench.run();
     }

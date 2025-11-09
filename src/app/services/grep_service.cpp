@@ -1,8 +1,8 @@
 #include "../../cli/hot_cold_utils.h"
-#include <yams/app/services/literal_extractor.hpp>
-#include <yams/app/services/simd_newline_scanner.hpp>
 #include <yams/app/services/grep_mode_tls.h>
+#include <yams/app/services/literal_extractor.hpp>
 #include <yams/app/services/services.hpp>
+#include <yams/app/services/simd_newline_scanner.hpp>
 #include <yams/common/utf8_utils.h>
 #include <yams/core/cpp23_features.hpp>
 #include <yams/core/magic_numbers.hpp>
@@ -405,12 +405,12 @@ public:
         // Extract literals for two-phase matching (ripgrep strategy)
         std::unique_ptr<BMHSearcher> bmhSearcher;
         LiteralExtractor::ExtractionResult literalExtraction;
-        
+
         if (!req.literalText) {
             literalExtraction = LiteralExtractor::extract(req.pattern, req.ignoreCase);
             if (literalExtraction.longestLength >= 3) {
-                bmhSearcher = std::make_unique<BMHSearcher>(
-                    literalExtraction.longest(), req.ignoreCase);
+                bmhSearcher =
+                    std::make_unique<BMHSearcher>(literalExtraction.longest(), req.ignoreCase);
                 spdlog::debug("[GrepService] Using BMH pre-filter with literal: '{}'",
                               literalExtraction.longest());
             }
@@ -636,19 +636,19 @@ public:
         std::vector<metadata::DocumentInfo> coldDocs;
         hotDocs.reserve(docs.size());
         coldDocs.reserve(docs.size());
-        
+
         // Parallel candidate filtering with magic_numbers.hpp for binary detection
         const size_t MAX_FILE_SIZE = 100 * 1024 * 1024;
         size_t filesSkippedType = 0;
         size_t filesSkippedSize = 0;
-        
+
         auto shouldSkipFile = [](const metadata::DocumentInfo& doc) -> bool {
             std::string ext;
             auto dotPos = doc.filePath.rfind('.');
             if (dotPos != std::string::npos && dotPos < doc.filePath.size() - 1) {
                 ext = doc.filePath.substr(dotPos + 1);
             }
-            
+
             auto category = yams::magic::getPruneCategory(doc.filePath, ext);
             if (category == yams::magic::PruneCategory::BuildObject ||
                 category == yams::magic::PruneCategory::BuildLibrary ||
@@ -657,48 +657,46 @@ public:
                 category == yams::magic::PruneCategory::Packages) {
                 return true;
             }
-            
-            if (doc.mimeType.find("image/") == 0 ||
-                doc.mimeType.find("video/") == 0 ||
-                doc.mimeType.find("audio/") == 0 ||
-                doc.mimeType == "application/pdf" ||
-                doc.mimeType == "application/zip" ||
-                doc.mimeType == "application/x-tar" ||
-                doc.mimeType == "application/x-gzip" ||
-                doc.mimeType == "application/x-bzip2" ||
+
+            if (doc.mimeType.find("image/") == 0 || doc.mimeType.find("video/") == 0 ||
+                doc.mimeType.find("audio/") == 0 || doc.mimeType == "application/pdf" ||
+                doc.mimeType == "application/zip" || doc.mimeType == "application/x-tar" ||
+                doc.mimeType == "application/x-gzip" || doc.mimeType == "application/x-bzip2" ||
                 doc.mimeType == "application/octet-stream") {
                 return true;
             }
-            
+
             return false;
         };
-        
+
         // Parallel filtering using C++20 async for large candidate sets
         // For large candidate sets (>100 files), use parallel filtering
         if (docs.size() > 100) {
             std::vector<std::future<std::pair<std::vector<metadata::DocumentInfo>,
-                                               std::vector<metadata::DocumentInfo>>>> futures;
-            
+                                              std::vector<metadata::DocumentInfo>>>>
+                futures;
+
             // Split candidates into chunks for parallel processing
-            const size_t chunkSize = std::max<size_t>(10, docs.size() / std::thread::hardware_concurrency());
+            const size_t chunkSize =
+                std::max<size_t>(10, docs.size() / std::thread::hardware_concurrency());
             for (size_t i = 0; i < docs.size(); i += chunkSize) {
                 size_t end = std::min(i + chunkSize, docs.size());
-                
+
                 futures.push_back(std::async(std::launch::async, [&, i, end]() {
                     std::vector<metadata::DocumentInfo> hot, cold;
                     for (size_t j = i; j < end; ++j) {
                         auto& d = docs[j];
-                        
+
                         // Skip binary/unsuitable files
                         if (shouldSkipFile(d)) {
                             continue;
                         }
-                        
+
                         // Skip oversized files
                         if (d.fileSize > MAX_FILE_SIZE) {
                             continue;
                         }
-                        
+
                         // Classify as hot or cold
                         bool isText = !d.mimeType.empty() && d.mimeType.rfind("text/", 0) == 0;
                         if (d.contentExtracted || isText) {
@@ -710,7 +708,7 @@ public:
                     return std::make_pair(std::move(hot), std::move(cold));
                 }));
             }
-            
+
             // Collect results from parallel filters
             for (auto& fut : futures) {
                 auto [hot, cold] = fut.get();
@@ -719,9 +717,10 @@ public:
                 coldDocs.insert(coldDocs.end(), std::make_move_iterator(cold.begin()),
                                 std::make_move_iterator(cold.end()));
             }
-            
+
             filesSkippedType = docs.size() - (hotDocs.size() + coldDocs.size());
-            spdlog::debug("[GrepService] Parallel filtering (magic_numbers): {} docs -> {} hot + {} cold ({} skipped)",
+            spdlog::debug("[GrepService] Parallel filtering (magic_numbers): {} docs -> {} hot + "
+                          "{} cold ({} skipped)",
                           docs.size(), hotDocs.size(), coldDocs.size(), filesSkippedType);
         } else {
             // Sequential filtering for small candidate sets
@@ -731,13 +730,13 @@ public:
                     filesSkippedType++;
                     continue;
                 }
-                
+
                 // Skip oversized files
                 if (d.fileSize > MAX_FILE_SIZE) {
                     filesSkippedSize++;
                     continue;
                 }
-                
+
                 bool isText = !d.mimeType.empty() && d.mimeType.rfind("text/", 0) == 0;
                 if (d.contentExtracted || isText) {
                     hotDocs.push_back(std::move(d));
@@ -746,12 +745,13 @@ public:
                 }
             }
         }
-        
+
         if (filesSkippedType > 0 || filesSkippedSize > 0) {
-            spdlog::debug("[GrepService] Skipped {} unsuitable files ({} binary/artifacts, {} oversized)",
-                          filesSkippedType + filesSkippedSize, filesSkippedType, filesSkippedSize);
+            spdlog::debug(
+                "[GrepService] Skipped {} unsuitable files ({} binary/artifacts, {} oversized)",
+                filesSkippedType + filesSkippedSize, filesSkippedType, filesSkippedSize);
         }
-        
+
         if (max_docs_hot >= 0 && hotDocs.size() > static_cast<size_t>(max_docs_hot))
             hotDocs.resize(static_cast<size_t>(max_docs_hot));
         if (max_docs_cold >= 0 && coldDocs.size() > static_cast<size_t>(max_docs_cold))
@@ -935,14 +935,14 @@ public:
                 };
                 auto countMatches = [&](const std::string& line) -> size_t {
                     size_t count = 0;
-                    
+
                     // Two-phase matching: BMH literal pre-filter → regex validation
                     if (bmhSearcher && !req.literalText) {
                         if (bmhSearcher->find(line) == std::string::npos) {
                             return 0;
                         }
                     }
-                    
+
                     if (req.literalText && bmhSearcher) {
                         size_t from = 0;
                         while (true) {
@@ -955,7 +955,7 @@ public:
                         }
                         return count;
                     }
-                    
+
                     // Fast path fallback: pure literal < 3 chars, use std::string::find
                     if (req.literalText && !req.ignoreCase) {
                         size_t from = 0;
@@ -969,7 +969,7 @@ public:
                         }
                         return count;
                     }
-                    
+
                     // Regex path: full pattern matching (after literal pre-filter if applicable)
                     std::cmatch cm;
                     const char* start = line.c_str();
@@ -1079,7 +1079,7 @@ public:
                             while (p < end) {
                                 size_t remaining = static_cast<size_t>(end - p);
                                 size_t nlOffset = SimdNewlineScanner::findNewline(p, remaining);
-                                
+
                                 if (nlOffset >= remaining) {
                                     // No newline found in remaining data
                                     if (memchr(p, '\r', remaining) != nullptr) {
@@ -1100,7 +1100,7 @@ public:
                                     }
                                     return n;
                                 }
-                                
+
                                 const char* nlc = p + nlOffset;
                                 // append up to newline, skipping CRs
                                 if (memchr(p, '\r', static_cast<size_t>(nlc - p)) != nullptr) {

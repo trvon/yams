@@ -1,7 +1,7 @@
-#include <yams/app/services/literal_extractor.hpp>
-#include <catch2/catch_test_macros.hpp>
 #include <string>
 #include <vector>
+#include <catch2/catch_test_macros.hpp>
+#include <yams/app/services/literal_extractor.hpp>
 
 using namespace yams::app::services;
 
@@ -45,8 +45,10 @@ TEST_CASE("LiteralExtractor: Patterns with metacharacters", "[literal_extractor]
         // Should contain both literals
         bool hasFoo = false, hasBar = false;
         for (const auto& lit : result.literals) {
-            if (lit == "foo") hasFoo = true;
-            if (lit == "bar") hasBar = true;
+            if (lit == "foo")
+                hasFoo = true;
+            if (lit == "bar")
+                hasBar = true;
         }
         REQUIRE(hasFoo);
         REQUIRE(hasBar);

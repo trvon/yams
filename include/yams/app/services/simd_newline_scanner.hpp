@@ -25,21 +25,21 @@ namespace services {
 
 /**
  * SIMD-optimized newline scanner for grep performance
- * 
+ *
  * Provides 4-8x faster newline detection compared to memchr() by using:
  * - SSE2 (128-bit) on x86_64: 16 bytes per instruction
- * - AVX2 (256-bit) on modern x86: 32 bytes per instruction  
+ * - AVX2 (256-bit) on modern x86: 32 bytes per instruction
  * - NEON (128-bit) on ARM/aarch64: 16 bytes per instruction
- * 
+ *
  * Falls back to scalar memchr() on platforms without SIMD support.
- * 
+ *
  * Based on ripgrep's bstr crate and Daniel Lemire's SIMD memchr techniques.
  */
 class SimdNewlineScanner {
 public:
     /**
      * Find the first newline character in a buffer using SIMD
-     * 
+     *
      * @param data Pointer to buffer to search
      * @param size Size of buffer in bytes
      * @return Offset of first '\n', or size if not found
@@ -48,7 +48,7 @@ public:
 
     /**
      * Check if buffer contains any newline characters (fast existence check)
-     * 
+     *
      * @param data Pointer to buffer to search
      * @param size Size of buffer in bytes
      * @return true if buffer contains '\n', false otherwise
@@ -57,7 +57,7 @@ public:
 
     /**
      * Count newlines in buffer (useful for line number calculations)
-     * 
+     *
      * @param data Pointer to buffer to search
      * @param size Size of buffer in bytes
      * @return Number of '\n' characters found
