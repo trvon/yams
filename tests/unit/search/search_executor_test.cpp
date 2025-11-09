@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <gtest/gtest.h>
 #include <yams/metadata/database.h>
+#include <yams/search/parallel_post_processor.hpp>
 #include <yams/search/search_executor.h>
 
 using namespace yams::search;
@@ -571,3 +572,165 @@ TEST_F(ResultRankerTest, RankingResults) {
     // (though other factors may affect this)
     EXPECT_GT(results[0].relevanceScore, 0.0f);
 }
+
+// --- Parallel Post-Processor Tests (PBI-001 Phase 3) ---
+
+TEST(ParallelPostProcessorTest, BelowThreshold_UsesSequentialPath) {
+    // Create test data below threshold (< 100 results)
+    std::vector<SearchResultItem> results;
+    for (int i = 0; i < 50; ++i) {
+        SearchResultItem item;
+        item.documentId = i;
+        item.title = "Document " + std::to_string(i);
+        item.contentPreview = "Content for document " + std::to_string(i);
+        item.contentType = (i % 2 == 0) ? "text/plain" : "text/markdown";
+        results.push_back(item);
+    }
+
+    // Process without filters or facets (just highlights and snippets)
+    auto result = ParallelPostProcessor::process(
+        std::move(results),
+        nullptr,  // No filters
+        {},       // No facet fields
+        nullptr,  // No query AST (no highlights)
+        100,      // Snippet length
+        3         // Max highlights
+    );
+
+    // Verify results were processed
+    EXPECT_EQ(result.filteredResults.size(), 50);
+    EXPECT_TRUE(result.snippetsGenerated);
+    EXPECT_FALSE(result.highlightsGenerated);  // No query AST provided
+    EXPECT_TRUE(result.facets.empty());
+}
+
+TEST(ParallelPostProcessorTest, AboveThreshold_UsesParallelPath) {
+    // Create test data above threshold (>= 100 results)
+    std::vector<SearchResultItem> results;
+    for (int i = 0; i < 150; ++i) {
+        SearchResultItem item;
+        item.documentId = i;
+        item.title = "Document " + std::to_string(i);
+        item.contentPreview = "Content for document " + std::to_string(i);
+        item.contentType = (i % 3 == 0) ? "text/plain" : 
+                          (i % 3 == 1) ? "text/markdown" : "text/html";
+        item.detectedLanguage = (i % 2 == 0) ? "en" : "es";
+        results.push_back(item);
+    }
+
+    // Process with facets
+    std::vector<std::string> facetFields = {"contentType", "language"};
+    auto result = ParallelPostProcessor::process(
+        std::move(results),
+        nullptr,
+        facetFields,
+        nullptr,
+        100,
+        3
+    );
+
+    // Verify parallel processing occurred
+    EXPECT_EQ(result.filteredResults.size(), 150);
+    EXPECT_EQ(result.facets.size(), 2);  // contentType and language
+    
+    // Verify facet generation worked
+    bool foundContentTypeFacet = false;
+    bool foundLanguageFacet = false;
+    for (const auto& facet : result.facets) {
+        if (facet.name == "contentType") {
+            foundContentTypeFacet = true;
+            EXPECT_GT(facet.values.size(), 0);
+            // Should have 3 types: text/plain, text/markdown, text/html
+            EXPECT_LE(facet.values.size(), 3);
+        }
+        if (facet.name == "language") {
+            foundLanguageFacet = true;
+            EXPECT_EQ(facet.values.size(), 2);  // en and es
+        }
+    }
+    EXPECT_TRUE(foundContentTypeFacet);
+    EXPECT_TRUE(foundLanguageFacet);
+}
+
+TEST(ParallelPostProcessorTest, SnippetGeneration) {
+    std::vector<SearchResultItem> results;
+    SearchResultItem item;
+    item.documentId = 1;
+    item.title = "Test Document";
+    item.contentPreview = "This is a very long content preview that should be truncated to the specified snippet length for display purposes.";
+    results.push_back(item);
+
+    auto result = ParallelPostProcessor::process(
+        std::move(results),
+        nullptr,
+        {},
+        nullptr,
+        50,  // Truncate to 50 chars
+        3
+    );
+
+    ASSERT_EQ(result.filteredResults.size(), 1);
+    EXPECT_LE(result.filteredResults[0].contentPreview.length(), 53);  // 50 + "..."
+    EXPECT_TRUE(result.snippetsGenerated);
+}
+
+TEST(ParallelPostProcessorTest, FacetValueCounts) {
+    std::vector<SearchResultItem> results;
+    // Create results with specific distribution
+    for (int i = 0; i < 120; ++i) {
+        SearchResultItem item;
+        item.documentId = i;
+        item.title = "Document " + std::to_string(i);
+        // 60 text/plain, 40 text/markdown, 20 text/html
+        if (i < 60) {
+            item.contentType = "text/plain";
+        } else if (i < 100) {
+            item.contentType = "text/markdown";
+        } else {
+            item.contentType = "text/html";
+        }
+        results.push_back(item);
+    }
+
+    std::vector<std::string> facetFields = {"contentType"};
+    auto result = ParallelPostProcessor::process(
+        std::move(results),
+        nullptr,
+        facetFields,
+        nullptr,
+        0,  // No snippets
+        0
+    );
+
+    ASSERT_EQ(result.facets.size(), 1);
+    const auto& facet = result.facets[0];
+    EXPECT_EQ(facet.name, "contentType");
+    EXPECT_EQ(facet.values.size(), 3);
+
+    // Verify facet values are sorted by count (descending)
+    for (size_t i = 1; i < facet.values.size(); ++i) {
+        EXPECT_GE(facet.values[i-1].count, facet.values[i].count);
+    }
+
+    // Verify counts
+    EXPECT_EQ(facet.values[0].count, 60);   // text/plain (most common)
+    EXPECT_EQ(facet.values[1].count, 40);   // text/markdown
+    EXPECT_EQ(facet.values[2].count, 20);   // text/html (least common)
+}
+
+TEST(ParallelPostProcessorTest, EmptyResults) {
+    std::vector<SearchResultItem> results;  // Empty
+
+    auto result = ParallelPostProcessor::process(
+        std::move(results),
+        nullptr,
+        {"contentType"},
+        nullptr,
+        100,
+        3
+    );
+
+    EXPECT_TRUE(result.filteredResults.empty());
+    EXPECT_TRUE(result.facets.empty());
+}
+

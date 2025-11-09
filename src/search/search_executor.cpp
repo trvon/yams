@@ -3,6 +3,7 @@
 #include <atomic>
 #include <regex>
 #include <sstream>
+#include <yams/search/parallel_post_processor.hpp>
 #include <yams/search/search_executor.h>
 
 namespace yams::search {
@@ -105,9 +106,22 @@ Result<SearchResults> SearchExecutor::search(const SearchRequest& request) {
     auto results = std::move(searchResult.value());
     stats.totalResults = results.size();
 
-    // Apply filters
-    if (request.filters.hasFilters()) {
-        results = applyFilters(results, request.filters);
+    // Use ParallelPostProcessor for filtering, faceting, highlights, and snippets
+    auto postProcessResult = ParallelPostProcessor::process(
+        std::move(results),
+        request.filters.hasFilters() ? &request.filters : nullptr,
+        (request.includeFacets && config_.enableFaceting) ? request.facetFields : std::vector<std::string>{},
+        queryAst.get(),
+        (request.includeSnippets && config_.enableSnippets) ? config_.snippetLength : 0,
+        config_.maxHighlights
+    );
+
+    // Extract processed results and facets
+    results = std::move(postProcessResult.filteredResults);
+    
+    // Add facets to response
+    for (auto& facet : postProcessResult.facets) {
+        response.addFacet(std::move(facet));
     }
 
     // Rank results
@@ -120,28 +134,6 @@ Result<SearchResults> SearchExecutor::search(const SearchRequest& request) {
     // Sort results if requested
     if (request.sortOrder != SearchConfig::SortOrder::Relevance) {
         sortResults(results, request.sortOrder);
-    }
-
-    // Generate highlights
-    auto highlightStartTime = std::chrono::high_resolution_clock::now();
-    if (request.includeHighlights && config_.enableHighlighting) {
-        generateHighlights(results, queryAst.get());
-    }
-
-    // Generate snippets
-    if (request.includeSnippets && config_.enableSnippets) {
-        generateSnippets(results);
-    }
-    auto highlightEndTime = std::chrono::high_resolution_clock::now();
-    [[maybe_unused]] auto highlightTime = std::chrono::duration_cast<std::chrono::milliseconds>(
-        highlightEndTime - highlightStartTime);
-
-    // Generate facets
-    if (request.includeFacets && config_.enableFaceting) {
-        auto facets = generateFacets(results, request.facetFields);
-        for (auto& facet : facets) {
-            response.addFacet(std::move(facet));
-        }
     }
 
     // Apply pagination

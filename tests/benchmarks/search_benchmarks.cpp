@@ -14,6 +14,7 @@
 #include <yams/metadata/database.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/bk_tree.h>
+#include <yams/search/parallel_post_processor.hpp>
 #include <yams/search/query_parser.h>
 #include <yams/search/query_tokenizer.h>
 #include <yams/search/search_executor.h>
@@ -98,6 +99,50 @@ protected:
     std::string query_;
 };
 
+// --- Parallel Post-Processor Benchmarks (PBI-001 Phase 3) ---
+
+class ParallelPostProcessorBenchmark : public BenchmarkBase {
+public:
+    ParallelPostProcessorBenchmark(const std::string& name, int resultCount,
+                                  const Config& config = Config())
+        : BenchmarkBase(name, config), resultCount_(resultCount) {
+        // Create test results
+        for (int i = 0; i < resultCount_; ++i) {
+            search::SearchResultItem item;
+            item.documentId = i;
+            item.title = "Document " + std::to_string(i);
+            item.contentPreview = "This is the content preview for document " + 
+                                 std::to_string(i) + " with some searchable text.";
+            item.contentType = (i % 3 == 0) ? "text/plain" :
+                              (i % 3 == 1) ? "text/markdown" : "text/html";
+            item.detectedLanguage = (i % 2 == 0) ? "en" : "es";
+            results_.push_back(item);
+        }
+        facetFields_ = {"contentType", "language"};
+    }
+
+protected:
+    size_t runIteration() override {
+        // Copy results for each iteration
+        auto resultsCopy = results_;
+        
+        auto result = search::ParallelPostProcessor::process(
+            std::move(resultsCopy),
+            nullptr,  // No filters
+            facetFields_,
+            nullptr,  // No query AST (no highlights)
+            100,      // Snippet length
+            3         // Max highlights
+        );
+        
+        return result.filteredResults.size();
+    }
+
+    int resultCount_;
+    std::vector<search::SearchResultItem> results_;
+    std::vector<std::string> facetFields_;
+};
+
 } // namespace yams::benchmark
 
 // --- Main Runner ---
@@ -155,6 +200,14 @@ int main(int argc, char** argv) {
         std::make_unique<QueryParserBenchmark>("QueryParser_Simple", "simple query", config));
     benchmarks.push_back(std::make_unique<QueryParserBenchmark>(
         "QueryParser_Complex", "(query OR search) AND (terms OR words)", config));
+
+    // Parallel Post-Processor benchmarks (PBI-001 Phase 3)
+    benchmarks.push_back(
+        std::make_unique<yams::benchmark::ParallelPostProcessorBenchmark>("ParallelPostProcessor_100", 100, config));
+    benchmarks.push_back(
+        std::make_unique<yams::benchmark::ParallelPostProcessorBenchmark>("ParallelPostProcessor_500", 500, config));
+    benchmarks.push_back(
+        std::make_unique<yams::benchmark::ParallelPostProcessorBenchmark>("ParallelPostProcessor_1000", 1000, config));
 
     for (auto& benchmark : benchmarks) {
         auto result = benchmark->run();

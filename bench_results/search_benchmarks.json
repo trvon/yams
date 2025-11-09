@@ -1,0 +1,84 @@
+{
+  "history": {
+    "BKTree_Construction_256": [
+      {
+        "environment": {},
+        "metrics": {},
+        "name": "BKTree_Construction_256",
+        "timestamp": 1762693294090,
+        "unit": "ms",
+        "value": 1.75663
+      }
+    ],
+    "BKTree_Construction_4096": [
+      {
+        "environment": {},
+        "metrics": {},
+        "name": "BKTree_Construction_4096",
+        "timestamp": 1762693299497,
+        "unit": "ms",
+        "value": 52.497150000000005
+      }
+    ],
+    "ParallelPostProcessor_100": [
+      {
+        "environment": {},
+        "metrics": {},
+        "name": "ParallelPostProcessor_100",
+        "timestamp": 1762693299506,
+        "unit": "ms",
+        "value": 0.060020000000000004
+      }
+    ],
+    "ParallelPostProcessor_1000": [
+      {
+        "environment": {},
+        "metrics": {},
+        "name": "ParallelPostProcessor_1000",
+        "timestamp": 1762693299575,
+        "unit": "ms",
+        "value": 0.43021999999999994
+      }
+    ],
+    "ParallelPostProcessor_500": [
+      {
+        "environment": {},
+        "metrics": {},
+        "name": "ParallelPostProcessor_500",
+        "timestamp": 1762693299530,
+        "unit": "ms",
+        "value": 0.22658999999999996
+      }
+    ],
+    "QueryParser_Complex": [
+      {
+        "environment": {},
+        "metrics": {},
+        "name": "QueryParser_Complex",
+        "timestamp": 1762693299500,
+        "unit": "ms",
+        "value": 0.010190000000000006
+      }
+    ],
+    "QueryParser_Simple": [
+      {
+        "environment": {},
+        "metrics": {},
+        "name": "QueryParser_Simple",
+        "timestamp": 1762693299498,
+        "unit": "ms",
+        "value": 0.004050000000000003
+      }
+    ],
+    "Search_ExactMatch_1K": [
+      {
+        "environment": {},
+        "metrics": {},
+        "name": "Search_ExactMatch_1K",
+        "timestamp": 1762693293908,
+        "unit": "ms",
+        "value": 0.0
+      }
+    ]
+  }
+}
