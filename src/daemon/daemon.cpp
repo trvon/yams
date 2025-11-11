@@ -473,13 +473,14 @@ Result<void> YamsDaemon::stop() {
     stop_cv_.notify_all();
 
     // Stop socket server to prevent new connections
+    // Note: Do NOT reset socketServer_ yet - it contains RequestHandler with active
+    // coroutines that reference ServiceManager. Reset after ServiceManager shutdown.
     if (socketServer_) {
         spdlog::debug("Stopping socket server...");
         auto stopResult = socketServer_->stop();
         if (!stopResult) {
             spdlog::warn("Socket server stop returned error: {}", stopResult.error().message);
         }
-        socketServer_.reset();
         state_.readiness.ipcServerReady = false;
     }
 
@@ -511,8 +512,24 @@ Result<void> YamsDaemon::stop() {
         repairCoordinator_.reset();
     }
 
+    // Stop metrics polling thread BEFORE service manager shutdown
+    // to prevent races on ServiceManager component access
+    if (metrics_) {
+        spdlog::debug("Stopping metrics polling thread...");
+        metrics_->stopPolling();
+        spdlog::debug("Metrics polling stopped");
+    }
+
     if (serviceManager_) {
         serviceManager_->shutdown();
+    }
+
+    // Now safe to reset socketServer after ServiceManager shutdown completed
+    // (all io_context threads joined, no coroutines accessing RequestHandler members)
+    if (socketServer_) {
+        spdlog::debug("Resetting socket server...");
+        socketServer_.reset();
+        spdlog::debug("Socket server reset");
     }
 
     if (lifecycleManager_) {

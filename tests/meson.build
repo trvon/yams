@@ -1077,9 +1077,9 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'search', 'hybrid'],
     env: {
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
-      'YAMS_DISABLE_VECTORS': '1',  # Skip embedding tests when ONNX unavailable
+      'YAMS_DISABLE_VECTORS': '1',
     },
-    timeout: 120  # Increased timeout for engine initialization attempts
+    timeout: 120
   )
 
   # Plugin integration tests

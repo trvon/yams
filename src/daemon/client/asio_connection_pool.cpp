@@ -310,6 +310,8 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                     if (!hres) {
                         Error e = hres.error();
                         if (auto c = weak_conn.lock()) {
+                            // Acquire strand before accessing handlers map
+                            co_await boost::asio::dispatch(c->strand, use_awaitable);
                             for (auto& [rid, h] : c->handlers) {
                                 if (h.unary)
                                     h.unary->channel->try_send(
@@ -338,6 +340,8 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                         if (!pres) {
                             Error e = pres.error();
                             if (auto c = weak_conn.lock()) {
+                                // Acquire strand before accessing handlers map
+                                co_await boost::asio::dispatch(c->strand, use_awaitable);
                                 for (auto& [rid, h] : c->handlers) {
                                     if (h.unary)
                                         h.unary->channel->try_send(
@@ -366,6 +370,8 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                     if (!msgRes) {
                         Error e{ErrorCode::InvalidData, "Failed to parse daemon response frame"};
                         if (auto c = weak_conn.lock()) {
+                            // Acquire strand before accessing handlers map
+                            co_await boost::asio::dispatch(c->strand, use_awaitable);
                             for (auto& [rid, h] : c->handlers) {
                                 if (h.unary)
                                     h.unary->channel->try_send(
@@ -398,6 +404,10 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                         }
                     }
                     uint64_t reqId = msg.requestId;
+
+                    // Re-acquire strand protection before accessing handlers map
+                    // to prevent race with concurrent emplace() from send_request
+                    co_await boost::asio::dispatch(conn->strand, use_awaitable);
 
                     AsioConnection::Handler* handlerPtr = nullptr;
                     if (auto it = conn->handlers.find(reqId); it != conn->handlers.end()) {

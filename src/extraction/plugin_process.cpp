@@ -110,6 +110,12 @@ private:
 
 PluginProcess::Impl::Impl(PluginProcessConfig config) : config_{std::move(config)} {
     spdlog::debug("PluginProcess: Spawning process: {}", config_.executable.string());
+
+    // Ignore SIGPIPE globally to prevent crashes when plugin terminates unexpectedly
+    // PBI-002: Critical fix for external_plugin_extractor SIGPIPE crashes (signal 13)
+    signal(SIGPIPE, SIG_IGN);
+    spdlog::debug("PluginProcess: SIGPIPE handling configured (ignored globally)");
+
     state_.store(ProcessState::Starting, std::memory_order_release);
     start_time_ = std::chrono::steady_clock::now();
 
@@ -302,7 +308,14 @@ size_t PluginProcess::Impl::write_stdin(std::span<const std::byte> data) {
 
     ssize_t written = write(stdin_fd_, data.data(), data.size());
     if (written < 0) {
-        spdlog::error("PluginProcess: Failed to write to stdin: {}", strerror(errno));
+        // PBI-002: Detect broken pipe (plugin terminated unexpectedly)
+        if (errno == EPIPE) {
+            spdlog::error("PluginProcess: Broken pipe detected (plugin terminated) - errno: EPIPE");
+            state_.store(ProcessState::Terminated, std::memory_order_release);
+            return 0;
+        }
+        spdlog::error("PluginProcess: Failed to write to stdin: {} (errno: {})", strerror(errno),
+                      errno);
         return 0;
     }
 

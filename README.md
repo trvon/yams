@@ -37,13 +37,20 @@ Supported platforms: Linux x86_64/ARM64, macOS x86_64/ARM64
 
 ### macOS (Homebrew)
 ```bash
+# Stable release (recommended)
 brew install trvon/yams/yams
+
+# Or get nightly builds for latest features
+brew install trvon/yams/yams@nightly
 
 # If linking fails due to conflicts, force link
 brew link --overwrite yams
 
 # Verify installation
 yams --version
+
+# Run as a service (optional)
+brew services start yams
 ```
 
 ### Build from Source

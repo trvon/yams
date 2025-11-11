@@ -1,0 +1,127 @@
+from conan import ConanFile
+from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
+from conan.tools.files import apply_conandata_patches, collect_libs, copy, export_conandata_patches, get, replace_in_file, rmdir, rm
+from conan.tools.scm import Version
+import glob
+import os
+import shutil
+
+required_conan_version = ">=2.1"
+
+class ZstdConan(ConanFile):
+    name = "zstd"
+    url = "https://github.com/conan-io/conan-center-index"
+    homepage = "https://github.com/facebook/zstd"
+    description = "Zstandard - Fast real-time compression algorithm"
+    topics = ("zstandard", "compression", "algorithm", "decoder")
+    license = "BSD-3-Clause"
+
+    package_type = "library"
+    settings = "os", "arch", "compiler", "build_type"
+    options = {
+        "shared": [True, False],
+        "fPIC": [True, False],
+        "threading": [True, False],
+        "build_programs": [True, False],
+    }
+    default_options = {
+        "shared": False,
+        "fPIC": True,
+        "threading": True,
+        "build_programs": True,
+    }
+
+    def export_sources(self):
+        export_conandata_patches(self)
+
+    def config_options(self):
+        if self.settings.os == "Windows":
+            del self.options.fPIC
+
+    def configure(self):
+        if self.options.shared:
+            self.options.rm_safe("fPIC")
+        self.settings.rm_safe("compiler.cppstd")
+        self.settings.rm_safe("compiler.libcxx")
+
+    def layout(self):
+        cmake_layout(self, src_folder="src")
+
+    def source(self):
+        get(self, **self.conan_data["sources"][self.version], strip_root=True)
+
+        # Patch: Remove symlinks in test directories to avoid Docker volume issues
+        # These are only needed for test programs which we typically disable in fuzzing builds
+        self._remove_test_symlinks()
+
+    def _remove_test_symlinks(self):
+        """Remove problematic symlinks in test directories that fail on macOS Docker volumes"""
+        test_dirs = [
+            os.path.join(self.source_folder, "tests", "cli-tests", "bin"),
+            os.path.join(self.source_folder, "programs"),
+        ]
+
+        for test_dir in test_dirs:
+            if os.path.isdir(test_dir):
+                for root, dirs, files in os.walk(test_dir):
+                    for name in files + dirs:
+                        path = os.path.join(root, name)
+                        try:
+                            if os.path.islink(path):
+                                self.output.info(f"Removing symlink: {path}")
+                                os.unlink(path)
+                        except (OSError, IOError) as e:
+                            # Log but don't fail - symlink removal is best-effort
+                            self.output.info(f"Note: Could not remove {path}: {e}")
+
+    def generate(self):
+        tc = CMakeToolchain(self)
+        tc.variables["ZSTD_BUILD_PROGRAMS"] = self.options.build_programs
+        tc.variables["ZSTD_BUILD_STATIC"] = not self.options.shared or self.options.build_programs
+        tc.variables["ZSTD_BUILD_SHARED"] = self.options.shared
+        tc.variables["ZSTD_MULTITHREAD_SUPPORT"] = self.options.threading
+        if Version(self.version) < "1.5.6":
+            tc.cache_variables["CMAKE_POLICY_VERSION_MINIMUM"] = "3.5" # CMake 4 support
+        tc.generate()
+
+    def _patch_sources(self):
+        apply_conandata_patches(self)
+        # Don't force PIC
+        replace_in_file(self, os.path.join(self.source_folder, "build", "cmake", "lib", "CMakeLists.txt"),
+                              "POSITION_INDEPENDENT_CODE On", "")
+
+    def build(self):
+        self._patch_sources()
+        cmake = CMake(self)
+        cmake.configure(build_script_folder=os.path.join(self.source_folder, "build", "cmake"))
+        cmake.build()
+
+    def package(self):
+        copy(self, "LICENSE", src=self.source_folder, dst=os.path.join(self.package_folder, "licenses"))
+        cmake = CMake(self)
+        cmake.install()
+        rmdir(self, os.path.join(self.package_folder, "lib", "cmake"))
+        rmdir(self, os.path.join(self.package_folder, "lib", "pkgconfig"))
+        rmdir(self, os.path.join(self.package_folder, "share"))
+
+        if self.options.shared and self.options.build_programs:
+            # If we build programs we have to build static libs (see logic in generate()),
+            # but if shared is True, we only want shared lib in package folder.
+            rm(self, "*_static.*", os.path.join(self.package_folder, "lib"))
+            for lib in glob.glob(os.path.join(self.package_folder, "lib", "*.a")):
+                if not lib.endswith(".dll.a"):
+                    os.remove(lib)
+
+    def package_info(self):
+        zstd_cmake = "libzstd_shared" if self.options.shared else "libzstd_static"
+        self.cpp_info.set_property("cmake_file_name", "zstd")
+        self.cpp_info.set_property("cmake_target_name", f"zstd::{zstd_cmake}")
+        self.cpp_info.set_property("pkg_config_name", "libzstd")
+        self.cpp_info.set_property("cmake_target_aliases", ["zstd::libzstd"])
+        self.cpp_info.components["zstdlib"].libs = collect_libs(self)
+        if self.settings.os in ["Linux", "FreeBSD"]:
+            self.cpp_info.components["zstdlib"].system_libs.append("pthread")
+
+        # TODO: Remove after dropping Conan 1.x from ConanCenterIndex
+        self.cpp_info.components["zstdlib"].set_property("cmake_target_name", f"zstd::{zstd_cmake}")
+        self.cpp_info.components["zstdlib"].set_property("pkg_config_name", "libzstd")

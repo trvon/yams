@@ -60,9 +60,9 @@ case "${BUILD_TYPE_LOWER}" in
     ENABLE_PROFILING=true
     ;;
   fuzzing)
-    echo "Error: Fuzzing build type not yet implemented" >&2
-    echo "TODO: Will enable AFL++/libFuzzer instrumentation when ready" >&2
-    exit 1
+    BUILD_TYPE="Debug"  # Use Debug as base for Conan/Meson
+    ENABLE_FUZZING=true
+    echo "Fuzzing build: AFL++/libFuzzer instrumentation enabled"
     ;;
   *)
     echo "Unknown build type: ${BUILD_TYPE_INPUT}. Expected Debug, Release, Profiling, or Fuzzing." >&2
@@ -116,6 +116,11 @@ CONAN_ARGS=(-s "build_type=${BUILD_TYPE}" -b missing --update)
 
 # Add common Conan options (sqlite3 with FTS5, etc.)
 CONAN_ARGS+=(-o "sqlite3/*:fts5=True")
+
+# Fuzzing builds: disable programs in zstd to avoid symlink issues in Docker
+if [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
+  CONAN_ARGS+=(-o "zstd/*:build_programs=False")
+fi
 
 # Add extra Conan options from environment (for CI)
 if [[ -n "${CONAN_EXTRA_OPTIONS}" ]]; then
@@ -222,6 +227,9 @@ fi
 if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
   BUILD_DIR="build/profiling"
   CONAN_SUBDIR="build-profiling"
+elif [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
+  BUILD_DIR="build/fuzzing"
+  CONAN_SUBDIR="build-fuzzing"
 elif [[ "${BUILD_TYPE}" == "Debug" ]]; then
   BUILD_DIR="builddir"
   CONAN_SUBDIR="build-debug"
@@ -250,6 +258,9 @@ INSTALL_PREFIX="${YAMS_INSTALL_PREFIX:-${INSTALL_PREFIX}}"
 echo "Build Type:        ${BUILD_TYPE_INPUT}"
 if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
   echo "Profiling:         Tracy enabled"
+fi
+if [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
+  echo "Fuzzing:           AFL++/libFuzzer enabled"
 fi
 echo "Build Dir:         ${BUILD_DIR}"
 echo "Install Prefix:    ${INSTALL_PREFIX}"
@@ -281,7 +292,7 @@ if [[ -n "${DOCKERFILE_CONF_REV:-}" ]] || [[ -n "${CI:-}" ]]; then
 fi
 
 # Enable tests for Debug builds in Conan (needed for Catch2/gtest dependencies)
-if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
+if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true" ]] || [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
   CONAN_ARGS+=(-o build_tests=True)
 fi
 
@@ -367,7 +378,7 @@ if [[ "${YAMS_DISABLE_PDF:-}" == "true" ]]; then
   MESON_OPTIONS+=("-Dplugin-pdf=false")
 fi
 
-if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
+if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true" ]] || [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
   MESON_OPTIONS+=(
     "-Dbuild-tests=true"
     "-Denable-bench-tests=true"
@@ -379,6 +390,13 @@ if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
     "-Denable-profiling=true"
   )
   echo "Tracy profiling enabled for Meson build"
+fi
+
+if [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
+  MESON_OPTIONS+=(
+    "-Dbuild-fuzzers=true"
+  )
+  echo "Fuzzing targets enabled for Meson build"
 fi
 
 if [[ "${ENABLE_COVERAGE}" == "true" ]]; then

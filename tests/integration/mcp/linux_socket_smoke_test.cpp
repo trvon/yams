@@ -7,6 +7,7 @@
 #include <string>
 #include <thread>
 
+#include "../../common/daemon_test_fixture.h"
 #include <yams/daemon/daemon.h>
 #include <yams/mcp/mcp_server.h>
 
@@ -25,30 +26,20 @@ public:
     bool isConnected() const override { return true; }
     void close() override {}
 };
+
+// Fixture for Linux socket tests
+class LinuxSocketFixture : public yams::test::DaemonTestFixture {
+protected:
+    void SetUp() override {
+        // Set XDG_RUNTIME_DIR so both daemon and MCP resolve the same socket path
+        ::setenv("XDG_RUNTIME_DIR", runtimeRoot_.c_str(), 1);
+        DaemonTestFixture::SetUp();
+    }
+};
 } // namespace
 
-TEST(MCPLinuxSocketSmokeTest, StatsSucceedsWithXdgRuntimeDir) {
-    namespace fs = std::filesystem;
-    auto tempBase = fs::temp_directory_path() / ("yams_xdg_" + std::to_string(::getpid()));
-    fs::create_directories(tempBase);
-    // Ensure cleanup
-    struct Cleanup {
-        fs::path p;
-        ~Cleanup() {
-            std::error_code ec;
-            fs::remove_all(p, ec);
-        }
-    } cleanup{tempBase};
-
-    // Set XDG_RUNTIME_DIR so both daemon and MCP resolve the same socket path
-    ::setenv("XDG_RUNTIME_DIR", tempBase.c_str(), 1);
-
-    yams::daemon::DaemonConfig cfg;
-    cfg.dataDir = tempBase / "storage";
-    fs::create_directories(cfg.dataDir);
-    // Leave cfg.socketPath empty so daemon resolves via XDG_RUNTIME_DIR
-    yams::daemon::YamsDaemon daemon(cfg);
-    ASSERT_TRUE(daemon.start());
+TEST_F(LinuxSocketFixture, StatsSucceedsWithXdgRuntimeDir) {
+    ASSERT_TRUE(startDaemon());
 
     // Spin briefly to allow socket server to come up
     std::this_thread::sleep_for(200ms);
@@ -63,8 +54,6 @@ TEST(MCPLinuxSocketSmokeTest, StatsSucceedsWithXdgRuntimeDir) {
     } else {
         ASSERT_TRUE(res.contains("content"));
     }
-
-    (void)daemon.stop();
 }
 
 #else

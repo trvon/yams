@@ -26,11 +26,16 @@ namespace yams::daemon {
 
 struct AsioConnection {
     using socket_t = boost::asio::local::stream_protocol::socket;
-    using response_channel_t = boost::asio::experimental::channel<void(
-        boost::system::error_code, std::shared_ptr<Result<Response>>)>;
-    using void_channel_t =
-        boost::asio::experimental::channel<void(boost::system::error_code, Result<void>)>;
-
+    // Use std::mutex in channel_traits for thread-safe access across multiple threads
+    // Template params: <Executor, Traits, Signatures...>
+    using response_channel_t = boost::asio::experimental::basic_channel<
+        boost::asio::any_io_executor,
+        boost::asio::experimental::channel_traits<std::mutex>,
+        void(boost::system::error_code, std::shared_ptr<Result<Response>>)>;
+    using void_channel_t = boost::asio::experimental::basic_channel<
+        boost::asio::any_io_executor,
+        boost::asio::experimental::channel_traits<std::mutex>,
+        void(boost::system::error_code, Result<void>)>;
     explicit AsioConnection(const TransportOptions& o)
         : opts(o),
           strand(o.executor ? *o.executor

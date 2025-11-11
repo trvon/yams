@@ -12,6 +12,7 @@
 #include <cctype>
 #include <cmath>
 #include <condition_variable>
+#include <cstdlib>
 #include <filesystem>
 #include <future>
 #include <mutex>
@@ -19,11 +20,41 @@
 #include <queue>
 #include <regex>
 #include <sstream>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
 namespace yams::search {
+
+namespace {
+bool envTruthy(const char* value) {
+    if (!value || *value == '\0')
+        return false;
+
+    std::string normalized(value);
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    return !(normalized.empty() || normalized == "0" || normalized == "false" ||
+             normalized == "off" || normalized == "no");
+}
+
+bool testThreadClampEnabled() {
+    static constexpr const char* kEnvKeys[] = {
+        "YAMS_TEST_SAFE_SINGLE_INSTANCE",
+        "YAMS_TESTING",
+    };
+
+    for (const char* key : kEnvKeys) {
+        if (envTruthy(std::getenv(key))) {
+            return true;
+        }
+    }
+
+    return false;
+}
+} // namespace
 
 // =============================================================================
 // Simple Keyword Search Engine Implementation (BM25-based)
@@ -309,8 +340,24 @@ private:
             if (threads == 0)
                 return;
             done_ = false;
-            for (size_t i = 0; i < threads; ++i) {
-                workers_.emplace_back([this]() { run(); });
+            workers_.reserve(threads);
+            try {
+                for (size_t i = 0; i < threads; ++i) {
+                    workers_.emplace_back([this]() { run(); });
+                }
+            } catch (...) {
+                {
+                    std::lock_guard<std::mutex> lk(m_);
+                    done_ = true;
+                }
+                cv_.notify_all();
+                for (auto& worker : workers_) {
+                    if (worker.joinable()) {
+                        try { worker.join(); } catch (...) {}
+                    }
+                }
+                workers_.clear();
+                throw;
             }
         }
         void stop() {
@@ -1323,8 +1370,24 @@ private:
             if (threads == 0)
                 return;
             done_ = false;
-            for (size_t i = 0; i < threads; ++i) {
-                workers_.emplace_back([this]() { run(); });
+            workers_.reserve(threads);
+            try {
+                for (size_t i = 0; i < threads; ++i) {
+                    workers_.emplace_back([this]() { run(); });
+                }
+            } catch (...) {
+                {
+                    std::lock_guard<std::mutex> lk(m_);
+                    done_ = true;
+                }
+                cv_.notify_all();
+                for (auto& worker : workers_) {
+                    if (worker.joinable()) {
+                        try { worker.join(); } catch (...) {}
+                    }
+                }
+                workers_.clear();
+                throw;
             }
         }
         void stop() {
@@ -1388,6 +1451,9 @@ private:
                 n = std::clamp<size_t>(hw / 2, 2, 4);
             }
         }
+
+        if (testThreadClampEnabled())
+            n = 1;
         pool_.start(n);
     }
 

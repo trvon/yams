@@ -1,0 +1,29 @@
+# Conan profile for AFL++ Docker container
+# Used with: docker run -ti -v $(pwd):/src aflplusplus/aflplusplus
+#
+# The AFL++ container ships with afl-clang-fast/afl-clang-fast++ wrappers
+# that instrument code for fuzzing. This profile ensures dependencies are
+# built with compatible settings (libc++, Debug mode for better crash info).
+#
+# Note: This is the HOST profile. Build tools use default_build profile.
+
+[settings]
+os=Linux
+arch=x86_64
+compiler=clang
+compiler.version=18
+compiler.libcxx=libc++
+compiler.cppstd=23
+build_type=Debug
+
+[conf]
+tools.cmake.cmaketoolchain:generator=Ninja
+# Use AFL++ instrumented compilers
+tools.build:compiler_executables={"c":"afl-clang-fast","cpp":"afl-clang-fast++"}
+
+[buildenv]
+# AFL++ environment variables for optimal fuzzing
+# Note: AFL_HARDEN and AFL_USE_ASAN are mutually exclusive
+AFL_USE_ASAN=1
+# Ensure static linking (AFL++ docs: "Never instrument shared libraries")
+AFL_LLVM_INSTRUMENT=AFL

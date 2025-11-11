@@ -359,8 +359,20 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
         const std::size_t numWorkers =
             std::max<std::size_t>(1, std::thread::hardware_concurrency());
         workers_.reserve(numWorkers);
-        for (std::size_t i = 0; i < numWorkers; ++i) {
-            workers_.emplace_back([this]() { ioContext_->run(); });
+        try {
+            for (std::size_t i = 0; i < numWorkers; ++i) {
+                workers_.emplace_back([this]() { ioContext_->run(); });
+            }
+        } catch (...) {
+            spdlog::error("Failed to create ServiceManager worker thread, cleaning up {} existing workers", workers_.size());
+            ioContext_->stop();
+            for (auto& worker : workers_) {
+                if (worker.joinable()) {
+                    try { worker.join(); } catch (...) {}
+                }
+            }
+            workers_.clear();
+            throw;
         }
         spdlog::info("ServiceManager: Created io_context with {} worker threads", numWorkers);
     } catch (const std::exception& e) {
@@ -2341,8 +2353,10 @@ boost::asio::awaitable<bool> ServiceManager::co_openDatabase(const std::filesyst
 
     // Channel to receive completion from worker (wrap Result in shared_ptr for
     // default-construct path)
-    boost::asio::experimental::channel<void(boost::system::error_code,
-                                            std::shared_ptr<Result<void>>)>
+    boost::asio::experimental::basic_channel<
+        boost::asio::any_io_executor,
+        boost::asio::experimental::channel_traits<std::mutex>,
+        void(boost::system::error_code, std::shared_ptr<Result<void>>)>
         ch(ex, 1);
     try {
         boost::asio::post(getWorkerExecutor(), [this, dbPath, &ch]() mutable {
@@ -2405,8 +2419,10 @@ boost::asio::awaitable<bool> ServiceManager::co_migrateDatabase(int timeout_ms,
     }
     mm.registerMigrations(metadata::YamsMetadataMigrations::getAllMigrations());
 
-    boost::asio::experimental::channel<void(boost::system::error_code,
-                                            std::shared_ptr<Result<void>>)>
+    boost::asio::experimental::basic_channel<
+        boost::asio::any_io_executor,
+        boost::asio::experimental::channel_traits<std::mutex>,
+        void(boost::system::error_code, std::shared_ptr<Result<void>>)>
         ch(ex, 1);
     try {
         boost::asio::post(getWorkerExecutor(), [&mm, &ch]() mutable {

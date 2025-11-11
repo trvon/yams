@@ -179,20 +179,41 @@ Result<void> SocketServer::start() {
         } catch (...) {
         }
 
-        // Simple worker pool: blocking io_context_.run(), no polling, deterministic shutdown
+        // Worker pool using poll() pattern for responsive shutdown
         workers_.reserve(config_.workerThreads);
-        for (size_t i = 0; i < config_.workerThreads; ++i) {
-            workers_.emplace_back([this, i](const yams::compat::stop_token& /*token*/) {
-                set_current_thread_name("yams-ipc-" + std::to_string(i));
-                spdlog::info("SocketServer: worker {} starting (blocking run)", i);
-                try {
-                    // Blocking run() - exits when work_guard_ is reset or io_context_ stopped
-                    io_context_.run();
-                } catch (const std::exception& e) {
-                    spdlog::error("SocketServer: worker {} exception: {}", i, e.what());
+        try {
+            for (size_t i = 0; i < config_.workerThreads; ++i) {
+                workers_.emplace_back([this, i]() {
+                    set_current_thread_name("yams-ipc-" + std::to_string(i));
+                    spdlog::info("SocketServer: worker {} starting (poll loop)", i);
+                    try {
+                        // Poll loop - responsive shutdown unlike blocking run()
+                        while (!io_context_.stopped() && running_.load(std::memory_order_relaxed)) {
+                            std::size_t count = io_context_.poll();
+                            if (count == 0) {
+                                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                            }
+                        }
+                    } catch (const std::exception& e) {
+                        spdlog::error("SocketServer: worker {} exception: {}", i, e.what());
+                    }
+                    spdlog::info("SocketServer: worker {} exiting", i);
+                });
+            }
+        } catch (...) {
+            // If thread creation fails, clean up already-created threads before rethrowing
+            spdlog::error("Failed to create worker thread, cleaning up {} existing workers", workers_.size());
+            running_ = false;
+            io_context_.stop();
+            for (auto& worker : workers_) {
+                if (worker.joinable()) {
+                    try {
+                        worker.join();
+                    } catch (...) {}
                 }
-                spdlog::info("SocketServer: worker {} exiting", i);
-            });
+            }
+            workers_.clear();
+            throw; // Rethrow to propagate error
         }
 
         if (state_) {
@@ -211,6 +232,7 @@ Result<void> SocketServer::start() {
 
     } catch (const std::exception& e) {
         running_ = false;
+        spdlog::error("SocketServer::start exception: {}", e.what());
         return Error{ErrorCode::IOError,
                      fmt::format("Failed to start socket server: {}", e.what())};
     }
@@ -309,7 +331,7 @@ Result<void> SocketServer::stop() {
         } catch (...) {
         }
 
-        // Stop io_context BEFORE clearing workers
+        // Stop io_context to signal workers to exit
         spdlog::info("SocketServer: stopping io_context");
         try {
             work_guard_.reset();
@@ -317,11 +339,19 @@ Result<void> SocketServer::stop() {
         } catch (...) {
         }
 
-        // Now clear workers - jthread RAII will join
-        // Workers should exit quickly since io_context is stopped
-        spdlog::info("SocketServer: clearing workers (RAII join)");
+        // Join worker threads (they check io_context_.stopped() in poll loop)
+        spdlog::info("SocketServer: joining {} worker threads", workers_.size());
+        for (size_t i = 0; i < workers_.size(); ++i) {
+            if (workers_[i].joinable()) {
+                try {
+                    workers_[i].join();
+                } catch (const std::system_error& e) {
+                    spdlog::warn("SocketServer: worker {} join failed: {}", i, e.what());
+                }
+            }
+        }
         workers_.clear();
-        spdlog::info("SocketServer: workers joined");
+        spdlog::info("SocketServer: all workers stopped");
 
         if (state_) {
             state_->readiness.ipcServerReady.store(false);

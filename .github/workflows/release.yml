@@ -1107,6 +1107,80 @@ jobs:
           fi
           popd >/dev/null
 
+      - name: Update Homebrew nightly formula (nightly/weekly only)
+        if: steps.meta.outputs.channel != 'stable'
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN || '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.meta.outputs.version }}"
+          TAG="${{ steps.meta.outputs.tag }}"
+          TAP_PATH="homebrew-yams"
+          
+          # Extract date and hash from version (e.g., nightly-20251109-ebd0701)
+          DATE=$(echo "$VERSION" | sed -E 's/.*-([0-9]{8})-.*/\1/')
+          HASH=$(echo "$VERSION" | sed -E 's/.*-([a-f0-9]{7})$/\1/')
+          
+          if [ ! -d "$TAP_PATH" ]; then
+            echo "Tap submodule not found at $TAP_PATH; skipping nightly formula update" >&2
+            exit 0
+          fi
+          
+          # Initialize submodule
+          git submodule update --init homebrew-yams
+          
+          # Download macOS binaries and compute SHA256s
+          ARM64_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/yams-${VERSION}-macos-arm64.zip"
+          X86_64_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/yams-${VERSION}-macos-x86_64.zip"
+          
+          echo "Downloading macOS ARM64 binary: $ARM64_URL" >&2
+          curl -Ls -o "yams-nightly-arm64.zip" "$ARM64_URL"
+          SHA256_ARM64=$(shasum -a 256 "yams-nightly-arm64.zip" | awk '{print $1}')
+          echo "Computed ARM64 sha256: $SHA256_ARM64" >&2
+          
+          echo "Downloading macOS x86_64 binary: $X86_64_URL" >&2
+          curl -Ls -o "yams-nightly-x86_64.zip" "$X86_64_URL"
+          SHA256_X86_64=$(shasum -a 256 "yams-nightly-x86_64.zip" | awk '{print $1}')
+          echo "Computed x86_64 sha256: $SHA256_X86_64" >&2
+          
+          # Update nightly formula
+          NIGHTLY_FORMULA="$TAP_PATH/Formula/yams@nightly.rb"
+          if [ ! -f "$NIGHTLY_FORMULA" ]; then
+            echo "Nightly formula not found at $NIGHTLY_FORMULA; skipping" >&2
+            exit 0
+          fi
+          
+          # Replace placeholders
+          sed -i.bak \
+            -e "s/__VERSION__/${VERSION}/g" \
+            -e "s/__TAG__/${TAG}/g" \
+            -e "s/__DATE__/${DATE}/g" \
+            -e "s/__HASH__/${HASH}/g" \
+            -e "s/__SHA256_ARM64__/${SHA256_ARM64}/g" \
+            -e "s/__SHA256_X86_64__/${SHA256_X86_64}/g" \
+            "$NIGHTLY_FORMULA"
+          rm -f "${NIGHTLY_FORMULA}.bak"
+          
+          pushd "$TAP_PATH" >/dev/null
+          git checkout main || git checkout -b main
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/yams@nightly.rb || true
+          if git diff --cached --quiet; then
+            echo "Nightly formula unchanged; skipping push" >&2
+            popd >/dev/null
+            exit 0
+          fi
+          git commit -m "chore(homebrew): update nightly formula to ${VERSION}"
+          if [ -n "${HOMEBREW_TAP_TOKEN:-}" ]; then
+            REMOTE="https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${{ github.repository_owner }}/homebrew-yams.git"
+            git push "$REMOTE" main || echo "Push failed; ensure HOMEBREW_TAP_TOKEN has repo permissions"
+          else
+            echo "HOMEBREW_TAP_TOKEN not set; manual push required" >&2
+          fi
+          popd >/dev/null
+
       - name: Build APT repository metadata (stable only, linux .deb present)
         if: steps.meta.outputs.channel == 'stable'
         shell: bash

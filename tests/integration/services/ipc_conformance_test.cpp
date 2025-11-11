@@ -5,8 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "../../common/daemon_test_fixture.h"
 #include "../daemon/test_async_helpers.h"
-#include "../daemon/test_daemon_harness.h"
 #include <boost/asio/awaitable.hpp>
 
 #include <boost/asio/local/stream_protocol.hpp>
@@ -25,31 +25,6 @@ using yams::mcp::MCPServer;
 
 namespace {
 
-static bool canBindUnixSocketHere() {
-    try {
-        boost::asio::io_context io;
-        boost::asio::local::stream_protocol::acceptor acc(io);
-        auto path = std::filesystem::path("/tmp") /
-                    (std::string("yams-bind-probe-") + std::to_string(::getpid()) + ".sock");
-        std::error_code ec;
-        std::filesystem::remove(path, ec);
-        boost::system::error_code bec;
-        acc.open(boost::asio::local::stream_protocol::endpoint(path.string()).protocol(), bec);
-        if (bec)
-            return false;
-        acc.bind(boost::asio::local::stream_protocol::endpoint(path.string()), bec);
-        if (bec) {
-            return false;
-        }
-        acc.close();
-        std::filesystem::remove(path, ec);
-        return true;
-    } catch (...) {
-        return false;
-    }
-}
-
-namespace {
 class NullTransport : public ITransport {
 public:
     yams::mcp::MessageResult receive() override {
@@ -62,17 +37,43 @@ public:
     bool isConnected() const override { return true; }
     void close() override {}
 };
-} // namespace
 
-TEST(IpcConformanceIT, CatAndCancelAndSessions) {
+// Fixture for IPC conformance tests that need daemon
+class IpcConformanceFixture : public yams::test::DaemonTestFixture {
+protected:
+    bool canBindUnixSocketHere() {
+        try {
+            boost::asio::io_context io;
+            boost::asio::local::stream_protocol::acceptor acc(io);
+            auto path = std::filesystem::path("/tmp") /
+                        (std::string("yams-bind-probe-") + std::to_string(::getpid()) + ".sock");
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+            boost::system::error_code bec;
+            acc.open(boost::asio::local::stream_protocol::endpoint(path.string()).protocol(), bec);
+            if (bec)
+                return false;
+            acc.bind(boost::asio::local::stream_protocol::endpoint(path.string()), bec);
+            if (bec) {
+                return false;
+            }
+            acc.close();
+            std::filesystem::remove(path, ec);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+};
+
+TEST_F(IpcConformanceFixture, CatAndCancelAndSessions) {
     if (!canBindUnixSocketHere()) {
         GTEST_SKIP() << "Skipping IPC conformance: environment forbids AF_UNIX bind (sandbox).";
     }
-    yams::test::DaemonHarness h;
-    ASSERT_TRUE(h.start());
+    ASSERT_TRUE(startDaemon());
 
     ClientConfig cc;
-    cc.socketPath = h.socketPath();
+    cc.socketPath = socketPath_;
     cc.autoStart = false;
     cc.requestTimeout = 10s;
     DaemonClient client(cc);
@@ -133,7 +134,7 @@ TEST(IpcConformanceIT, CatAndCancelAndSessions) {
 }
 
 // Phase 1: Unreachable socket returns actionable error (tolerant envelope)
-TEST(IpcConformanceIT, UnreachableSocketErrorShape) {
+TEST_F(IpcConformanceFixture, UnreachableSocketErrorShape) {
     if (!canBindUnixSocketHere()) {
         GTEST_SKIP() << "Skipping IPC unreachable: AF_UNIX not available.";
     }
@@ -154,14 +155,13 @@ TEST(IpcConformanceIT, UnreachableSocketErrorShape) {
 // interference from services daemon lifecycle and avoid flakiness here.
 
 // Final lightweight stress: ping loop to ensure stable IPC handling.
-TEST(IpcConformanceIT, StressTail) {
+TEST_F(IpcConformanceFixture, StressTail) {
     if (!canBindUnixSocketHere()) {
         GTEST_SKIP() << "Skipping IPC stress: AF_UNIX not available.";
     }
-    yams::test::DaemonHarness h;
-    ASSERT_TRUE(h.start());
+    ASSERT_TRUE(startDaemon());
     ClientConfig cc;
-    cc.socketPath = h.socketPath();
+    cc.socketPath = socketPath_;
     cc.autoStart = false;
     cc.requestTimeout = 2s;
     DaemonClient client(cc);
@@ -179,4 +179,5 @@ TEST(IpcConformanceIT, StressTail) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 }
+
 } // namespace

@@ -79,8 +79,8 @@ private:
     boost::asio::io_context io_context_;
     std::unique_ptr<boost::asio::local::stream_protocol::acceptor> acceptor_;
 
-    // Simplified worker pool (1 thread default, RAII with jthread)
-    std::vector<yams::compat::jthread> workers_;
+    // Worker pool - using std::thread for explicit control over join/detach
+    std::vector<std::thread> workers_;
 
     // Keep io_context_ alive while running (RAII with optional)
     std::optional<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>

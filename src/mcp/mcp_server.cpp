@@ -5163,31 +5163,45 @@ MCPServer::handleListSnapshots([[maybe_unused]] const MCPListSnapshotsRequest& r
 // === Thread pool implementation for MCPServer ===
 void MCPServer::startThreadPool(std::size_t threads) {
     stopWorkers_.store(false);
-    for (std::size_t i = 0; i < threads; ++i) {
-        workerPool_.emplace_back([this]() {
-            while (true) {
-                std::function<void()> task;
-                {
-                    std::unique_lock<std::mutex> lk(taskMutex_);
-                    taskCv_.wait(lk,
-                                 [this]() { return stopWorkers_.load() || !taskQueue_.empty(); });
-                    if (stopWorkers_.load() && taskQueue_.empty()) {
-                        return;
+    workerPool_.reserve(threads);
+    try {
+        for (std::size_t i = 0; i < threads; ++i) {
+            workerPool_.emplace_back([this]() {
+                while (true) {
+                    std::function<void()> task;
+                    {
+                        std::unique_lock<std::mutex> lk(taskMutex_);
+                        taskCv_.wait(lk,
+                                     [this]() { return stopWorkers_.load() || !taskQueue_.empty(); });
+                        if (stopWorkers_.load() && taskQueue_.empty()) {
+                            return;
+                        }
+                        task = std::move(taskQueue_.front());
+                        taskQueue_.pop_front();
                     }
-                    task = std::move(taskQueue_.front());
-                    taskQueue_.pop_front();
+                    mcpWorkerActive_.fetch_add(1, std::memory_order_relaxed);
+                    try {
+                        task();
+                        mcpWorkerProcessed_.fetch_add(1, std::memory_order_relaxed);
+                    } catch (...) {
+                        mcpWorkerFailed_.fetch_add(1, std::memory_order_relaxed);
+                        // Swallow to keep worker alive
+                    }
+                    mcpWorkerActive_.fetch_sub(1, std::memory_order_relaxed);
                 }
-                mcpWorkerActive_.fetch_add(1, std::memory_order_relaxed);
-                try {
-                    task();
-                    mcpWorkerProcessed_.fetch_add(1, std::memory_order_relaxed);
-                } catch (...) {
-                    mcpWorkerFailed_.fetch_add(1, std::memory_order_relaxed);
-                    // Swallow to keep worker alive
-                }
-                mcpWorkerActive_.fetch_sub(1, std::memory_order_relaxed);
+            });
+        }
+    } catch (...) {
+        spdlog::error("Failed to create MCP worker thread, cleaning up {} existing workers", workerPool_.size());
+        stopWorkers_.store(true);
+        taskCv_.notify_all();
+        for (auto& worker : workerPool_) {
+            if (worker.joinable()) {
+                try { worker.join(); } catch (...) {}
             }
-        });
+        }
+        workerPool_.clear();
+        throw; // Rethrow to propagate error
     }
 }
 

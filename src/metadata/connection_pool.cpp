@@ -1,4 +1,8 @@
 #include <spdlog/spdlog.h>
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
+#include <string>
 #include <thread>
 #include <yams/metadata/connection_pool.h>
 
@@ -415,11 +419,32 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
         return timeoutResult.error();
     }
 
-    // Enable WAL mode if requested (disabled in tests to avoid tempfs WAL I/O issues)
+    // Enable WAL mode if requested (disabled in select environments)
     // If enabling WAL fails (e.g., on restricted filesystems), log and fall back to a
     // memory journal to improve concurrency in test environments.
-#ifndef YAMS_TESTING
-    if (config_.enableWAL) {
+    const auto envTruthy = [](const char* value) {
+        if (!value)
+            return false;
+        std::string v(value);
+        std::transform(v.begin(), v.end(), v.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return !(v.empty() || v == "0" || v == "false" || v == "off" || v == "no");
+    };
+
+    const bool walDisabledViaEnv = [&]() {
+        const char* keys[] = {"YAMS_DISABLE_WAL",     "YAMS_TEST_DISABLE_WAL",
+                              "YAMS_TESTING",         "YAMS_TEST_SAFE_SINGLE_INSTANCE",
+                              "YAMS_DISABLE_VECTORS", "YAMS_TEST_FAST_START"};
+        for (const char* key : keys) {
+            if (envTruthy(std::getenv(key))) {
+                spdlog::debug("WAL override active via {}", key);
+                return true;
+            }
+        }
+        return false;
+    }();
+
+    if (config_.enableWAL && !walDisabledViaEnv) {
         auto walResult = db.enableWAL();
         if (!walResult) {
             spdlog::warn("WAL enable failed: {} — continuing without WAL",
@@ -428,8 +453,11 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
             db.execute("PRAGMA journal_mode=MEMORY");
             db.execute("PRAGMA locking_mode=NORMAL");
         }
+    } else if (config_.enableWAL) {
+        spdlog::debug("Skipping WAL enablement due to environment override");
+        db.execute("PRAGMA journal_mode=MEMORY");
+        db.execute("PRAGMA locking_mode=NORMAL");
     }
-#endif
 
     // Enable foreign keys if requested
     if (config_.enableForeignKeys) {

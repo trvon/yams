@@ -66,6 +66,7 @@ public:
     std::chrono::milliseconds bodyTimeout_{60000};   // 60s default
     TransportOptions transportOptions_;
     std::shared_ptr<AsioConnectionPool> pool_;
+    bool explicitly_disconnected_{false}; // Track explicit disconnect() calls
 
     void refresh_transport() {
         transportOptions_.socketPath = config_.socketPath;
@@ -325,6 +326,8 @@ boost::asio::awaitable<Result<void>> DaemonClient::connect() {
         if (r) {
             if (!pImpl->config_.enableCircuitBreaker)
                 pImpl->breaker_.recordSuccess();
+            // Clear explicitly disconnected flag on successful connection
+            pImpl->explicitly_disconnected_ = false;
             co_return Result<void>();
         }
         if (!pImpl->config_.autoStart) {
@@ -347,6 +350,8 @@ boost::asio::awaitable<Result<void>> DaemonClient::connect() {
         auto r = co_await try_connect(pImpl->config_.connectTimeout);
         if (r) {
             spdlog::debug("Daemon started successfully after {} retries", i + 1);
+            // Clear explicitly disconnected flag on successful connection
+            pImpl->explicitly_disconnected_ = false;
             co_return Result<void>();
         }
         steady_timer t(co_await boost::asio::this_coro::executor);
@@ -358,10 +363,18 @@ boost::asio::awaitable<Result<void>> DaemonClient::connect() {
 }
 
 void DaemonClient::disconnect() {
-    // No-op for Asio transport; connections are per-request and scoped in adapter
+    // Shutdown the connection pool and mark as explicitly disconnected
+    if (pImpl->pool_) {
+        pImpl->pool_->shutdown();
+    }
+    pImpl->explicitly_disconnected_ = true;
 }
 
 bool DaemonClient::isConnected() const {
+    // If explicitly disconnected, return false until reconnect
+    if (pImpl->explicitly_disconnected_) {
+        return false;
+    }
     // Treat connectivity as liveness of the daemon (socket + ping), not a persistent socket
     return pingDaemonSync(pImpl->config_.socketPath, std::chrono::milliseconds(250),
                           std::chrono::milliseconds(150), std::chrono::milliseconds(300));

@@ -1,0 +1,12 @@
+# Exclude build artifacts and caches from Docker context
+build/
+builddir/
+.conan2/
+.conan2-docker/
+__pycache__/
+*.pyc
+.git/
+.github/
+.vscode/
+.idea/
+*.log

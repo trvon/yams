@@ -1,0 +1,169 @@
+# YAMS Fuzzing Infrastructure
+
+AFL++ fuzzing harnesses for CLI/daemon IPC protocol testing per issue #8.
+
+## Targets
+
+- `fuzz_ipc_protocol` - MessageFramer, CRC32 validation, frame header parsing
+- `fuzz_add_document` - AddDocumentRequest/UpdateDocumentRequest deserialization
+
+Fuzzers run in `aflplusplus/aflplusplus` Docker container for reproducibility.
+
+## Usage
+
+Build fuzzers:
+```bash
+./tools/fuzzing/fuzz-docker.sh build
+```
+
+Run fuzzer:
+```bash
+./tools/fuzzing/fuzz-docker.sh fuzz ipc
+./tools/fuzzing/fuzz-docker.sh fuzz add_document
+```
+
+Monitor:
+```bash
+./tools/fuzzing/fuzz-docker.sh exec afl-whatsup /fuzz/findings/ipc
+```
+
+Reproduce crash:
+```bash
+./tools/fuzzing/fuzz-docker.sh exec \
+  /build/tools/fuzzing/fuzz_ipc_protocol /fuzz/findings/ipc/crashes/id:000000*
+```
+
+## Architecture
+
+### Directory Structure
+
+```
+tools/fuzzing/
+├── README.md                    # This file
+├── fuzz-docker.sh              # Docker wrapper script
+├── meson.build                 # Build definitions
+├── fuzz_ipc_protocol.cpp       # IPC fuzzer harness
+├── fuzz_add_document.cpp       # Document fuzzer harness
+└── generate_corpus.sh          # Seed corpus generator
+
+data/fuzz/
+├── corpus/                     # Input seeds (read-only for fuzzer)
+│   ├── ipc/                   # IPC protocol seeds
+│   └── add_document/          # Document request seeds
+└── findings/                   # AFL++ output (crashes, hangs, queue)
+    ├── ipc/
+    └── add_document/
+```
+
+### Instrumentation Flow
+
+```
+1. Conan Profile       → conan/profiles/aflplusplus-docker
+                         Sets: AFL_USE_ASAN=1, AFL_HARDEN=1
+                         Compiler: afl-clang-fast++
+
+2. Setup Script        → ./setup.sh Fuzzing
+                         Build type: Debug (for symbols)
+                         Enables: -Dbuild-fuzzers=true
+
+3. Meson Build         → tools/fuzzing/meson.build
+                         Flags: -fsanitize=fuzzer (AFL++ libFuzzer mode)
+                         Links: Static daemon IPC libraries
+
+4. Fuzzer Binary       → build/fuzzing/tools/fuzzing/fuzz_*
+                         Entry: LLVMFuzzerTestOneInput()
+                         ASAN: Memory safety checks
+                         AFL++: Coverage-guided mutation
+```
+
+## Configuration
+
+Conan profile (`conan/profiles/aflplusplus-docker`):
+- `AFL_HARDEN=1` - Stack protector, fortify source
+- `AFL_USE_ASAN=1` - Address sanitizer
+- `AFL_LLVM_INSTRUMENT=AFL` - AFL instrumentation mode
+- Compiler: `afl-clang-fast++`
+- libcxx: `libc++` (container default)
+
+Compiler flags:
+- `-fsanitize=fuzzer` (compile and link)
+- Enables AFL++ libFuzzer compatibility mode with automatic persistent mode
+
+## Advanced
+
+Parallel fuzzing (main + secondary workers):
+```bash
+# Terminal 1
+./tools/fuzzing/fuzz-docker.sh fuzz ipc
+
+# Terminal 2-N
+docker run -ti --rm -v "$(pwd):/src:ro" -v "$(pwd)/build/fuzzing:/build" \
+  -v "$(pwd)/data/fuzz:/fuzz" aflplusplus/aflplusplus \
+  afl-fuzz -i /fuzz/corpus/ipc -o /fuzz/findings/ipc \
+  -S worker1 -m none /build/tools/fuzzing/fuzz_ipc_protocol
+```
+
+Corpus minimization:
+```bash
+./tools/fuzzing/fuzz-docker.sh exec bash -c \
+  "afl-cmin -i /fuzz/findings/ipc/queue -o /fuzz/corpus/ipc_min -m none \
+   -- /build/tools/fuzzing/fuzz_ipc_protocol"
+```
+
+Crash minimization:
+```bash
+./tools/fuzzing/fuzz-docker.sh exec bash -c \
+  "afl-tmin -i /fuzz/findings/ipc/crashes/id:000000 -o crash_min -m none \
+   -- /build/tools/fuzzing/fuzz_ipc_protocol"
+```
+
+## Seed Corpus
+
+Location: `data/fuzz/corpus/<target>/`
+
+Generate minimal seeds:
+```bash
+./tools/fuzzing/generate_corpus.sh
+```
+
+Add custom seeds from:
+- Integration test traffic capture
+- Sanitized CLI→daemon messages
+- Manual construction
+
+Corpus should cover request types, edge cases, and real-world patterns. Do not include secrets.
+
+## CI Integration
+
+See `.github/workflows/fuzzing.yml`:
+- PR smoke tests: 5 min timeout
+- Nightly: 1+ hour for deeper coverage
+
+## Crash Triage
+
+Reproduce:
+```bash
+./tools/fuzzing/fuzz-docker.sh exec \
+  /build/tools/fuzzing/fuzz_ipc_protocol /fuzz/findings/ipc/crashes/id:000000*
+```
+
+ASAN provides automatic stack traces. After fixing:
+1. Rebuild fuzzers
+2. Verify crash input no longer crashes
+3. Add crash input to corpus for regression prevention
+
+## Troubleshooting
+
+AFL++ compiler not detected: Use `./tools/fuzzing/fuzz-docker.sh build`
+
+No instrumentation: Verify Conan profile `conan/profiles/aflplusplus-docker` sets `afl-clang-fast++`
+
+Out of memory: Increase Docker limit or disable ASAN for throughput fuzzing
+
+Corpus too large: Run `afl-cmin` for minimization
+
+## References
+
+- Issue #8: Crash Fuzzing & Stability Hardening
+- AFL++ docs: https://github.com/AFLplusplus/AFLplusplus/tree/stable/docs
+- AFL++ container: https://hub.docker.com/r/aflplusplus/aflplusplus

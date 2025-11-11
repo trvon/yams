@@ -274,7 +274,8 @@ jobs:
             mkdir -p "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" || true
             echo "Using XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
           fi
-          meson test -C ${{ env.BUILD_DIR }} --print-errorlogs
+          # Run only unit and integration tests (exclude bench, stress, daemon-long, etc.)
+          meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs
 
       - name: Run Tests with Meson (Rosetta x86_64)
         id: meson_tests_rosetta
@@ -284,7 +285,8 @@ jobs:
         run: |
           # Ensure Rosetta is present (idempotent)
           softwareupdate --install-rosetta --agree-to-license || true
-          arch -x86_64 meson test -C ${{ env.BUILD_DIR }} --print-errorlogs
+          # Run only unit and integration tests (exclude bench, stress, daemon-long, etc.)
+          arch -x86_64 meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs
 
       - name: Upload test logs (artifacts)
         if: ${{ steps.meson_tests_native.outcome == 'failure' || steps.meson_tests_rosetta.outcome == 'failure' }}

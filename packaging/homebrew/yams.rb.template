@@ -29,6 +29,14 @@ class Yams < Formula
     lib.install Dir["local/lib/*"] if Dir.exist?("local/lib")
   end
 
+  service do
+    run [opt_bin/"yams-daemon"]
+    keep_alive true
+    log_path var/"log/yams-daemon.log"
+    error_log_path var/"log/yams-daemon.log"
+    environment_variables YAMS_STORAGE: var/"lib/yams"
+  end
+
   def caveats
     <<~EOS
       Initialize YAMS storage:
@@ -37,6 +45,12 @@ class Yams < Formula
       Or specify custom location:
         export YAMS_STORAGE="$HOME/.local/share/yams"
         yams init
+
+      To start the YAMS daemon as a service:
+        brew services start yams
+      
+      To stop the daemon:
+        brew services stop yams
 
       Documentation: https://yamsmemory.ai
       Repository: https://github.com/trvon/yams

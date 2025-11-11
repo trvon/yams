@@ -1,7 +1,7 @@
 #pragma once
 
+#include <memory>
 #include <mutex>
-#include <optional>
 #include <thread>
 #include <vector>
 #include <boost/asio/any_io_executor.hpp>
@@ -25,7 +25,7 @@ private:
     ~GlobalIOContext();
 
     boost::asio::io_context io_context_;
-    std::optional<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>
+    std::unique_ptr<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>
         work_guard_;
     std::vector<std::thread> io_threads_;
     std::mutex restart_mutex_;

@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <map>
 #include <optional>
 #include <set>
@@ -24,14 +25,32 @@ using namespace yams::daemon;
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
 
+#ifndef _WIN32
+#include <sys/un.h>
+#endif
+
 // =============================================================================
 // Test Helpers
 // =============================================================================
 
 namespace {
 fs::path makeTempRuntimeDir(const std::string& name) {
-    auto base = fs::temp_directory_path() / "yams-component-tests";
-    auto dir = base / name;
+    auto base = fs::temp_directory_path();
+#ifndef _WIN32
+    constexpr std::size_t maxUnixPath = sizeof(sockaddr_un::sun_path) - 1;
+    auto candidate = base / "yams-component-tests" / name;
+    auto candidateWithSocket = candidate / "ipc.sock";
+    std::cerr << "candidate path: " << candidateWithSocket
+              << " len=" << candidateWithSocket.native().size() << " limit=" << maxUnixPath << "\n";
+    if (candidateWithSocket.native().size() >= maxUnixPath) {
+        base = fs::path("/tmp");
+        candidate = base / "yams-component-tests" / name;
+        candidateWithSocket = candidate / "ipc.sock";
+        std::cerr << "fallback path: " << candidateWithSocket
+                  << " len=" << candidateWithSocket.native().size() << "\n";
+    }
+#endif
+    auto dir = base / "yams-component-tests" / name;
     std::error_code ec;
     fs::create_directories(dir, ec);
     return dir;
@@ -131,6 +150,9 @@ TEST_CASE("SocketServer: Lifecycle management", "[daemon][components][socket]") 
         SocketServer server(config, nullptr, &state);
 
         auto first = server.start();
+        if (!first) {
+            UNSCOPED_INFO(first.error().message);
+        }
         if (!first && isPermissionDenied(first)) {
             SKIP("UNIX domain sockets not permitted on this system");
         }
@@ -141,6 +163,9 @@ TEST_CASE("SocketServer: Lifecycle management", "[daemon][components][socket]") 
 
         // Second start should work (stopping flag cleared)
         auto second = server.start();
+        if (!second) {
+            UNSCOPED_INFO(second.error().message);
+        }
         if (!second && isPermissionDenied(second)) {
             SKIP("UNIX domain sockets not permitted on this system");
         }
@@ -153,6 +178,9 @@ TEST_CASE("SocketServer: Lifecycle management", "[daemon][components][socket]") 
         SocketServer server(config, nullptr, &state);
 
         auto first = server.start();
+        if (!first) {
+            UNSCOPED_INFO(first.error().message);
+        }
         if (!first && isPermissionDenied(first)) {
             SKIP("UNIX domain sockets not permitted on this system");
         }

@@ -51,6 +51,34 @@ if libcxx_hardening != 'none'
   endif
 endif
 
+# --- ThreadSanitizer for race detection ---
+enable_tsan = get_option('enable-tsan')
+if enable_tsan
+  buildtype = get_option('buildtype')
+  # TSan is most useful in debug builds; warn if enabled in release
+  if buildtype == 'release' or buildtype == 'plain'
+    warning('ThreadSanitizer enabled in non-debug build. This will significantly impact performance.')
+  endif
+  
+  tsan_flags = [
+    '-fsanitize=thread',
+    '-g',  # Debug symbols for better stack traces
+    '-fno-omit-frame-pointer',  # Better stack traces
+  ]
+  
+  # Check if compiler supports TSan
+  if cpp.has_argument('-fsanitize=thread')
+    add_project_arguments(tsan_flags, language: 'cpp')
+    add_project_arguments(tsan_flags, language: 'c')
+    add_project_link_arguments(['-fsanitize=thread'], language: 'cpp')
+    add_project_link_arguments(['-fsanitize=thread'], language: 'c')
+    message('ThreadSanitizer enabled - expect significant performance impact')
+    message('Note: TSan requires all code (including dependencies) to be compiled with -fsanitize=thread')
+  else
+    error('ThreadSanitizer requested but compiler does not support -fsanitize=thread')
+  endif
+endif
+
 # --- Install prefix for plugin auto-trust ---
 # Pass the install prefix to C++ code so the daemon knows where system plugins are installed
 install_prefix = get_option('prefix')
@@ -170,6 +198,11 @@ _buildtype = get_option('buildtype')
 _tests_enabled = _tests_opt or (_buildtype == 'debug')
 if _tests_enabled
   subdir('tests')
+endif
+
+# Fuzzing harnesses (AFL++/libFuzzer)
+if get_option('build-fuzzers')
+  subdir('tools/fuzzing')
 endif
 
 summary({

@@ -10,6 +10,7 @@
 #include <yams/mcp/mcp_server.h>
 
 #include "common/daemon_preflight.h"
+#include "common/daemon_test_fixture.h"
 
 using nlohmann::json;
 using yams::mcp::ITransport;
@@ -141,11 +142,32 @@ TEST(MCPDoctorPositiveSmoke, DoctorReportsReadyWithLiveDaemon) {
 }
 #endif // __linux__
 
+// Test fixture for MCP smoke tests with proper isolation
+class MCPSmokeFixture : public ::testing::Test {
+protected:
+    void SetUp() override {
+        // Ensure clean environment for each test
+        ::unsetenv("YAMS_SOCKET_PATH");
+        ::unsetenv("YAMS_DAEMON_SOCKET");
+    }
+
+    void TearDown() override {
+        // Cleanup environment
+        ::unsetenv("YAMS_SOCKET_PATH");
+        ::unsetenv("YAMS_DAEMON_SOCKET");
+    }
+};
+
 // Basic success-shape sanity for a couple of tools (no crash, minimal structure).
-TEST(MCPSmoke, BasicToolSuccessShapes) {
+TEST_F(MCPSmokeFixture, BasicToolSuccessShapes) {
     using nlohmann::json;
     auto t = std::make_unique<NullTransport>();
     MCPServer svr(std::move(t));
+    
+    // Prevent daemon client access to avoid interference from previous tests
+    svr.setEnsureDaemonClientHook([](const yams::daemon::ClientConfig&) -> yams::Result<void> {
+        return yams::Error{yams::ErrorCode::NetworkError, "no daemon for test"};
+    });
 
     // search: minimal valid body; allow empty results but expect a result object
     {
@@ -165,43 +187,40 @@ TEST(MCPSmoke, BasicToolSuccessShapes) {
 
 // PBI028_PHASE3_MCP_DOCOPS
 // Doc ops round-trip via MCP with a live daemon (portable; uses short /tmp socket).
-TEST(MCPSmoke, DocOpsRoundTrip) {
+// Converted to use DaemonTestFixture for proper isolation and cleanup.
+class MCPDocOpsFixture : public yams::test::DaemonTestFixture {
+protected:
+    void SetUp() override {
+        DaemonTestFixture::SetUp();
+        
+        // Ensure CLI pool is reset for this test
+        yams::cli::cli_pool_reset_for_test();
+        
+        // Set daemon socket environment variables
+        ::setenv("YAMS_SOCKET_PATH", socketPath().string().c_str(), 1);
+        ::setenv("YAMS_DAEMON_SOCKET", socketPath().string().c_str(), 1);
+    }
+    
+    void TearDown() override {
+        // Ensure daemon is stopped before base cleanup
+        stopDaemon();
+        
+        DaemonTestFixture::TearDown();
+    }
+};
+
+TEST_F(MCPDocOpsFixture, DocOpsRoundTrip) {
     using namespace std::chrono_literals;
-    namespace fs = std::filesystem;
     using nlohmann::json;
 
-    // Prepare isolated runtime and storage paths
-    auto unique = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
-    const fs::path root = fs::temp_directory_path() / ("yams_mcp_docops_smoke_" + unique);
-    const fs::path storageDir = root / "storage";
-    const fs::path runtimeRoot = root / "runtime";
-    std::error_code ec;
-    fs::create_directories(storageDir, ec);
-    fs::create_directories(runtimeRoot, ec);
-
-    // Short socket to avoid AF_UNIX sun_path limits
-    const fs::path socketPath =
-        fs::path("/tmp") / ("yams-mcp-docops-" + std::to_string(::getpid()) + ".sock");
-    ::setenv("YAMS_SOCKET_PATH", socketPath.string().c_str(), 1);
-    ::setenv("YAMS_DAEMON_SOCKET", socketPath.string().c_str(), 1);
-    yams::cli::cli_pool_reset_for_test();
-
-    // Start daemon
-    yams::daemon::DaemonConfig cfg;
-    cfg.dataDir = storageDir;
-    cfg.socketPath = socketPath;
-    cfg.pidFile = root / "daemon.pid";
-    cfg.logFile = root / "daemon.log";
-    yams::daemon::YamsDaemon daemon(cfg);
-    auto started = daemon.start();
-    ASSERT_TRUE(started) << started.error().message;
-
-    ASSERT_TRUE(wait_for_daemon_ready(socketPath)) << "daemon readiness wait failed";
+    // Start daemon using fixture helper
+    ASSERT_TRUE(startDaemon());
+    ASSERT_TRUE(wait_for_daemon_ready(socketPath())) << "daemon readiness wait failed";
 
     // Build an MCP server with a dummy transport (direct callToolPublic)
     auto t = std::make_unique<NullTransport>();
     MCPServer svr(std::move(t));
-    svr.setDaemonClientSocketPathForTest(socketPath);
+    svr.setDaemonClientSocketPathForTest(socketPath());
 
     // 1) add content
     auto addRes =
@@ -246,13 +265,11 @@ TEST(MCPSmoke, DocOpsRoundTrip) {
     auto listGone = svr.callToolPublic("list", json{{"name", "mcp_smoke.txt"}, {"limit", 1}});
     ASSERT_TRUE(listGone.is_object());
 
-    // Cleanup
-    daemon.stop();
-    fs::remove_all(root, ec);
+    // Daemon cleanup handled by fixture TearDown()
 }
 
 // Pagination and dry-run behaviors should be accepted and return structured JSON.
-TEST(MCPSmoke, ListPaginationAndDryRunDelete) {
+TEST_F(MCPSmokeFixture, ListPaginationAndDryRunDelete) {
     using namespace std::chrono_literals;
     namespace fs = std::filesystem;
     using nlohmann::json;
@@ -279,7 +296,7 @@ TEST(MCPSmoke, ListPaginationAndDryRunDelete) {
 
 // Update metadata by hash should be accepted when daemon is reachable; here we only assert schema
 // roundtrip (no crash)
-TEST(MCPSmoke, UpdateMetadataSchemaRoundTrip) {
+TEST_F(MCPSmokeFixture, UpdateMetadataSchemaRoundTrip) {
     auto t = std::make_unique<NullTransport>();
     MCPServer svr(std::move(t));
     auto upd = svr.callToolPublic("update", nlohmann::json{{"hash", "deadbeef"},
@@ -289,7 +306,7 @@ TEST(MCPSmoke, UpdateMetadataSchemaRoundTrip) {
 }
 
 // Minimal list success-shape (daemon-first path, but tolerant structure check).
-TEST(MCPSmoke, ListDocumentsResponds) {
+TEST_F(MCPSmokeFixture, ListDocumentsResponds) {
     using nlohmann::json;
     auto t = std::make_unique<NullTransport>();
     MCPServer svr(std::move(t));
@@ -300,7 +317,7 @@ TEST(MCPSmoke, ListDocumentsResponds) {
 
 // Unreachable envelope checks for daemon-first doc ops: list and add; tolerant checks for
 // get_by_name.
-TEST(MCPSmoke, UnreachableEnvelopeUniformForDocOps) {
+TEST_F(MCPSmokeFixture, UnreachableEnvelopeUniformForDocOps) {
     using nlohmann::json;
     auto t = std::make_unique<NullTransport>();
     MCPServer svr(std::move(t));
@@ -342,7 +359,7 @@ TEST(MCPSmoke, UnreachableEnvelopeUniformForDocOps) {
 
 // PBI028-45-MCP-PARITY-MOVE: Parity test moved from services shard to smoke and
 // relaxed latency to 2500ms to avoid interference from services' daemon lifecycle.
-TEST(MCPSmoke, Parity_UnreachableEnvelopeAndToolsListRespondsQuickly) {
+TEST_F(MCPSmokeFixture, Parity_UnreachableEnvelopeAndToolsListRespondsQuickly) {
     using nlohmann::json;
     auto t = std::make_unique<NullTransport>();
     MCPServer svr(std::move(t));

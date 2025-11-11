@@ -57,22 +57,35 @@ public:
     jthread(jthread&& other) noexcept : t_(std::move(other.t_)) {}
     jthread& operator=(jthread&& other) noexcept {
         if (this != &other) {
-            if (t_.joinable())
-                t_.join();
+            if (t_.joinable()) {
+                try {
+                    t_.join();
+                } catch (const std::system_error&) {
+                }
+            }
             t_ = std::move(other.t_);
         }
         return *this;
     }
 
     ~jthread() {
-        if (t_.joinable())
-            t_.join();
+        if (t_.joinable()) {
+            try {
+                t_.join();
+            } catch (const std::system_error&) {
+            }
+        }
     }
 
     bool joinable() const noexcept { return t_.joinable(); }
     void join() {
-        if (t_.joinable())
-            t_.join();
+        if (t_.joinable()) {
+            try {
+                t_.join();
+            } catch (const std::system_error&) {
+                throw;
+            }
+        }
     }
     void request_stop() noexcept { /* no-op */ }
 

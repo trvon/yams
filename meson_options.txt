@@ -15,12 +15,14 @@ option('plugin-s3', type: 'boolean', value: true, description: 'Build object_sto
 option('plugin-pdf', type: 'boolean', value: true, description: 'Build PDF extractor plugin (requires pdfium and app/services)')
 option('plugin-onnx', type: 'boolean', value: true, description: 'Build ONNX plugin (requires onnxruntime and vector lib)')
 option('build-tests', type: 'boolean', value: false, description: 'Build unit/integration tests under tests/')
+option('build-fuzzers', type: 'boolean', value: false, description: 'Build fuzzing harnesses under tools/fuzzing/')
 option('plugin-symbols', type: 'boolean', value: true, description: 'Build Tree-sitter symbol extractor plugin')
 option('yams-version', type: 'string', value: '', description: 'Override runtime/display version (falls back to project version when empty). A generated header will expose this.')
 option('unit-timeout', type: 'integer', value: 1200, description: 'Total time budget (seconds) for unit tests; per-shard timeout is derived automatically when sharding is enabled')
 option('unit-shards', type: 'integer', value: 6, description: 'Number of shards to split the unit test binary into via GTest sharding (set to 1 to disable)')
-option('bench-timeout', type: 'integer', value: 1800, description: 'Timeout (seconds) for benchmark/stress-oriented test suite')
-option('integration-timeout', type: 'integer', value: 900, description: 'Timeout (seconds) for integration_services suite')
+option('shard-timeout', type: 'integer', value: 60, description: 'Timeout (seconds) for each individual unit shard')
+option('bench-timeout', type: 'integer', value: 60, description: 'Timeout (seconds) for benchmark/stress-oriented test suite')
+option('integration-timeout', type: 'integer', value: 300, description: 'Timeout (seconds) for integration_services suite')
 option('integration-ui-timeout', type: 'integer', value: 600, description: 'Timeout (seconds) for integration_ui suite')
 option('integration-smoke-timeout', type: 'integer', value: 300, description: 'Timeout (seconds) for integration_smoke suite')
 option('integration-daemon-timeout', type: 'integer', value: 600, description: 'Timeout (seconds) for integration_daemon suite')
@@ -44,3 +46,6 @@ option('enable-symbol-extraction', type: 'boolean', value: true, description: 'E
 
 # libc++ hardening modes (only effective when using libc++)
 option('libcxx-hardening', type: 'combo', choices: ['none', 'fast', 'extensive', 'debug'], value: 'none', description: 'libc++ hardening mode: none (default), fast (minimal overhead), extensive (more checks), debug (maximum validation)')
+
+# Thread sanitizer (for detecting data races in debug builds)
+option('enable-tsan', type: 'boolean', value: false, description: 'Enable ThreadSanitizer for race detection (debug builds only, significant performance impact)')

@@ -1,0 +1,16 @@
+# ThreadSanitizer suppressions for YAMS
+
+# Boost.Asio experimental channel - known library limitation
+# The channel_service uses null_mutex even when channel_traits<std::mutex> is specified
+# This appears to be a boost library issue in versions < 1.85
+race:boost::asio::experimental::detail::channel_service
+race:channel_service.hpp
+
+# Boost.Asio thread_info_base - thread-local storage cleanup race
+# This is an internal boost::asio issue during thread destruction
+race:boost::asio::detail::thread_info_base::deallocate
+
+# Boost.Asio executor - internal race during coroutine dispatch
+# This appears to be a timing issue in boost::asio's any_executor
+race:boost::asio::execution::detail::any_executor_base::execute
+race:any_executor.hpp

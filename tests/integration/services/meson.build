@@ -24,7 +24,6 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'YAMS_STRESS_ITERS': get_option('stress-iters').to_string(),
-      'YAMS_DISABLE_VECTORS': '1',
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
     },
     is_parallel: false,
@@ -37,7 +36,6 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'YAMS_STRESS_ITERS': get_option('stress-iters').to_string(),
-      'YAMS_DISABLE_VECTORS': '1',
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
     },
     is_parallel: false,
@@ -62,7 +60,6 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
     suite: ['catch2', 'integration', 'sync', 'indexing'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-      'YAMS_DISABLE_VECTORS': '1',
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
     },
     is_parallel: false,
