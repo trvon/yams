@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // AddDocumentRequest Fuzzer - Targets document ingestion deserialization
 
+#include <cstddef>
+#include <cstdint>
+#include <span>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
-#include <cstdint>
-#include <cstddef>
-#include <span>
 
 using namespace yams::daemon;
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
-    if (size < 4) return 0;
+    if (size < 4)
+        return 0;
 
     // Test 1: Direct deserialization of AddDocumentRequest
     {

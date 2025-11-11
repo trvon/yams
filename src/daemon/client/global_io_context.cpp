@@ -1,4 +1,3 @@
-#include <boost/asio/executor_work_guard.hpp>
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -6,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <boost/asio/executor_work_guard.hpp>
 #include <yams/daemon/client/global_io_context.h>
 
 namespace {
@@ -14,9 +14,8 @@ bool env_truthy(const char* value) {
         return false;
 
     std::string normalized(value);
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
     return !(normalized.empty() || normalized == "0" || normalized == "false" ||
              normalized == "off" || normalized == "no");
@@ -81,7 +80,10 @@ void GlobalIOContext::restart() {
         this->io_context_.stop();
         for (auto& worker : this->io_threads_) {
             if (worker.joinable()) {
-                try { worker.join(); } catch (...) {}
+                try {
+                    worker.join();
+                } catch (...) {
+                }
             }
         }
         if (this->work_guard_) {
@@ -116,7 +118,10 @@ GlobalIOContext::GlobalIOContext() {
         // Join all successfully created threads before destroying work_guard
         for (auto& worker : this->io_threads_) {
             if (worker.joinable()) {
-                try { worker.join(); } catch (...) {}
+                try {
+                    worker.join();
+                } catch (...) {
+                }
             }
         }
         // NOW it's safe to destroy work_guard (no threads are using it)

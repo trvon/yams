@@ -163,7 +163,7 @@ TEST_F(MCPSmokeFixture, BasicToolSuccessShapes) {
     using nlohmann::json;
     auto t = std::make_unique<NullTransport>();
     MCPServer svr(std::move(t));
-    
+
     // Prevent daemon client access to avoid interference from previous tests
     svr.setEnsureDaemonClientHook([](const yams::daemon::ClientConfig&) -> yams::Result<void> {
         return yams::Error{yams::ErrorCode::NetworkError, "no daemon for test"};
@@ -192,19 +192,19 @@ class MCPDocOpsFixture : public yams::test::DaemonTestFixture {
 protected:
     void SetUp() override {
         DaemonTestFixture::SetUp();
-        
+
         // Ensure CLI pool is reset for this test
         yams::cli::cli_pool_reset_for_test();
-        
+
         // Set daemon socket environment variables
         ::setenv("YAMS_SOCKET_PATH", socketPath().string().c_str(), 1);
         ::setenv("YAMS_DAEMON_SOCKET", socketPath().string().c_str(), 1);
     }
-    
+
     void TearDown() override {
         // Ensure daemon is stopped before base cleanup
         stopDaemon();
-        
+
         DaemonTestFixture::TearDown();
     }
 };

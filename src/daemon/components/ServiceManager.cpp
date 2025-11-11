@@ -364,11 +364,16 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                 workers_.emplace_back([this]() { ioContext_->run(); });
             }
         } catch (...) {
-            spdlog::error("Failed to create ServiceManager worker thread, cleaning up {} existing workers", workers_.size());
+            spdlog::error(
+                "Failed to create ServiceManager worker thread, cleaning up {} existing workers",
+                workers_.size());
             ioContext_->stop();
             for (auto& worker : workers_) {
                 if (worker.joinable()) {
-                    try { worker.join(); } catch (...) {}
+                    try {
+                        worker.join();
+                    } catch (...) {
+                    }
                 }
             }
             workers_.clear();
@@ -2354,8 +2359,7 @@ boost::asio::awaitable<bool> ServiceManager::co_openDatabase(const std::filesyst
     // Channel to receive completion from worker (wrap Result in shared_ptr for
     // default-construct path)
     boost::asio::experimental::basic_channel<
-        boost::asio::any_io_executor,
-        boost::asio::experimental::channel_traits<std::mutex>,
+        boost::asio::any_io_executor, boost::asio::experimental::channel_traits<std::mutex>,
         void(boost::system::error_code, std::shared_ptr<Result<void>>)>
         ch(ex, 1);
     try {
@@ -2420,8 +2424,7 @@ boost::asio::awaitable<bool> ServiceManager::co_migrateDatabase(int timeout_ms,
     mm.registerMigrations(metadata::YamsMetadataMigrations::getAllMigrations());
 
     boost::asio::experimental::basic_channel<
-        boost::asio::any_io_executor,
-        boost::asio::experimental::channel_traits<std::mutex>,
+        boost::asio::any_io_executor, boost::asio::experimental::channel_traits<std::mutex>,
         void(boost::system::error_code, std::shared_ptr<Result<void>>)>
         ch(ex, 1);
     try {

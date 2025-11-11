@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // IPC Protocol Fuzzer - Targets message framing and deserialization
 
-#include <yams/daemon/ipc/message_framing.h>
-#include <yams/daemon/ipc/ipc_protocol.h>
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <span>
+#include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/daemon/ipc/message_framing.h>
 
 using namespace yams::daemon;
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
-    if (size == 0) return 0;
+    if (size == 0)
+        return 0;
 
     // Test 1: Parse raw frame header
     {
@@ -30,7 +31,8 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     {
         FrameReader reader;
         size_t chunk_size = size > 0 ? size / 4 : 0;
-        if (chunk_size == 0 && size > 0) chunk_size = 1;
+        if (chunk_size == 0 && size > 0)
+            chunk_size = 1;
 
         size_t offset = 0;
         while (offset < size) {

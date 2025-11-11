@@ -202,14 +202,16 @@ Result<void> SocketServer::start() {
             }
         } catch (...) {
             // If thread creation fails, clean up already-created threads before rethrowing
-            spdlog::error("Failed to create worker thread, cleaning up {} existing workers", workers_.size());
+            spdlog::error("Failed to create worker thread, cleaning up {} existing workers",
+                          workers_.size());
             running_ = false;
             io_context_.stop();
             for (auto& worker : workers_) {
                 if (worker.joinable()) {
                     try {
                         worker.join();
-                    } catch (...) {}
+                    } catch (...) {
+                    }
                 }
             }
             workers_.clear();

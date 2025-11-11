@@ -7,11 +7,11 @@
 #include <thread>
 #include <gtest/gtest.h>
 
-#include "integration/daemon/test_async_helpers.h"
-#include <yams/daemon/daemon.h>
-#include <yams/daemon/client/daemon_client.h>
 #include "daemon_preflight.h"
 #include "fixture_manager.h"
+#include "integration/daemon/test_async_helpers.h"
+#include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/daemon.h>
 
 namespace yams::test {
 
@@ -37,7 +37,7 @@ protected:
         root_ = std::filesystem::temp_directory_path() / ("yams_test_" + unique);
         storageDir_ = root_ / "storage";
         runtimeRoot_ = root_ / "runtime";
-        
+
         std::error_code ec;
         std::filesystem::create_directories(storageDir_, ec);
         ASSERT_FALSE(ec) << "Failed to create storage dir: " << ec.message();
@@ -74,13 +74,13 @@ protected:
 
         // Cleanup runtime and temp directories
         yams::tests::harnesses::DaemonPreflight::post_test_cleanup(runtimeRoot_);
-        
+
         std::error_code ec;
         std::filesystem::remove_all(root_, ec);
         if (ec) {
             // Log but don't fail test on cleanup error
-            std::cerr << "Warning: Failed to cleanup test dir " << root_ 
-                      << ": " << ec.message() << std::endl;
+            std::cerr << "Warning: Failed to cleanup test dir " << root_ << ": " << ec.message()
+                      << std::endl;
         }
 
         // Clear socket path from environment
@@ -97,15 +97,15 @@ protected:
         cfg.socketPath = socketPath_;
         cfg.pidFile = root_ / "daemon.pid";
         cfg.logFile = root_ / "daemon.log";
-        
+
         daemon_ = std::make_unique<yams::daemon::YamsDaemon>(cfg);
         auto started = daemon_->start();
-        
+
         if (!started) {
             ADD_FAILURE() << "Failed to start daemon: " << started.error().message;
             return false;
         }
-        
+
         // Poll for daemon to be fully ready by attempting to connect
         auto client = yams::daemon::DaemonClient(
             yams::daemon::ClientConfig{.socketPath = socketPath_,

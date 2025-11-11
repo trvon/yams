@@ -353,7 +353,10 @@ private:
                 cv_.notify_all();
                 for (auto& worker : workers_) {
                     if (worker.joinable()) {
-                        try { worker.join(); } catch (...) {}
+                        try {
+                            worker.join();
+                        } catch (...) {
+                        }
                     }
                 }
                 workers_.clear();
@@ -1383,7 +1386,10 @@ private:
                 cv_.notify_all();
                 for (auto& worker : workers_) {
                     if (worker.joinable()) {
-                        try { worker.join(); } catch (...) {}
+                        try {
+                            worker.join();
+                        } catch (...) {
+                        }
                     }
                 }
                 workers_.clear();

@@ -5171,8 +5171,8 @@ void MCPServer::startThreadPool(std::size_t threads) {
                     std::function<void()> task;
                     {
                         std::unique_lock<std::mutex> lk(taskMutex_);
-                        taskCv_.wait(lk,
-                                     [this]() { return stopWorkers_.load() || !taskQueue_.empty(); });
+                        taskCv_.wait(
+                            lk, [this]() { return stopWorkers_.load() || !taskQueue_.empty(); });
                         if (stopWorkers_.load() && taskQueue_.empty()) {
                             return;
                         }
@@ -5192,12 +5192,16 @@ void MCPServer::startThreadPool(std::size_t threads) {
             });
         }
     } catch (...) {
-        spdlog::error("Failed to create MCP worker thread, cleaning up {} existing workers", workerPool_.size());
+        spdlog::error("Failed to create MCP worker thread, cleaning up {} existing workers",
+                      workerPool_.size());
         stopWorkers_.store(true);
         taskCv_.notify_all();
         for (auto& worker : workerPool_) {
             if (worker.joinable()) {
-                try { worker.join(); } catch (...) {}
+                try {
+                    worker.join();
+                } catch (...) {
+                }
             }
         }
         workerPool_.clear();
