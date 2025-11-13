@@ -285,7 +285,7 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
 
     SECTION("Process single task successfully") {
         auto queue =
-            std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr, 1, 8);
+            std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr, nullptr, 8);
 
         PostIngestQueue::Task task{
             doc.sha256Hash, doc.mimeType, "", {}, PostIngestQueue::Task::Stage::Metadata};
@@ -293,7 +293,6 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
 
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
         while (queue->processed() < 1 && std::chrono::steady_clock::now() < deadline) {
-            queue->notifyWorkers();
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 
@@ -317,14 +316,12 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
 
     SECTION("Queue shutdown drains pending tasks") {
         auto queue =
-            std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr, 1, 8);
+            std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr, nullptr, 8);
 
-        // Enqueue but don't notify immediately
         PostIngestQueue::Task task{
             doc.sha256Hash, doc.mimeType, "", {}, PostIngestQueue::Task::Stage::Metadata};
         REQUIRE(queue->tryEnqueue(std::move(task)));
 
-        // Reset (destroy) - should drain gracefully
         queue.reset();
         SUCCEED("Queue shutdown completed without hang");
     }
@@ -354,7 +351,7 @@ TEST_CASE("PostIngestQueue: InternalEventBus integration and stress",
         const std::string payload = "hello world";
 
         auto pq = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
-                                                    /*threads*/ 4, /*capacity*/ 4096);
+                                                    nullptr, 4096);
 
         // Spawn producers that publish into the InternalEventBus channel
         std::vector<std::thread> producers;
@@ -381,7 +378,6 @@ TEST_CASE("PostIngestQueue: InternalEventBus integration and stress",
                         std::this_thread::yield();
                     }
                     InternalEventBus::instance().incPostQueued();
-                    pq->notifyWorkers();
                 }
             });
         }
@@ -394,7 +390,6 @@ TEST_CASE("PostIngestQueue: InternalEventBus integration and stress",
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
         while (static_cast<int>(pq->processed()) < expected &&
                std::chrono::steady_clock::now() < deadline) {
-            pq->notifyWorkers();
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 

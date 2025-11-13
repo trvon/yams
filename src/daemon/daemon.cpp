@@ -472,9 +472,14 @@ Result<void> YamsDaemon::stop() {
     stopRequested_.store(true, std::memory_order_release);
     stop_cv_.notify_all();
 
-    // Stop socket server to prevent new connections
-    // Note: Do NOT reset socketServer_ yet - it contains RequestHandler with active
-    // coroutines that reference ServiceManager. Reset after ServiceManager shutdown.
+    // Stop ServiceManager FIRST so handlers don't access services during shutdown
+    if (serviceManager_) {
+        spdlog::debug("Shutting down service manager...");
+        serviceManager_->shutdown();
+        spdlog::debug("Service manager shutdown complete");
+    }
+
+    // Now stop SocketServer - handlers will get errors immediately
     if (socketServer_) {
         spdlog::debug("Stopping socket server...");
         auto stopResult = socketServer_->stop();
@@ -512,20 +517,14 @@ Result<void> YamsDaemon::stop() {
         repairCoordinator_.reset();
     }
 
-    // Stop metrics polling thread BEFORE service manager shutdown
-    // to prevent races on ServiceManager component access
     if (metrics_) {
         spdlog::debug("Stopping metrics polling thread...");
         metrics_->stopPolling();
         spdlog::debug("Metrics polling stopped");
     }
 
-    if (serviceManager_) {
-        serviceManager_->shutdown();
-    }
+    // ServiceManager already shut down earlier (before SocketServer)
 
-    // Now safe to reset socketServer after ServiceManager shutdown completed
-    // (all io_context threads joined, no coroutines accessing RequestHandler members)
     if (socketServer_) {
         spdlog::debug("Resetting socket server...");
         socketServer_.reset();
@@ -536,13 +535,15 @@ Result<void> YamsDaemon::stop() {
         lifecycleManager_->shutdown();
     }
 
-    // Reset GlobalIOContext for clean daemon restart
-    try {
-        yams::daemon::GlobalIOContext::reset();
-        spdlog::debug("GlobalIOContext reset for restart");
-    } catch (const std::exception& e) {
-        spdlog::warn("GlobalIOContext reset failed: {}", e.what());
+    if (lifecycleManager_) {
+        lifecycleManager_->shutdown();
     }
+
+    // NOTE: We do NOT reset GlobalIOContext here.
+    // GlobalIOContext is a singleton that should persist for the process lifetime.
+    // Resetting it after multiple daemon lifecycles causes resource corruption.
+    // For production use, daemons typically run for extended periods without restart.
+    // For testing, the accumulated resources are acceptable and freed at process exit.
 
     // Mark lifecycle stopped
     lifecycleFsm_.dispatch(StoppedEvent{});

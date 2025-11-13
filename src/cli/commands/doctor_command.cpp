@@ -2716,6 +2716,16 @@ void DoctorCommand::runPrune() {
             return;
         }
 
+        // Display status message if present (e.g., async job queued)
+        if (!resp.statusMessage.empty()) {
+            std::cout << "\n"
+                      << yams::cli::ui::colorize(resp.statusMessage, yams::cli::ui::Ansi::CYAN)
+                      << "\n";
+            std::cout
+                << "Note: Prune is running in the background. Check daemon logs for progress.\n";
+            return;
+        }
+
         // Display results
         std::cout << "\n" << yams::cli::ui::section_header("Prune Summary") << "\n\n";
 

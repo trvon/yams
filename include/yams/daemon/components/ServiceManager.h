@@ -35,11 +35,13 @@
 #include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/SearchEngineFsm.h>
 #include <yams/daemon/components/SearchEngineManager.h>
+#include <yams/daemon/components/SearchPool.h>
 #include <yams/daemon/components/ServiceManagerFsm.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningConfig.h>
 #include <yams/daemon/components/WalMetricsProvider.h>
+#include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/retrieval_session.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
@@ -192,8 +194,6 @@ public:
             if (q && q->try_push(std::move(t))) {
                 yams::daemon::InternalEventBus::instance().incPostQueued();
                 routedViaBus = true;
-                if (postIngest_)
-                    postIngest_->notifyWorkers();
             } else {
                 yams::daemon::InternalEventBus::instance().incPostDropped();
             }
@@ -205,7 +205,6 @@ public:
             PostIngestQueue::Task t{
                 hash, mime, /*session*/ "", {}, PostIngestQueue::Task::Stage::Metadata};
             postIngest_->enqueue(std::move(t));
-            postIngest_->notifyWorkers();
         } else {
             // Warn if PostIngestQueue is not yet initialized (async init not complete)
             spdlog::warn("PostIngestQueue not available - document {} will not be indexed. "
@@ -499,24 +498,19 @@ private:
     std::shared_ptr<yams::search::HybridSearchEngine> searchEngine_;
     mutable std::shared_mutex searchEngineMutex_; // Allow concurrent reads
 
-    // Modern async architecture (Phase 0b): Single io_context + strands for deterministic lifecycle
+    // Modern async architecture (Phase 0c): WorkCoordinator delegates threading complexity
     // Member declaration order is CRITICAL for correct destruction
     // 1. Cancellation signal (destructs last among these) - signals all async ops to cancel
     boost::asio::cancellation_signal shutdownSignal_;
 
-    // 2. Execution context (destructs after cancellation) - single context for all async work
-    std::shared_ptr<boost::asio::io_context> ioContext_;
-    std::optional<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>
-        workGuard_;
+    // 2. WorkCoordinator (destructs after cancellation) - owns io_context + worker threads
+    //    Replaces ioContext_, workGuard_, workers_ (extracted for reusability and testability)
+    std::unique_ptr<WorkCoordinator> workCoordinator_;
 
     // 3. Execution domains for logical separation (lightweight strands) - optional for lazy init
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> initStrand_;
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> pluginStrand_;
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> modelStrand_;
-
-    // 4. Worker threads (MUST destruct first - declared before services)
-    //    Destructors join threads, ensuring no async work during cleanup
-    std::vector<std::thread> workers_;
 
     // Legacy callback support (for transition period)
     InitCompleteCallback initCompleteCallback_;
@@ -527,6 +521,7 @@ private:
     std::shared_ptr<WalMetricsProvider> walMetricsProvider_;
     std::shared_ptr<yams::integrity::RepairManager> repairManager_;
     std::unique_ptr<PostIngestQueue> postIngest_;
+    std::unique_ptr<SearchPool> searchPool_;
     std::unique_ptr<EmbeddingService> embeddingService_;
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors_;
     std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> symbolExtractors_;

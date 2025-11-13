@@ -187,9 +187,8 @@ Result<void> SocketServer::start() {
                     set_current_thread_name("yams-ipc-" + std::to_string(i));
                     spdlog::info("SocketServer: worker {} starting (poll loop)", i);
                     try {
-                        // Poll loop - responsive shutdown unlike blocking run()
                         while (!io_context_.stopped() && running_.load(std::memory_order_relaxed)) {
-                            std::size_t count = io_context_.poll();
+                            std::size_t count = io_context_.poll_one();
                             if (count == 0) {
                                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                             }
@@ -280,48 +279,12 @@ Result<void> SocketServer::stop() {
             spdlog::warn("Unknown exception while closing active sockets");
         }
 
-        // Wait for connection handlers to complete with timeout (PBI-066-41)
+        // Clear connection handler futures without waiting
         try {
-            std::vector<std::future<void>> futures;
-            {
-                std::lock_guard<std::mutex> lk(connectionFuturesMutex_);
-                futures = std::move(connectionFutures_);
-                connectionFutures_.clear();
-            }
-
-            if (!futures.empty()) {
-                spdlog::info("SocketServer: waiting for {} connection handlers to complete",
-                             futures.size());
-
-                const auto timeout = std::chrono::seconds(2);
-                const auto deadline = std::chrono::steady_clock::now() + timeout;
-                size_t completed = 0;
-
-                for (auto& fut : futures) {
-                    auto remaining = deadline - std::chrono::steady_clock::now();
-                    if (remaining <= std::chrono::seconds(0)) {
-                        spdlog::warn(
-                            "SocketServer: timeout waiting for connections ({}/{} completed)",
-                            completed, futures.size());
-                        break;
-                    }
-
-                    if (fut.wait_for(remaining) == std::future_status::ready) {
-                        try {
-                            fut.get(); // Get result, may throw
-                            ++completed;
-                        } catch (const std::exception& e) {
-                            spdlog::warn("Connection handler exception: {}", e.what());
-                            ++completed;
-                        }
-                    }
-                }
-
-                spdlog::info("SocketServer: {}/{} connection handlers completed gracefully",
-                             completed, futures.size());
-            }
+            std::lock_guard<std::mutex> lk(connectionFuturesMutex_);
+            connectionFutures_.clear();
         } catch (const std::exception& e) {
-            spdlog::warn("Exception waiting for connection futures: {}", e.what());
+            spdlog::warn("Exception clearing connection futures: {}", e.what());
         }
 
         // Close acceptor
@@ -333,7 +296,8 @@ Result<void> SocketServer::stop() {
         } catch (...) {
         }
 
-        // Stop io_context to signal workers to exit
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
         spdlog::info("SocketServer: stopping io_context");
         try {
             work_guard_.reset();
@@ -341,19 +305,19 @@ Result<void> SocketServer::stop() {
         } catch (...) {
         }
 
-        // Join worker threads (they check io_context_.stopped() in poll loop)
-        spdlog::info("SocketServer: joining {} worker threads", workers_.size());
+        // Detach all worker threads after brief grace period
+        // Workers should exit soon after io_context.stop(), but some may be stuck in handlers
+        spdlog::info("SocketServer: detaching {} worker threads after grace period",
+                     workers_.size());
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
         for (size_t i = 0; i < workers_.size(); ++i) {
             if (workers_[i].joinable()) {
-                try {
-                    workers_[i].join();
-                } catch (const std::system_error& e) {
-                    spdlog::warn("SocketServer: worker {} join failed: {}", i, e.what());
-                }
+                workers_[i].detach();
             }
         }
         workers_.clear();
-        spdlog::info("SocketServer: all workers stopped");
+        spdlog::info("SocketServer: all workers detached");
 
         if (state_) {
             state_->readiness.ipcServerReady.store(false);
@@ -420,8 +384,6 @@ awaitable<void> SocketServer::accept_loop() {
 #endif
 
         try {
-            // Acquire slot - blocks naturally when at capacity (PBI-066-42)
-            // This replaces ~70 lines of manual backpressure logic
             if (connectionSlots_) {
                 connectionSlots_->acquire();
                 if (trace) {
@@ -654,8 +616,6 @@ awaitable<void> SocketServer::handle_connection(local::socket socket) {
         handlerConfig.graceful_half_close = true;
         auto connectionTimeout = config_.connectionTimeout;
         if (connectionTimeout.count() == 0) {
-            // C++ IPC should be fast: 2s read timeout is generous for local sockets
-            // This prevents hanging connections during shutdown and keeps everything sub-second
             connectionTimeout = std::chrono::milliseconds(2000);
         }
         auto timeoutSeconds = std::chrono::duration_cast<std::chrono::seconds>(connectionTimeout);

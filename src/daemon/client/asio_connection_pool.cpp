@@ -313,14 +313,20 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                             // Acquire strand before accessing handlers map
                             co_await boost::asio::dispatch(c->strand, use_awaitable);
                             for (auto& [rid, h] : c->handlers) {
-                                if (h.unary)
-                                    h.unary->channel->try_send(
-                                        make_error_code(boost::system::errc::io_error),
-                                        std::make_shared<Result<Response>>(e));
+                                if (h.unary) {
+                                    try {
+                                        h.unary->promise->set_value(Result<Response>(e));
+                                    } catch (const std::future_error&) {
+                                        // Promise already satisfied, ignore
+                                    }
+                                }
                                 if (h.streaming) {
                                     h.streaming->onError(e);
-                                    h.streaming->done_channel->try_send(boost::system::error_code{},
-                                                                        e);
+                                    try {
+                                        h.streaming->done_promise->set_value(Result<void>(e));
+                                    } catch (const std::future_error&) {
+                                        // Promise already satisfied, ignore
+                                    }
                                 }
                             }
                             c->handlers.clear();
@@ -343,14 +349,20 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                                 // Acquire strand before accessing handlers map
                                 co_await boost::asio::dispatch(c->strand, use_awaitable);
                                 for (auto& [rid, h] : c->handlers) {
-                                    if (h.unary)
-                                        h.unary->channel->try_send(
-                                            make_error_code(boost::system::errc::io_error),
-                                            std::make_shared<Result<Response>>(e));
+                                    if (h.unary) {
+                                        try {
+                                            h.unary->promise->set_value(Result<Response>(e));
+                                        } catch (const std::future_error&) {
+                                            // Promise already satisfied, ignore
+                                        }
+                                    }
                                     if (h.streaming) {
                                         h.streaming->onError(e);
-                                        h.streaming->done_channel->try_send(
-                                            boost::system::error_code{}, e);
+                                        try {
+                                            h.streaming->done_promise->set_value(Result<void>(e));
+                                        } catch (const std::future_error&) {
+                                            // Promise already satisfied, ignore
+                                        }
                                     }
                                 }
                                 c->handlers.clear();
@@ -373,14 +385,20 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                             // Acquire strand before accessing handlers map
                             co_await boost::asio::dispatch(c->strand, use_awaitable);
                             for (auto& [rid, h] : c->handlers) {
-                                if (h.unary)
-                                    h.unary->channel->try_send(
-                                        make_error_code(boost::system::errc::io_error),
-                                        std::make_shared<Result<Response>>(e));
+                                if (h.unary) {
+                                    try {
+                                        h.unary->promise->set_value(Result<Response>(e));
+                                    } catch (const std::future_error&) {
+                                        // Promise already satisfied, ignore
+                                    }
+                                }
                                 if (h.streaming) {
                                     h.streaming->onError(e);
-                                    h.streaming->done_channel->try_send(boost::system::error_code{},
-                                                                        e);
+                                    try {
+                                        h.streaming->done_promise->set_value(Result<void>(e));
+                                    } catch (const std::future_error&) {
+                                        // Promise already satisfied, ignore
+                                    }
                                 }
                             }
                             c->handlers.clear();
@@ -428,14 +446,20 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                     const Response& r = std::get<Response>(msg.payload);
                     if (!isChunked) {
                         if (handlerPtr->unary) {
-                            handlerPtr->unary->channel->try_send(
-                                boost::system::error_code{}, std::make_shared<Result<Response>>(r));
+                            try {
+                                handlerPtr->unary->promise->set_value(Result<Response>(r));
+                            } catch (const std::future_error&) {
+                                // Promise already satisfied, ignore
+                            }
                             conn->handlers.erase(reqId);
                         } else if (handlerPtr->streaming) {
                             handlerPtr->streaming->onHeader(r);
                             handlerPtr->streaming->onComplete();
-                            handlerPtr->streaming->done_channel->try_send(
-                                boost::system::error_code{}, Result<void>());
+                            try {
+                                handlerPtr->streaming->done_promise->set_value(Result<void>());
+                            } catch (const std::future_error&) {
+                                // Promise already satisfied, ignore
+                            }
                             conn->handlers.erase(reqId);
                         }
                         continue;
@@ -450,8 +474,11 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                             bool cont = handlerPtr->streaming->onChunk(r, isLast);
                             if (!cont || isLast) {
                                 handlerPtr->streaming->onComplete();
-                                handlerPtr->streaming->done_channel->try_send(
-                                    boost::system::error_code{}, Result<void>());
+                                try {
+                                    handlerPtr->streaming->done_promise->set_value(Result<void>());
+                                } catch (const std::future_error&) {
+                                    // Promise already satisfied, ignore
+                                }
                                 conn->handlers.erase(reqId);
                             }
                         }

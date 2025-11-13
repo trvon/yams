@@ -315,13 +315,11 @@ MetadataRepository::MetadataRepository(ConnectionPool& pool) : pool_(pool) {
                  pathFtsAvailable_);
 }
 
-// Legacy makeSelect removed; use sql::QuerySpec in callers.
-
 // Document operations
 Result<int64_t> MetadataRepository::insertDocument(const DocumentInfo& info) {
     return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
-        // Build INSERT SQL based on whether path indexing columns exist
-        std::string sql = "INSERT INTO documents (file_path, file_name, file_extension, "
+        // Build INSERT OR IGNORE SQL based on whether path indexing columns exist
+        std::string sql = "INSERT OR IGNORE INTO documents (file_path, file_name, file_extension, "
                           "file_size, sha256_hash, mime_type, created_time, modified_time, "
                           "indexed_time, content_extracted, extraction_status, extraction_error";
 
@@ -371,12 +369,41 @@ Result<int64_t> MetadataRepository::insertDocument(const DocumentInfo& info) {
         if (!execResult)
             return execResult.error();
 
-        int64_t docId = db.lastInsertRowId();
+        // Check if a row was actually inserted (changes() returns 0 if INSERT was ignored)
+        int changes = db.changes();
+        int64_t docId;
 
-        // Update component-owned metrics
-        cachedDocumentCount_.fetch_add(1, std::memory_order_relaxed);
-        if (info.contentExtracted) {
-            cachedExtractedCount_.fetch_add(1, std::memory_order_relaxed);
+        if (changes > 0) {
+            // New document inserted
+            docId = db.lastInsertRowId();
+
+            // Update component-owned metrics
+            cachedDocumentCount_.fetch_add(1, std::memory_order_relaxed);
+            if (info.contentExtracted) {
+                cachedExtractedCount_.fetch_add(1, std::memory_order_relaxed);
+            }
+
+            spdlog::debug("Inserted new document with hash {} (id={})", info.sha256Hash, docId);
+        } else {
+            // Document already exists (INSERT was ignored), retrieve existing ID
+            auto checkStmt = db.prepare("SELECT id FROM documents WHERE sha256_hash = ?");
+            if (!checkStmt)
+                return checkStmt.error();
+
+            auto& stmt2 = checkStmt.value();
+            if (auto bindRes = stmt2.bind(1, info.sha256Hash); !bindRes)
+                return bindRes.error();
+
+            if (auto execRes = stmt2.execute(); !execRes)
+                return execRes.error();
+
+            if (!stmt2.step())
+                return Error{ErrorCode::DatabaseError,
+                             "Document insert was ignored but could not find existing document"};
+
+            docId = stmt2.getInt64(0);
+            spdlog::debug("Document with hash {} already exists (id={}), using existing",
+                          info.sha256Hash, docId);
         }
 
         return docId;

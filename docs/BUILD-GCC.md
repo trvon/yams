@@ -62,7 +62,8 @@ conan profile detect --force
 ### GCC
 
 ```bash
-conan install . -of build/release -s build_type=Release -b missing
+conan install . -of build/release -s build_type=Release \
+  -s compiler.cppstd=20 -b missing --build=qpdf/*
 meson setup build/release \
   --prefix /usr/local \
   --native-file build/release/build-release/conan/conan_meson_native.ini \
@@ -75,7 +76,7 @@ meson compile -C build/release
 ```bash
 conan install . -of build/release -s build_type=Release \
   -s compiler=clang -s compiler.version=18 -s compiler.libcxx=libstdc++11 \
-  -b missing
+  -s compiler.cppstd=20 -b missing --build=qpdf/*
 CC=clang CXX=clang++ meson setup build/release \
   --prefix /usr/local \
   --native-file build/release/build-release/conan/conan_meson_native.ini \
@@ -115,6 +116,27 @@ YAMS_LIBCXX_HARDENING=extensive ./setup.sh Debug  # ~10-20% overhead
 ```
 
 ## Troubleshooting
+
+### qpdf linking error: "recompile with -fPIC"
+
+**Error:**
+```
+/usr/bin/ld: libqpdf.a(...): relocation R_X86_64_PC32 against symbol `...` can not be used when making a shared object; recompile with -fPIC
+```
+
+**Cause:** Cached qpdf package was built without `-fPIC` (required for plugins).
+
+**Fix:**
+```bash
+# Remove cached qpdf packages
+conan remove 'qpdf/*' -c
+
+# Rebuild with forced qpdf rebuild
+./setup.sh Release
+# or manually:
+conan install . -of build/release -s build_type=Release \
+  -s compiler.cppstd=20 -b missing --build=qpdf/*
+```
 
 ### Clang: "cannot find -lstdc++"
 
@@ -198,8 +220,14 @@ Both work equally well. Clang + LLD gives faster link times.
 
 **Custom C++ standard:**
 ```bash
-YAMS_CPPSTD=20 ./setup.sh Release  # C++20 instead of C++23
+# C++20 (default, widely supported)
+YAMS_CPPSTD=20 ./setup.sh Release
+
+# C++23 (optional, for constexpr containers - requires GCC 13+ or Clang 16+)
+YAMS_CPPSTD=23 ./setup.sh Release
 ```
+
+**Note:** YAMS detects C++23 features at compile-time via `cpp23_features.hpp` and uses them when available. C++20 is the baseline requirement.
 
 **Custom install prefix:**
 ```bash

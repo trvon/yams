@@ -99,6 +99,8 @@ private:
     bool matchAllTags_ = false;
     std::string colorMode_ = "auto";
     size_t maxCount_ = 20;
+    // Output format control - LLM mode is default
+    bool minimalMode_ = false;
     // Session scoping
     std::optional<std::string> sessionOverride_;
     bool noSession_{false};
@@ -255,6 +257,10 @@ public:
         // Streaming control (disabled by default for reliability)
         cmd->add_flag("--streaming", enableStreaming_,
                       "Enable streaming responses from daemon (off by default)");
+
+        // Output format control
+        cmd->add_flag("--minimal", minimalMode_,
+                      "Use minimal grep-style output (default: LLM-friendly rich context)");
 
         // Session scoping controls
         cmd->add_option("--session", sessionOverride_, "Use this session for scoping");
@@ -528,54 +534,126 @@ public:
                             printLiteralTextHint();
                             return Result<void>();
                         }
-                        // Full match output with match type indicators
-                        size_t regexCount = 0, semanticCount = 0;
 
-                        for (const auto& match : resp.matches) {
-                            // Track match types for summary
-                            if (match.matchType == "semantic") {
-                                semanticCount++;
-                            } else {
-                                regexCount++;
-                            }
+                        // Check if minimal mode is enabled
+                        if (minimalMode_) {
+                            // Traditional grep output
+                            for (const auto& match : resp.matches) {
+                                if (showFilename_ || resp.matches.size() > 1) {
+                                    std::cout << match.file << ":";
+                                }
+                                if (showLineNumbers_) {
+                                    std::cout << match.lineNumber << ":";
+                                }
+                                std::cout << sanitizeForDisplay(match.line) << std::endl;
 
-                            // Build output line with match type indicator
-                            if (showFilename_ || resp.matches.size() > 1) {
-                                std::cout << match.file << ":";
+                                for (const auto& ctx : match.contextBefore) {
+                                    std::cout << "  " << sanitizeForDisplay(ctx) << std::endl;
+                                }
+                                for (const auto& ctx : match.contextAfter) {
+                                    std::cout << "  " << sanitizeForDisplay(ctx) << std::endl;
+                                }
                             }
-                            if (showLineNumbers_) {
-                                std::cout << match.lineNumber << ":";
-                            }
+                        } else {
+                            // LLM-friendly rich output (default)
+                            size_t regexCount = 0, semanticCount = 0;
+                            std::map<std::string, std::vector<const daemon::GrepMatch*>> fileGroups;
 
-                            // Add match type indicator
-                            if (match.matchType == "semantic") {
-                                // Show semantic match with confidence
-                                std::cout << "[S:" << std::fixed << std::setprecision(2)
-                                          << match.confidence << "] ";
-                            } else if (match.matchType == "hybrid") {
-                                std::cout << "[H] ";
-                            } else {
-                                // Regex match - only show indicator if we have mixed results
-                                if (!regexOnly_ && semanticLimit_ > 0) {
-                                    std::cout << "[R] ";
+                            // Group matches by file
+                            for (const auto& match : resp.matches) {
+                                fileGroups[match.file].push_back(&match);
+                                if (match.matchType == "semantic") {
+                                    semanticCount++;
+                                } else {
+                                    regexCount++;
                                 }
                             }
 
-                            std::cout << sanitizeForDisplay(match.line) << std::endl;
+                            // Print header with summary
+                            std::cout << "=== Results for \"" << pattern_ << "\" in "
+                                      << fileGroups.size() << " file"
+                                      << (fileGroups.size() != 1 ? "s" : "") << " (";
+                            if (regexCount > 0)
+                                std::cout << regexCount << " regex";
+                            if (regexCount > 0 && semanticCount > 0)
+                                std::cout << ", ";
+                            if (semanticCount > 0)
+                                std::cout << semanticCount << " semantic";
+                            std::cout << ") ===" << std::endl << std::endl;
 
-                            // Show context lines if any
-                            for (const auto& ctx : match.contextBefore) {
-                                std::cout << "  " << sanitizeForDisplay(ctx) << std::endl;
-                            }
-                            for (const auto& ctx : match.contextAfter) {
-                                std::cout << "  " << sanitizeForDisplay(ctx) << std::endl;
-                            }
-                        }
+                            // Print results grouped by file
+                            for (const auto& [filename, matches] : fileGroups) {
+                                // Get file extension for language hint
+                                std::string ext;
+                                auto dotPos = filename.rfind('.');
+                                if (dotPos != std::string::npos) {
+                                    ext = filename.substr(dotPos + 1);
+                                }
 
-                        // Show summary if we have mixed match types
-                        if (regexCount > 0 && semanticCount > 0) {
-                            std::cout << "\n[Summary: " << regexCount << " regex matches, "
-                                      << semanticCount << " semantic matches]" << std::endl;
+                                // File header with metadata
+                                std::cout << "File: " << filename;
+                                if (!ext.empty()) {
+                                    std::cout << " (" << ext << ")";
+                                }
+                                std::cout << std::endl;
+                                std::cout << "   Matches: " << matches.size();
+
+                                // Count match types for this file
+                                size_t fileRegex = 0, fileSemantic = 0;
+                                for (const auto* m : matches) {
+                                    if (m->matchType == "semantic")
+                                        fileSemantic++;
+                                    else
+                                        fileRegex++;
+                                }
+                                if (fileRegex > 0 || fileSemantic > 0) {
+                                    std::cout << " (";
+                                    if (fileRegex > 0)
+                                        std::cout << fileRegex << " regex";
+                                    if (fileRegex > 0 && fileSemantic > 0)
+                                        std::cout << ", ";
+                                    if (fileSemantic > 0)
+                                        std::cout << fileSemantic << " semantic";
+                                    std::cout << ")";
+                                }
+                                std::cout << std::endl << std::endl;
+
+                                // Print matches for this file
+                                for (const auto* match : matches) {
+                                    std::cout << "   Line " << std::setw(4) << match->lineNumber
+                                              << ": ";
+
+                                    // Match type indicator
+                                    if (match->matchType == "semantic") {
+                                        std::cout << "[Semantic:" << std::fixed
+                                                  << std::setprecision(2) << match->confidence
+                                                  << "] ";
+                                    } else if (match->matchType == "hybrid") {
+                                        std::cout << "[Hybrid] ";
+                                    } else if (semanticCount > 0) {
+                                        std::cout << "[Regex] ";
+                                    }
+
+                                    std::cout << sanitizeForDisplay(match->line) << std::endl;
+
+                                    // Context lines
+                                    for (const auto& ctx : match->contextBefore) {
+                                        std::cout << "          " << sanitizeForDisplay(ctx)
+                                                  << std::endl;
+                                    }
+                                    for (const auto& ctx : match->contextAfter) {
+                                        std::cout << "          " << sanitizeForDisplay(ctx)
+                                                  << std::endl;
+                                    }
+                                }
+                                std::cout << std::endl;
+                            }
+
+                            // Final summary
+                            std::cout << "[Total: " << resp.matches.size() << " match"
+                                      << (resp.matches.size() != 1 ? "es" : "") << " across "
+                                      << fileGroups.size() << " file"
+                                      << (fileGroups.size() != 1 ? "s" : "") << "]" << std::endl;
                         }
                     }
 
@@ -628,6 +706,30 @@ public:
     }
 
 private:
+    // Helper to get relative time description
+    std::string getRelativeTime(const std::chrono::system_clock::time_point& tp) const {
+        auto now = std::chrono::system_clock::now();
+        auto diff = std::chrono::duration_cast<std::chrono::hours>(now - tp);
+
+        if (diff.count() < 1) {
+            auto mins = std::chrono::duration_cast<std::chrono::minutes>(now - tp);
+            return std::to_string(mins.count()) + "m ago";
+        } else if (diff.count() < 24) {
+            return std::to_string(diff.count()) + "h ago";
+        } else if (diff.count() < 168) { // 7 days
+            return std::to_string(diff.count() / 24) + "d ago";
+        } else if (diff.count() < 720) { // 30 days
+            return std::to_string(diff.count() / 168) + "w ago";
+        } else {
+            return std::to_string(diff.count() / 720) + "mo ago";
+        }
+    }
+
+    // Helper to count lines in file
+    size_t countLines(const std::string& content) const {
+        return std::count(content.begin(), content.end(), '\n') + 1;
+    }
+
     // Helper to suggest -F flag when pattern has regex special chars
     void printLiteralTextHint() const {
         // Check if pattern contains common regex special characters

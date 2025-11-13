@@ -128,7 +128,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
             spdlog::info("Prune job {} queued for async execution ({} files)", requestId,
                          candidates.size());
 
-            response.errorMessage =
+            response.statusMessage =
                 fmt::format("Prune job {} started (processing {} files in background)", requestId,
                             candidates.size());
         }

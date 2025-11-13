@@ -65,7 +65,7 @@
 
 namespace yams::mcp {
 
-// Stdio send helper: sends JSON-RPC messages via stdio transport
+// Stdio send helper: sends JSON-RPC messages via stdio transport with buffering
 void MCPServer::sendResponse(const nlohmann::json& message) {
     spdlog::debug("MCP server sending response: {}", message.dump());
 
@@ -85,8 +85,16 @@ void MCPServer::sendResponse(const nlohmann::json& message) {
     }
 
     // MCP stdio spec: always output NDJSON (newline-delimited JSON)
+    // Use buffered sending for large payloads to prevent "End of file" errors
     if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
-        stdio->send(message);
+        constexpr size_t kLargePayloadThreshold = 256 * 1024; // 256KB
+        if (payload.size() > kLargePayloadThreshold) {
+            spdlog::debug("sendResponse: using buffered send for large payload ({} bytes)",
+                          payload.size());
+            stdio->sendFramedSerialized(payload);
+        } else {
+            stdio->send(message);
+        }
     } else {
         spdlog::error("sendResponse: transport is not stdio, cannot send");
     }
@@ -166,9 +174,34 @@ void StdioTransport::sendFramedSerialized(const std::string& payload) {
 
     try {
         std::lock_guard<std::mutex> lock(outMutex_);
-        // MCP stdio spec: newline-delimited JSON
-        std::cout << payload << '\n';
-        std::cout.flush();
+
+        constexpr size_t kChunkThreshold = 512 * 1024; // 512KB
+        constexpr size_t kChunkSize = 64 * 1024;       // 64KB chunks
+
+        // For large payloads, use chunked writing to prevent buffer overflow/"End of file" errors
+        if (payload.size() > kChunkThreshold) {
+            size_t offset = 0;
+            const size_t totalSize = payload.size();
+
+            while (offset < totalSize) {
+                size_t remaining = totalSize - offset;
+                size_t chunkLen = std::min(remaining, kChunkSize);
+
+                // Write chunk with explicit flush
+                std::cout.write(payload.data() + offset, static_cast<std::streamsize>(chunkLen));
+                std::cout.flush();
+
+                offset += chunkLen;
+            }
+
+            // Write final newline per NDJSON spec
+            std::cout << '\n';
+            std::cout.flush();
+        } else {
+            // Small payloads: send as-is (original behavior)
+            std::cout << payload << '\n';
+            std::cout.flush();
+        }
     } catch (const std::exception& e) {
         spdlog::error("StdioTransport::sendFramedSerialized failed: {}", e.what());
         recordError();

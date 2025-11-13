@@ -2,11 +2,13 @@
 #pragma once
 
 #include <spdlog/spdlog.h>
+#include <cstdlib>
 #include <filesystem>
 #include <random>
 #include <thread>
 #include "test_async_helpers.h"
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/daemon.h>
 
 namespace yams::test {
@@ -27,15 +29,10 @@ public:
         pid_ = root_ / ("daemon_" + id + ".pid");
         log_ = root_ / ("daemon_" + id + ".log");
 
-        yams::daemon::DaemonConfig cfg;
-        cfg.dataDir = data_;
-        cfg.socketPath = sock_;
-        cfg.pidFile = pid_;
-        cfg.logFile = log_;
-        cfg.enableModelProvider = true;
-        cfg.autoLoadPlugins = false; // stable under mock
-        cfg.useMockModelProvider = true;
-        daemon_ = std::make_unique<yams::daemon::YamsDaemon>(cfg);
+        // NOTE: Do NOT create daemon instance in constructor!
+        // Creating YamsDaemon initializes ServiceManager which spawns worker threads.
+        // If start() is never called but destructor runs, thread cleanup can crash.
+        // Defer daemon creation until start() is explicitly called.
     }
 
     ~DaemonHarness() {
@@ -45,39 +42,155 @@ public:
     }
 
     bool start(std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
-        if (!daemon_) {
-            return false;
-        }
+        // Always create new daemon instance on start()
+        // (daemon cannot be restarted after stop() - must create new instance)
+        spdlog::info("[DaemonHarness] Creating new daemon instance...");
+        yams::daemon::DaemonConfig cfg;
+        cfg.dataDir = data_;
+        cfg.socketPath = sock_;
+        cfg.pidFile = pid_;
+        cfg.logFile = log_;
+        cfg.enableModelProvider = true;
+        cfg.autoLoadPlugins = false;
+        cfg.useMockModelProvider = true;
+        daemon_ = std::make_unique<yams::daemon::YamsDaemon>(cfg);
+        spdlog::info("[DaemonHarness] Daemon instance created");
+
+        spdlog::info("[DaemonHarness] Calling daemon_->start()...");
         auto s = daemon_->start();
         if (!s) {
+            spdlog::error("[DaemonHarness] daemon_->start() failed!");
+            return false;
+        }
+        spdlog::info(
+            "[DaemonHarness] daemon_->start() succeeded, polling for daemon Ready state...");
+
+        // Poll for daemon to reach Ready state in lifecycle FSM
+        // This ensures ServiceManager has completed initialization, not just socket availability
+        auto deadline = std::chrono::steady_clock::now() + timeout;
+        bool socketReady = false;
+        bool lifecycleReady = false;
+
+        while (std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+            // Check lifecycle state first
+            auto lifecycle = daemon_->getLifecycle().snapshot();
+            if (lifecycle.state == yams::daemon::LifecycleState::Ready) {
+                lifecycleReady = true;
+                spdlog::info("[DaemonHarness] Daemon lifecycle reached Ready state");
+                break;
+            } else if (lifecycle.state == yams::daemon::LifecycleState::Failed) {
+                spdlog::error("[DaemonHarness] Daemon lifecycle reached Failed state: {}",
+                              lifecycle.lastError);
+                return false;
+            }
+        }
+
+        if (!lifecycleReady) {
+            auto lifecycle = daemon_->getLifecycle().snapshot();
+            spdlog::error(
+                "[DaemonHarness] Timeout waiting for Ready state after {}ms (current state: {})",
+                timeout.count(), static_cast<int>(lifecycle.state));
             return false;
         }
 
-        // Poll for socket server to be available
+        // Verify socket connectivity as final sanity check
         auto client = yams::daemon::DaemonClient(
             yams::daemon::ClientConfig{.socketPath = sock_,
                                        .connectTimeout = std::chrono::milliseconds(500),
                                        .autoStart = false});
-
-        auto deadline = std::chrono::steady_clock::now() + timeout;
-        while (std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-            // Try to connect - socket server readiness is enough
-            auto connectResult =
-                yams::cli::run_sync(client.connect(), std::chrono::milliseconds(300));
-            if (connectResult) {
-                // Connected successfully, daemon is ready
-                return true;
-            }
+        auto connectResult = yams::cli::run_sync(client.connect(), std::chrono::milliseconds(300));
+        if (connectResult) {
+            spdlog::info("[DaemonHarness] Socket connection verified, daemon fully ready");
+            return true;
+        } else {
+            spdlog::error("[DaemonHarness] Daemon Ready but socket connection failed");
+            return false;
         }
-
-        return false;
     }
 
     void stop() {
         if (daemon_) {
-            (void)daemon_->stop();
+            spdlog::info("[DaemonHarness] Stopping daemon (running={})...", daemon_->isRunning());
+
+            // Wait for daemon to fully stop - it handles GlobalIOContext::reset() internally
+            auto stopResult = daemon_->stop();
+            if (!stopResult) {
+                spdlog::warn("[DaemonHarness] Daemon stop returned error: {}",
+                             stopResult.error().message);
+            }
+
+            // Wait for daemon to report it's no longer running
+            int isRunningRetries = 0;
+            while (daemon_->isRunning() && isRunningRetries < 50) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                isRunningRetries++;
+            }
+            if (isRunningRetries > 0) {
+                spdlog::info("[DaemonHarness] Waited {}ms for isRunning() to become false",
+                             isRunningRetries * 10);
+            }
+
+            spdlog::info("[DaemonHarness] Daemon stopped (running={}), resetting instance...",
+                         daemon_->isRunning());
+
+            // Reset GlobalIOContext to clean up threads and io_context state
+            // This is critical for test isolation - without it, threads accumulate across test
+            // cases Temporarily unset YAMS_TESTING to allow reset() to actually work
+            const char* yams_testing = std::getenv("YAMS_TESTING");
+            const char* yams_safe = std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
+            if (yams_testing) {
+                unsetenv("YAMS_TESTING");
+            }
+            if (yams_safe) {
+                unsetenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
+            }
+
+            yams::daemon::GlobalIOContext::reset();
+            spdlog::info("[DaemonHarness] GlobalIOContext reset complete");
+
+            // Restore environment variables
+            if (yams_testing) {
+                setenv("YAMS_TESTING", yams_testing, 1);
+            }
+            if (yams_safe) {
+                setenv("YAMS_TEST_SAFE_SINGLE_INSTANCE", yams_safe, 1);
+            }
+
+            // Reset daemon so it can be recreated on next start()
+            daemon_.reset();
+
+            // CRITICAL: Allow OS to fully release thread resources (macOS needs this)
+            // Each daemon creates ~48 threads (32 SocketServer + 16 ServiceManager).
+            // macOS has strict per-process thread creation rate limits and needs time
+            // to reclaim thread resources before next daemon starts creating threads.
+            // Testing shows: 250ms → crashes at daemon #6, 500ms should allow 10+ daemons.
+            std::this_thread::sleep_for(std::chrono::milliseconds(
+                500)); // Wait for socket file to be removed by daemon shutdown
+            int socketRetries = 0;
+            while (std::filesystem::exists(sock_) && socketRetries < 50) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                socketRetries++;
+            }
+
+            if (socketRetries > 0) {
+                spdlog::info("[DaemonHarness] Waited {}ms for socket file removal",
+                             socketRetries * 20);
+            }
+
+            // Verify socket is truly gone
+            if (std::filesystem::exists(sock_)) {
+                spdlog::warn("[DaemonHarness] Socket file still exists after {}ms",
+                             socketRetries * 20);
+            }
+
+            // Additional brief wait to ensure OS fully releases socket
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+            spdlog::info(
+                "[DaemonHarness] Stop complete (isRunning check: {}ms, socket cleanup: {}ms)",
+                isRunningRetries * 10, socketRetries * 20);
         }
     }
 

@@ -50,19 +50,11 @@ class QpdfConan(ConanFile):
             strip_root=True, destination=self.source_folder)
     
     def generate(self):
-        from conan.tools.env import Environment
-        
-        # Force fPIC via environment variables - most reliable method
-        env = Environment()
-        env.append("CXXFLAGS", "-fPIC")
-        env.append("CFLAGS", "-fPIC")
-        env.vars(self).save_script("conanqpdfenv")
-        
         tc = CMakeToolchain(self)
-        # Force PIC for all targets
+        # Force PIC for all targets - critical for use in plugins
         tc.variables["CMAKE_POSITION_INDEPENDENT_CODE"] = "ON"
-        tc.variables["CMAKE_CXX_FLAGS_INIT"] = "-fPIC"
-        tc.variables["CMAKE_C_FLAGS_INIT"] = "-fPIC"
+        tc.variables["CMAKE_CXX_FLAGS"] = "-fPIC"
+        tc.variables["CMAKE_C_FLAGS"] = "-fPIC"
         tc.variables["BUILD_SHARED_LIBS"] = self.options.shared
         tc.variables["BUILD_STATIC_LIBS"] = not self.options.shared
         # Disable unnecessary features - build only the library

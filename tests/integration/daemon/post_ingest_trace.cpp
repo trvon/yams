@@ -76,7 +76,6 @@ int main() {
         return 1;
     }
     std::cout << "   ✓ PostIngestQueue exists" << std::endl;
-    std::cout << "   - Threads: " << queue->threads() << std::endl;
     std::cout << "   - Capacity: " << queue->capacity() << std::endl;
     std::cout << "   - Size: " << queue->size() << std::endl;
     std::cout << "   - Processed: " << queue->processed() << std::endl;
@@ -127,13 +126,11 @@ int main() {
         auto size = queue->size();
         auto processed = queue->processed();
         auto failed = queue->failed();
-        auto threads = queue->threads();
 
         std::cout << "   [" << (i * 0.5) << "s] "
                   << "size=" << size << " "
                   << "processed=" << processed << " "
-                  << "failed=" << failed << " "
-                  << "threads=" << threads;
+                  << "failed=" << failed;
 
         if (processed > initialProcessed) {
             std::cout << " ✓ PROCESSING OCCURRED!";

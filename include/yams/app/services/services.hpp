@@ -86,8 +86,8 @@ struct AppContext {
     std::shared_ptr<api::IContentStore> store;
     std::shared_ptr<search::SearchExecutor> searchExecutor;
     std::shared_ptr<metadata::MetadataRepository> metadataRepo;
-    std::shared_ptr<search::HybridSearchEngine> hybridEngine;
-    std::shared_ptr<metadata::KnowledgeGraphStore> kgStore; // PBI-043: tree diff KG integration
+    std::shared_ptr<search::HybridSearchEngine> hybridEngine; // Keep as HybridSearchEngine for now
+    std::shared_ptr<metadata::KnowledgeGraphStore> kgStore;   // PBI-043: tree diff KG integration
     // Optional: externally-provided content extractors (plugins)
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors;
 

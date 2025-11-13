@@ -75,8 +75,10 @@ if [[ "${ENABLE_COVERAGE}" == "true" ]] && [[ "${BUILD_TYPE}" != "Debug" ]]; the
   exit 1
 fi
 
-# Select desired C++ standard (defaults to C++23). Override with YAMS_CPPSTD=20/23.
-CPPSTD_INPUT=${YAMS_CPPSTD:-23}
+# Select desired C++ standard (defaults to C++20 to match meson.build).
+# Override with YAMS_CPPSTD=20/23.
+# Note: C++23 is only used if explicitly requested and compiler supports it.
+CPPSTD_INPUT=${YAMS_CPPSTD:-20}
 case "${CPPSTD_INPUT}" in
   17|20|23)
     CPPSTD="${CPPSTD_INPUT}"
@@ -291,9 +293,10 @@ if [[ -n "${DOCKERFILE_CONF_REV:-}" ]] || [[ -n "${CI:-}" ]]; then
   CONAN_ARGS+=(-c "tools.cmake.cmaketoolchain:user_toolchain+=${POLICY_TC}")
 fi
 
-# Enable tests for Debug builds in Conan (needed for Catch2/gtest dependencies)
+# Enable tests and benchmarks for Debug builds in Conan (needed for Catch2/gtest/benchmark dependencies)
 if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true" ]] || [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
   CONAN_ARGS+=(-o build_tests=True)
+  CONAN_ARGS+=(-o build_benchmarks=True)
 fi
 
 # Enable Tracy profiling for profiling builds
@@ -320,7 +323,8 @@ fi
 
 # Force building missing packages to ensure ABI compatibility
 # This is especially important for C++23 with Clang + libstdc++
-CONAN_ARGS+=(--build=missing)
+# Always rebuild qpdf to ensure it's built with -fPIC for plugins
+CONAN_ARGS+=(--build=missing --build=qpdf/*)
 
 conan install . -of "${BUILD_DIR}" "${CONAN_ARGS[@]}"
 

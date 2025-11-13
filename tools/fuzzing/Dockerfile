@@ -2,6 +2,16 @@
 # Dockerfile for AFL++ fuzzing environment
 FROM aflplusplus/aflplusplus:latest
 
+# Install system dependencies (per docs/BUILD-GCC.md)
+RUN apt-get update && apt-get install -y \
+    libssl-dev \
+    libcurl4-openssl-dev \
+    libsqlite3-dev \
+    protobuf-compiler \
+    libprotobuf-dev \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install Conan and dependencies
 RUN pip3 install conan
 
@@ -30,7 +40,7 @@ RUN mkdir -p build/fuzzing && \
       -o "zstd/*:build_programs=False" && \
     cd build/fuzzing && \
     . ./build-debug/conan/conanbuild.sh && \
-    meson setup --buildtype=debug -Dbuild-fuzzers=true ../.. && \
+    CC=afl-clang-fast CXX=afl-clang-fast++ meson setup --native-file build-debug/conan/conan_meson_native.ini --buildtype=debug -Dbuild-fuzzers=true ../.. && \
     meson compile
 
 # Set up fuzzing directories

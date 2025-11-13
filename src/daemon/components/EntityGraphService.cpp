@@ -20,7 +20,9 @@ EntityGraphService::EntityGraphService(ServiceManager* services, std::size_t wor
 }
 
 EntityGraphService::~EntityGraphService() {
+    spdlog::info("[EntityGraphService] Destructor called");
     stop();
+    spdlog::info("[EntityGraphService] Destructor complete");
 }
 
 void EntityGraphService::start() {
@@ -33,14 +35,29 @@ void EntityGraphService::start() {
 }
 
 void EntityGraphService::stop() {
-    if (!stop_.exchange(true)) {
+    spdlog::info("[EntityGraphService] stop() entry, stop_={}", stop_.load());
+    bool wasAlreadyStopped = stop_.exchange(true);
+    spdlog::info("[EntityGraphService] stop_.exchange(true) returned: {}", wasAlreadyStopped);
+
+    if (!wasAlreadyStopped) {
+        spdlog::info("[EntityGraphService] Notifying {} worker threads", threads_.size());
         qcv_.notify_all();
-        for (auto& t : threads_) {
-            if (t.joinable())
+        spdlog::info("[EntityGraphService] Joining {} threads", threads_.size());
+        for (size_t i = 0; i < threads_.size(); ++i) {
+            auto& t = threads_[i];
+            spdlog::info("[EntityGraphService] Checking thread {}: joinable={}", i, t.joinable());
+            if (t.joinable()) {
+                spdlog::info("[EntityGraphService] Joining thread {}...", i);
                 t.join();
+                spdlog::info("[EntityGraphService] Thread {} joined", i);
+            }
         }
         threads_.clear();
+        spdlog::info("[EntityGraphService] All threads joined and cleared");
+    } else {
+        spdlog::info("[EntityGraphService] stop() already called previously (no-op)");
     }
+    spdlog::info("[EntityGraphService] stop() exiting");
 }
 
 Result<void> EntityGraphService::submitExtraction(Job job) {

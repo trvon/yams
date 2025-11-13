@@ -22,17 +22,21 @@ namespace yams::metadata {
  * @brief Configuration for connection pool
  */
 struct ConnectionPoolConfig {
-    size_t minConnections = 2;                   ///< Minimum connections to maintain
-    size_t maxConnections = 10;                  ///< Maximum connections allowed
-    std::chrono::seconds idleTimeout{300};       ///< Idle connection timeout
-    std::chrono::seconds maxConnectionAge{3600}; ///< Maximum connection age before refresh
-    std::chrono::seconds connectTimeout{
-        2}; ///< Connection establishment timeout (mirrors socket server)
-    std::chrono::milliseconds busyTimeout{
-        2000};                     ///< SQLite busy timeout (mirrors socket server default)
-    bool enableWAL = true;         ///< Enable WAL mode
-    bool enableForeignKeys = true; ///< Enable foreign key constraints
+    size_t minConnections = 2;
+    size_t maxConnections = 10;
+    float reservedConnectionsPct = 0.20f;
+    std::chrono::seconds idleTimeout{300};
+    std::chrono::seconds maxConnectionAge{3600};
+    std::chrono::seconds connectTimeout{2};
+    std::chrono::milliseconds busyTimeout{2000};
+    bool enableWAL = true;
+    bool enableForeignKeys = true;
 };
+
+/**
+ * @brief Priority for connection acquisition
+ */
+enum class ConnectionPriority { Normal, High };
 
 /**
  * @brief Database connection wrapper with metadata
@@ -117,16 +121,20 @@ public:
 
     /**
      * @brief Acquire a connection from the pool
+     * @param timeout Timeout for waiting for a connection
+     * @param priority Priority level (High = client request, Normal = background operation)
      */
     Result<std::unique_ptr<PooledConnection>> acquire(
-        std::chrono::milliseconds timeout = std::chrono::milliseconds(30000)); // 30 seconds default
+        std::chrono::milliseconds timeout = std::chrono::milliseconds(30000), // 30 seconds default
+        ConnectionPriority priority = ConnectionPriority::Normal);
 
     /**
      * @brief Execute a function with a connection
      */
     template <typename Func>
-    auto withConnection(Func&& func) -> std::invoke_result_t<Func, Database&> {
-        auto connResult = acquire();
+    auto withConnection(Func&& func, ConnectionPriority priority = ConnectionPriority::Normal)
+        -> std::invoke_result_t<Func, Database&> {
+        auto connResult = acquire(std::chrono::milliseconds(30000), priority);
         if (!connResult) {
             return Error{ErrorCode::ResourceExhausted, "Failed to acquire database connection"};
         }

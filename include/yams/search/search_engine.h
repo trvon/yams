@@ -1,0 +1,298 @@
+#pragma once
+
+#include <yams/core/types.h>
+#include <yams/metadata/connection_pool.h>
+#include <yams/metadata/metadata_repository.h>
+#include <yams/search/search_results.h>
+#include <yams/vector/embedding_generator.h>
+#include <yams/vector/vector_database.h>
+#include <yams/vector/vector_index_manager.h>
+
+#include <atomic>
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+
+// Forward declarations
+namespace yams::metadata {
+class KnowledgeGraphStore;
+}
+
+namespace yams::search {
+
+// Import SearchResult from metadata namespace
+using yams::metadata::SearchResult;
+
+/**
+ * @brief Search parameters for query execution
+ */
+struct SearchParams {
+    // TODO: Add filtering, faceting, pagination parameters as needed
+    int limit = 100;
+    int offset = 0;
+};
+
+/**
+ * @brief Configuration for SearchEngine
+ *
+ * Search engine configuration with tunable weights for each component.
+ * This engine parallelizes queries across all available metadata structures
+ * and fuses results with configurable ranking.
+ */
+struct SearchEngineConfig {
+    // Component weights (0.0 = disabled, 1.0 = full weight)
+    float fts5Weight = 0.35f;     // Full-text search weight
+    float pathTreeWeight = 0.15f; // Path tree hierarchical weight
+    float symbolWeight = 0.20f;   // Symbol metadata weight
+    float kgWeight = 0.10f;       // Knowledge graph weight
+    float vectorWeight = 0.20f;   // Vector similarity weight
+
+    // Search parameters
+    size_t maxResults = 100;                     // Maximum results to return
+    float similarityThreshold = 0.65f;           // Minimum similarity threshold
+    bool enableParallelExecution = true;         // Parallel component queries
+    std::chrono::milliseconds componentTimeout = // Timeout per component
+        std::chrono::milliseconds(5000);
+
+    // Result fusion strategy
+    enum class FusionStrategy {
+        WEIGHTED_SUM,       // Sum of weighted scores
+        RECIPROCAL_RANK,    // Reciprocal Rank Fusion
+        BORDA_COUNT,        // Borda count voting
+        WEIGHTED_RECIPROCAL // Weighted RRF (custom)
+    } fusionStrategy = FusionStrategy::WEIGHTED_RECIPROCAL;
+
+    // Component-specific settings
+    size_t fts5MaxResults = 200;     // FTS5 candidate limit
+    size_t pathTreeMaxResults = 100; // Path tree candidate limit
+    size_t symbolMaxResults = 150;   // Symbol search candidate limit
+    size_t kgMaxResults = 50;        // KG traversal candidate limit
+    size_t vectorMaxResults = 100;   // Vector search k
+
+    // Performance tuning
+    bool useConnectionPriority = true;   // Use High priority for search queries
+    size_t minChunkSizeForParallel = 50; // Min results for parallel processing
+
+    // Debugging
+    bool includeDebugInfo = false; // Include per-component scores in results
+};
+
+/**
+ * @brief Component-specific search result
+ *
+ * Internal structure for tracking results from individual search components.
+ */
+struct ComponentResult {
+    std::string documentHash;
+    std::string filePath;
+    float score;                                  // Component-specific score [0.0, 1.0]
+    std::string source;                           // Component name (e.g., "fts5", "vector")
+    size_t rank;                                  // Rank within component results (0-based)
+    std::optional<std::string> snippet;           // Optional text snippet
+    std::map<std::string, std::string> debugInfo; // Component-specific debug data
+};
+
+/**
+ * @brief Parallel component query executor
+ *
+ * Internal class for managing parallel execution of search queries across
+ * all components. Uses connection pool with High priority and deterministic
+ * error handling (no hangs from timeouts).
+ */
+class ComponentQueryExecutor {
+public:
+    explicit ComponentQueryExecutor(yams::metadata::ConnectionPool& pool,
+                                    const SearchEngineConfig& config);
+
+    // Execute all component queries in parallel
+    Result<std::vector<ComponentResult>>
+    executeAll(const std::string& query, const std::optional<std::vector<float>>& queryEmbedding);
+
+private:
+    // Individual component query methods (each returns Results ordered by score)
+    Result<std::vector<ComponentResult>> queryFTS5(const std::string& query);
+    Result<std::vector<ComponentResult>> queryPathTree(const std::string& query);
+    Result<std::vector<ComponentResult>> querySymbols(const std::string& query);
+    Result<std::vector<ComponentResult>> queryKnowledgeGraph(const std::string& query);
+    Result<std::vector<ComponentResult>> queryVectorIndex(const std::vector<float>& embedding);
+
+    yams::metadata::ConnectionPool& pool_;
+    const SearchEngineConfig& config_;
+};
+
+/**
+ * @brief Result fusion and ranking engine
+ *
+ * Fuses results from multiple components using configurable strategies.
+ * All fusion algorithms are deterministic and produce consistent rankings
+ * given the same input results.
+ */
+class ResultFusion {
+public:
+    explicit ResultFusion(const SearchEngineConfig& config);
+
+    // Fuse component results into final ranked list
+    std::vector<SearchResult> fuse(const std::vector<ComponentResult>& componentResults);
+
+private:
+    // Fusion strategy implementations
+    std::vector<SearchResult> fuseWeightedSum(const std::vector<ComponentResult>& results);
+    std::vector<SearchResult> fuseReciprocalRank(const std::vector<ComponentResult>& results);
+    std::vector<SearchResult> fuseBordaCount(const std::vector<ComponentResult>& results);
+    std::vector<SearchResult> fuseWeightedReciprocal(const std::vector<ComponentResult>& results);
+
+    // Helper: Group component results by document
+    std::map<std::string, std::vector<ComponentResult>>
+    groupByDocument(const std::vector<ComponentResult>& results) const;
+
+    // Helper: Get weight for component source
+    float getComponentWeight(const std::string& source) const;
+
+    const SearchEngineConfig& config_;
+};
+
+/**
+ * @brief Multi-component parallel search engine
+ *
+ * This engine:
+ * 1. Queries all available metadata structures in parallel:
+ *    - FTS5 full-text search (documents_fts)
+ *    - Path tree hierarchical search (path_tree_nodes)
+ *    - Symbol metadata search (symbol_metadata)
+ *    - Knowledge graph traversal (kg_nodes, kg_edges, kg_aliases)
+ *    - Vector similarity search (VectorDatabase + VectorIndexManager)
+ *
+ * 2. Ranks and fuses results from all components using configurable strategies
+ *
+ * 3. Optimizes for fast database reads (no in-memory loading required)
+ *
+ * 4. Uses deterministic execution flow (no hangs from complex async patterns)
+ *
+ * Design Philosophy:
+ * - Each component query is independent and returns scored results
+ * - Parallel execution uses connection pool with High priority
+ * - No complex std::async/future timeout patterns that cause hangs
+ * - Fusion happens after all components complete or timeout
+ * - Failed components don't block other components
+ * - Deterministic ranking for reproducible results
+ */
+class SearchEngine {
+public:
+    /**
+     * @brief Construct a new SearchEngine
+     *
+     * @param metadataRepo Metadata repository for database access
+     * @param vectorDb Vector database for similarity search
+     * @param vectorIndex In-memory HNSW vector index
+     * @param embeddingGen Embedding generator for query vectorization
+     * @param kgStore Knowledge graph store for entity/alias queries (optional)
+     * @param config Search engine configuration
+     */
+    explicit SearchEngine(std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo,
+                          std::shared_ptr<vector::VectorDatabase> vectorDb,
+                          std::shared_ptr<vector::VectorIndexManager> vectorIndex,
+                          std::shared_ptr<vector::EmbeddingGenerator> embeddingGen,
+                          std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore,
+                          const SearchEngineConfig& config = {});
+
+    ~SearchEngine();
+
+    // Non-copyable, movable
+    SearchEngine(const SearchEngine&) = delete;
+    SearchEngine& operator=(const SearchEngine&) = delete;
+    SearchEngine(SearchEngine&&) noexcept;
+    SearchEngine& operator=(SearchEngine&&) noexcept;
+
+    /**
+     * @brief Execute a search query
+     *
+     * Parallelizes queries across all components, then fuses and ranks results.
+     * This is the main entry point for search operations.
+     *
+     * @param query Search query string
+     * @param params Additional search parameters (filters, limits, etc.)
+     * @return Ranked search results
+     */
+    Result<std::vector<SearchResult>> search(const std::string& query,
+                                             const SearchParams& params = {});
+
+    /**
+     * @brief Update configuration at runtime
+     *
+     * Allows tuning component weights and fusion strategy without restart.
+     *
+     * @param config New configuration
+     */
+    void setConfig(const SearchEngineConfig& config);
+
+    /**
+     * @brief Get current configuration
+     */
+    const SearchEngineConfig& getConfig() const;
+
+    /**
+     * @brief Get search engine statistics
+     *
+     * Returns metrics about search performance and component health.
+     */
+    struct Statistics {
+        // Query metrics
+        std::atomic<uint64_t> totalQueries{0};
+        std::atomic<uint64_t> successfulQueries{0};
+        std::atomic<uint64_t> failedQueries{0};
+
+        // Component metrics
+        std::atomic<uint64_t> fts5Queries{0};
+        std::atomic<uint64_t> pathTreeQueries{0};
+        std::atomic<uint64_t> symbolQueries{0};
+        std::atomic<uint64_t> kgQueries{0};
+        std::atomic<uint64_t> vectorQueries{0};
+
+        // Timing metrics (microseconds)
+        std::atomic<uint64_t> totalQueryTimeMicros{0};
+        std::atomic<uint64_t> avgQueryTimeMicros{0};
+
+        // Component timing (microseconds)
+        std::atomic<uint64_t> avgFts5TimeMicros{0};
+        std::atomic<uint64_t> avgPathTreeTimeMicros{0};
+        std::atomic<uint64_t> avgSymbolTimeMicros{0};
+        std::atomic<uint64_t> avgKgTimeMicros{0};
+        std::atomic<uint64_t> avgVectorTimeMicros{0};
+
+        // Fusion metrics
+        std::atomic<uint64_t> avgResultsPerQuery{0};
+        std::atomic<uint64_t> avgComponentsPerResult{0};
+    };
+
+    const Statistics& getStatistics() const;
+    void resetStatistics();
+
+    /**
+     * @brief Health check for all components
+     *
+     * Verifies that all search components are available and responsive.
+     * Useful for startup validation and monitoring.
+     */
+    Result<void> healthCheck();
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> pImpl_;
+};
+
+/**
+ * @brief Factory function for creating SearchEngine
+ *
+ * Convenience function for constructing the search engine with default config.
+ */
+std::unique_ptr<SearchEngine>
+createSearchEngine(std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo,
+                   std::shared_ptr<vector::VectorDatabase> vectorDb,
+                   std::shared_ptr<vector::VectorIndexManager> vectorIndex,
+                   std::shared_ptr<vector::EmbeddingGenerator> embeddingGen,
+                   std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore,
+                   const SearchEngineConfig& config = {});
+
+} // namespace yams::search

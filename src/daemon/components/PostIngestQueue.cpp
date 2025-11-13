@@ -1,9 +1,16 @@
 #include <spdlog/spdlog.h>
 #include <regex>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/deferred.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/experimental/parallel_group.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/use_awaitable.hpp>
 #include <yams/api/content_store.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/extraction/text_extractor.h>
 #include <yams/ingest/ingest_helpers.h>
@@ -19,698 +26,240 @@ namespace yams::daemon {
 PostIngestQueue::PostIngestQueue(
     std::shared_ptr<api::IContentStore> store, std::shared_ptr<metadata::MetadataRepository> meta,
     std::vector<std::shared_ptr<extraction::IContentExtractor>> extractors,
-    std::shared_ptr<metadata::KnowledgeGraphStore> kg, std::size_t threads, std::size_t capacity)
+    std::shared_ptr<metadata::KnowledgeGraphStore> kg, WorkCoordinator* coordinator,
+    std::size_t capacity)
     : store_(std::move(store)), meta_(std::move(meta)), extractors_(std::move(extractors)),
-      kg_(std::move(kg)), capacity_(capacity ? capacity : 1000) {
-    if (threads == 0)
-        threads = 2;
-    threads_.reserve(threads);
-    for (std::size_t i = 0; i < threads; ++i) {
-        auto flag = std::make_shared<std::atomic<bool>>(false);
-        Worker w{std::thread([this, flag] {
-                     while (!stop_.load(std::memory_order_relaxed) &&
-                            !flag->load(std::memory_order_relaxed)) {
-                         workerLoop();
-                     }
-                 }),
-                 flag};
-        threads_.emplace_back(std::move(w));
-    }
-
-#if !YAMS_INTERNAL_BUS_MPMC
-    // When bus is SPSC, create a single dispatcher thread that drains the bus
-    // and enqueues into the internal deques under lock, preserving SPSC semantics.
-    if (TuneAdvisor::useInternalBusForPostIngest()) {
-        busDispatcher_ = std::thread([this] {
-            auto bus =
-                InternalEventBus::instance()
-                    .get_or_create_channel<InternalEventBus::PostIngestTask>("post_ingest", 4096);
-            while (!stop_.load(std::memory_order_relaxed)) {
-                InternalEventBus::PostIngestTask bt;
-                if (bus && bus->try_pop(bt)) {
-                    std::unique_lock<std::mutex> lk(mtx_);
-                    auto it = inflight_.find(bt.hash);
-                    if (it == inflight_.end()) {
-                        inflight_.emplace(bt.hash, 1u);
-                        Task t{bt.hash, bt.mime, /*session*/ "", {}, Task::Stage::Metadata};
-                        t.enqueuedAt = std::chrono::steady_clock::now();
-                        qMeta_.push_back(std::move(t));
-                        lk.unlock();
-                        cv_.notify_one();
-                        InternalEventBus::instance().incPostConsumed();
-                    } else {
-                        InternalEventBus::instance().incPostDropped();
-                    }
-                } else {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                }
-            }
-        });
-    }
-#endif
+      kg_(std::move(kg)), coordinator_(coordinator), strand_(coordinator_->makeStrand()),
+      capacity_(capacity ? capacity : 1000) {
+    spdlog::info("[PostIngestQueue] Created with strand from WorkCoordinator");
 }
 
 PostIngestQueue::~PostIngestQueue() {
+    stop();
+}
+
+void PostIngestQueue::start() {
+    if (!stop_.load()) {
+        boost::asio::co_spawn(strand_, channelPoller(), boost::asio::detached);
+        spdlog::info("[PostIngestQueue] Channel poller started");
+    }
+}
+
+void PostIngestQueue::stop() {
     stop_.store(true);
-    cv_.notify_all();
-#if !YAMS_INTERNAL_BUS_MPMC
-    if (busDispatcher_.joinable()) {
-        busDispatcher_.join();
+    spdlog::info("[PostIngestQueue] Stop requested");
+}
+
+boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
+    auto channel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
+            "post_ingest", 4096);
+
+    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+
+    while (!stop_.load()) {
+        InternalEventBus::PostIngestTask task;
+        if (channel->try_pop(task)) {
+            try {
+                co_await processMetadataStage(task.hash, task.mime);
+
+                using namespace boost::asio::experimental;
+                auto ex = co_await boost::asio::this_coro::executor;
+
+                auto result = co_await make_parallel_group(
+                                  co_spawn(ex, processKnowledgeGraphStage(task.hash, task.mime),
+                                           boost::asio::deferred),
+                                  co_spawn(ex, processEmbeddingStage(task.hash, task.mime),
+                                           boost::asio::deferred))
+                                  .async_wait(wait_for_all(), boost::asio::use_awaitable);
+
+                processed_++;
+            } catch (const std::exception& e) {
+                spdlog::error("[PostIngestQueue] Failed to process {}: {}", task.hash, e.what());
+                failed_++;
+            }
+        } else {
+            timer.expires_after(std::chrono::milliseconds(100));
+            co_await timer.async_wait(boost::asio::use_awaitable);
+        }
     }
-#endif
-    for (auto& w : threads_) {
-        if (w.th.joinable())
-            w.th.join();
-    }
+
+    spdlog::info("[PostIngestQueue] Channel poller exited");
 }
 
 void PostIngestQueue::enqueue(Task t) {
-    {
-        std::unique_lock<std::mutex> lk(mtx_);
-        // Bounded queue with backpressure: wait while full
-        // total queued used only for wait predicate below
-        cv_.wait(lk, [&] { return stop_.load() || (qMeta_.size() + qKg_.size()) < capacity_; });
-        if (stop_.load())
-            return; // shutdown requested
-        if (inflight_.find(t.hash) != inflight_.end()) {
-            // Drop duplicate task while one is already queued or processing
-            return;
-        }
-        inflight_.emplace(t.hash, 1u);
-        t.enqueuedAt = std::chrono::steady_clock::now();
-        if (t.session.empty())
-            t.session = "default";
-        switch (t.stage) {
-            case Task::Stage::KnowledgeGraph:
-                qKg_.push_back(std::move(t));
-                break;
-            default:
-                qMeta_.push_back(std::move(t));
-                break;
-        }
+    auto channel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
+            "post_ingest", 4096);
+
+    InternalEventBus::PostIngestTask task;
+    task.hash = std::move(t.hash);
+    task.mime = std::move(t.mime);
+
+    if (!channel->try_push(task)) {
+        spdlog::warn("[PostIngestQueue] Channel full, dropping task");
     }
-    cv_.notify_one();
 }
 
 bool PostIngestQueue::tryEnqueue(const Task& t) {
-    return tryEnqueue(Task{t});
+    auto channel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
+            "post_ingest", 4096);
+
+    InternalEventBus::PostIngestTask task;
+    task.hash = t.hash;
+    task.mime = t.mime;
+
+    return channel->try_push(task);
 }
 
 bool PostIngestQueue::tryEnqueue(Task&& t) {
-    std::unique_lock<std::mutex> lk(mtx_);
-    if (stop_.load())
-        return false;
-    if ((qMeta_.size() + qKg_.size()) >= capacity_)
-        return false;
-    if (inflight_.find(t.hash) != inflight_.end()) {
-        return false; // duplicate suppressed
-    }
-    t.enqueuedAt = std::chrono::steady_clock::now();
-    if (t.session.empty())
-        t.session = "default";
-    inflight_.emplace(t.hash, 1u);
-    switch (t.stage) {
-        case Task::Stage::KnowledgeGraph:
-            qKg_.push_back(std::move(t));
-            break;
-        default:
-            qMeta_.push_back(std::move(t));
-            break;
-    }
-    lk.unlock();
-    cv_.notify_one();
-    return true;
-}
-
-void PostIngestQueue::notifyWorkers() {
-    cv_.notify_one();
+    return tryEnqueue(t);
 }
 
 std::size_t PostIngestQueue::size() const {
-    std::lock_guard<std::mutex> lk(mtx_);
-    return qMeta_.size() + qKg_.size();
+    // Channel size not available, return 0
+    return 0;
 }
 
-void PostIngestQueue::workerLoop() {
-    Task task;
-    bool haveTask = false;
-    const bool busEnabled = TuneAdvisor::useInternalBusForPostIngest();
-#if YAMS_INTERNAL_BUS_MPMC
-    // Try InternalEventBus first when enabled (MPMC mode only). In SPSC mode, a single
-    // dispatcher thread fills internal queues instead.
-    if (busEnabled) {
-        static std::shared_ptr<SpscQueue<InternalEventBus::PostIngestTask>> bus =
-            InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
-                "post_ingest", 4096);
-        InternalEventBus::PostIngestTask bt;
-        if (bus && bus->try_pop(bt)) {
-            // Deduplicate using inflight_ under lock
-            {
-                std::lock_guard<std::mutex> lk(mtx_);
-                if (inflight_.find(bt.hash) != inflight_.end()) {
-                    // Already queued/processing, skip
-                    haveTask = false;
-                } else {
-                    inflight_.emplace(bt.hash, 1u);
-                    task.hash = std::move(bt.hash);
-                    task.mime = std::move(bt.mime);
-                    task.enqueuedAt = std::chrono::steady_clock::now();
-                    haveTask = true;
-                    InternalEventBus::instance().incPostConsumed();
-                }
-            }
-        }
-    }
-#endif
-    if (!haveTask) {
-        std::unique_lock<std::mutex> lk(mtx_);
-        auto predicate = [&] { return stop_.load() || (!qMeta_.empty() || !qKg_.empty()); };
-        if (busEnabled) {
-#if YAMS_INTERNAL_BUS_MPMC
-            cv_.wait_for(lk, std::chrono::milliseconds(50), predicate);
-#else
-            cv_.wait(lk, predicate);
-#endif
-        } else {
-            cv_.wait(lk, predicate);
-        }
-        if (stop_.load())
-            return;
-        if (!popNextTaskLocked(task)) {
-            // Nothing eligible (token-starved), wait briefly to allow refill
-            lk.unlock();
-            if (busEnabled) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            }
-            return;
-        }
-        cv_.notify_one();
+boost::asio::awaitable<void> PostIngestQueue::processMetadataStage(const std::string& hash,
+                                                                   const std::string& mime) {
+    if (!store_ || !meta_) {
+        spdlog::warn("[PostIngestQueue] store or metadata unavailable; dropping task {}", hash);
+        co_return;
     }
 
-    bool processedOk = true;
     try {
-        if (!store_ || !meta_) {
-            spdlog::warn("PostIngest: store or metadata unavailable; dropping task {}", task.hash);
-            processedOk = false; // skip heavy path
-        }
+        auto start = std::chrono::steady_clock::now();
+
         int64_t docId = -1;
         std::string fileName;
-        std::string mime = task.mime;
+        std::string mimeType = mime;
         std::string extension;
-        if (processedOk) {
-            auto infoRes = meta_->getDocumentByHash(task.hash);
-            if (infoRes && infoRes.value().has_value()) {
-                const auto& info = *infoRes.value();
-                docId = info.id;
-                if (!info.fileName.empty())
-                    fileName = info.fileName;
-                if (!info.mimeType.empty())
-                    mime = info.mimeType;
-                if (!info.fileExtension.empty())
-                    extension = info.fileExtension;
-            }
-            if (task.stage == Task::Stage::Metadata) {
-                auto txt = extractDocumentText(store_, task.hash, mime, extension, extractors_);
-                if (!txt || txt->empty()) {
-                    spdlog::debug("PostIngest: no text extracted for {} (mime={})", task.hash,
-                                  mime);
-                    if (docId >= 0) {
-                        auto d = meta_->getDocument(docId);
-                        if (d && d.value().has_value()) {
-                            auto updated = d.value().value();
-                            updated.contentExtracted = false;
-                            updated.extractionStatus = metadata::ExtractionStatus::Skipped;
-                            (void)meta_->updateDocument(updated);
-                        }
-                    }
-                } else if (docId >= 0) {
-                    {
-                        auto pr = yams::ingest::persist_content_and_index(
-                            *meta_, docId, fileName, *txt, mime, "post_ingest");
-                        if (!pr) {
-                            spdlog::warn("PostIngest: persist/index failed for {}: {}", task.hash,
-                                         pr.error().message);
-                        }
-                    }
-                    // Enqueue next stages after metadata is persisted
-                    addNextStagesLocked(task.hash, mime, task.session);
-                }
-            }
-            // KG upsert (best-effort) — handled only in KG stage below
-            try {
-                if (task.stage == Task::Stage::KnowledgeGraph && kg_) {
-                    auto infoRes2 = meta_->getDocumentByHash(task.hash);
-                    if (infoRes2 && infoRes2.value().has_value()) {
-                        const auto& doc = *infoRes2.value();
-                        metadata::KGNode docNode;
-                        docNode.nodeKey = std::string("doc:") + task.hash;
-                        docNode.type = std::string("document");
-                        docNode.label = !doc.fileName.empty()
-                                            ? std::optional<std::string>(doc.fileName)
-                                            : std::nullopt;
-                        std::int64_t docNodeId = -1;
-                        if (TuneAdvisor::kgBatchNodesEnabled()) {
-                            auto ids = kg_->upsertNodes({docNode});
-                            if (ids && !ids.value().empty())
-                                docNodeId = ids.value()[0];
-                        } else {
-                            auto r = kg_->upsertNode(docNode);
-                            if (r)
-                                docNodeId = r.value();
-                        }
-                        if (docNodeId >= 0) {
-                            auto tagsRes = meta_->getDocumentTags(doc.id);
-                            std::vector<metadata::KGEdge> edges;
-                            if (tagsRes && !tagsRes.value().empty()) {
-                                std::vector<metadata::KGNode> tagNodes;
-                                tagNodes.reserve(tagsRes.value().size());
-                                for (const auto& t : tagsRes.value()) {
-                                    metadata::KGNode tagNode;
-                                    tagNode.nodeKey = std::string("tag:") + t;
-                                    tagNode.type = std::string("tag");
-                                    tagNodes.push_back(std::move(tagNode));
-                                }
-                                std::vector<std::int64_t> tagIds;
-                                if (TuneAdvisor::kgBatchNodesEnabled()) {
-                                    auto rids = kg_->upsertNodes(tagNodes);
-                                    if (rids)
-                                        tagIds = std::move(rids.value());
-                                } else {
-                                    for (const auto& n : tagNodes) {
-                                        auto rr = kg_->upsertNode(n);
-                                        if (rr)
-                                            tagIds.push_back(rr.value());
-                                    }
-                                }
-                                for (auto tid : tagIds) {
-                                    metadata::KGEdge e;
-                                    e.srcNodeId = docNodeId;
-                                    e.dstNodeId = tid;
-                                    e.relation = "HAS_TAG";
-                                    edges.push_back(std::move(e));
-                                }
-                                if (!edges.empty()) {
-                                    if (TuneAdvisor::kgBatchEdgesEnabled())
-                                        (void)kg_->addEdgesUnique(edges);
-                                    else
-                                        for (const auto& e : edges)
-                                            (void)kg_->addEdge(e);
-                                }
-                            }
-                            // Lightweight entity extraction (from persisted content)
-                            auto contentOpt = meta_->getContent(docId);
-                            if (contentOpt && contentOpt.value().has_value()) {
-                                const std::string& s = contentOpt.value().value().contentText;
-                                if (!s.empty()) {
-                                    static const std::regex url_re(R"((https?:\/\/[^\s)]+))",
-                                                                   std::regex::icase);
-                                    static const std::regex email_re(
-                                        R"(([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}))",
-                                        std::regex::icase);
-                                    static const std::regex path_re(R"((\/[^\s:]{2,}))");
-                                    std::vector<metadata::KGNode> nodeBuf;
-                                    auto add_entity = [&](const std::string& key,
-                                                          const std::string& type) {
-                                        metadata::KGNode n;
-                                        n.nodeKey = key;
-                                        n.type = type;
-                                        nodeBuf.push_back(std::move(n));
-                                    };
-                                    size_t added = 0;
-                                    const size_t kMax = TuneAdvisor::maxEntitiesPerDoc();
-                                    std::smatch m;
-                                    auto it = s.cbegin();
-                                    if (TuneAdvisor::analyzerUrls()) {
-                                        while (added < kMax &&
-                                               std::regex_search(it, s.cend(), m, url_re)) {
-                                            add_entity(std::string("url:") + m.str(1), "url");
-                                            it = m.suffix().first;
-                                            ++added;
-                                        }
-                                    }
-                                    it = s.cbegin();
-                                    if (TuneAdvisor::analyzerEmails()) {
-                                        while (added < kMax &&
-                                               std::regex_search(it, s.cend(), m, email_re)) {
-                                            add_entity(std::string("email:") + m.str(1), "email");
-                                            it = m.suffix().first;
-                                            ++added;
-                                        }
-                                    }
-                                    it = s.cbegin();
-                                    if (TuneAdvisor::analyzerFilePaths()) {
-                                        while (added < kMax &&
-                                               std::regex_search(it, s.cend(), m, path_re)) {
-                                            add_entity(std::string("path:") + m.str(1), "path");
-                                            it = m.suffix().first;
-                                            ++added;
-                                        }
-                                    }
-                                    if (!nodeBuf.empty()) {
-                                        std::vector<std::int64_t> nids;
-                                        if (TuneAdvisor::kgBatchNodesEnabled()) {
-                                            auto rids = kg_->upsertNodes(nodeBuf);
-                                            if (rids)
-                                                nids = std::move(rids.value());
-                                        } else {
-                                            for (const auto& n : nodeBuf) {
-                                                auto rr = kg_->upsertNode(n);
-                                                if (rr)
-                                                    nids.push_back(rr.value());
-                                            }
-                                        }
-                                        std::vector<metadata::KGEdge> ents;
-                                        ents.reserve(nids.size());
-                                        for (auto id : nids) {
-                                            metadata::KGEdge e;
-                                            e.srcNodeId = docNodeId;
-                                            e.dstNodeId = id;
-                                            e.relation = "MENTIONS";
-                                            ents.push_back(std::move(e));
-                                        }
-                                        if (!ents.empty()) {
-                                            if (TuneAdvisor::kgBatchEdgesEnabled())
-                                                (void)kg_->addEdgesUnique(ents);
-                                            else
-                                                for (const auto& e : ents)
-                                                    (void)kg_->addEdge(e);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } catch (...) {
-            }
 
-            // Embedding stage removed: now handled asynchronously by EmbeddingService
-            // PostIngestQueue enqueues EmbedJob to InternalBus in addNextStagesLocked()
+        auto infoRes = meta_->getDocumentByHash(hash);
+        if (infoRes && infoRes.value().has_value()) {
+            const auto& info = *infoRes.value();
+            docId = info.id;
+            if (!info.fileName.empty())
+                fileName = info.fileName;
+            if (!info.mimeType.empty())
+                mimeType = info.mimeType;
+            if (!info.fileExtension.empty())
+                extension = info.fileExtension;
+        }
+
+        auto txt = extractDocumentText(store_, hash, mimeType, extension, extractors_);
+        if (!txt || txt->empty()) {
+            spdlog::debug("[PostIngestQueue] no text extracted for {} (mime={})", hash, mimeType);
+            if (docId >= 0) {
+                auto d = meta_->getDocument(docId);
+                if (d && d.value().has_value()) {
+                    auto updated = d.value().value();
+                    updated.contentExtracted = false;
+                    updated.extractionStatus = metadata::ExtractionStatus::Skipped;
+                    (void)meta_->updateDocument(updated);
+                }
+            }
+        } else if (docId >= 0) {
+            auto pr = yams::ingest::persist_content_and_index(*meta_, docId, fileName, *txt,
+                                                              mimeType, "post_ingest");
+            if (!pr) {
+                spdlog::warn("[PostIngestQueue] persist/index failed for {}: {}", hash,
+                             pr.error().message);
+            } else {
+                auto duration = std::chrono::steady_clock::now() - start;
+                double ms = std::chrono::duration<double, std::milli>(duration).count();
+                spdlog::debug("[PostIngestQueue] Metadata stage completed for {} in {:.2f}ms", hash,
+                              ms);
+            }
         }
     } catch (const std::exception& e) {
-        spdlog::warn("PostIngest: exception: {}", e.what());
-        processedOk = false;
-        failed_.fetch_add(1, std::memory_order_relaxed);
-    } catch (...) {
-        spdlog::warn("PostIngest: unknown exception");
-        processedOk = false;
-        failed_.fetch_add(1, std::memory_order_relaxed);
-    }
-
-    processed_.fetch_add(1, std::memory_order_relaxed);
-    // Finalize: decrement inflight for this hash and update EMAs
-    {
-        std::lock_guard<std::mutex> lk(mtx_);
-        auto it = inflight_.find(task.hash);
-        if (it != inflight_.end()) {
-            if (it->second > 1)
-                --(it->second);
-            else
-                inflight_.erase(it);
-        }
-        try {
-            auto now = std::chrono::steady_clock::now();
-            if (task.enqueuedAt.time_since_epoch().count() != 0) {
-                double ms = static_cast<double>(
-                    std::chrono::duration_cast<std::chrono::milliseconds>(now - task.enqueuedAt)
-                        .count());
-                double prev = latencyMsEma_.load();
-                double ema = (prev == 0.0) ? ms : (kAlpha_ * ms + (1.0 - kAlpha_) * prev);
-                latencyMsEma_.store(ema);
-            }
-            if (lastCompleteTs_.time_since_epoch().count() != 0) {
-                double secs = std::chrono::duration<double>(now - lastCompleteTs_).count();
-                if (secs > 0.0) {
-                    double inst = 1.0 / secs;
-                    double prev = ratePerSecEma_.load();
-                    double ema = (prev == 0.0) ? inst : (kAlpha_ * inst + (1.0 - kAlpha_) * prev);
-                    ratePerSecEma_.store(ema);
-                }
-            }
-            lastCompleteTs_ = now;
-        } catch (...) {
-        }
-    }
-    // Optional tiny pause to reduce contention on very fast loops and give CPU back
-    try {
-        auto ms = TuneAdvisor::workerPollMs();
-        if (ms > 0 && ms < 1000)
-            std::this_thread::sleep_for(std::chrono::milliseconds(std::min<uint32_t>(ms, 25)));
-    } catch (...) {
+        spdlog::error("[PostIngestQueue] Metadata stage failed for {}: {}", hash, e.what());
     }
 }
 
-bool PostIngestQueue::admitSessionLocked(const std::string& session) {
-    auto now = std::chrono::steady_clock::now();
-    auto it = buckets_.find(session);
-    if (it == buckets_.end()) {
-        buckets_[session] = Bucket{static_cast<double>(tokenBurst_), now};
-        return true;
-    }
-    auto& b = it->second;
-    // Refill tokens based on elapsed time
-    double elapsed = std::chrono::duration<double>(now - b.last).count();
-    b.tokens = std::min<double>(b.tokens + elapsed * tokenRatePerSec_, tokenBurst_);
-    b.last = now;
-    if (b.tokens >= 1.0) {
-        b.tokens -= 1.0;
-        return true;
-    }
-    return false;
-}
-
-bool PostIngestQueue::popNextTaskLocked(Task& out) {
-    // Weighted-fair selection order cycles through a flattened schedule
-    // Build a small static pattern based on weights: [M x wMeta][K x wKg]
-    auto nonEmpty = [&]() { return !qMeta_.empty() || !qKg_.empty(); };
-    if (!nonEmpty())
-        return false;
-    const uint32_t period = wMeta_ + wKg_;
-    for (uint32_t i = 0; i < period; ++i) {
-        uint32_t idx = (schedCounter_ + i) % period;
-        // map idx to a queue band
-        if (idx < wMeta_) {
-            if (!qMeta_.empty()) {
-                const auto& cand = qMeta_.front();
-                if (admitSessionLocked(cand.session)) {
-                    out = cand;
-                    qMeta_.pop_front();
-                    schedCounter_ = (idx + 1) % period;
-                    return true;
-                }
-            }
-        } else {
-            if (!qKg_.empty()) {
-                const auto& cand = qKg_.front();
-                if (admitSessionLocked(cand.session)) {
-                    out = cand;
-                    qKg_.pop_front();
-                    schedCounter_ = (idx + 1) % period;
-                    return true;
-                }
-            }
-        }
-    }
-    // No eligible task due to token starvation
-    return false;
-}
-
-bool PostIngestQueue::resize(std::size_t target) {
-    if (target == 0)
-        target = 1;
-    std::lock_guard<std::mutex> lk(mtx_);
-    std::size_t cur = threads_.size();
-    if (target == cur)
-        return false;
-    if (target > cur) {
-        std::size_t add = target - cur;
-        for (std::size_t i = 0; i < add; ++i) {
-            auto flag = std::make_shared<std::atomic<bool>>(false);
-            Worker w{std::thread([this, flag] {
-                         while (!stop_.load(std::memory_order_relaxed) &&
-                                !flag->load(std::memory_order_relaxed)) {
-                             workerLoop();
-                         }
-                     }),
-                     flag};
-            threads_.emplace_back(std::move(w));
-        }
-        spdlog::info("PostIngestQueue resized up to {} threads", threads_.size());
-        return true;
-    }
-    // shrink: signal last N workers to exit; join outside lock
-    std::size_t remove = cur - target;
-    std::vector<std::thread> joiners;
-    for (std::size_t i = 0; i < remove; ++i) {
-        auto& w = threads_.back();
-        if (w.exit)
-            w.exit->store(true, std::memory_order_relaxed);
-        joiners.emplace_back(std::move(w.th));
-        threads_.pop_back();
-    }
-    // Unlock and detach threads so the tuning manager is not blocked.
-    // The threads will exit cleanly as their loop condition will fail.
-    for (auto& t : joiners) {
-        if (t.joinable())
-            t.detach();
-    }
-    spdlog::info("PostIngestQueue resized down to {} threads", threads_.size());
-    return true;
-}
-
-void PostIngestQueue::addNextStagesLocked(const std::string& hash, const std::string& mime,
-                                          const std::string& session) {
-    std::lock_guard<std::mutex> lk(mtx_);
-
-    // Enqueue KG stage to internal queue
-    Task tKg{hash, mime, session, std::chrono::steady_clock::now(), Task::Stage::KnowledgeGraph};
-    qKg_.push_back(std::move(tKg));
-
-    auto it = inflight_.find(hash);
-    if (it != inflight_.end()) {
-        it->second += 1u; // Only KG stage now, embeddings handled by EmbeddingService
-    } else {
-        inflight_[hash] = 1u;
-    }
-
-    // Enqueue embedding job to InternalBus for async processing by EmbeddingService
-    InternalEventBus::EmbedJob embedJob;
-    embedJob.hashes = {hash};
-    embedJob.batchSize = 1;
-    embedJob.skipExisting = true;
-    embedJob.modelName = ""; // Will use preferred model
-
-    auto embedChannel =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>("embed_jobs",
-                                                                                       2048);
-    if (embedChannel && embedChannel->try_push(std::move(embedJob))) {
-        spdlog::debug("PostIngest: enqueued embedding job for {}", hash);
-    } else {
-        spdlog::warn(
-            "PostIngest: failed to enqueue embedding job for {} (channel full or unavailable)",
-            hash);
-    }
-
-    cv_.notify_one();
-}
-
-bool PostIngestQueue::indexDocumentSync(const std::string& hash, const std::string& mime) {
-    spdlog::info("PostIngest(sync): index start {}", hash);
-    if (!store_ || !meta_) {
-        spdlog::warn("PostIngest(sync): store or metadata unavailable for {}", hash);
-        return false;
+boost::asio::awaitable<void> PostIngestQueue::processKnowledgeGraphStage(const std::string& hash,
+                                                                         const std::string& mime) {
+    if (!kg_ || !meta_) {
+        co_return;
     }
 
     try {
-        // Resolve document info from metadata
+        auto start = std::chrono::steady_clock::now();
+
         auto infoRes = meta_->getDocumentByHash(hash);
         if (!infoRes || !infoRes.value().has_value()) {
-            spdlog::warn("PostIngest(sync): document not found in metadata: {}", hash);
-            return false;
+            co_return;
         }
 
-        const auto& info = *infoRes.value();
-        int64_t docId = info.id;
-        std::string fileName = info.fileName.empty() ? "" : info.fileName;
-        std::string resolvedMime = mime.empty() ? info.mimeType : mime;
-        std::string extension = info.fileExtension;
+        const auto& doc = *infoRes.value();
+        metadata::KGNode docNode;
+        docNode.nodeKey = std::string("doc:") + hash;
+        docNode.type = std::string("document");
+        docNode.label =
+            !doc.fileName.empty() ? std::optional<std::string>(doc.fileName) : std::nullopt;
 
-        // Extract text content
-        auto txt = extractDocumentText(store_, hash, resolvedMime, extension, extractors_);
-        if (!txt || txt->empty()) {
-            spdlog::debug("PostIngest(sync): no text extracted for {} (mime={})", hash,
-                          resolvedMime);
-            // Mark as skipped
-            auto d = meta_->getDocument(docId);
-            if (d && d.value().has_value()) {
-                auto updated = d.value().value();
-                updated.contentExtracted = false;
-                updated.extractionStatus = metadata::ExtractionStatus::Skipped;
-                (void)meta_->updateDocument(updated);
-            }
-            return false;
-        }
+        std::int64_t docNodeId = -1;
+        auto r = kg_->upsertNode(docNode);
+        if (r)
+            docNodeId = r.value();
 
-        // Perform FTS5 indexing synchronously
-        spdlog::info("[PBI-040-4] About to call persist_content_and_index for {}", hash);
-        auto pr = yams::ingest::persist_content_and_index(*meta_, docId, fileName, *txt,
-                                                          resolvedMime, "sync_add");
-        if (!pr) {
-            spdlog::warn("[PBI-040-4] persist/index failed for {}: {}", hash, pr.error().message);
-            return false;
-        }
+        if (docNodeId >= 0) {
+            auto tagsRes = meta_->getDocumentTags(doc.id);
+            if (tagsRes && !tagsRes.value().empty()) {
+                for (const auto& tag : tagsRes.value()) {
+                    metadata::KGNode tagNode;
+                    tagNode.nodeKey = std::string("tag:") + tag;
+                    tagNode.type = std::string("tag");
 
-        spdlog::info("[PBI-040-4] FTS5 indexing completed successfully for {}", hash);
-
-        // PBI-040-4 + PBI-079: Force WAL checkpoint and refresh connections
-        // to ensure FTS5/documents table updates are visible immediately.
-        // This is critical for synchronous indexing tests.
-        if (meta_) {
-            spdlog::info("PostIngest(sync): attempting WAL checkpoint for {}", hash);
-            if (auto res = meta_->checkpointWal(); !res) {
-                spdlog::warn("PostIngest(sync): WAL checkpoint failed: {}", res.error().message);
-            } else {
-                spdlog::info("PostIngest(sync): WAL checkpoint successful for {}", hash);
-
-                // PBI-079: Refresh all idle connections to invalidate stale query plans
-                // This forces subsequent queries to see the checkpointed data
-                spdlog::info("PostIngest(sync): about to refresh connections for {}", hash);
-                try {
-                    meta_->refreshAllConnections();
-                    spdlog::info("PostIngest(sync): refreshed all idle connections for {}", hash);
-
-                    // PBI-079: Additional synchronization - brief sleep to ensure
-                    // connection pool has fully cycled and new connections are ready
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                } catch (const std::exception& e) {
-                    spdlog::error("PostIngest(sync): refresh failed: {}", e.what());
+                    auto tagR = kg_->upsertNode(tagNode);
+                    if (tagR) {
+                        metadata::KGEdge edge;
+                        edge.srcNodeId = docNodeId;
+                        edge.dstNodeId = tagR.value();
+                        edge.relation = "HAS_TAG";
+                        (void)kg_->addEdge(edge);
+                    }
                 }
             }
-        } else {
-            spdlog::warn("PostIngest(sync): meta_ is null, cannot checkpoint WAL for {}", hash);
+
+            auto duration = std::chrono::steady_clock::now() - start;
+            double ms = std::chrono::duration<double, std::milli>(duration).count();
+            spdlog::debug("[PostIngestQueue] KG stage completed for {} in {:.2f}ms", hash, ms);
         }
-
-        // Queue KG stage asynchronously and enqueue embedding job to InternalBus
-        {
-            std::lock_guard<std::mutex> lk(mtx_);
-            if (inflight_.find(hash) == inflight_.end()) {
-                Task tKg{hash, resolvedMime, "", std::chrono::steady_clock::now(),
-                         Task::Stage::KnowledgeGraph};
-                qKg_.push_back(std::move(tKg));
-                inflight_[hash] = 1u;
-                cv_.notify_one();
-
-                // Enqueue embedding job to InternalBus
-                InternalEventBus::EmbedJob embedJob;
-                embedJob.hashes = {hash};
-                embedJob.batchSize = 1;
-                embedJob.skipExisting = true;
-                embedJob.modelName = "";
-
-                auto embedChannel =
-                    InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
-                        "embed_jobs", 2048);
-                if (embedChannel && embedChannel->try_push(std::move(embedJob))) {
-                    spdlog::debug("PostIngest(sync): enqueued embedding job for {}", hash);
-                } else {
-                    spdlog::warn("PostIngest(sync): failed to enqueue embedding job for {}", hash);
-                }
-            }
-        }
-
-        spdlog::info("PostIngest(sync): index done {}", hash);
-        return true;
     } catch (const std::exception& e) {
-        spdlog::error("PostIngest(sync): exception for {}: {}", hash, e.what());
-        spdlog::info("PostIngest(sync): index done {} (failure)", hash);
-        return false;
-    } catch (...) {
-        spdlog::error("PostIngest(sync): unknown exception for {}", hash);
-        spdlog::info("PostIngest(sync): index done {} (failure)", hash);
-        return false;
+        spdlog::error("[PostIngestQueue] KG stage failed for {}: {}", hash, e.what());
     }
+}
+
+boost::asio::awaitable<void> PostIngestQueue::processEmbeddingStage(const std::string& hash,
+                                                                    const std::string& mime) {
+    try {
+        auto embedChannel =
+            InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
+                "embed_jobs", 2048);
+
+        if (!embedChannel) {
+            spdlog::warn("[PostIngestQueue] Embed channel unavailable for {}", hash);
+            co_return;
+        }
+
+        InternalEventBus::EmbedJob job;
+        job.hashes.push_back(hash);
+        job.batchSize = 1;
+        job.skipExisting = true;
+        job.modelName = "";
+
+        if (!embedChannel->try_push(std::move(job))) {
+            spdlog::warn("[PostIngestQueue] Embed channel full, dropping job for {}", hash);
+        } else {
+            spdlog::debug("[PostIngestQueue] Dispatched embedding job for {}", hash);
+        }
+    } catch (const std::exception& e) {
+        spdlog::error("[PostIngestQueue] Embedding dispatch failed for {}: {}", hash, e.what());
+    }
+    co_return;
 }
 
 } // namespace yams::daemon

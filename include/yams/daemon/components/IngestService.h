@@ -1,26 +1,29 @@
 #pragma once
 
 #include <atomic>
-#include <yams/app/services/services.hpp>
-#include <yams/compat/thread_stop_compat.h>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/strand.hpp>
 
 namespace yams::daemon {
 
 class ServiceManager;
+class WorkCoordinator;
 
 class IngestService {
 public:
-    IngestService(ServiceManager* sm, size_t threads = 1);
+    IngestService(ServiceManager* sm, WorkCoordinator* coordinator);
     ~IngestService();
 
     void start();
     void stop();
 
 private:
-    void workerLoop(const yams::compat::stop_token& token);
+    boost::asio::awaitable<void> channelPoller();
 
     ServiceManager* sm_;
-    std::vector<yams::compat::jthread> threads_;
+    WorkCoordinator* coordinator_;
+    boost::asio::strand<boost::asio::io_context::executor_type> strand_;
     std::atomic<bool> stop_{false};
 };
 

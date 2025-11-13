@@ -12,7 +12,6 @@
 #include <vector>
 
 #include <boost/asio/awaitable.hpp>
-#include <boost/asio/experimental/channel.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
 #include <boost/asio/strand.hpp>
@@ -26,14 +25,11 @@ namespace yams::daemon {
 
 struct AsioConnection {
     using socket_t = boost::asio::local::stream_protocol::socket;
-    // Use std::mutex in channel_traits for thread-safe access across multiple threads
-    // Template params: <Executor, Traits, Signatures...>
-    using response_channel_t = boost::asio::experimental::basic_channel<
-        boost::asio::any_io_executor, boost::asio::experimental::channel_traits<std::mutex>,
-        void(boost::system::error_code, std::shared_ptr<Result<Response>>)>;
-    using void_channel_t = boost::asio::experimental::basic_channel<
-        boost::asio::any_io_executor, boost::asio::experimental::channel_traits<std::mutex>,
-        void(boost::system::error_code, Result<void>)>;
+    // Use std::promise/std::future for thread-safe one-shot response delivery
+    // Replaces experimental channels that had data race issues
+    using response_promise_t = std::promise<Result<Response>>;
+    using void_promise_t = std::promise<Result<void>>;
+
     explicit AsioConnection(const TransportOptions& o)
         : opts(o),
           strand(o.executor ? *o.executor
@@ -49,7 +45,7 @@ struct AsioConnection {
     std::future<void> read_loop_future;
 
     struct UnaryHandler {
-        std::shared_ptr<response_channel_t> channel;
+        std::shared_ptr<response_promise_t> promise;
     };
     struct StreamingHandler {
         using HeaderCallback = std::function<void(const Response&)>;
@@ -61,7 +57,7 @@ struct AsioConnection {
         ChunkCallback onChunk;
         ErrorCallback onError;
         CompleteCallback onComplete;
-        std::shared_ptr<void_channel_t> done_channel;
+        std::shared_ptr<void_promise_t> done_promise;
 
         StreamingHandler() = default;
         StreamingHandler(HeaderCallback h, ChunkCallback c, ErrorCallback e, CompleteCallback comp)

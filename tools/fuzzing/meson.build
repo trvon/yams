@@ -29,23 +29,15 @@ message('AFL++ compiler detected - building fuzzers')
 # Per docs: "-fsanitize=fuzzer" provides automatic persistent mode
 fuzzer_args = ['-fsanitize=fuzzer']
 
-# Get daemon IPC library dependencies
-yams_core_dep = dependency('yams_core', required: true)
-yams_daemon_dep = dependency('yams_daemon', required: false)
-
-# If daemon dependency doesn't exist as pkg-config, link directly
-daemon_deps = [yams_core_dep]
-if not yams_daemon_dep.found()
-  # Link against daemon libraries built in this tree
-  daemon_deps += dependency('threads')
-  daemon_deps += dependency('boost', modules: ['system'], method: 'cmake')
-endif
+# Link against the daemon library built in this tree
+# The daemon library contains MessageFramer and IPC protocol implementation
+# Note: yams_daemon_lib is defined in src/daemon/meson.build and available in this scope
 
 # IPC Protocol Fuzzer
 fuzz_ipc_protocol = executable('fuzz_ipc_protocol',
   'fuzz_ipc_protocol.cpp',
   include_directories: include_directories('../../include'),
-  dependencies: daemon_deps,
+  link_with: yams_daemon_lib,
   cpp_args: fuzzer_args,
   link_args: fuzzer_args,
   build_by_default: true,
@@ -55,7 +47,7 @@ fuzz_ipc_protocol = executable('fuzz_ipc_protocol',
 fuzz_add_document = executable('fuzz_add_document',
   'fuzz_add_document.cpp',
   include_directories: include_directories('../../include'),
-  dependencies: daemon_deps,
+  link_with: yams_daemon_lib,
   cpp_args: fuzzer_args,
   link_args: fuzzer_args,
   build_by_default: true,

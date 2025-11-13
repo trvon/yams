@@ -13,22 +13,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     if (size < 4)
         return 0;
 
-    // Test 1: Direct deserialization of AddDocumentRequest
-    {
-        auto result = AddDocumentRequest::deserialize(std::span<const uint8_t>(data, size));
-        if (result) {
-            const auto& req = result.value();
-            [[maybe_unused]] auto paths_size = req.paths.size();
-            [[maybe_unused]] auto tags_size = req.tags.size();
-            [[maybe_unused]] auto content_size = req.content.size();
-
-            for (const auto& path : req.paths) {
-                [[maybe_unused]] auto path_len = path.size();
-            }
-        }
-    }
-
-    // Test 2: Wrap in framed message
+    // Test framed message parsing - exercises full deserialization
     {
         MessageFramer framer;
         auto frame_result = framer.parse_frame(std::span<const uint8_t>(data, size));
@@ -36,20 +21,32 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
             const auto& msg = frame_result.value();
             if (std::holds_alternative<Request>(msg.payload)) {
                 const auto& request = std::get<Request>(msg.payload);
+
+                // Exercise AddDocumentRequest fields if present
                 if (std::holds_alternative<AddDocumentRequest>(request)) {
                     const auto& add_req = std::get<AddDocumentRequest>(request);
                     [[maybe_unused]] auto recursive = add_req.recursive;
+                    [[maybe_unused]] auto path_size = add_req.path.size();
+                    [[maybe_unused]] auto tags_size = add_req.tags.size();
+                    [[maybe_unused]] auto content_size = add_req.content.size();
+                    [[maybe_unused]] auto include_patterns_size = add_req.includePatterns.size();
+
+                    for (const auto& tag : add_req.tags) {
+                        [[maybe_unused]] auto tag_len = tag.size();
+                    }
+                    for (const auto& pattern : add_req.includePatterns) {
+                        [[maybe_unused]] auto pattern_len = pattern.size();
+                    }
+                }
+
+                // Exercise UpdateDocumentRequest fields if present
+                if (std::holds_alternative<UpdateDocumentRequest>(request)) {
+                    const auto& upd_req = std::get<UpdateDocumentRequest>(request);
+                    [[maybe_unused]] auto add_tags_size = upd_req.addTags.size();
+                    [[maybe_unused]] auto remove_tags_size = upd_req.removeTags.size();
+                    [[maybe_unused]] auto new_content_size = upd_req.newContent.size();
                 }
             }
-        }
-    }
-
-    // Test 3: UpdateDocumentRequest
-    {
-        auto result = UpdateDocumentRequest::deserialize(std::span<const uint8_t>(data, size));
-        if (result) {
-            const auto& req = result.value();
-            [[maybe_unused]] auto paths_size = req.paths.size();
         }
     }
 

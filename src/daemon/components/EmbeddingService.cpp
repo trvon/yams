@@ -1,7 +1,12 @@
 #include <yams/daemon/components/EmbeddingService.h>
 
 #include <spdlog/spdlog.h>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/use_awaitable.hpp>
 #include <yams/api/content_store.h>
+#include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/ingest/ingest_helpers.h>
 #include <yams/metadata/metadata_repository.h>
@@ -12,19 +17,15 @@ namespace yams::daemon {
 
 EmbeddingService::EmbeddingService(std::shared_ptr<api::IContentStore> store,
                                    std::shared_ptr<metadata::MetadataRepository> meta,
-                                   std::size_t threads)
-    : store_(std::move(store)), meta_(std::move(meta)) {
-    if (threads == 0)
-        threads = 2;
-    workers_.reserve(threads);
-}
+                                   WorkCoordinator* coordinator)
+    : store_(std::move(store)), meta_(std::move(meta)), coordinator_(coordinator),
+      strand_(coordinator_->makeStrand()) {}
 
 EmbeddingService::~EmbeddingService() {
     shutdown();
 }
 
 Result<void> EmbeddingService::initialize() {
-    // Get or create the embedding channel from InternalBus
     embedChannel_ = InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
         "embed_jobs", 2048);
 
@@ -33,32 +34,21 @@ Result<void> EmbeddingService::initialize() {
                      "Failed to create embedding channel on InternalBus"};
     }
 
-    // Start worker threads
-    stop_.store(false);
-    for (std::size_t i = 0; i < workers_.capacity(); ++i) {
-        workers_.emplace_back([this] { workerLoop(); });
-    }
-
-    spdlog::info("EmbeddingService: initialized with {} workers", workers_.size());
+    spdlog::info("EmbeddingService: initialized");
     return Result<void>();
+}
+
+void EmbeddingService::start() {
+    stop_.store(false);
+    boost::asio::co_spawn(strand_, channelPoller(), boost::asio::detached);
+    spdlog::info("EmbeddingService: started channel poller");
 }
 
 void EmbeddingService::shutdown() {
     if (stop_.exchange(true)) {
-        return; // Already stopped
+        return;
     }
-
-    spdlog::info("EmbeddingService: shutting down...");
-
-    // Join all worker threads
-    for (auto& worker : workers_) {
-        if (worker.joinable()) {
-            worker.join();
-        }
-    }
-    workers_.clear();
-
-    spdlog::info("EmbeddingService: shutdown complete (processed={}, failed={})", processed_.load(),
+    spdlog::info("EmbeddingService: shutting down (processed={}, failed={})", processed_.load(),
                  failed_.load());
 }
 
@@ -72,27 +62,25 @@ void EmbeddingService::setProviders(
 }
 
 std::size_t EmbeddingService::queuedJobs() const {
-    // SpscQueue doesn't expose size(), so we can't query pending jobs
-    // This is acceptable as it's just a metric
     return 0;
 }
 
-void EmbeddingService::workerLoop() {
-    while (!stop_.load(std::memory_order_relaxed)) {
-        InternalEventBus::EmbedJob job;
+boost::asio::awaitable<void> EmbeddingService::channelPoller() {
+    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
-        // Try to pop a job from the channel (non-blocking with timeout)
+    while (!stop_.load()) {
+        InternalEventBus::EmbedJob job;
         if (embedChannel_ && embedChannel_->try_pop(job)) {
-            processEmbedJob(job);
+            co_await processEmbedJob(job);
         } else {
-            // No jobs available, sleep briefly to avoid busy-waiting
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            timer.expires_after(std::chrono::milliseconds(100));
+            co_await timer.async_wait(boost::asio::use_awaitable);
         }
     }
 }
 
-void EmbeddingService::processEmbedJob(const InternalEventBus::EmbedJob& job) {
-    // Get providers
+boost::asio::awaitable<void>
+EmbeddingService::processEmbedJob(const InternalEventBus::EmbedJob& job) {
     std::shared_ptr<IModelProvider> provider;
     std::string modelName;
     std::shared_ptr<yams::vector::VectorDatabase> vdb;
@@ -104,7 +92,6 @@ void EmbeddingService::processEmbedJob(const InternalEventBus::EmbedJob& job) {
     if (getVectorDatabase_)
         vdb = getVectorDatabase_();
 
-    // Use job's model name if specified, otherwise use preferred
     if (!job.modelName.empty()) {
         modelName = job.modelName;
     }
@@ -115,7 +102,7 @@ void EmbeddingService::processEmbedJob(const InternalEventBus::EmbedJob& job) {
                      job.hashes.size(), provider ? "available" : "null", modelName,
                      vdb ? "available" : "null");
         failed_.fetch_add(job.hashes.size());
-        return;
+        co_return;
     }
 
     spdlog::debug("EmbeddingService: processing batch of {} documents with model '{}'",
@@ -126,13 +113,6 @@ void EmbeddingService::processEmbedJob(const InternalEventBus::EmbedJob& job) {
 
     for (const auto& hash : job.hashes) {
         try {
-            // Check if embeddings already exist for this document
-            if (job.skipExisting) {
-                // Note: VectorDatabase doesn't have countChunks(), so we'll always generate
-                // This is acceptable - duplicate detection happens in embed_and_insert_document
-            }
-
-            // Get document info
             auto docInfoRes = meta_->getDocumentByHash(hash);
             if (!docInfoRes || !docInfoRes.value().has_value()) {
                 spdlog::warn("EmbeddingService: document not found: {}", hash);
@@ -143,7 +123,6 @@ void EmbeddingService::processEmbedJob(const InternalEventBus::EmbedJob& job) {
             const auto& docInfo = *docInfoRes.value();
             int64_t docId = docInfo.id;
 
-            // Get document content
             auto contentOpt = meta_->getContent(docId);
             if (!contentOpt || !contentOpt.value().has_value()) {
                 spdlog::debug("EmbeddingService: no content for document {}", hash);
@@ -158,7 +137,6 @@ void EmbeddingService::processEmbedJob(const InternalEventBus::EmbedJob& job) {
                 continue;
             }
 
-            // Generate and insert embeddings
             yams::vector::ChunkingConfig ccfg{};
             spdlog::debug("EmbeddingService: generating embeddings for {} using model '{}'", hash,
                           modelName);
@@ -186,6 +164,7 @@ void EmbeddingService::processEmbedJob(const InternalEventBus::EmbedJob& job) {
 
     spdlog::debug("EmbeddingService: batch complete (succeeded={}, skipped={}, failed={})",
                   succeeded, skipped, job.hashes.size() - succeeded - skipped);
+    co_return;
 }
 
 } // namespace yams::daemon

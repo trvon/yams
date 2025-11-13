@@ -837,8 +837,8 @@ public:
         std::mutex outMutex;
         std::vector<GrepFileResult> outResults;
         outResults.reserve(docs.size());
-        std::vector<std::string> filesWith;
-        std::vector<std::string> filesWithout;
+        std::unordered_set<std::string> filesWith;
+        std::unordered_set<std::string> filesWithout;
         std::atomic<size_t> totalMatches{0};
         std::atomic<size_t> regexMatches{0};
         std::atomic<bool> stop{false};
@@ -1161,7 +1161,7 @@ public:
                                   fileResult.matchCount);
                     totalMatches += static_cast<size_t>(fileResult.matchCount);
                     regexMatches += static_cast<size_t>(fileResult.matchCount);
-                    filesWith.push_back(fileResult.file);
+                    filesWith.insert(fileResult.file);
                     if (!req.filesWithMatches && !req.pathsOnly)
                         outResults.push_back(std::move(fileResult));
 
@@ -1173,7 +1173,7 @@ public:
                         stop.store(true, std::memory_order_relaxed);
                     }
                 } else {
-                    filesWithout.push_back(doc.filePath);
+                    filesWithout.insert(doc.filePath);
                 }
             }
         };
@@ -1201,8 +1201,8 @@ public:
         }
 
         response.results = std::move(outResults);
-        response.filesWith = std::move(filesWith);
-        response.filesWithout = std::move(filesWithout);
+        response.filesWith = std::vector<std::string>(filesWith.begin(), filesWith.end());
+        response.filesWithout = std::vector<std::string>(filesWithout.begin(), filesWithout.end());
         if (req.pathsOnly) {
             response.pathsOnly = req.invert ? response.filesWithout : response.filesWith;
         }

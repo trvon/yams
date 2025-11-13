@@ -103,12 +103,10 @@ public:
         while (std::chrono::steady_clock::now() - start < timeout) {
             if (auto* queue = serviceManager_->getPostIngestQueue()) {
                 auto size = queue->size();
-                auto inflight = queue->threads(); // Approximate
 
-                spdlog::info("PostIngestQueue status: size={} threads={}", size, inflight);
+                spdlog::info("PostIngestQueue status: size={}", size);
 
                 if (size == 0) {
-                    // Give it a bit more time to finish processing
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
                     return true;
                 }
@@ -157,9 +155,6 @@ TEST_CASE("PostIngestQueue - Initialization", "[daemon][post-ingest][init]") {
         auto* queue = fixture.serviceManager_->getPostIngestQueue();
         REQUIRE(queue != nullptr);
 
-        INFO("Queue should have worker threads");
-        REQUIRE(queue->threads() >= 2);
-
         INFO("Queue should have capacity");
         REQUIRE(queue->capacity() > 0);
     }
@@ -168,17 +163,14 @@ TEST_CASE("PostIngestQueue - Initialization", "[daemon][post-ingest][init]") {
         auto* queue = fixture.serviceManager_->getPostIngestQueue();
         REQUIRE(queue != nullptr);
 
-        // These should not crash
         auto size = queue->size();
         auto processed = queue->processed();
         auto failed = queue->failed();
-        auto threads = queue->threads();
 
         INFO("Initial metrics should be reasonable");
         REQUIRE(size >= 0);
         REQUIRE(processed >= 0);
         REQUIRE(failed >= 0);
-        REQUIRE(threads >= 2);
     }
 }
 
@@ -297,18 +289,14 @@ TEST_CASE("PostIngestQueue - FTS5 Indexing", "[daemon][post-ingest][fts5]") {
 TEST_CASE("PostIngestQueue - Synchronous Indexing", "[daemon][post-ingest][sync]") {
     PostIngestQueueFixture fixture;
 
-    SECTION("indexDocumentSync processes immediately") {
+    SECTION("Documents are indexed via async channel") {
         auto* queue = fixture.serviceManager_->getPostIngestQueue();
         REQUIRE(queue != nullptr);
 
-        // Store a document
         auto hash = fixture.storeDocument("sync_test.txt", "Sync content");
 
-        // Use synchronous indexing
-        bool success = queue->indexDocumentSync(hash, "text/plain");
-        REQUIRE(success);
+        REQUIRE(fixture.waitForQueueDrain(std::chrono::seconds(5)));
 
-        // Document should be searchable immediately (no async delay)
         auto appContext = fixture.serviceManager_->getAppContext();
         auto searchService = makeSearchService(appContext);
         REQUIRE(searchService);
@@ -368,7 +356,7 @@ TEST_CASE("PostIngestQueue - Capacity and Backpressure", "[daemon][post-ingest][
 
         // At least some should be rejected when exceeding capacity
         // (Note: some may process quickly, so we can't guarantee exact rejection count)
-        REQUIRE(enqueued <= capacity + queue->threads());
+        REQUIRE(enqueued <= capacity + 10);
     }
 }
 
@@ -408,19 +396,11 @@ TEST_CASE("PostIngestQueue - Error Handling", "[daemon][post-ingest][errors]") {
 TEST_CASE("PostIngestQueue - Thread Scaling", "[daemon][post-ingest][scaling]") {
     PostIngestQueueFixture fixture;
 
-    SECTION("Can resize worker thread count") {
+    SECTION("Thread scaling not supported in strand-based implementation") {
         auto* queue = fixture.serviceManager_->getPostIngestQueue();
         REQUIRE(queue != nullptr);
 
-        auto initialThreads = queue->threads();
-        INFO("Initial threads: " << initialThreads);
-
-        // Scale up
-        bool scaled = fixture.serviceManager_->resizePostIngestThreads(initialThreads + 2);
-        REQUIRE(scaled);
-
-        auto newThreads = queue->threads();
-        INFO("After scaling: " << newThreads);
-        REQUIRE(newThreads == initialThreads + 2);
+        bool scaled = fixture.serviceManager_->resizePostIngestThreads(4);
+        REQUIRE_FALSE(scaled);
     }
 }

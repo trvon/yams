@@ -579,15 +579,10 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             out.workerActive = services_->getWorkerActive();
             out.workerQueued = services_->getWorkerQueueDepth();
             if (auto* pq = services_->getPostIngestQueue()) {
-                out.postIngestThreads = pq->threads();
+                out.postIngestThreads = 1; // Strand-based now, conceptually 1 "thread"
                 out.postIngestQueued = pq->size();
-                // New gauges: inflight and capacity
-                try {
-                    auto g = pq->gauges();
-                    out.postIngestInflight = g.inflight;
-                    out.postIngestCapacity = g.cap;
-                } catch (...) {
-                }
+                out.postIngestInflight = 0; // Not tracked in new implementation
+                out.postIngestCapacity = pq->capacity();
                 out.postIngestProcessed = pq->processed();
                 out.postIngestFailed = pq->failed();
                 out.postIngestLatencyMsEma = pq->latencyMsEma();
@@ -641,8 +636,9 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
     try {
         if (services_) {
             if (auto* pq = services_->getPostIngestQueue()) {
-                auto g = pq->gauges();
-                if (g.cap > 0 && g.queued >= g.cap) {
+                auto queued = pq->size();
+                auto cap = pq->capacity();
+                if (cap > 0 && queued >= cap) {
                     // Suggest a small backoff based on tuning control interval
                     auto cfg = services_->getTuningConfig();
                     out.retryAfterMs = std::max<uint32_t>(50, cfg.controlIntervalMs / 4);

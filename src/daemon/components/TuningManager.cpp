@@ -242,9 +242,8 @@ void TuningManager::tick_once() {
             try {
                 if (auto* pq = sm_->getPostIngestQueue()) {
                     pqDepth = pq->size();
-                    auto g = pq->gauges();
-                    pqInflight = g.inflight;
-                    pqCap = g.cap;
+                    pqInflight = 0; // Not tracked in strand-based implementation
+                    pqCap = pq->capacity();
                 }
             } catch (...) {
             }

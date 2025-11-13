@@ -50,35 +50,58 @@ void GlobalIOContext::reset() {
 void GlobalIOContext::restart() {
     std::lock_guard<std::mutex> lock(this->restart_mutex_);
 
+    // Phase 1: Signal stop and release work guard
     if (this->work_guard_) {
         this->work_guard_->reset();
         this->work_guard_.reset();
     }
 
+    // Phase 2: Stop io_context (will cause run() to return in worker threads)
     io_context_.stop();
+
+    // Phase 3: Join all worker threads with timeout protection
     for (auto& t : this->io_threads_) {
         if (t.joinable()) {
-            t.join();
+            try {
+                t.join();
+            } catch (const std::exception&) {
+                // Thread join failed - continue with cleanup
+            } catch (...) {
+                // Unknown exception during join
+            }
         }
     }
     this->io_threads_.clear();
 
+    // Phase 4: Allow brief settling time for any lingering async operations
+    // This is critical on macOS to prevent resource corruption across restart cycles
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // Phase 5: Restart io_context and recreate work guard
     io_context_.restart();
     this->work_guard_ = std::make_unique<WorkGuard>(io_context_.get_executor());
 
+    // Phase 6: Calculate thread count
     unsigned int thread_count = std::thread::hardware_concurrency();
     if (thread_count == 0)
         thread_count = 4;
     thread_count = std::min(thread_count, 16u);
 
+    // Phase 7: Create new worker threads with proper error handling
     this->io_threads_.reserve(thread_count);
+    std::vector<std::thread> new_threads;
+    new_threads.reserve(thread_count);
+
     try {
         for (unsigned int i = 0; i < thread_count; ++i) {
-            this->io_threads_.emplace_back([this]() { io_context_.run(); });
+            new_threads.emplace_back([this]() { io_context_.run(); });
         }
+        // All threads created successfully - move them to member variable
+        this->io_threads_ = std::move(new_threads);
     } catch (...) {
+        // Thread creation failed - clean up partial state
         this->io_context_.stop();
-        for (auto& worker : this->io_threads_) {
+        for (auto& worker : new_threads) {
             if (worker.joinable()) {
                 try {
                     worker.join();

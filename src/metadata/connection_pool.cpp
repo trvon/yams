@@ -106,8 +106,6 @@ void ConnectionPool::shutdown() {
     // They will handle shutdown state in their destructors
     totalConnections_ = 0;
     activeConnections_ = 0;
-
-    spdlog::debug("Connection pool shut down");
 #if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
     if (maintenanceThread_.joinable()) {
         maintenanceThread_.request_stop();
@@ -115,8 +113,8 @@ void ConnectionPool::shutdown() {
 #endif
 }
 
-Result<std::unique_ptr<PooledConnection>>
-ConnectionPool::acquire(std::chrono::milliseconds timeout) {
+Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::milliseconds timeout,
+                                                                  ConnectionPriority priority) {
     std::unique_lock<std::mutex> lock(mutex_);
 
     if (shutdown_) {
@@ -167,12 +165,19 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout) {
         std::chrono::steady_clock::time_point startedAt_{};
     } waitingGuard(*this);
 
+    const size_t reservedConns =
+        static_cast<size_t>(config_.maxConnections * config_.reservedConnectionsPct);
+    const size_t effectiveMaxConnections =
+        (priority == ConnectionPriority::High)
+            ? config_.maxConnections
+            : (config_.maxConnections > reservedConns ? config_.maxConnections - reservedConns : 1);
+
     // Wait for available connection
     auto deadline = std::chrono::steady_clock::now() + timeout;
 
     while (available_.empty()) {
         // Can we create a new connection?
-        if (totalConnections_ < config_.maxConnections) {
+        if (totalConnections_ < effectiveMaxConnections) {
             lock.unlock();
             auto connResult = createConnection();
             lock.lock();

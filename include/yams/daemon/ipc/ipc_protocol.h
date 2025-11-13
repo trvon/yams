@@ -4587,6 +4587,7 @@ struct PruneResponse {
     std::unordered_map<std::string, uint64_t> categorySizes;  // Category -> bytes
     std::vector<std::string> deletedPaths;                    // If verbose
     std::vector<std::string> failedPaths;
+    std::string statusMessage;
     std::string errorMessage;
 
     template <typename Serializer>
@@ -4604,7 +4605,7 @@ struct PruneResponse {
             ser << cat << size;
         }
 
-        ser << deletedPaths << failedPaths << errorMessage;
+        ser << deletedPaths << failedPaths << statusMessage << errorMessage;
     }
 
     template <typename Deserializer>
@@ -4662,6 +4663,11 @@ struct PruneResponse {
 
         if (auto r = deser.readStringVector(); r)
             res.failedPaths = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            res.statusMessage = std::move(r.value());
         else
             return r.error();
 

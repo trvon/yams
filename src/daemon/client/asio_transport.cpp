@@ -197,10 +197,9 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
         co_return Error{ErrorCode::InvalidData, "Frame build failed"};
     }
 
-    auto executor = conn->opts.executor.has_value()
-                        ? *conn->opts.executor
-                        : GlobalIOContext::instance().get_io_context().get_executor();
-    auto response_ch = std::make_shared<AsioConnection::response_channel_t>(executor, 1);
+    // Use promise/future for thread-safe one-shot response delivery
+    auto response_promise = std::make_shared<AsioConnection::response_promise_t>();
+    auto response_future = response_promise->get_future();
 
     co_await boost::asio::dispatch(conn->strand, use_awaitable);
     if (conn->handlers.size() >= conn->opts.maxInflight) {
@@ -209,7 +208,7 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
     }
     {
         AsioConnection::Handler h;
-        h.unary.emplace(AsioConnection::UnaryHandler{response_ch});
+        h.unary.emplace(AsioConnection::UnaryHandler{response_promise});
         conn->handlers.emplace(msg.requestId, std::move(h));
     }
 
@@ -228,12 +227,24 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
     // response
     conn->in_use.store(false, std::memory_order_release);
 
-    auto [ec, response_result] =
-        co_await response_ch->async_receive(boost::asio::as_tuple(use_awaitable));
-    if (ec) {
-        co_return Error{ErrorCode::NetworkError, "Failed to receive response: " + ec.message()};
+    // Poll future with timeout (similar to ServiceManager pattern)
+    using namespace std::chrono_literals;
+    auto deadline = std::chrono::steady_clock::now() + opts_.requestTimeout;
+    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (response_future.wait_for(10ms) == std::future_status::ready) {
+            auto result = response_future.get();
+            co_return result;
+        }
+        timer.expires_after(10ms);
+        co_await timer.async_wait(use_awaitable);
     }
-    co_return *response_result;
+
+    // Timeout - clean up handler
+    co_await boost::asio::dispatch(conn->strand, use_awaitable);
+    conn->handlers.erase(msg.requestId);
+    co_return Error{ErrorCode::Timeout, "Request timeout waiting for response"};
 }
 
 boost::asio::awaitable<Result<void>>
@@ -265,10 +276,9 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
         co_return Error{ErrorCode::InvalidData, "Frame build failed"};
     }
 
-    auto executor = conn->opts.executor.has_value()
-                        ? *conn->opts.executor
-                        : GlobalIOContext::instance().get_io_context().get_executor();
-    auto done_ch = std::make_shared<AsioConnection::void_channel_t>(executor, 1);
+    // Use promise/future for thread-safe streaming completion notification
+    auto done_promise = std::make_shared<AsioConnection::void_promise_t>();
+    auto done_future = done_promise->get_future();
 
     co_await boost::asio::dispatch(conn->strand, use_awaitable);
     if (conn->handlers.size() >= conn->opts.maxInflight) {
@@ -278,7 +288,7 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
     {
         AsioConnection::Handler h;
         h.streaming.emplace(onHeader, onChunk, onError, onComplete);
-        h.streaming->done_channel = done_ch;
+        h.streaming->done_promise = done_promise;
         conn->handlers.emplace(msg.requestId, std::move(h));
     }
 
@@ -297,12 +307,24 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
     // streaming response
     conn->in_use.store(false, std::memory_order_release);
 
-    auto [ec, void_result] = co_await done_ch->async_receive(boost::asio::as_tuple(use_awaitable));
-    if (ec) {
-        co_return Error{ErrorCode::NetworkError,
-                        "Failed to receive stream completion: " + ec.message()};
+    // Poll future with timeout (similar to ServiceManager pattern)
+    using namespace std::chrono_literals;
+    auto deadline = std::chrono::steady_clock::now() + opts_.requestTimeout;
+    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (done_future.wait_for(10ms) == std::future_status::ready) {
+            auto result = done_future.get();
+            co_return result;
+        }
+        timer.expires_after(10ms);
+        co_await timer.async_wait(use_awaitable);
     }
-    co_return void_result;
+
+    // Timeout - clean up handler
+    co_await boost::asio::dispatch(conn->strand, use_awaitable);
+    conn->handlers.erase(msg.requestId);
+    co_return Error{ErrorCode::Timeout, "Streaming request timeout"};
 }
 
 } // namespace yams::daemon

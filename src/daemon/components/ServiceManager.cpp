@@ -8,23 +8,25 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
-#include <future>
 #include <map>
 #include <optional>
 #include <string>
 #include <system_error>
 #include <thread>
+
+// Platform-specific malloc pressure relief for macOS
+#ifdef __APPLE__
+#include <malloc/malloc.h>
+#endif
+
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/experimental/awaitable_operators.hpp>
-#include <boost/asio/experimental/channel.hpp>
 #include <boost/asio/experimental/parallel_group.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
-#include <boost/asio/use_future.hpp>
 #include <tl/expected.hpp>
 #include <yams/api/content_store_builder.h>
 #include <yams/app/services/session_service.hpp>
@@ -336,52 +338,23 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
         }
     }
 
-    // Initialize modern async architecture (Phase 0b): Single io_context with strands
-    spdlog::debug("[ServiceManager] Creating io_context...");
+    // Initialize WorkCoordinator (Phase 0c): Unified async work coordination
+    spdlog::debug("[ServiceManager] Creating WorkCoordinator...");
     try {
-        // Create io_context for all async work
-        ioContext_ = std::make_shared<boost::asio::io_context>();
-        spdlog::debug("[ServiceManager] io_context created");
-
-        // Create work guard to keep io_context alive until explicitly reset
-        workGuard_.emplace(boost::asio::make_work_guard(*ioContext_));
-        spdlog::debug("[ServiceManager] Work guard created");
+        workCoordinator_ = std::make_unique<WorkCoordinator>();
+        workCoordinator_->start();
+        spdlog::info("[ServiceManager] WorkCoordinator created with {} worker threads",
+                     workCoordinator_->getWorkerCount());
 
         // Initialize strands for logical separation
         spdlog::debug("[ServiceManager] Creating strands...");
-        initStrand_.emplace(ioContext_->get_executor());
-        pluginStrand_.emplace(ioContext_->get_executor());
-        modelStrand_.emplace(ioContext_->get_executor());
+        auto executor = workCoordinator_->getExecutor();
+        initStrand_.emplace(executor);
+        pluginStrand_.emplace(executor);
+        modelStrand_.emplace(executor);
         spdlog::debug("[ServiceManager] Strands created");
-
-        // Spawn worker threads that run ioContext_->run()
-        spdlog::debug("[ServiceManager] Spawning worker threads...");
-        const std::size_t numWorkers =
-            std::max<std::size_t>(1, std::thread::hardware_concurrency());
-        workers_.reserve(numWorkers);
-        try {
-            for (std::size_t i = 0; i < numWorkers; ++i) {
-                workers_.emplace_back([this]() { ioContext_->run(); });
-            }
-        } catch (...) {
-            spdlog::error(
-                "Failed to create ServiceManager worker thread, cleaning up {} existing workers",
-                workers_.size());
-            ioContext_->stop();
-            for (auto& worker : workers_) {
-                if (worker.joinable()) {
-                    try {
-                        worker.join();
-                    } catch (...) {
-                    }
-                }
-            }
-            workers_.clear();
-            throw;
-        }
-        spdlog::info("ServiceManager: Created io_context with {} worker threads", numWorkers);
     } catch (const std::exception& e) {
-        spdlog::error("Failed to initialize modern async architecture: {}", e.what());
+        spdlog::error("Failed to initialize WorkCoordinator: {}", e.what());
         throw;
     }
 
@@ -408,9 +381,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             // Intentionally ignored - test-only environment variable parsing
         }
 #endif
-        // Initialize plugin hosts early so that environment-driven trust (YAMS_PLUGIN_DIR)
-        // can be applied before autoload attempts. Previously abiHost_ was never constructed,
-        // causing autoloadPluginsNow() to scan zero ABI roots and load 0 plugins.
+
         try {
             if (!abiHost_) {
                 // Use dataDir (may be empty here) for trust file persistence; it will be
@@ -567,17 +538,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
 
         try {
             if (!ingestService_) {
-                std::size_t ingestThreads = 1;
-                try {
-                    auto configured = config_.workerThreads;
-                    if (configured > 0)
-                        ingestThreads = std::max<std::size_t>(1, configured / 4);
-                    if (ingestThreads == 0)
-                        ingestThreads = 1;
-                } catch (...) {
-                    ingestThreads = 1;
-                }
-                ingestService_ = std::make_unique<IngestService>(this, ingestThreads);
+                ingestService_ = std::make_unique<IngestService>(this, workCoordinator_.get());
                 // Initialize EntityGraphService skeleton
                 try {
                     if (!entityGraphService_) {
@@ -693,25 +654,42 @@ yams::Result<void> ServiceManager::initialize() {
     // io_context and workers already created in constructor; proceed with initialization
     spdlog::debug("ServiceManager: Using io_context from constructor");
 
-    initThread_ = yams::compat::jthread([this](const yams::compat::stop_token& token) {
-        spdlog::info("Starting async resource initialization (coroutine)...");
-        // Launch coroutine on system executor and wait for completion in this thread
-        auto fut =
-            boost::asio::co_spawn(ioContext_->get_executor(), this->initializeAsyncAwaitable(token),
-                                  boost::asio::use_future);
-        auto result = fut.get();
-        if (!result) {
-            spdlog::error("Async resource initialization failed: {}", result.error().message);
+    // Launch async initialization without blocking or using futures
+    // Use detached coroutine with completion callback
+    boost::asio::co_spawn(
+        workCoordinator_->getExecutor(),
+        [this]() -> boost::asio::awaitable<void> {
+            spdlog::info("Starting async resource initialization (coroutine)...");
+
+            // Create a dummy stop_token since we're not using initThread_ anymore
+            yams::compat::stop_source stop_src;
+            auto token = stop_src.get_token();
+
             try {
-                serviceFsm_.dispatch(InitializationFailedEvent{result.error().message});
-            } catch (...) {
+                auto result = co_await this->initializeAsyncAwaitable(token);
+
+                if (!result) {
+                    spdlog::error("Async resource initialization failed: {}",
+                                  result.error().message);
+                    try {
+                        serviceFsm_.dispatch(InitializationFailedEvent{result.error().message});
+                    } catch (...) {
+                    }
+                    (void)invokeInitCompleteOnce(false, result.error().message);
+                } else {
+                    spdlog::info("All daemon services initialized successfully");
+                    (void)invokeInitCompleteOnce(true, "");
+                }
+            } catch (const std::exception& e) {
+                spdlog::error("Async resource initialization exception: {}", e.what());
+                try {
+                    serviceFsm_.dispatch(InitializationFailedEvent{e.what()});
+                } catch (...) {
+                }
+                (void)invokeInitCompleteOnce(false, e.what());
             }
-            (void)invokeInitCompleteOnce(false, result.error().message);
-        } else {
-            spdlog::info("All daemon services initialized successfully");
-            (void)invokeInitCompleteOnce(true, "");
-        }
-    });
+        }(),
+        boost::asio::detached);
 
     // Removed: defensive 100ms sleep (unnecessary with proper async initialization)
 
@@ -932,37 +910,19 @@ void ServiceManager::shutdown() {
         spdlog::warn("[ServiceManager] Phase 2: Session watcher stop failed");
     }
 
-    // Phase 3: Reset work guard to allow io_context to complete
-    spdlog::info("[ServiceManager] Phase 3: Resetting work guard");
-    if (workGuard_) {
-        workGuard_.reset();
-        spdlog::info("[ServiceManager] Phase 3: Work guard reset");
-    } else {
-        spdlog::info("[ServiceManager] Phase 3: No work guard to reset");
-    }
+    // Phase 3: (Removed - work guard now managed by WorkCoordinator)
+    spdlog::info("[ServiceManager] Phase 3: Skipped (work guard managed by WorkCoordinator)");
 
-    // Phase 4: Cancel all asynchronous operations
+    // Phase 4: Cancel all asynchronous operations and stop WorkCoordinator
     spdlog::info("[ServiceManager] Phase 4: Cancelling async operations");
     shutdownSignal_.emit(boost::asio::cancellation_type::terminal);
-    if (ioContext_) {
-        ioContext_->stop();
-        spdlog::info("[ServiceManager] Phase 4: io_context stop() called");
+    if (workCoordinator_) {
+        workCoordinator_->stop();
+        spdlog::info("[ServiceManager] Phase 4: WorkCoordinator stop() called");
     }
 
-    // Phase 5: Join worker threads (should exit cleanly now that coroutines are stopped)
-    spdlog::info("[ServiceManager] Phase 5: Joining {} worker threads", workers_.size());
-    auto workerJoinStart = std::chrono::steady_clock::now();
-    for (size_t i = 0; i < workers_.size(); ++i) {
-        if (workers_[i].joinable()) {
-            spdlog::info("[ServiceManager] Joining worker thread {}/{}", i + 1, workers_.size());
-            workers_[i].join();
-            spdlog::info("[ServiceManager] Worker thread {}/{} joined", i + 1, workers_.size());
-        }
-    }
-    auto workerJoinDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - workerJoinStart);
-    spdlog::info("[ServiceManager] Phase 5: All worker threads joined ({}ms)",
-                 workerJoinDuration.count());
+    // Phase 5: Join worker threads (delegated to WorkCoordinator destructor)
+    spdlog::info("[ServiceManager] Phase 5: WorkCoordinator will join threads on destruction");
 
     // Phase 6: Stop services in reverse dependency order
     spdlog::info("[ServiceManager] Phase 6: Shutting down daemon services");
@@ -1044,43 +1004,19 @@ void ServiceManager::shutdown() {
     // Model provider manages embedding lifecycle, no separate shutdown needed
     spdlog::info("[ServiceManager] Phase 6.5: Embedding lifecycle managed by model provider");
 
-    // Shutdown model provider (unload models first, then shutdown)
     spdlog::info("[ServiceManager] Phase 6.6: Shutting down model provider");
     if (modelProvider_) {
         try {
-            spdlog::debug("[ServiceManager] Phase 6.6.1: Getting loaded models list");
             auto loaded = modelProvider_->getLoadedModels();
-            spdlog::info("[ServiceManager] Phase 6.6.2: Unloading {} models", loaded.size());
             for (const auto& name : loaded) {
-                spdlog::debug("[ServiceManager] Phase 6.6.2: Unloading model '{}'", name);
-                auto ur = modelProvider_->unloadModel(name);
-                if (!ur) {
-                    spdlog::debug("[ServiceManager] Unload model {} failed: {}", name,
-                                  ur.error().message);
-                } else {
-                    spdlog::debug("[ServiceManager] Model '{}' unloaded successfully", name);
-                }
+                (void)modelProvider_->unloadModel(name);
             }
-            spdlog::info("[ServiceManager] Phase 6.6.3: All models unloaded, calling shutdown()");
-        } catch (const std::exception& e) {
-            spdlog::warn("[ServiceManager] Phase 6.6: Exception during model unloading: {}",
-                         e.what());
-        } catch (...) {
-            spdlog::warn("[ServiceManager] Phase 6.6: Unknown exception during model unloading");
-        }
-
-        try {
-            spdlog::debug("[ServiceManager] Phase 6.6.4: Calling modelProvider_->shutdown()");
             modelProvider_->shutdown();
-            spdlog::debug("[ServiceManager] Phase 6.6.5: modelProvider_->shutdown() returned");
             modelProvider_.reset();
-            spdlog::info("[ServiceManager] Phase 6.6: Model provider shut down successfully");
         } catch (const std::exception& e) {
-            spdlog::error("[ServiceManager] Phase 6.6: Exception during shutdown(): {}", e.what());
-            modelProvider_.reset(); // Force reset even if shutdown fails
-        } catch (...) {
-            spdlog::error("[ServiceManager] Phase 6.6: Unknown exception during shutdown()");
-            modelProvider_.reset(); // Force reset even if shutdown fails
+            spdlog::warn("[ServiceManager] Phase 6.6: Model provider shutdown failed: {}",
+                         e.what());
+            modelProvider_.reset();
         }
     } else {
         spdlog::info("[ServiceManager] Phase 6.6: No model provider to shut down");
@@ -1121,19 +1057,21 @@ void ServiceManager::shutdown() {
         spdlog::warn("[ServiceManager] Phase 6.9: Exception during plugin unloading");
     }
 
-    // Shutdown connection pool and database
     spdlog::info("[ServiceManager] Phase 7: Shutting down database");
-    if (connectionPool_) {
-        connectionPool_->shutdown();
-        connectionPool_.reset();
-        spdlog::info("[ServiceManager] Phase 6: Connection pool shut down");
-    }
-    if (database_) {
-        database_->close();
-        database_.reset();
-        spdlog::info("[ServiceManager] Phase 6: Database closed");
-    } else {
-        spdlog::info("[ServiceManager] Phase 6: No database to close");
+    try {
+        if (connectionPool_) {
+            connectionPool_->shutdown();
+            connectionPool_.reset();
+        }
+        if (database_) {
+            database_->close();
+            database_.reset();
+        } else {
+            spdlog::info("[ServiceManager] Phase 7.2: No database to close");
+        }
+        spdlog::info("[ServiceManager] Phase 7: Database shutdown complete");
+    } catch (const std::exception& e) {
+        spdlog::error("[ServiceManager] Phase 7: Database shutdown failed: {}", e.what());
     }
 
     // Release all remaining resources
@@ -1147,7 +1085,13 @@ void ServiceManager::shutdown() {
     contentStore_.reset();
     spdlog::info("[ServiceManager] Phase 8.4: Content store reset");
 
-    // Small ownership alignment: ensure plugin loader/hosts are released at stop
+    spdlog::info("[ServiceManager] Phase 8.5: Releasing WorkCoordinator");
+    workCoordinator_.reset(); // WorkCoordinator destructor will join threads
+
+#ifdef __APPLE__
+    malloc_zone_pressure_relief(nullptr, 0);
+#endif
+
     spdlog::info("[ServiceManager] Phase 9: Releasing plugin infrastructure");
     try {
         abiPluginLoader_.reset();
@@ -1325,19 +1269,9 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
                         }
                     }
                     if (load_ms > 0) {
-                        auto fut = std::async(std::launch::async, [this, preferred]() {
-                            return modelProvider_->loadModel(preferred);
-                        });
-                        if (fut.wait_for(std::chrono::milliseconds(load_ms)) ==
-                            std::future_status::ready) {
-                            auto r = fut.get();
-                            spdlog::info("[VectorInit] provider loadModel('{}') status={} (timed)",
-                                         preferred, r ? 0 : -1);
-                        } else {
-                            spdlog::warn(
-                                "[VectorInit] provider loadModel('{}') timed out after {} ms",
-                                preferred, load_ms);
-                        }
+                        auto r = modelProvider_->loadModel(preferred);
+                        spdlog::info("[VectorInit] provider loadModel('{}') status={}", preferred,
+                                     r ? 0 : -1);
                         prov = modelProvider_->getEmbeddingDim(preferred);
                         spdlog::info(
                             "[VectorInit] probe: provider preferred='{}' prov_dim={} (post-load)",
@@ -1451,45 +1385,21 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
         }
         try {
             auto vdb = std::make_shared<vector::VectorDatabase>(cfg);
-            // Bound initialization to avoid indefinite blocking
             try {
-                auto fut = std::async(std::launch::async, [vdb]() { return vdb->initialize(); });
-                const int init_timeout_ms = []() {
-                    int ms = 7000;
-                    if (const char* e = std::getenv("YAMS_VECTOR_DB_INIT_TIMEOUT_MS")) {
-                        try {
-                            ms = std::max(500, std::stoi(e));
-                        } catch (const std::exception& ex) {
-                            spdlog::debug("Failed to parse YAMS_VECTOR_DB_INIT_TIMEOUT_MS: {}",
-                                          ex.what());
-                        } catch (...) {
-                            spdlog::debug(
-                                "Failed to parse YAMS_VECTOR_DB_INIT_TIMEOUT_MS: unknown error");
-                        }
-                    }
-                    return ms;
-                }();
-                if (fut.wait_for(std::chrono::milliseconds(init_timeout_ms)) ==
-                    std::future_status::ready) {
-                    if (!fut.get()) {
-                        auto err = vdb->getLastError();
-                        spdlog::warn("[VectorInit] initialization attempt {} failed (within "
-                                     "timeout {} ms): {}",
-                                     attempt + 1, init_timeout_ms, err);
-                        goto init_failed_path;
-                    }
-                } else {
-                    spdlog::warn("[VectorInit] initialization attempt {} timed out after {} ms",
-                                 attempt + 1, init_timeout_ms);
+                if (!vdb->initialize()) {
+                    auto err = vdb->getLastError();
+                    spdlog::warn("[VectorInit] initialization attempt {} failed: {}", attempt + 1,
+                                 err);
                     goto init_failed_path;
                 }
+                spdlog::info("[VectorInit] vdb->initialize() succeeded.");
+                vectorDatabase_ = std::move(vdb);
+                goto init_success_path;
             } catch (...) {
-                spdlog::warn("[VectorInit] initialization attempt {} raised exception (async)",
+                spdlog::warn("[VectorInit] initialization attempt {} raised exception",
                              attempt + 1);
                 goto init_failed_path;
             }
-            // fallthrough on success to existing success block
-            ;
 
         init_failed_path:
             spdlog::info("[VectorInit] Calling vdb->initialize() attempt {}", attempt + 1);
@@ -1510,6 +1420,8 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
             } else {
                 spdlog::info("[VectorInit] vdb->initialize() succeeded.");
                 vectorDatabase_ = std::move(vdb);
+
+            init_success_path:
                 // Initialize component-owned metrics (sync with DB once at startup)
                 try {
                     vectorDatabase_->initializeCounter();
@@ -1853,7 +1765,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             rec = std::max<size_t>(1, hw / 2);
         }
         dbPoolCfg.minConnections = std::min<size_t>(std::max<size_t>(2, rec), 8);
-        dbPoolCfg.maxConnections = 32;
+        dbPoolCfg.maxConnections = 64; // Increased from 32 to handle heavy concurrent indexing
         if (const char* envMax = std::getenv("YAMS_DB_POOL_MAX"); envMax && *envMax) {
             try {
                 auto v = static_cast<size_t>(std::stoul(envMax));
@@ -2015,24 +1927,41 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         } catch (...) {
         }
         auto qcap = static_cast<std::size_t>(TA::postIngestQueueMax());
-        postIngest_ = std::make_unique<PostIngestQueue>(
-            contentStore_, metadataRepo_, contentExtractors_, kgStore_, threads, qcap);
-        // PostIngestQueue no longer handles embeddings directly - removed setEmbeddingProviders()
-        // Apply daemon tuning config (capacity/min threads) now that queue exists
+        postIngest_ =
+            std::make_unique<PostIngestQueue>(contentStore_, metadataRepo_, contentExtractors_,
+                                              kgStore_, workCoordinator_.get(), qcap);
+        postIngest_->start();
+
         try {
             if (config_.tuning.postIngestCapacity > 0)
                 postIngest_->setCapacity(config_.tuning.postIngestCapacity);
-            if (config_.tuning.postIngestThreadsMin > 0)
-                (void)resizePostIngestThreads(config_.tuning.postIngestThreadsMin);
         } catch (...) {
         }
-        spdlog::info("Post-ingest queue initialized (threads={}, capacity={})", threads, qcap);
+        spdlog::info("Post-ingest queue initialized (capacity={})", qcap);
     } catch (const std::exception& e) {
         spdlog::warn("Post-ingest queue init failed: {}", e.what());
     } catch (...) {
         spdlog::warn("Post-ingest queue init failed (unknown)");
     }
     spdlog::info("[ServiceManager] Phase: Post-Ingest Queue Initialized.");
+
+    // Initialize SearchPool for parallel hybrid search
+    try {
+        searchPool_ =
+            std::make_unique<SearchPool>(metadataRepo_, vectorDatabase_, workCoordinator_.get());
+
+        // Wire model provider getters for embedding generation
+        searchPool_->setModelProvider(
+            [this]() -> std::shared_ptr<IModelProvider> { return getModelProvider(); },
+            [this]() -> std::string { return embeddingModelName_; });
+
+        spdlog::info("SearchPool initialized for parallel hybrid search");
+    } catch (const std::exception& e) {
+        spdlog::warn("SearchPool init failed: {}", e.what());
+    } catch (...) {
+        spdlog::warn("SearchPool init failed (unknown)");
+    }
+    spdlog::info("[ServiceManager] Phase: SearchPool Initialized.");
 
     // Initialize EmbeddingService for async embedding generation
     try {
@@ -2045,18 +1974,16 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         std::size_t postIngestThreads = taThreads
                                             ? static_cast<std::size_t>(taThreads)
                                             : static_cast<std::size_t>(TA::postIngestThreads());
-        std::size_t embedThreads =
-            std::max<std::size_t>(2, postIngestThreads / 2); // Half of ingest threads
-        embeddingService_ =
-            std::make_unique<EmbeddingService>(contentStore_, metadataRepo_, embedThreads);
+        embeddingService_ = std::make_unique<EmbeddingService>(contentStore_, metadataRepo_,
+                                                               workCoordinator_.get());
 
         auto initRes = embeddingService_->initialize();
         if (initRes) {
-            // Wire embedding providers
             embeddingService_->setProviders([this]() { return this->modelProvider_; },
                                             [this]() { return this->resolvePreferredModel(); },
                                             [this]() { return this->vectorDatabase_; });
-            spdlog::info("EmbeddingService initialized with {} workers", embedThreads);
+            embeddingService_->start();
+            spdlog::info("EmbeddingService initialized");
         } else {
             spdlog::warn("EmbeddingService initialization failed: {}", initRes.error().message);
             embeddingService_.reset();
@@ -2119,6 +2046,52 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             } else {
                 state_.readiness.vectorIndexReady = true;
                 writeBootstrapStatusFile(config_, state_);
+
+                // Load persisted vector index if it exists
+                auto indexPath = config_.dataDir / "vector_index.bin";
+                bool indexLoaded = false;
+                if (std::filesystem::exists(indexPath)) {
+                    spdlog::info("[VectorInit] Loading persisted vector index from '{}'",
+                                 indexPath.string());
+                    auto loadRes = vectorIndexManager_->loadIndex(indexPath.string());
+                    if (!loadRes) {
+                        spdlog::warn("[VectorInit] Failed to load vector index: {}. Will rebuild "
+                                     "from database.",
+                                     loadRes.error().message);
+                    } else {
+                        auto stats = vectorIndexManager_->getStats();
+                        spdlog::info("[VectorInit] Loaded vector index with {} vectors",
+                                     stats.num_vectors);
+                        indexLoaded = (stats.num_vectors > 0);
+                    }
+                } else {
+                    spdlog::debug("[VectorInit] No persisted vector index found at '{}'",
+                                  indexPath.string());
+                }
+
+                // If index wasn't loaded or is empty, attempt to populate from VectorDatabase
+                if (!indexLoaded && vectorDatabase_) {
+                    spdlog::info("[VectorInit] Populating vector index from database...");
+                    try {
+                        // Get all unique document hashes from the database
+                        auto stats = vectorDatabase_->getStats();
+                        if (stats.total_vectors > 0) {
+                            spdlog::info("[VectorInit] Found {} vectors in database, loading into "
+                                         "search index",
+                                         stats.total_vectors);
+
+                            spdlog::warn(
+                                "[VectorInit] Direct database->index population not yet "
+                                "implemented. "
+                                "Vectors will be available after first document is added or after "
+                                "running 'yams repair --embeddings'");
+                        } else {
+                            spdlog::debug("[VectorInit] Database is empty, no vectors to load");
+                        }
+                    } catch (const std::exception& e) {
+                        spdlog::warn("[VectorInit] Failed to populate from database: {}", e.what());
+                    }
+                }
             }
         } else {
             spdlog::warn("Vector index initialization disabled by YAMS_DISABLE_VECTOR_DB");
@@ -2227,8 +2200,6 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     state_.readiness.pluginsReady = true;
     refreshPluginStatusSnapshot();
 
-    // embeddingPreloadOnStartup_ already detected earlier before plugin autoload
-    // Now initialize Vector DB synchronously so embedding flow sees correct dim
     spdlog::info("[ServiceManager] Phase: Vector DB Init (post-plugins, sync).");
     {
         auto vdbRes = initializeVectorDatabaseOnce(dataDir);
@@ -2236,6 +2207,23 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             spdlog::warn("[ServiceManager] Vector DB init failed: {}", vdbRes.error().message);
         } else if (vdbRes.value()) {
             spdlog::info("[ServiceManager] Vector DB initialized successfully");
+
+            // Now that VectorDatabase is initialized, load vectors into VectorIndexManager if
+            // needed
+            if (vectorIndexManager_ && vectorDatabase_) {
+                auto stats = vectorIndexManager_->getStats();
+                if (stats.num_vectors == 0) {
+                    // Index is empty - check if we have vectors in the database
+                    auto dbStats = vectorDatabase_->getStats();
+                    if (dbStats.total_vectors > 0) {
+                        spdlog::info(
+                            "[VectorInit] Found {} vectors in database but search index is empty. "
+                            "Run 'yams repair --embeddings' to rebuild the search index from "
+                            "database.",
+                            dbStats.total_vectors);
+                    }
+                }
+            }
         } else {
             spdlog::info("[ServiceManager] Vector DB init deferred (dim unresolved)");
         }
@@ -2353,66 +2341,75 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 boost::asio::awaitable<bool> ServiceManager::co_openDatabase(const std::filesystem::path& dbPath,
                                                              int timeout_ms,
                                                              yams::compat::stop_token token) {
-    using namespace boost::asio::experimental::awaitable_operators;
     auto ex = co_await boost::asio::this_coro::executor;
 
-    // Channel to receive completion from worker (wrap Result in shared_ptr for
-    // default-construct path)
-    boost::asio::experimental::basic_channel<
-        boost::asio::any_io_executor, boost::asio::experimental::channel_traits<std::mutex>,
-        void(boost::system::error_code, std::shared_ptr<Result<void>>)>
-        ch(ex, 1);
+    // Use pure awaitable pattern with timeout timer (no futures!)
+    boost::asio::steady_timer timeout_timer(ex);
+    timeout_timer.expires_after(std::chrono::milliseconds(timeout_ms));
+
     try {
-        boost::asio::post(getWorkerExecutor(), [this, dbPath, &ch]() mutable {
-            try {
-                auto r = database_->open(dbPath.string(), metadata::ConnectionMode::Create);
-                ch.try_send(boost::system::error_code{},
-                            std::make_shared<Result<void>>(std::move(r)));
-            } catch (...) {
-                ch.try_send(make_error_code(std::errc::operation_canceled),
-                            std::make_shared<Result<void>>(
-                                Error{ErrorCode::InternalError, "DB open exception"}));
+        // Race database open against timeout using boost::asio::experimental::make_parallel_group
+        // This avoids futures entirely and properly handles cancellation
+        using namespace boost::asio::experimental;
+
+        auto [completion_order, ex_ptr, open_result, timer_result] =
+            co_await make_parallel_group(
+                boost::asio::co_spawn(
+                    ex,
+                    [this, dbPath]() -> boost::asio::awaitable<Result<void>> {
+                        co_return database_->open(dbPath.string(),
+                                                  metadata::ConnectionMode::Create);
+                    }(),
+                    boost::asio::deferred),
+                timeout_timer.async_wait(boost::asio::deferred))
+                .async_wait(wait_for_one(), boost::asio::use_awaitable);
+
+        if (completion_order[0] == 0) {
+            // Database open completed first
+            if (ex_ptr) {
+                // Exception occurred
+                try {
+                    std::rethrow_exception(ex_ptr);
+                } catch (const std::exception& e) {
+                    spdlog::warn("Database open threw exception: {} — continuing in degraded mode",
+                                 e.what());
+                }
+                timeout_timer.cancel(); // Clean up timer
+                co_return false;
             }
-        });
+
+            // open_result is directly Result<void> (not a variant)
+            // Since completion_order[0] == 0, the database operation completed
+            timeout_timer.cancel(); // Clean up timer
+
+            if (open_result) {
+                state_.readiness.databaseReady = true;
+                spdlog::info("Database opened successfully");
+                co_return true;
+            } else {
+                spdlog::warn("Database open failed: {} — continuing in degraded mode",
+                             open_result.error().message);
+                co_return false;
+            }
+        } else {
+            // Timeout occurred first
+            spdlog::warn("Database open timed out after {} ms — continuing in degraded mode",
+                         timeout_ms);
+            // Note: The database open coroutine will be cancelled automatically
+            co_return false;
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("Database open failed (exception): {} — continuing in degraded mode",
+                     e.what());
+        co_return false;
     } catch (...) {
-        // Fallback: run inline if posting fails
-        auto r = database_->open(dbPath.string(), metadata::ConnectionMode::Create);
-        co_return (r && (state_.readiness.databaseReady = true,
-                         spdlog::info("Database opened successfully"), true));
-    }
-
-    boost::asio::steady_timer timer(ex);
-    timer.expires_after(std::chrono::milliseconds(timeout_ms));
-
-    auto which = co_await (ch.async_receive(boost::asio::as_tuple(boost::asio::use_awaitable)) ||
-                           timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable)));
-
-    if (which.index() == 1 || token.stop_requested()) {
-        spdlog::warn("Database open timed out after {} ms; continuing in degraded mode",
-                     timeout_ms);
+        spdlog::warn("Database open failed (unknown exception) — continuing in degraded mode");
         co_return false;
     }
-
-    auto tup0 = std::move(std::get<0>(which));
-    auto ec = std::get<0>(tup0);
-    auto pres = std::get<1>(tup0);
-    if (ec) {
-        spdlog::warn("Database open failed (channel/ec): {}", ec.message());
-        co_return false;
-    }
-    if (!pres || !(*pres)) {
-        std::string msg = (!pres ? std::string("no result") : (*pres).error().message);
-        spdlog::warn("Database open failed: {} — continuing in degraded mode", msg);
-        co_return false;
-    }
-    state_.readiness.databaseReady = true;
-    spdlog::info("Database opened successfully");
-    co_return true;
 }
 
 boost::asio::awaitable<bool> ServiceManager::co_migrateDatabase(int timeout_ms,
                                                                 yams::compat::stop_token token) {
-    using namespace boost::asio::experimental::awaitable_operators;
     auto ex = co_await boost::asio::this_coro::executor;
     metadata::MigrationManager mm(*database_);
     auto initResult = mm.initialize();
@@ -2423,41 +2420,53 @@ boost::asio::awaitable<bool> ServiceManager::co_migrateDatabase(int timeout_ms,
     }
     mm.registerMigrations(metadata::YamsMetadataMigrations::getAllMigrations());
 
-    boost::asio::experimental::basic_channel<
-        boost::asio::any_io_executor, boost::asio::experimental::channel_traits<std::mutex>,
-        void(boost::system::error_code, std::shared_ptr<Result<void>>)>
-        ch(ex, 1);
-    try {
-        boost::asio::post(getWorkerExecutor(), [&mm, &ch]() mutable {
-            try {
-                auto r = mm.migrate();
-                ch.try_send(boost::system::error_code{},
-                            std::make_shared<Result<void>>(std::move(r)));
-            } catch (...) {
-                ch.try_send(make_error_code(std::errc::operation_canceled),
-                            std::make_shared<Result<void>>(
-                                Error{ErrorCode::InternalError, "Migration exception"}));
-            }
-        });
-    } catch (...) {
-        auto r = mm.migrate();
-        co_return r;
-    }
+    // Use pure awaitable pattern with timeout timer (no futures!)
+    boost::asio::steady_timer timeout_timer(ex);
+    timeout_timer.expires_after(std::chrono::milliseconds(timeout_ms));
 
-    boost::asio::steady_timer timer(ex);
-    timer.expires_after(std::chrono::milliseconds(timeout_ms));
-    auto which = co_await (ch.async_receive(boost::asio::as_tuple(boost::asio::use_awaitable)) ||
-                           timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable)));
-    if (which.index() == 1 || token.stop_requested()) {
-        spdlog::warn("Database migration timed out after {} ms; proceeding", timeout_ms);
+    try {
+        // Race migration against timeout using boost::asio::experimental::make_parallel_group
+        using namespace boost::asio::experimental;
+
+        auto [completion_order, ex_ptr, migrate_result, timer_result] =
+            co_await make_parallel_group(
+                boost::asio::co_spawn(
+                    ex,
+                    [&mm]() -> boost::asio::awaitable<Result<void>> { co_return mm.migrate(); }(),
+                    boost::asio::deferred),
+                timeout_timer.async_wait(boost::asio::deferred))
+                .async_wait(wait_for_one(), boost::asio::use_awaitable);
+
+        if (completion_order[0] == 0) {
+            // Migration completed first
+            if (ex_ptr) {
+                // Exception occurred
+                try {
+                    std::rethrow_exception(ex_ptr);
+                } catch (const std::exception& e) {
+                    spdlog::warn("Database migration threw exception: {}", e.what());
+                }
+                timeout_timer.cancel(); // Clean up timer
+                co_return false;
+            }
+
+            // migrate_result is directly Result<void> (not a variant)
+            // Since completion_order[0] == 0, the migration operation completed
+            timeout_timer.cancel();                      // Clean up timer
+            co_return static_cast<bool>(migrate_result); // Result<void> converts to bool
+        } else {
+            // Timeout occurred first
+            spdlog::warn("Database migration timed out after {} ms", timeout_ms);
+            // Note: The migration coroutine will be cancelled automatically
+            co_return false;
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("Database migration failed (exception): {}", e.what());
+        co_return false;
+    } catch (...) {
+        spdlog::warn("Database migration failed (unknown exception)");
         co_return false;
     }
-    auto tup1 = std::move(std::get<0>(which));
-    auto ec1 = std::get<0>(tup1);
-    auto pres1 = std::get<1>(tup1);
-    if (ec1)
-        co_return false;
-    co_return pres1 && (*pres1);
 }
 
 Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& preferredName) {
@@ -2544,11 +2553,6 @@ Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& pref
                     spdlog::warn("[Provider] Failed to check provider availability: {}", e.what());
                 }
 
-                // Embedding generator initialization happens in the caller after all plugins are
-                // processed
-
-                // Safeguard: set preferred embedding model to ONNX default when user hasn't
-                // chosen one
                 try {
                     namespace fs = std::filesystem;
                     fs::path cfgPath;
@@ -2719,8 +2723,8 @@ Result<size_t> ServiceManager::adoptContentExtractorsFromHosts() {
 }
 
 boost::asio::any_io_executor ServiceManager::getWorkerExecutor() const {
-    if (ioContext_)
-        return ioContext_->get_executor();
+    if (workCoordinator_)
+        return workCoordinator_->getExecutor();
     return boost::asio::system_executor();
 }
 
@@ -3653,9 +3657,6 @@ ServiceManager::co_initVectorSystem(boost::asio::any_io_executor exec,
         }
 
         vectorDatabase_ = vectorDb;
-
-        // Skip vector index manager and embedding generator init here; handled elsewhere
-        // Mark readiness for vector DB only
         state_.readiness.vectorDbReady.store(true);
 
         spdlog::info("[ServiceManager::co_initVectorSystem] Vector system initialized");
@@ -3683,7 +3684,6 @@ ServiceManager::co_initPluginSystem(boost::asio::any_io_executor exec,
         abiPluginLoader_ = std::make_unique<AbiPluginLoader>();
         abiHost_ = std::make_unique<AbiPluginHost>(this);
 
-        // Scan for plugins (simplified, using existing logic)
         if (true /* simulate success - actual implementation would co_await scan_plugins */) {
             state_.readiness.pluginsReady.store(true);
         }
@@ -3703,13 +3703,9 @@ ServiceManager::co_initPluginSystem(boost::asio::any_io_executor exec,
 namespace yams::daemon {
 
 bool ServiceManager::resizePostIngestThreads(std::size_t target) {
-    try {
-        if (!postIngest_)
-            return false;
-        return postIngest_->resize(target);
-    } catch (...) {
-        return false;
-    }
+    // PostIngestQueue now uses strand, no dynamic thread pool resizing
+    (void)target;
+    return false;
 }
 
 // Start background task coroutines (EmbedJob/Fts5Job consumers, OrphanScan)
@@ -3756,8 +3752,6 @@ void ServiceManager::__test_setModelProviderDegraded(bool degraded, const std::s
             embeddingFsm_.dispatch(
                 ProviderDegradedEvent{error.empty() ? std::string{"test"} : error});
         } else {
-            // Treat as recovered to a ready-ish state without asserting a model; use
-            // ModelLoadedEvent with dimension 0 to clear degraded state in FSM.
             embeddingFsm_.dispatch(ModelLoadedEvent{embeddingModelName_, 0});
         }
     } catch (...) {
