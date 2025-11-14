@@ -334,7 +334,7 @@ TEST_CASE("ResourcePool: Basic lifecycle", "[daemon][components][pool]") {
             [](const TestResource& r) { return r.isValid(); });
 
         std::this_thread::sleep_for(50ms); // Allow async creation
-        REQUIRE(TestResource::getCreationCount() >= config.minSize);
+        REQUIRE(TestResource::getCreationCount() >= static_cast<int>(config.minSize));
     }
 
     TestResource::resetCounters();
@@ -358,9 +358,6 @@ TEST_CASE("ResourcePool: Basic lifecycle", "[daemon][components][pool]") {
         auto& handle = handleResult.value();
         REQUIRE(handle.isValid());
         REQUIRE(handle->isValid());
-
-        // Resource should be in use
-        int idBefore = handle->getId();
 
         // Release by destroying handle (handle goes out of scope)
     }
@@ -445,3 +442,6 @@ TEST_CASE("ResourcePool: Concurrency", "[daemon][components][pool][concurrent]")
         REQUIRE(TestResource::getWorkCount() == 20);
     }
 }
+
+#include <yams/daemon/client/asio_connection_pool.h>
+#include <yams/daemon/client/global_io_context.h>

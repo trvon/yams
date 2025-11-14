@@ -209,8 +209,21 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::acquire() {
             if (auto conn = weak.lock()) {
                 if (conn->alive.load(std::memory_order_relaxed) && conn->socket &&
                     conn->socket->is_open()) {
-                    existing = conn;
-                    break;
+                    // Additional validation: check if socket is really alive
+                    // by peeking at the receive buffer (non-blocking)
+                    boost::system::error_code ec;
+                    char peek_buf[1];
+                    conn->socket->native_non_blocking(true, ec);
+                    if (!ec) {
+                        auto avail = conn->socket->available(ec);
+                        // If available() fails with error, socket is likely dead
+                        if (!ec || ec == boost::asio::error::would_block) {
+                            existing = conn;
+                            break;
+                        }
+                        // Socket has an error - mark as dead
+                        conn->alive.store(false, std::memory_order_relaxed);
+                    }
                 }
             }
         }
