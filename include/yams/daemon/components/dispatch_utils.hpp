@@ -32,23 +32,8 @@ offload_to_worker(ServiceManager* sm, Fn&& fn) {
     using RawResult = std::invoke_result_t<Fn&>;
     using ResultType = std::remove_cvref_t<RawResult>;
     static_assert(!std::is_void_v<ResultType>, "offload_to_worker requires non-void result type");
-    auto pool = sm ? sm->getWorkerPool() : nullptr;
-    if (pool) {
-        auto exec = pool->executor();
-        auto shared = co_await boost::asio::co_spawn(
-            exec,
-            [fn = std::forward<Fn>(
-                 fn)]() mutable -> boost::asio::awaitable<std::shared_ptr<ResultType>> {
-                try {
-                    auto value = fn();
-                    co_return std::make_shared<ResultType>(std::move(value));
-                } catch (...) {
-                    std::rethrow_exception(std::current_exception());
-                }
-            },
-            boost::asio::use_awaitable);
-        co_return std::move(*shared);
-    }
+    // WorkerPool removed - execute directly
+    (void)sm;
     co_return fn();
 }
 
