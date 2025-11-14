@@ -15,7 +15,6 @@
 #include <yams/core/types.h>
 #include <yams/daemon/components/init_utils.hpp>
 #include <yams/daemon/components/ServiceManager.h>
-#include <yams/daemon/components/WorkerPool.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
