@@ -33,6 +33,7 @@ struct stop_source {
     stop_token get_token() const noexcept { return stop_token{}; }
     void request_stop() noexcept { /* no-op */ }
     bool stop_requested() const noexcept { return false; }
+    constexpr bool stop_possible() const noexcept { return true; }
 };
 
 // Fallback jthread wrapper over std::thread with a no-op request_stop
