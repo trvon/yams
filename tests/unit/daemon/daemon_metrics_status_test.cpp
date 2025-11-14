@@ -115,7 +115,7 @@ TEST_CASE("DaemonMetrics: Embedding provider status", "[daemon][metrics][embeddi
 
         // Model provider is now directly used - no need to ensure generator
 
-        DaemonMetrics metrics(nullptr, &state, &svc);
+        DaemonMetrics metrics(nullptr, &state, &svc, svc.getWorkCoordinator());
         auto snap = metrics.getSnapshot();
 
         REQUIRE(snap != nullptr);
@@ -128,7 +128,7 @@ TEST_CASE("DaemonMetrics: Embedding provider status", "[daemon][metrics][embeddi
 
     SECTION("Metrics snapshot doesn't crash without provider") {
         // No provider set
-        DaemonMetrics metrics(nullptr, &state, &svc);
+        DaemonMetrics metrics(nullptr, &state, &svc, svc.getWorkCoordinator());
         auto snap = metrics.getSnapshot();
 
         REQUIRE(snap != nullptr);

@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <string>
 
@@ -43,7 +44,10 @@ public:
     ~DaemonLifecycleFsm() = default;
 
     // Returns the latest known lifecycle snapshot.
-    LifecycleSnapshot snapshot() const { return snapshot_; }
+    LifecycleSnapshot snapshot() const {
+        MutexLock lock(mutex_);
+        return snapshot_;
+    }
 
     // Advance time-based guards; lightweight and safe to call frequently.
     void tick();
@@ -63,15 +67,25 @@ public:
     void setSubsystemDegraded(const std::string& name, bool degraded,
                               const std::string& reason = std::string());
     bool isSubsystemDegraded(const std::string& name) const;
-    std::map<std::string, bool> degradedSubsystems() const { return degraded_; }
+    std::map<std::string, bool> degradedSubsystems() const {
+        MutexLock lock(mutex_);
+        return degraded_;
+    }
     std::string degradationReason(const std::string& name) const;
 
 private:
     void transitionTo(LifecycleState next, std::optional<std::string> err = std::nullopt);
 
+#if defined(__cpp_lib_scoped_lock) && __cpp_lib_scoped_lock >= 201703L
+    using MutexLock = std::scoped_lock<std::mutex>;
+#else
+    using MutexLock = std::lock_guard<std::mutex>;
+#endif
+
     LifecycleSnapshot snapshot_{};
     std::map<std::string, bool> degraded_;
     std::map<std::string, std::string> degradeReasons_;
+    mutable std::mutex mutex_;
 };
 
 } // namespace yams::daemon

@@ -11,6 +11,7 @@
 #include <boost/asio/detached.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/experimental/channel.hpp>
+#include <boost/asio/experimental/concurrent_channel.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
@@ -102,9 +103,8 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
     auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
 
     using RetT = Result<std::shared_ptr<yams::search::HybridSearchEngine>>;
-    boost::asio::experimental::basic_channel<boost::asio::any_io_executor,
-                                             boost::asio::experimental::channel_traits<std::mutex>,
-                                             void(boost::system::error_code, std::shared_ptr<RetT>)>
+    boost::asio::experimental::concurrent_channel<
+        boost::asio::any_io_executor, void(boost::system::error_code, std::shared_ptr<RetT>)>
         ch(ex, 1);
 
     // Post build work to worker executor (blocking operations)

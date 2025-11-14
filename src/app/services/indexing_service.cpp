@@ -469,8 +469,6 @@ private:
             if (!req.collection.empty()) {
                 storeReq.metadata["collection"] = req.collection;
             }
-            // If caller requested deferred extraction, propagate to DocumentService
-            storeReq.deferExtraction = req.deferExtraction;
 
             auto docService = makeDocumentService(ctx_);
             auto result = docService->store(storeReq);

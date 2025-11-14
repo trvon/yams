@@ -45,21 +45,25 @@ bool stream_trace_enabled() {
 
 #include <spdlog/spdlog.h>
 #include <boost/asio/as_tuple.hpp>
+#include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/dispatch.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/read.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/strand.hpp>
+#include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/use_future.hpp>
 #include <boost/asio/write.hpp>
 
 #include <atomic>
 #include <cctype>
+#include <cstddef>
 #include <cstdlib>
-#include <filesystem>
 
 #ifndef _WIN32
 #include <sys/un.h>
@@ -74,9 +78,9 @@ using boost::asio::detached;
 using boost::asio::use_awaitable;
 using local = boost::asio::local::stream_protocol;
 
-SocketServer::SocketServer(const Config& config, RequestDispatcher* dispatcher,
-                           StateComponent* state)
-    : config_(config), dispatcher_(dispatcher), state_(state) {}
+SocketServer::SocketServer(const Config& config, WorkCoordinator* coordinator,
+                           RequestDispatcher* dispatcher, StateComponent* state)
+    : config_(config), coordinator_(coordinator), dispatcher_(dispatcher), state_(state) {}
 
 SocketServer::~SocketServer() {
     stop();
@@ -130,10 +134,14 @@ Result<void> SocketServer::start() {
             }
         }
 #endif
-        io_context_.restart();
-        work_guard_.emplace(io_context_.get_executor());
+        if (!coordinator_ || !coordinator_->isRunning()) {
+            running_ = false;
+            return Error{ErrorCode::InvalidState,
+                         "WorkCoordinator must be started before SocketServer"};
+        }
 
-        acceptor_ = std::make_unique<local::acceptor>(io_context_);
+        auto io_context = coordinator_->getIOContext();
+        acceptor_ = std::make_unique<local::acceptor>(*io_context);
         local::endpoint endpoint(sockPath.string());
         acceptor_->open(endpoint.protocol());
         acceptor_->bind(endpoint);
@@ -159,63 +167,18 @@ Result<void> SocketServer::start() {
             initialBudget = 256ULL * 1024;
         setWriterBudget(initialBudget);
 
-        co_spawn(
-            io_context_,
+        acceptLoopFuture_ = co_spawn(
+            coordinator_->getExecutor(),
             [this]() -> awaitable<void> {
                 co_await accept_loop();
                 co_return;
             },
-            detached);
-        spdlog::info("SocketServer: accept_loop scheduled");
+            boost::asio::use_future);
+        spdlog::info("SocketServer: accept_loop scheduled on WorkCoordinator");
 
-        // Get tuneable worker count from TuneAdvisor
-        // Use poolMaxSizeIpc() for fixed pool sized for peak load (deterministic, no runtime
-        // scaling) Override via YAMS_POOL_IPC_MAX env var
-        try {
-            auto rec = TuneAdvisor::poolMaxSizeIpc();
-            if (rec > 0) {
-                config_.workerThreads = rec;
-            }
-        } catch (...) {
-        }
-
-        // Worker pool using poll() pattern for responsive shutdown
-        workers_.reserve(config_.workerThreads);
-        try {
-            for (size_t i = 0; i < config_.workerThreads; ++i) {
-                workers_.emplace_back([this, i]() {
-                    set_current_thread_name("yams-ipc-" + std::to_string(i));
-                    spdlog::info("SocketServer: worker {} starting (poll loop)", i);
-                    try {
-                        while (!io_context_.stopped() && running_.load(std::memory_order_relaxed)) {
-                            std::size_t count = io_context_.poll_one();
-                            if (count == 0) {
-                                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                            }
-                        }
-                    } catch (const std::exception& e) {
-                        spdlog::error("SocketServer: worker {} exception: {}", i, e.what());
-                    }
-                    spdlog::info("SocketServer: worker {} exiting", i);
-                });
-            }
-        } catch (...) {
-            // If thread creation fails, clean up already-created threads before rethrowing
-            spdlog::error("Failed to create worker thread, cleaning up {} existing workers",
-                          workers_.size());
-            running_ = false;
-            io_context_.stop();
-            for (auto& worker : workers_) {
-                if (worker.joinable()) {
-                    try {
-                        worker.join();
-                    } catch (...) {
-                    }
-                }
-            }
-            workers_.clear();
-            throw; // Rethrow to propagate error
-        }
+        // WorkCoordinator handles all threading - no need for separate worker pool
+        spdlog::info("SocketServer: using WorkCoordinator ({} threads) for async execution",
+                     coordinator_->getWorkerCount());
 
         if (state_) {
             state_->readiness.ipcServerReady.store(true);
@@ -256,68 +219,66 @@ Result<void> SocketServer::stop() {
 
         // Close all active sockets IMMEDIATELY for deterministic shutdown
         try {
-            std::vector<std::shared_ptr<boost::asio::local::stream_protocol::socket>> sockets;
+            std::vector<std::shared_ptr<TrackedSocket>> sockets;
             {
                 std::lock_guard<std::mutex> lk(activeSocketsMutex_);
                 for (auto& weak_sock : activeSockets_) {
-                    if (auto sock = weak_sock.lock()) {
-                        sockets.push_back(sock);
+                    if (auto tracked = weak_sock.lock()) {
+                        sockets.push_back(std::move(tracked));
                     }
                 }
                 activeSockets_.clear();
             }
-            for (auto& sock : sockets) {
-                if (sock && sock->is_open()) {
-                    boost::system::error_code ec;
-                    sock->close(ec);
-                }
-            }
-            spdlog::info("Closed {} active connections", sockets.size());
+
+            const auto closed = close_sockets_on_executor(std::move(sockets));
+            spdlog::info("Closed {} active connections", closed);
         } catch (const std::exception& e) {
             spdlog::warn("Exception while closing active sockets: {}", e.what());
         } catch (...) {
             spdlog::warn("Unknown exception while closing active sockets");
         }
 
-        // Clear connection handler futures without waiting
+        // Drain connection handler futures so no IPC coroutine continues
+        // running after we tear down executors (prevents TSAN races during
+        // restart cycles).
+        std::vector<std::future<void>> pending;
         try {
             std::lock_guard<std::mutex> lk(connectionFuturesMutex_);
-            connectionFutures_.clear();
+            pending.swap(connectionFutures_);
         } catch (const std::exception& e) {
-            spdlog::warn("Exception clearing connection futures: {}", e.what());
+            spdlog::warn("Exception moving connection futures: {}", e.what());
         }
 
-        // Close acceptor
-        try {
-            if (acceptor_ && acceptor_->is_open()) {
-                boost::system::error_code ec;
-                acceptor_->close(ec);
+        for (auto& future : pending) {
+            if (!future.valid()) {
+                continue;
             }
-        } catch (...) {
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-        spdlog::info("SocketServer: stopping io_context");
-        try {
-            work_guard_.reset();
-            io_context_.stop();
-        } catch (...) {
-        }
-
-        // Detach all worker threads after brief grace period
-        // Workers should exit soon after io_context.stop(), but some may be stuck in handlers
-        spdlog::info("SocketServer: detaching {} worker threads after grace period",
-                     workers_.size());
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-        for (size_t i = 0; i < workers_.size(); ++i) {
-            if (workers_[i].joinable()) {
-                workers_[i].detach();
+            try {
+                future.wait();
+            } catch (const std::exception& e) {
+                spdlog::warn("Connection future wait failed: {}", e.what());
+            } catch (...) {
+                spdlog::warn("Connection future wait failed with unknown exception");
             }
         }
-        workers_.clear();
-        spdlog::info("SocketServer: all workers detached");
+
+        // Close acceptor on executor thread and wait for accept loop completion
+        close_acceptor_on_executor();
+
+        if (acceptLoopFuture_.valid()) {
+            try {
+                acceptLoopFuture_.get();
+                spdlog::info("SocketServer: accept_loop completed");
+            } catch (const std::exception& e) {
+                spdlog::warn("SocketServer: accept_loop terminated with exception: {}", e.what());
+            } catch (...) {
+                spdlog::warn("SocketServer: accept_loop terminated with unknown exception");
+            }
+            acceptLoopFuture_ = {};
+        }
+
+        // WorkCoordinator manages thread lifecycle - just signal completion
+        spdlog::info("SocketServer: accept loop stopped, WorkCoordinator continues running");
 
         if (state_) {
             state_->readiness.ipcServerReady.store(false);
@@ -399,9 +360,12 @@ awaitable<void> SocketServer::accept_loop() {
                 break;
             }
 
+            // Generate monotonic connection token for end-to-end tracing
+            const uint64_t conn_token = connectionToken_.fetch_add(1, std::memory_order_relaxed);
+
             if (trace) {
-                spdlog::info("stream-trace: waiting for accept (active={} total={})",
-                             activeConnections_.load(std::memory_order_relaxed),
+                spdlog::info("stream-trace: [conn={}] accept_start (active={} total={})",
+                             conn_token, activeConnections_.load(std::memory_order_relaxed),
                              totalConnections_.load(std::memory_order_relaxed));
             }
 
@@ -444,7 +408,8 @@ awaitable<void> SocketServer::accept_loop() {
                                 rebuildPath = config_.socketPath;
                             }
                             std::filesystem::remove(rebuildPath, rebuild_ec);
-                            acceptor_ = std::make_unique<local::acceptor>(io_context_);
+                            acceptor_ =
+                                std::make_unique<local::acceptor>(*coordinator_->getIOContext());
                             local::endpoint endpoint(rebuildPath.string());
                             acceptor_->open(endpoint.protocol());
                             acceptor_->bind(endpoint);
@@ -485,7 +450,7 @@ awaitable<void> SocketServer::accept_loop() {
                 }
 
                 if (need_delay) {
-                    boost::asio::steady_timer timer(io_context_);
+                    boost::asio::steady_timer timer(*coordinator_->getIOContext());
                     timer.expires_after(backoff_ms);
                     try {
                         co_await timer.async_wait(use_awaitable);
@@ -498,20 +463,31 @@ awaitable<void> SocketServer::accept_loop() {
             }
 
             if (trace) {
-                spdlog::info("stream-trace: accept completed (active={} total={})",
-                             activeConnections_.load(std::memory_order_relaxed),
+                spdlog::info("stream-trace: [conn={}] slot_acquired", conn_token);
+            }
+
+            if (trace) {
+                spdlog::info("stream-trace: [conn={}] accept completed (active={} total={})",
+                             conn_token, activeConnections_.load(std::memory_order_relaxed),
                              totalConnections_.load(std::memory_order_relaxed));
             }
 
             auto current = activeConnections_.fetch_add(1) + 1;
             totalConnections_.fetch_add(1);
 
-            spdlog::info("SocketServer: accepted connection, active={} total={}", current,
-                         totalConnections_.load());
+            spdlog::info("SocketServer: [conn={}] accepted connection, active={} total={}",
+                         conn_token, current, totalConnections_.load());
 
             if (state_) {
                 state_->stats.activeConnections.store(current);
             }
+
+            auto connectionExecutor = boost::asio::make_strand(coordinator_->getExecutor());
+            auto sock = std::make_shared<local::socket>(std::move(socket));
+            auto tracked = std::make_shared<TrackedSocket>();
+            tracked->socket = sock;
+            tracked->executor = connectionExecutor;
+            register_socket(tracked);
 
             // Spawn connection with use_future for graceful shutdown tracking (PBI-066-41)
             // Pass semaphore for automatic release when connection completes (PBI-066-42)
@@ -521,9 +497,12 @@ awaitable<void> SocketServer::accept_loop() {
                 // Prune completed futures before adding new one
                 prune_completed_futures();
 
+                if (trace) {
+                    spdlog::info("stream-trace: [conn={}] handler_spawned", conn_token);
+                }
+
                 // Create a capturing lambda that releases the semaphore on completion
-                auto wrapped_handler = [this,
-                                        socket = std::move(socket)]() mutable -> awaitable<void> {
+                auto wrapped_handler = [this, conn_token, tracked]() mutable -> awaitable<void> {
                     // RAII guard for semaphore - releases on any exit path
                     struct SemaphoreGuard {
                         std::counting_semaphore<>* sem;
@@ -534,13 +513,13 @@ awaitable<void> SocketServer::accept_loop() {
                         }
                     } guard{connectionSlots_.get()};
 
-                    // Handle the connection
-                    co_await handle_connection(std::move(socket));
+                    // Handle the connection with tracing token
+                    co_await handle_connection(tracked, conn_token);
                 };
 
                 // Spawn and track the connection
-                connectionFutures_.push_back(co_spawn(acceptor_->get_executor(), wrapped_handler(),
-                                                      boost::asio::use_future));
+                connectionFutures_.push_back(
+                    co_spawn(connectionExecutor, wrapped_handler(), boost::asio::use_future));
             }
 
         } catch (const std::exception& e) {
@@ -560,32 +539,75 @@ awaitable<void> SocketServer::accept_loop() {
     spdlog::debug("Accept loop ended");
 }
 
-awaitable<void> SocketServer::handle_connection(local::socket socket) {
+awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> tracked_socket,
+                                                uint64_t conn_token) {
 #if defined(TRACY_ENABLE)
     ZoneScopedN("SocketServer::handle_connection");
 #endif
     static const bool trace = stream_trace_enabled();
+    const auto handler_start_time = std::chrono::steady_clock::now();
+
+    if (!tracked_socket || !tracked_socket->socket) {
+        co_return;
+    }
+
+    auto sock = tracked_socket->socket;
+
+    // Track IPC task lifecycle: pending (spawned) -> active (executing) -> done
+    struct IpcTaskTracker {
+        StateComponent* state;
+        bool active{false};
+        IpcTaskTracker(StateComponent* s) : state(s) {
+            if (state) {
+                state->stats.ipcTasksPending.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        void markActive() {
+            if (state && !active) {
+                state->stats.ipcTasksPending.fetch_sub(1, std::memory_order_relaxed);
+                state->stats.ipcTasksActive.fetch_add(1, std::memory_order_relaxed);
+                active = true;
+            }
+        }
+        ~IpcTaskTracker() {
+            if (state) {
+                if (active) {
+                    state->stats.ipcTasksActive.fetch_sub(1, std::memory_order_relaxed);
+                } else {
+                    state->stats.ipcTasksPending.fetch_sub(1, std::memory_order_relaxed);
+                }
+            }
+        }
+    } ipcTracker{state_};
+
     struct CleanupGuard {
         SocketServer* server;
         bool trace;
+        uint64_t conn_token;
+        std::chrono::steady_clock::time_point start_time;
         ~CleanupGuard() {
             auto current = server->activeConnections_.fetch_sub(1) - 1;
             if (server->state_) {
                 server->state_->stats.activeConnections.store(current);
             }
+            auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now() - start_time)
+                                   .count();
             if (trace) {
-                spdlog::info("stream-trace: handle_connection cleanup active={} total={}", current,
-                             server->totalConnections_.load());
+                spdlog::info("stream-trace: [conn={}] handle_connection cleanup active={} total={} "
+                             "duration_ms={}",
+                             conn_token, current, server->totalConnections_.load(), duration_ms);
             } else {
-                spdlog::debug("Connection closed, active: {}", current);
+                spdlog::debug("[conn={}] Connection closed, active: {}, duration_ms: {}",
+                              conn_token, current, duration_ms);
             }
         }
-    } guard{this, trace};
+    } guard{this, trace, conn_token, handler_start_time};
 
     if (trace) {
-        spdlog::info("stream-trace: handle_connection begin active={} total={} socket_valid={}",
-                     activeConnections_.load(std::memory_order_relaxed),
-                     totalConnections_.load(std::memory_order_relaxed), socket.is_open());
+        spdlog::info("stream-trace: [conn={}] handler_ready active={} total={} socket_valid={}",
+                     conn_token, activeConnections_.load(std::memory_order_relaxed),
+                     totalConnections_.load(std::memory_order_relaxed), sock && sock->is_open());
     }
 
     try {
@@ -599,14 +621,16 @@ awaitable<void> SocketServer::handle_connection(local::socket socket) {
         }
 
         RequestHandler::Config handlerConfig;
-        handlerConfig.worker_executor = io_context_.get_executor();
+        handlerConfig.worker_executor = coordinator_->getExecutor();
         handlerConfig.writer_budget_ref = writerBudget_;
         handlerConfig.writer_budget_bytes_per_turn = writerBudget_->load(std::memory_order_relaxed);
         handlerConfig.enable_streaming = true;
         handlerConfig.enable_multiplexing = true;
+        // Keep worker_job_signal for cross-executor coordination, but don't override
+        // worker_executor This keeps IPC handlers on dedicated yams-ipc-N threads (prevents
+        // starvation by background work)
         if (dispatcher_) {
             try {
-                handlerConfig.worker_executor = dispatcher_->getWorkerExecutor();
                 handlerConfig.worker_job_signal = dispatcher_->getWorkerJobSignal();
             } catch (...) {
             }
@@ -643,9 +667,11 @@ awaitable<void> SocketServer::handle_connection(local::socket socket) {
             std::lock_guard<std::mutex> lk(dispatcherMutex_);
             disp = dispatcher_;
         }
+        // Keep worker_job_signal for cross-executor coordination, but don't override
+        // worker_executor This keeps IPC handlers on dedicated yams-ipc-N threads (prevents
+        // starvation by background work)
         try {
             if (disp) {
-                handlerConfig.worker_executor = disp->getWorkerExecutor();
                 handlerConfig.worker_job_signal = disp->getWorkerJobSignal();
             }
         } catch (...) {
@@ -653,29 +679,29 @@ awaitable<void> SocketServer::handle_connection(local::socket socket) {
         RequestHandler handler(disp, handlerConfig);
 
         // Wrap socket in shared_ptr for tracking and use modern C++20 move semantics
-        auto sock =
-            std::make_shared<boost::asio::local::stream_protocol::socket>(std::move(socket));
-
-        // Register for deterministic shutdown
-        register_socket(sock);
-
         // Use the server's stop_source token so we can cancel connections during shutdown
         auto token = stop_source_.get_token();
 
-        co_await handler.handle_connection(std::move(*sock), token);
+        // Mark IPC task as active (transitioned from pending to executing)
+        ipcTracker.markActive();
+
+        co_await handler.handle_connection(sock, token, conn_token);
     } catch (const std::exception& e) {
         spdlog::error("SocketServer::handle_connection error: {}", e.what());
     }
 }
 
-void SocketServer::register_socket(
-    std::weak_ptr<boost::asio::local::stream_protocol::socket> socket) {
+void SocketServer::register_socket(std::shared_ptr<TrackedSocket> tracked_socket) {
+    if (!tracked_socket) {
+        return;
+    }
+
     std::lock_guard<std::mutex> lk(activeSocketsMutex_);
     // Clean up expired weak_ptrs while we're here
     activeSockets_.erase(std::remove_if(activeSockets_.begin(), activeSockets_.end(),
                                         [](const auto& weak) { return weak.expired(); }),
                          activeSockets_.end());
-    activeSockets_.push_back(std::move(socket));
+    activeSockets_.push_back(tracked_socket);
 }
 
 void SocketServer::prune_completed_futures() {
@@ -687,6 +713,108 @@ void SocketServer::prune_completed_futures() {
                                                        std::future_status::ready;
                                             }),
                              connectionFutures_.end());
+}
+
+void SocketServer::execute_on_io_context(std::function<void()> fn) {
+    if (!fn) {
+        return;
+    }
+
+    auto io_context = coordinator_->getIOContext();
+    auto executor = coordinator_->getExecutor();
+    if (io_context->stopped() || executor.running_in_this_thread()) {
+        fn();
+        return;
+    }
+
+    std::promise<void> promise;
+    auto future = promise.get_future();
+    boost::asio::post(executor, [fn = std::move(fn), promise = std::move(promise)]() mutable {
+        try {
+            fn();
+            promise.set_value();
+        } catch (...) {
+            try {
+                promise.set_exception(std::current_exception());
+            } catch (...) {
+            }
+        }
+    });
+
+    future.get();
+}
+
+void SocketServer::close_acceptor_on_executor() {
+    if (!acceptor_) {
+        return;
+    }
+
+    try {
+        execute_on_io_context([this]() {
+            if (!acceptor_) {
+                return;
+            }
+            boost::system::error_code ec;
+            acceptor_->cancel(ec);
+            if (acceptor_->is_open()) {
+                acceptor_->close(ec);
+            }
+        });
+    } catch (const std::exception& e) {
+        spdlog::warn("SocketServer: failed to close acceptor on executor: {}", e.what());
+    }
+}
+
+std::size_t SocketServer::close_sockets_on_executor(
+    std::vector<std::shared_ptr<TrackedSocket>> tracked_sockets) {
+    if (tracked_sockets.empty()) {
+        return 0;
+    }
+
+    std::vector<std::future<void>> completions;
+    completions.reserve(tracked_sockets.size());
+    std::size_t scheduled = 0;
+
+    for (auto& tracked : tracked_sockets) {
+        if (!tracked || !tracked->socket) {
+            continue;
+        }
+
+        auto sock = tracked->socket;
+
+        auto promise = std::make_shared<std::promise<void>>();
+        auto future = promise->get_future();
+        completions.emplace_back(std::move(future));
+        ++scheduled;
+
+        auto exec = tracked->executor;
+        if (!exec) {
+            exec = sock->get_executor();
+        }
+        try {
+            boost::asio::dispatch(exec, [sock, promise]() mutable {
+                boost::system::error_code ec;
+                sock->cancel(ec);
+                sock->close(ec);
+                promise->set_value();
+            });
+        } catch (const std::exception& e) {
+            spdlog::warn("SocketServer: failed to dispatch socket close: {}", e.what());
+            promise->set_value();
+        } catch (...) {
+            spdlog::warn("SocketServer: failed to dispatch socket close (unknown error)");
+            promise->set_value();
+        }
+    }
+
+    for (auto& future : completions) {
+        try {
+            future.wait();
+        } catch (...) {
+        }
+    }
+
+    return scheduled;
 }
 
 } // namespace yams::daemon

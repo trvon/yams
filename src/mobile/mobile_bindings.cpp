@@ -807,7 +807,6 @@ yams_mobile_status yams_mobile_store_document(yams_mobile_context_t* ctx,
     StoreDocumentRequest req;
     if (request->path)
         req.path = request->path;
-    req.deferExtraction = request->sync_now == 0;
     if (request->tags && request->tag_count > 0) {
         for (size_t i = 0; i < request->tag_count; ++i) {
             if (request->tags[i])

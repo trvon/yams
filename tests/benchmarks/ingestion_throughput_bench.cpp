@@ -132,7 +132,6 @@ std::vector<std::string> splitCsv(const std::string& csv) {
 struct IngestOptions {
     bool recursive{true};
     bool verify{false};
-    bool deferExtraction{true};
     std::vector<std::string> includePatterns;
     std::vector<std::string> excludePatterns;
     std::vector<std::string> tags;
@@ -167,10 +166,6 @@ IngestOptions parseArgs(const std::vector<std::string>& args) {
             opts.verify = true;
         } else if (arg == "--no-verify") {
             opts.verify = false;
-        } else if (arg == "--defer-extraction") {
-            opts.deferExtraction = true;
-        } else if (arg == "--no-defer-extraction") {
-            opts.deferExtraction = false;
         } else if (arg.rfind("--metadata=", 0) == 0) {
             auto kv = arg.substr(std::string("--metadata=").size());
             auto pos = kv.find('=');
@@ -320,7 +315,6 @@ struct LocalIngestionSession {
         req.excludePatterns = opts.excludePatterns;
         req.recursive = opts.recursive;
         req.verify = opts.verify;
-        req.deferExtraction = opts.deferExtraction;
         req.tags = opts.tags;
         for (const auto& [key, value] : opts.metadata) {
             req.metadata[key] = value;

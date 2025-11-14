@@ -35,7 +35,6 @@
 #include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/SearchEngineFsm.h>
 #include <yams/daemon/components/SearchEngineManager.h>
-#include <yams/daemon/components/SearchPool.h>
 #include <yams/daemon/components/ServiceManagerFsm.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -110,7 +109,9 @@ public:
     // Service Accessors
     std::shared_ptr<api::IContentStore> getContentStore() const { return contentStore_; }
     std::shared_ptr<metadata::MetadataRepository> getMetadataRepo() const { return metadataRepo_; }
-    std::shared_ptr<search::SearchExecutor> getSearchExecutor() const { return searchExecutor_; }
+    std::shared_ptr<search::SearchExecutor> getSearchExecutor() const {
+        return std::atomic_load(&searchExecutor_);
+    }
     std::shared_ptr<EntityGraphService> getEntityGraphService() const {
         return entityGraphService_;
     }
@@ -122,6 +123,7 @@ public:
     std::string getEmbeddingModelName() const { return embeddingModelName_; }
     std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const { return vectorDatabase_; }
     std::shared_ptr<WorkerPool> getWorkerPool() const { return nullptr; }
+    WorkCoordinator* getWorkCoordinator() const { return workCoordinator_.get(); }
     // Resize the worker pool to a target size; creates pool on demand.
     bool resizeWorkerPool(std::size_t target);
     PostIngestQueue* getPostIngestQueue() const { return postIngest_.get(); }
@@ -288,7 +290,8 @@ public:
             dirFiles; // dir -> (file -> (mtime,size))
     };
     SessionWatchState sessionWatch_;
-    std::atomic<bool> sessionWatchStop_{false};
+    yams::compat::stop_source sessionWatchStopSource_;
+    std::future<void> sessionWatcherFuture_;
 
     // ABI plugin loader access
     AbiPluginLoader* getAbiPluginLoader() const { return abiPluginLoader_.get(); }
@@ -437,6 +440,8 @@ private:
     co_initPluginSystem(boost::asio::any_io_executor exec,
                         const boost::asio::cancellation_state& token);
 
+    boost::asio::awaitable<void> co_runSessionWatcher(yams::compat::stop_token token);
+
     // Awaitable phase helpers for modern architecture
     boost::asio::awaitable<bool> co_openDatabase(const std::filesystem::path& dbPath,
                                                  int timeout_ms, yams::compat::stop_token token);
@@ -521,7 +526,6 @@ private:
     std::shared_ptr<WalMetricsProvider> walMetricsProvider_;
     std::shared_ptr<yams::integrity::RepairManager> repairManager_;
     std::unique_ptr<PostIngestQueue> postIngest_;
-    std::unique_ptr<SearchPool> searchPool_;
     std::unique_ptr<EmbeddingService> embeddingService_;
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors_;
     std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> symbolExtractors_;

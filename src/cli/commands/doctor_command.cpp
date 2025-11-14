@@ -1369,25 +1369,26 @@ private:
                     auto leaseHandle = std::move(leaseRes.value());
                     auto& client = **leaseHandle;
 
-                    // Single status call
-                    auto sres = yams::cli::run_result<StatusResponse>(client.status(),
-                                                                      std::chrono::seconds(10));
-                    if (sres) {
-                        cachedStatus = std::move(sres.value());
+                    {
+                        auto sres = yams::cli::run_result<StatusResponse>(
+                            client.status(), std::chrono::seconds(10));
+                        if (sres) {
+                            cachedStatus = std::move(sres.value());
+                        }
                     }
 
-                    // Single stats call with detailed info
-                    GetStatsRequest req;
-                    req.detailed = true;
-                    req.showFileTypes = false;
-                    auto gres = yams::cli::run_result<GetStatsResponse>(
-                        client.call(req), std::chrono::milliseconds(10000));
-                    if (gres) {
-                        cachedStats = std::move(gres.value());
+                    {
+                        GetStatsRequest req;
+                        req.detailed = true;
+                        req.showFileTypes = false;
+                        auto gres = yams::cli::run_result<GetStatsResponse>(
+                            client.getStats(req), std::chrono::milliseconds(10000));
+                        if (gres) {
+                            cachedStats = std::move(gres.value());
+                        }
                     }
                 }
             } catch (...) {
-                // Continue with cached data (may be empty)
             }
         }
 
@@ -2612,7 +2613,8 @@ void DoctorCommand::runPrune() {
                       << yams::cli::ui::colorize("build-artifacts", yams::cli::ui::Ansi::CYAN)
                       << "  - Compiled objects, libraries, executables, archives\n";
             std::cout << "  " << yams::cli::ui::colorize("build-system", yams::cli::ui::Ansi::CYAN)
-                      << "     - CMake, Ninja, Meson, Make, Gradle, Maven, NPM, Cargo, Go\n";
+                      << "     - CMake, Ninja, Meson, Make, Gradle, Maven, NPM, Cargo, Go, "
+                         "Flutter, Dart\n";
             std::cout << "  " << yams::cli::ui::colorize("build", yams::cli::ui::Ansi::CYAN)
                       << "            - Both build-artifacts and build-system\n";
             std::cout << "  " << yams::cli::ui::colorize("logs", yams::cli::ui::Ansi::CYAN)
@@ -2631,7 +2633,8 @@ void DoctorCommand::runPrune() {
             std::cout << yams::cli::ui::subsection_header("Specific Categories") << "\n\n";
             std::cout << "  build-object, build-library, build-executable, build-archive\n";
             std::cout << "  system-cmake, system-ninja, system-meson, system-make\n";
-            std::cout << "  system-gradle, system-maven, system-npm, system-cargo, system-go\n\n";
+            std::cout << "  system-gradle, system-maven, system-npm, system-cargo, system-go\n";
+            std::cout << "  system-flutter, system-dart\n\n";
 
             std::cout << yams::cli::ui::subsection_header("Usage Examples") << "\n\n";
             std::cout << "  "
@@ -2674,12 +2677,10 @@ void DoctorCommand::runPrune() {
         req.dryRun = !pruneApply_;
         req.verbose = pruneVerbose_;
 
-        // Get daemon client configuration
         daemon::ClientConfig clientCfg;
         clientCfg.socketPath = daemon::DaemonClient::resolveSocketPathConfigFirst();
-        clientCfg.requestTimeout = std::chrono::milliseconds(300000); // 5 minutes
+        clientCfg.requestTimeout = std::chrono::milliseconds(300000);
 
-        // Check if daemon is running
         if (!daemon::DaemonClient::isDaemonRunning(clientCfg.socketPath)) {
             printError("Daemon not running on socket: " + clientCfg.socketPath.string());
             std::cout << yams::cli::ui::colorize("\nHint:", yams::cli::ui::Ansi::YELLOW)
@@ -2692,7 +2693,6 @@ void DoctorCommand::runPrune() {
                                              yams::cli::ui::Ansi::CYAN)
                   << "\n";
 
-        // Acquire client from pool and send request
         auto leaseRes = acquire_cli_daemon_client(clientCfg, 1, 4);
         if (!leaseRes) {
             printError("Failed to acquire daemon client: " + leaseRes.error().message);
@@ -2701,7 +2701,6 @@ void DoctorCommand::runPrune() {
 
         auto lease = std::move(leaseRes.value());
 
-        // Use run_result to execute the async call synchronously
         auto respRes =
             run_result(lease->call<daemon::PruneRequest>(req), std::chrono::milliseconds(300000));
         if (!respRes) {

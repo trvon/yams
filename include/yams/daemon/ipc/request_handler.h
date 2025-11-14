@@ -137,8 +137,8 @@ public:
 
     // Handle a connection with coroutines using native boost::asio socket
     [[nodiscard]] boost::asio::awaitable<void>
-    handle_connection(boost::asio::local::stream_protocol::socket socket,
-                      yams::compat::stop_token token);
+    handle_connection(std::shared_ptr<boost::asio::local::stream_protocol::socket> socket,
+                      yams::compat::stop_token token, uint64_t conn_token);
 
     // Handle a single request-response cycle (internal use)
     [[nodiscard]] boost::asio::awaitable<Result<void>>

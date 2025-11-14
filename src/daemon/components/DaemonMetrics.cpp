@@ -2,6 +2,10 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/use_awaitable.hpp>
 #include <yams/compression/compression_monitor.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
@@ -10,6 +14,7 @@
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
 #include <yams/vector/embedding_generator.h>
@@ -211,8 +216,9 @@ double readCpuUsagePercent(std::uint64_t& lastProcJiffies, std::uint64_t& lastTo
 } // namespace
 
 DaemonMetrics::DaemonMetrics(const DaemonLifecycleFsm* lifecycle, const StateComponent* state,
-                             const ServiceManager* services)
-    : lifecycle_(lifecycle), state_(state), services_(services) {
+                             const ServiceManager* services, WorkCoordinator* coordinator)
+    : lifecycle_(lifecycle), state_(state), services_(services), coordinator_(coordinator),
+      strand_(coordinator->getExecutor()) {
     cacheMs_ = TuneAdvisor::metricsCacheMs();
 }
 
@@ -224,20 +230,17 @@ void DaemonMetrics::startPolling() {
     if (pollingActive_.exchange(true)) {
         return; // Already running
     }
-    pollingThread_ = std::thread([this]() { pollingLoop(); });
+    boost::asio::co_spawn(strand_, pollingLoop(), boost::asio::detached);
 }
 
 void DaemonMetrics::stopPolling() {
-    if (!pollingActive_.exchange(false)) {
-        return; // Not running
-    }
-    if (pollingThread_.joinable()) {
-        pollingThread_.join();
-    }
+    pollingActive_ = false;
 }
 
-void DaemonMetrics::pollingLoop() {
-    spdlog::info("DaemonMetrics: polling thread started (interval={}ms)", cacheMs_);
+boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
+    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+    spdlog::info("DaemonMetrics: polling loop started (interval={}ms)", cacheMs_);
+
     while (pollingActive_.load(std::memory_order_relaxed)) {
         try {
             // Poll CPU and memory here, and cache the results.
@@ -445,10 +448,12 @@ void DaemonMetrics::pollingLoop() {
         } catch (...) {
             spdlog::warn("DaemonMetrics: polling iteration failed (unknown exception)");
         }
-        // Sleep for cache interval
-        std::this_thread::sleep_for(std::chrono::milliseconds(cacheMs_));
+
+        // Sleep for cache interval using async timer
+        timer.expires_after(std::chrono::milliseconds(cacheMs_));
+        co_await timer.async_wait(boost::asio::use_awaitable);
     }
-    spdlog::info("DaemonMetrics: polling thread stopped");
+    spdlog::info("DaemonMetrics: polling loop stopped");
 }
 
 void DaemonMetrics::refresh() {
@@ -487,6 +492,8 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             std::chrono::duration_cast<std::chrono::seconds>(uptime).count());
         out.requestsProcessed = state_->stats.requestsProcessed.load();
         out.activeConnections = state_->stats.activeConnections.load();
+        out.ipcTasksPending = state_->stats.ipcTasksPending.load();
+        out.ipcTasksActive = state_->stats.ipcTasksActive.load();
     } catch (...) {
     }
 

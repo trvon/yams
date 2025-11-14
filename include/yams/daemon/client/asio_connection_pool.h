@@ -17,6 +17,7 @@ namespace yams::daemon {
 class AsioConnectionPool : public std::enable_shared_from_this<AsioConnectionPool> {
 public:
     static std::shared_ptr<AsioConnectionPool> get_or_create(const TransportOptions& opts);
+    static void shutdown_all(std::chrono::milliseconds timeout = std::chrono::milliseconds{2000});
 
     boost::asio::awaitable<std::shared_ptr<AsioConnection>> acquire();
     void release(const std::shared_ptr<AsioConnection>& conn);

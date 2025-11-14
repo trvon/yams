@@ -20,10 +20,13 @@
 #include <algorithm>
 #include <stdexcept>
 
+#include <boost/asio/detail/concurrency_hint.hpp>
+
 namespace yams::daemon {
 
 WorkCoordinator::WorkCoordinator()
-    : ioContext_(std::make_shared<boost::asio::io_context>()), started_(false) {
+    : ioContext_(std::make_shared<boost::asio::io_context>(BOOST_ASIO_CONCURRENCY_HINT_SAFE)),
+      started_(false) {
     spdlog::debug("[WorkCoordinator] Constructed (io_context created, not started)");
 }
 
@@ -91,9 +94,10 @@ void WorkCoordinator::stop() {
         return;
     }
 
-    spdlog::debug("[WorkCoordinator] Stopping (resetting work guard)...");
+    spdlog::debug("[WorkCoordinator] Stopping (resetting work guard and stopping io_context)...");
     workGuard_.reset();
-    spdlog::info("[WorkCoordinator] Work guard reset, io_context will drain naturally");
+    ioContext_->stop();
+    spdlog::info("[WorkCoordinator] Work guard reset and io_context stopped");
 }
 
 void WorkCoordinator::join() {

@@ -423,15 +423,17 @@ enum class PruneCategory {
     BuildArchive,    // .jar, .war, .whl, .egg, .gem
 
     // Build systems - generated files
-    SystemCMake,  // CMake generated files
-    SystemNinja,  // Ninja build files
-    SystemMeson,  // Meson build files
-    SystemMake,   // Make generated files
-    SystemGradle, // Gradle build files
-    SystemMaven,  // Maven build files
-    SystemNpm,    // NPM/Yarn files
-    SystemCargo,  // Rust Cargo files
-    SystemGo,     // Go build files
+    SystemCMake,   // CMake generated files
+    SystemNinja,   // Ninja build files
+    SystemMeson,   // Meson build files
+    SystemMake,    // Make generated files
+    SystemGradle,  // Gradle build files
+    SystemMaven,   // Maven build files
+    SystemNpm,     // NPM/Yarn files
+    SystemCargo,   // Rust Cargo files
+    SystemGo,      // Go build files
+    SystemFlutter, // Flutter build files
+    SystemDart,    // Dart build files
 
     // Logs and temporary
     Logs,     // .log, build logs
@@ -493,6 +495,10 @@ inline constexpr const char* getPruneCategoryName(PruneCategory cat) {
             return "system-cargo";
         case PruneCategory::SystemGo:
             return "system-go";
+        case PruneCategory::SystemFlutter:
+            return "system-flutter";
+        case PruneCategory::SystemDart:
+            return "system-dart";
         case PruneCategory::Logs:
             return "logs";
         case PruneCategory::Cache:
@@ -566,6 +572,10 @@ inline constexpr const char* getPruneCategoryDescription(PruneCategory cat) {
             return "Rust Cargo build files (target/)";
         case PruneCategory::SystemGo:
             return "Go build files";
+        case PruneCategory::SystemFlutter:
+            return "Flutter build files (.flutter-plugins, .dart_tool/, build/)";
+        case PruneCategory::SystemDart:
+            return "Dart build files (.dart_tool/, .packages, pubspec.lock)";
         case PruneCategory::Logs:
             return "Build and test logs (.log, meson-log.txt)";
         case PruneCategory::Cache:
@@ -833,6 +843,37 @@ inline PruneCategory getPruneCategory(std::string_view filename, std::string_vie
     if (filenameLower == "go.work.sum")
         return PruneCategory::SystemGo;
 
+    // Flutter
+    if (filenameLower == ".flutter-plugins" || filenameLower == ".flutter-plugins-dependencies" ||
+        filenameLower == "flutter_export_environment.sh" ||
+        filenameLower == "generated_plugin_registrant.dart" ||
+        filenameLower == ".flutter_tool_state") {
+        return PruneCategory::SystemFlutter;
+    }
+    if (filename.find("/.dart_tool/") != std::string_view::npos ||
+        filename.find(".dart_tool/") == 0) {
+        return PruneCategory::SystemFlutter;
+    }
+    if ((filename.find("/build/") != std::string_view::npos || filename.find("build/") == 0) &&
+        (filename.find("/flutter/") != std::string_view::npos ||
+         filename.find("/ios/") != std::string_view::npos ||
+         filename.find("/android/") != std::string_view::npos ||
+         filename.find("/macos/") != std::string_view::npos ||
+         filename.find("/linux/") != std::string_view::npos ||
+         filename.find("/windows/") != std::string_view::npos)) {
+        return PruneCategory::SystemFlutter;
+    }
+
+    // Dart
+    if (filenameLower == ".packages" || filenameLower == "pubspec.lock" ||
+        filenameLower == ".dart_tool_version") {
+        return PruneCategory::SystemDart;
+    }
+    if (extLower == "dart.js" || extLower == "dart.js.map" || extLower == "dart.js.deps" ||
+        extLower == "dart.js.tar.gz") {
+        return PruneCategory::SystemDart;
+    }
+
     return PruneCategory::None;
 }
 
@@ -855,7 +896,8 @@ inline bool matchesPruneGroup(PruneCategory cat, std::string_view group) {
                cat == PruneCategory::SystemMeson || cat == PruneCategory::SystemMake ||
                cat == PruneCategory::SystemGradle || cat == PruneCategory::SystemMaven ||
                cat == PruneCategory::SystemNpm || cat == PruneCategory::SystemCargo ||
-               cat == PruneCategory::SystemGo;
+               cat == PruneCategory::SystemGo || cat == PruneCategory::SystemFlutter ||
+               cat == PruneCategory::SystemDart;
     }
 
     if (group == "build") {

@@ -3,13 +3,17 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <chrono>
-#include <thread>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/use_awaitable.hpp>
 #include <yams/daemon/components/PoolManager.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningConfig.h>
 #include <yams/daemon/components/TuningSnapshot.h>
+#include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
 #if defined(TRACY_ENABLE)
@@ -18,7 +22,9 @@
 
 namespace yams::daemon {
 
-TuningManager::TuningManager(ServiceManager* sm, StateComponent* state) : sm_(sm), state_(state) {}
+TuningManager::TuningManager(ServiceManager* sm, StateComponent* state,
+                             WorkCoordinator* coordinator)
+    : sm_(sm), state_(state), coordinator_(coordinator), strand_(coordinator->getExecutor()) {}
 
 TuningManager::~TuningManager() {
     stop();
@@ -27,30 +33,35 @@ TuningManager::~TuningManager() {
 void TuningManager::start() {
     if (running_.exchange(true))
         return;
-    thread_ = yams::compat::jthread([this](const yams::compat::stop_token& st) {
-        spdlog::debug("TuningManager thread started");
-        while (!st.stop_requested() && running_.load()) {
-#if defined(TRACY_ENABLE)
-            ZoneScopedN("TuningManager::loop");
-#endif
-            try {
-                tick_once();
-            } catch (const std::exception& e) {
-                spdlog::debug("TuningManager tick error: {}", e.what());
-            } catch (...) {
-            }
-            // Cadence derived from TuneAdvisor status tick for now
-            auto ms = TuneAdvisor::statusTickMs();
-            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
-        }
-        spdlog::debug("TuningManager thread exiting");
-    });
+    boost::asio::co_spawn(strand_, tuningLoop(), boost::asio::detached);
 }
 
 void TuningManager::stop() {
     running_ = false;
-    if (thread_.joinable())
-        thread_.join();
+}
+
+boost::asio::awaitable<void> TuningManager::tuningLoop() {
+    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+    spdlog::debug("TuningManager loop started");
+
+    while (running_.load()) {
+#if defined(TRACY_ENABLE)
+        ZoneScopedN("TuningManager::loop");
+#endif
+        try {
+            tick_once();
+        } catch (const std::exception& e) {
+            spdlog::debug("TuningManager tick error: {}", e.what());
+        } catch (...) {
+        }
+
+        // Cadence derived from TuneAdvisor status tick
+        auto ms = TuneAdvisor::statusTickMs();
+        timer.expires_after(std::chrono::milliseconds(ms));
+        co_await timer.async_wait(boost::asio::use_awaitable);
+    }
+
+    spdlog::debug("TuningManager loop exiting");
 }
 
 void TuningManager::tick_once() {
@@ -180,38 +191,16 @@ void TuningManager::tick_once() {
         }
     }
 
-    // Search pool tuning and concurrency governance
+    // Search concurrency governance (no dedicated pool)
     try {
         auto searchMetrics = sm_->getSearchLoadMetrics();
-        PoolManager::Config searchCfg{};
-        searchCfg.min_size = TuneAdvisor::searchPoolMinSize();
-        searchCfg.max_size = TuneAdvisor::searchPoolMaxSize();
-        searchCfg.cooldown_ms = TuneAdvisor::poolCooldownMs();
-        pm.configure("search", searchCfg);
-        auto searchStats = pm.stats("search");
-        std::uint32_t poolSize = searchStats.current_size;
-        if (poolSize == 0)
-            poolSize = searchCfg.min_size;
-
-        const int searchStep = std::max(1, TuneAdvisor::poolScaleStep());
-        if ((searchMetrics.queued > 0 || searchMetrics.active >= poolSize) &&
-            poolSize < searchCfg.max_size) {
-            pm.apply_delta(
-                {"search", +searchStep,
-                 searchMetrics.queued > 0 ? "search_queue_pressure" : "search_active_pressure",
-                 TuneAdvisor::poolCooldownMs()});
-            poolSize = pm.stats("search").current_size;
-        } else if (searchMetrics.active == 0 && searchMetrics.queued == 0 &&
-                   poolSize > searchCfg.min_size) {
-            pm.apply_delta({"search", -searchStep, "search_idle", TuneAdvisor::poolCooldownMs()});
-            poolSize = pm.stats("search").current_size;
-        }
-
-        std::uint32_t concurrencyTarget = std::max<std::uint32_t>(1, poolSize) * 2;
+        std::uint32_t base = std::max<std::uint32_t>(1, TuneAdvisor::recommendedThreads(0.25));
+        std::uint32_t loadHint = searchMetrics.active + searchMetrics.queued;
+        std::uint32_t target = std::max(base, loadHint);
         auto advisorLimit = TuneAdvisor::searchConcurrencyLimit();
         if (advisorLimit > 0)
-            concurrencyTarget = std::min(concurrencyTarget, advisorLimit);
-        (void)sm_->applySearchConcurrencyTarget(concurrencyTarget);
+            target = std::min(target, advisorLimit);
+        (void)sm_->applySearchConcurrencyTarget(target);
     } catch (...) {
     }
 

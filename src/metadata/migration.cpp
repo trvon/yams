@@ -449,12 +449,14 @@ Migration YamsMetadataMigrations::upgradeFTS5Tokenization() {
         // Do not issue explicit BEGIN/COMMIT here to avoid nested transactions.
         Result<void> rc;
 
-        // Drop any leftover temp table from previous failed attempts
         (void)db.execute("DROP TABLE IF EXISTS documents_fts_new;");
 
-        // Create a new FTS5 table with improved tokenization
+        rc = db.execute("DROP TABLE IF EXISTS documents_fts;");
+        if (!rc)
+            return rc;
+
         rc = db.execute(R"(
-            CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts_new USING fts5(
+            CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
                 content,
                 title,
                 content_type,
@@ -483,7 +485,7 @@ Migration YamsMetadataMigrations::upgradeFTS5Tokenization() {
             const std::int64_t kChunk = 10000; // configurable future
             for (std::int64_t offset = 0; offset < total; offset += kChunk) {
                 auto ins = db.prepare(R"(
-                    INSERT OR REPLACE INTO documents_fts_new (rowid, content, title, content_type)
+                    INSERT OR REPLACE INTO documents_fts (rowid, content, title, content_type)
                     SELECT d.id,
                            COALESCE(dc.content_text, ''),
                            d.file_name,
@@ -514,13 +516,6 @@ Migration YamsMetadataMigrations::upgradeFTS5Tokenization() {
             spdlog::info("[FTS5 v10] Backfill complete: {} rows", total);
         }
 
-        // Swap tables
-        rc = db.execute(R"(
-            DROP TABLE IF EXISTS documents_fts;
-            ALTER TABLE documents_fts_new RENAME TO documents_fts;
-        )");
-        if (!rc)
-            return rc;
         return rc;
     };
 

@@ -14,3 +14,9 @@ race:boost::asio::detail::thread_info_base::deallocate
 # This appears to be a timing issue in boost::asio's any_executor
 race:boost::asio::execution::detail::any_executor_base::execute
 race:any_executor.hpp
+
+# Boost.Asio kqueue reactor descriptor mutex - upstream TSAN false positive when
+# conditionally_enabled_mutex is reinitialized out of line with the reactor run
+# loop (tracked upstream for Boost.Asio kqueue).
+race:boost::asio::detail::conditionally_enabled_mutex
+race:kqueue_reactor.ipp

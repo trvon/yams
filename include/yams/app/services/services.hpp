@@ -413,9 +413,6 @@ struct StoreDocumentRequest {
     // Embedding control
     bool noEmbeddings{false}; // disable embedding generation
 
-    // Extraction/indexing control (daemon fast-path)
-    bool deferExtraction{false}; // when true, skip synchronous extraction/indexing
-
     // Directory recursion options (when path is a directory)
     bool recursive{false};                    // recursively add files from directories
     std::vector<std::string> includePatterns; // glob patterns to include
@@ -858,8 +855,6 @@ struct AddDirectoryRequest {
     std::unordered_map<std::string, std::string> metadata;
     bool recursive{true};
     bool followSymlinks{false};
-    // When true, skip synchronous text extraction/indexing during store()
-    bool deferExtraction{false};
     // Post-add verification: when true, verify stored content exists and matches expected hash
     bool verify{false};
     // Optional: verify indexes (FTS/vector) presence when enabled

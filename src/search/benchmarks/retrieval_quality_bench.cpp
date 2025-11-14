@@ -333,14 +333,23 @@ struct BenchFixture {
             throw std::runtime_error("Failed to connect: " + connectResult.error().message);
 
         spdlog::info("Ingesting {} documents...", corpusSize);
+        int successCount = 0, failCount = 0;
         for (const auto& filename : corpus->createdFiles) {
             yams::daemon::AddDocumentRequest addReq;
             addReq.path = (corpus->corpusDir / filename).string();
             addReq.noEmbeddings = false;
             auto addResult = yams::cli::run_sync(client->streamingAddDocument(addReq), 30s);
-            if (!addResult)
+            if (!addResult) {
                 spdlog::warn("Failed to ingest {}: {}", filename, addResult.error().message);
+                failCount++;
+            } else {
+                successCount++;
+                if (successCount % 10 == 0 || successCount == corpusSize) {
+                    spdlog::info("Ingested {}/{} documents", successCount, corpusSize);
+                }
+            }
         }
+        spdlog::info("Ingestion complete: {} succeeded, {} failed", successCount, failCount);
 
         spdlog::info("Waiting for ingestion to complete...");
         auto deadline = std::chrono::steady_clock::now() + 60s;
@@ -397,6 +406,20 @@ struct BenchFixture {
             spdlog::info("Vector DB ready: dim={}", finalStatus.value().vectorDbDim);
         } else {
             spdlog::warn("Vector DB may not be ready or no embeddings generated");
+        }
+
+        // Verify document count by doing a test search
+        yams::daemon::SearchRequest testReq;
+        testReq.query = "test";
+        testReq.searchType = "hybrid";
+        testReq.limit = 1000;
+        testReq.timeout = 5s;
+        auto testResult = yams::cli::run_sync(client->search(testReq), 10s);
+        int indexedDocCount = testResult ? testResult.value().results.size() : 0;
+        spdlog::info("Verified indexed documents: {} (expected: {})", indexedDocCount, corpusSize);
+        if (indexedDocCount == 0) {
+            spdlog::error("NO DOCUMENTS IN INDEX! Ingestion failed completely.");
+            throw std::runtime_error("No documents indexed - benchmark cannot proceed");
         }
 
         queries = corpus->generateQueries(numQueries);

@@ -124,6 +124,19 @@ if benchmark_dep.found()
   )
 
   alias_target('bench_retrieval_quality', retrieval_quality_bench)
+
+  # PBI-004: End-to-end ingestion pipeline benchmark
+  ingestion_e2e_bench_deps = engine_comparison_bench_deps + [test_deps]
+
+  ingestion_e2e_bench = executable('ingestion_e2e_bench',
+    files('../../src/search/benchmarks/ingestion_e2e_bench.cpp'),
+    include_directories: incs,
+    dependencies: ingestion_e2e_bench_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    install: false,
+  )
+
+  alias_target('bench_ingestion_e2e', ingestion_e2e_bench)
 else
   message('Google Benchmark not found; skipping service and metadata benchmark executables')
 endif

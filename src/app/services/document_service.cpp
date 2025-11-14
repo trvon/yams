@@ -400,58 +400,56 @@ public:
                 for (const auto& [k, v] : md.tags) {
                     (void)ctx_.metadataRepo->setMetadata(docId, k, metadata::MetadataValue(v));
                 }
-                if (!req.deferExtraction) {
-                    // Best-effort: index content into FTS5 using robust extraction (plugins +
-                    // built-ins)
-                    try {
-                        auto extractedOpt = yams::extraction::util::extractDocumentText(
-                            ctx_.store, out.hash, info.mimeType, info.fileExtension,
-                            ctx_.contentExtractors);
-                        if (extractedOpt && !extractedOpt->empty()) {
-                            const std::string& extracted = *extractedOpt;
+                // Best-effort: index content into FTS5 using robust extraction (plugins +
+                // built-ins)
+                try {
+                    auto extractedOpt = yams::extraction::util::extractDocumentText(
+                        ctx_.store, out.hash, info.mimeType, info.fileExtension,
+                        ctx_.contentExtractors);
+                    if (extractedOpt && !extractedOpt->empty()) {
+                        const std::string& extracted = *extractedOpt;
 
-                            if (docId > 0) {
-                                metadata::DocumentContent contentRow;
-                                contentRow.documentId = docId;
-                                contentRow.contentText = extracted;
-                                contentRow.contentLength =
-                                    static_cast<int64_t>(contentRow.contentText.size());
-                                contentRow.extractionMethod = "inline";
-                                double langConfidence = 0.0;
-                                contentRow.language =
-                                    yams::extraction::LanguageDetector::detectLanguage(
-                                        contentRow.contentText, &langConfidence);
-                                auto contentUpsert = ctx_.metadataRepo->insertContent(contentRow);
-                                if (!contentUpsert) {
-                                    spdlog::warn("Failed to upsert extracted content for {}: {}",
-                                                 out.hash, contentUpsert.error().message);
-                                }
-                            }
-
-                            (void)ctx_.metadataRepo->indexDocumentContent(docId, info.fileName,
-                                                                          extracted, info.mimeType);
-                            (void)ctx_.metadataRepo->updateFuzzyIndex(docId);
-                            // Try to update extraction flags on the document row
-                            auto d = ctx_.metadataRepo->getDocument(docId);
-                            if (d && d.value().has_value()) {
-                                auto updated = d.value().value();
-                                updated.contentExtracted = true;
-                                updated.extractionStatus = metadata::ExtractionStatus::Success;
-                                (void)ctx_.metadataRepo->updateDocument(updated);
-                            }
-                        } else {
-                            // Mark as attempted but possibly skipped/failed for non-text types
-                            auto d = ctx_.metadataRepo->getDocument(docId);
-                            if (d && d.value().has_value()) {
-                                auto updated = d.value().value();
-                                updated.contentExtracted = false;
-                                updated.extractionStatus = metadata::ExtractionStatus::Skipped;
-                                (void)ctx_.metadataRepo->updateDocument(updated);
+                        if (docId > 0) {
+                            metadata::DocumentContent contentRow;
+                            contentRow.documentId = docId;
+                            contentRow.contentText = extracted;
+                            contentRow.contentLength =
+                                static_cast<int64_t>(contentRow.contentText.size());
+                            contentRow.extractionMethod = "inline";
+                            double langConfidence = 0.0;
+                            contentRow.language =
+                                yams::extraction::LanguageDetector::detectLanguage(
+                                    contentRow.contentText, &langConfidence);
+                            auto contentUpsert = ctx_.metadataRepo->insertContent(contentRow);
+                            if (!contentUpsert) {
+                                spdlog::warn("Failed to upsert extracted content for {}: {}",
+                                             out.hash, contentUpsert.error().message);
                             }
                         }
-                    } catch (...) {
-                        // Non-fatal: indexing is opportunistic here
+
+                        (void)ctx_.metadataRepo->indexDocumentContent(docId, info.fileName,
+                                                                      extracted, info.mimeType);
+                        (void)ctx_.metadataRepo->updateFuzzyIndex(docId);
+                        // Try to update extraction flags on the document row
+                        auto d = ctx_.metadataRepo->getDocument(docId);
+                        if (d && d.value().has_value()) {
+                            auto updated = d.value().value();
+                            updated.contentExtracted = true;
+                            updated.extractionStatus = metadata::ExtractionStatus::Success;
+                            (void)ctx_.metadataRepo->updateDocument(updated);
+                        }
+                    } else {
+                        // Mark as attempted but possibly skipped/failed for non-text types
+                        auto d = ctx_.metadataRepo->getDocument(docId);
+                        if (d && d.value().has_value()) {
+                            auto updated = d.value().value();
+                            updated.contentExtracted = false;
+                            updated.extractionStatus = metadata::ExtractionStatus::Skipped;
+                            (void)ctx_.metadataRepo->updateDocument(updated);
+                        }
                     }
+                } catch (...) {
+                    // Non-fatal: indexing is opportunistic here
                 }
             }
         }

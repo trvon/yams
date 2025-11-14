@@ -6,6 +6,7 @@
 #include <string>
 #include <thread>
 #include <boost/asio/executor_work_guard.hpp>
+#include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/global_io_context.h>
 
 namespace {
@@ -44,6 +45,7 @@ void GlobalIOContext::reset() {
         }
     }
 
+    AsioConnectionPool::shutdown_all();
     instance().restart();
 }
 

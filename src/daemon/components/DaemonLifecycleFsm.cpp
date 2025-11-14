@@ -4,6 +4,7 @@
 namespace yams::daemon {
 
 void DaemonLifecycleFsm::transitionTo(LifecycleState next, std::optional<std::string> err) {
+    MutexLock lock(mutex_);
     if (snapshot_.state == next && (!err || snapshot_.lastError == *err)) {
         spdlog::debug("Lifecycle transition no-op: already in state {}", static_cast<int>(next));
         return; // no-op
@@ -22,7 +23,8 @@ void DaemonLifecycleFsm::tick() {
 }
 
 void DaemonLifecycleFsm::dispatch(const BootstrappedEvent&) {
-    switch (snapshot_.state) {
+    const auto current = snapshot();
+    switch (current.state) {
         case LifecycleState::Unknown:
         case LifecycleState::Starting:
             transitionTo(LifecycleState::Initializing);
@@ -34,7 +36,8 @@ void DaemonLifecycleFsm::dispatch(const BootstrappedEvent&) {
 }
 
 void DaemonLifecycleFsm::dispatch(const HealthyEvent&) {
-    switch (snapshot_.state) {
+    const auto current = snapshot();
+    switch (current.state) {
         case LifecycleState::Initializing:
         case LifecycleState::Degraded:
             transitionTo(LifecycleState::Ready);
@@ -45,7 +48,8 @@ void DaemonLifecycleFsm::dispatch(const HealthyEvent&) {
 }
 
 void DaemonLifecycleFsm::dispatch(const DegradedEvent&) {
-    switch (snapshot_.state) {
+    const auto current = snapshot();
+    switch (current.state) {
         case LifecycleState::Ready:
         case LifecycleState::Initializing:
             transitionTo(LifecycleState::Degraded);
@@ -56,7 +60,8 @@ void DaemonLifecycleFsm::dispatch(const DegradedEvent&) {
 }
 
 void DaemonLifecycleFsm::dispatch(const FailureEvent& ev) {
-    switch (snapshot_.state) {
+    const auto current = snapshot();
+    switch (current.state) {
         case LifecycleState::Unknown:
         case LifecycleState::Starting:
         case LifecycleState::Initializing:
@@ -70,7 +75,8 @@ void DaemonLifecycleFsm::dispatch(const FailureEvent& ev) {
 }
 
 void DaemonLifecycleFsm::dispatch(const ShutdownRequestedEvent&) {
-    switch (snapshot_.state) {
+    const auto current = snapshot();
+    switch (current.state) {
         case LifecycleState::Unknown:
         case LifecycleState::Starting:
         case LifecycleState::Initializing:
@@ -85,7 +91,8 @@ void DaemonLifecycleFsm::dispatch(const ShutdownRequestedEvent&) {
 }
 
 void DaemonLifecycleFsm::dispatch(const StoppedEvent&) {
-    switch (snapshot_.state) {
+    const auto current = snapshot();
+    switch (current.state) {
         case LifecycleState::Stopping:
         case LifecycleState::Failed:
             transitionTo(LifecycleState::Stopped);
@@ -101,6 +108,7 @@ void DaemonLifecycleFsm::reset() {
 
 void DaemonLifecycleFsm::setSubsystemDegraded(const std::string& name, bool degraded,
                                               const std::string& reason) {
+    MutexLock lock(mutex_);
     auto it = degraded_.find(name);
     if (it == degraded_.end() || it->second != degraded) {
         degraded_[name] = degraded;
@@ -115,11 +123,13 @@ void DaemonLifecycleFsm::setSubsystemDegraded(const std::string& name, bool degr
 }
 
 bool DaemonLifecycleFsm::isSubsystemDegraded(const std::string& name) const {
+    MutexLock lock(mutex_);
     auto it = degraded_.find(name);
     return it != degraded_.end() && it->second;
 }
 
 std::string DaemonLifecycleFsm::degradationReason(const std::string& name) const {
+    MutexLock lock(mutex_);
     auto it = degradeReasons_.find(name);
     return it == degradeReasons_.end() ? std::string() : it->second;
 }

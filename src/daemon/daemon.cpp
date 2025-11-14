@@ -63,12 +63,14 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config) : config_(config) {
     serviceManager_ = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
 
     // Create metrics aggregator before the dispatcher so status can pull from a single snapshot
-    metrics_ = std::make_unique<DaemonMetrics>(&lifecycleFsm_, &state_, serviceManager_.get());
+    metrics_ = std::make_unique<DaemonMetrics>(&lifecycleFsm_, &state_, serviceManager_.get(),
+                                               serviceManager_->getWorkCoordinator());
     requestDispatcher_ =
         std::make_unique<RequestDispatcher>(this, serviceManager_.get(), &state_, metrics_.get());
     // Prepare centralized tuning manager early; start it in start() before sockets/services
     try {
-        tuningManager_ = std::make_unique<TuningManager>(serviceManager_.get(), &state_);
+        tuningManager_ = std::make_unique<TuningManager>(serviceManager_.get(), &state_,
+                                                         serviceManager_->getWorkCoordinator());
         spdlog::debug("TuningManager constructed early in YamsDaemon");
         // Bridge repair control into TuningManager (centralized tokens/batch)
         tuningManager_->setRepairControlHook([this](uint32_t tokens, uint32_t batch) {
@@ -213,7 +215,8 @@ Result<void> YamsDaemon::start() {
         socketConfig.maxConnections = static_cast<std::size_t>(cap);
     }
 
-    socketServer_ = std::make_unique<SocketServer>(socketConfig, requestDispatcher_.get(), &state_);
+    socketServer_ = std::make_unique<SocketServer>(
+        socketConfig, serviceManager_->getWorkCoordinator(), requestDispatcher_.get(), &state_);
 
     if (auto result = socketServer_->start(); !result) {
         running_ = false;
@@ -472,14 +475,30 @@ Result<void> YamsDaemon::stop() {
     stopRequested_.store(true, std::memory_order_release);
     stop_cv_.notify_all();
 
-    // Stop ServiceManager FIRST so handlers don't access services during shutdown
-    if (serviceManager_) {
-        spdlog::debug("Shutting down service manager...");
-        serviceManager_->shutdown();
-        spdlog::debug("Service manager shutdown complete");
+    // Stop components that use WorkCoordinator's io_context BEFORE stopping ServiceManager
+    // (ServiceManager stops WorkCoordinator, which would prevent async operations from completing)
+
+    // Stop tuning manager (uses WorkCoordinator strand + timers)
+    if (tuningManager_) {
+        try {
+            spdlog::debug("Stopping tuning manager...");
+            tuningManager_->stop();
+            spdlog::debug("Tuning manager stopped");
+        } catch (const std::exception& e) {
+            spdlog::warn("TuningManager stop exception: {}", e.what());
+        } catch (...) {
+        }
+        tuningManager_.reset();
     }
 
-    // Now stop SocketServer - handlers will get errors immediately
+    // Stop metrics (uses WorkCoordinator strand + timers)
+    if (metrics_) {
+        spdlog::debug("Stopping metrics polling...");
+        metrics_->stopPolling();
+        spdlog::debug("Metrics polling stopped");
+    }
+
+    // Stop socket server before ServiceManager tears down the WorkCoordinator
     if (socketServer_) {
         spdlog::debug("Stopping socket server...");
         auto stopResult = socketServer_->stop();
@@ -489,15 +508,11 @@ Result<void> YamsDaemon::stop() {
         state_.readiness.ipcServerReady = false;
     }
 
-    // Stop tuning manager
-    if (tuningManager_) {
-        try {
-            tuningManager_->stop();
-        } catch (const std::exception& e) {
-            spdlog::warn("TuningManager stop exception: {}", e.what());
-        } catch (...) {
-        }
-        tuningManager_.reset();
+    // Stop ServiceManager (this will stop WorkCoordinator's io_context in Phase 4)
+    if (serviceManager_) {
+        spdlog::debug("Shutting down service manager...");
+        serviceManager_->shutdown();
+        spdlog::debug("Service manager shutdown complete");
     }
 
     // Wait for daemon thread to exit (should be quick since we notified stop_cv_)
@@ -517,13 +532,7 @@ Result<void> YamsDaemon::stop() {
         repairCoordinator_.reset();
     }
 
-    if (metrics_) {
-        spdlog::debug("Stopping metrics polling thread...");
-        metrics_->stopPolling();
-        spdlog::debug("Metrics polling stopped");
-    }
-
-    // ServiceManager already shut down earlier (before SocketServer)
+    // Metrics already stopped earlier (before ServiceManager)
 
     if (socketServer_) {
         spdlog::debug("Resetting socket server...");

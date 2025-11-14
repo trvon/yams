@@ -259,6 +259,19 @@ SymbolExtractor::Result SymbolExtractor::extractFunctions(const ExtractionContex
             // Modifiers
             "(modifier_definition name: (identifier) @name)",
         };
+    } else if (language == "dart" || language == "flutter") {
+        queries = {
+            // Function declarations: void foo() {}
+            "(function_signature name: (identifier) @name)",
+            // Method declarations in classes
+            "(method_signature name: (identifier) @name)",
+            // Getter declarations: get foo => ...
+            "(getter_signature name: (identifier) @name)",
+            // Setter declarations: set foo(x) => ...
+            "(setter_signature name: (identifier) @name)",
+            // Function expressions assigned to variables: final foo = () {};
+            "(initialized_variable_definition name: (identifier) @name)",
+        };
     }
 
     // Execute queries - try all patterns to get comprehensive coverage
@@ -489,6 +502,17 @@ SymbolExtractor::Result SymbolExtractor::extractClasses(const ExtractionContext&
             "(enum_declaration name: (identifier) @name)",
             // Event declarations
             "(event_definition name: (identifier) @name)",
+        };
+    } else if (language == "dart" || language == "flutter") {
+        queries = {
+            // Class declarations: class Foo {}
+            "(class_definition name: (identifier) @name)",
+            // Mixin declarations: mixin Bar {}
+            "(mixin_declaration name: (identifier) @name)",
+            // Extension declarations: extension FooExt on Foo {}
+            "(extension_declaration name: (identifier) @name)",
+            // Enum declarations: enum Color { red, green }
+            "(enum_declaration name: (identifier) @name)",
         };
     }
 

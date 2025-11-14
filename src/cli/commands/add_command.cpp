@@ -521,8 +521,6 @@ private:
         req.collection = collection_;
         req.snapshotId = snapshotId_;
         req.snapshotLabel = snapshotLabel_;
-        // Keep fallback fast and resilient: defer extraction to background tooling
-        req.deferExtraction = true;
 
         // Parse metadata key=value pairs
         for (const auto& kv : metadata_) {
@@ -571,8 +569,6 @@ private:
         req.collection = collection_;
         req.snapshotId = snapshotId_;
         req.snapshotLabel = snapshotLabel_;
-        // Defer extraction for fast CLI fallback and to avoid plugin-related crashes
-        req.deferExtraction = true;
 
         // Parse metadata key=value pairs
         for (const auto& kv : metadata_) {
@@ -626,8 +622,6 @@ private:
         req.excludePatterns = excludePatterns_;
         req.recursive = recursive_;
         req.verify = verify_;
-        // Match daemon behavior: directory ingestion defers extraction
-        req.deferExtraction = true;
 
         // Parse metadata key=value pairs
         for (const auto& kv : metadata_) {

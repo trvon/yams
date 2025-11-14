@@ -349,7 +349,6 @@ public:
     }
 
     // Orphan scan interval (hours). Default 6h. Range 1-48h.
-    // Env: YAMS_ORPHAN_SCAN_INTERVAL_HOURS
     static uint32_t orphanScanIntervalHours() {
         uint32_t def = 6;
         if (const char* s = std::getenv("YAMS_ORPHAN_SCAN_INTERVAL_HOURS")) {
@@ -838,40 +837,6 @@ public:
         poolHighWatermarkPctOverride_.store(v, std::memory_order_relaxed);
     }
 
-    static uint32_t searchPoolMinSize() {
-        uint32_t ov = searchPoolMinOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        if (const char* s = std::getenv("YAMS_SEARCH_POOL_MIN")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1 && v <= 64)
-                    return v;
-            } catch (...) {
-            }
-        }
-        return std::max<uint32_t>(2, recommendedThreads(0.25));
-    }
-    static void setSearchPoolMinSize(uint32_t v) {
-        searchPoolMinOverride_.store(v, std::memory_order_relaxed);
-    }
-    static uint32_t searchPoolMaxSize() {
-        uint32_t ov = searchPoolMaxOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        if (const char* s = std::getenv("YAMS_SEARCH_POOL_MAX")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1 && v <= 256)
-                    return v;
-            } catch (...) {
-            }
-        }
-        return std::max<uint32_t>(searchPoolMinSize(), recommendedThreads(0.5));
-    }
-    static void setSearchPoolMaxSize(uint32_t v) {
-        searchPoolMaxOverride_.store(v, std::memory_order_relaxed);
-    }
     static uint32_t searchConcurrencyLimit() {
         uint32_t ov = searchConcurrencyOverride_.load(std::memory_order_relaxed);
         if (ov != 0)
@@ -884,9 +849,7 @@ public:
             } catch (...) {
             }
         }
-        auto derived = searchPoolMaxSize();
-        if (derived == 0)
-            return 0;
+        auto derived = std::max<uint32_t>(2, recommendedThreads(0.5));
         return derived * 2;
     }
     static void setSearchConcurrencyLimit(uint32_t v) {
@@ -1076,8 +1039,6 @@ private:
     static inline std::atomic<uint32_t> poolMaxSizeIpcIoOverride_{0};
     static inline std::atomic<uint32_t> poolLowWatermarkPctOverride_{0};
     static inline std::atomic<uint32_t> poolHighWatermarkPctOverride_{0};
-    static inline std::atomic<uint32_t> searchPoolMinOverride_{0};
-    static inline std::atomic<uint32_t> searchPoolMaxOverride_{0};
     static inline std::atomic<uint32_t> searchConcurrencyOverride_{0};
     static inline std::atomic<unsigned> hwCached_{0};
     static inline std::atomic<uint32_t> postIngestQueueMaxOverride_{0};

@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
-## [v0.7.8] - Unreleased
+## [v0.7.8] - 2025-11-14
 
 ### Added
 - **Thread Pool Consolidation**
@@ -23,26 +23,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Replaces 3 separate thread pools (IngestService, PostIngestQueue, EmbeddingService)
     - Provides strand allocation for per-service ordering guarantees
     - Hardware-aware thread count (8-32 threads based on CPU cores)
-  - **SearchPool Component**: New parallel hybrid search implementation
-    - Executes FTS5 and Vector queries concurrently using `make_parallel_group`
-    - Implements Reciprocal Rank Fusion (RRF) with k=60 for result merging
-    - Strand-based execution via WorkCoordinator
-    - Integrated into ServiceManager with model provider wiring
-  - Location: `include/yams/daemon/components/WorkCoordinator.h`, `SearchPool.h`
-- **Search Service Parallel Post-Processing** 
-  - New `ParallelPostProcessor` class for concurrent search result processing
-  - Parallelizes filtering, facet generation, and highlighting when result count ≥ 100
-  - Uses `std::async` to run independent operations concurrently
-  - Threshold-based activation (PARALLEL_THRESHOLD = 100) avoids overhead on small result sets
-  - **Performance Measured** (100 iterations):
-    - 100 results: 0.06ms (~1.66M ops/sec) - sequential path
-    - 500 results: 0.23ms (~2.21M ops/sec) - parallel path
-    - 1000 results: 0.43ms (~2.32M ops/sec) - parallel path
-    - **Speedup**: ~3.4x faster at 1000 results vs linear scaling
-  - Location: `include/yams/search/parallel_post_processor.hpp`, `src/search/parallel_post_processor.cpp`
-  - Integration: `search_executor.cpp` now uses ParallelPostProcessor instead of sequential processing
-  - Benchmarks: `tests/benchmarks/search_benchmarks.cpp`
-
+  - **Search Service Parallel Post-Processing** 
+    - New `ParallelPostProcessor` class for concurrent search result processing
+    - Parallelizes filtering, facet generation, and highlighting when result count ≥ 100
+    - Uses `std::async` to run independent operations concurrently
+    - Threshold-based activation (PARALLEL_THRESHOLD = 100) avoids overhead on small result sets
+    - **Performance Measured** (100 iterations):
+      - 100 results: 0.06ms (~1.66M ops/sec) - sequential path
+      - 500 results: 0.23ms (~2.21M ops/sec) - parallel path
+      - 1000 results: 0.43ms (~2.32M ops/sec) - parallel path
+      - **Speedup**: ~3.4x faster at 1000 results vs linear scaling
+    - Location: `include/yams/search/parallel_post_processor.hpp`, `src/search/parallel_post_processor.cpp`
+    - Integration: `search_executor.cpp` now uses ParallelPostProcessor instead of sequential processing
+    - Benchmarks: `tests/benchmarks/search_benchmarks.cpp`
 ### Changed
 - **Service Architecture Refactor**
   - **IngestService**: Converted from manual thread pool to strand-based channel polling
@@ -55,9 +48,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **EmbeddingService**: Converted from worker threads to strand-based channel polling
     - Removed worker thread pool (~70 lines)
     - New `channelPoller()` awaitable with async timer
+  - **TuningManager**: Converted from manual thread to strand-based periodic execution
+    - Removed `compat::jthread` with stop_token
+    - New `tuningLoop()` awaitable with `boost::asio::steady_timer`
+    - Uses WorkCoordinator strand for pool size adjustments
+    - Maintains `TuneAdvisor::statusTickMs()` polling interval
+  - **DaemonMetrics**: Converted from manual thread to strand-based polling loop
+    - Removed `std::thread` for CPU/memory metrics collection
+    - New `pollingLoop()` awaitable with 250ms timer interval
+    - Uses WorkCoordinator strand for metric updates
+    - Thread-safe snapshot access via `shared_mutex`
+  - **BackgroundTaskManager**: Migrated from GlobalIOContext to WorkCoordinator
+    - Removed fallback to GlobalIOContext (proper architectural separation)
+    - Now uses WorkCoordinator executor for all background tasks
+    - Integrated with unified work-stealing thread pool
+    - Fts5Job consumer polling delay reduced: 200ms → 10ms (20x throughput improvement)
+    - Fixed orphan scan queue overflow (was causing hundreds of dropped batches)
   - **ServiceManager**: Refactored async operations
     - Eliminated all 5 uses of `std::future`/`std::async`
     - Converted database operations to use `make_parallel_group` with timeouts
+- **SearchPool Removal**
+  - Deleted the unused `SearchPool` component and associated meson/build wiring
+  - `ServiceManager` no longer constructs dead search infrastructure; `HybridSearchEngine`
+    remains the sole search path
+  - `TuneAdvisor`/`TuningManager` now derive concurrency targets directly from
+    `SearchExecutor` load metrics instead of phantom pool sizes
+- **Ingestion Pipeline Cleanup (PBI-004 Phase 1)**
+  - **Removed `deferExtraction` Technical Debt**: Eliminated bypass mechanism that skipped full production pipeline
+    - Removed `deferExtraction` field from `StoreDocumentRequest` and `AddDirectoryRequest` structs
+    - Removed conditional logic in DocumentService that skipped FTS5 extraction
+    - All document ingestion now uses full pipeline: metadata storage → FTS5 extraction → PostIngestQueue → (KG extraction || Embedding generation)
+    - Updated IngestService to always enqueue to PostIngestQueue (removed lines setting `deferExtraction=true`)
+    - Updated CLI add_command fallback paths (3 locations) to use full pipeline
+    - Updated mobile bindings to remove `sync_now`-based deferral
+    - Removed `--defer-extraction` and `--no-defer-extraction` flags from ingestion_throughput_bench
+    - Updated test helpers (tests/common/capability.h, integration test) to use full pipeline
+  - **Impact**: Benchmarks and production code now exercise identical code paths, improving test coverage and eliminating hidden complexity
 - **Grep Output Update**
   - New default output format
   - Example output:

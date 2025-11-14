@@ -206,11 +206,12 @@ RequestHandler::handle_request(const std::vector<uint8_t>& request_data,
 // std::stop_token exists, yams::compat::stop_token aliases it, avoiding the
 // need for an overload that would collide at the type level.
 
-boost::asio::awaitable<void>
-RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket socket,
-                                  yams::compat::stop_token token) {
+boost::asio::awaitable<void> RequestHandler::handle_connection(
+    std::shared_ptr<boost::asio::local::stream_protocol::socket> socket,
+    yams::compat::stop_token token, uint64_t conn_token) {
     using boost::asio::use_awaitable;
     const bool stream_trace = stream_trace_enabled_local();
+    const auto handler_start = std::chrono::steady_clock::now();
     try {
 #if defined(TRACY_ENABLE)
         // Treat each connection as a fiber for better cross-await stack attribution
@@ -219,17 +220,14 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
             ~FiberGuard() { YAMS_FIBER_LEAVE(); }
         } _fg;
 #endif
-        if (stream_trace) {
-            spdlog::info("stream-trace: RequestHandler::handle_connection enter socket_open={} "
-                         "stop_requested={}",
-                         socket.is_open(), token.stop_requested());
-        } else {
-            spdlog::info("RequestHandler::handle_connection coroutine started");
-            spdlog::info("RequestHandler::handle_connection: new connection established");
+        if (!socket) {
+            co_return;
         }
-        // Wrap socket in shared_ptr so per-request coroutines can safely reference it
-        using socket_t = boost::asio::local::stream_protocol::socket;
-        auto sock = std::make_shared<socket_t>(std::move(socket));
+        if (stream_trace) {
+            spdlog::info("stream-trace: [conn={}] handler_ready socket_open={} stop_requested={}",
+                         conn_token, socket->is_open(), token.stop_requested());
+        }
+        auto sock = std::move(socket);
         // Initialize per-connection FSM (adapter kept internal to source file)
         ConnectionFsm fsm;
         fsm.enable_metrics(true);
@@ -583,10 +581,35 @@ RequestHandler::handle_connection(boost::asio::local::stream_protocol::socket so
         if (fsm.alive()) {
             fsm.on_close_request();
         }
+        const auto handler_end = std::chrono::steady_clock::now();
+        const auto duration_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(handler_end - handler_start)
+                .count();
+        if (stream_trace) {
+            spdlog::info("stream-trace: [conn={}] handler_done duration_ms={}", conn_token,
+                         duration_ms);
+        }
         spdlog::debug("Connection handler exiting normally");
     } catch (const std::exception& e) {
+        const auto handler_end = std::chrono::steady_clock::now();
+        const auto duration_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(handler_end - handler_start)
+                .count();
+        if (stream_trace) {
+            spdlog::error(
+                "stream-trace: [conn={}] handler_done (exception) duration_ms={} error={}",
+                conn_token, duration_ms, e.what());
+        }
         spdlog::error("RequestHandler::handle_connection unhandled exception: {}", e.what());
     } catch (...) {
+        const auto handler_end = std::chrono::steady_clock::now();
+        const auto duration_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(handler_end - handler_start)
+                .count();
+        if (stream_trace) {
+            spdlog::error("stream-trace: [conn={}] handler_done (unknown exception) duration_ms={}",
+                          conn_token, duration_ms);
+        }
         spdlog::error("RequestHandler::handle_connection unhandled unknown exception");
     }
 }

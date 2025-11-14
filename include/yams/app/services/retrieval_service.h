@@ -32,7 +32,8 @@ struct RetrievalOptions {
     int headerTimeoutMs{30000};
     int bodyTimeoutMs{120000};
     int requestTimeoutMs{30000};
-    bool acceptCompressed{true};
+    bool acceptCompressed{
+        false}; // Default to false for text output; set true for binary efficiency
 };
 
 struct GetOptions {

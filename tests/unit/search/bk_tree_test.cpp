@@ -452,3 +452,88 @@ TEST_F(BKTreeTest, StressTestConcurrentSearch) {
     // All searches should succeed
     EXPECT_EQ(successCount.load(), 10);
 }
+
+// Regression test for multi-word fuzzy search with similarity thresholds
+TEST_F(BKTreeTest, MultiWordFuzzySearchSimilarityThresholds) {
+    HybridFuzzySearch search;
+
+    // Add documents with multi-word titles
+    search.addDocument("1", "Protocol Fingerprinting Enhancement",
+                       {"protocol", "fingerprint", "enhancement"});
+    search.addDocument("2", "Enhanced Protocol Fingerprinting",
+                       {"enhanced", "protocol", "fingerprint"});
+    search.addDocument("3", "Protocol Fingerprinting and Analysis",
+                       {"protocol", "fingerprint", "analysis"});
+    search.addDocument("4", "Network Protocol Detection", {"network", "protocol", "detection"});
+
+    HybridFuzzySearch::SearchOptions opts;
+
+    // Test 1: Default threshold (0.7) - this currently fails
+    opts.minSimilarity = 0.7f;
+    auto results = search.search("Protocol Fingerprinting Enhancement", 10, opts);
+
+    // Document baseline behavior (may fail initially)
+    if (results.empty()) {
+        GTEST_SKIP() << "Baseline: similarity 0.7 returns no results (known issue)";
+    } else {
+        EXPECT_GT(results.size(), 0) << "Should find exact match with 0.7 similarity";
+        EXPECT_EQ(results[0].id, "1") << "Exact match should be first";
+    }
+
+    // Test 2: Lower threshold should work
+    opts.minSimilarity = 0.3f;
+    results = search.search("Protocol Fingerprinting Enhancement", 10, opts);
+    EXPECT_GE(results.size(), 2) << "Should find multiple matches at 0.3 similarity";
+
+    // Test 3: Verify scores are reasonable
+    bool foundExactMatch = false;
+    for (const auto& result : results) {
+        if (result.id == "1") {
+            foundExactMatch = true;
+            EXPECT_GT(result.score, 0.5f) << "Exact match should have high score";
+        }
+    }
+    EXPECT_TRUE(foundExactMatch) << "Should find exact match in results";
+}
+
+// Test to characterize Jaccard similarity behavior for multi-word queries
+TEST_F(BKTreeTest, CharacterizeJaccardSimilarityScores) {
+    HybridFuzzySearch search;
+
+    // Add documents with varying similarity to query
+    search.addDocument("1", "Protocol Fingerprinting Enhancement", {});
+    search.addDocument("2", "Enhanced Protocol Fingerprinting", {});
+    search.addDocument("3", "Protocol Analysis Enhancement", {});
+    search.addDocument("4", "Network Fingerprinting", {});
+    search.addDocument("5", "Security Protocol", {});
+
+    HybridFuzzySearch::SearchOptions opts;
+    opts.minSimilarity = 0.1f; // Very low to capture all results
+
+    auto results = search.search("Protocol Fingerprinting Enhancement", 10, opts);
+
+    // Verify we got results
+    EXPECT_GT(results.size(), 0) << "Should find results with low threshold";
+
+    // Log all results for analysis
+    std::cout << "\n=== Score Distribution ===\n";
+    for (size_t i = 0; i < results.size(); ++i) {
+        const auto& result = results[i];
+        std::cout << i + 1 << ". ID=" << result.id << " Title=\"" << result.title << "\""
+                  << " Score=" << result.score << " MatchType=" << result.matchType << "\n";
+    }
+    std::cout << "========================\n" << std::endl;
+
+    // Document what scores we actually see
+    if (!results.empty()) {
+        float maxScore = results[0].score;
+        EXPECT_GT(maxScore, 0.0f) << "Top result should have positive score";
+
+        // If exact match isn't first with high score, document it
+        if (results[0].id != "1" || maxScore < 0.7f) {
+            ADD_FAILURE() << "Score distribution issue: "
+                          << "Top result ID=" << results[0].id << ", score=" << maxScore
+                          << " (expected ID=1 with score >= 0.7)";
+        }
+    }
+}

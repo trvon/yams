@@ -162,6 +162,25 @@ AsioConnectionPool::get_or_create(const TransportOptions& opts) {
     }
 }
 
+void AsioConnectionPool::shutdown_all(std::chrono::milliseconds timeout) {
+    std::vector<std::shared_ptr<AsioConnectionPool>> pools;
+    {
+        std::lock_guard<std::shared_mutex> lk(registry_mutex());
+        auto& map = registry_map();
+        pools.reserve(map.size());
+        for (auto& [_, pool] : map) {
+            if (pool) {
+                pools.push_back(pool);
+            }
+        }
+        map.clear();
+    }
+
+    for (auto& pool : pools) {
+        pool->shutdown(timeout);
+    }
+}
+
 void AsioConnectionPool::cleanup_stale_connections() {
     // Remove dead/closed connections from pool (lock must be held by caller)
     connection_pool_.erase(

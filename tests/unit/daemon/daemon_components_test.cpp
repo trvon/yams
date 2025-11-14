@@ -18,6 +18,7 @@
 
 #include <yams/daemon/components/SocketServer.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/socket_utils.h>
 #include <yams/daemon/resource/resource_pool.h>
 
@@ -147,7 +148,9 @@ TEST_CASE("SocketServer: Lifecycle management", "[daemon][components][socket]") 
     state.stats.startTime = std::chrono::steady_clock::now();
 
     SECTION("Start and stop clears stopping flag") {
-        SocketServer server(config, nullptr, &state);
+        WorkCoordinator coordinator;
+        coordinator.start(2);
+        SocketServer server(config, &coordinator, nullptr, &state);
 
         auto first = server.start();
         if (!first) {
@@ -172,10 +175,14 @@ TEST_CASE("SocketServer: Lifecycle management", "[daemon][components][socket]") 
         REQUIRE(second);
 
         REQUIRE(server.stop());
+        coordinator.stop();
+        coordinator.join();
     }
 
     SECTION("Multiple start attempts are safe") {
-        SocketServer server(config, nullptr, &state);
+        WorkCoordinator coordinator;
+        coordinator.start(2);
+        SocketServer server(config, &coordinator, nullptr, &state);
 
         auto first = server.start();
         if (!first) {
@@ -191,6 +198,8 @@ TEST_CASE("SocketServer: Lifecycle management", "[daemon][components][socket]") 
         REQUIRE(!second); // Already running
 
         REQUIRE(server.stop());
+        coordinator.stop();
+        coordinator.join();
     }
 
     // Cleanup

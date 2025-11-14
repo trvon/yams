@@ -518,8 +518,7 @@ TEST_F(ServicesRetrievalIngestionIT, IndexingAddDirectoryVerifyAndDefer) {
     req.tags = {"idx", "phase2"};
     req.metadata = {{"pbi", "028-45"}};
     req.recursive = true;
-    req.deferExtraction = true; // exercise defer path
-    req.verify = true;          // verify content was stored
+    req.verify = true; // verify content was stored
 
     auto ar = idxSvc->addDirectory(req);
     if (!ar) {

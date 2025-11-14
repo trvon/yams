@@ -6,11 +6,14 @@
 #include <functional>
 #include <memory>
 #include <string>
-#include <yams/compat/thread_stop_compat.h>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/strand.hpp>
 
 namespace yams::daemon {
 
 class ServiceManager;
+class WorkCoordinator;
 struct StateComponent;
 
 // Centralized tuning controller owned by ServiceManager.
@@ -18,7 +21,7 @@ struct StateComponent;
 // resource allocation across daemon subsystems (IPC CPU/IO pools, writer budgets, etc.).
 class TuningManager {
 public:
-    TuningManager(ServiceManager* sm, StateComponent* state);
+    TuningManager(ServiceManager* sm, StateComponent* state, WorkCoordinator* coordinator);
     ~TuningManager();
 
     void start();
@@ -34,13 +37,15 @@ public:
     }
 
 private:
+    boost::asio::awaitable<void> tuningLoop();
     void tick_once();
     void apply_post_ingest_control(std::size_t queued, std::size_t inflight, std::size_t capacity,
                                    std::uint64_t activeConns);
 
     ServiceManager* sm_;
     StateComponent* state_;
-    yams::compat::jthread thread_;
+    WorkCoordinator* coordinator_;
+    boost::asio::strand<boost::asio::io_context::executor_type> strand_;
     std::atomic<bool> running_{false};
 
     // Repair tuning helpers (hysteresis + rate limiting)

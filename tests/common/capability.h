@@ -23,7 +23,6 @@ inline bool indexing_available(const yams::app::services::AppContext& ctx) {
         req.directoryPath = tmp.string();
         req.includePatterns = {"*.txt"};
         req.recursive = true;
-        req.deferExtraction = true;
         req.verify = false;
         auto r = idx->addDirectory(req);
         std::filesystem::remove_all(tmp, ec);

@@ -74,6 +74,7 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
                                   .async_wait(wait_for_all(), boost::asio::use_awaitable);
 
                 processed_++;
+                InternalEventBus::instance().incPostConsumed();
             } catch (const std::exception& e) {
                 spdlog::error("[PostIngestQueue] Failed to process {}: {}", task.hash, e.what());
                 failed_++;
@@ -253,7 +254,9 @@ boost::asio::awaitable<void> PostIngestQueue::processEmbeddingStage(const std::s
 
         if (!embedChannel->try_push(std::move(job))) {
             spdlog::warn("[PostIngestQueue] Embed channel full, dropping job for {}", hash);
+            InternalEventBus::instance().incEmbedDropped();
         } else {
+            InternalEventBus::instance().incEmbedQueued();
             spdlog::debug("[PostIngestQueue] Dispatched embedding job for {}", hash);
         }
     } catch (const std::exception& e) {

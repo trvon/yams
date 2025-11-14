@@ -273,9 +273,6 @@ std::vector<std::pair<std::string, float>> TrigramIndex::search(const std::strin
         }
     }
 
-    // std::cerr << "[DEBUG] Found " << candidateCounts.size() << " candidate documents" <<
-    // std::endl;
-
     // Calculate similarity scores
     std::vector<std::pair<std::string, float>> results;
 
@@ -290,13 +287,9 @@ std::vector<std::pair<std::string, float>> TrigramIndex::search(const std::strin
                 std::string lowerStr = strIt->second;
                 std::ranges::transform(lowerStr, lowerStr.begin(), ::tolower);
 
-                // Check if query is a substring (case-insensitive)
                 if (lowerStr.find(lowerQuery) != std::string::npos) {
-                    // Boost similarity for substring matches
                     similarity = std::max(similarity, 0.7f);
                 } else {
-                    // Check for fuzzy substring match (allowing 1-2 char difference)
-                    // This is a simple approximation
                     size_t matchCount = 0;
                     for (const auto& trigram : queryTrigrams) {
                         if (lowerStr.find(trigram.substr(1, 2)) != std::string::npos) {
@@ -309,17 +302,15 @@ std::vector<std::pair<std::string, float>> TrigramIndex::search(const std::strin
                 }
             }
 
-            // Debug: Show similarity scores
-            // std::cerr << "[DEBUG] ID=" << id << " similarity=" << similarity << " (threshold=" <<
-            // threshold << ")" << std::endl;
-
             if (similarity >= threshold) {
                 results.emplace_back(id, similarity);
+            } else if (similarity >= threshold * 0.5f) {
+                spdlog::debug("TrigramIndex near-miss: ID={} similarity={:.2f} (threshold={:.2f})",
+                              id, similarity, threshold);
             }
         }
     }
 
-    // Sort by similarity score
     std::ranges::sort(results, [](const auto& a, const auto& b) { return a.second > b.second; });
 
     return results;
@@ -348,8 +339,6 @@ void HybridFuzzySearch::addDocument(const std::string& id, const std::string& ti
         keywordTree_.add(keyword);
     }
 
-    // Add to trigram indices - index each word separately for better matching
-    // Split title into words and index each word
     std::istringstream titleStream(title);
     std::string word;
     int wordIndex = 0;
@@ -379,14 +368,6 @@ std::vector<HybridFuzzySearch::SearchResult>
 HybridFuzzySearch::search(const std::string& query, size_t maxResults,
                           const SearchOptions& options) const {
     std::unordered_map<std::string, SearchResult> resultMap;
-
-    // Debug: Log search parameters (disabled)
-    // std::cerr << "[DEBUG] Fuzzy search for: '" << query << "' with minSimilarity="
-    //           << options.minSimilarity << ", maxEditDistance=" << options.maxEditDistance <<
-    //           std::endl;
-    // std::cerr << "[DEBUG] Index has " << idToTitle_.size() << " documents" << std::endl;
-
-    // Split query into words for multi-word handling (industry standard approach)
     std::vector<std::string> queryWords;
     std::istringstream queryStream(query);
     std::string word;
@@ -413,10 +394,11 @@ HybridFuzzySearch::search(const std::string& query, size_t maxResults,
 
         // Search for each word independently
         for (const auto& queryWord : queryWords) {
-            // std::cerr << "[DEBUG] Searching for word: '" << queryWord << "'" << std::endl;
+            float adjustmentFactor = 1.0f / std::sqrt(static_cast<float>(queryWords.size()));
+            float wordSimilarity = options.minSimilarity * adjustmentFactor;
 
-            // Use lower similarity threshold for individual words
-            float wordSimilarity = options.minSimilarity * 0.7f;
+            // Clamp to reasonable range: [0.2, 0.7]
+            wordSimilarity = std::clamp(wordSimilarity, 0.2f, 0.7f);
 
             // Search using trigrams
             if (options.useTrigramPrefilter) {
@@ -510,20 +492,10 @@ HybridFuzzySearch::search(const std::string& query, size_t maxResults,
         }
 
     } else {
-        // Single word query - use original logic
-
-        // Trigram pre-filtering
         if (options.useTrigramPrefilter) {
             // Search in both title and keyword trigrams
             auto trigramResults = titleTrigrams_.search(query, options.minSimilarity);
             auto keywordTrigramResults = keywordTrigrams_.search(query, options.minSimilarity);
-
-            // Debug: Log trigram search results (disabled)
-            // std::cerr << "[DEBUG] Title trigram results: " << trigramResults.size() << std::endl;
-            // std::cerr << "[DEBUG] Keyword trigram results: " << keywordTrigramResults.size() <<
-            // std::endl;
-
-            // Combine results from both searches
             for (const auto& [id, score] : keywordTrigramResults) {
                 trigramResults.push_back(
                     {id, score * 0.9f}); // Slightly lower weight for keyword matches
@@ -605,16 +577,24 @@ HybridFuzzySearch::search(const std::string& query, size_t maxResults,
                 }
             }
         }
-    } // End of else block for single-word query
+    }
 
-    // Convert map to vector and sort
     std::vector<SearchResult> results;
     for (const auto& [_, result] : resultMap) {
         results.push_back(result);
     }
 
-    std::sort(results.begin(), results.end(),
-              [](const auto& a, const auto& b) { return a.score > b.score; });
+    std::sort(results.begin(), results.end(), [&query](const auto& a, const auto& b) {
+        if (a.score != b.score) {
+            return a.score > b.score;
+        }
+        // Tiebreaker: prefer exact title match, then shorter titles
+        bool aExact = (a.title == query);
+        bool bExact = (b.title == query);
+        if (aExact != bExact)
+            return aExact;
+        return a.title.length() < b.title.length();
+    });
 
     if (results.size() > maxResults) {
         results.resize(maxResults);

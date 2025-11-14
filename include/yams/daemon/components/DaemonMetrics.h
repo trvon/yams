@@ -7,11 +7,14 @@
 #include <memory>
 #include <shared_mutex>
 #include <string>
-#include <thread>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/strand.hpp>
 
 namespace yams::daemon {
 
 class ServiceManager;
+class WorkCoordinator;
 class DaemonLifecycleFsm;
 struct StateComponent;
 
@@ -32,6 +35,8 @@ struct MetricsSnapshot {
     std::size_t uptimeSeconds{0};
     std::size_t requestsProcessed{0};
     std::size_t activeConnections{0};
+    std::size_t ipcTasksPending{0}; // IPC handlers spawned but not yet started
+    std::size_t ipcTasksActive{0};  // IPC handlers currently executing
     double memoryUsageMb{0.0};
     double cpuUsagePercent{0.0};
 
@@ -150,12 +155,12 @@ struct MetricsSnapshot {
 class DaemonMetrics {
 public:
     DaemonMetrics(const DaemonLifecycleFsm* lifecycle, const StateComponent* state,
-                  const ServiceManager* services);
+                  const ServiceManager* services, WorkCoordinator* coordinator);
     ~DaemonMetrics();
 
-    // Start background polling thread to keep metrics cache hot
+    // Start background polling loop to keep metrics cache hot
     void startPolling();
-    // Stop background polling thread
+    // Stop background polling loop
     void stopPolling();
 
     // Retrieve metrics snapshot. When detailed is true, include deep store stats
@@ -171,13 +176,16 @@ public:
     EmbeddingServiceInfo getEmbeddingServiceInfo() const;
 
 private:
-    void pollingLoop(); // Background thread loop
+    boost::asio::awaitable<void> pollingLoop(); // Background polling loop
 
     const DaemonLifecycleFsm* lifecycle_;
     const StateComponent* state_;
     const ServiceManager* services_;
+    WorkCoordinator* coordinator_;
+    boost::asio::strand<boost::asio::io_context::executor_type> strand_;
+
     // Lightweight memoization to avoid repeated /proc reads; 0 disables caching
-    uint32_t cacheMs_{200};
+    uint32_t cacheMs_{250};
     // Shared mutex for concurrent reads, exclusive writes
     mutable std::shared_mutex cacheMutex_;
     mutable std::shared_ptr<MetricsSnapshot> cachedSnapshot_{nullptr};
@@ -185,9 +193,8 @@ private:
     // Physical storage breakdown (updated separately with TTL, reuses cacheMutex_)
     mutable MetricsSnapshot cached_{}; // Only physical storage breakdown fields used
 
-    // Background polling thread
+    // Background polling control
     std::atomic<bool> pollingActive_{false};
-    std::thread pollingThread_;
 
     // CPU utilization sampling state (Linux): deltas over /proc since last snapshot
     mutable std::uint64_t lastProcJiffies_{0};

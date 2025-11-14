@@ -104,7 +104,12 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetRequest(const GetRe
                 response.created = doc.created;
                 response.modified = doc.modified;
                 response.indexed = doc.indexed;
-                if (doc.content.has_value()) {
+                // When extract=true, prefer extractedText over raw content for display
+                if (req.extract && doc.extractedText.has_value() &&
+                    !doc.extractedText.value().empty()) {
+                    response.content = doc.extractedText.value();
+                    response.hasContent = true;
+                } else if (doc.content.has_value()) {
                     response.content = doc.content.value();
                     response.hasContent = true;
                 } else {
@@ -136,7 +141,12 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetRequest(const GetRe
                 response.created = doc.created;
                 response.modified = doc.modified;
                 response.indexed = doc.indexed;
-                if (doc.content.has_value()) {
+                // When extract=true, prefer extractedText over raw content for display
+                if (req.extract && doc.extractedText.has_value() &&
+                    !doc.extractedText.value().empty()) {
+                    response.content = doc.extractedText.value();
+                    response.hasContent = true;
+                } else if (doc.content.has_value()) {
                     response.content = doc.content.value();
                     response.hasContent = true;
                 } else {

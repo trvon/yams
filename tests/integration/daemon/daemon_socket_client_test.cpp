@@ -104,6 +104,26 @@ TEST_CASE("Daemon socket connection lifecycle", "[daemon][socket][integration]")
         REQUIRE(!result.has_value());
         REQUIRE(elapsed < 200ms); // Should fail fast with 100ms timeout
     }
+
+    SECTION("survives repeated restart cycles") {
+        DaemonHarness harness;
+        constexpr int cycles = 3;
+
+        for (int i = 0; i < cycles; ++i) {
+            INFO("restart cycle " << i);
+            REQUIRE(harness.start());
+
+            auto client = createClient(harness.socketPath());
+            auto connectResult = yams::cli::run_sync(client.connect(), 3s);
+            REQUIRE(connectResult.has_value());
+
+            auto statusResult = yams::cli::run_sync(client.status(), 5s);
+            REQUIRE(statusResult.has_value());
+
+            harness.stop();
+            std::this_thread::sleep_for(200ms);
+        }
+    }
 }
 
 TEST_CASE("Daemon client request execution", "[daemon][socket][requests]") {

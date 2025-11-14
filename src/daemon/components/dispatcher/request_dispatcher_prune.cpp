@@ -2,6 +2,8 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
+#include <system_error>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -106,31 +108,69 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
         spdlog::info("Prune preview: {} candidates, {} bytes total", candidates.size(),
                      response.totalBytesFreed);
 
-        // If not dry-run and user wants to apply, queue async job
+        // If not dry-run and user wants to apply, execute prune synchronously
         if (!req.dryRun && !candidates.empty()) {
-            static uint64_t pruneRequestCounter = 0;
-            uint64_t requestId = ++pruneRequestCounter;
+            spdlog::info("Executing prune operation for {} candidates", candidates.size());
 
-            InternalEventBus::PruneJob job{.requestId = requestId, .config = std::move(config)};
+            uint64_t deleted = 0;
+            uint64_t failed = 0;
+            uint64_t bytesFreed = 0;
 
-            static auto pruneQueue =
-                InternalEventBus::instance().get_or_create_channel<InternalEventBus::PruneJob>(
-                    "prune_jobs", 128);
+            for (size_t i = 0; i < candidates.size(); ++i) {
+                const auto& candidate = candidates[i];
 
-            if (!pruneQueue->try_push(std::move(job))) {
-                spdlog::error("Prune queue full, request dropped");
-                InternalEventBus::instance().incPostDropped();
-                response.errorMessage = "Prune queue full, try again later";
-                co_return response;
+                if (i > 0 && i % 100 == 0) {
+                    co_await boost::asio::post(boost::asio::use_awaitable);
+                }
+                try {
+                    // Delete filesystem file
+                    std::error_code ec;
+                    if (std::filesystem::exists(candidate.path, ec)) {
+                        if (std::filesystem::remove(candidate.path, ec)) {
+                            deleted++;
+                            bytesFreed += candidate.fileSize;
+
+                            // Delete from metadata database
+                            // Look up document by hash to get ID
+                            auto docResult = metaRepo->getDocumentByHash(candidate.hash);
+                            if (docResult && docResult.value().has_value()) {
+                                auto delResult = metaRepo->deleteDocument(docResult.value()->id);
+                                if (!delResult) {
+                                    spdlog::warn(
+                                        "Deleted file {} but failed to remove from metadata: {}",
+                                        candidate.path, delResult.error().message);
+                                }
+                            }
+                        } else {
+                            spdlog::warn("Failed to delete {}: {}", candidate.path, ec.message());
+                            failed++;
+                        }
+                    } else {
+                        // File doesn't exist anymore, just remove from metadata
+                        auto docResult = metaRepo->getDocumentByHash(candidate.hash);
+                        if (docResult && docResult.value().has_value()) {
+                            auto delResult = metaRepo->deleteDocument(docResult.value()->id);
+                            if (delResult) {
+                                deleted++;
+                            } else {
+                                spdlog::warn("Failed to remove {} from metadata: {}",
+                                             candidate.path, delResult.error().message);
+                                failed++;
+                            }
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::error("Exception while pruning {}: {}", candidate.path, e.what());
+                    failed++;
+                }
             }
 
-            InternalEventBus::instance().incPostQueued();
-            spdlog::info("Prune job {} queued for async execution ({} files)", requestId,
-                         candidates.size());
+            response.filesDeleted = deleted;
+            response.filesFailed = failed;
+            response.totalBytesFreed = bytesFreed;
 
-            response.statusMessage =
-                fmt::format("Prune job {} started (processing {} files in background)", requestId,
-                            candidates.size());
+            spdlog::info("Prune complete: deleted={} failed={} bytes_freed={}", deleted, failed,
+                         bytesFreed);
         }
 
     } catch (const std::exception& e) {

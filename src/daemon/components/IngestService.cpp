@@ -83,7 +83,6 @@ static void processTask(ServiceManager* sm, const InternalEventBus::StoreDocumen
         serviceReq.includePatterns = req.includePatterns;
         serviceReq.excludePatterns = req.excludePatterns;
         serviceReq.recursive = true;
-        serviceReq.deferExtraction = true;
         for (const auto& [key, value] : req.metadata) {
             serviceReq.metadata[key] = value;
         }
@@ -121,7 +120,6 @@ static void processTask(ServiceManager* sm, const InternalEventBus::StoreDocumen
         serviceReq.snapshotId = req.snapshotId;
         serviceReq.snapshotLabel = req.snapshotLabel;
         serviceReq.noEmbeddings = req.noEmbeddings;
-        serviceReq.deferExtraction = true;
 
         auto result = docService->store(serviceReq);
         if (!result) {

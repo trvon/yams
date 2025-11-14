@@ -1,5 +1,6 @@
 #pragma once
 
+#include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
@@ -9,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -22,6 +24,7 @@ namespace yams::daemon {
 
 // Forward declarations
 class RequestDispatcher;
+class WorkCoordinator;
 struct StateComponent;
 
 /**
@@ -40,7 +43,8 @@ public:
         std::chrono::milliseconds acceptBackoffMs{100};
     };
 
-    SocketServer(const Config& config, RequestDispatcher* dispatcher, StateComponent* state);
+    SocketServer(const Config& config, WorkCoordinator* coordinator, RequestDispatcher* dispatcher,
+                 StateComponent* state);
     ~SocketServer();
 
     // Lifecycle
@@ -59,32 +63,31 @@ public:
     // Metrics
     size_t activeConnections() const { return activeConnections_.load(); }
     uint64_t totalConnections() const { return totalConnections_.load(); }
+    uint64_t connectionToken() const { return connectionToken_.load(); }
 
 private:
     // Async operations
     boost::asio::awaitable<void> accept_loop();
-    boost::asio::awaitable<void>
-    handle_connection(boost::asio::local::stream_protocol::socket socket);
+    struct TrackedSocket {
+        std::shared_ptr<boost::asio::local::stream_protocol::socket> socket;
+        boost::asio::any_io_executor executor;
+    };
+    boost::asio::awaitable<void> handle_connection(std::shared_ptr<TrackedSocket> tracked_socket,
+                                                   uint64_t conn_token);
 
     // Register active socket for deterministic shutdown (RAII pattern)
-    void register_socket(std::weak_ptr<boost::asio::local::stream_protocol::socket> socket);
+    void register_socket(std::shared_ptr<TrackedSocket> tracked_socket);
 
     // Configuration
     Config config_;
+    WorkCoordinator* coordinator_;
     RequestDispatcher* dispatcher_;
     StateComponent* state_;
     mutable std::mutex dispatcherMutex_;
 
-    // Boost.ASIO components
-    boost::asio::io_context io_context_;
+    // Boost.ASIO components (use WorkCoordinator's io_context)
     std::unique_ptr<boost::asio::local::stream_protocol::acceptor> acceptor_;
-
-    // Worker pool - using std::thread for explicit control over join/detach
-    std::vector<std::thread> workers_;
-
-    // Keep io_context_ alive while running (RAII with optional)
-    std::optional<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>
-        work_guard_;
+    std::future<void> acceptLoopFuture_;
 
     // Socket tracking
     std::filesystem::path actualSocketPath_;
@@ -92,6 +95,7 @@ private:
     // Connection metrics
     std::atomic<size_t> activeConnections_{0};
     std::atomic<uint64_t> totalConnections_{0};
+    std::atomic<uint64_t> connectionToken_{0};
 
     std::shared_ptr<std::atomic<std::size_t>> writerBudget_;
 
@@ -104,7 +108,7 @@ private:
 
     // Track active connections for deterministic shutdown
     std::mutex activeSocketsMutex_;
-    std::vector<std::weak_ptr<boost::asio::local::stream_protocol::socket>> activeSockets_;
+    std::vector<std::weak_ptr<TrackedSocket>> activeSockets_;
 
     // Track connection futures for graceful shutdown (PBI-066-41)
     std::mutex connectionFuturesMutex_;
@@ -113,6 +117,10 @@ private:
     std::unique_ptr<std::counting_semaphore<>> connectionSlots_;
 
     void prune_completed_futures();
+    void execute_on_io_context(std::function<void()> fn);
+    void close_acceptor_on_executor();
+    std::size_t
+    close_sockets_on_executor(std::vector<std::shared_ptr<TrackedSocket>> tracked_sockets);
 };
 
 } // namespace yams::daemon

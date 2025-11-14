@@ -2,6 +2,7 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdlib>
 #include <ctime>
@@ -9,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <system_error>
@@ -23,10 +25,13 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/experimental/parallel_group.hpp>
+#include <boost/asio/experimental/awaitable_operators.hpp>
+#include <boost/asio/experimental/channel.hpp>
 #include <boost/asio/post.hpp>
+#include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
+#include <boost/asio/use_future.hpp>
 #include <tl/expected.hpp>
 #include <yams/api/content_store_builder.h>
 #include <yams/app/services/session_service.hpp>
@@ -745,7 +750,7 @@ yams::Result<void> ServiceManager::initialize() {
 
     // Sanity check: if dependencies are ready but searchExecutor_ not initialized
     if (state_.readiness.databaseReady.load() && state_.readiness.metadataRepoReady.load() &&
-        !searchExecutor_) {
+        !std::atomic_load(&searchExecutor_)) {
         spdlog::warn("SearchExecutor not initialized despite database and metadata repo ready");
     }
     return Result<void>();
@@ -904,8 +909,15 @@ void ServiceManager::shutdown() {
     // Phase 2: Signal stop to session watcher
     spdlog::info("[ServiceManager] Phase 2: Stopping session watcher");
     try {
-        sessionWatchStop_.store(true, std::memory_order_relaxed);
-        spdlog::info("[ServiceManager] Phase 2: Session watcher stop signal sent");
+        if (sessionWatchStopSource_.stop_possible())
+            sessionWatchStopSource_.request_stop();
+        if (sessionWatcherFuture_.valid()) {
+            sessionWatcherFuture_.get();
+            sessionWatcherFuture_ = std::future<void>();
+        }
+        spdlog::info("[ServiceManager] Phase 2: Session watcher stopped");
+    } catch (const std::exception& e) {
+        spdlog::warn("[ServiceManager] Phase 2: Session watcher stop failed: {}", e.what());
     } catch (...) {
         spdlog::warn("[ServiceManager] Phase 2: Session watcher stop failed");
     }
@@ -1076,7 +1088,7 @@ void ServiceManager::shutdown() {
 
     // Release all remaining resources
     spdlog::info("[ServiceManager] Phase 8: Releasing remaining resources");
-    searchExecutor_.reset();
+    std::atomic_store(&searchExecutor_, std::shared_ptr<search::SearchExecutor>());
     spdlog::info("[ServiceManager] Phase 9.1: Search executor reset");
     metadataRepo_.reset();
     spdlog::info("[ServiceManager] Phase 9.2: Metadata repository reset");
@@ -1820,78 +1832,20 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     // Lightweight session directory watcher (polling), reacts to SessionService config.
     try {
         auto exec = getWorkerExecutor();
-        boost::asio::post(exec, [this]() {
-            // Poll every 2s by default; allow env override for tests
-            auto read_ms = [](const char* env, int def) {
-                try {
-                    if (const char* v = std::getenv(env))
-                        return std::max(100, std::stoi(v));
-                } catch (...) {
-                }
-                return def;
-            };
-            const int interval_ms = read_ms("YAMS_SESSION_WATCH_INTERVAL_MS", 2000);
-            while (!sessionWatchStop_.load(std::memory_order_relaxed)) {
-                try {
-                    // Consult SessionService JSON directly (same storage as CLI)
-                    yams::app::services::AppContext appCtx = getAppContext();
-                    auto sess = yams::app::services::makeSessionService(&appCtx);
-                    auto current = sess->current();
-                    if (current && sess->watchEnabled(*current)) {
-                        auto patterns = sess->getPinnedPatterns(*current);
-                        for (const auto& pat : patterns) {
-                            std::error_code ec;
-                            std::filesystem::path p(pat);
-                            if (!p.empty() && std::filesystem::is_directory(p, ec)) {
-                                // Scan directory: record mtime/size; enqueue changes
-                                auto& dirMap = sessionWatch_.dirFiles[p.string()];
-                                std::unordered_map<std::string,
-                                                   std::pair<std::uint64_t, std::uint64_t>>
-                                    cur;
-                                for (auto it = std::filesystem::recursive_directory_iterator(p, ec);
-                                     !ec && it != std::filesystem::recursive_directory_iterator();
-                                     ++it) {
-                                    if (!it->is_regular_file())
-                                        continue;
-                                    auto fp = it->path().string();
-                                    auto fsz = (std::uint64_t)it->file_size(ec);
-                                    auto fmt = (std::uint64_t)
-                                                   std::chrono::duration_cast<std::chrono::seconds>(
-                                                       it->last_write_time().time_since_epoch())
-                                                       .count();
-                                    cur[fp] = {fmt, fsz};
-                                    auto old = dirMap.find(fp);
-                                    if (old == dirMap.end() || old->second != cur[fp]) {
-                                        // New or modified file -> enqueue add/store
-                                        InternalEventBus::StoreDocumentTask t;
-                                        t.request.path = fp;
-                                        t.request.recursive = false;
-                                        t.request.noEmbeddings = true;
-                                        static std::shared_ptr<
-                                            SpscQueue<InternalEventBus::StoreDocumentTask>>
-                                            q = InternalEventBus::instance()
-                                                    .get_or_create_channel<
-                                                        InternalEventBus::StoreDocumentTask>(
-                                                        "store_document_tasks", 4096);
-                                        if (q)
-                                            (void)q->try_push(std::move(t));
-                                    }
-                                }
-                                // Detect deletions (optional): if desired, could record and handle
-                                dirMap.swap(cur);
-                            }
-                        }
-                    }
-                } catch (...) {
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
-            }
-        });
+        sessionWatchStopSource_ = yams::compat::stop_source{};
+        auto token = sessionWatchStopSource_.get_token();
+        sessionWatcherFuture_ = boost::asio::co_spawn(
+            exec,
+            [this, token]() -> boost::asio::awaitable<void> {
+                co_await co_runSessionWatcher(token);
+            },
+            boost::asio::use_future);
     } catch (...) {
     }
 
     if (database_ && metadataRepo_)
-        searchExecutor_ = std::make_shared<search::SearchExecutor>(database_, metadataRepo_);
+        std::atomic_store(&searchExecutor_,
+                          std::make_shared<search::SearchExecutor>(database_, metadataRepo_));
     retrievalSessions_ = std::make_unique<RetrievalSessionManager>();
     spdlog::info("[ServiceManager] Phase: Executors and Sessions Initialized.");
 
@@ -1944,24 +1898,6 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         spdlog::warn("Post-ingest queue init failed (unknown)");
     }
     spdlog::info("[ServiceManager] Phase: Post-Ingest Queue Initialized.");
-
-    // Initialize SearchPool for parallel hybrid search
-    try {
-        searchPool_ =
-            std::make_unique<SearchPool>(metadataRepo_, vectorDatabase_, workCoordinator_.get());
-
-        // Wire model provider getters for embedding generation
-        searchPool_->setModelProvider(
-            [this]() -> std::shared_ptr<IModelProvider> { return getModelProvider(); },
-            [this]() -> std::string { return embeddingModelName_; });
-
-        spdlog::info("SearchPool initialized for parallel hybrid search");
-    } catch (const std::exception& e) {
-        spdlog::warn("SearchPool init failed: {}", e.what());
-    } catch (...) {
-        spdlog::warn("SearchPool init failed (unknown)");
-    }
-    spdlog::info("[ServiceManager] Phase: SearchPool Initialized.");
 
     // Initialize EmbeddingService for async embedding generation
     try {
@@ -2321,21 +2257,86 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         spdlog::warn("Exception wiring HybridSearchEngine: {}", e.what());
     }
     spdlog::info("[ServiceManager] Phase: Search Engine Built.");
-
-    // Removed: lifecycleReadyWatchdog_ (1200ms sleep workaround)
-    // Proper event-driven initialization via invokeInitCompleteOnce ensures deterministic startup
-
     if (ingestService_) {
         ingestService_->start();
     }
     spdlog::info("[ServiceManager] Phase: Ingest Service Started.");
 
-    // Model provider manages embedding initialization on-demand
-
-    // Note: Background task coroutines (EmbedJob/Fts5Job consumers, OrphanScan) are launched
-    // via startBackgroundTasks() after construction, when shared_from_this() is available.
-
     co_return Result<void>();
+}
+
+boost::asio::awaitable<void> ServiceManager::co_runSessionWatcher(yams::compat::stop_token token) {
+    auto executor = co_await boost::asio::this_coro::executor;
+
+    auto read_ms = [](const char* env, int def) {
+        try {
+            if (const char* v = std::getenv(env))
+                return std::max(100, std::stoi(v));
+        } catch (...) {
+        }
+        return def;
+    };
+
+    const int interval_ms = read_ms("YAMS_SESSION_WATCH_INTERVAL_MS", 2000);
+    auto wait_duration = std::chrono::milliseconds(interval_ms);
+    boost::asio::steady_timer timer(executor);
+
+    while (!token.stop_requested()) {
+        try {
+            yams::app::services::AppContext appCtx = getAppContext();
+            auto sess = yams::app::services::makeSessionService(&appCtx);
+            auto current = sess->current();
+            if (current && sess->watchEnabled(*current)) {
+                auto patterns = sess->getPinnedPatterns(*current);
+                for (const auto& pat : patterns) {
+                    std::error_code ec;
+                    std::filesystem::path p(pat);
+                    if (!p.empty() && std::filesystem::is_directory(p, ec)) {
+                        auto& dirMap = sessionWatch_.dirFiles[p.string()];
+                        std::unordered_map<std::string, std::pair<std::uint64_t, std::uint64_t>>
+                            cur;
+                        for (auto it = std::filesystem::recursive_directory_iterator(p, ec);
+                             !ec && it != std::filesystem::recursive_directory_iterator(); ++it) {
+                            if (!it->is_regular_file())
+                                continue;
+                            auto fp = it->path().string();
+                            auto fsz = static_cast<std::uint64_t>(it->file_size(ec));
+                            auto fmt = static_cast<std::uint64_t>(
+                                std::chrono::duration_cast<std::chrono::seconds>(
+                                    it->last_write_time().time_since_epoch())
+                                    .count());
+                            cur[fp] = {fmt, fsz};
+                            auto old = dirMap.find(fp);
+                            if (old == dirMap.end() || old->second != cur[fp]) {
+                                InternalEventBus::StoreDocumentTask t;
+                                t.request.path = fp;
+                                t.request.recursive = false;
+                                t.request.noEmbeddings = true;
+                                static std::shared_ptr<
+                                    SpscQueue<InternalEventBus::StoreDocumentTask>>
+                                    q = InternalEventBus::instance()
+                                            .get_or_create_channel<
+                                                InternalEventBus::StoreDocumentTask>(
+                                                "store_document_tasks", 4096);
+                                if (q)
+                                    (void)q->try_push(std::move(t));
+                            }
+                        }
+                        dirMap.swap(cur);
+                    }
+                }
+            }
+        } catch (...) {
+        }
+
+        boost::system::error_code ec;
+        timer.expires_after(wait_duration);
+        co_await timer.async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+        if (token.stop_requested() || ec == boost::asio::error::operation_aborted)
+            break;
+    }
+
+    co_return;
 }
 
 boost::asio::awaitable<bool> ServiceManager::co_openDatabase(const std::filesystem::path& dbPath,
@@ -2348,56 +2349,71 @@ boost::asio::awaitable<bool> ServiceManager::co_openDatabase(const std::filesyst
     timeout_timer.expires_after(std::chrono::milliseconds(timeout_ms));
 
     try {
-        // Race database open against timeout using boost::asio::experimental::make_parallel_group
-        // This avoids futures entirely and properly handles cancellation
-        using namespace boost::asio::experimental;
+        using ResultPtr = std::shared_ptr<Result<void>>;
+        using Channel = boost::asio::experimental::basic_channel<
+            boost::asio::any_io_executor, boost::asio::experimental::channel_traits<std::mutex>,
+            void(std::exception_ptr, ResultPtr)>;
+        auto resultChannel = std::make_shared<Channel>(ex, 2);
 
-        auto [completion_order, ex_ptr, open_result, timer_result] =
-            co_await make_parallel_group(
-                boost::asio::co_spawn(
-                    ex,
-                    [this, dbPath]() -> boost::asio::awaitable<Result<void>> {
-                        co_return database_->open(dbPath.string(),
-                                                  metadata::ConnectionMode::Create);
-                    }(),
-                    boost::asio::deferred),
-                timeout_timer.async_wait(boost::asio::deferred))
-                .async_wait(wait_for_one(), boost::asio::use_awaitable);
-
-        if (completion_order[0] == 0) {
-            // Database open completed first
-            if (ex_ptr) {
-                // Exception occurred
+        boost::asio::co_spawn(
+            ex,
+            [this, dbPath, resultChannel]() -> boost::asio::awaitable<void> {
+                std::exception_ptr opException;
+                ResultPtr opResult;
                 try {
-                    std::rethrow_exception(ex_ptr);
-                } catch (const std::exception& e) {
-                    spdlog::warn("Database open threw exception: {} — continuing in degraded mode",
-                                 e.what());
+                    auto r = database_->open(dbPath.string(), metadata::ConnectionMode::Create);
+                    opResult = std::make_shared<Result<void>>(std::move(r));
+                } catch (...) {
+                    opException = std::current_exception();
                 }
-                timeout_timer.cancel(); // Clean up timer
-                co_return false;
-            }
+                resultChannel->try_send(opException, std::move(opResult));
+                co_return;
+            },
+            boost::asio::detached);
 
-            // open_result is directly Result<void> (not a variant)
-            // Since completion_order[0] == 0, the database operation completed
-            timeout_timer.cancel(); // Clean up timer
+        using namespace boost::asio::experimental::awaitable_operators;
 
-            if (open_result) {
-                state_.readiness.databaseReady = true;
-                spdlog::info("Database opened successfully");
-                co_return true;
-            } else {
-                spdlog::warn("Database open failed: {} — continuing in degraded mode",
-                             open_result.error().message);
-                co_return false;
-            }
-        } else {
-            // Timeout occurred first
+        auto race = co_await (
+            resultChannel->async_receive(boost::asio::as_tuple(boost::asio::use_awaitable)) ||
+            timeout_timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable)));
+
+        if (race.index() == 1) {
             spdlog::warn("Database open timed out after {} ms — continuing in degraded mode",
                          timeout_ms);
-            // Note: The database open coroutine will be cancelled automatically
+            resultChannel->close();
             co_return false;
         }
+
+        timeout_timer.cancel();
+
+        const auto channelTuple = std::get<0>(race);
+        auto opException = std::get<0>(channelTuple);
+        auto opResult = std::get<1>(channelTuple);
+
+        if (opException) {
+            try {
+                std::rethrow_exception(opException);
+            } catch (const std::exception& e) {
+                spdlog::warn("Database open threw exception: {} — continuing in degraded mode",
+                             e.what());
+            }
+            co_return false;
+        }
+
+        if (!opResult) {
+            spdlog::warn("Database open failed: unknown error — continuing in degraded mode");
+            co_return false;
+        }
+
+        if (*opResult) {
+            state_.readiness.databaseReady = true;
+            spdlog::info("Database opened successfully");
+            co_return true;
+        }
+
+        spdlog::warn("Database open failed: {} — continuing in degraded mode",
+                     opResult->error().message);
+        co_return false;
     } catch (const std::exception& e) {
         spdlog::warn("Database open failed (exception): {} — continuing in degraded mode",
                      e.what());
@@ -2425,41 +2441,61 @@ boost::asio::awaitable<bool> ServiceManager::co_migrateDatabase(int timeout_ms,
     timeout_timer.expires_after(std::chrono::milliseconds(timeout_ms));
 
     try {
-        // Race migration against timeout using boost::asio::experimental::make_parallel_group
-        using namespace boost::asio::experimental;
+        using ResultPtr = std::shared_ptr<Result<void>>;
+        using Channel = boost::asio::experimental::basic_channel<
+            boost::asio::any_io_executor, boost::asio::experimental::channel_traits<std::mutex>,
+            void(std::exception_ptr, ResultPtr)>;
+        auto resultChannel = std::make_shared<Channel>(ex, 2);
 
-        auto [completion_order, ex_ptr, migrate_result, timer_result] =
-            co_await make_parallel_group(
-                boost::asio::co_spawn(
-                    ex,
-                    [&mm]() -> boost::asio::awaitable<Result<void>> { co_return mm.migrate(); }(),
-                    boost::asio::deferred),
-                timeout_timer.async_wait(boost::asio::deferred))
-                .async_wait(wait_for_one(), boost::asio::use_awaitable);
-
-        if (completion_order[0] == 0) {
-            // Migration completed first
-            if (ex_ptr) {
-                // Exception occurred
+        boost::asio::co_spawn(
+            ex,
+            [&mm, resultChannel]() -> boost::asio::awaitable<void> {
+                std::exception_ptr opException;
+                ResultPtr opResult;
                 try {
-                    std::rethrow_exception(ex_ptr);
-                } catch (const std::exception& e) {
-                    spdlog::warn("Database migration threw exception: {}", e.what());
+                    auto r = mm.migrate();
+                    opResult = std::make_shared<Result<void>>(std::move(r));
+                } catch (...) {
+                    opException = std::current_exception();
                 }
-                timeout_timer.cancel(); // Clean up timer
-                co_return false;
-            }
+                resultChannel->try_send(opException, std::move(opResult));
+                co_return;
+            },
+            boost::asio::detached);
 
-            // migrate_result is directly Result<void> (not a variant)
-            // Since completion_order[0] == 0, the migration operation completed
-            timeout_timer.cancel();                      // Clean up timer
-            co_return static_cast<bool>(migrate_result); // Result<void> converts to bool
-        } else {
-            // Timeout occurred first
+        using namespace boost::asio::experimental::awaitable_operators;
+
+        auto race = co_await (
+            resultChannel->async_receive(boost::asio::as_tuple(boost::asio::use_awaitable)) ||
+            timeout_timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable)));
+
+        if (race.index() == 1) {
             spdlog::warn("Database migration timed out after {} ms", timeout_ms);
-            // Note: The migration coroutine will be cancelled automatically
+            resultChannel->close();
             co_return false;
         }
+
+        timeout_timer.cancel();
+
+        const auto channelTuple = std::get<0>(race);
+        auto opException = std::get<0>(channelTuple);
+        auto opResult = std::get<1>(channelTuple);
+
+        if (opException) {
+            try {
+                std::rethrow_exception(opException);
+            } catch (const std::exception& e) {
+                spdlog::warn("Database migration threw exception: {}", e.what());
+            }
+            co_return false;
+        }
+
+        if (!opResult) {
+            spdlog::warn("Database migration failed before producing a result");
+            co_return false;
+        }
+
+        co_return static_cast<bool>(*opResult);
     } catch (const std::exception& e) {
         spdlog::warn("Database migration failed (exception): {}", e.what());
         co_return false;
@@ -2536,8 +2572,6 @@ Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& pref
                 } catch (...) {
                 }
 
-                // With IModelProvider, check availability immediately after adoption
-                // (no explicit model loading step needed - provider handles it internally)
                 try {
                     if (modelProvider_ && modelProvider_->isAvailable()) {
                         std::string modelName = resolvePreferredModel();
@@ -2764,9 +2798,6 @@ boost::asio::awaitable<Result<size_t>> ServiceManager::autoloadPluginsNow() {
         } catch (...) {
         }
         refreshPluginStatusSnapshot();
-        // In mock/test mode, skip scanning/loading ABI plugins entirely to avoid
-        // platform-specific crashes from dlopen or missing runtimes. The embedding
-        // stack will use the mock provider instead.
         if (config_.useMockModelProvider || env_truthy(std::getenv("YAMS_USE_MOCK_PROVIDER"))) {
             spdlog::info("Plugin autoload skipped (mock provider in use)");
             co_return Result<size_t>(0);
@@ -2780,8 +2811,6 @@ boost::asio::awaitable<Result<size_t>> ServiceManager::autoloadPluginsNow() {
             for (const auto& p : abiHost_->trustList())
                 roots.push_back(p);
         }
-        // Prefer explicit env override before default directories to avoid stale system plugins
-        // Build default plugin roots without relying on env or legacy loader
         try {
             namespace fs = std::filesystem;
             if (const char* home = std::getenv("HOME")) {
@@ -2915,8 +2944,6 @@ boost::asio::awaitable<Result<size_t>> ServiceManager::autoloadPluginsNow() {
             spdlog::info("Plugin autoload(now): no model provider adopted");
         }
         (void)self->adoptContentExtractorsFromHosts();
-        // Skip model preload during init to avoid blocking - it will load on first use
-        // or can be triggered explicitly via daemon main loop after Ready state
         spdlog::info("Model preload deferred until after initialization completes");
         writeBootstrapStatusFile(self->config_, self->state_);
         co_return Result<size_t>(loaded_count);
@@ -2947,8 +2974,7 @@ void ServiceManager::preloadPreferredModelIfConfigured() {
             spdlog::debug("preloadPreferredModelIfConfigured: no model provider available");
             return;
         }
-        // Resolve preferred model via config/env (fallback scans will still handle install
-        // presence)
+
         std::string preferred = resolvePreferredModel();
         if (preferred.empty()) {
             spdlog::info("Model preload skipped: no preferred model configured (set "
@@ -3212,7 +3238,7 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
     app::services::AppContext ctx;
     ctx.service_manager = const_cast<ServiceManager*>(this);
     ctx.store = contentStore_;
-    ctx.searchExecutor = searchExecutor_;
+    ctx.searchExecutor = std::atomic_load(&searchExecutor_);
     ctx.metadataRepo = metadataRepo_;
     ctx.hybridEngine = getSearchEngineSnapshot();
     ctx.kgStore = this->kgStore_; // PBI-043: tree diff KG integration
@@ -3280,7 +3306,7 @@ size_t ServiceManager::getWorkerQueueDepth() const {
 
 ServiceManager::SearchLoadMetrics ServiceManager::getSearchLoadMetrics() const {
     SearchLoadMetrics metrics;
-    auto exec = searchExecutor_;
+    auto exec = std::atomic_load(&searchExecutor_);
     if (!exec)
         return metrics;
     auto load = exec->getLoadMetrics();
@@ -3298,7 +3324,7 @@ ServiceManager::SearchLoadMetrics ServiceManager::getSearchLoadMetrics() const {
 }
 
 bool ServiceManager::applySearchConcurrencyTarget(std::size_t target) {
-    auto exec = searchExecutor_;
+    auto exec = std::atomic_load(&searchExecutor_);
     if (!exec)
         return false;
     try {
@@ -3616,7 +3642,8 @@ ServiceManager::co_initSearchEngine(boost::asio::any_io_executor exec,
         searchEngine_ = engine;
 
         // Create search executor
-        searchExecutor_ = std::make_shared<yams::search::SearchExecutor>(database_, metadataRepo_);
+        std::atomic_store(&searchExecutor_,
+                          std::make_shared<yams::search::SearchExecutor>(database_, metadataRepo_));
 
         // Mark readiness
         state_.readiness.searchEngineReady.store(true);

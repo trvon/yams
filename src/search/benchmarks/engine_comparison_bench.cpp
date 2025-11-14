@@ -35,7 +35,8 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 #include <yams/search/hybrid_search_engine.h>
-#include <yams/search/search_engine.h> // New engine
+#include <yams/search/search_engine.h>         // New engine
+#include <yams/search/search_engine_builder.h> // For MetadataKeywordAdapter
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
 #include <yams/vector/vector_index_manager.h>
@@ -258,10 +259,39 @@ private:
     void setupEngines() {
         spdlog::info("Setting up search engines");
 
-        // Setup HybridSearchEngine
-        // Note: HybridSearchEngine requires KeywordSearchEngine + VectorIndexManager
-        // For this benchmark, we'll focus on the new engine since HybridSearchEngine
-        // has complex dependencies that would require full daemon setup
+        // Setup HybridSearchEngine with MetadataKeywordAdapter
+        auto keywordAdapter = std::make_shared<yams::search::MetadataKeywordAdapter>(metadataRepo_);
+
+        // Create a minimal VectorIndexManager (required by HybridSearchEngine)
+        yams::vector::IndexConfig vectorConfig;
+        vectorConfig.dimension = 384;                      // Minimal dimension
+        vectorConfig.type = yams::vector::IndexType::FLAT; // Simplest index
+        vectorConfig.max_elements = 100;                   // Small capacity for benchmark
+        vectorConfig.enable_persistence = false;           // No persistence needed
+        auto vectorIndex = std::make_shared<yams::vector::VectorIndexManager>(vectorConfig);
+        auto vectorInitResult = vectorIndex->initialize();
+        if (!vectorInitResult) {
+            spdlog::warn("VectorIndexManager initialization failed: {}",
+                         vectorInitResult.error().message);
+        }
+
+        yams::search::HybridSearchConfig hybridConfig;
+        hybridConfig.keyword_weight = 1.0f; // 100% keyword weight for keyword-only testing
+        hybridConfig.vector_weight = 0.0f;  // 0% vector weight
+        hybridConfig.final_top_k = config_.topK;
+
+        hybridEngine_ = std::make_shared<yams::search::HybridSearchEngine>(
+            vectorIndex, keywordAdapter, hybridConfig,
+            nullptr // embeddingGen - not needed
+        );
+
+        auto initResult = hybridEngine_->initialize();
+        if (!initResult) {
+            spdlog::warn("HybridSearchEngine initialization failed: {}",
+                         initResult.error().message);
+        } else {
+            spdlog::info("HybridSearchEngine initialized successfully");
+        }
 
         // Setup new SearchEngine
         yams::search::SearchEngineConfig searchConfig;
@@ -512,6 +542,124 @@ static void BM_NewEngine_Statistics(benchmark::State& state) {
     state.counters["avg_query_time_us"] = stats.avgQueryTimeMicros.load();
 }
 BENCHMARK(BM_NewEngine_Statistics);
+
+// ============================================================================
+// Benchmarks - Old HybridSearchEngine (for comparison)
+// ============================================================================
+
+static void BM_OldEngine_Search(benchmark::State& state) {
+    EnsureFixture();
+    auto* engine = g_fixture->getHybridEngine();
+    const auto& config = g_fixture->getConfig();
+
+    if (!engine) {
+        state.SkipWithError("Hybrid engine not available");
+        return;
+    }
+
+    // Warmup
+    for (int i = 0; i < config.warmup; ++i) {
+        auto result = engine->search(config.query, config.topK);
+        benchmark::DoNotOptimize(result);
+    }
+
+    // Benchmark
+    for (auto _ : state) {
+        auto start = std::chrono::high_resolution_clock::now();
+        auto result = engine->search(config.query, config.topK);
+        auto end = std::chrono::high_resolution_clock::now();
+
+        benchmark::DoNotOptimize(result);
+
+        auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+        state.SetIterationTime(elapsed.count() / 1000000.0); // Convert to seconds
+
+        if (result && !result.value().empty()) {
+            state.counters["results"] = result.value().size();
+        }
+    }
+
+    state.SetItemsProcessed(state.iterations());
+    state.counters["queries_per_sec"] =
+        benchmark::Counter(state.iterations(), benchmark::Counter::kIsRate);
+}
+BENCHMARK(BM_OldEngine_Search)->UseManualTime();
+
+static void BM_OldEngine_Statistics(benchmark::State& state) {
+    EnsureFixture();
+    auto* engine = g_fixture->getHybridEngine();
+    const auto& config = g_fixture->getConfig();
+
+    if (!engine) {
+        state.SkipWithError("Hybrid engine not available");
+        return;
+    }
+
+    // Run searches
+    size_t totalResults = 0;
+    size_t successfulQueries = 0;
+    size_t failedQueries = 0;
+
+    for (auto _ : state) {
+        auto result = engine->search(config.query, config.topK);
+        benchmark::DoNotOptimize(result);
+
+        if (result) {
+            successfulQueries++;
+            totalResults += result.value().size();
+        } else {
+            failedQueries++;
+        }
+    }
+
+    state.counters["total_queries"] = state.iterations();
+    state.counters["successful_queries"] = successfulQueries;
+    state.counters["failed_queries"] = failedQueries;
+    state.counters["avg_results"] = static_cast<double>(totalResults) / state.iterations();
+}
+BENCHMARK(BM_OldEngine_Statistics);
+
+// ============================================================================
+// Head-to-Head Comparison
+// ============================================================================
+
+static void BM_Comparison_BothEngines(benchmark::State& state) {
+    EnsureFixture();
+    auto* oldEngine = g_fixture->getHybridEngine();
+    auto* newEngine = g_fixture->getNewEngine();
+    const auto& config = g_fixture->getConfig();
+
+    if (!oldEngine || !newEngine) {
+        state.SkipWithError("Both engines must be available for comparison");
+        return;
+    }
+
+    bool testOldEngine = (state.range(0) == 0);
+
+    for (auto _ : state) {
+        auto start = std::chrono::high_resolution_clock::now();
+
+        if (testOldEngine) {
+            auto result = oldEngine->search(config.query, config.topK);
+            benchmark::DoNotOptimize(result);
+        } else {
+            auto result = newEngine->search(config.query);
+            benchmark::DoNotOptimize(result);
+        }
+
+        auto end = std::chrono::high_resolution_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+        state.SetIterationTime(elapsed.count() / 1000000.0);
+    }
+
+    state.SetLabel(testOldEngine ? "HybridSearchEngine" : "SearchEngine");
+    state.counters["queries_per_sec"] =
+        benchmark::Counter(state.iterations(), benchmark::Counter::kIsRate);
+}
+BENCHMARK(BM_Comparison_BothEngines)
+    ->Arg(0) // Old engine
+    ->Arg(1) // New engine
+    ->UseManualTime();
 
 // ============================================================================
 // Cleanup
