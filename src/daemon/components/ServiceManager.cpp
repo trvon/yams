@@ -48,7 +48,6 @@
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
-#include <yams/daemon/components/WorkerPool.h>
 #include <yams/daemon/ipc/retrieval_session.h>
 
 #include <yams/daemon/resource/abi_content_extractor_adapter.h>
