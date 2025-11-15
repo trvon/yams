@@ -12,4 +12,4 @@
 	url = git@github.com:trvon/sqlite-vec-cpp.git
 [submodule "external/yams-repo"]
 	path = external/yams-repo
-	url = git@github.com:trvon/yams-repo
+	url = https://github.com/trvon/yams-repo.git

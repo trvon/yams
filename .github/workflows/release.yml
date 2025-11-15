@@ -1089,7 +1089,19 @@ jobs:
           mkdir -p "$TAP_PATH/Formula"
           cp homebrew/yams.rb "$TAP_PATH/Formula/yams.rb"
           pushd "$TAP_PATH" >/dev/null
-          git checkout -B "update/formula-v${VERSION}"
+          
+          # Fetch latest to ensure we have up-to-date main
+          if [ -n "${HOMEBREW_TAP_TOKEN:-}" ]; then
+            REMOTE="https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${{ github.repository_owner }}/homebrew-yams.git"
+            git remote add tap-origin "$REMOTE" 2>/dev/null || git remote set-url tap-origin "$REMOTE"
+            git fetch tap-origin main
+            git checkout main
+            git reset --hard tap-origin/main
+          else
+            git checkout main
+            git pull --ff-only 2>/dev/null || true
+          fi
+          
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/yams.rb || true
@@ -1100,8 +1112,7 @@ jobs:
           fi
           git commit -m "chore(homebrew): update formula to v${VERSION}"
           if [ -n "${HOMEBREW_TAP_TOKEN:-}" ]; then
-            REMOTE="https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${{ github.repository_owner }}/homebrew-yams.git"
-            git push --set-upstream "$REMOTE" "update/formula-v${VERSION}" || echo "Push failed; ensure HOMEBREW_TAP_TOKEN has repo permissions"
+            git push tap-origin main || echo "Push failed; ensure HOMEBREW_TAP_TOKEN has repo permissions"
           else
             echo "HOMEBREW_TAP_TOKEN not set; manual push required" >&2
           fi
