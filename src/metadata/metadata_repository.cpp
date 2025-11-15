@@ -6,9 +6,12 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <limits>
+#include <optional>
 #include <span>
 #include <sstream>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <yams/common/utf8_utils.h>
@@ -3798,11 +3801,34 @@ MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, i
 
         auto start = std::chrono::high_resolution_clock::now();
 
-        for (const auto& fuzzyResult : fuzzyResults) {
-            int64_t docId = 0;
+        auto parseDocId = [](const std::string& token) -> std::optional<int64_t> {
+            if (token.empty()) {
+                return std::nullopt;
+            }
+            std::size_t len = 0;
+            while (len < token.size() && std::isdigit(static_cast<unsigned char>(token[len]))) {
+                ++len;
+            }
+            if (len == 0) {
+                return std::nullopt;
+            }
             try {
-                docId = std::stoll(fuzzyResult.id);
+                return std::stoll(token.substr(0, len));
             } catch (...) {
+                return std::nullopt;
+            }
+        };
+
+        std::unordered_set<int64_t> seenDocIds;
+
+        for (const auto& fuzzyResult : fuzzyResults) {
+            auto docIdOpt = parseDocId(fuzzyResult.id);
+            if (!docIdOpt.has_value()) {
+                continue;
+            }
+            int64_t docId = *docIdOpt;
+
+            if (!seenDocIds.insert(docId).second) {
                 continue;
             }
 
@@ -3882,7 +3908,6 @@ Result<void> MetadataRepository::buildFuzzyIndex() {
             -- Prioritize: tagged > KG-connected > recent > code files > rest
             ORDER BY (tag_count * 3 + entity_count * 2 + recency_score + code_boost) DESC, 
                      indexed_time DESC
-            LIMIT 50000
         )");
 
         if (!stmtResult)
@@ -3890,10 +3915,47 @@ Result<void> MetadataRepository::buildFuzzyIndex() {
 
         Statement stmt = std::move(stmtResult).value();
 
+        constexpr size_t kSafetyBufferEntries = 2048;
         size_t docsAdded = 0;
-        // Allow override via environment variable for large repos
-        const char* envLimit = std::getenv("YAMS_FUZZY_INDEX_LIMIT");
-        const size_t MAX_DOCS = envLimit ? std::stoul(envLimit) : 50000;
+        size_t guardLimit = std::numeric_limits<size_t>::max();
+        std::optional<size_t> configuredLimit;
+
+        if (const char* envLimit = std::getenv("YAMS_FUZZY_INDEX_LIMIT"); envLimit && *envLimit) {
+            try {
+                auto parsed = static_cast<size_t>(std::stoull(envLimit));
+                if (parsed > 0) {
+                    configuredLimit = parsed;
+                    if (parsed > std::numeric_limits<size_t>::max() - kSafetyBufferEntries) {
+                        guardLimit = std::numeric_limits<size_t>::max();
+                    } else {
+                        guardLimit = parsed + kSafetyBufferEntries;
+                    }
+                }
+            } catch (...) {
+                spdlog::warn("Invalid YAMS_FUZZY_INDEX_LIMIT '{}', ignoring", envLimit);
+            }
+        }
+
+        auto guardTriggered = [&](size_t count) {
+            return guardLimit != std::numeric_limits<size_t>::max() && count >= guardLimit;
+        };
+
+        bool guardHit = false;
+        auto stopIfGuarded = [&](const char* phase) {
+            if (guardHit || !guardTriggered(docsAdded)) {
+                return guardHit;
+            }
+            guardHit = true;
+            if (configuredLimit) {
+                spdlog::warn("Fuzzy index stopped after {} entries while {} (configured limit {} + "
+                             "{} entry safety buffer)",
+                             docsAdded, phase, configuredLimit.value(), kSafetyBufferEntries);
+            } else {
+                spdlog::warn("Fuzzy index stopped after {} entries while {} to protect memory",
+                             docsAdded, phase);
+            }
+            return true;
+        };
 
         while (true) {
             auto stepResult = stmt.step();
@@ -3902,9 +3964,7 @@ Result<void> MetadataRepository::buildFuzzyIndex() {
             if (!stepResult.value())
                 break;
 
-            // Safety check: stop if we're approaching memory limits
-            if (docsAdded >= MAX_DOCS) {
-                spdlog::warn("Fuzzy index limited to {} documents for memory safety", MAX_DOCS);
+            if (stopIfGuarded("scanning ranked documents")) {
                 break;
             }
 
@@ -3934,9 +3994,13 @@ Result<void> MetadataRepository::buildFuzzyIndex() {
             try {
                 fuzzySearchIndex_->addDocument(std::to_string(id), fileName, keywords);
                 docsAdded++;
+                if (stopIfGuarded("indexing document metadata")) {
+                    break;
+                }
             } catch (const std::bad_alloc& e) {
                 spdlog::error("Memory exhausted building fuzzy index at {} documents, stopping",
                               docsAdded);
+                guardHit = true;
                 break;
             }
             // std::cerr << "[DEBUG] Added doc " << id << " with title '" << fileName << "' and " <<
@@ -3995,69 +4059,86 @@ Result<void> MetadataRepository::buildFuzzyIndex() {
                     fuzzySearchIndex_->addDocument(std::to_string(id) + "_content", contentPreview,
                                                    contentKeywords);
                     docsAdded++;
+                    if (stopIfGuarded("indexing document content")) {
+                        break;
+                    }
                 } catch (const std::bad_alloc& e) {
                     spdlog::warn("Memory limit reached adding content entries, skipping remaining");
+                    guardHit = true;
                     break;
                 }
             }
 
             // Check if we've hit the limit
-            if (docsAdded >= MAX_DOCS) {
+            if (stopIfGuarded("indexing ranked documents")) {
                 break;
             }
         }
 
-        // Also query metadata tags
-        auto tagStmtResult = db.prepare(R"(
-            SELECT document_id, value
-            FROM metadata
-            WHERE key = 'tag'
-        )");
+        if (!guardHit) {
+            // Also query metadata tags
+            auto tagStmtResult = db.prepare(R"(
+                SELECT document_id, value
+                FROM metadata
+                WHERE key = 'tag'
+            )");
 
-        if (tagStmtResult) {
-            Statement tagStmt = std::move(tagStmtResult).value();
+            if (tagStmtResult) {
+                Statement tagStmt = std::move(tagStmtResult).value();
 
-            std::unordered_map<int64_t, std::vector<std::string>> docTags;
+                std::unordered_map<int64_t, std::vector<std::string>> docTags;
 
-            while (true) {
-                auto stepResult = tagStmt.step();
-                if (!stepResult || !stepResult.value())
-                    break;
+                while (true) {
+                    auto stepResult = tagStmt.step();
+                    if (!stepResult || !stepResult.value())
+                        break;
 
-                int64_t docId = tagStmt.getInt64(0);
-                std::string tag = tagStmt.getString(1);
-                docTags[docId].push_back(tag);
-            }
-
-            // Update documents with tags (respecting limit)
-            for (const auto& [docId, tags] : docTags) {
-                if (docsAdded >= MAX_DOCS) {
-                    spdlog::info("Fuzzy index reached {} document limit, skipping remaining tags",
-                                 MAX_DOCS);
-                    break;
+                    int64_t docId = tagStmt.getInt64(0);
+                    std::string tag = tagStmt.getString(1);
+                    docTags[docId].push_back(tag);
                 }
 
-                auto docResult = getDocument(docId);
-                if (docResult && docResult.value().has_value()) {
-                    auto doc = docResult.value().value();
-                    try {
-                        fuzzySearchIndex_->addDocument(std::to_string(docId), doc.fileName, tags);
-                        docsAdded++;
-                    } catch (const std::bad_alloc& e) {
-                        spdlog::error("Memory exhausted adding tagged documents at {} docs",
-                                      docsAdded);
+                // Update documents with tags (respecting limit)
+                for (const auto& [docId, tags] : docTags) {
+                    if (stopIfGuarded("enriching metadata tags")) {
                         break;
+                    }
+
+                    auto docResult = getDocument(docId);
+                    if (docResult && docResult.value().has_value()) {
+                        auto doc = docResult.value().value();
+                        try {
+                            fuzzySearchIndex_->addDocument(std::to_string(docId), doc.fileName,
+                                                           tags);
+                            docsAdded++;
+                            if (stopIfGuarded("enriching metadata tags")) {
+                                break;
+                            }
+                        } catch (const std::bad_alloc& e) {
+                            spdlog::error("Memory exhausted adding tagged documents at {} docs",
+                                          docsAdded);
+                            guardHit = true;
+                            break;
+                        }
                     }
                 }
             }
+        } else {
+            spdlog::debug("Skipping tag enrichment after fuzzy index guard triggered");
         }
 
         const size_t totalDocs = fuzzySearchIndex_->getStats().documentCount;
-        if (totalDocs >= MAX_DOCS) {
-            spdlog::info("Built fuzzy index with {} documents (limited for memory safety)",
-                         totalDocs);
+        if (configuredLimit) {
+            if (guardTriggered(totalDocs)) {
+                spdlog::info("Built fuzzy index with {} entries (reached configured limit {} plus "
+                             "{} entry safety buffer)",
+                             totalDocs, configuredLimit.value(), kSafetyBufferEntries);
+            } else {
+                spdlog::info("Built fuzzy index with {} entries (configured limit {})", totalDocs,
+                             configuredLimit.value());
+            }
         } else {
-            spdlog::info("Built fuzzy index with {} documents", totalDocs);
+            spdlog::info("Built fuzzy index with {} entries", totalDocs);
         }
 
         return Result<void>();

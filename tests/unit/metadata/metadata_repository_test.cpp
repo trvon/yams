@@ -383,6 +383,31 @@ TEST_F(MetadataRepositoryTest, SearchFunctionality) {
     EXPECT_GT(results.results.size(), std::size_t{0});
 }
 
+TEST_F(MetadataRepositoryTest, FuzzySearchReturnsContentMatches) {
+    auto doc = makeDocumentWithPath(
+        "/notes/fuzzy_content.txt",
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD");
+
+    auto insertResult = repository_->insertDocument(doc);
+    ASSERT_TRUE(insertResult.has_value());
+    auto docId = insertResult.value();
+
+    constexpr char kRareTerm[] = "blorptastic";
+    auto indexResult = repository_->indexDocumentContent(
+        docId, doc.fileName, std::string("The ") + kRareTerm, "text/plain");
+    ASSERT_TRUE(indexResult.has_value());
+
+    // Build the fuzzy index so the content-based entry is materialized.
+    ASSERT_TRUE(repository_->buildFuzzyIndex().has_value());
+
+    auto fuzzyResult = repository_->fuzzySearch(kRareTerm, 0.6f, 10);
+    ASSERT_TRUE(fuzzyResult.has_value());
+
+    const auto& searchResults = fuzzyResult.value();
+    ASSERT_EQ(searchResults.results.size(), 1u);
+    EXPECT_EQ(searchResults.results.front().document.id, docId);
+}
+
 TEST_F(MetadataRepositoryTest, SearchSanitizesSnippetUtf8) {
     DocumentInfo docInfo;
     docInfo.sha256Hash = "search_bad_utf8";

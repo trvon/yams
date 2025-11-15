@@ -435,6 +435,9 @@ enum class PruneCategory {
     SystemFlutter, // Flutter build files
     SystemDart,    // Dart build files
 
+    // Version control
+    GitArtifacts, // .git/objects, .git/logs, .git/refs
+
     // Logs and temporary
     Logs,     // .log, build logs
     Cache,    // Compiler/package manager cache
@@ -499,6 +502,8 @@ inline constexpr const char* getPruneCategoryName(PruneCategory cat) {
             return "system-flutter";
         case PruneCategory::SystemDart:
             return "system-dart";
+        case PruneCategory::GitArtifacts:
+            return "git-artifacts";
         case PruneCategory::Logs:
             return "logs";
         case PruneCategory::Cache:
@@ -576,6 +581,8 @@ inline constexpr const char* getPruneCategoryDescription(PruneCategory cat) {
             return "Flutter build files (.flutter-plugins, .dart_tool/, build/)";
         case PruneCategory::SystemDart:
             return "Dart build files (.dart_tool/, .packages, pubspec.lock)";
+        case PruneCategory::GitArtifacts:
+            return "Git internal files (.git/objects/, .git/logs/, .git/refs/)";
         case PruneCategory::Logs:
             return "Build and test logs (.log, meson-log.txt)";
         case PruneCategory::Cache:
@@ -686,6 +693,23 @@ inline PruneCategory getPruneCategory(std::string_view filename, std::string_vie
     if (extLower == "deb" || extLower == "rpm" || extLower == "apk" || extLower == "ipa" ||
         extLower == "pkg" || extLower == "msi") {
         return PruneCategory::Packages;
+    }
+
+    // === Git Artifacts ===
+    // Match .git/objects/*, .git/logs/*, .git/refs/*, .git/hooks/*, etc.
+    if (filenameLower.find(".git/objects/") != std::string::npos ||
+        filenameLower.find(".git/logs/") != std::string::npos ||
+        filenameLower.find(".git/refs/") != std::string::npos ||
+        filenameLower.find(".git/hooks/") != std::string::npos ||
+        filenameLower.find(".git/info/") != std::string::npos ||
+        filenameLower.find(".git/branches/") != std::string::npos ||
+        filenameLower == ".git/index" || filenameLower == ".git/packed-refs" ||
+        filenameLower == ".git/head" || filenameLower == ".git/config" ||
+        filenameLower == ".git/description" || filenameLower == ".git/fetch_head" ||
+        filenameLower == ".git/orig_head" || filenameLower == ".git/commit_editmsg" ||
+        filenameLower.find(".git/shallow") != std::string::npos ||
+        filenameLower.find(".git/commit-graph") != std::string::npos) {
+        return PruneCategory::GitArtifacts;
     }
 
     // === Logs ===

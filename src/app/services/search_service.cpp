@@ -24,9 +24,11 @@
 #include <mutex>
 #include <optional>
 #include <regex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #ifndef _WIN32
 #include <unistd.h>
@@ -1397,10 +1399,9 @@ private:
             return serviceResults;
         };
 
-        // Fuzzy or full-text via metadata repository
-        if (req.fuzzy) {
-            auto r = ctx_.metadataRepo->fuzzySearch(processedQuery, req.similarity,
-                                                    static_cast<int>(req.limit), docIds);
+        auto runFuzzySearch = [&](const SearchRequest& searchReq) -> Result<SearchResponse> {
+            auto r = ctx_.metadataRepo->fuzzySearch(processedQuery, searchReq.similarity,
+                                                    static_cast<int>(searchReq.limit), docIds);
             if (!r) {
                 return Error{ErrorCode::InternalError, "Fuzzy search failed: " + r.error().message};
             }
@@ -1413,7 +1414,7 @@ private:
             resp.executionTimeMs = res.executionTimeMs;
             resp.usedHybrid = false;
 
-            if (req.pathsOnly) {
+            if (searchReq.pathsOnly) {
                 for (const auto& item : res.results) {
                     const auto& d = item.document;
                     resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
@@ -1425,27 +1426,31 @@ private:
             resp.results = convertResults(res);
             normalizeScores(resp.results, resp.type);
             return resp;
-        } else {
-            auto r =
-                ctx_.metadataRepo->search(processedQuery, static_cast<int>(req.limit), 0, docIds);
+        };
+
+        auto runFullTextSearch = [&](const SearchRequest& searchReq,
+                                     bool allowAutoFuzzyFallback) -> Result<SearchResponse> {
+            auto r = ctx_.metadataRepo->search(processedQuery, static_cast<int>(searchReq.limit), 0,
+                                               docIds);
             if (!r) {
                 return Error{ErrorCode::InternalError,
                              "Full-text search failed: " + r.error().message};
             }
 
             const auto& res = r.value();
-            if (!req.fuzzy && res.totalCount == 0) {
-                SearchRequest req2 = req;
-                req2.fuzzy = true;
-                return metadataSearch(req2, telemetry);
+            if (allowAutoFuzzyFallback && res.totalCount == 0) {
+                SearchRequest fallbackReq = searchReq;
+                fallbackReq.fuzzy = true;
+                return runFuzzySearch(fallbackReq);
             }
+
             SearchResponse resp;
             resp.total = res.totalCount;
             resp.type = "full-text";
             resp.executionTimeMs = res.executionTimeMs;
             resp.usedHybrid = false;
 
-            if (req.pathsOnly) {
+            if (searchReq.pathsOnly) {
                 for (const auto& item : res.results) {
                     const auto& d = item.document;
                     resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
@@ -1457,7 +1462,62 @@ private:
             resp.results = convertResults(res);
             normalizeScores(resp.results, resp.type);
             return resp;
+        };
+
+        // Fuzzy or full-text via metadata repository. When the caller enables fuzzy, run both
+        // searches and merge so literal/BM25 hits are never dropped.
+        if (!req.fuzzy) {
+            return runFullTextSearch(req, true);
         }
+
+        auto keywordReq = req;
+        keywordReq.fuzzy = false;
+        auto keywordResults = runFullTextSearch(keywordReq, false);
+        auto fuzzyResults = runFuzzySearch(req);
+
+        if (!keywordResults && !fuzzyResults) {
+            return fuzzyResults.error();
+        }
+        if (!keywordResults) {
+            return fuzzyResults;
+        }
+        if (!fuzzyResults) {
+            return keywordResults;
+        }
+
+        auto combined = keywordResults.value();
+        combined.type = "full-text+fuzzy";
+        combined.executionTimeMs =
+            std::max(combined.executionTimeMs, fuzzyResults.value().executionTimeMs);
+
+        if (req.pathsOnly) {
+            std::unordered_set<std::string> seen(combined.paths.begin(), combined.paths.end());
+            for (const auto& path : fuzzyResults.value().paths) {
+                if (seen.insert(path).second) {
+                    combined.paths.push_back(path);
+                }
+            }
+            if (req.limit > 0 && combined.paths.size() > req.limit) {
+                combined.paths.resize(req.limit);
+            }
+            combined.total = combined.paths.size();
+            return combined;
+        }
+
+        std::unordered_set<int64_t> seenIds;
+        for (const auto& item : combined.results) {
+            seenIds.insert(item.id);
+        }
+        for (const auto& item : fuzzyResults.value().results) {
+            if (seenIds.insert(item.id).second) {
+                combined.results.push_back(item);
+            }
+        }
+        if (req.limit > 0 && combined.results.size() > req.limit) {
+            combined.results.resize(req.limit);
+        }
+        combined.total = combined.results.size();
+        return combined;
     }
 };
 

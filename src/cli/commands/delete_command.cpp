@@ -172,11 +172,19 @@ public:
                         if (resp.failureCount > 0) {
                             std::cout << "Failed to delete " << resp.failureCount
                                       << " document(s):\n";
+                            bool hasCorrupted = false;
                             for (const auto& result : resp.results) {
                                 if (!result.success && !result.error.empty()) {
                                     std::cout << "  " << result.name << ": " << result.error
                                               << "\n";
+                                    if (result.error.find("Corrupted data") != std::string::npos) {
+                                        hasCorrupted = true;
+                                    }
                                 }
+                            }
+                            if (hasCorrupted && !force_) {
+                                std::cout << "\nHint: Use --force to delete corrupted entries "
+                                             "(removes metadata even if content is corrupted)\n";
                             }
                         }
 

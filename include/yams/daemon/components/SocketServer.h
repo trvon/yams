@@ -41,6 +41,7 @@ public:
         size_t workerThreads = 1; // Default 1, tuneable via TuneAdvisor
         std::chrono::milliseconds connectionTimeout{2000};
         std::chrono::milliseconds acceptBackoffMs{100};
+        std::chrono::seconds maxConnectionLifetime{300}; // 5 minutes absolute limit
     };
 
     SocketServer(const Config& config, WorkCoordinator* coordinator, RequestDispatcher* dispatcher,
@@ -65,12 +66,16 @@ public:
     uint64_t totalConnections() const { return totalConnections_.load(); }
     uint64_t connectionToken() const { return connectionToken_.load(); }
 
+    // Compute age of oldest active connection (in seconds); 0 if no connections
+    uint64_t oldestConnectionAgeSeconds() const;
+
 private:
     // Async operations
     boost::asio::awaitable<void> accept_loop();
     struct TrackedSocket {
         std::shared_ptr<boost::asio::local::stream_protocol::socket> socket;
         boost::asio::any_io_executor executor;
+        std::chrono::steady_clock::time_point created_at; // Connection creation time
     };
     boost::asio::awaitable<void> handle_connection(std::shared_ptr<TrackedSocket> tracked_socket,
                                                    uint64_t conn_token);
@@ -96,6 +101,7 @@ private:
     std::atomic<size_t> activeConnections_{0};
     std::atomic<uint64_t> totalConnections_{0};
     std::atomic<uint64_t> connectionToken_{0};
+    std::atomic<uint64_t> forcedCloseCount_{0}; // Connections closed due to lifetime exceeded
 
     std::shared_ptr<std::atomic<std::size_t>> writerBudget_;
 
@@ -107,7 +113,7 @@ private:
     yams::compat::stop_source stop_source_;
 
     // Track active connections for deterministic shutdown
-    std::mutex activeSocketsMutex_;
+    mutable std::mutex activeSocketsMutex_;
     std::vector<std::weak_ptr<TrackedSocket>> activeSockets_;
 
     // Track connection futures for graceful shutdown (PBI-066-41)

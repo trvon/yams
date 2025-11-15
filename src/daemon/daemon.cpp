@@ -212,11 +212,18 @@ Result<void> YamsDaemon::start() {
                 computed = 256ull;
             cap = computed;
         }
+        if (cap == 0)
+            cap = 1024;
         socketConfig.maxConnections = static_cast<std::size_t>(cap);
     }
 
     socketServer_ = std::make_unique<SocketServer>(
         socketConfig, serviceManager_->getWorkCoordinator(), requestDispatcher_.get(), &state_);
+
+    // Provide SocketServer to DaemonMetrics for connection age tracking
+    if (metrics_) {
+        metrics_->setSocketServer(socketServer_.get());
+    }
 
     if (auto result = socketServer_->start(); !result) {
         running_ = false;

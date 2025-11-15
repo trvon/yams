@@ -153,11 +153,21 @@ Result<void> SocketServer::start() {
 
         actualSocketPath_ = sockPath;
 
-        // Initialize bounded concurrency semaphore (PBI-066-42)
-        // Use maxConnections as the limit for natural backpressure
         connectionSlots_ = std::make_unique<std::counting_semaphore<>>(config_.maxConnections);
         spdlog::info("SocketServer: bounded concurrency enabled (max {} slots)",
                      config_.maxConnections);
+
+        if (state_) {
+            const size_t maxConn = (config_.maxConnections > 0) ? config_.maxConnections : 1024;
+            state_->stats.maxConnections.store(maxConn, std::memory_order_relaxed);
+            state_->stats.connectionSlotsFree.store(maxConn, std::memory_order_relaxed);
+            state_->stats.oldestConnectionAge.store(0, std::memory_order_relaxed);
+            state_->stats.forcedCloseCount.store(0, std::memory_order_relaxed);
+            if (maxConn == 0 || config_.maxConnections == 0) {
+                spdlog::warn("SocketServer: connection limit is 0 (config={}, using={})",
+                             config_.maxConnections, maxConn);
+            }
+        }
 
         // Seed writer budget prior to first connection
         std::size_t initialBudget = TuneAdvisor::serverWriterBudgetBytesPerTurn();
@@ -480,6 +490,11 @@ awaitable<void> SocketServer::accept_loop() {
 
             if (state_) {
                 state_->stats.activeConnections.store(current);
+                auto maxConn = state_->stats.maxConnections.load(std::memory_order_relaxed);
+                if (maxConn == 0)
+                    maxConn = 1024;
+                auto slotsFree = (current < maxConn) ? (maxConn - current) : 0;
+                state_->stats.connectionSlotsFree.store(slotsFree, std::memory_order_relaxed);
             }
 
             auto connectionExecutor = boost::asio::make_strand(coordinator_->getExecutor());
@@ -487,6 +502,8 @@ awaitable<void> SocketServer::accept_loop() {
             auto tracked = std::make_shared<TrackedSocket>();
             tracked->socket = sock;
             tracked->executor = connectionExecutor;
+            tracked->created_at =
+                std::chrono::steady_clock::now(); // Track connection creation time
             register_socket(tracked);
 
             // Spawn connection with use_future for graceful shutdown tracking (PBI-066-41)
@@ -589,6 +606,12 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
             auto current = server->activeConnections_.fetch_sub(1) - 1;
             if (server->state_) {
                 server->state_->stats.activeConnections.store(current);
+                auto maxConn = server->state_->stats.maxConnections.load(std::memory_order_relaxed);
+                if (maxConn == 0)
+                    maxConn = 1024;
+                auto slotsFree = (current < maxConn) ? (maxConn - current) : 0;
+                server->state_->stats.connectionSlotsFree.store(slotsFree,
+                                                                std::memory_order_relaxed);
             }
             auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                    std::chrono::steady_clock::now() - start_time)
@@ -685,7 +708,34 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
         // Mark IPC task as active (transitioned from pending to executing)
         ipcTracker.markActive();
 
-        co_await handler.handle_connection(sock, token, conn_token);
+        // Enforce maximum connection lifetime to prevent zombie connections
+        if (config_.maxConnectionLifetime.count() > 0) {
+            using namespace boost::asio::experimental::awaitable_operators;
+
+            boost::asio::steady_timer lifetimeTimer(sock->get_executor());
+            lifetimeTimer.expires_after(config_.maxConnectionLifetime);
+
+            auto handleOrTimeout = co_await (handler.handle_connection(sock, token, conn_token) ||
+                                             lifetimeTimer.async_wait(use_awaitable));
+
+            if (handleOrTimeout.index() == 1) {
+                // Lifetime exceeded - forcefully close
+                auto newCount = forcedCloseCount_.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (state_) {
+                    state_->stats.forcedCloseCount.store(newCount, std::memory_order_relaxed);
+                }
+                auto age_s = std::chrono::duration_cast<std::chrono::seconds>(
+                                 std::chrono::steady_clock::now() - tracked_socket->created_at)
+                                 .count();
+                spdlog::warn(
+                    "[conn={}] Connection lifetime exceeded (age={}s, limit={}s) - forcing close",
+                    conn_token, age_s, config_.maxConnectionLifetime.count());
+                boost::system::error_code ec;
+                sock->close(ec);
+            }
+        } else {
+            co_await handler.handle_connection(sock, token, conn_token);
+        }
     } catch (const std::exception& e) {
         spdlog::error("SocketServer::handle_connection error: {}", e.what());
     }
@@ -815,6 +865,28 @@ std::size_t SocketServer::close_sockets_on_executor(
     }
 
     return scheduled;
+}
+
+uint64_t SocketServer::oldestConnectionAgeSeconds() const {
+    std::lock_guard<std::mutex> lk(activeSocketsMutex_);
+    if (activeSockets_.empty()) {
+        return 0;
+    }
+
+    auto now = std::chrono::steady_clock::now();
+    uint64_t oldestAge = 0;
+
+    for (const auto& weakPtr : activeSockets_) {
+        if (auto tracked = weakPtr.lock()) {
+            auto age =
+                std::chrono::duration_cast<std::chrono::seconds>(now - tracked->created_at).count();
+            if (static_cast<uint64_t>(age) > oldestAge) {
+                oldestAge = static_cast<uint64_t>(age);
+            }
+        }
+    }
+
+    return oldestAge;
 }
 
 } // namespace yams::daemon

@@ -1370,8 +1370,8 @@ private:
                     auto& client = **leaseHandle;
 
                     {
-                        auto sres = yams::cli::run_result<StatusResponse>(
-                            client.status(), std::chrono::seconds(10));
+                        auto sres = yams::cli::run_result<StatusResponse>(client.status(),
+                                                                          std::chrono::seconds(10));
                         if (sres) {
                             cachedStatus = std::move(sres.value());
                         }
@@ -2253,11 +2253,11 @@ Result<void> DoctorCommand::applyTuningBaseline(bool apply) {
         unsigned hc = std::thread::hardware_concurrency();
         if (hc == 0)
             hc = 4;
-        uint32_t ipcMax = std::min<unsigned>(32, hc);
+        uint32_t ipcMax = std::min<unsigned>(64, hc * 2);
         uint32_t ioMax = std::min<unsigned>(32, std::max<unsigned>(1, hc / 2));
         std::map<std::string, std::string> suggestions{
             {"tuning.backpressure_read_pause_ms", "10"},
-            {"tuning.worker_poll_ms", "150"},
+            {"tuning.worker_poll_ms", "75"},
             {"tuning.idle_cpu_pct", "10.0"},
             {"tuning.idle_mux_low_bytes", "4194304"},
             {"tuning.idle_shrink_hold_ms", "5000"},
@@ -2617,6 +2617,8 @@ void DoctorCommand::runPrune() {
                          "Flutter, Dart\n";
             std::cout << "  " << yams::cli::ui::colorize("build", yams::cli::ui::Ansi::CYAN)
                       << "            - Both build-artifacts and build-system\n";
+            std::cout << "  " << yams::cli::ui::colorize("git-artifacts", yams::cli::ui::Ansi::CYAN)
+                      << "   - Git internal files (.git/objects, .git/logs, .git/refs)\n";
             std::cout << "  " << yams::cli::ui::colorize("logs", yams::cli::ui::Ansi::CYAN)
                       << "             - Build and test logs\n";
             std::cout << "  " << yams::cli::ui::colorize("cache", yams::cli::ui::Ansi::CYAN)

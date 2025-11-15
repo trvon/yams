@@ -45,6 +45,10 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             res.uptimeSeconds = snap->uptimeSeconds;
             res.requestsProcessed = snap->requestsProcessed;
             res.activeConnections = snap->activeConnections;
+            res.maxConnections = snap->maxConnections;
+            res.connectionSlotsFree = snap->connectionSlotsFree;
+            res.oldestConnectionAge = snap->oldestConnectionAge;
+            res.forcedCloseCount = snap->forcedCloseCount;
             res.memoryUsageMb = snap->memoryUsageMb;
             res.cpuUsagePercent = snap->cpuUsagePercent;
             // Resolved via DaemonMetrics: ready reflects lifecycle readiness

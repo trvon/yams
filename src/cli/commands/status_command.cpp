@@ -125,6 +125,10 @@ public:
                             j["uptimeSeconds"] = s.uptimeSeconds;
                             j["requestsProcessed"] = s.requestsProcessed;
                             j["activeConnections"] = s.activeConnections;
+                            j["maxConnections"] = s.maxConnections;
+                            j["connectionSlotsFree"] = s.connectionSlotsFree;
+                            j["oldestConnectionAge"] = s.oldestConnectionAge;
+                            j["forcedCloseCount"] = s.forcedCloseCount;
                             j["memoryUsageMb"] = s.memoryUsageMb;
                             j["cpuUsagePercent"] = s.cpuUsagePercent;
                             if (s.retryAfterMs > 0)
@@ -286,7 +290,15 @@ public:
                                 << "\n";
                             std::cout << "UP   : " << s.uptimeSeconds << "s\n";
                             std::cout << "REQ  : " << s.requestsProcessed
-                                      << "  ACT: " << s.activeConnections << "\n";
+                                      << "  ACT: " << s.activeConnections << "/" << s.maxConnections
+                                      << " (free=" << s.connectionSlotsFree;
+                            if (s.oldestConnectionAge > 0) {
+                                std::cout << ", oldest=" << s.oldestConnectionAge << "s";
+                            }
+                            if (s.forcedCloseCount > 0) {
+                                std::cout << ", forced=" << s.forcedCloseCount;
+                            }
+                            std::cout << ")\n";
                             if (s.retryAfterMs > 0) {
                                 std::cout << "BACK : retry-after=" << s.retryAfterMs << "ms\n";
                             }

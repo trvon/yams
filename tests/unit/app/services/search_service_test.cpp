@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <optional>
 #include <thread>
+#include <unordered_set>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/executor_work_guard.hpp>
@@ -478,6 +479,38 @@ TEST_F(SearchServiceTest, FuzzySearch) {
     // Fuzzy search might find documents even with typos
     // The exact behavior depends on implementation
     EXPECT_GE(result.value().total, kZeroTotal);
+}
+
+TEST_F(SearchServiceTest, FuzzySearchIncludesKeywordResults) {
+    auto keywordRequest = createBasicSearchRequest("programming");
+    keywordRequest.limit = 10;
+    keywordRequest.type = "keyword";
+
+    auto keywordResult = runAwait(searchService_->search(keywordRequest));
+    ASSERT_TRUE(keywordResult);
+    ASSERT_FALSE(keywordResult.value().results.empty())
+        << "Baseline search should return at least one document";
+
+    auto fuzzyRequest = keywordRequest;
+    fuzzyRequest.fuzzy = true;
+    fuzzyRequest.similarity = 0.7f;
+    fuzzyRequest.type = "keyword";
+
+    auto fuzzyResult = runAwait(searchService_->search(fuzzyRequest));
+    ASSERT_TRUE(fuzzyResult);
+
+    std::unordered_set<int64_t> fuzzyDocIds;
+    for (const auto& item : fuzzyResult.value().results) {
+        fuzzyDocIds.insert(item.id);
+    }
+
+    for (const auto& item : keywordResult.value().results) {
+        EXPECT_NE(fuzzyDocIds.find(item.id), fuzzyDocIds.end())
+            << "Fuzzy search omitted keyword hit for path " << item.path;
+    }
+
+    EXPECT_GE(fuzzyResult.value().results.size(), keywordResult.value().results.size())
+        << "Fuzzy search should extend keyword coverage";
 }
 
 // Search Filters

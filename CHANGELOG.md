@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Integration: `search_executor.cpp` now uses ParallelPostProcessor instead of sequential processing
     - Benchmarks: `tests/benchmarks/search_benchmarks.cpp`
 ### Changed
+### Changed
+- **Search Service**: `--fuzzy` searches now merge BM25 keyword matches with fuzzy results so enabling typo tolerance never suppresses literal hits. (`src/app/services/search_service.cpp`)
+- **Metadata Repository**: Removed the default 50K fuzzy-index cap. The index now covers the full corpus by default and only enforces limits when `YAMS_FUZZY_INDEX_LIMIT` is set, adding a small safety buffer and explicit guard logging. (`src/metadata/metadata_repository.cpp`, `include/yams/metadata/fuzzy_index_builder.h`)
 - **Service Architecture Refactor**
   - **IngestService**: Converted from manual thread pool to strand-based channel polling
     - Removed `kSyncThreshold` heuristics and `compat::jthread` pool
@@ -120,6 +123,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Performance: 2-4x speedup on large corpora
 
 ### Fixed
+- **Content-backed Fuzzy Hits**: Content-derived fuzzy matches (`_content` entries) now map back to their owning documents, ensuring CLI searches show the expected files. (`src/metadata/metadata_repository.cpp`, `tests/unit/metadata/metadata_repository_test.cpp`)
 - **Cold Start Vector Index Loading**: Fixed issue where search and grep commands returned no results after daemon cold start despite having indexed documents. 
 - **Search Async Path**: Fixed `SearchCommand::executeAsync()` not populating `pathPatterns` field in daemon request, causing server-side multi-pattern filtering to fail. The async code path (default execution) now correctly sends all include patterns to the daemon, matching the behavior of the sync path. (`src/cli/commands/search_command.cpp:1360-1365`)
 - **Database Schema Compatibility**: Fixed "constraint failed" errors during document insertion on databases with migration v12 (pre-path-indexing schema). The `insertDocument()` function now conditionally builds INSERT statements based on the `hasPathIndexing_` flag, supporting both legacy (13-column) and modern (17-column with path indexing) schemas. This allows YAMS to work correctly regardless of whether migration v13 has been applied. (`src/metadata/metadata_repository.cpp:318-380`)

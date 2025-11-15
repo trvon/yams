@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <concepts>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <ranges>
 #include <string>
@@ -59,7 +60,7 @@ struct FuzzyIndexCandidate {
 class FuzzyIndexBuilder {
 public:
     struct Options {
-        size_t maxDocuments = 50000;
+        size_t maxDocuments = std::numeric_limits<size_t>::max();
         bool includeContent = true;
         size_t maxContentLength = 5000;
         size_t maxKeywords = 100;
@@ -68,7 +69,10 @@ public:
             Options opts;
             if (const char* limit = std::getenv("YAMS_FUZZY_INDEX_LIMIT")) {
                 try {
-                    opts.maxDocuments = std::stoul(limit);
+                    auto parsed = std::stoull(limit);
+                    if (parsed > 0) {
+                        opts.maxDocuments = parsed;
+                    }
                 } catch (...) {
                     // Keep default
                 }

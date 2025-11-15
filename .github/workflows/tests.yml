@@ -269,6 +269,15 @@ jobs:
         if: ${{ !matrix.needs_rosetta }}
         shell: bash
         continue-on-error: true
+        env:
+          YAMS_TEST_SAFE_SINGLE_INSTANCE: "1"
+          YAMS_SQLITE_MINIMAL_PRAGMAS: "1"
+          YAMS_SQLITE_VEC_INIT_TIMEOUT_MS: "1500"
+          YAMS_SQLITE_BUSY_TIMEOUT_MS: "1000"
+          YAMS_VDB_IN_MEMORY: "1"
+          YAMS_SQLITE_VEC_SKIP_INIT: "1"
+          YAMS_DISABLE_VECTORS: "1"
+          YAMS_TESTING: "1"
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
             mkdir -p "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" || true
@@ -282,6 +291,15 @@ jobs:
         if: ${{ matrix.needs_rosetta }}
         shell: bash
         continue-on-error: true
+        env:
+          YAMS_TEST_SAFE_SINGLE_INSTANCE: "1"
+          YAMS_SQLITE_MINIMAL_PRAGMAS: "1"
+          YAMS_SQLITE_VEC_INIT_TIMEOUT_MS: "1500"
+          YAMS_SQLITE_BUSY_TIMEOUT_MS: "1000"
+          YAMS_VDB_IN_MEMORY: "1"
+          YAMS_SQLITE_VEC_SKIP_INIT: "1"
+          YAMS_DISABLE_VECTORS: "1"
+          YAMS_TESTING: "1"
         run: |
           # Ensure Rosetta is present (idempotent)
           softwareupdate --install-rosetta --agree-to-license || true

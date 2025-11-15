@@ -12,6 +12,7 @@
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/MetricsSnapshotRegistry.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/SocketServer.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/WorkCoordinator.h>
@@ -216,9 +217,10 @@ double readCpuUsagePercent(std::uint64_t& lastProcJiffies, std::uint64_t& lastTo
 } // namespace
 
 DaemonMetrics::DaemonMetrics(const DaemonLifecycleFsm* lifecycle, const StateComponent* state,
-                             const ServiceManager* services, WorkCoordinator* coordinator)
+                             const ServiceManager* services, WorkCoordinator* coordinator,
+                             const SocketServer* socketServer)
     : lifecycle_(lifecycle), state_(state), services_(services), coordinator_(coordinator),
-      strand_(coordinator->getExecutor()) {
+      socketServer_(socketServer), strand_(coordinator->getExecutor()) {
     cacheMs_ = TuneAdvisor::metricsCacheMs();
 }
 
@@ -492,6 +494,11 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             std::chrono::duration_cast<std::chrono::seconds>(uptime).count());
         out.requestsProcessed = state_->stats.requestsProcessed.load();
         out.activeConnections = state_->stats.activeConnections.load();
+        out.maxConnections = state_->stats.maxConnections.load();
+        out.connectionSlotsFree = state_->stats.connectionSlotsFree.load();
+        // Compute oldestConnectionAge on-demand from SocketServer (requires lock, but cached)
+        out.oldestConnectionAge = socketServer_ ? socketServer_->oldestConnectionAgeSeconds() : 0;
+        out.forcedCloseCount = state_->stats.forcedCloseCount.load();
         out.ipcTasksPending = state_->stats.ipcTasksPending.load();
         out.ipcTasksActive = state_->stats.ipcTasksActive.load();
     } catch (...) {

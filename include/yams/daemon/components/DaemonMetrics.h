@@ -35,8 +35,12 @@ struct MetricsSnapshot {
     std::size_t uptimeSeconds{0};
     std::size_t requestsProcessed{0};
     std::size_t activeConnections{0};
-    std::size_t ipcTasksPending{0}; // IPC handlers spawned but not yet started
-    std::size_t ipcTasksActive{0};  // IPC handlers currently executing
+    std::size_t maxConnections{0};      // Connection slot limit
+    std::size_t connectionSlotsFree{0}; // Available connection slots
+    uint64_t oldestConnectionAge{0};    // Age of oldest active connection (seconds)
+    uint64_t forcedCloseCount{0};       // Connections closed due to lifetime exceeded
+    std::size_t ipcTasksPending{0};     // IPC handlers spawned but not yet started
+    std::size_t ipcTasksActive{0};      // IPC handlers currently executing
     double memoryUsageMb{0.0};
     double cpuUsagePercent{0.0};
 
@@ -152,10 +156,13 @@ struct MetricsSnapshot {
     uint32_t embeddingDim{0};
 };
 
+class SocketServer; // Forward declaration
+
 class DaemonMetrics {
 public:
     DaemonMetrics(const DaemonLifecycleFsm* lifecycle, const StateComponent* state,
-                  const ServiceManager* services, WorkCoordinator* coordinator);
+                  const ServiceManager* services, WorkCoordinator* coordinator,
+                  const SocketServer* socketServer = nullptr);
     ~DaemonMetrics();
 
     // Start background polling loop to keep metrics cache hot
@@ -175,6 +182,9 @@ public:
     // Centralized embedding/ONNX provider status for stats/status callers
     EmbeddingServiceInfo getEmbeddingServiceInfo() const;
 
+    // Set SocketServer (called after SocketServer is created, which happens after DaemonMetrics)
+    void setSocketServer(const SocketServer* socketServer) { socketServer_ = socketServer; }
+
 private:
     boost::asio::awaitable<void> pollingLoop(); // Background polling loop
 
@@ -182,6 +192,7 @@ private:
     const StateComponent* state_;
     const ServiceManager* services_;
     WorkCoordinator* coordinator_;
+    const SocketServer* socketServer_;
     boost::asio::strand<boost::asio::io_context::executor_type> strand_;
 
     // Lightweight memoization to avoid repeated /proc reads; 0 disables caching

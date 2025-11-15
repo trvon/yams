@@ -42,6 +42,8 @@ struct AsioConnection {
     std::atomic<bool> alive{false};
     std::atomic<bool> streaming_started{false};
     std::atomic<bool> in_use{false};
+    std::chrono::steady_clock::time_point created_at{std::chrono::steady_clock::now()};
+    std::chrono::steady_clock::time_point last_used{std::chrono::steady_clock::now()};
     std::future<void> read_loop_future;
 
     struct UnaryHandler {
@@ -80,6 +82,19 @@ struct AsioConnection {
     std::chrono::steady_clock::time_point last_adjust{std::chrono::steady_clock::now()};
 
     boost::asio::awaitable<Result<void>> async_write_frame(std::vector<uint8_t> frame);
+
+    bool is_stale(std::chrono::seconds max_age = std::chrono::seconds{270},
+                  std::chrono::seconds max_idle = std::chrono::seconds{60}) const {
+        if (!alive.load(std::memory_order_relaxed) || !socket || !socket->is_open()) {
+            return true;
+        }
+        auto now = std::chrono::steady_clock::now();
+        auto age = std::chrono::duration_cast<std::chrono::seconds>(now - created_at);
+        auto idle = std::chrono::duration_cast<std::chrono::seconds>(now - last_used);
+        return age > max_age || idle > max_idle;
+    }
+
+    void mark_used() { last_used = std::chrono::steady_clock::now(); }
 };
 
 } // namespace yams::daemon

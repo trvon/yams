@@ -1227,9 +1227,20 @@ private:
                                     : std::string{"stopped"}});
             overview.push_back({"Version", s.version.empty() ? "unknown" : s.version, ""});
             overview.push_back({"Uptime", formatDuration(s.uptimeSeconds), ""});
-            overview.push_back(
-                {"Requests", std::to_string(s.requestsProcessed),
-                 std::string{"active connections: "} + std::to_string(s.activeConnections)});
+            std::string connInfo =
+                std::to_string(s.activeConnections) + "/" + std::to_string(s.maxConnections);
+            if (s.connectionSlotsFree > 0) {
+                connInfo += " (" + std::to_string(s.connectionSlotsFree) + " free";
+                if (s.oldestConnectionAge > 0) {
+                    connInfo += ", oldest " + std::to_string(s.oldestConnectionAge) + "s";
+                }
+                if (s.forcedCloseCount > 0) {
+                    connInfo += ", " + std::to_string(s.forcedCloseCount) + " forced";
+                }
+                connInfo += ")";
+            }
+            overview.push_back({"Requests", std::to_string(s.requestsProcessed),
+                                std::string{"active connections: "} + connInfo});
             if (s.retryAfterMs > 0) {
                 overview.push_back(
                     {"Backpressure",

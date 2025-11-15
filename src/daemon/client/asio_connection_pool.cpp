@@ -182,13 +182,24 @@ void AsioConnectionPool::shutdown_all(std::chrono::milliseconds timeout) {
 }
 
 void AsioConnectionPool::cleanup_stale_connections() {
-    // Remove dead/closed connections from pool (lock must be held by caller)
     connection_pool_.erase(
         std::ranges::remove_if(connection_pool_,
                                [](const std::weak_ptr<AsioConnection>& weak) {
                                    auto conn = weak.lock();
-                                   return !conn || !conn->alive.load(std::memory_order_relaxed) ||
-                                          !conn->socket || !conn->socket->is_open();
+                                   if (!conn)
+                                       return true;
+
+                                   if (conn->is_stale()) {
+                                       if (conn->alive.load(std::memory_order_relaxed)) {
+                                           conn->alive.store(false, std::memory_order_relaxed);
+                                           if (conn->socket && conn->socket->is_open()) {
+                                               boost::system::error_code ec;
+                                               conn->socket->close(ec);
+                                           }
+                                       }
+                                       return true;
+                                   }
+                                   return false;
                                })
             .begin(),
         connection_pool_.end());
@@ -199,7 +210,6 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::acquire() {
         co_return co_await create_connection();
     }
 
-    // Try to find an existing alive, open connection from the pool (allow concurrent sharing)
     std::shared_ptr<AsioConnection> existing;
     {
         std::lock_guard<std::mutex> lk(mutex_);
@@ -207,22 +217,37 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::acquire() {
 
         for (auto& weak : connection_pool_) {
             if (auto conn = weak.lock()) {
+                if (conn->is_stale()) {
+                    continue;
+                }
+
                 if (conn->alive.load(std::memory_order_relaxed) && conn->socket &&
                     conn->socket->is_open()) {
-                    // Additional validation: check if socket is really alive
-                    // by peeking at the receive buffer (non-blocking)
                     boost::system::error_code ec;
-                    char peek_buf[1];
                     conn->socket->native_non_blocking(true, ec);
                     if (!ec) {
-                        auto avail = conn->socket->available(ec);
-                        // If available() fails with error, socket is likely dead
-                        if (!ec || ec == boost::asio::error::would_block) {
+                        char peek_buf[1];
+                        auto bytes_peeked =
+                            conn->socket->receive(boost::asio::buffer(peek_buf, 1),
+                                                  boost::asio::socket_base::message_peek, ec);
+
+                        if (ec == boost::asio::error::eof ||
+                            ec == boost::asio::error::connection_reset ||
+                            ec == boost::asio::error::broken_pipe) {
+                            conn->alive.store(false, std::memory_order_relaxed);
+                            spdlog::debug("Stale connection detected ({}), marking dead",
+                                          ec.message());
+                            continue;
+                        }
+
+                        if (!ec || ec == boost::asio::error::would_block || bytes_peeked > 0) {
+                            conn->mark_used();
                             existing = conn;
                             break;
                         }
-                        // Socket has an error - mark as dead
+
                         conn->alive.store(false, std::memory_order_relaxed);
+                        spdlog::debug("Connection error detected ({}), marking dead", ec.message());
                     }
                 }
             }
@@ -439,6 +464,7 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                         co_return;
                     }
                     auto& msg = msgRes.value();
+                    conn->mark_used();
                     static std::atomic<bool> warned{false};
                     if (!warned.load()) {
                         if (msg.version < PROTOCOL_VERSION) {

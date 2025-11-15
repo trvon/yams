@@ -2984,6 +2984,10 @@ struct StatusResponse {
     size_t uptimeSeconds;
     size_t requestsProcessed;
     size_t activeConnections;
+    size_t maxConnections{0};        // Connection slot limit
+    size_t connectionSlotsFree{0};   // Available connection slots
+    uint64_t oldestConnectionAge{0}; // Age of oldest active connection (seconds)
+    uint64_t forcedCloseCount{0};    // Connections closed due to lifetime exceeded
     double memoryUsageMb;
     double cpuUsagePercent;
     std::string version;
@@ -3206,6 +3210,8 @@ struct StatusResponse {
     void serialize(Serializer& ser) const {
         ser << running << ready << static_cast<uint64_t>(uptimeSeconds)
             << static_cast<uint64_t>(requestsProcessed) << static_cast<uint64_t>(activeConnections)
+            << static_cast<uint64_t>(maxConnections) << static_cast<uint64_t>(connectionSlotsFree)
+            << static_cast<uint64_t>(oldestConnectionAge) << static_cast<uint64_t>(forcedCloseCount)
             << memoryUsageMb << cpuUsagePercent << version << static_cast<uint64_t>(fsmTransitions)
             << static_cast<uint64_t>(fsmHeaderReads) << static_cast<uint64_t>(fsmPayloadReads)
             << static_cast<uint64_t>(fsmPayloadWrites) << static_cast<uint64_t>(fsmBytesSent)
@@ -3294,6 +3300,26 @@ struct StatusResponse {
         if (!connectionsResult)
             return connectionsResult.error();
         res.activeConnections = connectionsResult.value();
+
+        auto maxConnsResult = deser.template read<uint64_t>();
+        if (!maxConnsResult)
+            return maxConnsResult.error();
+        res.maxConnections = maxConnsResult.value();
+
+        auto slotsFreeResult = deser.template read<uint64_t>();
+        if (!slotsFreeResult)
+            return slotsFreeResult.error();
+        res.connectionSlotsFree = slotsFreeResult.value();
+
+        auto oldestAgeResult = deser.template read<uint64_t>();
+        if (!oldestAgeResult)
+            return oldestAgeResult.error();
+        res.oldestConnectionAge = oldestAgeResult.value();
+
+        auto forcedCloseResult = deser.template read<uint64_t>();
+        if (!forcedCloseResult)
+            return forcedCloseResult.error();
+        res.forcedCloseCount = forcedCloseResult.value();
 
         auto memoryResult = deser.template read<double>();
         if (!memoryResult)
