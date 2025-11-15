@@ -35,6 +35,15 @@ struct AsioConnection {
           strand(o.executor ? *o.executor
                             : GlobalIOContext::instance().get_io_context().get_executor()) {}
 
+    ~AsioConnection() {
+        alive.store(false, std::memory_order_release);
+        if (socket && socket->is_open()) {
+            boost::system::error_code ec;
+            socket->cancel(ec);
+            socket->close(ec);
+        }
+    }
+
     TransportOptions opts;
     boost::asio::strand<boost::asio::any_io_executor> strand;
     std::unique_ptr<socket_t> socket;

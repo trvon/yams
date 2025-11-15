@@ -58,13 +58,6 @@ if tests_has_cli
     'cli/add_command_stdin_test.cpp',
     'cli/grep_command_path_tree_test.cpp',
   )
-
-  if get_option('enable-tui')
-    unit_cli += files(
-      'cli/highlight_utils_test.cpp',
-      # Excluded: test_tui_services.cpp has its own main() - it's a standalone test
-    )
-  endif
 endif
 
 unit_compression = files(

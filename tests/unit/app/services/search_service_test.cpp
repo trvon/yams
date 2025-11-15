@@ -630,6 +630,10 @@ TEST_F(SearchServiceTest, PathsOnlyFallbackHandlesLargeCorpora) {
 }
 
 TEST_F(SearchServiceTest, HybridSearch) {
+    if (!appContext_.hybridEngine) {
+        GTEST_SKIP() << "Hybrid search engine not available in this configuration";
+    }
+
     auto request = createBasicSearchRequest("python programming");
     request.type = "hybrid";
 

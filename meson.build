@@ -142,7 +142,6 @@ configure_file(
 
 yams_build_cli = get_option('build-cli')
 yams_build_mcp = get_option('build-mcp-server')
-yams_enable_tui = get_option('enable-tui')
 
 # Install public headers under the compiler's include prefix without duplicating
 # the top-level 'include' directory (was producing prefix/include/include/...).
@@ -211,7 +210,6 @@ summary({
   'cpp_std': get_option('cpp_std'),
   'build_cli': yams_build_cli,
   'build_mcp_server': yams_build_mcp,
-  'enable_tui': yams_enable_tui,
 }, section: 'YAMS Meson configuration', bool_yn: true)
 
 if get_option('b_coverage')

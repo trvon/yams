@@ -179,28 +179,26 @@ void RepairCoordinator::start() {
     if (!cfg_.enable || running_.exchange(true)) {
         return;
     }
-    // Initialize maintenance tokens based on config
     tokens_.store(cfg_.maintenanceTokens);
     shutdownState_->finished.store(false, std::memory_order_relaxed);
     shutdownState_->running.store(true, std::memory_order_relaxed);
+    shutdownState_->config = cfg_;
 
     auto exec = RepairThreadPool::instance().get_executor();
-    // Capture shared_ptr to shutdown state - do NOT capture this
     auto shutdownState = shutdownState_;
-    auto* self = this; // Capture raw pointer - we guarantee lifetime via stop()
+    auto* self = this;
 
     boost::asio::co_spawn(
         exec,
         [self, shutdownState]() -> boost::asio::awaitable<void> {
             spdlog::debug("RepairCoordinator coroutine starting");
             try {
-                // Only proceed if still running
                 if (!shutdownState->running.load(std::memory_order_acquire)) {
                     spdlog::debug(
                         "RepairCoordinator coroutine - already stopped, exiting immediately");
                     co_return;
                 }
-                co_await self->runAsync();
+                co_await self->runAsync(shutdownState);
                 spdlog::debug("RepairCoordinator coroutine - runAsync completed");
             } catch (const std::exception& e) {
                 spdlog::error("RepairCoordinator coroutine exception: {}", e.what());
@@ -340,14 +338,15 @@ void RepairCoordinator::onDocumentRemoved(const DocumentRemovedEvent& event) {
     spdlog::debug("RepairCoordinator: document {} removed", event.hash);
 }
 
-boost::asio::awaitable<void> RepairCoordinator::runAsync() {
+boost::asio::awaitable<void>
+RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
     using namespace std::chrono_literals;
     auto ex = co_await boost::asio::this_coro::executor;
     boost::asio::steady_timer timer(ex);
 
     core::RepairFsm::Config fsmConfig;
     fsmConfig.enable_online_repair = true;
-    fsmConfig.max_repair_concurrency = cfg_.maintenanceTokens;
+    fsmConfig.max_repair_concurrency = shutdownState->config.maintenanceTokens;
     fsmConfig.repair_backoff_ms = 250;
     fsmConfig.max_retries = 3;
 
@@ -510,7 +509,7 @@ boost::asio::awaitable<void> RepairCoordinator::runAsync() {
         std::vector<std::string> batch;
         {
             std::lock_guard<std::mutex> lk(queueMutex_);
-            while (!pendingDocuments_.empty() && batch.size() < cfg_.maxBatch) {
+            while (!pendingDocuments_.empty() && batch.size() < shutdownState->config.maxBatch) {
                 batch.push_back(std::move(pendingDocuments_.front()));
                 pendingDocuments_.pop();
             }
@@ -601,11 +600,9 @@ boost::asio::awaitable<void> RepairCoordinator::runAsync() {
             if (state_)
                 state_->stats.repairBatchesAttempted++;
 
-            InternalEventBus::EmbedJob job{
-                missingEmbeddings, static_cast<uint32_t>(cfg_.maxBatch),
-                true,         // skipExisting
-                std::string{} // modelName (use default)
-            };
+            InternalEventBus::EmbedJob job{missingEmbeddings,
+                                           static_cast<uint32_t>(shutdownState->config.maxBatch),
+                                           true, std::string{}};
 
             static std::shared_ptr<SpscQueue<InternalEventBus::EmbedJob>> embedQ =
                 InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
@@ -622,11 +619,12 @@ boost::asio::awaitable<void> RepairCoordinator::runAsync() {
             }
         }
 
-        // Queue FTS5 repair job (allow during light load if degraded mode enabled)
-        bool allowFts5 = maintenance_allowed() || (cfg_.allowDegraded && activeConnFn_ &&
-                                                   activeConnFn_() <= cfg_.maxActiveDuringDegraded);
+        bool allowFts5 = maintenance_allowed() ||
+                         (shutdownState->config.allowDegraded && activeConnFn_ &&
+                          activeConnFn_() <= shutdownState->config.maxActiveDuringDegraded);
         if (!missingFts5.empty() && allowFts5) {
-            InternalEventBus::Fts5Job ftsJob{missingFts5, static_cast<uint32_t>(cfg_.maxBatch),
+            InternalEventBus::Fts5Job ftsJob{missingFts5,
+                                             static_cast<uint32_t>(shutdownState->config.maxBatch),
                                              InternalEventBus::Fts5Operation::ExtractAndIndex};
 
             static std::shared_ptr<SpscQueue<InternalEventBus::Fts5Job>> fts5Q =

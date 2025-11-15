@@ -107,11 +107,6 @@ public:
     static std::unique_ptr<ICommand> createServeCommand();
 
     /**
-     * Create browse command (TUI browser)
-     */
-    static std::unique_ptr<ICommand> createBrowseCommand();
-
-    /**
      * Create completion command (shell completions)
      */
     static std::unique_ptr<ICommand> createCompletionCommand();

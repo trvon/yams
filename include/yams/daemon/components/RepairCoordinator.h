@@ -74,9 +74,16 @@ public:
     void setMaxBatch(std::uint32_t maxBatch) { cfg_.maxBatch = maxBatch; }
 
 private:
-    // Coroutine-based main loop; scheduled on the daemon IO executor
-    boost::asio::awaitable<void> runAsync();
-    bool maintenance_allowed() const; // idle window based on server stats and degraded policy
+    struct ShutdownState {
+        std::atomic<bool> finished{false};
+        std::atomic<bool> running{true};
+        std::mutex mutex;
+        std::condition_variable cv;
+        Config config;
+    };
+
+    boost::asio::awaitable<void> runAsync(std::shared_ptr<ShutdownState> shutdownState);
+    bool maintenance_allowed() const;
     // Token gating helpers (inline to avoid ODR/decl mismatches)
     bool try_acquire_token() {
         if (cfg_.maintenanceTokens == 0)
@@ -139,13 +146,6 @@ private:
     std::atomic<std::uint64_t> processed_{0};
     void update_progress_pct();
 
-    // Graceful shutdown coordination for detached coroutine
-    struct ShutdownState {
-        std::atomic<bool> finished{false};
-        std::atomic<bool> running{true}; // Coroutine-owned running flag
-        std::mutex mutex;
-        std::condition_variable cv;
-    };
     std::shared_ptr<ShutdownState> shutdownState_;
 };
 

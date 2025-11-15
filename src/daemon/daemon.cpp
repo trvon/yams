@@ -72,9 +72,9 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config) : config_(config) {
         tuningManager_ = std::make_unique<TuningManager>(serviceManager_.get(), &state_,
                                                          serviceManager_->getWorkCoordinator());
         spdlog::debug("TuningManager constructed early in YamsDaemon");
-        // Bridge repair control into TuningManager (centralized tokens/batch)
         tuningManager_->setRepairControlHook([this](uint32_t tokens, uint32_t batch) {
             try {
+                std::lock_guard<std::mutex> lock(repairCoordinatorMutex_);
                 if (repairCoordinator_) {
                     repairCoordinator_->setMaintenanceTokens(tokens);
                     repairCoordinator_->setMaxBatch(batch);
@@ -114,6 +114,9 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config) : config_(config) {
 YamsDaemon::~YamsDaemon() {
     if (running_) {
         stop();
+    }
+    if (tuningManager_) {
+        tuningManager_->stop();
     }
 }
 
@@ -361,73 +364,75 @@ Result<void> YamsDaemon::start() {
             // This breaks the circular dependency where search engine waits for embeddings
             // which wait for RepairCoordinator which waits for search engine.
             auto snap = lifecycleFsm_.snapshot();
-            spdlog::debug(
-                "[DaemonLoop] FSM state={}, enableAutoRepair={}, repairCoordinator_exists={}",
-                static_cast<int>(snap.state), config_.enableAutoRepair,
-                (repairCoordinator_ != nullptr));
-            if (snap.state == LifecycleState::Ready) {
-                // Start RepairCoordinator if enabled
-                if (config_.enableAutoRepair && !repairCoordinator_) {
-                    spdlog::info("[DaemonLoop] Starting RepairCoordinator...");
-                    try {
-                        RepairCoordinator::Config rcfg;
-                        rcfg.enable = true;
-                        rcfg.dataDir = config_.dataDir;
-                        rcfg.maxBatch = static_cast<std::uint32_t>(config_.autoRepairBatchSize);
-                        auto activeFn = [this]() -> size_t {
-                            return static_cast<size_t>(state_.stats.activeConnections.load());
-                        };
-                        repairCoordinator_ = std::make_unique<RepairCoordinator>(
-                            serviceManager_.get(), &state_, activeFn, rcfg);
-                        repairCoordinator_->start();
-                    } catch (const std::exception& e) {
-                        spdlog::warn("Failed to start RepairCoordinator: {}", e.what());
+            {
+                std::lock_guard<std::mutex> lock(repairCoordinatorMutex_);
+                spdlog::debug(
+                    "[DaemonLoop] FSM state={}, enableAutoRepair={}, repairCoordinator_exists={}",
+                    static_cast<int>(snap.state), config_.enableAutoRepair,
+                    (repairCoordinator_ != nullptr));
+                if (snap.state == LifecycleState::Ready) {
+                    if (config_.enableAutoRepair && !repairCoordinator_) {
+                        spdlog::info("[DaemonLoop] Starting RepairCoordinator...");
+                        try {
+                            RepairCoordinator::Config rcfg;
+                            rcfg.enable = true;
+                            rcfg.dataDir = config_.dataDir;
+                            rcfg.maxBatch = static_cast<std::uint32_t>(config_.autoRepairBatchSize);
+                            auto activeFn = [this]() -> size_t {
+                                return static_cast<size_t>(state_.stats.activeConnections.load());
+                            };
+                            repairCoordinator_ = std::make_unique<RepairCoordinator>(
+                                serviceManager_.get(), &state_, activeFn, rcfg);
+                            repairCoordinator_->start();
+                        } catch (const std::exception& e) {
+                            spdlog::warn("Failed to start RepairCoordinator: {}", e.what());
+                        }
+                    }
+
+                    static bool modelPreloadSkipped = false;
+                    if (!modelPreloadSkipped) {
+                        modelPreloadSkipped = true;
+                        spdlog::info("Model preload disabled - models will load on first use");
                     }
                 }
-
-                // Model provider will load models on-demand when first embedding is requested
-                // This ensures fast daemon startup and no blocking during initialization
-                static bool modelPreloadSkipped = false;
-                if (!modelPreloadSkipped) {
-                    modelPreloadSkipped = true;
-                    spdlog::info("Model preload disabled - models will load on first use");
-                }
             }
-            // RepairCoordinator tokens are tuned by TuningManager. Keep FSM signaling only.
-            if (repairCoordinator_) {
-                size_t active = static_cast<size_t>(state_.stats.activeConnections.load());
-                uint32_t busyThresh = TuneAdvisor::repairBusyConnThreshold();
-                auto now = std::chrono::steady_clock::now();
-                static std::chrono::steady_clock::time_point rcBusySince{};
-                static std::chrono::steady_clock::time_point rcReadySince{};
-                bool isBusy = (active >= busyThresh);
-                if (isBusy) {
-                    if (rcBusySince.time_since_epoch().count() == 0)
-                        rcBusySince = now;
-                    rcReadySince = {};
-                } else {
-                    if (rcReadySince.time_since_epoch().count() == 0)
-                        rcReadySince = now;
-                    rcBusySince = {};
-                }
-                uint32_t degradeHold = TuneAdvisor::repairDegradeHoldMs();
-                uint32_t readyHold = TuneAdvisor::repairReadyHoldMs();
-                bool busyHeld =
-                    isBusy && rcBusySince.time_since_epoch().count() != 0 &&
-                    std::chrono::duration_cast<std::chrono::milliseconds>(now - rcBusySince)
-                            .count() >= degradeHold;
-                bool idleHeld =
-                    !isBusy && rcReadySince.time_since_epoch().count() != 0 &&
-                    std::chrono::duration_cast<std::chrono::milliseconds>(now - rcReadySince)
-                            .count() >= readyHold;
-                bool pending = state_.stats.repairQueueDepth.load() > 0;
-                auto snap = lifecycleFsm_.snapshot();
-                if (snap.state == LifecycleState::Ready) {
-                    if (pending && busyHeld)
-                        lifecycleFsm_.dispatch(DegradedEvent{});
-                } else if (snap.state == LifecycleState::Degraded) {
-                    if (!pending || idleHeld)
-                        lifecycleFsm_.dispatch(HealthyEvent{});
+            {
+                std::lock_guard<std::mutex> lock(repairCoordinatorMutex_);
+                if (repairCoordinator_) {
+                    size_t active = static_cast<size_t>(state_.stats.activeConnections.load());
+                    uint32_t busyThresh = TuneAdvisor::repairBusyConnThreshold();
+                    auto now = std::chrono::steady_clock::now();
+                    static std::chrono::steady_clock::time_point rcBusySince{};
+                    static std::chrono::steady_clock::time_point rcReadySince{};
+                    bool isBusy = (active >= busyThresh);
+                    if (isBusy) {
+                        if (rcBusySince.time_since_epoch().count() == 0)
+                            rcBusySince = now;
+                        rcReadySince = {};
+                    } else {
+                        if (rcReadySince.time_since_epoch().count() == 0)
+                            rcReadySince = now;
+                        rcBusySince = {};
+                    }
+                    uint32_t degradeHold = TuneAdvisor::repairDegradeHoldMs();
+                    uint32_t readyHold = TuneAdvisor::repairReadyHoldMs();
+                    bool busyHeld =
+                        isBusy && rcBusySince.time_since_epoch().count() != 0 &&
+                        std::chrono::duration_cast<std::chrono::milliseconds>(now - rcBusySince)
+                                .count() >= degradeHold;
+                    bool idleHeld =
+                        !isBusy && rcReadySince.time_since_epoch().count() != 0 &&
+                        std::chrono::duration_cast<std::chrono::milliseconds>(now - rcReadySince)
+                                .count() >= readyHold;
+                    bool pending = state_.stats.repairQueueDepth.load() > 0;
+                    auto snap = lifecycleFsm_.snapshot();
+                    if (snap.state == LifecycleState::Ready) {
+                        if (pending && busyHeld)
+                            lifecycleFsm_.dispatch(DegradedEvent{});
+                    } else if (snap.state == LifecycleState::Degraded) {
+                        if (!pending || idleHeld)
+                            lifecycleFsm_.dispatch(HealthyEvent{});
+                    }
                 }
             }
             // Periodic tasks can be added here
@@ -533,10 +538,12 @@ Result<void> YamsDaemon::stop() {
         }
     }
 
-    // Stop background coordinator
-    if (repairCoordinator_) {
-        repairCoordinator_->stop();
-        repairCoordinator_.reset();
+    {
+        std::lock_guard<std::mutex> lock(repairCoordinatorMutex_);
+        if (repairCoordinator_) {
+            repairCoordinator_->stop();
+            repairCoordinator_.reset();
+        }
     }
 
     // Metrics already stopped earlier (before ServiceManager)
@@ -571,6 +578,7 @@ Result<void> YamsDaemon::stop() {
 // run() method removed; loop is inlined in start()
 
 void YamsDaemon::onDocumentAdded(const std::string& hash, const std::string& path) {
+    std::lock_guard<std::mutex> lock(repairCoordinatorMutex_);
     if (repairCoordinator_) {
         RepairCoordinator::DocumentAddedEvent event{hash, path};
         repairCoordinator_->onDocumentAdded(event);
@@ -578,6 +586,7 @@ void YamsDaemon::onDocumentAdded(const std::string& hash, const std::string& pat
 }
 
 void YamsDaemon::onDocumentRemoved(const std::string& hash) {
+    std::lock_guard<std::mutex> lock(repairCoordinatorMutex_);
     if (repairCoordinator_) {
         RepairCoordinator::DocumentRemovedEvent event{hash};
         repairCoordinator_->onDocumentRemoved(event);

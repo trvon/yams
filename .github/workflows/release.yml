@@ -35,7 +35,73 @@ permissions:
   contents: write
 
 jobs:
+  check-commits:
+    name: Check for new commits (nightly/workflow_run only)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
+    outputs:
+      has_new_commits: ${{ steps.check.outputs.has_new_commits }}
+      last_release_sha: ${{ steps.check.outputs.last_release_sha }}
+    steps:
+      - name: Check if there are new commits since last nightly release
+        id: check
+        shell: bash
+        run: |
+          # Get the latest nightly release
+          LATEST_NIGHTLY=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/${{ github.repository }}/releases" \
+            --jq '.[] | select(.tag_name | startswith("nightly-")) | .tag_name' | head -1)
+          
+          if [ -z "$LATEST_NIGHTLY" ]; then
+            echo "No previous nightly release found, will create one"
+            echo "has_new_commits=true" >> $GITHUB_OUTPUT
+            echo "last_release_sha=none" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Get the commit SHA of the last nightly
+          LAST_SHA=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/${{ github.repository }}/git/ref/tags/$LATEST_NIGHTLY" \
+            --jq '.object.sha' || echo "")
+          
+          echo "last_release_sha=$LAST_SHA" >> $GITHUB_OUTPUT
+          
+          # Get current main HEAD
+          CURRENT_SHA=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/${{ github.repository }}/git/ref/heads/main" \
+            --jq '.object.sha')
+          
+          if [ "$LAST_SHA" != "$CURRENT_SHA" ]; then
+            # Count commits between last nightly and current main
+            COMMITS=$(gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "/repos/${{ github.repository }}/compare/${LAST_SHA}...${CURRENT_SHA}" \
+              --jq '.total_commits' || echo "1")
+            
+            echo "has_new_commits=true" >> $GITHUB_OUTPUT
+            echo "Found $COMMITS new commit(s) since last nightly ($LATEST_NIGHTLY)"
+          else
+            echo "has_new_commits=false" >> $GITHUB_OUTPUT
+            echo "No new commits since last nightly release ($LATEST_NIGHTLY), skipping"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
   warm:
+    needs: [check-commits]
+    if: |
+      always() &&
+      (needs.check-commits.result == 'skipped' || 
+       needs.check-commits.outputs.has_new_commits == 'true' ||
+       github.event_name == 'push' ||
+       github.event_name == 'workflow_dispatch')
     uses: ./.github/workflows/matrix-warm.yml
     with:
       build_type: Release

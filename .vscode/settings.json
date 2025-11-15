@@ -1,6 +1,16 @@
 {
     "C_Cpp.default.configurationProvider": "mesonbuild.mesonbuild",
-    "C_Cpp.default.compileCommands": "/Volumes/picaso/work/tools/yams/builddir/compile_commands.json",
-    "mesonbuild.configureOnOpen": true,
-    "mesonbuild.buildFolder": "builddir"
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/build/debug/compile_commands.json",
+    "mesonbuild.configureOnOpen": false,
+    "mesonbuild.buildFolder": "build/debug",
+    "files.associations": {
+        "*.h": "cpp",
+        "*.hpp": "cpp"
+    },
+    "files.exclude": {
+        "**/.DS_Store": true,
+        "**/build": true,
+        "**/__pycache__": true,
+        "**/*.pyc": true
+    }
 }

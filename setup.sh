@@ -2,9 +2,11 @@
 
 # Unified build script for YAMS
 #
-# Usage: ./setup.sh [Debug|Release|Profiling|Fuzzing] [--coverage]
+# Usage: ./setup.sh [Debug|Release|Profiling|Fuzzing] [--coverage] [--tsan] [--no-tsan]
 #   build_type: Release (default), Debug, Profiling, or Fuzzing (TODO)
 #   --coverage: Enable code coverage instrumentation (Debug builds only)
+#   --tsan: Enable ThreadSanitizer for race detection (default for Debug builds)
+#   --no-tsan: Disable ThreadSanitizer (overrides default)
 #
 # Environment variables (for CI/advanced use):
 #   YAMS_CONAN_HOST_PROFILE  - Path to Conan host profile (bypasses auto-detection)
@@ -22,12 +24,21 @@
 set -euo pipefail
 
 ENABLE_COVERAGE=false
+ENABLE_TSAN=""
 BUILD_TYPE_INPUT=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --coverage)
       ENABLE_COVERAGE=true
+      shift
+      ;;
+    --tsan)
+      ENABLE_TSAN=true
+      shift
+      ;;
+    --no-tsan)
+      ENABLE_TSAN=false
       shift
       ;;
     Debug|Release|Profiling|Fuzzing|debug|release|profiling|fuzzing)
@@ -39,7 +50,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     *)
-      echo "Usage: $0 [Debug|Release|Profiling|Fuzzing] [--coverage]" >&2
+      echo "Usage: $0 [Debug|Release|Profiling|Fuzzing] [--coverage] [--tsan] [--no-tsan]" >&2
       exit 1
       ;;
   esac
@@ -382,11 +393,25 @@ if [[ "${YAMS_DISABLE_PDF:-}" == "true" ]]; then
   MESON_OPTIONS+=("-Dplugin-pdf=false")
 fi
 
+# ThreadSanitizer: default enabled for Debug builds, can be overridden with --tsan/--no-tsan
+if [[ -z "${ENABLE_TSAN}" ]]; then
+  if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true" ]] || [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
+    ENABLE_TSAN=true
+  else
+    ENABLE_TSAN=false
+  fi
+fi
+
 if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true" ]] || [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
   MESON_OPTIONS+=(
     "-Dbuild-tests=true"
     "-Denable-bench-tests=true"
   )
+fi
+
+if [[ "${ENABLE_TSAN}" == "true" ]]; then
+  MESON_OPTIONS+=("-Denable-tsan=true")
+  echo "ThreadSanitizer enabled (race detection)"
 fi
 
 if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then

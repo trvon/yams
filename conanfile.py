@@ -22,7 +22,6 @@ class YamsConan(ConanFile):
         "build_tests": [True, False],
         "build_benchmarks": [True, False],
         "enable_pdf": [True, False],
-        "enable_tui": [True, False],  # Separate TUI from CLI
         "enable_onnx": [True, False],  # Gate ONNX Runtime and its
         # transitive graph
         "enable_wasmtime": [True, False],  # Gate WASM host
@@ -36,7 +35,6 @@ class YamsConan(ConanFile):
         "build_tests": False,
         "build_benchmarks": False,
         "enable_pdf": True,  # PDF support enabled by default
-        "enable_tui": True,  # TUI enabled by default
         "enable_onnx": True,  # ONNX enabled by default; can be disabled to drop Boost
         "enable_wasmtime": True,  # WASM host enabled by default (bring your own wasmtime-cpp)
         "enable_symbol_extraction": True,  # Enabled by default; disable to drop extractors
@@ -71,10 +69,6 @@ class YamsConan(ConanFile):
         # Boost is used directly (e.g., boost.asio for daemon comms); declare as a direct requirement
         # Using only override=True will not pull Boost into the graph when no transitive dep needs it
         self.requires("boost/1.83.0")
-
-        # TUI framework dependencies
-        if self.options.enable_tui:  # type: ignore
-            self.requires("ftxui/5.0.0")
 
         if self.options.enable_symbol_extraction:  # type: ignore
             try:

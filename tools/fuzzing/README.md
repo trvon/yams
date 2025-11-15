@@ -4,8 +4,14 @@ AFL++ fuzzing harnesses for CLI/daemon IPC protocol testing per issue #8.
 
 ## Targets
 
+### Protocol Layer
 - `fuzz_ipc_protocol` - MessageFramer, CRC32 validation, frame header parsing
 - `fuzz_add_document` - AddDocumentRequest/UpdateDocumentRequest deserialization
+
+### Daemon Services & IPC Bus
+- `fuzz_proto_serializer` - Protobuf encoding/decoding of IPC message payloads
+- `fuzz_request_handler` - Request processing, message framing, and handler configuration
+- `fuzz_streaming_processor` - Chunked streaming response handling and processor delegation
 
 Fuzzers run in `aflplusplus/aflplusplus` Docker container for reproducibility.
 
@@ -18,19 +24,25 @@ Build fuzzers:
 
 Run fuzzer:
 ```bash
-./tools/fuzzing/fuzz-docker.sh fuzz ipc
+./tools/fuzzing/fuzz-docker.sh fuzz ipc_protocol
 ./tools/fuzzing/fuzz-docker.sh fuzz add_document
+./tools/fuzzing/fuzz-docker.sh fuzz proto_serializer
+./tools/fuzzing/fuzz-docker.sh fuzz request_handler
+./tools/fuzzing/fuzz-docker.sh fuzz streaming_processor
 ```
 
 Monitor:
 ```bash
-./tools/fuzzing/fuzz-docker.sh exec afl-whatsup /fuzz/findings/ipc
+./tools/fuzzing/fuzz-docker.sh exec afl-whatsup /fuzz/findings/ipc_protocol
+./tools/fuzzing/fuzz-docker.sh exec afl-whatsup /fuzz/findings/proto_serializer
 ```
 
 Reproduce crash:
 ```bash
 ./tools/fuzzing/fuzz-docker.sh exec \
-  /build/tools/fuzzing/fuzz_ipc_protocol /fuzz/findings/ipc/crashes/id:000000*
+  /build/tools/fuzzing/fuzz_ipc_protocol /fuzz/findings/ipc_protocol/crashes/id:000000*
+./tools/fuzzing/fuzz-docker.sh exec \
+  /build/tools/fuzzing/fuzz_proto_serializer /fuzz/findings/proto_serializer/crashes/id:000000*
 ```
 
 ## Architecture
@@ -39,20 +51,29 @@ Reproduce crash:
 
 ```
 tools/fuzzing/
-├── README.md                    # This file
-├── fuzz-docker.sh              # Docker wrapper script
-├── meson.build                 # Build definitions
-├── fuzz_ipc_protocol.cpp       # IPC fuzzer harness
-├── fuzz_add_document.cpp       # Document fuzzer harness
-└── generate_corpus.sh          # Seed corpus generator
+├── README.md                       # This file
+├── fuzz-docker.sh                 # Docker wrapper script
+├── meson.build                    # Build definitions
+├── fuzz_ipc_protocol.cpp          # IPC protocol fuzzer harness
+├── fuzz_add_document.cpp          # Document fuzzer harness
+├── fuzz_proto_serializer.cpp      # Protobuf serializer fuzzer
+├── fuzz_request_handler.cpp       # Request handler fuzzer
+├── fuzz_streaming_processor.cpp   # Streaming processor fuzzer
+└── generate_corpus.sh             # Seed corpus generator
 
 data/fuzz/
-├── corpus/                     # Input seeds (read-only for fuzzer)
-│   ├── ipc/                   # IPC protocol seeds
-│   └── add_document/          # Document request seeds
-└── findings/                   # AFL++ output (crashes, hangs, queue)
-    ├── ipc/
-    └── add_document/
+├── corpus/                        # Input seeds (read-only for fuzzer)
+│   ├── ipc_protocol/             # IPC protocol seeds
+│   ├── add_document/             # Document request seeds
+│   ├── proto_serializer/         # Protobuf message seeds
+│   ├── request_handler/          # Request handler seeds
+│   └── streaming_processor/      # Streaming processor seeds
+└── findings/                      # AFL++ output (crashes, hangs, queue)
+    ├── ipc_protocol/
+    ├── add_document/
+    ├── proto_serializer/
+    ├── request_handler/
+    └── streaming_processor/
 ```
 
 ### Instrumentation Flow

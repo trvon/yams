@@ -35,17 +35,6 @@ yams_cli_sources = [
   'commands/diff_command.cpp',
 ]
 
-if get_option('enable-tui')
-  yams_cli_sources += [
-    'commands/browse_command.cpp',
-    'tui/browse_state.cpp',
-    'tui/browse_services.cpp',
-    'tui/browse_commands.cpp',
-    'tui/highlight_utils.cpp',
-    'tui/tui_services.cpp',
-  ]
-endif
-
 if get_option('build-mcp-server')
   yams_cli_sources += 'commands/serve_command.cpp'
 endif
@@ -150,14 +139,7 @@ cli_deps = [
   cli11_dep,
 ]
 
-# TUI framework dependencies
-if get_option('enable-tui')
-  # FTXUI: Modern C++17 TUI framework (screen + dom + component modules)
-  ftxui_screen_dep = dependency('ftxui-ftxui-screen', method: 'pkg-config', required: true)
-  ftxui_dom_dep = dependency('ftxui-ftxui-dom', method: 'pkg-config', required: true)
-  ftxui_component_dep = dependency('ftxui-ftxui-component', method: 'pkg-config', required: true)
-  cli_deps += [ftxui_screen_dep, ftxui_dom_dep, ftxui_component_dep]
-endif
+# TUI framework dependencies removed - migrating to Flutter UI
 
 if get_option('build-mcp-server')
   cli_deps += dependency('yams_mcp')
@@ -166,9 +148,6 @@ endif
 cli_cppargs = []
 if get_option('build-mcp-server')
   cli_cppargs += ['-DYAMS_BUILD_MCP_SERVER=1']
-endif
-if get_option('enable-tui')
-  cli_cppargs += ['-DYAMS_ENABLE_TUI=1']
 endif
 
 yams_cli_lib = static_library('yams_cli',

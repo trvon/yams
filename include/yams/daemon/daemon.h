@@ -121,7 +121,7 @@ public:
     // Integrated socket server (replaces external yams-socket-server)
     std::unique_ptr<SocketServer> socketServer_;
     std::unique_ptr<RepairCoordinator> repairCoordinator_;
-    // Tuning manager now owned by YamsDaemon to start early in lifecycle
+    mutable std::mutex repairCoordinatorMutex_;
     std::unique_ptr<TuningManager> tuningManager_;
 
     // Lifecycle FSM (authoritative lifecycle state)

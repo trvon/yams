@@ -470,7 +470,16 @@ public:
             co_return result;
         }
 
-        const std::string type = req.type.empty() ? "hybrid" : req.type;
+        bool forcedHybridFallback = false;
+        const std::string type = resolveSearchType(req, &forcedHybridFallback);
+
+        if (forcedHybridFallback) {
+            const std::string requestedType = req.type.empty() ? "hybrid" : req.type;
+            const std::string detail =
+                repairDetails_.empty() ? "hybrid engine disabled" : repairDetails_;
+            spdlog::warn("SearchService: routing {} search request to keyword path because {}",
+                         requestedType, detail);
+        }
 
         spdlog::info("SearchService: type='{}' fuzzy={} sim={} pathsOnly={} literal={} limit={} "
                      "filters: ext='{}' mime='{}' path='{}' pathPatterns={} tags={} allTags={}",
@@ -601,6 +610,11 @@ public:
 
         if (result) {
             auto resp = std::move(result).value();
+            if (forcedHybridFallback) {
+                resp.searchStats["hybrid_fallback"] =
+                    repairDetails_.empty() ? "hybrid_disabled" : repairDetails_;
+                resp.searchStats["effective_type"] = type;
+            }
             if (req.pathsOnly && resp.paths.empty()) {
                 spdlog::info("[SearchService] invoking paths fallback for empty pathsOnly result");
                 co_await ensurePathsFallbackAsync(normalizedReq, resp, &metadataTelemetry);
@@ -777,6 +791,23 @@ private:
     EnhancedConfig enhancedCfg_{}; // off by default
     EnhancedSearchExecutor enhanced_{};
     std::shared_ptr<yams::search::HotzoneManager> hotzones_{};
+
+    std::string resolveSearchType(const SearchRequest& req, bool* forcedHybridFallback) const {
+        if (forcedHybridFallback)
+            *forcedHybridFallback = false;
+
+        const std::string requested = req.type.empty() ? "hybrid" : req.type;
+        const bool wantsHybrid = (requested == "hybrid" || requested == "semantic");
+        const bool hybridDisabled = degraded_ || !ctx_.hybridEngine;
+
+        if (wantsHybrid && hybridDisabled) {
+            if (forcedHybridFallback)
+                *forcedHybridFallback = true;
+            return "keyword";
+        }
+
+        return requested;
+    }
 
     boost::asio::awaitable<void> hydrateSnippetsAsync(const SearchRequest& req,
                                                       SearchResponse& resp,

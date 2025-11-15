@@ -53,5 +53,35 @@ fuzz_add_document = executable('fuzz_add_document',
   build_by_default: true,
 )
 
+# ProtoSerializer Fuzzer
+fuzz_proto_serializer = executable('fuzz_proto_serializer',
+  'fuzz_proto_serializer.cpp',
+  include_directories: include_directories('../../include'),
+  link_with: yams_daemon_lib,
+  cpp_args: fuzzer_args,
+  link_args: fuzzer_args,
+  build_by_default: true,
+)
+
+# RequestHandler Fuzzer
+fuzz_request_handler = executable('fuzz_request_handler',
+  'fuzz_request_handler.cpp',
+  include_directories: include_directories('../../include'),
+  link_with: yams_daemon_lib,
+  cpp_args: fuzzer_args,
+  link_args: fuzzer_args,
+  build_by_default: true,
+)
+
+# StreamingRequestProcessor Fuzzer
+fuzz_streaming_processor = executable('fuzz_streaming_processor',
+  'fuzz_streaming_processor.cpp',
+  include_directories: include_directories('../../include'),
+  link_with: yams_daemon_lib,
+  cpp_args: fuzzer_args,
+  link_args: fuzzer_args,
+  build_by_default: true,
+)
+
 message('Fuzzing harnesses configured with AFL++ libFuzzer mode')
 message('ASAN enabled via AFL_USE_ASAN=1 environment variable')

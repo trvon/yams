@@ -21,9 +21,6 @@ std::unique_ptr<ICommand> createMigrateCommand();
 std::unique_ptr<ICommand> createUpdateCommand();
 std::unique_ptr<ICommand> createDownloadCommand();
 std::unique_ptr<ICommand> createSessionCommand();
-#ifdef YAMS_ENABLE_TUI
-std::unique_ptr<ICommand> createBrowseCommand();
-#endif
 std::unique_ptr<ICommand> createCompletionCommand();
 std::unique_ptr<ICommand> createRepairCommand();
 std::unique_ptr<ICommand> createModelCommand();
@@ -57,9 +54,6 @@ void CommandRegistry::registerAllCommands(YamsCLI* cli) {
     cli->registerCommand(CommandRegistry::createUpdateCommand());
     cli->registerCommand(::yams::cli::createDownloadCommand());
     cli->registerCommand(::yams::cli::createSessionCommand());
-#ifdef YAMS_ENABLE_TUI
-    cli->registerCommand(CommandRegistry::createBrowseCommand());
-#endif
     cli->registerCommand(CommandRegistry::createCompletionCommand());
     cli->registerCommand(CommandRegistry::createRepairCommand());
     cli->registerCommand(CommandRegistry::createModelCommand());
@@ -144,12 +138,6 @@ std::unique_ptr<ICommand> CommandRegistry::createMigrateCommand() {
 std::unique_ptr<ICommand> CommandRegistry::createUpdateCommand() {
     return ::yams::cli::createUpdateCommand();
 }
-
-#ifdef YAMS_ENABLE_TUI
-std::unique_ptr<ICommand> CommandRegistry::createBrowseCommand() {
-    return ::yams::cli::createBrowseCommand();
-}
-#endif
 
 std::unique_ptr<ICommand> CommandRegistry::createCompletionCommand() {
     return ::yams::cli::createCompletionCommand();

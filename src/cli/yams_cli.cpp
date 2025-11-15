@@ -47,13 +47,11 @@ namespace fs = std::filesystem;
         __has_include(<generated/cli_help_stats.hpp>) && \
         __has_include(<generated/cli_help_uninstall.hpp>) && \
         __has_include(<generated/cli_help_migrate.hpp>) && \
-        __has_include(<generated/cli_help_browse.hpp>) && \
         __has_include(<generated/cli_help_serve.hpp>)
 #define YAMS_HAVE_GENERATED_CLI_HELP 1
 #include <generated/cli_help.hpp>
 #include <generated/cli_help_add.hpp>
 #include <generated/cli_help_auth.hpp>
-#include <generated/cli_help_browse.hpp>
 #include <generated/cli_help_config.hpp>
 #include <generated/cli_help_delete.hpp>
 #include <generated/cli_help_get.hpp>
@@ -182,12 +180,8 @@ int YamsCLI::run(int argc, char* argv[]) {
 
         // Known subcommands (kept in sync with CommandRegistry)
         static const std::vector<std::string> kCommands = {
-            "init",   "add",        "get",   "delete",    "list",    "search",
-            "config", "auth",       "stats", "uninstall", "migrate", "update",
-#ifdef YAMS_ENABLE_TUI
-            "browse",
-#endif
-            "serve",  "completion", "model"};
+            "init",  "add",       "get",     "delete", "list",  "search",     "config", "auth",
+            "stats", "uninstall", "migrate", "update", "serve", "completion", "model"};
 
         auto hasArg = [&](std::string_view needle) {
             for (int i = 1; i < argc; ++i) {
@@ -238,10 +232,6 @@ int YamsCLI::run(int argc, char* argv[]) {
                 sectionPtr = yams::cli_help::CMD_UNINSTALL;
             else if (cmd == "migrate")
                 sectionPtr = yams::cli_help::CMD_MIGRATE;
-#ifdef YAMS_ENABLE_TUI
-            else if (cmd == "browse")
-                sectionPtr = yams::cli_help::CMD_BROWSE;
-#endif
             else if (cmd == "serve")
                 sectionPtr = yams::cli_help::CMD_SERVE;
             if (sectionPtr && sectionPtr[0] != '\0') {

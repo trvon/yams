@@ -243,7 +243,11 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_unique<
     }
 }
 
-DaemonClient::~DaemonClient() = default;
+DaemonClient::~DaemonClient() {
+    if (pImpl && pImpl->pool_) {
+        pImpl->pool_->shutdown();
+    }
+}
 
 DaemonClient::DaemonClient(DaemonClient&&) noexcept = default;
 DaemonClient& DaemonClient::operator=(DaemonClient&&) noexcept = default;
