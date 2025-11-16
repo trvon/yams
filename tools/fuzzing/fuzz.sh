@@ -27,7 +27,7 @@ EOF
 
 cmd_build() {
     echo "Building fuzzer Docker image..."
-    docker build --platform linux/amd64 \
+    docker build \
         -f "${SCRIPT_DIR}/Dockerfile" \
         -t "${IMAGE_NAME}" \
         "${PROJECT_ROOT}"
@@ -45,14 +45,14 @@ cmd_fuzz() {
     local findings_dir="/src/data/fuzz/findings/${target}"
 
     echo "Running AFL++ fuzzer for target: ${target}"
-    docker run --rm -ti --platform linux/amd64 \
+    docker run --rm -ti \
         -v "${PROJECT_ROOT}/data/fuzz:/src/data/fuzz" \
         "${IMAGE_NAME}" \
         afl-fuzz -i "${corpus_dir}" -o "${findings_dir}" -m none "${fuzzer_bin}"
 }
 
 cmd_shell() {
-    docker run --rm -ti --platform linux/amd64 "${IMAGE_NAME}" /bin/bash
+    docker run --rm -ti "${IMAGE_NAME}" /bin/bash
 }
 
 cmd_clean() {

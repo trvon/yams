@@ -415,28 +415,6 @@ bool IndexingPipeline::indexContent(IndexingTask& task) {
                     spdlog::warn("Failed to add alternate location metadata: {}",
                                  metaResult.error().message);
                 }
-
-                // Create automatic snapshot if significant time has passed
-                auto timeDiff = task.documentInfo->indexedTime - existing.indexedTime;
-                auto hoursSinceLastIndex =
-                    std::chrono::duration_cast<std::chrono::hours>(timeDiff).count();
-
-                if (hoursSinceLastIndex > 24) {
-                    // More than 24 hours since last index - create snapshot
-                    auto timestamp = std::chrono::system_clock::now();
-                    auto snapshotId =
-                        "auto_" + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
-                                                     timestamp.time_since_epoch())
-                                                     .count());
-
-                    metadataRepo_->setMetadata(existing.id, "snapshot_id",
-                                               metadata::MetadataValue(snapshotId));
-                    metadataRepo_->setMetadata(existing.id, "snapshot_time",
-                                               metadata::MetadataValue(static_cast<int64_t>(
-                                                   timestamp.time_since_epoch().count())));
-
-                    spdlog::info("Created automatic snapshot {} for duplicate content", snapshotId);
-                }
             }
 
             // Update the existing document's indexed time (make a copy since existing is const)
@@ -460,22 +438,21 @@ bool IndexingPipeline::indexContent(IndexingTask& task) {
 
             documentId = result.value();
             task.documentInfo->id = documentId;
-
-            // Create automatic time-based snapshot for new documents
-            auto timestamp = std::chrono::system_clock::now();
-            auto snapshotId =
-                "auto_" + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
-                                             timestamp.time_since_epoch())
-                                             .count());
-
-            metadataRepo_->setMetadata(documentId, "snapshot_id",
-                                       metadata::MetadataValue(snapshotId));
-            metadataRepo_->setMetadata(documentId, "snapshot_time",
-                                       metadata::MetadataValue(static_cast<int64_t>(
-                                           timestamp.time_since_epoch().count())));
-
-            spdlog::debug("Created automatic snapshot {} for new document", snapshotId);
         }
+
+        // Always create a snapshot on every ingestion for version tracking
+        auto timestamp = std::chrono::system_clock::now();
+        auto snapshotId = "auto_" + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
+                                                       timestamp.time_since_epoch())
+                                                       .count());
+
+        metadataRepo_->setMetadata(documentId, "snapshot_id", metadata::MetadataValue(snapshotId));
+        metadataRepo_->setMetadata(
+            documentId, "snapshot_time",
+            metadata::MetadataValue(static_cast<int64_t>(timestamp.time_since_epoch().count())));
+
+        spdlog::debug("Created automatic snapshot {} for document {}", snapshotId,
+                      isNewDocument ? "(new)" : "(existing)");
 
         // Chunk and index content (only for new documents)
         if (isNewDocument) {

@@ -4,6 +4,7 @@
 
 #include <spdlog/spdlog.h>
 #include <yams/api/content_store.h>
+#include <yams/app/services/graph_query_service.hpp>
 #include <yams/compression/compression_header.h>
 #include <yams/compression/compression_utils.h>
 #include <yams/compression/compressor_interface.h>
@@ -499,7 +500,7 @@ public:
         // If name is provided but no hash, resolve name to hash first
         std::string resolvedHash = normalizeHashInput(req.hash);
         if (!req.name.empty() && req.hash.empty()) {
-            auto resolveResult = resolveNameToHash(req.name);
+            auto resolveResult = resolveNameToHash(req.name, req.oldest);
             if (!resolveResult) {
                 return Error{ErrorCode::NotFound, "Document not found with name: " + req.name};
             }
@@ -666,50 +667,79 @@ public:
         }
         resp.document = doc;
 
-        // Build knowledge graph relationships (Task 043-12b)
-        if (req.graph && ctx_.metadataRepo && foundDoc) {
-            // Track relationships by distance for depth limiting
-            std::unordered_map<std::string, std::pair<int, std::string>> seenHashes;
-            seenHashes[foundDoc->sha256Hash] = {0, "self"};
+        // Build knowledge graph relationships via GraphQueryService
+        if (req.graph && foundDoc) {
+            std::unordered_set<std::string> seenHashes;
+            seenHashes.insert(foundDoc->sha256Hash);
 
             int maxDepth = std::clamp(req.depth, 1, 5);
 
-            // Level 1: Same-content relationships via KG (blob nodes)
-            if (ctx_.kgStore && maxDepth >= 1) {
-                auto blobNodeRes = ctx_.kgStore->ensureBlobNode(foundDoc->sha256Hash);
-                if (blobNodeRes) {
-                    auto edgesRes = ctx_.kgStore->getEdgesFrom(blobNodeRes.value(), "has_version");
-                    if (edgesRes) {
-                        for (const auto& edge : edgesRes.value()) {
-                            // Get path node and resolve to document
-                            auto pathNodeRes = ctx_.kgStore->getNodeById(edge.dstNodeId);
-                            if (pathNodeRes && pathNodeRes.value()) {
-                                const auto& pathNode = pathNodeRes.value().value();
-                                // Extract path from node key (format: "path:<snapshot>:<path>")
-                                if (pathNode.nodeKey.starts_with("path:")) {
-                                    // Parse node key: "path:<snapshot>:<path>"
-                                    size_t firstColon = pathNode.nodeKey.find(':', 5);
-                                    size_t secondColon = pathNode.nodeKey.find(':', firstColon + 1);
-                                    if (secondColon != std::string::npos) {
-                                        std::string path = pathNode.nodeKey.substr(secondColon + 1);
-                                        // Find document with this path
-                                        auto docRes = metadata::queryDocumentsByPattern(
-                                            *ctx_.metadataRepo, path);
-                                        if (docRes && !docRes.value().empty()) {
-                                            const auto& doc = docRes.value()[0];
-                                            if (seenHashes.find(doc.sha256Hash) ==
-                                                seenHashes.end()) {
-                                                RelatedDocument rd;
-                                                rd.hash = doc.sha256Hash;
-                                                rd.path = doc.filePath;
-                                                rd.name = doc.fileName;
-                                                rd.relationship = "same_content";
-                                                rd.distance = 1;
-                                                resp.related.push_back(std::move(rd));
-                                                seenHashes[doc.sha256Hash] = {1, "same_content"};
-                                            }
-                                        }
-                                    }
+            if (ctx_.graphQueryService) {
+                GraphQueryRequest graphReq;
+                graphReq.documentHash = foundDoc->sha256Hash;
+                graphReq.maxDepth = maxDepth;
+                graphReq.limit = 100;
+                graphReq.hydrateFully = true;
+                graphReq.relationFilters = {
+                    GraphRelationType::SameContent, GraphRelationType::RenamedFrom,
+                    GraphRelationType::RenamedTo, GraphRelationType::PathVersion};
+
+                auto graphResult = ctx_.graphQueryService->query(graphReq);
+                if (graphResult && !graphResult.value().allConnectedNodes.empty()) {
+                    for (const auto& connNode : graphResult.value().allConnectedNodes) {
+                        if (!connNode.nodeMetadata.documentHash.has_value() ||
+                            seenHashes.count(connNode.nodeMetadata.documentHash.value()) > 0) {
+                            continue;
+                        }
+
+                        auto docRes = ctx_.metadataRepo->getDocumentByHash(
+                            connNode.nodeMetadata.documentHash.value());
+                        if (docRes && docRes.value()) {
+                            const auto& doc = docRes.value().value();
+                            RelatedDocument rd;
+                            rd.hash = doc.sha256Hash;
+                            rd.path = doc.filePath;
+                            rd.name = doc.fileName;
+                            rd.distance = connNode.distance;
+
+                            if (!connNode.connectingEdges.empty()) {
+                                const auto& edge = connNode.connectingEdges.front();
+                                if (edge.relation == "has_version" ||
+                                    edge.relation == "same_content") {
+                                    rd.relationship = "same_content";
+                                } else if (edge.relation == "renamed_from" ||
+                                           edge.relation == "renamed_to") {
+                                    rd.relationship = "renamed";
+                                } else {
+                                    rd.relationship = edge.relation;
+                                }
+                            } else {
+                                rd.relationship = "related";
+                            }
+
+                            resp.related.push_back(std::move(rd));
+                            seenHashes.insert(doc.sha256Hash);
+                        }
+                    }
+                }
+
+                if (maxDepth >= 1 && ctx_.kgStore) {
+                    auto historyRes = ctx_.kgStore->fetchPathHistory(foundDoc->filePath, 100);
+                    if (historyRes) {
+                        for (const auto& record : historyRes.value()) {
+                            if (record.path != foundDoc->filePath &&
+                                seenHashes.count(record.blobHash) == 0) {
+                                auto docRes = ctx_.metadataRepo->getDocumentByHash(record.blobHash);
+                                if (docRes && docRes.value()) {
+                                    const auto& doc = docRes.value().value();
+                                    RelatedDocument rd;
+                                    rd.hash = doc.sha256Hash;
+                                    rd.path = doc.filePath;
+                                    rd.name = doc.fileName;
+                                    rd.relationship = record.changeType.value_or("renamed");
+                                    rd.distance = 1;
+                                    resp.related.push_back(std::move(rd));
+                                    seenHashes.insert(doc.sha256Hash);
                                 }
                             }
                         }
@@ -717,33 +747,7 @@ public:
                 }
             }
 
-            // Level 2: Rename chains via KG path history
-            if (ctx_.kgStore && maxDepth >= 1) {
-                auto historyRes = ctx_.kgStore->fetchPathHistory(foundDoc->filePath, 100);
-                if (historyRes) {
-                    for (const auto& record : historyRes.value()) {
-                        if (record.path != foundDoc->filePath &&
-                            seenHashes.find(record.blobHash) == seenHashes.end()) {
-                            // Resolve to document
-                            auto docRes = ctx_.metadataRepo->getDocumentByHash(record.blobHash);
-                            if (docRes && docRes.value()) {
-                                const auto& doc = docRes.value().value();
-                                RelatedDocument rd;
-                                rd.hash = doc.sha256Hash;
-                                rd.path = doc.filePath;
-                                rd.name = doc.fileName;
-                                rd.relationship = record.changeType.value_or("renamed");
-                                rd.distance = 1;
-                                resp.related.push_back(std::move(rd));
-                                seenHashes[doc.sha256Hash] = {1, "rename_chain"};
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Level 3: Fallback to directory-based relationships if no KG results
-            if (resp.related.empty()) {
+            if (resp.related.empty() && ctx_.metadataRepo) {
                 std::filesystem::path baseDir =
                     std::filesystem::path(foundDoc->filePath).parent_path();
                 auto docsRes = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%");
@@ -753,8 +757,7 @@ public:
                         if (other.sha256Hash == foundDoc->sha256Hash)
                             continue;
                         if (std::filesystem::path(other.filePath).parent_path() == baseDir) {
-                            if (seenHashes.find(other.sha256Hash) == seenHashes.end() &&
-                                count < 20) {
+                            if (seenHashes.count(other.sha256Hash) == 0 && count < 20) {
                                 RelatedDocument rd;
                                 rd.hash = other.sha256Hash;
                                 rd.path = other.filePath;
@@ -762,7 +765,7 @@ public:
                                 rd.relationship = "same_directory";
                                 rd.distance = 1;
                                 resp.related.push_back(std::move(rd));
-                                seenHashes[other.sha256Hash] = {1, "same_directory"};
+                                seenHashes.insert(other.sha256Hash);
                                 count++;
                             }
                         }
@@ -1612,8 +1615,9 @@ public:
     }
 
     // Resolve name to hash (disambiguate or error)
-    Result<std::string> resolveNameToHash(const std::string& name) override {
-        spdlog::info("[RESOLVE-TRACE] === Starting resolveNameToHash for: '{}'", name);
+    Result<std::string> resolveNameToHash(const std::string& name, bool oldest = false) override {
+        spdlog::info("[RESOLVE-TRACE] === Starting resolveNameToHash for: '{}' (oldest={})", name,
+                     oldest);
 
         if (!ctx_.metadataRepo) {
             return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
@@ -1701,18 +1705,24 @@ public:
             return Error{ErrorCode::NotFound, "Document not found: " + name};
         }
         if (uniqueMatches.size() > 1) {
-            spdlog::warn("[RESOLVE-TRACE] ⚠️ Ambiguous: {} matches", uniqueMatches.size());
-            std::string msg = "Ambiguous name: " + std::to_string(uniqueMatches.size()) +
-                              " matches for '" + name + "': ";
-            for (size_t i = 0; i < std::min(size_t(5), uniqueMatches.size()); ++i) {
-                if (i > 0)
-                    msg += ", ";
-                msg += uniqueMatches[i].fileName;
-            }
-            if (uniqueMatches.size() > 5) {
-                msg += ", ...";
-            }
-            return Error{ErrorCode::InvalidOperation, msg};
+            const char* strategy = oldest ? "oldest" : "most recent";
+            spdlog::warn("[RESOLVE-TRACE] ⚠️ Ambiguous: {} matches - returning {}",
+                         uniqueMatches.size(), strategy);
+
+            // Sort by indexedTime (descending for latest, ascending for oldest)
+            std::sort(uniqueMatches.begin(), uniqueMatches.end(),
+                      [oldest](const metadata::DocumentInfo& a, const metadata::DocumentInfo& b) {
+                          return oldest ? (a.indexedTime < b.indexedTime)
+                                        : (a.indexedTime > b.indexedTime);
+                      });
+
+            // Log the selection for transparency
+            spdlog::info("[RESOLVE-TRACE] ✓ Selected {}: {} (indexed: {})", strategy,
+                         uniqueMatches[0].fileName,
+                         uniqueMatches[0].indexedTime.time_since_epoch().count());
+
+            // Return the selected match
+            return uniqueMatches[0].sha256Hash;
         }
 
         spdlog::info("[RESOLVE-TRACE] ✓ Resolved via pattern matching");

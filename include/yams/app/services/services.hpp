@@ -78,6 +78,9 @@ NormalizedLookupPath normalizeLookupPath(const std::string& path);
 
 namespace yams::app::services {
 
+// Forward declare IGraphQueryService
+class IGraphQueryService;
+
 // Shared application context for services. Construct once and pass to service implementations.
 
 struct AppContext {
@@ -88,6 +91,7 @@ struct AppContext {
     std::shared_ptr<metadata::MetadataRepository> metadataRepo;
     std::shared_ptr<search::HybridSearchEngine> hybridEngine; // Keep as HybridSearchEngine for now
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore;   // PBI-043: tree diff KG integration
+    std::shared_ptr<IGraphQueryService> graphQueryService;    // PBI-009: centralized graph queries
     // Optional: externally-provided content extractors (plugins)
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors;
 
@@ -735,7 +739,7 @@ public:
     virtual Result<UpdateMetadataResponse> updateMetadata(const UpdateMetadataRequest& req) = 0;
 
     // Name-based helpers
-    virtual Result<std::string> resolveNameToHash(const std::string& name) = 0;
+    virtual Result<std::string> resolveNameToHash(const std::string& name, bool oldest = false) = 0;
     virtual Result<DeleteByNameResponse> deleteByName(const DeleteByNameRequest& req) = 0;
 };
 

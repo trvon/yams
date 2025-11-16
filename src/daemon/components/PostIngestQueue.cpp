@@ -7,6 +7,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/api/content_store.h>
+#include <yams/daemon/components/GraphComponent.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -26,11 +27,12 @@ namespace yams::daemon {
 PostIngestQueue::PostIngestQueue(
     std::shared_ptr<api::IContentStore> store, std::shared_ptr<metadata::MetadataRepository> meta,
     std::vector<std::shared_ptr<extraction::IContentExtractor>> extractors,
-    std::shared_ptr<metadata::KnowledgeGraphStore> kg, WorkCoordinator* coordinator,
+    std::shared_ptr<metadata::KnowledgeGraphStore> kg,
+    std::shared_ptr<GraphComponent> graphComponent, WorkCoordinator* coordinator,
     std::size_t capacity)
     : store_(std::move(store)), meta_(std::move(meta)), extractors_(std::move(extractors)),
-      kg_(std::move(kg)), coordinator_(coordinator), strand_(coordinator_->makeStrand()),
-      capacity_(capacity ? capacity : 1000) {
+      kg_(std::move(kg)), graphComponent_(std::move(graphComponent)), coordinator_(coordinator),
+      strand_(coordinator_->makeStrand()), capacity_(capacity ? capacity : 1000) {
     spdlog::info("[PostIngestQueue] Created with strand from WorkCoordinator");
 }
 
@@ -179,10 +181,9 @@ boost::asio::awaitable<void> PostIngestQueue::processMetadataStage(const std::st
         spdlog::error("[PostIngestQueue] Metadata stage failed for {}: {}", hash, e.what());
     }
 }
-
-boost::asio::awaitable<void> PostIngestQueue::processKnowledgeGraphStage(const std::string& hash,
-                                                                         const std::string& mime) {
-    if (!kg_ || !meta_) {
+boost::asio::awaitable<void>
+PostIngestQueue::processKnowledgeGraphStage(const std::string& hash, const std::string& /*mime*/) {
+    if (!graphComponent_ || !meta_) {
         co_return;
     }
 
@@ -195,36 +196,22 @@ boost::asio::awaitable<void> PostIngestQueue::processKnowledgeGraphStage(const s
         }
 
         const auto& doc = *infoRes.value();
-        metadata::KGNode docNode;
-        docNode.nodeKey = std::string("doc:") + hash;
-        docNode.type = std::string("document");
-        docNode.label =
-            !doc.fileName.empty() ? std::optional<std::string>(doc.fileName) : std::nullopt;
+        auto tagsRes = meta_->getDocumentTags(doc.id);
+        std::vector<std::string> tags;
+        if (tagsRes && !tagsRes.value().empty()) {
+            tags = tagsRes.value();
+        }
 
-        std::int64_t docNodeId = -1;
-        auto r = kg_->upsertNode(docNode);
-        if (r)
-            docNodeId = r.value();
+        GraphComponent::DocumentGraphContext ctx{.documentHash = hash,
+                                                 .filePath = doc.fileName,
+                                                 .tags = std::move(tags),
+                                                 .documentDbId = doc.id};
 
-        if (docNodeId >= 0) {
-            auto tagsRes = meta_->getDocumentTags(doc.id);
-            if (tagsRes && !tagsRes.value().empty()) {
-                for (const auto& tag : tagsRes.value()) {
-                    metadata::KGNode tagNode;
-                    tagNode.nodeKey = std::string("tag:") + tag;
-                    tagNode.type = std::string("tag");
-
-                    auto tagR = kg_->upsertNode(tagNode);
-                    if (tagR) {
-                        metadata::KGEdge edge;
-                        edge.srcNodeId = docNodeId;
-                        edge.dstNodeId = tagR.value();
-                        edge.relation = "HAS_TAG";
-                        (void)kg_->addEdge(edge);
-                    }
-                }
-            }
-
+        auto result = graphComponent_->onDocumentIngested(ctx);
+        if (!result) {
+            spdlog::warn("[PostIngestQueue] Graph ingestion failed for {}: {}", hash,
+                         result.error().message);
+        } else {
             auto duration = std::chrono::steady_clock::now() - start;
             double ms = std::chrono::duration<double, std::milli>(duration).count();
             spdlog::debug("[PostIngestQueue] KG stage completed for {} in {:.2f}ms", hash, ms);

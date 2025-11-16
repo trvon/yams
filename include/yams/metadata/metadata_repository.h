@@ -20,6 +20,10 @@
 #include <yams/metadata/metadata_concepts.h>
 #include <yams/search/bk_tree.h>
 
+namespace yams::daemon {
+class GraphComponent;
+}
+
 namespace yams::metadata {
 
 // Forward declarations
@@ -438,11 +442,18 @@ public:
         kgStore_ = std::move(kgStore);
     }
 
+    void setGraphComponent(std::shared_ptr<yams::daemon::GraphComponent> graphComponent) {
+        graphComponent_ = std::move(graphComponent);
+    }
+
+    std::shared_ptr<KnowledgeGraphStore> getKnowledgeGraphStore() const { return kgStore_; }
+
 private:
     ConnectionPool& pool_;
     bool hasPathIndexing_{false};
     bool pathFtsAvailable_{false};
     std::shared_ptr<KnowledgeGraphStore> kgStore_; // PBI-043: tree diff KG integration
+    std::shared_ptr<yams::daemon::GraphComponent> graphComponent_; // PBI-009: centralized graph ops
 
     // Component-owned metrics (updated on insert/delete, read by DaemonMetrics)
     mutable std::atomic<uint64_t> cachedDocumentCount_{0};

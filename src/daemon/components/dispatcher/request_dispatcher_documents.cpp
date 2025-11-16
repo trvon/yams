@@ -1,6 +1,7 @@
 // Split from RequestDispatcher.cpp: document/search/grep/download/cancel handlers
 #include <spdlog/spdlog.h>
 #include <filesystem>
+#include <future>
 #include <sstream>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
@@ -850,10 +851,46 @@ RequestDispatcher::handleFileHistoryRequest(const FileHistoryRequest& req) {
             }
 
             // For each matching document, check for snapshot_id metadata
-            for (const auto& doc : matchingDocs) {
-                auto metadataRes = appContext.metadataRepo->getAllMetadata(doc.id);
-                if (!metadataRes)
+            // Limit processing to prevent timeout on large result sets
+            const size_t maxDocsToProcess = 100;
+            size_t docsToProcess = std::min(matchingDocs.size(), maxDocsToProcess);
+
+            spdlog::info("[FileHistory] Processing {} matching documents (max {})",
+                         matchingDocs.size(), docsToProcess);
+
+            if (matchingDocs.size() > maxDocsToProcess) {
+                spdlog::warn("[FileHistory] Found {} documents, limiting to {} to prevent timeout",
+                             matchingDocs.size(), maxDocsToProcess);
+            }
+
+            for (size_t idx = 0; idx < docsToProcess; ++idx) {
+                const auto& doc = matchingDocs[idx];
+                spdlog::debug("[FileHistory] Processing doc {}/{}: id={}, path={}", idx + 1,
+                              docsToProcess, doc.id, doc.filePath);
+
+                // Use std::async with timeout to prevent blocking indefinitely
+                auto metadataFuture = std::async(std::launch::async, [&]() {
+                    return appContext.metadataRepo->getAllMetadata(doc.id);
+                });
+
+                // Wait with 500ms timeout per document
+                if (metadataFuture.wait_for(std::chrono::milliseconds(500)) !=
+                    std::future_status::ready) {
+                    spdlog::warn(
+                        "[FileHistory] Timeout getting metadata for doc {} (path={}), skipping",
+                        doc.id, doc.filePath);
                     continue;
+                }
+
+                auto metadataRes = metadataFuture.get();
+                if (!metadataRes) {
+                    spdlog::debug("[FileHistory] Failed to get metadata for doc {}: {}", doc.id,
+                                  metadataRes.error().message);
+                    continue;
+                }
+
+                spdlog::debug("[FileHistory] Got {} metadata entries for doc {}",
+                              metadataRes.value().size(), doc.id);
 
                 auto it = metadataRes.value().find("snapshot_id");
                 if (it != metadataRes.value().end() &&
@@ -869,8 +906,18 @@ RequestDispatcher::handleFileHistoryRequest(const FileHistoryRequest& req) {
                     auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration);
                     fv.indexedTimestamp = seconds.count();
 
+                    spdlog::debug("[FileHistory] Adding version: snapshot={}, hash={}",
+                                  fv.snapshotId, fv.hash.substr(0, 8));
                     response.versions.push_back(std::move(fv));
+                } else {
+                    spdlog::debug("[FileHistory] Doc {} has no snapshot_id metadata", doc.id);
                 }
+            }
+
+            if (matchingDocs.size() > maxDocsToProcess) {
+                response.message = "Found " + std::to_string(matchingDocs.size()) +
+                                   " versions (showing first " + std::to_string(docsToProcess) +
+                                   ")";
             }
 
             response.found = !response.versions.empty();

@@ -126,6 +126,15 @@ private:
     boost::asio::awaitable<Response> handleUnloadModelRequest(const UnloadModelRequest& req);
     boost::asio::awaitable<Response> handleModelStatusRequest(const ModelStatusRequest& req);
 
+    // Graph query handlers (PBI-009)
+    boost::asio::awaitable<Response> handleGraphQueryRequest(const GraphQueryRequest& req);
+    boost::asio::awaitable<Response>
+    handleGraphPathHistoryRequest(const GraphPathHistoryRequest& req);
+
+    // Graph maintenance handlers (PBI-009 Phase 4.3)
+    boost::asio::awaitable<Response> handleGraphRepairRequest(const GraphRepairRequest& req);
+    boost::asio::awaitable<Response> handleGraphValidateRequest(const GraphValidateRequest& req);
+
     // Legacy helper declarations removed after dispatcher split
 
 private:

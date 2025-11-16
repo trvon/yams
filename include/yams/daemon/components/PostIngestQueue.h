@@ -27,6 +27,7 @@ class VectorDatabase;
 namespace yams::daemon {
 class IModelProvider;
 class WorkCoordinator;
+class GraphComponent;
 
 class PostIngestQueue {
 public:
@@ -41,7 +42,8 @@ public:
     PostIngestQueue(std::shared_ptr<api::IContentStore> store,
                     std::shared_ptr<metadata::MetadataRepository> meta,
                     std::vector<std::shared_ptr<extraction::IContentExtractor>> extractors,
-                    std::shared_ptr<metadata::KnowledgeGraphStore> kg, WorkCoordinator* coordinator,
+                    std::shared_ptr<metadata::KnowledgeGraphStore> kg,
+                    std::shared_ptr<GraphComponent> graphComponent, WorkCoordinator* coordinator,
                     std::size_t capacity = 1000);
     ~PostIngestQueue();
 
@@ -74,6 +76,7 @@ private:
     std::shared_ptr<metadata::MetadataRepository> meta_;
     std::vector<std::shared_ptr<extraction::IContentExtractor>> extractors_;
     std::shared_ptr<metadata::KnowledgeGraphStore> kg_;
+    std::shared_ptr<GraphComponent> graphComponent_;
     WorkCoordinator* coordinator_;
     boost::asio::strand<boost::asio::io_context::executor_type> strand_;
 

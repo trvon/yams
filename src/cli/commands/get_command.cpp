@@ -42,7 +42,8 @@ public:
 
     std::string getDescription() const override {
         return "Retrieve a document from the content store (usage: yams get <path|hash> or yams "
-               "get --name <path>)";
+               "get --name <path>). When multiple instances exist, returns the most recent by "
+               "default.";
     }
 
     void registerCommand(CLI::App& app, YamsCLI* cli) override {
@@ -86,7 +87,9 @@ public:
         cmd->add_option("--chunk-size", chunkSize_, "Streaming chunk size in bytes")
             ->default_val(262144);
         cmd->add_flag("-v,--verbose", verbose_, "Enable verbose output");
-        cmd->add_flag("--latest", getLatest_, "Get the most recently indexed matching document");
+        cmd->add_flag("--latest", getLatest_,
+                      "Get the most recently indexed matching document (default when multiple "
+                      "matches exist)");
         cmd->add_flag("--oldest", getOldest_, "Get the oldest indexed matching document");
 
         // Text extraction options

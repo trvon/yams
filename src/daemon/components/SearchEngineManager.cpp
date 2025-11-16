@@ -61,11 +61,12 @@ void SearchEngineManager::refreshSnapshot() {
 }
 
 boost::asio::awaitable<Result<std::shared_ptr<yams::search::HybridSearchEngine>>>
-SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo,
-                                 std::shared_ptr<yams::vector::VectorIndexManager> vectorManager,
-                                 std::shared_ptr<yams::vector::EmbeddingGenerator> embeddingGen,
-                                 const std::string& reason, int timeoutMs,
-                                 boost::asio::any_io_executor workerExecutor) {
+SearchEngineManager::buildEngine(
+    std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo,
+    std::shared_ptr<yams::vector::VectorIndexManager> vectorManager,
+    std::shared_ptr<yams::vector::EmbeddingGenerator> embeddingGen,
+    std::shared_ptr<yams::app::services::IGraphQueryService> graphService,
+    const std::string& reason, int timeoutMs, boost::asio::any_io_executor workerExecutor) {
     using namespace boost::asio::experimental::awaitable_operators;
 
     auto ex = co_await boost::asio::this_coro::executor;
@@ -99,6 +100,8 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         builder->withVectorIndex(vectorManager);
     if (embeddingGen)
         builder->withEmbeddingGenerator(embeddingGen);
+    if (graphService)
+        builder->withGraphQueryService(graphService);
 
     auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
 

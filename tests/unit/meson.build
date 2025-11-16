@@ -115,6 +115,8 @@ unit_daemon_base = files(
   'daemon/service_manager_provider_degraded_test.cpp',
   'daemon/streaming_processor_test.cpp',
   'daemon/entity_graph_service_test.cpp',
+  # Migrated to Catch2 - see tests/meson.build (graph_component_catch2_test.cpp)
+  # 'daemon/graph_component_test.cpp',
   # Migrated to Catch2: plugin_host_test.cpp, request_dispatcher_plugin_test.cpp → plugin_infrastructure_test.cpp
   # Excluded: multiplex_client_test.cpp, onnx_*
 )

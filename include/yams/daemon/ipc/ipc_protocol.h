@@ -2438,6 +2438,190 @@ struct PluginTrustRemoveRequest {
     }
 };
 
+// Graph query requests (PBI-009)
+struct GraphQueryRequest {
+    // Origin selection (exactly one should be set)
+    std::string documentHash;
+    std::string documentName;
+    std::string snapshotId;
+    int64_t nodeId{-1}; // -1 means not set
+
+    // Traversal options
+    std::vector<std::string> relationFilters; // Empty = all relations
+    int32_t maxDepth{1};                      // BFS depth limit (1-4)
+    uint32_t maxResults{200};                 // Total result cap
+    uint32_t maxResultsPerDepth{100};         // Per-depth cap
+
+    // Snapshot context
+    std::string scopeToSnapshot;
+
+    // Pagination
+    uint32_t offset{0};
+    uint32_t limit{100};
+
+    // Output control
+    bool includeEdgeProperties{false};
+    bool includeNodeProperties{false};
+    bool hydrateFully{true};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << documentHash << documentName << snapshotId << nodeId << relationFilters << maxDepth
+            << maxResults << maxResultsPerDepth << scopeToSnapshot << offset << limit
+            << includeEdgeProperties << includeNodeProperties << hydrateFully;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<GraphQueryRequest> deserialize(Deserializer& deser) {
+        GraphQueryRequest req;
+
+        if (auto r = deser.readString(); r)
+            req.documentHash = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            req.documentName = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            req.snapshotId = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.template read<int64_t>(); r)
+            req.nodeId = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.readStringVector(); r)
+            req.relationFilters = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.template read<int32_t>(); r)
+            req.maxDepth = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<uint32_t>(); r)
+            req.maxResults = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<uint32_t>(); r)
+            req.maxResultsPerDepth = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            req.scopeToSnapshot = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.template read<uint32_t>(); r)
+            req.offset = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<uint32_t>(); r)
+            req.limit = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<bool>(); r)
+            req.includeEdgeProperties = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<bool>(); r)
+            req.includeNodeProperties = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<bool>(); r)
+            req.hydrateFully = r.value();
+        else
+            return r.error();
+
+        return req;
+    }
+};
+
+struct GraphPathHistoryRequest {
+    std::string path;
+    uint32_t limit{100};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << path << limit;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<GraphPathHistoryRequest> deserialize(Deserializer& deser) {
+        GraphPathHistoryRequest req;
+
+        if (auto r = deser.readString(); r)
+            req.path = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.template read<uint32_t>(); r)
+            req.limit = r.value();
+        else
+            return r.error();
+
+        return req;
+    }
+};
+
+// ============================================================================
+// Graph Maintenance Requests (PBI-009 Phase 4.3)
+// ============================================================================
+
+struct GraphRepairRequest {
+    bool dryRun{false};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << dryRun;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<GraphRepairRequest> deserialize(Deserializer& deser) {
+        GraphRepairRequest req;
+
+        if (auto r = deser.template read<bool>(); r)
+            req.dryRun = r.value();
+        else
+            return r.error();
+
+        return req;
+    }
+};
+
+struct GraphValidateRequest {
+    // No parameters needed for now
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& /*ser*/) const {
+        // Empty for now
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<GraphValidateRequest> deserialize(Deserializer& /*deser*/) {
+        return GraphValidateRequest{};
+    }
+};
+
 // Forward declarations for late-defined request types used in the Request variant
 struct CatRequest;
 struct ListSessionsRequest;
@@ -2456,7 +2640,8 @@ using Request = std::variant<
     PluginUnloadRequest, PluginTrustListRequest, PluginTrustAddRequest, PluginTrustRemoveRequest,
     CancelRequest, CatRequest, ListSessionsRequest, UseSessionRequest, AddPathSelectorRequest,
     RemovePathSelectorRequest, ListTreeDiffRequest, FileHistoryRequest, PruneRequest,
-    ListCollectionsRequest, ListSnapshotsRequest, RestoreCollectionRequest, RestoreSnapshotRequest>;
+    ListCollectionsRequest, ListSnapshotsRequest, RestoreCollectionRequest, RestoreSnapshotRequest,
+    GraphQueryRequest, GraphPathHistoryRequest, GraphRepairRequest, GraphValidateRequest>;
 
 // ============================================================================
 // Response Types
@@ -4955,6 +5140,368 @@ struct RestoreSnapshotResponse {
     }
 };
 
+// Graph query responses (PBI-009)
+struct GraphNode {
+    int64_t nodeId{0};
+    std::string nodeKey;
+    std::string label;
+    std::string type;
+    std::string documentHash;
+    std::string documentPath;
+    std::string snapshotId;
+    int32_t distance{0};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << nodeId << nodeKey << label << type << documentHash << documentPath << snapshotId
+            << distance;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<GraphNode> deserialize(Deserializer& deser) {
+        GraphNode node;
+
+        if (auto r = deser.template read<int64_t>(); r)
+            node.nodeId = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            node.nodeKey = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            node.label = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            node.type = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            node.documentHash = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            node.documentPath = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            node.snapshotId = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.template read<int32_t>(); r)
+            node.distance = r.value();
+        else
+            return r.error();
+
+        return node;
+    }
+};
+
+struct GraphQueryResponse {
+    GraphNode originNode;
+    std::vector<GraphNode> connectedNodes;
+    uint64_t totalNodesFound{0};
+    uint64_t totalEdgesTraversed{0};
+    bool truncated{false};
+    int32_t maxDepthReached{0};
+    int64_t queryTimeMs{0};
+    bool kgAvailable{true};
+    std::string warning;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        originNode.serialize(ser);
+        ser << static_cast<uint32_t>(connectedNodes.size());
+        for (const auto& node : connectedNodes) {
+            node.serialize(ser);
+        }
+        ser << totalNodesFound << totalEdgesTraversed << truncated << maxDepthReached << queryTimeMs
+            << kgAvailable << warning;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<GraphQueryResponse> deserialize(Deserializer& deser) {
+        GraphQueryResponse res;
+
+        auto origin = GraphNode::deserialize(deser);
+        if (!origin)
+            return origin.error();
+        res.originNode = std::move(origin.value());
+
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            res.connectedNodes.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto node = GraphNode::deserialize(deser);
+                if (!node)
+                    return node.error();
+                res.connectedNodes.push_back(std::move(node.value()));
+            }
+        } else
+            return cnt.error();
+
+        if (auto r = deser.template read<uint64_t>(); r)
+            res.totalNodesFound = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<uint64_t>(); r)
+            res.totalEdgesTraversed = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<bool>(); r)
+            res.truncated = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<int32_t>(); r)
+            res.maxDepthReached = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<int64_t>(); r)
+            res.queryTimeMs = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<bool>(); r)
+            res.kgAvailable = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            res.warning = std::move(r.value());
+        else
+            return r.error();
+
+        return res;
+    }
+};
+
+struct PathHistoryEntry {
+    std::string path;
+    std::string snapshotId;
+    std::string blobHash;
+    std::string changeType;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << path << snapshotId << blobHash << changeType;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<PathHistoryEntry> deserialize(Deserializer& deser) {
+        PathHistoryEntry entry;
+
+        if (auto r = deser.readString(); r)
+            entry.path = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            entry.snapshotId = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            entry.blobHash = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            entry.changeType = std::move(r.value());
+        else
+            return r.error();
+
+        return entry;
+    }
+};
+
+struct GraphPathHistoryResponse {
+    std::string queryPath;
+    std::vector<PathHistoryEntry> history;
+    bool hasMore{false};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << queryPath;
+        ser << static_cast<uint32_t>(history.size());
+        for (const auto& entry : history) {
+            entry.serialize(ser);
+        }
+        ser << hasMore;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<GraphPathHistoryResponse> deserialize(Deserializer& deser) {
+        GraphPathHistoryResponse res;
+
+        if (auto r = deser.readString(); r)
+            res.queryPath = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            res.history.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto entry = PathHistoryEntry::deserialize(deser);
+                if (!entry)
+                    return entry.error();
+                res.history.push_back(std::move(entry.value()));
+            }
+        } else
+            return cnt.error();
+
+        if (auto r = deser.template read<bool>(); r)
+            res.hasMore = r.value();
+        else
+            return r.error();
+
+        return res;
+    }
+};
+
+// ============================================================================
+// Graph Maintenance Responses (PBI-009 Phase 4.3)
+// ============================================================================
+
+struct GraphRepairResponse {
+    uint64_t nodesCreated{0};
+    uint64_t nodesUpdated{0};
+    uint64_t edgesCreated{0};
+    uint64_t errors{0};
+    std::vector<std::string> issues;
+    bool dryRun{false};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << nodesCreated << nodesUpdated << edgesCreated << errors;
+        ser << static_cast<uint32_t>(issues.size());
+        for (const auto& issue : issues) {
+            ser << issue;
+        }
+        ser << dryRun;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<GraphRepairResponse> deserialize(Deserializer& deser) {
+        GraphRepairResponse res;
+
+        if (auto r = deser.template read<uint64_t>(); r)
+            res.nodesCreated = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<uint64_t>(); r)
+            res.nodesUpdated = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<uint64_t>(); r)
+            res.edgesCreated = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<uint64_t>(); r)
+            res.errors = r.value();
+        else
+            return r.error();
+
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            res.issues.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto issue = deser.readString();
+                if (!issue)
+                    return issue.error();
+                res.issues.push_back(std::move(issue.value()));
+            }
+        } else
+            return cnt.error();
+
+        if (auto r = deser.template read<bool>(); r)
+            res.dryRun = r.value();
+        else
+            return r.error();
+
+        return res;
+    }
+};
+
+struct GraphValidateResponse {
+    uint64_t totalNodes{0};
+    uint64_t totalEdges{0};
+    uint64_t orphanedNodes{0};
+    uint64_t unreachableNodes{0};
+    std::vector<std::string> issues;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << totalNodes << totalEdges << orphanedNodes << unreachableNodes;
+        ser << static_cast<uint32_t>(issues.size());
+        for (const auto& issue : issues) {
+            ser << issue;
+        }
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<GraphValidateResponse> deserialize(Deserializer& deser) {
+        GraphValidateResponse res;
+
+        if (auto r = deser.template read<uint64_t>(); r)
+            res.totalNodes = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<uint64_t>(); r)
+            res.totalEdges = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<uint64_t>(); r)
+            res.orphanedNodes = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<uint64_t>(); r)
+            res.unreachableNodes = r.value();
+        else
+            return r.error();
+
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            res.issues.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto issue = deser.readString();
+                if (!issue)
+                    return issue.error();
+                res.issues.push_back(std::move(issue.value()));
+            }
+        } else
+            return cnt.error();
+
+        return res;
+    }
+};
+
 // Plugin responses
 struct PluginRecord {
     std::string name;
@@ -5508,7 +6055,8 @@ using Response =
                  PluginScanResponse, PluginLoadResponse, PluginTrustListResponse, CatResponse,
                  ListSessionsResponse, ListTreeDiffResponse, FileHistoryResponse, PruneResponse,
                  ListCollectionsResponse, ListSnapshotsResponse, RestoreCollectionResponse,
-                 RestoreSnapshotResponse,
+                 RestoreSnapshotResponse, GraphQueryResponse, GraphPathHistoryResponse,
+                 GraphRepairResponse, GraphValidateResponse,
                  // Streaming events (progress/heartbeats)
                  EmbeddingEvent, ModelLoadEvent>;
 
@@ -5592,6 +6140,12 @@ enum class MessageType : uint8_t {
     PluginTrustListRequest = 40,
     PluginTrustAddRequest = 41,
     PluginTrustRemoveRequest = 42,
+    // Graph query requests (PBI-009)
+    GraphQueryRequest = 43,
+    GraphPathHistoryRequest = 44,
+    // Graph maintenance requests (PBI-009 Phase 4.3)
+    GraphRepairRequest = 45,
+    GraphValidateRequest = 46,
 
     // Responses
     SearchResponse = 128,
@@ -5632,6 +6186,12 @@ enum class MessageType : uint8_t {
     PluginScanResponse = 161,
     PluginLoadResponse = 162,
     PluginTrustListResponse = 163,
+    // Graph query responses (PBI-009)
+    GraphQueryResponse = 164,
+    GraphPathHistoryResponse = 165,
+    // Graph maintenance responses (PBI-009 Phase 4.3)
+    GraphRepairResponse = 166,
+    GraphValidateResponse = 167,
     // Events
     EmbeddingEvent = 149,
     ModelLoadEvent = 150,

@@ -35,12 +35,12 @@ RUN mkdir -p build/fuzzing && \
       --profile:host=conan/profiles/aflplusplus-docker \
       --profile:build=default \
       --build=missing \
-      -o build_tests=True \
+      -o build_tests=False \
       -o "sqlite3/*:fts5=True" \
       -o "zstd/*:build_programs=False" && \
     cd build/fuzzing && \
     . ./build-debug/conan/conanbuild.sh && \
-    CC=afl-clang-fast CXX=afl-clang-fast++ meson setup --native-file build-debug/conan/conan_meson_native.ini --buildtype=debug -Dbuild-fuzzers=true ../.. && \
+    CC=afl-clang-fast CXX=afl-clang-fast++ meson setup --native-file build-debug/conan/conan_meson_native.ini --buildtype=debug -Dbuild-fuzzers=true -Dbuild-tests=false ../.. && \
     meson compile
 
 # Set up fuzzing directories

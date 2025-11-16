@@ -86,10 +86,30 @@ if [[ "${ENABLE_COVERAGE}" == "true" ]] && [[ "${BUILD_TYPE}" != "Debug" ]]; the
   exit 1
 fi
 
-# Select desired C++ standard (defaults to C++20 to match meson.build).
+# Select desired C++ standard (defaults to C++23 if compiler supports it, otherwise C++20).
 # Override with YAMS_CPPSTD=20/23.
-# Note: C++23 is only used if explicitly requested and compiler supports it.
-CPPSTD_INPUT=${YAMS_CPPSTD:-20}
+# Auto-detection: test compiler for C++23 support (constexpr containers)
+if [[ -z "${YAMS_CPPSTD:-}" ]]; then
+  # Test if compiler supports C++23 with constexpr containers
+  if echo '#include <vector>
+#if __cplusplus >= 202302L && defined(__cpp_lib_constexpr_vector) && __cpp_lib_constexpr_vector >= 201907L
+#define HAS_CPP23_CONTAINERS 1
+#else
+#define HAS_CPP23_CONTAINERS 0
+#endif
+#if !HAS_CPP23_CONTAINERS
+#error "No C++23 constexpr containers"
+#endif' | "${CXX:-c++}" -std=c++23 -fsyntax-only -x c++ - >/dev/null 2>&1; then
+    CPPSTD_INPUT="23"
+    echo "Auto-detected C++23 compiler support (constexpr containers available)"
+  else
+    CPPSTD_INPUT="20"
+    echo "C++23 not fully supported, using C++20"
+  fi
+else
+  CPPSTD_INPUT="${YAMS_CPPSTD}"
+fi
+
 case "${CPPSTD_INPUT}" in
   17|20|23)
     CPPSTD="${CPPSTD_INPUT}"

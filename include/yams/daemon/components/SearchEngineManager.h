@@ -7,6 +7,10 @@
 #include <boost/asio/awaitable.hpp>
 #include <yams/core/types.h> // For Result type
 
+namespace yams::app::services {
+class IGraphQueryService;
+}
+
 namespace yams::search {
 class HybridSearchEngine;
 class SearchEngineBuilder;
@@ -54,6 +58,7 @@ public:
      * @param metadataRepo Metadata repository dependency
      * @param vectorManager Optional vector index manager (for vector search)
      * @param embeddingGen Optional embedding generator (for vector search)
+     * @param graphService Optional graph query service (for enhanced KG scoring)
      * @param reason Human-readable reason for build (e.g., "user_initiated", "auto_repair")
      * @param timeoutMs Build timeout in milliseconds
      * @param workerExecutor Executor for blocking build operations
@@ -63,6 +68,7 @@ public:
     buildEngine(std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo,
                 std::shared_ptr<yams::vector::VectorIndexManager> vectorManager,
                 std::shared_ptr<yams::vector::EmbeddingGenerator> embeddingGen,
+                std::shared_ptr<yams::app::services::IGraphQueryService> graphService,
                 const std::string& reason, int timeoutMs,
                 boost::asio::any_io_executor workerExecutor);
 

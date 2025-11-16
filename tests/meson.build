@@ -698,7 +698,16 @@ if catch2_dep.found()
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
-  
+
+  catch2_daemon_graph_component_exe = executable('catch2_daemon_graph_component',
+    files('unit/daemon/graph_component_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # Add plugin path for plugin harness tests
   plugin_test_cpp_args = test_cpp_noerror_args + ['-DYAMS_TESTING=1']
   if get_option('plugin-onnx')
@@ -1128,7 +1137,13 @@ if catch2_dep.found()
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
   )
-  
+
+  test('daemon_graph_component', catch2_daemon_graph_component_exe,
+    suite: ['catch2', 'unit', 'daemon', 'graph', 'pbi-009'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
   test('daemon_plugin_harness', catch2_daemon_plugin_exe,
     suite: ['catch2', 'unit', 'daemon', 'plugin'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },

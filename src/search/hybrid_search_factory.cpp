@@ -11,11 +11,16 @@
 #include <memory>
 #include <utility>
 
+namespace yams::app::services {
+class IGraphQueryService;
+}
+
 namespace yams::search {
 
 // Forward declaration for the simple scorer factory implemented in the KG scorer TU.
 std::shared_ptr<KGScorer>
-makeSimpleKGScorer(std::shared_ptr<yams::metadata::KnowledgeGraphStore> store);
+makeSimpleKGScorer(std::shared_ptr<yams::metadata::KnowledgeGraphStore> store,
+                   std::shared_ptr<yams::app::services::IGraphQueryService> graphService = nullptr);
 
 std::shared_ptr<vector::EmbeddingGenerator>
 HybridSearchFactory::createDefaultEmbeddingGenerator(const std::filesystem::path& dataPath) {
@@ -143,7 +148,8 @@ Result<std::shared_ptr<HybridSearchEngine>> HybridSearchFactory::createWithKGSto
     std::shared_ptr<vector::VectorIndexManager> vectorIndex,
     std::shared_ptr<KeywordSearchEngine> keywordEngine, const HybridSearchConfig& config,
     std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore,
-    std::shared_ptr<vector::EmbeddingGenerator> embeddingGenerator) {
+    std::shared_ptr<vector::EmbeddingGenerator> embeddingGenerator,
+    std::shared_ptr<app::services::IGraphQueryService> graphQueryService) {
     if (!kgStore && config.enable_kg) {
         // If KG is requested but no store, surface a clear error.
         return Error{ErrorCode::InvalidArgument,
@@ -152,7 +158,7 @@ Result<std::shared_ptr<HybridSearchEngine>> HybridSearchFactory::createWithKGSto
 
     std::shared_ptr<KGScorer> scorer;
     if (config.enable_kg && kgStore) {
-        scorer = makeSimpleKGScorer(std::move(kgStore));
+        scorer = makeSimpleKGScorer(std::move(kgStore), std::move(graphQueryService));
     }
 
     return create(std::move(vectorIndex), std::move(keywordEngine), config, std::move(scorer),

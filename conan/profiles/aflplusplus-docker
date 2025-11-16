@@ -9,7 +9,7 @@
 
 [settings]
 os=Linux
-arch=x86_64
+arch=armv8
 compiler=clang
 compiler.version=18
 compiler.libcxx=libstdc++11

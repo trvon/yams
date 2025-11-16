@@ -284,8 +284,8 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
     std::vector<std::shared_ptr<extraction::IContentExtractor>> extractors{extractor};
 
     SECTION("Process single task successfully") {
-        auto queue =
-            std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr, nullptr, 8);
+        auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
+                                                       nullptr, nullptr, 8);
 
         PostIngestQueue::Task task{
             doc.sha256Hash, doc.mimeType, "", {}, PostIngestQueue::Task::Stage::Metadata};
@@ -315,8 +315,8 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
     }
 
     SECTION("Queue shutdown drains pending tasks") {
-        auto queue =
-            std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr, nullptr, 8);
+        auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
+                                                       nullptr, nullptr, 8);
 
         PostIngestQueue::Task task{
             doc.sha256Hash, doc.mimeType, "", {}, PostIngestQueue::Task::Stage::Metadata};
@@ -351,7 +351,7 @@ TEST_CASE("PostIngestQueue: InternalEventBus integration and stress",
         const std::string payload = "hello world";
 
         auto pq = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
-                                                    nullptr, 4096);
+                                                    nullptr, nullptr, 4096);
 
         // Spawn producers that publish into the InternalEventBus channel
         std::vector<std::thread> producers;

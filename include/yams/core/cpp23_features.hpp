@@ -115,6 +115,79 @@
 #define YAMS_CONSTEXPR_IF_SUPPORTED inline
 #endif
 
+/**
+ * @def YAMS_HAS_EXPECTED
+ * @brief Indicates support for std::expected (C++23)
+ *
+ * std::expected<T, E> provides monadic error handling without exceptions.
+ * Requires:
+ * - GCC 12+
+ * - Clang 16+
+ * - MSVC 19.33+
+ * - Apple Clang 15+
+ */
+#ifndef YAMS_HAS_EXPECTED
+#if defined(__cpp_lib_expected) && __cpp_lib_expected >= 202202L
+#define YAMS_HAS_EXPECTED 1
+#else
+#define YAMS_HAS_EXPECTED 0
+#endif
+#endif
+
+/**
+ * @def YAMS_HAS_STRING_CONTAINS
+ * @brief Indicates support for std::string::contains() (C++23)
+ *
+ * Requires:
+ * - GCC 12+
+ * - Clang 12+
+ * - MSVC 19.30+
+ * - Apple Clang 13+
+ */
+#ifndef YAMS_HAS_STRING_CONTAINS
+#if defined(__cpp_lib_string_contains) && __cpp_lib_string_contains >= 202011L
+#define YAMS_HAS_STRING_CONTAINS 1
+#else
+#define YAMS_HAS_STRING_CONTAINS 0
+#endif
+#endif
+
+/**
+ * @def YAMS_HAS_RANGES
+ * @brief Indicates support for C++20/23 ranges and views
+ *
+ * Requires:
+ * - GCC 10+ (partial), 12+ (complete)
+ * - Clang 13+ (partial), 15+ (complete)
+ * - MSVC 19.30+
+ * - Apple Clang 13+
+ */
+#ifndef YAMS_HAS_RANGES
+#if defined(__cpp_lib_ranges) && __cpp_lib_ranges >= 201911L
+#define YAMS_HAS_RANGES 1
+#else
+#define YAMS_HAS_RANGES 0
+#endif
+#endif
+
+/**
+ * @def YAMS_HAS_CONSTEXPR_ALGORITHMS
+ * @brief Indicates support for constexpr algorithms (C++20)
+ *
+ * Requires:
+ * - GCC 10+
+ * - Clang 10+
+ * - MSVC 19.26+
+ * - Apple Clang 12+
+ */
+#ifndef YAMS_HAS_CONSTEXPR_ALGORITHMS
+#if defined(__cpp_lib_constexpr_algorithms) && __cpp_lib_constexpr_algorithms >= 201806L
+#define YAMS_HAS_CONSTEXPR_ALGORITHMS 1
+#else
+#define YAMS_HAS_CONSTEXPR_ALGORITHMS 0
+#endif
+#endif
+
 // ============================================================================
 // C++26 Feature Detection (Experimental)
 // ============================================================================
@@ -205,7 +278,11 @@
 // Feature Summary (for diagnostics)
 // ============================================================================
 
-namespace yams::features {
+// Required for compatibility helpers
+#include <string_view>
+
+namespace yams {
+namespace features {
 
 /**
  * @brief Feature detection summary for diagnostics
@@ -214,6 +291,10 @@ struct FeatureInfo {
     static constexpr bool has_constexpr_containers = YAMS_HAS_CONSTEXPR_CONTAINERS;
     static constexpr bool has_constexpr_vector = YAMS_HAS_CONSTEXPR_VECTOR;
     static constexpr bool has_constexpr_string = YAMS_HAS_CONSTEXPR_STRING;
+    static constexpr bool has_expected = YAMS_HAS_EXPECTED;
+    static constexpr bool has_string_contains = YAMS_HAS_STRING_CONTAINS;
+    static constexpr bool has_ranges = YAMS_HAS_RANGES;
+    static constexpr bool has_constexpr_algorithms = YAMS_HAS_CONSTEXPR_ALGORITHMS;
     static constexpr bool has_profiles = YAMS_HAS_PROFILES;
     static constexpr bool has_reflection = YAMS_HAS_REFLECTION;
     static constexpr long cpp_version = YAMS_CPP_VERSION;
@@ -226,14 +307,65 @@ struct FeatureInfo {
  * @brief Get a human-readable feature summary
  */
 inline const char* get_feature_summary() {
-    if constexpr (FeatureInfo::has_constexpr_containers) {
+    if (FeatureInfo::has_constexpr_containers) {
         return "C++23 (constexpr containers enabled)";
     } else {
         return "C++20 (constexpr containers unavailable)";
     }
 }
 
-} // namespace yams::features
+// ============================================================================
+// Compatibility Helpers
+// ============================================================================
+
+/**
+ * @brief String contains helper (C++23 compatibility)
+ *
+ * When std::string::contains() is available, this is a passthrough.
+ * Otherwise, provides fallback using find().
+ */
+#if YAMS_HAS_STRING_CONTAINS
+template <typename StringT, typename SubstrT>
+inline constexpr bool string_contains(const StringT& str, const SubstrT& substr) {
+    return str.contains(substr);
+}
+#else
+template <typename StringT, typename SubstrT>
+inline bool string_contains(const StringT& str, const SubstrT& substr) {
+    return std::string_view(str).find(std::string_view(substr)) != std::string_view::npos;
+}
+#endif
+
+/**
+ * @brief String starts_with helper (C++20, but ensure availability)
+ */
+template <typename StringT, typename PrefixT>
+inline bool string_starts_with(const StringT& str, const PrefixT& prefix) {
+    std::string_view sv(str);
+    std::string_view pv(prefix);
+#if defined(__cpp_lib_starts_ends_with) && __cpp_lib_starts_ends_with >= 201711L
+    return sv.starts_with(pv);
+#else
+    return sv.size() >= pv.size() && sv.substr(0, pv.size()) == pv;
+#endif
+}
+
+/**
+ * @brief String ends_with helper (C++20, but ensure availability)
+ */
+template <typename StringT, typename SuffixT>
+inline bool string_ends_with(const StringT& str, const SuffixT& suffix) {
+    std::string_view sv(str);
+    std::string_view suf(suffix);
+#if defined(__cpp_lib_starts_ends_with) && __cpp_lib_starts_ends_with >= 201711L
+    return sv.ends_with(suf);
+#else
+    return sv.size() >= suf.size() && sv.substr(sv.size() - suf.size()) == suf;
+#endif
+}
+
+} // namespace features
+} // namespace yams
 
 // ============================================================================
 // Deprecation and Future Compatibility
@@ -263,8 +395,9 @@ inline const char* get_feature_summary() {
  * 3. Test on both C++20 and C++23 build configurations
  * 4. Document which features require C++23
  * 5. Use YAMS_CONSTEXPR_IF_SUPPORTED for conditional constexpr
+ * 6. Use yams::features helpers for cross-version string operations
  *
- * Example Pattern:
+ * Example Pattern - Compile-time data:
  * @code
  * namespace yams::config {
  *
@@ -287,5 +420,63 @@ inline const char* get_feature_summary() {
  * #endif
  *
  * } // namespace yams::config
+ * @endcode
+ *
+ * Example Pattern - String operations:
+ * @code
+ * #include <yams/core/cpp23_features.hpp>
+ *
+ * using yams::features::string_contains;
+ * using yams::features::string_starts_with;
+ *
+ * bool is_text_file(const std::string& path) {
+ *     // Works on both C++20 and C++23
+ *     return string_ends_with(path, ".txt") ||
+ *            string_ends_with(path, ".md");
+ * }
+ *
+ * bool has_keyword(const std::string& text, const std::string& keyword) {
+ *     return string_contains(text, keyword);
+ * }
+ * @endcode
+ *
+ * Example Pattern - Future std::expected migration:
+ * @code
+ * // Current: Use Result<T> (custom type)
+ * Result<Config> loadConfig(const std::string& path);
+ *
+ * // Future (when YAMS_HAS_EXPECTED): Migrate to std::expected
+ * // #if YAMS_HAS_EXPECTED
+ * // std::expected<Config, Error> loadConfig(const std::string& path);
+ * // #else
+ * // Result<Config> loadConfig(const std::string& path);
+ * // #endif
+ *
+ * // Note: Result<T> and std::expected<T, E> have similar monadic APIs,
+ * // making migration straightforward when std::expected becomes available.
+ * @endcode
+ *
+ * Example Pattern - Ranges and views:
+ * @code
+ * #if YAMS_HAS_RANGES
+ *     #include <ranges>
+ *
+ *     auto process_lines(const std::vector<std::string>& lines) {
+ *         return lines
+ *             | std::views::filter([](auto& s) { return !s.empty(); })
+ *             | std::views::transform([](auto& s) { return trim(s); });
+ *     }
+ * #else
+ *     // Fallback: manual iteration
+ *     std::vector<std::string> process_lines(const std::vector<std::string>& lines) {
+ *         std::vector<std::string> result;
+ *         for (const auto& line : lines) {
+ *             if (!line.empty()) {
+ *                 result.push_back(trim(line));
+ *             }
+ *         }
+ *         return result;
+ *     }
+ * #endif
  * @endcode
  */

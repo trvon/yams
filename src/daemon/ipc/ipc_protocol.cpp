@@ -170,6 +170,22 @@ template <> struct MessageTypeTraits<ListTreeDiffRequest> {
     static constexpr MessageType value = MessageType::ListTreeDiffRequest;
     static constexpr const char* name = "ListTreeDiff";
 };
+template <> struct MessageTypeTraits<GraphQueryRequest> {
+    static constexpr MessageType value = MessageType::GraphQueryRequest;
+    static constexpr const char* name = "GraphQuery";
+};
+template <> struct MessageTypeTraits<GraphPathHistoryRequest> {
+    static constexpr MessageType value = MessageType::GraphPathHistoryRequest;
+    static constexpr const char* name = "GraphPathHistory";
+};
+template <> struct MessageTypeTraits<GraphRepairRequest> {
+    static constexpr MessageType value = MessageType::GraphRepairRequest;
+    static constexpr const char* name = "GraphRepair";
+};
+template <> struct MessageTypeTraits<GraphValidateRequest> {
+    static constexpr MessageType value = MessageType::GraphValidateRequest;
+    static constexpr const char* name = "GraphValidate";
+};
 
 // Response type mappings
 template <> struct MessageTypeTraits<SearchResponse> {
@@ -279,6 +295,18 @@ template <> struct MessageTypeTraits<PluginLoadResponse> {
 };
 template <> struct MessageTypeTraits<PluginTrustListResponse> {
     static constexpr MessageType value = MessageType::PluginTrustListResponse;
+};
+template <> struct MessageTypeTraits<GraphQueryResponse> {
+    static constexpr MessageType value = MessageType::GraphQueryResponse;
+};
+template <> struct MessageTypeTraits<GraphPathHistoryResponse> {
+    static constexpr MessageType value = MessageType::GraphPathHistoryResponse;
+};
+template <> struct MessageTypeTraits<GraphRepairResponse> {
+    static constexpr MessageType value = MessageType::GraphRepairResponse;
+};
+template <> struct MessageTypeTraits<GraphValidateResponse> {
+    static constexpr MessageType value = MessageType::GraphValidateResponse;
 };
 
 MessageType getMessageType(const Request& req) {

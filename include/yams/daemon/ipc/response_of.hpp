@@ -117,6 +117,14 @@ template <> struct ResponseOf<RestoreSnapshotRequest> {
     using type = RestoreSnapshotResponse;
 };
 
+// Graph maintenance operations (PBI-009)
+template <> struct ResponseOf<GraphRepairRequest> {
+    using type = GraphRepairResponse;
+};
+template <> struct ResponseOf<GraphValidateRequest> {
+    using type = GraphValidateResponse;
+};
+
 // Helper alias
 template <typename Req> using ResponseOfT = typename ResponseOf<Req>::type;
 

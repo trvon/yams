@@ -833,10 +833,14 @@ jobs:
 
   create-release:
     name: Create GitHub Release
-    needs: build-release
+    needs: [check-commits, build-release]
     runs-on: ubuntu-latest
-    # Skip release creation entirely when running under act
-    if: always() && !cancelled() && github.actor != 'nektos/act'
+    # Skip release creation when: running under act, OR check-commits skipped release
+    if: |
+      always() && !cancelled() && 
+      github.actor != 'nektos/act' &&
+      (needs.check-commits.result == 'skipped' || needs.check-commits.outputs.has_new_commits == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      needs.build-release.result == 'success'
     permissions:
       contents: write
       actions: read

@@ -20,6 +20,12 @@ namespace vector {
 class VectorIndexManager;
 class EmbeddingGenerator;
 } // namespace vector
+
+namespace app {
+namespace services {
+class IGraphQueryService;
+}
+} // namespace app
 } // namespace yams
 
 namespace yams::search {
@@ -171,6 +177,12 @@ public:
         return *this;
     }
 
+    SearchEngineBuilder&
+    withGraphQueryService(std::shared_ptr<yams::app::services::IGraphQueryService> graphService) {
+        graphQueryService_ = std::move(graphService);
+        return *this;
+    }
+
     // Build embedded engine only (no remote fallback)
     Result<std::shared_ptr<HybridSearchEngine>>
     buildEmbedded(const BuildOptions& options = BuildOptions::makeDefault());
@@ -196,6 +208,7 @@ private:
     std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore_;
     std::shared_ptr<yams::vector::EmbeddingGenerator> embeddingGenerator_;
+    std::shared_ptr<yams::app::services::IGraphQueryService> graphQueryService_;
 };
 
 } // namespace yams::search

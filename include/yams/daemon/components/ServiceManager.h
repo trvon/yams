@@ -29,6 +29,7 @@
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/EmbeddingProviderFsm.h>
 #include <yams/daemon/components/EmbeddingService.h>
+#include <yams/daemon/components/GraphQueryServiceComponent.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PluginHostFsm.h>
 #include <yams/daemon/components/PoolManager.h>
@@ -83,6 +84,7 @@ namespace yams::daemon {
 
 class IngestService;
 class EntityGraphService;
+class GraphComponent;
 
 class ServiceManager : public IComponent, public std::enable_shared_from_this<ServiceManager> {
 public:
@@ -266,6 +268,9 @@ public:
 
     // Knowledge Graph Store (PBI-059)
     std::shared_ptr<metadata::KnowledgeGraphStore> getKgStore() const { return kgStore_; }
+
+    // Graph Component (PBI-009)
+    std::shared_ptr<GraphComponent> getGraphComponent() const { return graphComponent_; }
 
     // ContentStore diagnostics
     std::string getContentStoreError() const { return contentStoreError_; }
@@ -460,6 +465,7 @@ private:
     std::shared_ptr<metadata::ConnectionPool> connectionPool_;
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_; // PBI-043: tree diff KG integration
+    std::shared_ptr<GraphComponent> graphComponent_; // PBI-009: centralized graph management
     std::shared_ptr<search::SearchExecutor> searchExecutor_;
     std::shared_ptr<vector::VectorIndexManager> vectorIndexManager_;
     std::shared_ptr<vector::VectorDatabase> vectorDatabase_;

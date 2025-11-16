@@ -223,32 +223,9 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::acquire() {
 
                 if (conn->alive.load(std::memory_order_relaxed) && conn->socket &&
                     conn->socket->is_open()) {
-                    boost::system::error_code ec;
-                    conn->socket->native_non_blocking(true, ec);
-                    if (!ec) {
-                        char peek_buf[1];
-                        auto bytes_peeked =
-                            conn->socket->receive(boost::asio::buffer(peek_buf, 1),
-                                                  boost::asio::socket_base::message_peek, ec);
-
-                        if (ec == boost::asio::error::eof ||
-                            ec == boost::asio::error::connection_reset ||
-                            ec == boost::asio::error::broken_pipe) {
-                            conn->alive.store(false, std::memory_order_relaxed);
-                            spdlog::debug("Stale connection detected ({}), marking dead",
-                                          ec.message());
-                            continue;
-                        }
-
-                        if (!ec || ec == boost::asio::error::would_block || bytes_peeked > 0) {
-                            conn->mark_used();
-                            existing = conn;
-                            break;
-                        }
-
-                        conn->alive.store(false, std::memory_order_relaxed);
-                        spdlog::debug("Connection error detected ({}), marking dead", ec.message());
-                    }
+                    conn->mark_used();
+                    existing = conn;
+                    break;
                 }
             }
         }
@@ -258,26 +235,10 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::acquire() {
         co_return existing;
     }
 
-    // No existing connection - create a new one (outside the lock)
     auto fresh = co_await create_connection();
 
     if (shared_ && fresh && fresh->alive.load(std::memory_order_relaxed)) {
         std::lock_guard<std::mutex> lk(mutex_);
-        // Another connection might have appeared while creating this one; prefer reusing it
-        for (auto& weak : connection_pool_) {
-            if (auto conn = weak.lock()) {
-                if (conn->alive.load(std::memory_order_relaxed) && conn->socket &&
-                    conn->socket->is_open()) {
-                    // Discard the newly created extra connection and return the existing one
-                    boost::system::error_code ec;
-                    fresh->socket->close(ec);
-                    fresh->alive = false;
-                    co_return conn;
-                }
-            }
-        }
-
-        // Otherwise, add the new connection to the pool and return it
         if (connection_pool_.size() < kMaxPoolSize) {
             connection_pool_.push_back(fresh);
         }
@@ -324,13 +285,15 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
     // Adopt connected socket first
     conn->socket = std::move(socket_res.value());
     conn->alive = true;
-    // Set small send/recv buffer to avoid head-of-line blocking under multiplexed load
     try {
         if (conn->socket && conn->socket->is_open()) {
             boost::asio::socket_base::send_buffer_size send_sz(64 * 1024);
             boost::asio::socket_base::receive_buffer_size recv_sz(64 * 1024);
             conn->socket->set_option(send_sz);
             conn->socket->set_option(recv_sz);
+
+            boost::asio::socket_base::linger linger_opt(true, 0);
+            conn->socket->set_option(linger_opt);
         }
     } catch (...) {
     }
@@ -359,6 +322,7 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                     if (!conn->socket || !conn->socket->is_open()) {
                         co_return;
                     }
+
                     auto hres = co_await async_read_exact(
                         *conn->socket, sizeof(MessageFramer::FrameHeader),
                         conn->streaming_started.load(std::memory_order_relaxed)
@@ -366,6 +330,10 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                             : conn->opts.headerTimeout);
                     if (!hres) {
                         Error e = hres.error();
+                        if (e.message == "Read timeout" ||
+                            e.message.find("End of file") != std::string::npos) {
+                            e.message = "Connection closed by server (possibly stale connection)";
+                        }
                         if (auto c = weak_conn.lock()) {
                             // Acquire strand before accessing handlers map
                             co_await boost::asio::dispatch(c->strand, use_awaitable);
@@ -388,6 +356,7 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                             }
                             c->handlers.clear();
                             c->alive = false;
+                            c->streaming_started.store(false, std::memory_order_relaxed);
                         }
                         co_return;
                     }
@@ -402,6 +371,11 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                                                               conn->opts.bodyTimeout);
                         if (!pres) {
                             Error e = pres.error();
+                            if (e.message == "Read timeout" ||
+                                e.message.find("End of file") != std::string::npos) {
+                                e.message =
+                                    "Connection closed by server (possibly stale connection)";
+                            }
                             if (auto c = weak_conn.lock()) {
                                 // Acquire strand before accessing handlers map
                                 co_await boost::asio::dispatch(c->strand, use_awaitable);
@@ -424,6 +398,7 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                                 }
                                 c->handlers.clear();
                                 c->alive = false;
+                                c->streaming_started.store(false, std::memory_order_relaxed);
                             }
                             co_return;
                         }
@@ -460,11 +435,12 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                             }
                             c->handlers.clear();
                             c->alive = false;
+                            c->streaming_started.store(false, std::memory_order_relaxed);
                         }
                         co_return;
                     }
                     auto& msg = msgRes.value();
-                    conn->mark_used();
+                    conn->mark_read_success();
                     static std::atomic<bool> warned{false};
                     if (!warned.load()) {
                         if (msg.version < PROTOCOL_VERSION) {
@@ -501,11 +477,14 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                     bool isHeaderOnly = header.is_header_only();
                     bool isLast = header.is_last_chunk();
 
-                    const Response& r = std::get<Response>(msg.payload);
+                    // Move the response to avoid copying large vectors (e.g., DeleteResponse with
+                    // many results)
+                    Response r = std::move(std::get<Response>(msg.payload));
                     if (!isChunked) {
                         if (handlerPtr->unary) {
                             try {
-                                handlerPtr->unary->promise->set_value(Result<Response>(r));
+                                handlerPtr->unary->promise->set_value(
+                                    Result<Response>(std::move(r)));
                             } catch (const std::future_error&) {
                                 // Promise already satisfied, ignore
                             }
@@ -519,6 +498,7 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                                 // Promise already satisfied, ignore
                             }
                             conn->handlers.erase(reqId);
+                            conn->streaming_started.store(false, std::memory_order_relaxed);
                         }
                         continue;
                     }
@@ -538,6 +518,7 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                                     // Promise already satisfied, ignore
                                 }
                                 conn->handlers.erase(reqId);
+                                conn->streaming_started.store(false, std::memory_order_relaxed);
                             }
                         }
                     }

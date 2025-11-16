@@ -148,7 +148,11 @@ public:
             dreq.recursive = recursive_;
             dreq.verbose = verbose_ || (cli_ && cli_->getVerbose());
 
-            auto render = [&](const auto& response) -> Result<void> {
+            // Capture verbose flag by value to avoid referencing local variables after co_await
+            bool verboseMode = dreq.verbose;
+            bool forceMode = force_;
+
+            auto render = [verboseMode, forceMode](const auto& response) -> Result<void> {
                 // Handle both DeleteResponse and SuccessResponse
                 if constexpr (std::is_same_v<std::decay_t<decltype(response)>,
                                              yams::daemon::DeleteResponse>) {
@@ -182,14 +186,14 @@ public:
                                     }
                                 }
                             }
-                            if (hasCorrupted && !force_) {
+                            if (hasCorrupted && !forceMode) {
                                 std::cout << "\nHint: Use --force to delete corrupted entries "
                                              "(removes metadata even if content is corrupted)\n";
                             }
                         }
 
                         // Show details in verbose mode
-                        if (dreq.verbose && resp.successCount > 0) {
+                        if (verboseMode && resp.successCount > 0) {
                             std::cout << "\nDeleted documents:\n";
                             for (const auto& result : resp.results) {
                                 if (result.success) {

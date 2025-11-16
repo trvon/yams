@@ -15,6 +15,7 @@
 #include <unordered_set>
 #include <vector>
 #include <yams/common/utf8_utils.h>
+#include <yams/daemon/components/GraphComponent.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
@@ -3266,124 +3267,14 @@ Result<void> MetadataRepository::appendTreeChanges(int64_t diffId,
         return sqlResult;
     }
 
-    if (!kgStore_) {
-        return Result<void>();
-    }
-
-    auto diffResult = executeQuery<std::optional<TreeDiffDescriptor>>(
-        [&](Database& db) -> Result<std::optional<TreeDiffDescriptor>> {
-            auto stmtResult =
-                db.prepare("SELECT base_snapshot_id, target_snapshot_id, computed_at, status "
-                           "FROM tree_diffs WHERE id = ?");
-            if (!stmtResult) {
-                return stmtResult.error();
-            }
-            Statement stmt = std::move(stmtResult).value();
-            stmt.bind(1, diffId);
-            auto stepResult = stmt.step();
-            if (!stepResult) {
-                return stepResult.error();
-            }
-            if (!stepResult.value()) {
-                return std::optional<TreeDiffDescriptor>{};
-            }
-            TreeDiffDescriptor desc;
-            desc.baseSnapshotId = stmt.getString(0);
-            desc.targetSnapshotId = stmt.getString(1);
-            desc.computedAt = stmt.getInt64(2);
-            desc.status = stmt.getString(3);
-            return std::optional<TreeDiffDescriptor>{desc};
-        });
-
-    if (!diffResult || !diffResult.value()) {
-        spdlog::warn("Failed to fetch diff descriptor for KG population: diffId={}", diffId);
-        return Result<void>();
-    }
-
-    auto diff = diffResult.value().value();
-
-    for (const auto& change : changes) {
-        if (!change.oldHash.empty()) {
-            auto oldBlobRes = kgStore_->ensureBlobNode(change.oldHash);
-            if (!oldBlobRes) {
-                spdlog::warn("Failed to create KG blob node for hash={}: {}", change.oldHash,
-                             oldBlobRes.error().message);
-            }
-        }
-        if (!change.newHash.empty()) {
-            auto newBlobRes = kgStore_->ensureBlobNode(change.newHash);
-            if (!newBlobRes) {
-                spdlog::warn("Failed to create KG blob node for hash={}: {}", change.newHash,
-                             newBlobRes.error().message);
-            }
-        }
-
-        std::optional<std::int64_t> oldPathNodeId;
-        std::optional<std::int64_t> newPathNodeId;
-
-        if (!change.oldPath.empty()) {
-            metadata::PathNodeDescriptor oldDesc{.snapshotId = diff.baseSnapshotId,
-                                                 .path = change.oldPath,
-                                                 .rootTreeHash = "",
-                                                 .isDirectory = change.isDirectory};
-            auto oldPathRes = kgStore_->ensurePathNode(oldDesc);
-            if (oldPathRes) {
-                oldPathNodeId = oldPathRes.value();
-            } else {
-                spdlog::warn("Failed to create KG path node for path={}: {}", change.oldPath,
-                             oldPathRes.error().message);
-            }
-        }
-
-        if (!change.newPath.empty()) {
-            metadata::PathNodeDescriptor newDesc{.snapshotId = diff.targetSnapshotId,
-                                                 .path = change.newPath,
-                                                 .rootTreeHash = "",
-                                                 .isDirectory = change.isDirectory};
-            auto newPathRes = kgStore_->ensurePathNode(newDesc);
-            if (newPathRes) {
-                newPathNodeId = newPathRes.value();
-            } else {
-                spdlog::warn("Failed to create KG path node for path={}: {}", change.newPath,
-                             newPathRes.error().message);
-            }
-        }
-
-        if (oldPathNodeId && !change.oldHash.empty()) {
-            auto oldBlobNodeRes = kgStore_->ensureBlobNode(change.oldHash);
-            if (oldBlobNodeRes) {
-                auto linkRes =
-                    kgStore_->linkPathVersion(*oldPathNodeId, oldBlobNodeRes.value(), diffId);
-                if (!linkRes) {
-                    spdlog::warn("Failed to link path to blob in KG: path={}, hash={}",
-                                 change.oldPath, change.oldHash);
-                }
-            }
-        }
-
-        if (newPathNodeId && !change.newHash.empty()) {
-            auto newBlobNodeRes = kgStore_->ensureBlobNode(change.newHash);
-            if (newBlobNodeRes) {
-                auto linkRes =
-                    kgStore_->linkPathVersion(*newPathNodeId, newBlobNodeRes.value(), diffId);
-                if (!linkRes) {
-                    spdlog::warn("Failed to link path to blob in KG: path={}, hash={}",
-                                 change.newPath, change.newHash);
-                }
-            }
-        }
-
-        if ((change.type == TreeChangeType::Renamed || change.type == TreeChangeType::Moved) &&
-            oldPathNodeId && newPathNodeId) {
-            auto renameRes = kgStore_->recordRenameEdge(*oldPathNodeId, *newPathNodeId, diffId);
-            if (!renameRes) {
-                spdlog::warn("Failed to record rename edge in KG: {} -> {}", change.oldPath,
-                             change.newPath);
-            }
+    if (graphComponent_) {
+        auto kgResult = graphComponent_->onTreeDiffApplied(diffId, changes);
+        if (!kgResult) {
+            spdlog::warn("GraphComponent tree diff processing failed: {}",
+                         kgResult.error().message);
         }
     }
 
-    spdlog::debug("Populated KG with {} tree changes for diff_id={}", changes.size(), diffId);
     return Result<void>();
 }
 

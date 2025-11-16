@@ -23,6 +23,10 @@ else
     'connection_pool_stale_test.cpp',
   )
 
+  client_timeout_recovery_srcs = files(
+    'client_timeout_recovery_test.cpp',
+  )
+
   dbg = (get_option('buildtype') == 'debug')
   if (get_option('enable-integration-tests') or dbg) and (get_option('enable-daemon-integration') or dbg)
     # Catch2 needs its main library
@@ -99,6 +103,25 @@ else
     test('connection_pool_stale',
       connection_pool_stale_exe,
       suite: ['integration', 'daemon', 'catch2', 'connection-pool'],
+      env: {
+        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+        'YAMS_DISABLE_VECTORS': '1',
+      },
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+    )
+
+    client_timeout_recovery_exe = executable('yams_client_timeout_recovery_tests_catch2',
+      client_timeout_recovery_srcs,
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep, test_deps],
+      cpp_args: ['-DYAMS_TESTING=1'],
+      install: false,
+    )
+
+    test('client_timeout_recovery',
+      client_timeout_recovery_exe,
+      suite: ['integration', 'daemon', 'catch2', 'timeout'],
       env: {
         'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
         'YAMS_DISABLE_VECTORS': '1',

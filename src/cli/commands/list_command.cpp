@@ -483,30 +483,54 @@ private:
 
             const auto& history = response.value();
 
-            // Display results
-            std::cout << "File history for: " << history.filepath << "\n\n";
+            // Extract filename for display
+            std::filesystem::path p(history.filepath);
+            std::string filename = p.filename().string();
+
+            // Display results with enhanced UI
+            std::cout << ui::section_header("File History: " + filename) << "\n";
+            std::cout << ui::key_value("Path", history.filepath, ui::Ansi::CYAN, 12) << "\n\n";
 
             if (!history.found || history.versions.empty()) {
-                std::cout << (history.message.empty() ? "File not found in any snapshot."
-                                                      : history.message)
-                          << "\n";
-                std::cout << "\nTip: Add file to a snapshot with:\n";
-                std::cout << "  yams add --snapshot-id <id> " << filepath << "\n";
+                std::cout << ui::status_warning(history.message.empty()
+                                                    ? "File not found in any snapshot."
+                                                    : history.message)
+                          << "\n\n";
+
+                std::cout << ui::colorize("Tip:", ui::Ansi::BOLD)
+                          << " Add file to a snapshot with:\n";
+                std::cout << ui::indent("yams add --snapshot-id <id> " + filepath, 2) << "\n";
                 return Result<void>();
             }
 
-            std::cout << "Found " << history.totalVersions << " version(s) across snapshots:\n\n";
+            // Show count with color
+            std::string countMsg = "Found " + ui::format_number(history.totalVersions) +
+                                   " version" + (history.totalVersions > 1 ? "s" : "") +
+                                   " across snapshots";
+            std::cout << ui::status_ok(countMsg) << "\n\n";
 
-            // Table output
-            std::cout << std::left << std::setw(25) << "SNAPSHOT" << std::setw(18) << "HASH"
-                      << std::setw(12) << "SIZE"
-                      << "INDEXED AT\n";
-            std::cout << std::string(100, '-') << "\n";
+            // Enhanced table with ui_helpers
+            ui::Table table;
+            table.headers = {"VERSION", "SNAPSHOT", "HASH", "SIZE", "INDEXED"};
+            table.has_header = true;
 
-            for (const auto& version : history.versions) {
+            for (size_t i = 0; i < history.versions.size(); ++i) {
+                const auto& version = history.versions[i];
+
+                // Version number (most recent = 1)
+                std::string versionNum =
+                    i == 0
+                        ? ui::colorize("#" + std::to_string(i + 1) + " (current)", ui::Ansi::GREEN)
+                        : ui::colorize("#" + std::to_string(i + 1), ui::Ansi::DIM);
+
+                // Truncate snapshot ID
+                std::string snapDisplay = version.snapshotId.length() > 22
+                                              ? version.snapshotId.substr(0, 22) + "..."
+                                              : version.snapshotId;
+
                 // Truncate hash for display
                 std::string hashDisplay =
-                    version.hash.length() > 16 ? version.hash.substr(0, 16) + "..." : version.hash;
+                    version.hash.length() > 14 ? version.hash.substr(0, 14) + "..." : version.hash;
 
                 // Format size
                 std::string sizeStr = ui::format_bytes(version.size);
@@ -515,15 +539,31 @@ private:
                 std::time_t tt = version.indexedTimestamp;
                 std::tm* tm = std::localtime(&tt);
                 char timeBuffer[32];
-                std::strftime(timeBuffer, sizeof(timeBuffer), "%Y-%m-%d %H:%M:%S", tm);
+                std::strftime(timeBuffer, sizeof(timeBuffer), "%Y-%m-%d %H:%M", tm);
 
-                std::cout << std::left << std::setw(25) << version.snapshotId.substr(0, 24)
-                          << std::setw(18) << hashDisplay << std::setw(12) << sizeStr << timeBuffer
-                          << "\n";
+                table.add_row(
+                    {versionNum, snapDisplay, hashDisplay, sizeStr, std::string(timeBuffer)});
             }
 
-            std::cout << "\nTip: Retrieve a specific version with:\n";
-            std::cout << "  yams get --hash <hash>\n";
+            // Render table using ui_helpers
+            ui::render_table(std::cout, table);
+
+            // Show helpful tips
+            std::cout << "\n";
+            std::cout << ui::colorize("Tips:", ui::Ansi::BOLD) << "\n";
+            std::cout << ui::bullet("Retrieve a specific version: " +
+                                        ui::colorize("yams get --hash <hash>", ui::Ansi::CYAN),
+                                    2)
+                      << "\n";
+            std::cout << ui::bullet("Compare versions: " +
+                                        ui::colorize("yams diff <hash1> <hash2>", ui::Ansi::CYAN),
+                                    2)
+                      << "\n";
+
+            if (!history.message.empty() &&
+                history.message.find("showing first") != std::string::npos) {
+                std::cout << "\n" << ui::status_info(history.message) << "\n";
+            }
 
             return Result<void>();
 

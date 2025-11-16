@@ -112,6 +112,10 @@ DEFINE_REQUEST_HANDLER(PluginTrustAddRequest, handlePluginTrustAddRequest);
 DEFINE_REQUEST_HANDLER(PluginTrustRemoveRequest, handlePluginTrustRemoveRequest);
 DEFINE_REQUEST_HANDLER(CancelRequest, handleCancelRequest);
 DEFINE_REQUEST_HANDLER(EmbedDocumentsRequest, handleEmbedDocumentsRequest);
+DEFINE_REQUEST_HANDLER(GraphQueryRequest, handleGraphQueryRequest);
+DEFINE_REQUEST_HANDLER(GraphPathHistoryRequest, handleGraphPathHistoryRequest);
+DEFINE_REQUEST_HANDLER(GraphRepairRequest, handleGraphRepairRequest);
+DEFINE_REQUEST_HANDLER(GraphValidateRequest, handleGraphValidateRequest);
 
 #undef DEFINE_REQUEST_HANDLER
 

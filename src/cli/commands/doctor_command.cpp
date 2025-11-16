@@ -57,9 +57,9 @@ public:
     boost::asio::awaitable<Result<void>> executeAsync() override {
         // Only run default doctor if no subcommand was invoked
         // Subcommands set their own flags and handle execution themselves
-        if (!fixEmbeddings_ && !fixFts5_ && !fixGraph_ && !fixAll_ && !fixAllTop_ &&
-            !dedupeApply_ && !pruneInvoked_ && pluginArg_.empty() && !fixConfigDims_ &&
-            !recreateVectors_) {
+        if (!fixEmbeddings_ && !fixFts5_ && !fixGraph_ && !validateGraph_ && !fixAll_ &&
+            !fixAllTop_ && !dedupeApply_ && !pruneInvoked_ && pluginArg_.empty() &&
+            !fixConfigDims_ && !recreateVectors_) {
             // No subcommand flags set, run default doctor summary
             try {
                 runAll();
@@ -2009,6 +2009,7 @@ private:
     bool fixEmbeddings_{false};
     bool fixFts5_{false};
     bool fixGraph_{false};
+    bool validateGraph_{false};
     bool fixAll_{false};
     bool fixAllTop_{false};
     std::string pluginArg_;
@@ -2027,6 +2028,7 @@ private:
     bool dedupeForce_{false};
     bool dedupeVerbose_{false};
     Result<void> repairGraph();
+    Result<void> validateGraph();
     void runDedupe();
     // Prune state
     bool pruneApply_{false};
@@ -2105,6 +2107,17 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
     rsub->add_flag("--graph", fixGraph_, "Construct/repair knowledge graph from tags and metadata");
     rsub->add_flag("--all", fixAll_, "Run all repair operations");
     rsub->callback([this]() { runRepair(); });
+
+    auto* vsub = doctor->add_subcommand("validate", "Validate knowledge graph health");
+    vsub->add_flag("--graph", validateGraph_, "Validate knowledge graph integrity");
+    vsub->callback([this]() {
+        if (validateGraph_) {
+            auto result = validateGraph();
+            if (!result) {
+                std::cerr << "Validation failed: " << result.error().message << "\n";
+            }
+        }
+    });
 
     auto* dd = doctor->add_subcommand(
         "dedupe", "Detect (and optionally remove) duplicate documents (metadata)");
@@ -2288,143 +2301,154 @@ Result<void> DoctorCommand::applyTuningBaseline(bool apply) {
     }
 }
 
-// Build/repair knowledge graph using tags/metadata (non-destructive)
+// Build/repair knowledge graph using tags/metadata (daemon-first approach)
 Result<void> DoctorCommand::repairGraph() {
     try {
-        if (!cli_)
-            return Error{ErrorCode::InvalidState, std::string("CLI not initialized")};
-        auto repo = cli_->getMetadataRepository();
-        auto kg = cli_->getKnowledgeGraphStore();
-        if (!repo)
-            return Error{ErrorCode::NotInitialized, "Metadata repository unavailable"};
-        if (!kg)
-            return Error{ErrorCode::NotInitialized, "Knowledge graph store unavailable"};
+        using namespace yams::daemon;
+        using namespace yams::cli::ui;
 
-        std::cout << "Building knowledge graph from tags/metadata...\n";
-        auto docsR = metadata::queryDocumentsByPattern(*repo, "%");
-        if (!docsR)
+        ClientConfig cfg;
+        if (cli_ && cli_->hasExplicitDataDir()) {
+            cfg.dataDir = cli_->getDataPath();
+        }
+        cfg.requestTimeout = std::chrono::seconds(120);
+
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        if (!leaseRes) {
             return Error{ErrorCode::InternalError,
-                         std::string("List docs failed: ") + docsR.error().message};
-        const auto& docs = docsR.value();
-        size_t processed = 0, updated = 0, skipped = 0;
+                         "Daemon unavailable: " + leaseRes.error().message};
+        }
 
-        auto upsertNode =
-            [&](const std::string& key, const std::string& type,
-                const std::optional<std::string>& label,
-                const std::optional<std::string>& propsJson) -> std::optional<int64_t> {
-            yams::metadata::KGNode node;
-            node.nodeKey = key;
-            node.type = type;
-            node.label = label;
-            node.properties = propsJson;
-            auto r = kg->upsertNode(node);
-            if (!r) {
-                return std::nullopt;
-            }
-            return r.value();
-        };
+        auto leaseHandle = std::move(leaseRes.value());
+        auto& client = **leaseHandle;
 
-        for (const auto& d : docs) {
-            ++processed;
-            std::unordered_set<int64_t> existing;
-            {
-                auto er = kg->getDocEntitiesForDocument(d.id, 5000, 0);
-                if (er) {
-                    for (const auto& e : er.value())
-                        if (e.nodeId)
-                            existing.insert(*e.nodeId);
-                }
-            }
-            std::vector<yams::metadata::DocEntity> batch;
-            batch.reserve(32);
+        GraphRepairRequest req;
+        req.dryRun = false;
 
-            // Tags
-            if (auto tagsR = repo->getDocumentTags(d.id)) {
-                for (const auto& tag : tagsR.value()) {
-                    std::string key = std::string("tag:") + tag;
-                    auto nid = upsertNode(key, "tag", tag, std::nullopt);
-                    if (nid && existing.find(*nid) == existing.end()) {
-                        yams::metadata::DocEntity de;
-                        de.documentId = d.id;
-                        de.nodeId = *nid;
-                        de.entityText = tag;
-                        de.confidence = 1.0f;
-                        de.extractor = "meta";
-                        batch.push_back(std::move(de));
-                    }
-                }
-            }
+        std::cout << status_pending("Repairing knowledge graph") << "\n";
 
-            // MIME
-            if (!d.mimeType.empty()) {
-                std::string key = std::string("mime:") + d.mimeType;
-                auto nid = upsertNode(key, "mime", d.mimeType, std::nullopt);
-                if (nid && existing.find(*nid) == existing.end()) {
-                    yams::metadata::DocEntity de;
-                    de.documentId = d.id;
-                    de.nodeId = *nid;
-                    de.entityText = d.mimeType;
-                    de.confidence = 1.0f;
-                    de.extractor = "meta";
-                    batch.push_back(std::move(de));
-                }
-            }
-            // Extension
-            if (!d.fileExtension.empty()) {
-                std::string ext =
-                    d.fileExtension[0] == '.' ? d.fileExtension.substr(1) : d.fileExtension;
-                std::string key = std::string("ext:") + ext;
-                auto nid = upsertNode(key, "ext", ext, std::nullopt);
-                if (nid && existing.find(*nid) == existing.end()) {
-                    yams::metadata::DocEntity de;
-                    de.documentId = d.id;
-                    de.nodeId = *nid;
-                    de.entityText = ext;
-                    de.confidence = 1.0f;
-                    de.extractor = "meta";
-                    batch.push_back(std::move(de));
-                }
-            }
+        auto result = yams::cli::run_result(client.graphRepair(req), std::chrono::seconds(180));
+        if (!result) {
+            std::cout << status_error("Graph repair failed") << "\n";
+            return Error{ErrorCode::InternalError,
+                         "Graph repair failed: " + result.error().message};
+        }
 
-            // Key/Value metadata
-            if (auto mdR = repo->getAllMetadata(d.id)) {
-                for (const auto& [k, v] : mdR.value()) {
-                    std::string vv = v.asString();
-                    if (vv.empty())
-                        continue;
-                    (void)upsertNode(std::string("meta_key:") + k, "meta_key", k, std::nullopt);
-                    std::string nodeKey = std::string("meta_val:") + k + ":" + vv;
-                    std::string props = std::string("{\"key\":\"") + k + "\"}";
-                    auto nid = upsertNode(nodeKey, "meta_val", vv, props);
-                    if (nid && existing.find(*nid) == existing.end()) {
-                        yams::metadata::DocEntity de;
-                        de.documentId = d.id;
-                        de.nodeId = *nid;
-                        de.entityText = vv;
-                        de.confidence = 1.0f;
-                        de.extractor = "meta";
-                        batch.push_back(std::move(de));
-                    }
-                }
-            }
+        const auto& resp = result.value();
 
-            if (!batch.empty()) {
-                auto ar = kg->addDocEntities(batch);
-                if (ar)
-                    ++updated;
-                else
-                    ++skipped;
-            } else {
-                ++skipped;
-            }
+        if (resp.errors == 0) {
+            std::cout << status_ok("Graph repair completed") << "\n\n";
+        } else {
+            std::cout << status_warning("Graph repair completed with errors") << "\n\n";
+        }
 
-            if (processed % 100 == 0) {
-                std::cout << "  processed=" << processed << " updated=" << updated
-                          << " skipped=" << skipped << "\n";
+        std::cout << "  " << colorize("Nodes created:", Ansi::CYAN) << " "
+                  << format_number(resp.nodesCreated) << "\n";
+        std::cout << "  " << colorize("Nodes updated:", Ansi::CYAN) << " "
+                  << format_number(resp.nodesUpdated) << "\n";
+        std::cout << "  " << colorize("Edges created:", Ansi::CYAN) << " "
+                  << format_number(resp.edgesCreated) << "\n";
+
+        if (resp.errors > 0) {
+            std::cout << "  " << colorize("Errors:", Ansi::YELLOW) << " "
+                      << format_number(resp.errors) << "\n";
+        }
+
+        if (!resp.issues.empty()) {
+            std::cout << "\n" << colorize("Issues:", Ansi::YELLOW) << "\n";
+            size_t displayCount = std::min(resp.issues.size(), size_t(10));
+            for (size_t i = 0; i < displayCount; ++i) {
+                std::cout << "  " << bullet(resp.issues[i]) << "\n";
+            }
+            if (resp.issues.size() > displayCount) {
+                std::cout << "  "
+                          << colorize("... and " +
+                                          std::to_string(resp.issues.size() - displayCount) +
+                                          " more",
+                                      Ansi::DIM)
+                          << "\n";
             }
         }
-        std::cout << "Done. processed=" << processed << " updated=" << updated
-                  << " skipped=" << skipped << "\n";
+
+        return Result<void>();
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::InternalError, e.what()};
+    }
+}
+
+// Validate knowledge graph health
+Result<void> DoctorCommand::validateGraph() {
+    try {
+        using namespace yams::daemon;
+        using namespace yams::cli::ui;
+
+        ClientConfig cfg;
+        if (cli_ && cli_->hasExplicitDataDir()) {
+            cfg.dataDir = cli_->getDataPath();
+        }
+        cfg.requestTimeout = std::chrono::seconds(60);
+
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        if (!leaseRes) {
+            return Error{ErrorCode::InternalError,
+                         "Daemon unavailable: " + leaseRes.error().message};
+        }
+
+        auto leaseHandle = std::move(leaseRes.value());
+        auto& client = **leaseHandle;
+
+        GraphValidateRequest req;
+
+        std::cout << status_pending("Validating knowledge graph") << "\n";
+
+        auto result = yams::cli::run_result(client.graphValidate(req), std::chrono::seconds(120));
+        if (!result) {
+            std::cout << status_error("Graph validation failed") << "\n";
+            return Error{ErrorCode::InternalError,
+                         "Graph validation failed: " + result.error().message};
+        }
+
+        const auto& resp = result.value();
+
+        bool hasIssues =
+            !resp.issues.empty() || resp.orphanedNodes > 0 || resp.unreachableNodes > 0;
+        if (!hasIssues) {
+            std::cout << status_ok("Graph validation completed - no issues found") << "\n\n";
+        } else {
+            std::cout << status_warning("Graph validation completed - issues detected") << "\n\n";
+        }
+
+        std::cout << "  " << colorize("Total nodes:", Ansi::CYAN) << " "
+                  << format_number(resp.totalNodes) << "\n";
+        std::cout << "  " << colorize("Total edges:", Ansi::CYAN) << " "
+                  << format_number(resp.totalEdges) << "\n";
+
+        if (resp.orphanedNodes > 0) {
+            std::cout << "  " << colorize("Orphaned nodes:", Ansi::YELLOW) << " "
+                      << format_number(resp.orphanedNodes) << "\n";
+        }
+
+        if (resp.unreachableNodes > 0) {
+            std::cout << "  " << colorize("Unreachable nodes:", Ansi::YELLOW) << " "
+                      << format_number(resp.unreachableNodes) << "\n";
+        }
+
+        if (!resp.issues.empty()) {
+            std::cout << "\n" << colorize("Issues:", Ansi::YELLOW) << "\n";
+            size_t displayCount = std::min(resp.issues.size(), size_t(10));
+            for (size_t i = 0; i < displayCount; ++i) {
+                std::cout << "  " << bullet(resp.issues[i]) << "\n";
+            }
+            if (resp.issues.size() > displayCount) {
+                std::cout << "  "
+                          << colorize("... and " +
+                                          std::to_string(resp.issues.size() - displayCount) +
+                                          " more",
+                                      Ansi::DIM)
+                          << "\n";
+            }
+        }
+
         return Result<void>();
     } catch (const std::exception& e) {
         return Error{ErrorCode::InternalError, e.what()};

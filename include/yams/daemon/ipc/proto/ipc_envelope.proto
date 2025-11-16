@@ -712,6 +712,32 @@ message RestoreSnapshotResponse {
   bool dry_run = 3;
 }
 
+// Graph maintenance requests/responses (PBI-009)
+message GraphRepairRequest {
+  bool dry_run = 1;
+}
+
+message GraphRepairResponse {
+  uint64 nodes_created = 1;
+  uint64 nodes_updated = 2;
+  uint64 edges_created = 3;
+  uint64 errors = 4;
+  repeated string issues = 5;
+  bool dry_run = 6;
+}
+
+message GraphValidateRequest {
+  // Empty for now
+}
+
+message GraphValidateResponse {
+  uint64 total_nodes = 1;
+  uint64 total_edges = 2;
+  uint64 orphaned_nodes = 3;
+  uint64 unreachable_nodes = 4;
+  repeated string issues = 5;
+}
+
 // ENVELOPE
 message Envelope {
   uint32 version = 1;
@@ -767,6 +793,9 @@ message Envelope {
     ListSnapshotsRequest list_snapshots_request = 49;
     RestoreCollectionRequest restore_collection_request = 50;
     RestoreSnapshotRequest restore_snapshot_request = 51;
+    // Graph maintenance requests (PBI-009)
+    GraphRepairRequest graph_repair_request = 52;
+    GraphValidateRequest graph_validate_request = 53;
 
     // Responses
     SuccessResponse success_response = 100;
@@ -811,6 +840,9 @@ message Envelope {
     ListSnapshotsResponse list_snapshots_response = 134;
     RestoreCollectionResponse restore_collection_response = 135;
     RestoreSnapshotResponse restore_snapshot_response = 136;
+    // Graph maintenance responses (PBI-009)
+    GraphRepairResponse graph_repair_response = 137;
+    GraphValidateResponse graph_validate_response = 138;
 
   }
 }

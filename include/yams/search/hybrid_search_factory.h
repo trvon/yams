@@ -14,6 +14,12 @@ class KnowledgeGraphStore; // forward declaration to avoid heavy includes
 namespace vector {
 class EmbeddingGenerator; // forward declaration
 } // namespace vector
+
+namespace app {
+namespace services {
+class IGraphQueryService; // forward declaration
+} // namespace services
+} // namespace app
 } // namespace yams
 
 namespace yams::search {
@@ -63,15 +69,16 @@ public:
      * Build a HybridSearchEngine and attach a default KG scorer backed by the given KG store.
      * Implementations may use a simple local-first scorer for entity overlap + 1-hop prior.
      * If no embedding generator is provided, attempts to create a default one.
+     * If graphQueryService is provided, the KG scorer will use it for graph traversal.
      *
      * The returned engine will be initialized() on success.
      */
-    static Result<std::shared_ptr<HybridSearchEngine>>
-    createWithKGStore(std::shared_ptr<vector::VectorIndexManager> vectorIndex,
-                      std::shared_ptr<KeywordSearchEngine> keywordEngine,
-                      const HybridSearchConfig& config,
-                      std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore,
-                      std::shared_ptr<vector::EmbeddingGenerator> embeddingGenerator = nullptr);
+    static Result<std::shared_ptr<HybridSearchEngine>> createWithKGStore(
+        std::shared_ptr<vector::VectorIndexManager> vectorIndex,
+        std::shared_ptr<KeywordSearchEngine> keywordEngine, const HybridSearchConfig& config,
+        std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore,
+        std::shared_ptr<vector::EmbeddingGenerator> embeddingGenerator = nullptr,
+        std::shared_ptr<app::services::IGraphQueryService> graphQueryService = nullptr);
 
 private:
     /**

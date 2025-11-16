@@ -19,7 +19,8 @@ namespace yams::search {
 
 // Forward declaration for the simple scorer factory implemented in the KG scorer TU.
 std::shared_ptr<KGScorer>
-makeSimpleKGScorer(std::shared_ptr<yams::metadata::KnowledgeGraphStore> store);
+makeSimpleKGScorer(std::shared_ptr<yams::metadata::KnowledgeGraphStore> store,
+                   std::shared_ptr<yams::app::services::IGraphQueryService> graphService = nullptr);
 
 // ------------------------------
 // MetadataKeywordAdapter
@@ -236,7 +237,7 @@ SearchEngineBuilder::makeKGScorerIfEnabled(const HybridSearchConfig& cfg) {
                      "without KG scorer");
         return std::shared_ptr<KGScorer>{};
     }
-    auto scorer = makeSimpleKGScorer(kgStore_);
+    auto scorer = makeSimpleKGScorer(kgStore_, graphQueryService_);
     return scorer;
 }
 
@@ -270,8 +271,8 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
     // Pass embedding generator to factory (will create default if null)
     if (cfg.enable_kg && kgStore_) {
         // Create engine with KG store; factory will attach a default KG scorer
-        auto engRes = HybridSearchFactory::createWithKGStore(vectorIndex_, keywordEngine, cfg,
-                                                             kgStore_, embeddingGenerator_);
+        auto engRes = HybridSearchFactory::createWithKGStore(
+            vectorIndex_, keywordEngine, cfg, kgStore_, embeddingGenerator_, graphQueryService_);
         if (!engRes) {
             // Fail open: attempt without KG
             spdlog::warn("HybridSearchFactory::createWithKGStore failed: {}. Retrying without KG.",

@@ -32,6 +32,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Fixed RepairCoordinator access race by adding mutex protection around all accesses from TuningManager callbacks
   - Added mutex synchronization for RepairCoordinator lifecycle (creation, access, destruction)
   - Enabled ThreadSanitizer by default for Debug builds to catch race conditions early
+- **Document Retrieval**: Fixed "Document not found" error when multiple instances of a document exist
+  - `yams get --name` now returns the most recently indexed document by default when multiple matches exist
+  - Added `--oldest` flag support to retrieve the oldest indexed version instead
+  - Updated `resolveNameToHash` to accept disambiguation strategy parameter
+  - Non-blocking for LLM usage - always returns a result without requiring manual selection
+- **Snapshot Creation**: Fixed "File found in index but not in any snapshot" error
+  - Simplified snapshot logic to always create snapshots on every ingestion
+  - Removed conditional 24-hour check that prevented snapshot creation for existing documents
+  - All documents now properly tracked in version history via `yams list <filename>`
+- **Connection Pool Reliability**: Simplified stale connection detection following industry best practices
+  - Removed complex non-blocking peek logic that added unreliable staleness detection
+  - Rely on age-based eviction and natural I/O error detection during actual operations
+  - Added SO_LINGER with timeout=0 for instant EOF detection on Unix domain sockets
+  - Retry on connection acquisition failure (not just post-send EOF)
 
 ### Changed
 - **Build System**: Removed `enable-tui` build option from meson_options.txt

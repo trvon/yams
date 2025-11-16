@@ -41,6 +41,7 @@
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/EmbeddingService.h>
 #include <yams/daemon/components/EntityGraphService.h>
+#include <yams/daemon/components/GraphComponent.h>
 #include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/init_utils.hpp>
 #include <yams/daemon/components/InternalEventBus.h>
@@ -951,14 +952,26 @@ void ServiceManager::shutdown() {
         spdlog::info("[ServiceManager] Phase 6.1: No ingest service to stop");
     }
 
-    spdlog::info("[ServiceManager] Phase 6.2: Stopping entity graph service");
+    spdlog::info("[ServiceManager] Phase 6.2: Shutting down graph component");
+    if (graphComponent_) {
+        try {
+            graphComponent_->shutdown();
+            graphComponent_.reset();
+            spdlog::info("[ServiceManager] Phase 6.2: Graph component shut down");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 6.2: GraphComponent shutdown failed: {}",
+                         e.what());
+        }
+    }
+
+    spdlog::info("[ServiceManager] Phase 6.3: Stopping entity graph service");
     if (entityGraphService_) {
         try {
             entityGraphService_->stop();
             entityGraphService_.reset();
-            spdlog::info("[ServiceManager] Phase 6.2: Entity graph service stopped");
+            spdlog::info("[ServiceManager] Phase 6.3: Entity graph service stopped");
         } catch (const std::exception& e) {
-            spdlog::warn("[ServiceManager] Phase 6.2: EntityGraphService shutdown failed: {}",
+            spdlog::warn("[ServiceManager] Phase 6.3: EntityGraphService shutdown failed: {}",
                          e.what());
         }
     } else {
@@ -1875,14 +1888,32 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                         spdlog::info(
                             "KG store wired to metadata repository for tree diff integration");
                     }
+                    // PBI-009: Initialize GraphComponent after KG store is ready
+                    try {
+                        graphComponent_ = std::make_shared<GraphComponent>(metadataRepo_, kgStore_);
+                        auto initResult = graphComponent_->initialize();
+                        if (!initResult) {
+                            spdlog::warn("GraphComponent initialization failed: {}",
+                                         initResult.error().message);
+                            graphComponent_.reset();
+                        } else {
+                            spdlog::info("GraphComponent initialized successfully");
+                            if (metadataRepo_) {
+                                metadataRepo_->setGraphComponent(graphComponent_);
+                                spdlog::info("GraphComponent wired to metadata repository");
+                            }
+                        }
+                    } catch (const std::exception& e) {
+                        spdlog::warn("GraphComponent init failed: {}", e.what());
+                    }
                 }
             }
         } catch (...) {
         }
         auto qcap = static_cast<std::size_t>(TA::postIngestQueueMax());
-        postIngest_ =
-            std::make_unique<PostIngestQueue>(contentStore_, metadataRepo_, contentExtractors_,
-                                              kgStore_, workCoordinator_.get(), qcap);
+        postIngest_ = std::make_unique<PostIngestQueue>(
+            contentStore_, metadataRepo_, contentExtractors_, kgStore_, graphComponent_,
+            workCoordinator_.get(), qcap);
         postIngest_->start();
 
         try {
@@ -2227,8 +2258,9 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             } catch (...) {
             }
         }
+        auto graphService = graphComponent_ ? graphComponent_->getQueryService() : nullptr;
         auto buildResult = co_await searchEngineManager_.buildEngine(
-            metadataRepo_, vectorIndexManager_, embGen, "initial", build_timeout,
+            metadataRepo_, vectorIndexManager_, embGen, graphService, "initial", build_timeout,
             getWorkerExecutor());
 
         if (buildResult.has_value()) {
@@ -3187,8 +3219,9 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
             }
 
             // Phase 2.4: Use SearchEngineManager instead of co_buildEngine
+            auto graphService = graphComponent_ ? graphComponent_->getQueryService() : nullptr;
             auto rebuildResult = co_await searchEngineManager_.buildEngine(
-                metadataRepo_, vectorIndexManager_, embGen, "rebuild", build_timeout,
+                metadataRepo_, vectorIndexManager_, embGen, graphService, "rebuild", build_timeout,
                 getWorkerExecutor());
 
             if (rebuildResult.has_value()) {
@@ -3241,6 +3274,8 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
     ctx.metadataRepo = metadataRepo_;
     ctx.hybridEngine = getSearchEngineSnapshot();
     ctx.kgStore = this->kgStore_; // PBI-043: tree diff KG integration
+    ctx.graphQueryService = graphComponent_ ? graphComponent_->getQueryService()
+                                            : nullptr; // PBI-009: centralized graph queries
     ctx.contentExtractors = contentExtractors_;
 
     // Log vector capability status
@@ -3611,8 +3646,9 @@ ServiceManager::co_buildEngine(int timeout_ms, const boost::asio::cancellation_s
         } catch (...) {
         }
     }
-    auto res = co_await searchEngineManager_.buildEngine(metadataRepo_, vectorIndexManager_, gen,
-                                                         "co_buildEngine", timeout_ms, exec);
+    auto graphService = graphComponent_ ? graphComponent_->getQueryService() : nullptr;
+    auto res = co_await searchEngineManager_.buildEngine(
+        metadataRepo_, vectorIndexManager_, gen, graphService, "co_buildEngine", timeout_ms, exec);
     if (res.has_value()) {
         co_return res.value();
     }

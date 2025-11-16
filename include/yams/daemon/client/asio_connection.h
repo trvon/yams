@@ -53,6 +53,7 @@ struct AsioConnection {
     std::atomic<bool> in_use{false};
     std::chrono::steady_clock::time_point created_at{std::chrono::steady_clock::now()};
     std::chrono::steady_clock::time_point last_used{std::chrono::steady_clock::now()};
+    std::chrono::steady_clock::time_point last_successful_read{std::chrono::steady_clock::now()};
     std::future<void> read_loop_future;
 
     struct UnaryHandler {
@@ -100,10 +101,18 @@ struct AsioConnection {
         auto now = std::chrono::steady_clock::now();
         auto age = std::chrono::duration_cast<std::chrono::seconds>(now - created_at);
         auto idle = std::chrono::duration_cast<std::chrono::seconds>(now - last_used);
-        return age > max_age || idle > max_idle;
+        auto since_read =
+            std::chrono::duration_cast<std::chrono::seconds>(now - last_successful_read);
+        return age > max_age || idle > max_idle || since_read > max_idle;
     }
 
     void mark_used() { last_used = std::chrono::steady_clock::now(); }
+
+    void mark_read_success() {
+        auto now = std::chrono::steady_clock::now();
+        last_successful_read = now;
+        last_used = now;
+    }
 };
 
 } // namespace yams::daemon

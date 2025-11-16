@@ -1,3 +1,4 @@
+#include <yams/app/services/graph_query_service.hpp>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/search/kg_scorer.h>
 
@@ -20,6 +21,9 @@
 
 namespace yams::search {
 
+using yams::app::services::GraphQueryRequest;
+using yams::app::services::GraphRelationType;
+using yams::app::services::IGraphQueryService;
 using yams::metadata::AliasResolution;
 using yams::metadata::DocEntity;
 using yams::metadata::KnowledgeGraphStore;
@@ -35,6 +39,11 @@ class SimpleKGScorer final : public KGScorer {
 public:
     explicit SimpleKGScorer(std::shared_ptr<KnowledgeGraphStore> store)
         : store_(std::move(store)) {}
+
+    // Set graph query service for advanced traversal (optional)
+    void setGraphQueryService(std::shared_ptr<IGraphQueryService> graphService) {
+        graphService_ = std::move(graphService);
+    }
 
     void setConfig(const KGScoringConfig& cfg) override { cfg_ = cfg; }
     const KGScoringConfig& getConfig() const override { return cfg_; }
@@ -469,13 +478,19 @@ private:
 private:
     KGScoringConfig cfg_{};
     std::shared_ptr<KnowledgeGraphStore> store_;
+    std::shared_ptr<IGraphQueryService> graphService_; // Optional: enhanced traversal
     std::vector<KGExplain> last_expl_;
 };
 
 // Factory helper (optional): create a SimpleKGScorer bound to a KG store
 std::shared_ptr<KGScorer>
-makeSimpleKGScorer(std::shared_ptr<yams::metadata::KnowledgeGraphStore> store) {
-    return std::make_shared<SimpleKGScorer>(std::move(store));
+makeSimpleKGScorer(std::shared_ptr<yams::metadata::KnowledgeGraphStore> store,
+                   std::shared_ptr<IGraphQueryService> graphService) {
+    auto scorer = std::make_shared<SimpleKGScorer>(std::move(store));
+    if (graphService) {
+        scorer->setGraphQueryService(std::move(graphService));
+    }
+    return scorer;
 }
 
 } // namespace yams::search

@@ -96,6 +96,15 @@ public:
         return call<RestoreSnapshotRequest>(req);
     }
 
+    // Graph maintenance operations (PBI-009)
+    boost::asio::awaitable<Result<GraphRepairResponse>> graphRepair(const GraphRepairRequest& req) {
+        return call<GraphRepairRequest>(req);
+    }
+    boost::asio::awaitable<Result<GraphValidateResponse>>
+    graphValidate(const GraphValidateRequest& req) {
+        return call<GraphValidateRequest>(req);
+    }
+
     // Streaming path for AddDocument (header-first, final-only chunk)
     boost::asio::awaitable<Result<AddDocumentResponse>>
     streamingAddDocument(const AddDocumentRequest& req);
@@ -408,7 +417,9 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
             std::is_same<Req, PruneRequest>,
             // Collection and snapshot operations (PBI-066)
             std::is_same<Req, ListCollectionsRequest>, std::is_same<Req, ListSnapshotsRequest>,
-            std::is_same<Req, RestoreCollectionRequest>, std::is_same<Req, RestoreSnapshotRequest>>,
+            std::is_same<Req, RestoreCollectionRequest>, std::is_same<Req, RestoreSnapshotRequest>,
+            // Graph maintenance operations (PBI-009)
+            std::is_same<Req, GraphRepairRequest>, std::is_same<Req, GraphValidateRequest>>,
         "Req must be a valid daemon Request alternative");
 
     // Force streaming for streaming-capable requests

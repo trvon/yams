@@ -2108,6 +2108,74 @@ template <> struct ProtoBinding<PruneResponse> {
     }
 };
 
+template <> struct ProtoBinding<GraphRepairRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kGraphRepairRequest;
+    static void set(Envelope& env, const GraphRepairRequest& r) {
+        auto* o = env.mutable_graph_repair_request();
+        o->set_dry_run(r.dryRun);
+    }
+    static GraphRepairRequest get(const Envelope& env) {
+        const auto& i = env.graph_repair_request();
+        GraphRepairRequest r{};
+        r.dryRun = i.dry_run();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<GraphRepairResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kGraphRepairResponse;
+    static void set(Envelope& env, const GraphRepairResponse& r) {
+        auto* o = env.mutable_graph_repair_response();
+        o->set_nodes_created(r.nodesCreated);
+        o->set_nodes_updated(r.nodesUpdated);
+        o->set_edges_created(r.edgesCreated);
+        o->set_errors(r.errors);
+        set_string_list(r.issues, o->mutable_issues());
+        o->set_dry_run(r.dryRun);
+    }
+    static GraphRepairResponse get(const Envelope& env) {
+        const auto& i = env.graph_repair_response();
+        GraphRepairResponse r{};
+        r.nodesCreated = i.nodes_created();
+        r.nodesUpdated = i.nodes_updated();
+        r.edgesCreated = i.edges_created();
+        r.errors = i.errors();
+        r.issues = get_string_list(i.issues());
+        r.dryRun = i.dry_run();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<GraphValidateRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kGraphValidateRequest;
+    static void set(Envelope& env, const GraphValidateRequest& /*r*/) {
+        env.mutable_graph_validate_request();
+    }
+    static GraphValidateRequest get(const Envelope& /*env*/) { return GraphValidateRequest{}; }
+};
+
+template <> struct ProtoBinding<GraphValidateResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kGraphValidateResponse;
+    static void set(Envelope& env, const GraphValidateResponse& r) {
+        auto* o = env.mutable_graph_validate_response();
+        o->set_total_nodes(r.totalNodes);
+        o->set_total_edges(r.totalEdges);
+        o->set_orphaned_nodes(r.orphanedNodes);
+        o->set_unreachable_nodes(r.unreachableNodes);
+        set_string_list(r.issues, o->mutable_issues());
+    }
+    static GraphValidateResponse get(const Envelope& env) {
+        const auto& i = env.graph_validate_response();
+        GraphValidateResponse r{};
+        r.totalNodes = i.total_nodes();
+        r.totalEdges = i.total_edges();
+        r.orphanedNodes = i.orphaned_nodes();
+        r.unreachableNodes = i.unreachable_nodes();
+        r.issues = get_string_list(i.issues());
+        return r;
+    }
+};
+
 // Helper to encode Request/Response variants using bindings
 template <typename Variant>
 static Result<void> encode_variant_into(Envelope& env, const Variant& v) {
@@ -2407,6 +2475,16 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
             m.payload = Request{std::move(v)};
             break;
         }
+        case Envelope::kGraphRepairRequest: {
+            auto v = ProtoBinding<GraphRepairRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
+        case Envelope::kGraphValidateRequest: {
+            auto v = ProtoBinding<GraphValidateRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
 
         // Additional responses
         case Envelope::kSuccessResponse: {
@@ -2542,6 +2620,16 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
         case Envelope::kPruneResponse: {
             auto v = ProtoBinding<PruneResponse>::get(env);
             m.payload = Response{std::in_place_type<PruneResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kGraphRepairResponse: {
+            auto v = ProtoBinding<GraphRepairResponse>::get(env);
+            m.payload = Response{std::in_place_type<GraphRepairResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kGraphValidateResponse: {
+            auto v = ProtoBinding<GraphValidateResponse>::get(env);
+            m.payload = Response{std::in_place_type<GraphValidateResponse>, std::move(v)};
             break;
         }
         case Envelope::kEmbedEvent: {

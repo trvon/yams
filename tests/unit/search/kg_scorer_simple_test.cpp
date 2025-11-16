@@ -11,9 +11,14 @@ using namespace yams::metadata;
 using namespace yams::search;
 
 // Forward-declare the simple scorer factory implemented in kg_scorer_simple.cpp
+namespace yams::app::services {
+class IGraphQueryService;
+}
+
 namespace yams::search {
 std::shared_ptr<KGScorer>
-makeSimpleKGScorer(std::shared_ptr<yams::metadata::KnowledgeGraphStore> store);
+makeSimpleKGScorer(std::shared_ptr<yams::metadata::KnowledgeGraphStore> store,
+                   std::shared_ptr<yams::app::services::IGraphQueryService> graphService = nullptr);
 }
 
 namespace {
