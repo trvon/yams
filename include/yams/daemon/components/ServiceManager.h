@@ -29,7 +29,6 @@
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/EmbeddingProviderFsm.h>
 #include <yams/daemon/components/EmbeddingService.h>
-#include <yams/daemon/components/GraphQueryServiceComponent.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PluginHostFsm.h>
 #include <yams/daemon/components/PoolManager.h>
