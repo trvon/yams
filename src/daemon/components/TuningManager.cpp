@@ -137,58 +137,10 @@ void TuningManager::tick_once() {
         muxQueuedBytes < std::max<std::uint64_t>(TuneAdvisor::maxMuxBytes() / 64ull,
                                                  1ull * 1024ull * 1024ull); // ~1/64 of cap or 1MiB
 
-    // Only perform idle shrink when the daemon is fully ready.
     bool fully_ready = state_ ? state_->readiness.searchEngineReady.load() : false;
 
     if (fully_ready && noConns && noWorkerQ && muxLow) {
-        const int baseStep = std::max(1, TuneAdvisor::poolScaleStep());
-        const int step =
-            std::max(1, static_cast<int>(std::lround(baseStep * TuneAdvisor::profileScale())));
-        pm.apply_delta({"ipc", -step, "central_idle", TuneAdvisor::statusTickMs()});
-        pm.apply_delta({"ipc_io", -step, "central_idle", TuneAdvisor::statusTickMs()});
     } else {
-        // Pressure grow
-        const bool workerHigh =
-            (maxWorkerQ > 0) ? (workerQueued > maxWorkerQ) : (workerQueued > (workerThreads * 2));
-        const bool muxHigh = (maxMux > 0)
-                                 ? (muxQueuedBytes > maxMux)
-                                 : (muxQueuedBytes > TuneAdvisor::muxBacklogHighFallbackBytes());
-        if (workerHigh) {
-            const int baseStep = std::max(1, TuneAdvisor::poolScaleStep());
-            const int step =
-                std::max(1, static_cast<int>(std::lround(baseStep * TuneAdvisor::profileScale())));
-            pm.apply_delta(
-                {"ipc", +step, "central_worker_queue_high", TuneAdvisor::statusTickMs()});
-        }
-        // IO pool growth heuristic: only grow when connections per IO thread exceed a threshold
-        // to avoid unbounded scaling on any activity.
-        try {
-            auto ioStats = pm.stats("ipc_io");
-            std::uint32_t ioThreads = std::max<std::uint32_t>(ioStats.current_size, 1);
-            const std::uint32_t connPerThread = TuneAdvisor::ioConnPerThread();
-            // Aggressive profile lowers threshold (divide by scale), efficient raises it.
-            const double scale = std::max(0.5, TuneAdvisor::profileScale());
-            const std::uint32_t adjConnPerThread = std::max<std::uint32_t>(
-                1, static_cast<std::uint32_t>(std::lround(connPerThread / scale)));
-            bool connHigh =
-                (activeConns > static_cast<std::uint64_t>(ioThreads) * adjConnPerThread);
-            if (muxHigh || connHigh) {
-                const int baseStep = std::max(1, TuneAdvisor::poolScaleStep());
-                const int step = std::max(
-                    1, static_cast<int>(std::lround(baseStep * TuneAdvisor::profileScale())));
-                pm.apply_delta({"ipc_io", +step,
-                                muxHigh ? "central_mux_backlog" : "central_conns_per_thread_high",
-                                TuneAdvisor::statusTickMs()});
-            }
-        } catch (...) {
-            if (muxHigh) {
-                const int baseStep = std::max(1, TuneAdvisor::poolScaleStep());
-                const int step = std::max(
-                    1, static_cast<int>(std::lround(baseStep * TuneAdvisor::profileScale())));
-                pm.apply_delta(
-                    {"ipc_io", +step, "central_mux_backlog", TuneAdvisor::statusTickMs()});
-            }
-        }
     }
 
     // Search concurrency governance (no dedicated pool)
@@ -201,17 +153,6 @@ void TuningManager::tick_once() {
         if (advisorLimit > 0)
             target = std::min(target, advisorLimit);
         (void)sm_->applySearchConcurrencyTarget(target);
-    } catch (...) {
-    }
-
-    // Apply pool target to worker pool when changed
-    try {
-        auto ipcStats = pm.stats("ipc");
-        // Always apply the pool manager's recommended size, even if starting from 0
-        std::size_t desired = ipcStats.current_size;
-        if (desired == 0)
-            desired = 1;
-        (void)sm_->resizeWorkerPool(desired);
     } catch (...) {
     }
 

@@ -3,7 +3,6 @@
 #include <filesystem>
 
 #include <vector>
-#include <boost/asio/thread_pool.hpp>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/PluginHostFsm.h>
 #include <yams/daemon/components/RequestDispatcher.h>
@@ -45,10 +44,6 @@ boost::asio::awaitable<Response> guard_plugin_host_ready(ServiceManager* sm, Awa
     co_return co_await fn();
 }
 
-boost::asio::any_io_executor plugin_fallback_executor() {
-    static boost::asio::thread_pool pool(1);
-    return pool.get_executor();
-}
 } // namespace
 
 static PluginRecord toRecord(const PluginDescriptor& sr) {
@@ -234,8 +229,7 @@ RequestDispatcher::handlePluginTrustAddRequest(const PluginTrustAddRequest& req)
                     }
 
                     auto path = std::filesystem::path(req.path);
-                    auto exec = serviceManager_ ? serviceManager_->getWorkerExecutor()
-                                                : plugin_fallback_executor();
+                    auto exec = serviceManager_->getWorkerExecutor();
 
                     boost::asio::co_spawn(
                         exec,

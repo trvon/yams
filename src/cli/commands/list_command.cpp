@@ -174,7 +174,22 @@ public:
             }
 
             if (isFilePath) {
-                return showFileHistory(namePattern_);
+                // Check if the path is a directory
+                std::filesystem::path p(namePattern_);
+                std::error_code ec;
+                if (std::filesystem::exists(p, ec) && std::filesystem::is_directory(p, ec)) {
+                    // It's a directory - use it as a path prefix pattern for listing
+                    // Don't call showFileHistory for directories
+                    isFilePath = false;
+                    // Convert directory path to a pattern for filtering
+                    std::filesystem::path absPath = std::filesystem::absolute(p, ec);
+                    if (!ec) {
+                        namePattern_ = absPath.string() + "/";
+                    }
+                } else {
+                    // It's a file path - show history
+                    return showFileHistory(namePattern_);
+                }
             }
 
             if (!snapshotId_.empty()) {

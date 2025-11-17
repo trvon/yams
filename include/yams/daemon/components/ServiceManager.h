@@ -304,7 +304,9 @@ public:
     std::size_t getWorkerCompleted() const {
         return poolCompleted_.load(std::memory_order_relaxed);
     }
-    std::size_t getWorkerThreads() const { return poolThreads_; }
+    std::size_t getWorkerThreads() const {
+        return workCoordinator_ ? workCoordinator_->getWorkerCount() : 0;
+    }
 
     RetrievalSessionManager* getRetrievalSessionManager() const { return retrievalSessions_.get(); }
 

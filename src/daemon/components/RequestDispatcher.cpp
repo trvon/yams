@@ -119,12 +119,6 @@ DEFINE_REQUEST_HANDLER(GraphValidateRequest, handleGraphValidateRequest);
 
 #undef DEFINE_REQUEST_HANDLER
 
-namespace {
-boost::asio::any_io_executor dispatcher_fallback_executor() {
-    static boost::asio::thread_pool pool(1);
-    return pool.get_executor();
-}
-} // namespace
 
 // Helper functions for system metrics (moved from daemon.cpp)
 double getMemoryUsage() {
@@ -315,7 +309,7 @@ boost::asio::any_io_executor RequestDispatcher::getWorkerExecutor() const {
         }
     } catch (...) {
     }
-    return dispatcher_fallback_executor();
+    throw std::runtime_error("RequestDispatcher: ServiceManager not available");
 }
 std::function<void(bool)> RequestDispatcher::getWorkerJobSignal() const {
     try {

@@ -303,4 +303,198 @@ yams session list
 yams session unpin --path "src/**/*.cpp"
 ```
 
+## PBI (Product Backlog Item) Creation
+
+When creating new PBIs, follow this structured approach:
+
+### 1. Determine PBI Number
+```bash
+# Find the latest PBI number
+grep -roh "PBI-[0-9]\{3\}" docs/ src/ include/ | sort -u | tail -1
+
+# Use next sequential number (e.g., if PBI-080 exists, use PBI-081)
+```
+
+### 2. Create PBI Document
+**Location:** `docs/design/pbi/PBI-XXX-<descriptive-name>.md`
+
+**Required Sections:**
+```markdown
+# PBI-XXX: <Title>
+
+**Status:** Proposed | Agreed | InProgress | Review | Done
+**Priority:** Low | Medium | High | Critical
+**Estimated Effort:** X days
+**Created:** YYYY-MM-DD
+**Last Updated:** YYYY-MM-DD
+
+## Overview
+[Brief summary of the enhancement/feature]
+
+## Problem Statement
+**Current State:** [What doesn't work or is missing]
+**User Impact:** [How this affects users]
+
+## Goals
+### Primary Goals
+1. [Core objective 1]
+2. [Core objective 2]
+
+### Secondary Goals
+1. [Nice-to-have 1]
+
+## Architecture
+[Technical design, code samples, diagrams]
+
+## Implementation Plan
+### Task Breakdown (X days)
+#### Task 1: <Name> (Xd)
+- **File:** path/to/file
+- [Implementation details]
+
+[... more tasks ...]
+
+### Total Estimated Time: X-Y days
+
+## Files to Modify
+### Modified Files
+1. **path/to/file.cpp** - [Changes description]
+
+### New Files
+2. **path/to/new_file.cpp** - [Purpose]
+
+## Testing Strategy
+### Unit Tests
+[Test approach]
+
+### Integration Tests
+[Integration test approach]
+
+## Success Criteria
+1. ✅ [Functional criterion 1]
+2. ✅ [Performance criterion 1]
+
+## CHANGELOG Integration
+Upon completion, add to CHANGELOG.md:
+\`\`\`markdown
+### Added
+- **Feature Name**: Brief description
+  - Detail 1
+  - Detail 2
+\`\`\`
+
+## Dependencies
+### Internal Components
+- ✅ ComponentA - Already exists
+- ⏳ ComponentB - To be created
+
+## Risks and Mitigations
+### Risk: [Risk Name]
+- **Concern:** [Description]
+- **Mitigation:** [Approach]
+
+## Change Log
+- **YYYY-MM-DD:** Initial PBI created
+```
+
+### 3. Add PBI to YAMS Memory
+```bash
+# Add the PBI document to YAMS with appropriate tags
+yams add docs/design/pbi/PBI-XXX-<name>.md \
+  --name "PBI-XXX-<name>.md" \
+  --tags "pbi,pbi-XXX,design,<domain>,<status>"
+
+# Create a summary document for quick reference
+cat > /tmp/pbi-XXX-summary.md << EOF
+# PBI-XXX: <Title> - Summary
+
+**Status:** Proposed
+**Effort:** X days
+
+## Problem
+[One paragraph problem statement]
+
+## Solution
+[One paragraph solution overview]
+
+## Tasks (X days)
+1. Task 1 (Xd): [Description]
+2. Task 2 (Xd): [Description]
+
+## CHANGELOG Entry
+\`\`\`markdown
+### Added
+- **Feature**: Description
+\`\`\`
+
+## Full Design
+See: docs/design/pbi/PBI-XXX-<name>.md
+EOF
+
+yams add /tmp/pbi-XXX-summary.md \
+  --name "pbi-XXX-summary.md" \
+  --tags "pbi,pbi-XXX,summary"
+```
+
+### 4. Update CHANGELOG.md (After Completion)
+
+When the PBI is **complete**, update the CHANGELOG:
+
+```bash
+# Add the CHANGELOG entry from PBI to CHANGELOG.md
+# Location: Under the "Unreleased" section
+
+### Added
+- **Feature Name**: Brief description from PBI
+  - Implementation details
+  - Files: src/path/file.cpp
+  - Tests: tests/unit/feature_test.cpp
+
+# Then add CHANGELOG update to YAMS
+yams add CHANGELOG.md \
+  --name "CHANGELOG.md" \
+  --tags "changelog,pbi-XXX,done"
+```
+
+### 5. PBI Lifecycle Tracking
+
+```bash
+# Update PBI status as work progresses
+echo "## PBI-XXX Status Update
+Date: $(date -Iseconds)
+Status: Proposed → Agreed
+Rationale: User approved design
+" | yams add - \
+  --name "pbi-XXX-status-$(date +%s).md" \
+  --tags "pbi,pbi-XXX,status"
+
+# When creating tasks from PBI
+echo "## PBI-XXX Tasks
+- [ ] XXX-1: Task description (Est: Xd)
+- [ ] XXX-2: Task description (Est: Xd)
+- [ ] XXX-3: Task description (Est: Xd)
+" | yams add - \
+  --name "pbi-XXX-tasks.md" \
+  --tags "pbi,pbi-XXX,tasks,planning"
+```
+
+### PBI Status Workflow
+```
+Proposed → Agreed → InProgress → Review → Done
+     ↓                  ↓
+  Rejected          Blocked
+```
+
+### PBI Naming Conventions
+- **PBI-XXX-feature-name.md** - Feature additions
+- **PBI-XXX-bug-fix-name.md** - Bug fixes
+- **PBI-XXX-refactor-name.md** - Refactoring work
+- **PBI-XXX-performance-name.md** - Performance improvements
+
+### Example PBI References
+- **PBI-009:** GraphComponent centralization (551 lines)
+- **PBI-043:** Tree diff and snapshot operations
+- **PBI-075:** Binary file extraction via plugins
+- **PBI-081:** Tag-based search component
+
 This maintains a complete audit trail in YAMS while following strict engineering practices.
