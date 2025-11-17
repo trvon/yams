@@ -118,7 +118,6 @@ int main(int argc, char* argv[]) {
             app.add_option("--data-dir,--storage", cliDataDir, "Data directory for storage");
         app.add_option("--pid-file", config.pidFile, "PID file path");
         app.add_option("--log-file", config.logFile, "Log file path");
-        app.add_option("--workers", config.workerThreads, "Number of worker threads");
         app.add_option("--max-memory", config.maxMemoryGb, "Maximum memory usage (GB)")
             ->default_val(8);
         app.add_option("--log-level", config.logLevel, "Log level (trace/debug/info/warn/error)")
@@ -159,14 +158,6 @@ int main(int argc, char* argv[]) {
             std::string v;
             if (next_str(v))
                 config.logFile = v;
-        } else if (arg == "--workers") {
-            std::string v;
-            if (next_str(v)) {
-                try {
-                    config.workerThreads = static_cast<size_t>(std::stoul(v));
-                } catch (...) {
-                }
-            }
         } else if (arg == "--max-memory") {
             std::string v;
             if (next_str(v)) {
@@ -245,14 +236,6 @@ int main(int argc, char* argv[]) {
                     } else if (auto it3 = daemonSection.find("storage_path");
                                it3 != daemonSection.end()) {
                         config.dataDir = fs::path(it3->second);
-                    }
-                }
-
-                // Worker threads
-                if (daemonSection.find("worker_threads") != daemonSection.end()) {
-                    try {
-                        config.workerThreads = std::stoi(daemonSection.at("worker_threads"));
-                    } catch (...) {
                     }
                 }
 
@@ -742,19 +725,6 @@ int main(int argc, char* argv[]) {
         }
     } catch (...) {
         // Non-fatal: ignore config check errors in daemon startup
-    }
-
-    // Coerce workers to a safe minimum if zero was configured
-    if (config.workerThreads == 0) {
-        // Prefer centralized, hardware-aware recommendation (IO-friendly background factor)
-        try {
-            auto rec = yams::daemon::TuneAdvisor::recommendedThreads(0.25 /*backgroundFactor*/);
-            config.workerThreads = static_cast<size_t>(std::max(1u, rec));
-        } catch (...) {
-            auto hc = std::thread::hardware_concurrency();
-            config.workerThreads = (hc > 0 ? static_cast<size_t>(hc) : static_cast<size_t>(4));
-        }
-        spdlog::warn("--workers was 0; using {} IO worker thread(s) instead", config.workerThreads);
     }
 
     // Daemonize if not running in foreground

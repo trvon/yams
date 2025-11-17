@@ -182,68 +182,16 @@ void AsioConnectionPool::shutdown_all(std::chrono::milliseconds timeout) {
 }
 
 void AsioConnectionPool::cleanup_stale_connections() {
-    connection_pool_.erase(
-        std::ranges::remove_if(connection_pool_,
-                               [](const std::weak_ptr<AsioConnection>& weak) {
-                                   auto conn = weak.lock();
-                                   if (!conn)
-                                       return true;
-
-                                   if (conn->is_stale()) {
-                                       if (conn->alive.load(std::memory_order_relaxed)) {
-                                           conn->alive.store(false, std::memory_order_relaxed);
-                                           if (conn->socket && conn->socket->is_open()) {
-                                               boost::system::error_code ec;
-                                               conn->socket->close(ec);
-                                           }
-                                       }
-                                       return true;
-                                   }
-                                   return false;
-                               })
-            .begin(),
-        connection_pool_.end());
+    connection_pool_.erase(std::ranges::remove_if(connection_pool_,
+                                                  [](const std::weak_ptr<AsioConnection>& weak) {
+                                                      return weak.expired();
+                                                  })
+                               .begin(),
+                           connection_pool_.end());
 }
 
 awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::acquire() {
-    if (!shared_) {
-        co_return co_await create_connection();
-    }
-
-    std::shared_ptr<AsioConnection> existing;
-    {
-        std::lock_guard<std::mutex> lk(mutex_);
-        cleanup_stale_connections();
-
-        for (auto& weak : connection_pool_) {
-            if (auto conn = weak.lock()) {
-                if (conn->is_stale()) {
-                    continue;
-                }
-
-                if (conn->alive.load(std::memory_order_relaxed) && conn->socket &&
-                    conn->socket->is_open()) {
-                    conn->mark_used();
-                    existing = conn;
-                    break;
-                }
-            }
-        }
-    }
-
-    if (existing) {
-        co_return existing;
-    }
-
-    auto fresh = co_await create_connection();
-
-    if (shared_ && fresh && fresh->alive.load(std::memory_order_relaxed)) {
-        std::lock_guard<std::mutex> lk(mutex_);
-        if (connection_pool_.size() < kMaxPoolSize) {
-            connection_pool_.push_back(fresh);
-        }
-    }
-    co_return fresh;
+    co_return co_await create_connection();
 }
 
 void AsioConnectionPool::release(const std::shared_ptr<AsioConnection>& conn) {
@@ -291,14 +239,14 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
             boost::asio::socket_base::receive_buffer_size recv_sz(64 * 1024);
             conn->socket->set_option(send_sz);
             conn->socket->set_option(recv_sz);
-
-            boost::asio::socket_base::linger linger_opt(true, 0);
-            conn->socket->set_option(linger_opt);
         }
     } catch (...) {
     }
 
-    // Start background read loop to receive responses
+    co_return conn;
+}
+
+awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<AsioConnection> conn) {
     if (!conn->read_started.exchange(true)) {
         auto executor = conn->opts.executor.has_value()
                             ? *conn->opts.executor
@@ -306,12 +254,11 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
         conn->read_loop_future = co_spawn(
             executor,
             [weak_conn = std::weak_ptr(conn)]() -> awaitable<void> {
-                if (auto conn = weak_conn.lock()) {
-                    co_await boost::asio::dispatch(conn->strand, use_awaitable);
-                } else {
+                auto conn = weak_conn.lock();
+                if (!conn) {
                     co_return;
                 }
-
+                co_await boost::asio::post(conn->strand, use_awaitable);
                 MessageFramer framer;
                 for (;;) {
                     auto conn = weak_conn.lock();
@@ -440,7 +387,6 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
                         co_return;
                     }
                     auto& msg = msgRes.value();
-                    conn->mark_read_success();
                     static std::atomic<bool> warned{false};
                     if (!warned.load()) {
                         if (msg.version < PROTOCOL_VERSION) {
@@ -526,8 +472,7 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
             },
             boost::asio::use_future);
     }
-
-    co_return conn;
+    co_return;
 }
 
 } // namespace yams::daemon

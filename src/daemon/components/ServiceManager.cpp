@@ -544,18 +544,6 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
         try {
             if (!ingestService_) {
                 ingestService_ = std::make_unique<IngestService>(this, workCoordinator_.get());
-                // Initialize EntityGraphService skeleton
-                try {
-                    if (!entityGraphService_) {
-                        entityGraphService_ = std::make_shared<EntityGraphService>(this, 1);
-                        entityGraphService_->start();
-                        spdlog::info("EntityGraphService initialized (workers=1)");
-                    }
-                } catch (const std::exception& e2) {
-                    spdlog::warn("Failed to initialize EntityGraphService: {}", e2.what());
-                } catch (...) {
-                    spdlog::warn("Unknown error initializing EntityGraphService");
-                }
             }
         } catch (const std::exception& e) {
             spdlog::warn("ServiceManager: failed to initialize IngestService scaffold: {}",
@@ -962,20 +950,6 @@ void ServiceManager::shutdown() {
             spdlog::warn("[ServiceManager] Phase 6.2: GraphComponent shutdown failed: {}",
                          e.what());
         }
-    }
-
-    spdlog::info("[ServiceManager] Phase 6.3: Stopping entity graph service");
-    if (entityGraphService_) {
-        try {
-            entityGraphService_->stop();
-            entityGraphService_.reset();
-            spdlog::info("[ServiceManager] Phase 6.3: Entity graph service stopped");
-        } catch (const std::exception& e) {
-            spdlog::warn("[ServiceManager] Phase 6.3: EntityGraphService shutdown failed: {}",
-                         e.what());
-        }
-    } else {
-        spdlog::info("[ServiceManager] Phase 6.2: No entity graph service to stop");
     }
 
     spdlog::info("[ServiceManager] Phase 6.3: Resetting post-ingest queue");
@@ -1890,7 +1864,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     }
                     // PBI-009: Initialize GraphComponent after KG store is ready
                     try {
-                        graphComponent_ = std::make_shared<GraphComponent>(metadataRepo_, kgStore_);
+                        graphComponent_ =
+                            std::make_shared<GraphComponent>(metadataRepo_, kgStore_, this);
                         auto initResult = graphComponent_->initialize();
                         if (!initResult) {
                             spdlog::warn("GraphComponent initialization failed: {}",
@@ -3267,15 +3242,22 @@ std::shared_ptr<search::HybridSearchEngine> ServiceManager::getSearchEngineSnaps
 }
 
 yams::app::services::AppContext ServiceManager::getAppContext() const {
+    spdlog::debug("[getAppContext] START");
     app::services::AppContext ctx;
     ctx.service_manager = const_cast<ServiceManager*>(this);
     ctx.store = contentStore_;
+    spdlog::debug("[getAppContext] about to call atomic_load(searchExecutor_)");
     ctx.searchExecutor = std::atomic_load(&searchExecutor_);
+    spdlog::debug("[getAppContext] about to set metadataRepo");
     ctx.metadataRepo = metadataRepo_;
+    spdlog::debug("[getAppContext] about to call getSearchEngineSnapshot()");
     ctx.hybridEngine = getSearchEngineSnapshot();
+    spdlog::debug("[getAppContext] getSearchEngineSnapshot() returned");
     ctx.kgStore = this->kgStore_; // PBI-043: tree diff KG integration
+    spdlog::debug("[getAppContext] about to call graphComponent_->getQueryService()");
     ctx.graphQueryService = graphComponent_ ? graphComponent_->getQueryService()
                                             : nullptr; // PBI-009: centralized graph queries
+    spdlog::debug("[getAppContext] graphComponent_->getQueryService() returned");
     ctx.contentExtractors = contentExtractors_;
 
     // Log vector capability status

@@ -8,6 +8,8 @@
 #include <optional>
 #include <string>
 #include <variant>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/use_awaitable.hpp>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
 #include <yams/daemon/ipc/proto_serializer.h>
@@ -422,7 +424,12 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
 
             // Search/List/Grep initial compute (first post-heartbeat chunk)
             if (mode_ == Mode::Search && !search_.has_value()) {
-                auto r = co_await delegate_->process(**pending_request_);
+                auto r = co_await boost::asio::co_spawn(
+                    cfg_.worker_executor,
+                    [this, req = **pending_request_]() -> boost::asio::awaitable<Response> {
+                        co_return co_await delegate_->process(req);
+                    },
+                    boost::asio::use_awaitable);
                 if (auto* s = std::get_if<SearchResponse>(&r)) {
                     search_ = SearchState{};
                     search_->results = std::move(s->results);
@@ -434,7 +441,12 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                     co_return ResponseChunk{.data = std::move(r), .is_last_chunk = true};
                 }
             } else if (mode_ == Mode::List && !list_.has_value()) {
-                auto r = co_await delegate_->process(**pending_request_);
+                auto r = co_await boost::asio::co_spawn(
+                    cfg_.worker_executor,
+                    [this, req = **pending_request_]() -> boost::asio::awaitable<Response> {
+                        co_return co_await delegate_->process(req);
+                    },
+                    boost::asio::use_awaitable);
                 if (auto* l = std::get_if<ListResponse>(&r)) {
                     list_ = ListState{};
                     list_->items = std::move(l->items);
@@ -445,7 +457,12 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                     co_return ResponseChunk{.data = std::move(r), .is_last_chunk = true};
                 }
             } else if (mode_ == Mode::Grep && !grep_.has_value()) {
-                auto r = co_await delegate_->process(**pending_request_);
+                auto r = co_await boost::asio::co_spawn(
+                    cfg_.worker_executor,
+                    [this, req = **pending_request_]() -> boost::asio::awaitable<Response> {
+                        co_return co_await delegate_->process(req);
+                    },
+                    boost::asio::use_awaitable);
                 if (auto* g = std::get_if<GrepResponse>(&r)) {
                     grep_ = GrepState{};
                     grep_->matches = std::move(g->matches);

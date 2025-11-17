@@ -82,7 +82,6 @@ class TuningManager;
 namespace yams::daemon {
 
 class IngestService;
-class EntityGraphService;
 class GraphComponent;
 
 class ServiceManager : public IComponent, public std::enable_shared_from_this<ServiceManager> {
@@ -112,9 +111,6 @@ public:
     std::shared_ptr<metadata::MetadataRepository> getMetadataRepo() const { return metadataRepo_; }
     std::shared_ptr<search::SearchExecutor> getSearchExecutor() const {
         return std::atomic_load(&searchExecutor_);
-    }
-    std::shared_ptr<EntityGraphService> getEntityGraphService() const {
-        return entityGraphService_;
     }
     std::shared_ptr<IModelProvider> getModelProvider() const { return modelProvider_; }
     std::shared_ptr<yams::search::HybridSearchEngine> getSearchEngineSnapshot() const;
@@ -481,8 +477,6 @@ private:
     // Legacy members retained for compatibility during transition
     std::unique_ptr<IngestService> ingestService_;
     yams::compat::jthread initThread_; // Retained for legacy async init (will be removed later)
-
-    std::shared_ptr<EntityGraphService> entityGraphService_;
 
     std::unique_ptr<AbiPluginLoader> abiPluginLoader_;
     std::unique_ptr<AbiPluginHost> abiHost_;

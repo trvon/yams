@@ -7,6 +7,8 @@
 #include <boost/asio/write.hpp>
 #include <boost/system/error_code.hpp>
 
+#include <spdlog/spdlog.h>
+
 namespace yams::daemon {
 
 using boost::asio::use_awaitable;
@@ -52,19 +54,25 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
             total_bytes_written.store(0, std::memory_order_relaxed);
             total_batches.store(0, std::memory_order_relaxed);
         }
+        spdlog::debug("AsioConnection::async_write_frame: writing {} frames, {} bytes total",
+                      frames, batched);
         boost::system::error_code ec;
         auto result = co_await boost::asio::async_write(
             *socket, buffers, boost::asio::redirect_error(use_awaitable, ec));
         if (ec) {
+            spdlog::error("AsioConnection::async_write_frame: write error: {}", ec.message());
             writing = false;
             alive = false;
             co_return Error{ErrorCode::NetworkError, ec.message()};
         }
         if (result != batched) {
+            spdlog::error("AsioConnection::async_write_frame: short write {} != {}", result,
+                          batched);
             writing = false;
             alive = false;
             co_return Error{ErrorCode::NetworkError, "Short write on transport socket"};
         }
+        spdlog::debug("AsioConnection::async_write_frame: successfully wrote {} bytes", result);
     }
     writing = false;
     co_return Result<void>();

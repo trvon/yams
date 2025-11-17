@@ -4,7 +4,7 @@
 #include <iomanip>
 #include <sstream>
 #include <yams/crypto/hasher.h>
-#include <yams/daemon/components/EntityGraphService.h>
+#include <yams/daemon/components/GraphComponent.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/indexing/document_indexer.h>
 #include <yams/indexing/indexing_pipeline.h>
@@ -226,15 +226,15 @@ IndexingResult IndexingPipeline::processTask(IndexingTask& task) {
             namespace ydaemon = ::yams::daemon;
             extern ydaemon::ServiceManager* yams_get_global_service_manager();
             if (auto* sm = yams_get_global_service_manager()) {
-                auto svc = sm->getEntityGraphService();
-                if (svc && task.extractionResult) {
-                    ydaemon::EntityGraphService::Job j;
+                auto gc = sm->getGraphComponent();
+                if (gc && task.extractionResult) {
+                    ydaemon::GraphComponent::EntityExtractionJob j;
                     if (task.documentInfo)
                         j.documentHash = task.documentInfo->sha256Hash;
                     j.filePath = task.path.string();
                     j.contentUtf8 = task.extractionResult->text;
                     j.language = task.extractionResult->language;
-                    (void)svc->submitExtraction(std::move(j));
+                    (void)gc->submitEntityExtraction(std::move(j));
                 }
             }
         } catch (...) {

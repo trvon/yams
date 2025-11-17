@@ -33,7 +33,6 @@ struct DaemonConfig {
     std::filesystem::path socketPath;
     std::filesystem::path pidFile;
     std::filesystem::path logFile;
-    size_t workerThreads = 4;
     size_t maxMemoryGb = 4;
     std::chrono::milliseconds requestTimeout{5000};
     bool healthMonitoring = true;

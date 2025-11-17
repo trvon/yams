@@ -141,7 +141,6 @@ TEST_CASE("SocketServer: Lifecycle management", "[daemon][components][socket]") 
 
     SocketServer::Config config;
     config.socketPath = socketPath;
-    config.workerThreads = 1;
     config.connectionTimeout = 1500ms;
 
     StateComponent state;

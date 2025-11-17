@@ -96,11 +96,6 @@ Result<void> SocketServer::start() {
     try {
         spdlog::info("Starting socket server on {}", config_.socketPath.string());
 
-        if (config_.workerThreads == 0) {
-            config_.workerThreads = 1;
-            spdlog::warn("SocketServer: workerThreads was 0; coercing to 1");
-        }
-
         // Normalize to an absolute path to avoid surprises after daemon chdir("/")
         std::filesystem::path sockPath = config_.socketPath;
         if (!sockPath.is_absolute()) {
@@ -343,10 +338,9 @@ awaitable<void> SocketServer::accept_loop() {
         }
     }
     if (trace) {
-        spdlog::info("stream-trace: accept_loop starting (max_conn={} worker_threads={} socket={})",
-                     config_.maxConnections, config_.workerThreads,
-                     actualSocketPath_.empty() ? config_.socketPath.string()
-                                               : actualSocketPath_.string());
+        spdlog::info(
+            "stream-trace: accept_loop starting (max_conn={} socket={})", config_.maxConnections,
+            actualSocketPath_.empty() ? config_.socketPath.string() : actualSocketPath_.string());
     }
 
     while (running_ && !stopping_) {
@@ -644,7 +638,6 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
         }
 
         RequestHandler::Config handlerConfig;
-        handlerConfig.worker_executor = coordinator_->getExecutor();
         handlerConfig.writer_budget_ref = writerBudget_;
         handlerConfig.writer_budget_bytes_per_turn = writerBudget_->load(std::memory_order_relaxed);
         handlerConfig.enable_streaming = true;
@@ -654,6 +647,7 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
         // starvation by background work)
         if (dispatcher_) {
             try {
+                handlerConfig.worker_executor = dispatcher_->getWorkerExecutor();
                 handlerConfig.worker_job_signal = dispatcher_->getWorkerJobSignal();
             } catch (...) {
             }

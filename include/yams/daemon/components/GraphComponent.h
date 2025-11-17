@@ -24,11 +24,13 @@ struct TreeChangeRecord;
 namespace yams::daemon {
 
 class EntityGraphService;
+class ServiceManager;
 
 class GraphComponent {
 public:
     GraphComponent(std::shared_ptr<metadata::MetadataRepository> metadataRepo,
-                   std::shared_ptr<metadata::KnowledgeGraphStore> kgStore);
+                   std::shared_ptr<metadata::KnowledgeGraphStore> kgStore,
+                   ServiceManager* serviceManager = nullptr);
 
     ~GraphComponent();
 
@@ -75,8 +77,6 @@ public:
     };
     Result<GraphHealthReport> validateGraph();
 
-    Result<void> recomputeStats();
-
     std::shared_ptr<app::services::IGraphQueryService> getQueryService() const;
 
     struct EntityStats {
@@ -91,6 +91,7 @@ private:
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_;
     std::shared_ptr<app::services::IGraphQueryService> queryService_;
     std::shared_ptr<EntityGraphService> entityService_;
+    ServiceManager* serviceManager_{nullptr};
     bool initialized_{false};
 };
 

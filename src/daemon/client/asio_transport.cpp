@@ -212,16 +212,27 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
         conn->handlers.emplace(msg.requestId, std::move(h));
     }
 
+    auto pool = AsioConnectionPool::get_or_create(opts_);
+    co_await pool->ensure_read_loop_started(conn);
+
+    auto frame_size = frame.size();
+    spdlog::info("AsioTransportAdapter::send_request about to write frame req_id={} type={} "
+                 "socket_open={} bytes={}",
+                 msg.requestId, static_cast<int>(req_type), conn->socket && conn->socket->is_open(),
+                 frame_size);
+
     auto wres = co_await conn->async_write_frame(std::move(frame));
     if (!wres) {
         co_await boost::asio::dispatch(conn->strand, use_awaitable);
         conn->handlers.erase(msg.requestId);
         // Release connection before returning error
         conn->in_use.store(false, std::memory_order_release);
+        spdlog::error("AsioTransportAdapter::send_request write failed req_id={}: {}",
+                      msg.requestId, wres.error().message);
         co_return wres.error();
     }
-    spdlog::info("AsioTransportAdapter::send_request wrote frame req_id={} type={}", msg.requestId,
-                 static_cast<int>(req_type));
+    spdlog::info("AsioTransportAdapter::send_request wrote frame req_id={} type={} bytes={}",
+                 msg.requestId, static_cast<int>(req_type), frame_size);
 
     // Release connection AFTER writing frame - connection can now be reused while we wait for
     // response
@@ -233,11 +244,11 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
     while (std::chrono::steady_clock::now() < deadline) {
-        if (response_future.wait_for(10ms) == std::future_status::ready) {
+        if (response_future.wait_for(0ms) == std::future_status::ready) {
             auto result = response_future.get();
             co_return result;
         }
-        timer.expires_after(10ms);
+        timer.expires_after(1ms);
         co_await timer.async_wait(use_awaitable);
     }
 
@@ -262,8 +273,6 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
             }
             co_return Error{ErrorCode::NetworkError, "Failed to establish connection"};
         }
-
-        auto acquire_time = std::chrono::steady_clock::now();
 
         static std::atomic<uint64_t> g_req_id{
             static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count())};
@@ -300,6 +309,9 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
             conn->handlers.emplace(msg.requestId, std::move(h));
         }
 
+        auto pool = AsioConnectionPool::get_or_create(opts_);
+        co_await pool->ensure_read_loop_started(conn);
+
         auto wres = co_await conn->async_write_frame(std::move(frame));
         if (!wres) {
             co_await boost::asio::dispatch(conn->strand, use_awaitable);
@@ -317,29 +329,23 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
         boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
         while (std::chrono::steady_clock::now() < deadline) {
-            if (done_future.wait_for(10ms) == std::future_status::ready) {
+            if (done_future.wait_for(0ms) == std::future_status::ready) {
                 auto result = done_future.get();
 
                 if (!result && attempt < kMaxRetries) {
-                    auto error_time = std::chrono::steady_clock::now();
-                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        error_time - acquire_time);
-
                     const auto& err_msg = result.error().message;
                     bool is_eof_error = err_msg.find("End of file") != std::string::npos ||
                                         err_msg.find("Connection closed") != std::string::npos;
 
-                    if (is_eof_error && elapsed < 100ms) {
-                        spdlog::warn("Immediate EOF detected ({}ms after acquire), retrying with "
-                                     "fresh connection",
-                                     elapsed.count());
+                    if (is_eof_error) {
+                        spdlog::debug("Connection error detected, retrying with fresh connection");
                         break;
                     }
                 }
 
                 co_return result;
             }
-            timer.expires_after(10ms);
+            timer.expires_after(1ms);
             co_await timer.async_wait(use_awaitable);
         }
 

@@ -7,7 +7,6 @@ using namespace yams::daemon;
 
 TEST(ServiceManagerShutdownOwnership, AbiHostReleasedOnShutdownAndFsmStopped) {
     DaemonConfig cfg;
-    cfg.workerThreads = 1;
     StateComponent state{};
     DaemonLifecycleFsm lifecycleFsm;
 

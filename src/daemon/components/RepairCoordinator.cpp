@@ -1,4 +1,5 @@
 #include <yams/compat/thread_stop_compat.h>
+#include <yams/daemon/components/GraphComponent.h>
 #include <yams/daemon/components/RepairCoordinator.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
@@ -285,11 +286,10 @@ void RepairCoordinator::onDocumentAdded(const DocumentAddedEvent& event) {
     // Query plugins dynamically for supported languages - no static checks
     try {
         if (services_) {
-            auto eg = services_->getEntityGraphService();
+            auto gc = services_->getGraphComponent();
             auto symbolExtractors = services_->getSymbolExtractors();
 
-            if (eg && !symbolExtractors.empty()) {
-                // Build extension->language map from loaded plugins
+            if (gc && !symbolExtractors.empty()) {
                 static thread_local std::unordered_map<std::string, std::string> extToLang;
                 static thread_local bool mapInitialized = false;
 
@@ -301,22 +301,20 @@ void RepairCoordinator::onDocumentAdded(const DocumentAddedEvent& event) {
                         extToLang.size());
                 }
 
-                // Extract file extension from path
                 std::string extension;
                 auto dotPos = event.path.find_last_of('.');
                 if (dotPos != std::string::npos) {
-                    extension = event.path.substr(dotPos); // includes the dot
+                    extension = event.path.substr(dotPos);
                 }
 
-                // Check if any plugin supports this extension
                 auto it = extToLang.find(extension);
                 if (it != extToLang.end()) {
-                    EntityGraphService::Job j;
+                    GraphComponent::EntityExtractionJob j;
                     j.documentHash = event.hash;
                     j.filePath = event.path;
-                    j.language = it->second; // Language from plugin!
+                    j.language = it->second;
 
-                    (void)eg->submitExtraction(std::move(j));
+                    (void)gc->submitEntityExtraction(std::move(j));
                     spdlog::debug("RepairCoordinator: queued symbol extraction {} (ext={} lang={})",
                                   event.hash.substr(0, 12), extension, it->second);
                 }

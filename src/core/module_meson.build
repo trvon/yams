@@ -1,0 +1,69 @@
+# Optional module build configuration for yams_core
+# This is a proof-of-concept for C++20 modules
+# 
+# Usage: Include this from src/core/meson.build when module support is detected
+
+cpp = meson.get_compiler('cpp')
+
+# Check for C++20 module support
+has_modules = cpp.compiles('''
+    export module test;
+    export int test_func() { return 42; }
+''', 
+    name: 'C++20 modules',
+    args: ['-std=c++20', '-fmodules-ts']
+)
+
+if not has_modules
+    warning('C++20 modules not supported, using traditional headers only')
+    subdir_done()
+endif
+
+message('Building yams_core with C++20 module support')
+
+# Module-specific compiler flags
+module_args = ['-fmodules-ts']
+
+if cpp.get_id() == 'gcc'
+    module_args += ['-fmodule-mapper=@BUILD_ROOT@/module.map']
+elif cpp.get_id() == 'clang'
+    module_args += ['-fprebuilt-module-path=@BUILD_ROOT@/modules']
+endif
+
+# Build the module interface
+yams_core_module = custom_target('yams_core_module',
+    input: 'yams_core.cppm',
+    output: 'yams_core.pcm',
+    command: [
+        cpp.cmd_array(),
+        '-std=c++20',
+        module_args,
+        '-c',
+        '@INPUT@',
+        '-o', '@OUTPUT@'
+    ],
+    install: false,
+)
+
+# Build module implementation
+yams_core_module_impl = static_library('yams_core_module_impl',
+    'yams_core_impl.cpp',
+    dependencies: [tl_expected_dep],
+    cpp_args: module_args + ['-DYAMS_USE_MODULES=1'],
+    link_depends: [yams_core_module],
+    install: false,
+)
+
+# Create a dependency for consumers
+yams_core_module_dep = declare_dependency(
+    link_with: yams_core_module_impl,
+    compile_args: ['-DYAMS_USE_MODULES=1'] + module_args,
+    sources: [yams_core_module],
+)
+
+# Override the standard yams_core dependency when building with modules
+meson.override_dependency('yams_core_module', yams_core_module_dep)
+
+message('yams.core module configured successfully')
+message('  BMI output: ' + yams_core_module.full_path())
+message('  Consumers can use: dependency(\'yams_core_module\')')

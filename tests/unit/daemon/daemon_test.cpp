@@ -34,7 +34,6 @@ protected:
         config_.socketPath = runtime_root_ / "sock";
         config_.pidFile = runtime_root_ / "daemon.pid";
         config_.logFile = runtime_root_ / "daemon.log";
-        config_.workerThreads = 2;
         config_.maxMemoryGb = 1.0;
 
         // Check if we should attempt to use models
@@ -669,22 +668,6 @@ TEST_F(DaemonTest, RestartWithExistingSocket) {
     auto result2 = daemon_->start();
     EXPECT_TRUE(result2) << "Should successfully restart after clean stop";
     if (result2) {
-        daemon_->stop();
-    }
-}
-
-// Test invalid worker thread count (config validation)
-TEST_F(DaemonTest, InvalidWorkerThreadCount) {
-    DaemonConfig bad_config = config_;
-    bad_config.workerThreads = 0; // Invalid: must be >= 1
-
-    daemon_ = std::make_unique<YamsDaemon>(bad_config);
-    auto result = daemon_->start();
-    // Should either fail or clamp to valid value
-    if (!result) {
-        EXPECT_FALSE(result.error().message.empty());
-    }
-    if (result) {
         daemon_->stop();
     }
 }

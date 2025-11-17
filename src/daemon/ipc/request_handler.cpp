@@ -899,9 +899,6 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
     using boost::asio::use_awaitable;
     auto start_time = std::chrono::steady_clock::now();
 
-    spdlog::info("handle_streaming_request begin req_id={} type={} client_expects={}", request_id,
-                 static_cast<int>(getMessageType(request)), client_expects_streaming);
-
     try {
         // Check socket is open before processing
         if (!socket.is_open()) {
@@ -1693,6 +1690,8 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
             }
         }
         auto chunk_result = co_await processor->next_chunk();
+        spdlog::debug("stream_chunks processor->next_chunk() returned req_id={} last={}",
+                      request_id, chunk_result.is_last_chunk);
         last_chunk_received = chunk_result.is_last_chunk;
         // Belt-and-suspenders: if the payload is an ErrorResponse, force this to be the last
         try {

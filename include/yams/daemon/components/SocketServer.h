@@ -38,7 +38,6 @@ public:
     struct Config {
         std::filesystem::path socketPath;
         size_t maxConnections = 1024;
-        size_t workerThreads = 1; // Default 1, tuneable via TuneAdvisor
         std::chrono::milliseconds connectionTimeout{2000};
         std::chrono::milliseconds acceptBackoffMs{100};
         std::chrono::seconds maxConnectionLifetime{300}; // 5 minutes absolute limit
