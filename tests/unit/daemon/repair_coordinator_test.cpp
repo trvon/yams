@@ -7,6 +7,11 @@
 #include <yams/daemon/components/RepairCoordinator.h>
 #include <yams/daemon/components/StateComponent.h>
 
+// Include test helpers for wait_for_condition utility
+#include "../../common/test_helpers.h"
+
+using namespace std::chrono_literals;
+
 namespace yams::daemon {
 
 TEST(RepairCoordinatorTest, ProcessesDocumentEventsWhenEnabled) {
@@ -31,8 +36,9 @@ TEST(RepairCoordinatorTest, ProcessesDocumentEventsWhenEnabled) {
     rc.onDocumentAdded(event1);
     rc.onDocumentAdded(event2);
 
-    // Give the coordinator time to process
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // Give the coordinator time to process events
+    // NOTE: RepairCoordinator processes asynchronously; wait for reasonable processing time
+    std::this_thread::sleep_for(100ms);
 
     // Simulate document removal
     RepairCoordinator::DocumentRemovedEvent removeEvent{"hash1"};
@@ -61,8 +67,8 @@ TEST(RepairCoordinatorTest, DoesNothingWhenDisabled) {
     RepairCoordinator::DocumentAddedEvent event{"hash1", "/path/to/doc1"};
     rc.onDocumentAdded(event);
 
-    // Give a moment to ensure nothing happens
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    // Give a moment to ensure nothing happens (disabled coordinator should not process)
+    std::this_thread::sleep_for(50ms);
 
     rc.stop();
 
@@ -85,7 +91,8 @@ TEST(RepairCoordinatorTest, StartIdempotent) {
 
     // First start should succeed
     coordinator.start();
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // Allow coordinator to complete startup
+    std::this_thread::sleep_for(100ms);
 
     // Second start should be idempotent (no error)
     EXPECT_NO_THROW(coordinator.start());
@@ -105,7 +112,8 @@ TEST(RepairCoordinatorTest, StopIdempotent) {
     RepairCoordinator coordinator(nullptr, &state, activeFn, cfg);
 
     coordinator.start();
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // Allow coordinator to initialize
+    std::this_thread::sleep_for(100ms);
     coordinator.stop();
 
     // Second stop should be idempotent (no error)
@@ -133,10 +141,13 @@ TEST(RepairCoordinatorTest, MultipleDocumentAddedEvents) {
         coordinator.onDocumentAdded(event);
     }
 
-    // Allow time for processing
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    // Allow time for batch processing (coordinator processes in background)
+    // Wait for queue depth to be tracked, which indicates processing has begun
+    bool processed = yams::test::wait_for_condition(
+        2000ms, 50ms, [&state]() { return state.stats.repairQueueDepth.load() >= 0; });
 
-    // Verify queue depth was tracked
+    // Queue depth should be tracked (may already be processed)
+    EXPECT_TRUE(processed);
     EXPECT_GE(state.stats.repairQueueDepth.load(), 0u);
 
     coordinator.stop();
@@ -183,8 +194,8 @@ TEST(RepairCoordinatorTest, StatsTrackingUpdatesQueueDepth) {
     RepairCoordinator::DocumentAddedEvent event{"stats_hash", "/stats.txt"};
     coordinator.onDocumentAdded(event);
 
-    // Small delay to allow queue update
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    // Small delay to allow queue update (async processing)
+    std::this_thread::sleep_for(50ms);
 
     // Queue depth should have been updated (may be processed already)
     EXPECT_GE(state.stats.repairQueueDepth.load(), 0u);

@@ -14,17 +14,18 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/core/types.h>
 #include <yams/daemon/components/init_utils.hpp>
+#include <yams/daemon/components/PluginHostFsm.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
 
 #include <filesystem>
-namespace yams::daemon::dispatch {
-const std::vector<std::filesystem::path>& defaultAbiPluginDirs() noexcept;
-}
 
 namespace yams::daemon::dispatch {
+
+// Forward declaration
+const std::vector<std::filesystem::path>& defaultAbiPluginDirs() noexcept;
 
 template <typename Fn>
 inline boost::asio::awaitable<std::remove_cvref_t<std::invoke_result_t<Fn&>>>
@@ -37,30 +38,65 @@ offload_to_worker(ServiceManager* sm, Fn&& fn) {
     co_return fn();
 }
 
-// Provider availability (adopt from hosts if absent). Synchronous helper used by
-// request handlers to avoid duplicating adoption logic.
-inline yams::Result<std::shared_ptr<IModelProvider>> ensure_provider_available(ServiceManager* sm) {
+inline yams::Result<std::shared_ptr<IModelProvider>> check_provider_ready(ServiceManager* sm) {
     try {
         if (!sm)
             return yams::Error{yams::ErrorCode::InvalidState, "ServiceManager unavailable"};
-        spdlog::info("ensure_provider_available: checking provider");
+
         auto provider = sm->getModelProvider();
-        if (provider && provider->isAvailable())
+        if (provider && provider->isAvailable()) {
+            spdlog::debug("check_provider_ready: provider available");
             return provider;
-        spdlog::info("ensure_provider_available: provider not ready, autoloading");
-        (void)sm->autoloadPluginsNow();
-        auto adopted = sm->adoptModelProviderFromHosts();
-        if (adopted && adopted.value()) {
-            provider = sm->getModelProvider();
         }
-        if (!provider || !provider->isAvailable()) {
-            spdlog::info("ensure_provider_available: provider unavailable after autoload");
-            return yams::Error{yams::ErrorCode::InvalidState, "Model provider unavailable"};
+
+        auto pluginStatus = sm->getPluginStatusSnapshot();
+        auto hostState = pluginStatus.host.state;
+
+        std::string message;
+        switch (hostState) {
+            case PluginHostState::NotInitialized:
+                message = "Plugin system not yet initialized - daemon is starting up";
+                break;
+            case PluginHostState::ScanningDirectories:
+                message = "Plugin system scanning directories - initialization in progress";
+                break;
+            case PluginHostState::VerifyingTrust:
+                message = "Plugin system verifying trust - initialization in progress";
+                break;
+            case PluginHostState::LoadingPlugins:
+                message = "Plugin system loading plugins - initialization in progress";
+                break;
+            case PluginHostState::Failed:
+                message = "Plugin system failed to initialize";
+                if (!pluginStatus.host.lastError.empty()) {
+                    message += ": " + pluginStatus.host.lastError;
+                }
+                break;
+            case PluginHostState::Ready:
+                message = "Plugin system ready but model provider not available";
+                for (const auto& rec : pluginStatus.records) {
+                    if (rec.isProvider) {
+                        if (!rec.ready) {
+                            message = "Model provider plugin loaded but not ready";
+                            if (!rec.error.empty()) {
+                                message += ": " + rec.error;
+                            }
+                        } else if (rec.degraded) {
+                            message = "Model provider is degraded";
+                            if (!rec.error.empty()) {
+                                message += ": " + rec.error;
+                            }
+                        }
+                        break;
+                    }
+                }
+                break;
         }
-        spdlog::info("ensure_provider_available: provider ready now");
-        return provider;
+
+        spdlog::info("check_provider_ready: provider not ready - {}", message);
+        return yams::Error{yams::ErrorCode::InvalidState, message};
     } catch (const std::exception& e) {
-        spdlog::info("ensure_provider_available: exception {}", e.what());
+        spdlog::warn("check_provider_ready: exception {}", e.what());
         return yams::Error{yams::ErrorCode::InternalError, e.what()};
     }
 }

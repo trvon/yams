@@ -1,18 +1,18 @@
-#include <catch2/catch_test_macros.hpp>
-#include <yams/daemon/components/SocketServer.h>
-#include <yams/daemon/components/WorkCoordinator.h>
-#include <yams/daemon/components/RequestDispatcher.h>
-#include <yams/daemon/components/StateComponent.h>
-#include <yams/daemon/ipc/ipc_protocol.h>
-#include <yams/daemon/ipc/message_framing.h>
+#include <chrono>
+#include <filesystem>
+#include <thread>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
 #include <boost/asio/read.hpp>
-#include <boost/asio/write.hpp>
 #include <boost/asio/steady_timer.hpp>
-#include <chrono>
-#include <thread>
-#include <filesystem>
+#include <boost/asio/write.hpp>
+#include <catch2/catch_test_macros.hpp>
+#include <yams/daemon/components/RequestDispatcher.h>
+#include <yams/daemon/components/SocketServer.h>
+#include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/WorkCoordinator.h>
+#include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/daemon/ipc/message_framing.h>
 
 using namespace yams::daemon;
 using namespace std::chrono_literals;
@@ -35,7 +35,8 @@ struct IdleStreamingFixture {
         config.connectionTimeout = std::chrono::milliseconds(500);
         config.maxConnections = 10;
 
-        server_ = std::make_unique<SocketServer>(config, coordinator_.get(), dispatcher_.get(), state_.get());
+        server_ = std::make_unique<SocketServer>(config, coordinator_.get(), dispatcher_.get(),
+                                                 state_.get());
         auto result = server_->start();
         REQUIRE(result.has_value());
 
@@ -69,7 +70,7 @@ struct IdleStreamingFixture {
         msg.requestId = requestId;
         msg.expectsStreamingResponse = streaming;
         msg.timestamp = std::chrono::steady_clock::now();
-        PingRequest req;  // Ping is simplest - doesn't need daemon/services
+        PingRequest req; // Ping is simplest - doesn't need daemon/services
         msg.payload = Request{req};
 
         MessageFramer framer;
@@ -84,14 +85,15 @@ struct IdleStreamingFixture {
     std::unique_ptr<SocketServer> server_;
 };
 
-TEST_CASE_METHOD(IdleStreamingFixture, "Persistent connection - streaming after idle", "[daemon][idle][streaming][persistent]") {
+TEST_CASE_METHOD(IdleStreamingFixture, "Persistent connection - streaming after idle",
+                 "[daemon][idle][streaming][persistent]") {
     // Test persistent connection that goes idle then sends streaming request
     auto clientIo = createClientIo();
     auto socket = createClientSocket(*clientIo);
 
     // Send initial request to establish connection
     {
-        auto encoded = createPingRequest(1, false);  // unary first
+        auto encoded = createPingRequest(1, false); // unary first
         REQUIRE(!encoded.empty());
         boost::asio::write(socket, boost::asio::buffer(encoded));
 
@@ -107,7 +109,7 @@ TEST_CASE_METHOD(IdleStreamingFixture, "Persistent connection - streaming after 
 
     // Send streaming request on same connection after idle
     {
-        auto encoded = createPingRequest(2, true);  // streaming=true
+        auto encoded = createPingRequest(2, true); // streaming=true
         REQUIRE(!encoded.empty());
         boost::asio::write(socket, boost::asio::buffer(encoded));
 
@@ -132,16 +134,17 @@ TEST_CASE_METHOD(IdleStreamingFixture, "Persistent connection - streaming after 
             }
         }
 
-        REQUIRE(received);  // This should pass after the multiplexing fix
+        REQUIRE(received); // This should pass after the multiplexing fix
     }
 }
 
-TEST_CASE_METHOD(IdleStreamingFixture, "New connection - streaming after server idle", "[daemon][idle][streaming][new-conn]") {
+TEST_CASE_METHOD(IdleStreamingFixture, "New connection - streaming after server idle",
+                 "[daemon][idle][streaming][new-conn]") {
     // Test 1: Verify server works immediately after start
     {
         auto clientIo = createClientIo();
         auto socket = createClientSocket(*clientIo);
-        auto encoded = createPingRequest(1, true);  // streaming=true
+        auto encoded = createPingRequest(1, true); // streaming=true
         REQUIRE(!encoded.empty());
 
         boost::asio::write(socket, boost::asio::buffer(encoded));
@@ -164,7 +167,7 @@ TEST_CASE_METHOD(IdleStreamingFixture, "New connection - streaming after server 
     {
         auto clientIo = createClientIo();
         auto socket = createClientSocket(*clientIo);
-        auto encoded = createPingRequest(2, true);  // streaming=true
+        auto encoded = createPingRequest(2, true); // streaming=true
         REQUIRE(!encoded.empty());
 
         boost::asio::write(socket, boost::asio::buffer(encoded));
@@ -190,18 +193,19 @@ TEST_CASE_METHOD(IdleStreamingFixture, "New connection - streaming after server 
             }
         }
 
-        REQUIRE(received);  // This should pass after the multiplexing fix
+        REQUIRE(received); // This should pass after the multiplexing fix
     }
 }
 
-TEST_CASE_METHOD(IdleStreamingFixture, "Persistent connection - unary after idle", "[daemon][idle][unary][persistent]") {
+TEST_CASE_METHOD(IdleStreamingFixture, "Persistent connection - unary after idle",
+                 "[daemon][idle][unary][persistent]") {
     // Test persistent connection that goes idle then sends unary request
     auto clientIo = createClientIo();
     auto socket = createClientSocket(*clientIo);
 
     // Send initial request to establish connection
     {
-        auto encoded = createPingRequest(1, false);  // unary first
+        auto encoded = createPingRequest(1, false); // unary first
         REQUIRE(!encoded.empty());
         boost::asio::write(socket, boost::asio::buffer(encoded));
 
@@ -217,7 +221,7 @@ TEST_CASE_METHOD(IdleStreamingFixture, "Persistent connection - unary after idle
 
     // Send another unary request on same connection after idle
     {
-        auto encoded = createPingRequest(2, false);  // unary
+        auto encoded = createPingRequest(2, false); // unary
         REQUIRE(!encoded.empty());
         boost::asio::write(socket, boost::asio::buffer(encoded));
 
@@ -226,17 +230,18 @@ TEST_CASE_METHOD(IdleStreamingFixture, "Persistent connection - unary after idle
         auto bytes = socket.read_some(boost::asio::buffer(buf), ec);
 
         REQUIRE(!ec);
-        REQUIRE(bytes > 0);  // Unary should always work
+        REQUIRE(bytes > 0); // Unary should always work
     }
 }
 
-TEST_CASE_METHOD(IdleStreamingFixture, "New connection - unary after server idle", "[daemon][idle][unary][new-conn]") {
+TEST_CASE_METHOD(IdleStreamingFixture, "New connection - unary after server idle",
+                 "[daemon][idle][unary][new-conn]") {
     // Wait for server to idle (3 x 500ms = 1.5s)
     std::this_thread::sleep_for(2s);
 
     auto clientIo = createClientIo();
     auto socket = createClientSocket(*clientIo);
-    auto encoded = createPingRequest(1, false);  // streaming=false
+    auto encoded = createPingRequest(1, false); // streaming=false
     REQUIRE(!encoded.empty());
 
     boost::asio::write(socket, boost::asio::buffer(encoded));
@@ -246,5 +251,5 @@ TEST_CASE_METHOD(IdleStreamingFixture, "New connection - unary after server idle
     auto bytes = socket.read_some(boost::asio::buffer(buf), ec);
 
     REQUIRE(!ec);
-    REQUIRE(bytes > 0);  // Unary should always work
+    REQUIRE(bytes > 0); // Unary should always work
 }
