@@ -485,6 +485,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                              message.requestId, message.expectsStreamingResponse);
                 if (config_.enable_multiplexing) {
                     auto cur = inflight_.load(std::memory_order_relaxed);
+                    spdlog::info("[MUX] req_id={} inflight={}/{}", message.requestId, cur, config_.max_inflight_per_connection);
                     if (cur >= config_.max_inflight_per_connection) {
                         (void)co_await send_error(*sock, ErrorCode::ResourceExhausted,
                                                   "Too many in-flight requests", message.requestId);
@@ -503,8 +504,10 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                         auto request_id = message.requestId;
                         auto expects_streaming = message.expectsStreamingResponse;
                         auto routed_request = std::move(*request_ptr);
+                        auto spawn_exec = config_.worker_executor ? config_.worker_executor
+                                                                  : sock->get_executor();
                         boost::asio::co_spawn(
-                            sock->get_executor(),
+                            spawn_exec,
                             [this, sock, req = std::move(routed_request), req_id = request_id,
                              expects = expects_streaming]() -> boost::asio::awaitable<void> {
                                 spdlog::info(
@@ -518,7 +521,6 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                                 }
                                 inflight_.fetch_sub(1, std::memory_order_relaxed);
                                 MuxMetricsRegistry::instance().incrementActiveHandlers(-1);
-                                // Mark context completed and erase
                                 {
                                     std::lock_guard<std::mutex> lk(ctx_mtx_);
                                     auto it = contexts_.find(req_id);

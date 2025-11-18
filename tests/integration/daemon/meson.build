@@ -27,6 +27,10 @@ else
     'client_timeout_recovery_test.cpp',
   )
 
+  idle_streaming_srcs = files(
+    'idle_streaming_test.cpp',
+  )
+
   dbg = (get_option('buildtype') == 'debug')
   if (get_option('enable-integration-tests') or dbg) and (get_option('enable-daemon-integration') or dbg)
     # Catch2 needs its main library
@@ -122,6 +126,25 @@ else
     test('client_timeout_recovery',
       client_timeout_recovery_exe,
       suite: ['integration', 'daemon', 'catch2', 'timeout'],
+      env: {
+        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+        'YAMS_DISABLE_VECTORS': '1',
+      },
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+    )
+
+    idle_streaming_exe = executable('yams_idle_streaming_tests_catch2',
+      idle_streaming_srcs,
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep, test_deps],
+      cpp_args: ['-DYAMS_TESTING=1'],
+      install: false,
+    )
+
+    test('idle_streaming',
+      idle_streaming_exe,
+      suite: ['integration', 'daemon', 'catch2', 'idle', 'streaming'],
       env: {
         'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
         'YAMS_DISABLE_VECTORS': '1',

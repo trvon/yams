@@ -68,7 +68,7 @@ static inline ErrorResponse makeError(ErrorCode code, const std::string& msg) {
 boost::asio::awaitable<Response>
 RequestDispatcher::handleGenerateEmbeddingRequest(const GenerateEmbeddingRequest& req) {
     try {
-        auto provRes = yams::daemon::dispatch::ensure_provider_available(serviceManager_);
+        auto provRes = yams::daemon::dispatch::check_provider_ready(serviceManager_);
         if (!provRes) {
             if (daemon_)
                 daemon_->setSubsystemDegraded("embedding", true, "provider_unavailable");
@@ -129,7 +129,7 @@ RequestDispatcher::handleBatchEmbeddingRequest(const BatchEmbeddingRequest& req)
                      "normalize={} batchSize={}",
                      req.modelName, req.modelName.size(), hex_preview(req.modelName),
                      req.texts.size(), req.normalize ? "true" : "false", req.batchSize);
-        auto provRes = yams::daemon::dispatch::ensure_provider_available(serviceManager_);
+        auto provRes = yams::daemon::dispatch::check_provider_ready(serviceManager_);
         if (!provRes)
             co_return makeError(provRes.error().code, provRes.error().message);
         const auto& provider = provRes.value();
@@ -201,44 +201,33 @@ RequestDispatcher::handleEmbedDocumentsRequest(const EmbedDocumentsRequest& req)
         }
     } catch (...) {
     }
-    auto executor = getWorkerExecutor();
     auto signal = getWorkerJobSignal();
     if (signal) {
         signal(true);
     }
-    auto result = co_await boost::asio::co_spawn(
-        executor,
-        [this, req]() -> boost::asio::awaitable<
-                          std::optional<yams::Result<yams::repair::EmbeddingRepairStats>>> {
-            auto contentStore = serviceManager_->getContentStore();
-            auto metadataRepo = serviceManager_->getMetadataRepo();
-            auto modelProvider = serviceManager_->getModelProvider();
-            auto contentExtractors = serviceManager_->getContentExtractors();
 
-            if (!modelProvider || !modelProvider->isAvailable()) {
-                co_return std::optional<yams::Result<yams::repair::EmbeddingRepairStats>>{
-                    Error{ErrorCode::NotInitialized, "Model provider not available"}};
-            }
+    auto contentStore = serviceManager_->getContentStore();
+    auto metadataRepo = serviceManager_->getMetadataRepo();
+    auto modelProvider = serviceManager_->getModelProvider();
+    auto contentExtractors = serviceManager_->getContentExtractors();
 
-            // Get the preferred model name
-            std::string modelName;
-            try {
-                modelName = serviceManager_->getEmbeddingModelName();
-            } catch (...) {
-            }
-            if (modelName.empty()) {
-                co_return std::optional<yams::Result<yams::repair::EmbeddingRepairStats>>{
-                    Error{ErrorCode::NotInitialized, "No embedding model configured"}};
-            }
+    std::optional<yams::Result<yams::repair::EmbeddingRepairStats>> result;
 
-            if (!contentStore) {
-                co_return std::optional<yams::Result<yams::repair::EmbeddingRepairStats>>{
-                    Error{ErrorCode::NotInitialized, "Content store not available"}};
-            }
-            if (!metadataRepo) {
-                co_return std::optional<yams::Result<yams::repair::EmbeddingRepairStats>>{
-                    Error{ErrorCode::NotInitialized, "Metadata repository not available"}};
-            }
+    if (!modelProvider || !modelProvider->isAvailable()) {
+        result = Error{ErrorCode::NotInitialized, "Model provider not available"};
+    } else {
+        std::string modelName;
+        try {
+            modelName = serviceManager_->getEmbeddingModelName();
+        } catch (...) {
+        }
+        if (modelName.empty()) {
+            result = Error{ErrorCode::NotInitialized, "No embedding model configured"};
+        } else if (!contentStore) {
+            result = Error{ErrorCode::NotInitialized, "Content store not available"};
+        } else if (!metadataRepo) {
+            result = Error{ErrorCode::NotInitialized, "Metadata repository not available"};
+        } else {
             yams::repair::EmbeddingRepairConfig repairConfig;
             repairConfig.batchSize = req.batchSize;
             repairConfig.skipExisting = req.skipExisting;
@@ -249,10 +238,10 @@ RequestDispatcher::handleEmbedDocumentsRequest(const EmbedDocumentsRequest& req)
             auto stats = yams::repair::repairMissingEmbeddings(
                 contentStore, metadataRepo, modelProvider, modelName, repairConfig,
                 req.documentHashes, nullptr, contentExtractors);
-            co_return std::optional<yams::Result<yams::repair::EmbeddingRepairStats>>{
-                std::move(stats)};
-        },
-        boost::asio::use_awaitable);
+            result = std::move(stats);
+        }
+    }
+
     if (signal) {
         signal(false);
     }

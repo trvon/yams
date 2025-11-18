@@ -119,7 +119,6 @@ DEFINE_REQUEST_HANDLER(GraphValidateRequest, handleGraphValidateRequest);
 
 #undef DEFINE_REQUEST_HANDLER
 
-
 // Helper functions for system metrics (moved from daemon.cpp)
 double getMemoryUsage() {
 #ifdef __APPLE__
