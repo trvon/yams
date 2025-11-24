@@ -39,6 +39,18 @@ yams_app_services_lib = static_library('yams_app_services',
 yams_app_services_dep = declare_dependency(
   link_with: yams_app_services_lib,
   include_directories: include_directories('../../../include'),
+  dependencies: [
+    dependency('yams_api'),
+    dependency('yams_daemon_client'),
+    dependency('yams_metadata'),
+    dependency('yams_search'),
+    dependency('yams_vector'),
+    dependency('yams_downloader'),
+    dependency('boost'),
+    dependency('nlohmann_json'),
+    dependency('spdlog'),
+    tl_expected_dep,
+  ],
 )
 
 meson.override_dependency('yams_app_services', yams_app_services_dep)

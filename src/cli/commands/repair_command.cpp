@@ -6,7 +6,9 @@
 #include <iomanip>
 #include <iostream>
 #include <thread>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>

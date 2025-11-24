@@ -2,14 +2,18 @@
 #include <fcntl.h>
 #include <fstream>
 #include <map>
+#ifndef _WIN32
 #include <poll.h>
+#endif
 #include <regex>
 #include <set>
 #include <signal.h>
 #include <sstream>
+#ifndef _WIN32
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#endif
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
 

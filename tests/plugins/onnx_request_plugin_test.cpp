@@ -1,7 +1,9 @@
 #include <nlohmann/json.hpp>
-#include <dlfcn.h>
 #include <string>
 #include <gtest/gtest.h>
+#include <yams/compat/dlfcn.h>
+#include <yams/compat/unistd.h>
+
 extern "C" {
 #include <yams/plugins/abi.h>
 #include <yams/plugins/onnx_request_v1.h>

@@ -1,5 +1,6 @@
 // Split from RequestDispatcher.cpp: embedding-related handlers
 #include <sstream>
+#include <utility>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/repair/embedding_repair_util.h>
@@ -61,18 +62,18 @@ static inline std::string sanitizeUtf8(const std::string& s) {
     }
     return out;
 }
-static inline ErrorResponse makeError(ErrorCode code, const std::string& msg) {
+static inline ErrorResponse makeErrorResponse(ErrorCode code, const std::string& msg) {
     return ErrorResponse{code, sanitizeUtf8(msg)};
 }
 
 boost::asio::awaitable<Response>
 RequestDispatcher::handleGenerateEmbeddingRequest(const GenerateEmbeddingRequest& req) {
     try {
-        auto provRes = yams::daemon::dispatch::check_provider_ready(serviceManager_);
+        auto provRes = yams::daemon::dispatch::ensure_provider_available(serviceManager_);
         if (!provRes) {
             if (daemon_)
                 daemon_->setSubsystemDegraded("embedding", true, "provider_unavailable");
-            co_return makeError(provRes.error().code, provRes.error().message);
+            co_return makeErrorResponse(provRes.error().code, provRes.error().message);
         }
         const auto& provider = provRes.value();
         spdlog::info("Embedding request: model='{}' normalize={} text_len={}", req.modelName,
@@ -90,13 +91,13 @@ RequestDispatcher::handleGenerateEmbeddingRequest(const GenerateEmbeddingRequest
             auto lr = co_await yams::daemon::dispatch::ensure_model_loaded(
                 serviceManager_, provider, req.modelName, timeout_ms);
             if (!lr) {
-                co_return makeError(lr.error().code, lr.error().message);
+                co_return makeErrorResponse(lr.error().code, lr.error().message);
             }
         }
         auto r = yams::daemon::dispatch::generate_single(provider.get(), req.modelName, req.text,
                                                          req.normalize);
         if (!r) {
-            co_return makeError(r.error().code, r.error().message);
+            co_return makeErrorResponse(r.error().code, r.error().message);
         }
         EmbeddingResponse resp;
         resp.embedding = std::move(r.value());
@@ -105,7 +106,7 @@ RequestDispatcher::handleGenerateEmbeddingRequest(const GenerateEmbeddingRequest
         resp.processingTimeMs = 0;
         co_return resp;
     } catch (const std::exception& e) {
-        co_return makeError(ErrorCode::InternalError,
+        co_return makeErrorResponse(ErrorCode::InternalError,
                             std::string("Embedding generation failed: ") + e.what());
     }
 }
@@ -129,9 +130,9 @@ RequestDispatcher::handleBatchEmbeddingRequest(const BatchEmbeddingRequest& req)
                      "normalize={} batchSize={}",
                      req.modelName, req.modelName.size(), hex_preview(req.modelName),
                      req.texts.size(), req.normalize ? "true" : "false", req.batchSize);
-        auto provRes = yams::daemon::dispatch::check_provider_ready(serviceManager_);
+        auto provRes = yams::daemon::dispatch::ensure_provider_available(serviceManager_);
         if (!provRes)
-            co_return makeError(provRes.error().code, provRes.error().message);
+            co_return makeErrorResponse(provRes.error().code, provRes.error().message);
         const auto& provider = provRes.value();
         spdlog::info("Batch embedding request: model='{}' count={} normalize={} batchSize={}",
                      req.modelName, req.texts.size(), req.normalize ? "true" : "false",
@@ -149,7 +150,7 @@ RequestDispatcher::handleBatchEmbeddingRequest(const BatchEmbeddingRequest& req)
             Result<void> r = co_await yams::daemon::dispatch::ensure_model_loaded(
                 serviceManager_, provider, req.modelName, timeout_ms);
             if (!r) {
-                co_return makeError(r.error().code, r.error().message);
+                co_return makeErrorResponse(r.error().code, r.error().message);
             }
         }
         BatchEmbeddingResponse resp;
@@ -170,7 +171,7 @@ RequestDispatcher::handleBatchEmbeddingRequest(const BatchEmbeddingRequest& req)
                     resp.successCount++;
                 }
             } else {
-                co_return makeError(rr.error().code, rr.error().message);
+                co_return makeErrorResponse(rr.error().code, rr.error().message);
             }
         } else {
             resp.embeddings = std::move(rr.value());
@@ -182,7 +183,7 @@ RequestDispatcher::handleBatchEmbeddingRequest(const BatchEmbeddingRequest& req)
         (void)t0;
         co_return resp;
     } catch (const std::exception& e) {
-        co_return makeError(ErrorCode::InternalError,
+        co_return makeErrorResponse(ErrorCode::InternalError,
                             std::string("Batch embedding failed: ") + e.what());
     }
 }

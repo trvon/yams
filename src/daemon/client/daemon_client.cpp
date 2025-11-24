@@ -1,3 +1,4 @@
+#define _CRT_SECURE_NO_WARNINGS
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/asio_transport.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -808,8 +809,13 @@ Result<SearchResponse> DaemonClient::StreamingSearchHandler::getResults() const 
 void DaemonClient::setTimeoutEnvVars(std::chrono::milliseconds headerTimeout,
                                      std::chrono::milliseconds bodyTimeout) {
     // Set environment variables
+#ifdef _WIN32
+    _putenv_s("YAMS_HEADER_TIMEOUT", std::to_string(headerTimeout.count()).c_str());
+    _putenv_s("YAMS_BODY_TIMEOUT", std::to_string(bodyTimeout.count()).c_str());
+#else
     setenv("YAMS_HEADER_TIMEOUT", std::to_string(headerTimeout.count()).c_str(), 1);
     setenv("YAMS_BODY_TIMEOUT", std::to_string(bodyTimeout.count()).c_str(), 1);
+#endif
 }
 
 // Streaming list helper method

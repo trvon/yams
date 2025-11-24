@@ -1,11 +1,18 @@
+#define _CRT_SECURE_NO_WARNINGS
 #include <yams/storage/storage_backend.h>
 
 #include <spdlog/spdlog.h>
 
-#include <dlfcn.h>
+
 #include <filesystem>
 #include <string>
 #include <vector>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 
 namespace yams::storage {
 
@@ -25,7 +32,11 @@ public:
             inner_ = nullptr;
         }
         if (handle_) {
+#ifdef _WIN32
+            FreeLibrary(static_cast<HMODULE>(handle_));
+#else
             dlclose(handle_);
+#endif
             handle_ = nullptr;
         }
     }
@@ -117,6 +128,17 @@ static std::unique_ptr<IStorageBackend> loadSpecific(const char* /*createSym*/,
     fs::path path = resolveS3PluginPath();
     if (path.empty())
         return nullptr;
+
+#ifdef _WIN32
+    HMODULE handle = LoadLibraryA(path.string().c_str());
+    if (!handle) {
+        spdlog::warn("Failed to open {}: GetLastError={}", path.string(), GetLastError());
+        return nullptr;
+    }
+    
+    auto create = reinterpret_cast<CreateFn>(GetProcAddress(handle, "yams_plugin_create_object_storage"));
+    auto destroy = reinterpret_cast<DestroyFn>(GetProcAddress(handle, "yams_plugin_destroy_object_storage"));
+#else
     void* handle = dlopen(path.c_str(), RTLD_LAZY | RTLD_LOCAL);
     if (!handle) {
         spdlog::warn("Failed to open {}: {}", path.string(), dlerror() ? dlerror() : "");
@@ -125,14 +147,24 @@ static std::unique_ptr<IStorageBackend> loadSpecific(const char* /*createSym*/,
     dlerror();
     auto create = reinterpret_cast<CreateFn>(dlsym(handle, "yams_plugin_create_object_storage"));
     auto destroy = reinterpret_cast<DestroyFn>(dlsym(handle, "yams_plugin_destroy_object_storage"));
+#endif
+
     if (!create || !destroy) {
         spdlog::warn("Missing create/destroy in {}", path.string());
+#ifdef _WIN32
+        FreeLibrary(handle);
+#else
         dlclose(handle);
+#endif
         return nullptr;
     }
     IStorageBackend* inner = create();
     if (!inner) {
+#ifdef _WIN32
+        FreeLibrary(handle);
+#else
         dlclose(handle);
+#endif
         return nullptr;
     }
     return std::unique_ptr<IStorageBackend>(new PluginBackendProxy(handle, destroy, inner));

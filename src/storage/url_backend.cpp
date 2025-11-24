@@ -1,3 +1,5 @@
+#define _CRT_SECURE_NO_WARNINGS
+#define NOMINMAX
 #include <yams/storage/storage_backend.h>
 #include <yams/storage/storage_engine.h>
 

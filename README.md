@@ -33,7 +33,7 @@
 - License: GPL-3.0-or-later
 
 ## Install
-Supported platforms: Linux x86_64/ARM64, macOS x86_64/ARM64
+Supported platforms: Linux x86_64/ARM64, macOS x86_64/ARM64, Windows x86_64
 
 ### macOS (Homebrew)
 ```bash
@@ -54,6 +54,8 @@ brew services start yams
 ```
 
 ### Build from Source
+
+**Linux/macOS:**
 ```bash
 # Quick build (auto-detects Clang/GCC, configures Conan + Meson)
 ./setup.sh Release
@@ -65,12 +67,21 @@ meson compile -C build/release
 meson install -C build/release
 ```
 
-**Prerequisites:**
-- Compiler: GCC 13+ or Clang 16+ (C++20 minimum)
-- Build tools: meson, ninja-build, cmake, pkg-config, conan
-- System libs: libssl-dev, libsqlite3-dev, protobuf-compiler
+**Windows:**
+```pwsh
+# Quick build (MSVC + Conan + Meson)
+./setup.ps1 Release
 
-See [docs/BUILD-GCC.md](docs/BUILD-GCC.md) for detailed build instructions, compiler configuration, Conan profiles, and troubleshooting.
+# Build
+meson compile -C build/release
+```
+
+**Prerequisites:**
+- Compiler: GCC 13+, Clang 16+, or MSVC 2022+ (C++20 minimum)
+- Build tools: meson, ninja-build, cmake, pkg-config, conan
+- System libs: libssl-dev, libsqlite3-dev, protobuf-compiler (Linux/macOS)
+
+See [docs/BUILD.md](docs/BUILD.md) for detailed build instructions, compiler configuration, Conan profiles, and troubleshooting.
 
 ## Quick Start
 ```bash
@@ -118,7 +129,7 @@ MCP config (example):
 
 ## Troubleshooting
 
-**Build issues:** See [docs/BUILD-GCC.md](docs/BUILD-GCC.md) for compiler setup, Conan profiles, and dependency resolution.
+**Build issues:** See [docs/BUILD.md](docs/BUILD.md) for compiler setup, Conan profiles, and dependency resolution.
 
 **Plugin discovery:** Verify with `yams plugin list`. If empty:
 - Check trusted directories: `yams plugin trust list`
@@ -135,5 +146,4 @@ title = {yams: Content addressable storage with excellent search },
 year = {2025},
 publisher = {GitHub},
 url = {https://github.com/trvon/yams}
-}
-```
+}```

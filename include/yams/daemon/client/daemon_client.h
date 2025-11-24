@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <utility>
 #include <boost/asio/any_io_executor.hpp>
+#include <boost/asio/awaitable.hpp>
 
 namespace yams::daemon {
 

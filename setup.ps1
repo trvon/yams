@@ -337,6 +337,14 @@ if (Test-Path $conanBuildPs1) {
     . $conanBuildPs1
 }
 
+# Detect install prefix
+if ($env:YAMS_INSTALL_PREFIX) {
+    $InstallPrefix = $env:YAMS_INSTALL_PREFIX
+} else {
+    $InstallPrefix = "C:\Program Files\yams"
+}
+Write-Host "Install Prefix:    $InstallPrefix"
+
 if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
     Write-Host 'Configuring Meson builddir...'
     $buildTypeLower = $BuildType.ToLower()
@@ -345,6 +353,7 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
 
     meson setup $buildDir `
         --buildtype=$buildTypeLower `
+        --prefix="$InstallPrefix" `
         $mesonToolchainArg $mesonToolchainFile `
         @extraMesonFlags
 } else {

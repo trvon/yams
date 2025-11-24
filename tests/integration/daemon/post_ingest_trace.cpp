@@ -14,6 +14,8 @@
 
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
+#include <yams/compat/unistd.h>
+#include <yams/daemon/client/daemon_client.h>
 
 #include <yams/app/services/services.hpp>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>

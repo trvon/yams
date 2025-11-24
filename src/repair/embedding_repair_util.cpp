@@ -13,7 +13,13 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <thread>
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+#include <sys/stat.h>
+#else
 #include <unistd.h>
+#endif
 
 namespace yams::repair {
 
@@ -22,6 +28,35 @@ namespace {
 class VectorDbLock {
 public:
     explicit VectorDbLock(const std::filesystem::path& lockPath) : path_(lockPath), fd_(-1) {
+#ifdef _WIN32
+        int err = _sopen_s(&fd_, path_.string().c_str(), _O_RDWR | _O_CREAT | _O_BINARY, _SH_DENYNO, _S_IREAD | _S_IWRITE);
+        if (err == 0 && fd_ >= 0) {
+            HANDLE hFile = (HANDLE)_get_osfhandle(fd_);
+            if (hFile != INVALID_HANDLE_VALUE) {
+                OVERLAPPED overlapped = {0};
+                // Lock the first byte exclusively
+                if (!LockFileEx(hFile, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &overlapped)) {
+                    _close(fd_);
+                    fd_ = -1;
+                } else {
+                    // Stamp PID and timestamp for diagnostics
+                    try {
+                        _chsize_s(fd_, 0);
+                        std::string stamp = std::to_string(_getpid()) + " " +
+                                            std::to_string(std::time(nullptr)) + "\n";
+                        _write(fd_, stamp.data(), static_cast<unsigned int>(stamp.size()));
+                        _lseek(fd_, 0, SEEK_SET);
+                    } catch (...) {
+                    }
+                }
+            } else {
+                _close(fd_);
+                fd_ = -1;
+            }
+        } else {
+            fd_ = -1;
+        }
+#else
         fd_ = ::open(path_.c_str(), O_CREAT | O_RDWR, 0644);
         if (fd_ >= 0) {
             struct flock fl{};
@@ -45,12 +80,21 @@ public:
                 }
             }
         }
+#endif
     }
 
     bool isLocked() const { return fd_ >= 0; }
 
     ~VectorDbLock() {
         if (fd_ >= 0) {
+#ifdef _WIN32
+            HANDLE hFile = (HANDLE)_get_osfhandle(fd_);
+            if (hFile != INVALID_HANDLE_VALUE) {
+                OVERLAPPED overlapped = {0};
+                UnlockFileEx(hFile, 0, 1, 0, &overlapped);
+            }
+            _close(fd_);
+#else
             struct flock fl{};
             fl.l_type = F_UNLCK;
             fl.l_whence = SEEK_SET;
@@ -58,6 +102,7 @@ public:
             fl.l_len = 0;
             (void)fcntl(fd_, F_SETLK, &fl);
             ::close(fd_);
+#endif
         }
     }
 

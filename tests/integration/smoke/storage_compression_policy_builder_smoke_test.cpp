@@ -3,11 +3,12 @@
 #include <fstream>
 #include <vector>
 #include <gtest/gtest.h>
-
 #include <yams/api/content_store_builder.h>
+#include <yams/compat/unistd.h>
 #include <yams/compression/compression_header.h>
 #include <yams/crypto/hasher.h>
 #include <yams/storage/storage_engine.h>
+
 
 using namespace yams;
 using namespace yams::api;

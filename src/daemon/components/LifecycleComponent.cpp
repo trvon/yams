@@ -3,13 +3,26 @@
 #include <csignal>
 #include <future>
 #include <thread>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/thread_pool.hpp>
+#ifndef _WIN32
 #include <sys/file.h>
 #include <sys/wait.h>
+#else
+#include <fcntl.h>
+#include <io.h>
+#include <process.h>
+#include <windows.h>
+
+#define strcasecmp _stricmp
+#define getpid _getpid
+#define ssize_t int
+#endif
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/components/LifecycleComponent.h>
 #include <yams/daemon/daemon.h>
@@ -188,6 +201,41 @@ bool LifecycleComponent::isAnotherInstanceRunning() const {
         return false;
     }
 
+#ifdef _WIN32
+    int fd = _open(pidFile_.string().c_str(), _O_RDONLY);
+    if (fd == -1) {
+        return false;
+    }
+
+    HANDLE hFile = (HANDLE)_get_osfhandle(fd);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        OVERLAPPED overlapped = {0};
+        // Try to lock. If it fails, another process has it.
+        if (!LockFileEx(hFile, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0,
+                        &overlapped)) {
+            _close(fd);
+            return true;
+        }
+        UnlockFileEx(hFile, 0, 1, 0, &overlapped);
+    }
+
+    char pid_buf[16] = {0};
+    _read(fd, pid_buf, sizeof(pid_buf) - 1);
+    pid_t pid = atoi(pid_buf);
+    _close(fd);
+
+    if (pid > 0) {
+        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+        if (hProcess) {
+            DWORD exitCode;
+            if (GetExitCodeProcess(hProcess, &exitCode) && exitCode == STILL_ACTIVE) {
+                CloseHandle(hProcess);
+                return true;
+            }
+            CloseHandle(hProcess);
+        }
+    }
+#else
     int fd = open(pidFile_.c_str(), O_RDONLY);
     if (fd == -1) {
         return false; // Cannot open, assume not running
@@ -222,6 +270,7 @@ bool LifecycleComponent::isAnotherInstanceRunning() const {
             return true;
         }
     }
+#endif
 
     // If we are here, the PID file is stale.
     spdlog::warn("Found stale PID file for a non-existent process. Removing it.");
@@ -230,6 +279,35 @@ bool LifecycleComponent::isAnotherInstanceRunning() const {
 }
 
 Result<void> LifecycleComponent::createPidFile() {
+#ifdef _WIN32
+    pidFileFd_ =
+        _open(pidFile_.string().c_str(), _O_CREAT | _O_RDWR | _O_BINARY, _S_IREAD | _S_IWRITE);
+    if (pidFileFd_ == -1) {
+        return Error{ErrorCode::WriteError,
+                     "Failed to open PID file: " + std::string(strerror(errno))};
+    }
+
+    HANDLE hFile = (HANDLE)_get_osfhandle(pidFileFd_);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        OVERLAPPED overlapped = {0};
+        if (!LockFileEx(hFile, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0,
+                        &overlapped)) {
+            _close(pidFileFd_);
+            pidFileFd_ = -1;
+            return Error{ErrorCode::InvalidState, "Daemon already running (PID file is locked)."};
+        }
+    }
+
+    std::string pid_str = std::to_string(_getpid());
+    _chsize_s(pidFileFd_, 0);
+    if (_write(pidFileFd_, pid_str.c_str(), static_cast<unsigned int>(pid_str.length())) !=
+        static_cast<int>(pid_str.length())) {
+        _close(pidFileFd_);
+        pidFileFd_ = -1;
+        return Error{ErrorCode::WriteError,
+                     "Failed to write to PID file: " + std::string(strerror(errno))};
+    }
+#else
     pidFileFd_ = open(pidFile_.c_str(), O_CREAT | O_RDWR, 0644);
     if (pidFileFd_ == -1) {
         return Error{ErrorCode::WriteError,
@@ -243,17 +321,17 @@ Result<void> LifecycleComponent::createPidFile() {
     }
 
     std::string pid_str = std::to_string(getpid());
-    if (ftruncate(pidFileFd_, 0) != 0) {
+    if (_chsize(pidFileFd_, 0) != 0) {
         // handle error
     }
-    if (write(pidFileFd_, pid_str.c_str(), pid_str.length()) !=
-        static_cast<ssize_t>(pid_str.length())) {
-        close(pidFileFd_);
+    if (_write(pidFileFd_, pid_str.c_str(), static_cast<unsigned int>(pid_str.length())) !=
+        static_cast<int>(pid_str.length())) {
+        _close(pidFileFd_);
         pidFileFd_ = -1;
         return Error{ErrorCode::WriteError,
                      "Failed to write to PID file: " + std::string(strerror(errno))};
     }
-
+#endif
     return Result<void>();
 }
 
@@ -271,14 +349,18 @@ void LifecycleComponent::setupSignalHandlers() {
     instance_ = this;
     std::signal(SIGTERM, &LifecycleComponent::signalHandler);
     std::signal(SIGINT, &LifecycleComponent::signalHandler);
+#ifndef _WIN32
     std::signal(SIGHUP, &LifecycleComponent::signalHandler);
+#endif
 }
 
 void LifecycleComponent::cleanupSignalHandlers() {
     if (instance_ == this) {
         std::signal(SIGTERM, SIG_DFL);
         std::signal(SIGINT, SIG_DFL);
+#ifndef _WIN32
         std::signal(SIGHUP, SIG_DFL);
+#endif
         instance_ = nullptr;
     }
 }
@@ -295,27 +377,14 @@ void LifecycleComponent::handleSignal(int signal) {
         case SIGINT:
             spdlog::info("Received signal {}, initiating shutdown.", signal);
             if (daemon_) {
-                // This is a crucial part. The signal handler should not do much work.
-                // It should signal the main loop to shut down gracefully.
-                // Here, we request a graceful stop and notify lifecycle FSM.
                 daemon_->requestStop();
-                daemon_->getLifecycle(); // ensure object exists; dispatch below
-                // Dispatch shutdown request to FSM (non-blocking)
-                // Note: signal handler context is limited; we only set flags and rely on main loop
-                // to process tick and transitions.
-                // Safe because getLifecycle returns a const&; but we only need to set a flag.
-                // We avoid calling non-async-signal-safe operations here beyond logging.
-                // Therefore, actual dispatch will be in main loop when it notices stopRequested_.
             }
             break;
+#ifndef _WIN32
         case SIGHUP:
-            spdlog::info("Received SIGHUP, configuration reload requested.");
-            if (daemon_) {
-                daemon_->requestReload();
-            }
+            spdlog::info("Received SIGHUP, reloading configuration.");
             break;
-        default:
-            break;
+#endif
     }
 }
 
@@ -324,13 +393,22 @@ bool LifecycleComponent::readPidFromFile(pid_t& outPid) const {
     if (!std::filesystem::exists(pidFile_)) {
         return false;
     }
+#ifdef _WIN32
+    int fd = _open(pidFile_.string().c_str(), _O_RDONLY);
+#else
     int fd = open(pidFile_.c_str(), O_RDONLY);
+#endif
     if (fd == -1) {
         return false;
     }
     char pid_buf[32] = {0};
+#ifdef _WIN32
+    int n = _read(fd, pid_buf, sizeof(pid_buf) - 1);
+    _close(fd);
+#else
     ssize_t n = read(fd, pid_buf, sizeof(pid_buf) - 1);
     close(fd);
+#endif
     if (n <= 0) {
         return false;
     }
@@ -343,6 +421,23 @@ Result<void> LifecycleComponent::terminateProcess(pid_t pid) const {
         return Result<void>();
     }
 
+#ifdef _WIN32
+    HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+    if (hProcess == NULL) {
+        // Process might not exist
+        return Result<void>();
+    }
+
+    if (!TerminateProcess(hProcess, 1)) {
+        CloseHandle(hProcess);
+        return Error{ErrorCode::InvalidState, "Failed to terminate process"};
+    }
+    CloseHandle(hProcess);
+
+    if (waitForProcessExit(pid, std::chrono::seconds(3))) {
+        return Result<void>();
+    }
+#else
     if (kill(pid, SIGTERM) == -1) {
         if (errno == ESRCH) {
             return Result<void>();
@@ -366,6 +461,7 @@ Result<void> LifecycleComponent::terminateProcess(pid_t pid) const {
     if (waitForProcessExit(pid, std::chrono::seconds(8))) {
         return Result<void>();
     }
+#endif
 
     return Error{ErrorCode::Timeout, std::string("Failed to terminate PID ") + std::to_string(pid) +
                                          ": still running after SIGKILL"};
@@ -406,12 +502,35 @@ bool LifecycleComponent::waitForProcessExit(pid_t pid, std::chrono::milliseconds
 
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
+#ifdef _WIN32
+        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | SYNCHRONIZE, FALSE, pid);
+        if (hProcess == NULL) {
+            return true; // Process gone or inaccessible
+        }
+        DWORD exitCode;
+        if (GetExitCodeProcess(hProcess, &exitCode) && exitCode != STILL_ACTIVE) {
+            CloseHandle(hProcess);
+            return true;
+        }
+        CloseHandle(hProcess);
+#else
         if (kill(pid, 0) == -1 && errno == ESRCH) {
             return true;
         }
+#endif
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
+#ifdef _WIN32
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (hProcess == NULL)
+        return true;
+    DWORD exitCode;
+    bool exited = (GetExitCodeProcess(hProcess, &exitCode) && exitCode != STILL_ACTIVE);
+    CloseHandle(hProcess);
+    return exited;
+#else
     return (kill(pid, 0) == -1 && errno == ESRCH);
+#endif
 }
 
 bool LifecycleComponent::aggressiveModeEnabled() {

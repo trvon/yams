@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Updated command registry and CLI help to remove browse references
 
 ### Fixed
+- **Windows Sypport**
 - **Thread Safety**: Fixed critical race conditions detected by ThreadSanitizer (TSan)
   - Fixed AsioConnection destructor race by properly canceling and closing sockets before destruction
   - Fixed RepairCoordinator access race by adding mutex protection around all accesses from TuningManager callbacks
@@ -48,11 +49,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Read loop starts immediately on connection creation for proper request/response flow
   - Client reacts to natural I/O errors with automatic retry instead of trying to predict failures
   - Removed synchronization complexity (`read_loop_ready` flag and polling)
-  - Unix domain socket connections are lightweight - daemon manages when to close idle connections
-- **Response Latency**: Optimized future polling to reduce post-response delay
-  - Changed polling from 10ms blocking wait to instant check with 1ms sleep
-  - Eliminates up to 10ms unnecessary delay after responses arrive
-  - Average response latency improved by ~5ms (50% reduction in polling overhead)
 
 ### Changed
 - **Build System**: Removed `enable-tui` build option from meson_options.txt

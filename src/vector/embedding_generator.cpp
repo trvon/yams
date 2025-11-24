@@ -1,3 +1,5 @@
+#define _CRT_SECURE_NO_WARNINGS
+#include <filesystem>
 #include <spdlog/spdlog.h>
 #include <future>
 #include <boost/asio/awaitable.hpp>
@@ -201,7 +203,7 @@ private:
 
         for (const auto& word : common_words) {
             if (vocab_to_id_.find(word) == vocab_to_id_.end()) {
-                vocab_to_id_[word] = vocab_to_id_.size();
+                vocab_to_id_[word] = static_cast<int32_t>(vocab_to_id_.size());
             }
         }
     }
@@ -217,7 +219,7 @@ private:
         const size_t MAX_VOCAB_SIZE = 30527; // Known limit from error message
 
         if (vocab_to_id_.size() < MAX_VOCAB_SIZE) {
-            vocab_to_id_[token] = vocab_to_id_.size();
+            vocab_to_id_[token] = static_cast<int32_t>(vocab_to_id_.size());
             return vocab_to_id_[token];
         } else {
             // Return UNK token for unknown tokens beyond vocab limit
@@ -329,7 +331,7 @@ public:
 
             // Load ONNX model
             info.session =
-                std::make_unique<Ort::Session>(env_, model_path.c_str(), session_options_);
+                std::make_unique<Ort::Session>(env_, std::filesystem::path(model_path).c_str(), session_options_);
 
             // Get model metadata from ONNX
             size_t num_input_nodes = info.session->GetInputCount();

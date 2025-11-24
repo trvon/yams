@@ -39,6 +39,51 @@
 #include <vector>
 #include <sys/types.h>
 
+#ifdef _WIN32
+#include <process.h>
+#include <windows.h>
+
+#define pid_t int
+#define SIGKILL 9
+#define SIGTERM 15
+#define execvp _execvp
+
+inline int kill(pid_t pid, int sig) {
+    if (sig == 0) {
+        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+        if (hProcess) {
+            CloseHandle(hProcess);
+            return 0;
+        }
+        return -1;
+    }
+    HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+    if (hProcess) {
+        BOOL result = TerminateProcess(hProcess, 1);
+        CloseHandle(hProcess);
+        return result ? 0 : -1;
+    }
+    return -1;
+}
+
+using uid_t = int;
+inline uid_t getuid() {
+    return 0;
+}
+
+// Windows implementation of setenv
+inline int setenv(const char* name, const char* value, int overwrite) {
+    int errcode = 0;
+    if (!overwrite) {
+        size_t envsize = 0;
+        errcode = getenv_s(&envsize, NULL, 0, name);
+        if (errcode || envsize)
+            return errcode;
+    }
+    return _putenv_s(name, value);
+}
+#endif
+
 namespace yams::cli {
 
 class DaemonCommand : public ICommand {
@@ -444,7 +489,7 @@ private:
             } else if (cli_) {
                 auto p = cli_->getDataPath();
                 if (!p.empty())
-                    setenv("YAMS_STORAGE", p.c_str(), 1);
+                    setenv("YAMS_STORAGE", p.string().c_str(), 1);
             }
             // Pass log level via env too (daemon may read it)
             if (!startLogLevel_.empty()) {
@@ -464,7 +509,7 @@ private:
             if (!dataDir_.empty()) {
                 effectiveDataDir = dataDir_;
             } else if (cli_) {
-                effectiveDataDir = cli_->getDataPath();
+                effectiveDataDir = cli_->getDataPath().string();
             }
             if (!effectiveDataDir.empty()) {
                 args.emplace_back("--data-dir");
@@ -2019,7 +2064,7 @@ private:
         if (!dataDir_.empty())
             config.dataDir = dataDir_;
         else if (cli_)
-            config.dataDir = cli_->getDataPath();
+            config.dataDir = cli_->getDataPath().string();
 
         auto result = daemon::DaemonClient::startDaemon(config);
         if (!result) {

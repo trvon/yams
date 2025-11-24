@@ -1,7 +1,12 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#ifdef _WIN32
+#include <process.h>
+#define getpid _getpid
+#else
 #include <unistd.h>
+#endif
 #include <gtest/gtest.h>
 #include <yams/metadata/database.h>
 #include <yams/search/parallel_post_processor.hpp>
@@ -14,7 +19,9 @@ class SearchExecutorTest : public ::testing::Test {
 protected:
     void SetUp() override {
         // Create file-backed test database
-        db_path_ = "/tmp/yams_search_exec_test_" + std::to_string(::getpid()) + ".db";
+        auto temp_dir = std::filesystem::temp_directory_path();
+        db_path_ =
+            (temp_dir / ("yams_search_exec_test_" + std::to_string(::getpid()) + ".db")).string();
         std::error_code removeEc;
         std::filesystem::remove(db_path_, removeEc);
 

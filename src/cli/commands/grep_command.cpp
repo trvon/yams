@@ -10,7 +10,9 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #include <unordered_set>
 #include <vector>
 #include <yams/cli/command.h>
@@ -1245,6 +1247,28 @@ private:
         std::string line;
     };
 
+    void printHighlightedLine(const std::string& line, const Match& match) {
+        // ANSI color codes
+        const char* RED = "\033[31m";
+        const char* RESET = "\033[0m";
+
+        if (match.columnStart >= line.size()) {
+            std::cout << line << std::endl;
+            return;
+        }
+
+        std::cout << line.substr(0, match.columnStart);
+        std::cout << RED;
+        if (match.columnEnd > match.columnStart) {
+            std::cout << line.substr(match.columnStart, match.columnEnd - match.columnStart);
+        }
+        std::cout << RESET;
+        if (match.columnEnd < line.size()) {
+            std::cout << line.substr(match.columnEnd);
+        }
+        std::cout << std::endl;
+    }
+
     std::vector<Match> processFile(const std::string& /*filename*/, const std::string& content,
                                    const std::regex& regex) {
         std::vector<Match> matches;
@@ -1347,23 +1371,6 @@ private:
                 }
             }
         }
-    }
-
-    void printHighlightedLine(const std::string& line, const Match& match) {
-        // Simple highlighting with color codes if enabled
-        bool useColor =
-            (colorMode_ == "always") || (colorMode_ == "auto" && isatty(fileno(stdout)));
-
-        if (useColor && match.columnEnd > match.columnStart) {
-            std::cout << line.substr(0, match.columnStart);
-            std::cout << "\033[1;31m"; // Bold red
-            std::cout << line.substr(match.columnStart, match.columnEnd - match.columnStart);
-            std::cout << "\033[0m"; // Reset
-            std::cout << line.substr(match.columnEnd);
-        } else {
-            std::cout << line;
-        }
-        std::cout << std::endl;
     }
 
     std::vector<std::string> splitPatterns(const std::vector<std::string>& patterns) {

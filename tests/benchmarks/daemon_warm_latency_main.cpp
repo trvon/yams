@@ -4,7 +4,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
-#include <unistd.h>
+#include <yams/compat/unistd.h>
 #include <yams/daemon/daemon.h>
 
 namespace fs = std::filesystem;

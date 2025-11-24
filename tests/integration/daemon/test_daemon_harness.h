@@ -7,9 +7,11 @@
 #include <random>
 #include <thread>
 #include "test_async_helpers.h"
+#include <yams/compat/unistd.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/daemon.h>
+
 
 namespace yams::test {
 

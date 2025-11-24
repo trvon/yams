@@ -10,7 +10,13 @@
 #include <future>
 #include <iostream>
 #include <thread>
+#ifndef _WIN32
 #include <unistd.h>
+#else
+#include <io.h>
+#define isatty _isatty
+#define STDIN_FILENO 0
+#endif
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -149,6 +155,18 @@ public:
             }
 
             // Signal handlers
+#ifdef _WIN32
+            auto handler = [](int sig) {
+                g_shutdown = true;
+                std::cerr << "\n[Signal " << sig << " received, shutting down...]\n";
+                if (std::cin.fail())
+                    std::cin.clear();
+            };
+            if (signal(SIGINT, handler) == SIG_ERR)
+                spdlog::warn("Failed to install SIGINT handler");
+            if (signal(SIGTERM, handler) == SIG_ERR)
+                spdlog::warn("Failed to install SIGTERM handler");
+#else
             struct sigaction sa = {};
             sa.sa_handler = [](int sig) {
                 g_shutdown = true;
@@ -161,6 +179,7 @@ public:
                 spdlog::warn("Failed to install SIGINT handler");
             if (sigaction(SIGTERM, &sa, nullptr) == -1)
                 spdlog::warn("Failed to install SIGTERM handler");
+#endif
 
             // Do not enforce storage initialization here. MCPServer resolves dataDir and connects
             // to the daemon on its own, and many tools don't require a pre-initialized store.

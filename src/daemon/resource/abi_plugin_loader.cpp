@@ -1,5 +1,34 @@
 #include <spdlog/spdlog.h>
+#ifdef _WIN32
+#include <windows.h>
+#define RTLD_LAZY 0
+#define RTLD_LOCAL 0
+
+static void* dlopen(const char* filename, int flags) {
+    return LoadLibraryA(filename);
+}
+
+static void* dlopen(const wchar_t* filename, int flags) {
+    return LoadLibraryW(filename);
+}
+
+static void* dlsym(void* handle, const char* symbol) {
+    return (void*)GetProcAddress((HMODULE)handle, symbol);
+}
+
+static int dlclose(void* handle) {
+    return FreeLibrary((HMODULE)handle) ? 0 : -1;
+}
+
+static const char* dlerror() {
+    static char buf[128];
+    FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, GetLastError(),
+                   MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), buf, sizeof(buf), NULL);
+    return buf;
+}
+#else
 #include <dlfcn.h>
+#endif
 #include <fstream>
 #include <regex>
 #include <yams/app/services/services.hpp>

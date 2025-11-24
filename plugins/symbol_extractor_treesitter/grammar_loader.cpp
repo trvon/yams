@@ -9,7 +9,7 @@
 #include <sstream>
 #include <string>
 
-#include <dlfcn.h>
+#include <yams/compat/dlfcn.h>
 
 #include <chrono>
 #include <cstdlib>

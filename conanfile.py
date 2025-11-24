@@ -68,7 +68,8 @@ class YamsConan(ConanFile):
         self.requires("tl-expected/1.1.0")
         # Boost is used directly (e.g., boost.asio for daemon comms); declare as a direct requirement
         # Using only override=True will not pull Boost into the graph when no transitive dep needs it
-        self.requires("boost/1.83.0")
+        # Use 1.85.0 for cross-platform stability (1.86+ has MSVC regressions)
+        self.requires("boost/1.85.0")
 
         if self.options.enable_symbol_extraction:  # type: ignore
             try:
@@ -80,9 +81,10 @@ class YamsConan(ConanFile):
         if self.options.enable_onnx:  # type: ignore
             self.requires("onnxruntime/1.23.2")
             # Set compiler flags for clang 19
-            self.conf.append("tools.build:cxxflags", "-Wno-unused-but-set-variable")
-            self.conf.append("tools.build:cxxflags", "-Wno-unused-function")
-            self.conf.append("tools.build:cxxflags", "-Wno-deprecated-declarations")
+            if self.settings.compiler != "msvc":
+                self.conf.append("tools.build:cxxflags", "-Wno-unused-but-set-variable")
+                self.conf.append("tools.build:cxxflags", "-Wno-unused-function")
+                self.conf.append("tools.build:cxxflags", "-Wno-deprecated-declarations")
             # Ensure TBB is available (required by ONNX Runtime)
             try:
                 self.requires("onetbb/2021.12.0")
@@ -97,6 +99,10 @@ class YamsConan(ConanFile):
             self.requires("libmediainfo/22.03")
 
     def build_requirements(self):
+        self.tool_requires("pkgconf/2.1.0")
+        self.tool_requires("meson/1.9.1")
+        self.tool_requires("ninja/1.13.1")
+        
         # Use requires() instead of test_requires() to ensure pkg-config files
         # are generated for Meson to find gtest/benchmark dependencies
         if self.options.build_tests:  # type: ignore
@@ -148,7 +154,13 @@ class YamsConan(ConanFile):
             from conan.tools.meson import MesonToolchain
             from conan.tools.gnu import PkgConfigDeps
             from conan.tools.cmake import CMakeDeps
+            from conan.tools.env import VirtualBuildEnv
 
+            # Ensure PowerShell scripts are generated on Windows for setup.ps1
+            if self.settings.os == "Windows":
+                self.conf.define("tools.env.virtualenv:powershell", True)
+
+            VirtualBuildEnv(self).generate()
             tc = MesonToolchain(self)
             if self.settings.os == "Linux" and self.settings.compiler.libcxx == "libstdc++11":  # type: ignore
                 tc.preprocessor_definitions["_GLIBCXX_USE_CXX11_ABI"] = "1"

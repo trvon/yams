@@ -15,6 +15,8 @@
 #include <tuple>
 #include <utility>
 #include <vector>
+#include <yams/compat/unistd.h>
+
 
 #include <nlohmann/json.hpp>
 #include <numeric>
@@ -218,14 +220,14 @@ public:
         const char* existing = std::getenv(key.c_str());
         if (existing)
             previous_ = std::string(existing);
-        ::setenv(key.c_str(), value.c_str(), 1);
+        setenv(key.c_str(), value.c_str(), 1);
     }
 
     ~ScopedEnv() {
         if (previous_) {
-            ::setenv(key_.c_str(), previous_->c_str(), 1);
+            setenv(key_.c_str(), previous_->c_str(), 1);
         } else {
-            ::unsetenv(key_.c_str());
+            unsetenv(key_.c_str());
         }
     }
 

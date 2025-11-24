@@ -5,6 +5,13 @@
 #include "IComponent.h"
 #include <yams/core/types.h>
 
+#ifdef _WIN32
+#include <process.h>
+using pid_t = int;
+#else
+#include <sys/types.h>
+#endif
+
 namespace yams::daemon {
 
 class YamsDaemon; // Forward declaration

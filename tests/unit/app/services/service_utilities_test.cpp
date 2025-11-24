@@ -6,6 +6,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
+#include <yams/compat/unistd.h>
+
 
 using namespace yams::app::services;
 

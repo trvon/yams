@@ -73,8 +73,8 @@ struct StateBase {
     // Phase 4: entry/exit hooks (no-op by default)
     virtual void entry() {}
     virtual void exit() {}
-    virtual Next on_accept(int) { return {}; }
-    virtual Next on_connect(int) { return {}; }
+    virtual Next on_accept(uint64_t) { return {}; }
+    virtual Next on_connect(uint64_t) { return {}; }
     virtual Next on_header_parsed(uint64_t /*payload_size*/) { return {}; }
     virtual Next on_body_parsed() { return {}; }
     virtual Next on_stream_next(bool /*done*/) { return {}; }
@@ -85,13 +85,13 @@ struct StateBase {
 };
 
 struct DisconnectedState final : StateBase {
-    Next on_accept(int fd) override {
-        if (fd < 0)
+    Next on_accept(uint64_t fd) override {
+        if (fd == static_cast<uint64_t>(-1))
             return {true, ImplState::Error};
         return {true, ImplState::Accepting};
     }
-    Next on_connect(int fd) override {
-        if (fd < 0)
+    Next on_connect(uint64_t fd) override {
+        if (fd == static_cast<uint64_t>(-1))
             return {true, ImplState::Error};
         return {true, ImplState::Connected};
     }
@@ -99,8 +99,8 @@ struct DisconnectedState final : StateBase {
 };
 
 struct AcceptingState final : StateBase {
-    Next on_connect(int fd) override {
-        if (fd < 0)
+    Next on_connect(uint64_t fd) override {
+        if (fd == static_cast<uint64_t>(-1))
             return {true, ImplState::Error};
         return {true, ImplState::Connected};
     }
@@ -444,7 +444,7 @@ bool ConnectionFsm::transition(State next, const char* reason) noexcept {
     return true;
 }
 
-void ConnectionFsm::on_accept(int fd) {
+void ConnectionFsm::on_accept(uint64_t fd) {
     if (auto* impl = impl_.get())
         impl->last_event = "accept";
     fd_ = fd;
@@ -455,7 +455,7 @@ void ConnectionFsm::on_accept(int fd) {
     }
 }
 
-void ConnectionFsm::on_connect(int fd) {
+void ConnectionFsm::on_connect(uint64_t fd) {
     if (auto* impl = impl_.get())
         impl->last_event = "connect";
     fd_ = fd;

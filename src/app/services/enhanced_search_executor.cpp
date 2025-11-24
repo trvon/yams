@@ -1,3 +1,4 @@
+#define _CRT_SECURE_NO_WARNINGS
 #include <yams/app/services/enhanced_search_executor.h>
 
 #include <filesystem>

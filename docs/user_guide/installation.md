@@ -99,7 +99,7 @@ cd yams
 
 ## Build
 
-**Using setup script (recommended):**
+**Linux/macOS (using setup script):**
 ```bash
 # Release build
 ./setup.sh Release
@@ -113,7 +113,21 @@ meson compile -C builddir
 meson install -C build/release --prefix /usr/local
 ```
 
-**Advanced options:**
+**Windows (using PowerShell script):**
+```pwsh
+# Release build
+./setup.ps1 Release
+meson compile -C build/release
+
+# Debug build
+./setup.ps1 Debug
+meson compile -C builddir
+
+# Install (requires Admin for default C:\Program Files\yams)
+meson install -C build/release
+```
+
+**Advanced options (Linux/macOS):**
 ```bash
 # Coverage (Debug only)
 ./setup.sh Debug --coverage

@@ -10,13 +10,17 @@
 #include <iostream>
 #include <sstream>
 #include <thread>
+#ifdef _WIN32
+#include <process.h>
+#else
 #include <unistd.h>
+#include <sys/wait.h>
+#endif
 #include <vector>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/yams_cli.h>
@@ -74,6 +78,20 @@ private:
         if (!path_env)
             return false;
 
+#ifdef _WIN32
+        std::stringstream ss(path_env);
+        std::string dir;
+        while (std::getline(ss, dir, ';')) {
+            fs::path full_path = fs::path(dir) / cmd;
+            // On Windows, check for .exe extension if not present
+            if (full_path.extension() != ".exe")
+                full_path += ".exe";
+
+            if (fs::exists(full_path) && fs::is_regular_file(full_path)) {
+                return true;
+            }
+        }
+#else
         std::stringstream ss(path_env);
         std::string dir;
         while (std::getline(ss, dir, ':')) {
@@ -85,6 +103,7 @@ private:
                 }
             }
         }
+#endif
         return false;
     }
 
@@ -247,6 +266,16 @@ private:
         if (args.empty())
             return -1;
 
+#ifdef _WIN32
+        std::vector<const char*> argv;
+        for (const auto& arg : args) {
+            argv.push_back(arg.c_str());
+        }
+        argv.push_back(nullptr);
+
+        intptr_t status = _spawnvp(_P_WAIT, argv[0], argv.data());
+        return (int)status;
+#else
         // Convert to char* array for execvp
         std::vector<char*> argv;
         for (const auto& arg : args) {
@@ -274,6 +303,7 @@ private:
             std::cerr << "Fork failed" << std::endl;
             return -1;
         }
+#endif
     }
 
     // Helper function to validate paths for safety

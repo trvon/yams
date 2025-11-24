@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <io.h>
 #include <windows.h>
+#include <winioctl.h>
 
 namespace yams::storage::platform {
 

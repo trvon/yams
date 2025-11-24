@@ -4,6 +4,17 @@
 #include <gtest/gtest.h>
 #include <yams/cli/yams_cli.h>
 
+#ifdef _WIN32
+#include <process.h>
+#define getpid _getpid
+static int setenv(const char* name, const char* value, int overwrite) {
+    return _putenv_s(name, value);
+}
+static int unsetenv(const char* name) {
+    return _putenv_s(name, "");
+}
+#endif
+
 namespace fs = std::filesystem;
 
 class ConfigCommandEmbeddingsTest : public ::testing::Test {
@@ -23,8 +34,8 @@ protected:
         testConfigHome_ = testHome_ / "config";
         fs::create_directories(testConfigHome_);
 
-        setenv("XDG_DATA_HOME", testDataHome_.c_str(), 1);
-        setenv("XDG_CONFIG_HOME", testConfigHome_.c_str(), 1);
+        setenv("XDG_DATA_HOME", testDataHome_.string().c_str(), 1);
+        setenv("XDG_CONFIG_HOME", testConfigHome_.string().c_str(), 1);
     }
 
     void TearDown() override {

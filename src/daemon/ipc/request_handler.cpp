@@ -345,14 +345,14 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                 // while in Connected (idle) can spuriously transition to Error.
                 spdlog::debug(
                     "Read timeout (persistent) on socket {} after {} ms — keeping connection open",
-                    sock->native_handle(),
+                    (uint64_t)sock->native_handle(),
                     std::chrono::duration_cast<std::chrono::milliseconds>(config_.read_timeout)
                         .count());
                 // Bound idle lifetime to avoid FD/backlog exhaustion if clients vanish silently
                 if (++consecutive_idle_timeouts >= kMaxIdleTimeouts) {
                     spdlog::info(
                         "Closing idle connection after {} consecutive read timeouts (fd={})",
-                        consecutive_idle_timeouts, sock->native_handle());
+                        consecutive_idle_timeouts, (uint64_t)sock->native_handle());
                     boost::system::error_code ignore_ec;
                     sock->close(ignore_ec);
                     break;
@@ -1158,15 +1158,15 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
                 // Close regardless after drain/timeout
                 socket.close();
                 spdlog::debug("graceful half-close complete (request_id={} fd={})", request_id,
-                              socket.native_handle());
+                              (uint64_t)socket.native_handle());
             } else {
                 spdlog::debug("closing socket after response (request_id={} fd={})", request_id,
-                              socket.native_handle());
+                              (uint64_t)socket.native_handle());
                 socket.close();
             }
         } else {
             spdlog::debug("keeping socket open after response (request_id={} fd={})", request_id,
-                          socket.native_handle());
+                          (uint64_t)socket.native_handle());
         }
 
         auto duration = std::chrono::steady_clock::now() - start_time;
@@ -1796,10 +1796,10 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                       timer.async_wait(boost::asio::use_awaitable));
             socket.close();
             spdlog::debug("graceful half-close complete (streaming) (request_id={} fd={})",
-                          request_id, socket.native_handle());
+                          request_id, (uint64_t)socket.native_handle());
         } else {
             spdlog::debug("closing socket after streaming response (request_id={} fd={})",
-                          request_id, socket.native_handle());
+                          request_id, (uint64_t)socket.native_handle());
             socket.close();
         }
         if (fsm) {
@@ -1807,7 +1807,7 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
         }
     } else {
         spdlog::debug("keeping socket open after streaming response (request_id={} fd={})",
-                      request_id, socket.native_handle());
+                      request_id, (uint64_t)socket.native_handle());
     }
     co_return Result<void>();
 }

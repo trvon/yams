@@ -804,6 +804,7 @@ if catch2_dep.found()
     dependency('yams_content'),
     dependency('yams_extraction'),
     dependency('yams_detection'),
+    dependency('sqlite3'),
   ]
   
   content_handlers_exe = executable('content_handlers',
@@ -964,14 +965,16 @@ if catch2_dep.found()
 
   # Ghidra plugin integration test (PBI-075)
   # Tests plugin spawning and JSON-RPC communication without requiring Ghidra installed
-  ghidra_plugin_exe = executable('ghidra_plugin_communication',
-    files('integration/ghidra_plugin_communication_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep, dependency('nlohmann_json'), dependency('spdlog')],
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  if host_machine.system() != 'windows'
+    ghidra_plugin_exe = executable('ghidra_plugin_communication',
+      files('integration/ghidra_plugin_communication_test.cpp'),
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep, dependency('nlohmann_json'), dependency('spdlog')],
+      cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+      build_rpath: ':'.join(_test_rpaths),
+      install: false,
+    )
+  endif
 
   # Test Registrations
   # --------------------------------------------------------------------------
@@ -1101,11 +1104,13 @@ if catch2_dep.found()
   )
 
   # Plugin integration tests
-  test('ghidra_plugin_communication', ghidra_plugin_exe,
-    suite: ['catch2', 'integration', 'plugin', 'ghidra'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
+  if host_machine.system() != 'windows'
+    test('ghidra_plugin_communication', ghidra_plugin_exe,
+      suite: ['catch2', 'integration', 'plugin', 'ghidra'],
+      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+      timeout: 30
+    )
+  endif
 
   # Daemon tests
   test('daemon_fsm_suite', catch2_daemon_fsm_exe,

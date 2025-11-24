@@ -22,7 +22,7 @@ Thanks for your interest in contributing!
 - CMake alternative (optional):
   - Build: `cmake --preset yams-release && cmake --build --preset yams-release`
   - Tests: `ctest --preset yams-release` (or `ctest --test-dir build/yams-release`)
-- GCC flow: see `docs/BUILD-GCC.md`.
+- GCC flow: see `docs/BUILD.md`.
 - Full build guide: see `docs/developer/build_system.md`.
 - For CI/test speed and stability: `export YAMS_DISABLE_MODEL_PRELOAD=1`
 

@@ -4,6 +4,7 @@
 
 #include <nlohmann/json.hpp>
 #include <onnxruntime_cxx_api.h>
+#include <filesystem>
 static Ort::Env& get_global_ort_env() {
     static Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "YamsDaemon");
     return env;
@@ -211,7 +212,8 @@ public:
 
             // Create session directly - no async wrapper needed for local file operations
             // This matches the working ModelManager approach used by HybridBackend
-            session_ = std::make_unique<Ort::Session>(*env_, modelPath_.c_str(), *sessionOptions_);
+            session_ = std::make_unique<Ort::Session>(
+                *env_, std::filesystem::path(modelPath_).c_str(), *sessionOptions_);
 
             // Get input/output information
             size_t numInputs = session_->GetInputCount();

@@ -4,6 +4,7 @@
 #include <future>
 #include <thread>
 #include <catch2/catch_test_macros.hpp>
+#include <yams/compat/unistd.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -11,6 +12,7 @@
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/plugins/model_provider_v1.h>
+
 
 namespace yams::daemon {
 namespace fs = std::filesystem;
@@ -20,7 +22,7 @@ struct PluginHostFixture {
         tempDir_ = fs::temp_directory_path() / ("yams_ph_" + std::to_string(::getpid()));
         fs::create_directories(tempDir_);
         trustFile_ = tempDir_ / "plugins_trust.txt";
-        ::setenv("XDG_CONFIG_HOME", tempDir_.c_str(), 1);
+        ::setenv("XDG_CONFIG_HOME", tempDir_.string().c_str(), 1);
         ::setenv("YAMS_TESTING", "1", 1);
         ::setenv("YAMS_PLUGIN_NAME_POLICY", "spec", 1);
     }

@@ -6,7 +6,9 @@
 #include <future>
 #include <mutex>
 #include <thread>
-#include <unistd.h> // For getuid(), geteuid(), getpid()
+#ifndef _WIN32
+#include <unistd.h>
+#endif // For getuid(), geteuid(), getpid()
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/thread_pool.hpp>
 #include <boost/asio/use_future.hpp>
@@ -605,19 +607,40 @@ std::filesystem::path getXDGStateHome() {
 
 std::filesystem::path YamsDaemon::resolveSystemPath(PathType type) {
     namespace fs = std::filesystem;
+#ifdef _WIN32
+    bool isRoot = false;
+    int uid = 0; // Not used for path generation on Windows usually, or use GetCurrentProcessId() if needed
+#else
     bool isRoot = (geteuid() == 0);
     uid_t uid = getuid();
+#endif
 
     switch (type) {
         case PathType::Socket:
             return yams::daemon::ConnectionFsm::resolve_socket_path();
         case PathType::PidFile:
+#ifdef _WIN32
+            if (auto xdg = getXDGRuntimeDir(); !xdg.empty() && canWriteToDirectory(xdg))
+                return xdg / "yams-daemon.pid";
+            return fs::temp_directory_path() / "yams-daemon.pid";
+#else
             if (isRoot)
                 return fs::path("/var/run/yams-daemon.pid");
             if (auto xdg = getXDGRuntimeDir(); !xdg.empty() && canWriteToDirectory(xdg))
                 return xdg / "yams-daemon.pid";
             return fs::path("/tmp") / ("yams-daemon-" + std::to_string(uid) + ".pid");
+#endif
         case PathType::LogFile:
+#ifdef _WIN32
+            if (auto xdg = getXDGStateHome(); !xdg.empty()) {
+                auto logDir = xdg / "yams";
+                std::error_code ec;
+                fs::create_directories(logDir, ec);
+                if (canWriteToDirectory(logDir))
+                    return logDir / "daemon.log";
+            }
+            return fs::temp_directory_path() / "yams-daemon.log";
+#else
             if (isRoot && canWriteToDirectory("/var/log"))
                 return fs::path("/var/log/yams-daemon.log");
             if (auto xdg = getXDGStateHome(); !xdg.empty()) {
@@ -628,6 +651,7 @@ std::filesystem::path YamsDaemon::resolveSystemPath(PathType type) {
                     return logDir / "daemon.log";
             }
             return fs::path("/tmp") / ("yams-daemon-" + std::to_string(uid) + ".log");
+#endif
     }
     return fs::path();
 }
@@ -636,7 +660,12 @@ bool YamsDaemon::canWriteToDirectory(const std::filesystem::path& dir) {
     namespace fs = std::filesystem;
     if (!fs::exists(dir))
         return false;
-    auto testFile = dir / (".yams-test-" + std::to_string(getpid()));
+#ifdef _WIN32
+    auto pid = _getpid();
+#else
+    auto pid = getpid();
+#endif
+    auto testFile = dir / (".yams-test-" + std::to_string(pid));
     std::ofstream test(testFile);
     if (test.good()) {
         test.close();
@@ -739,3 +768,15 @@ void YamsDaemon::reloadTuningConfig() {
 }
 
 } // namespace yams::daemon
+
+#ifdef _WIN32
+#include <process.h>
+#define getpid _getpid
+using uid_t = int;
+inline uid_t getuid() {
+    return 0;
+}
+inline uid_t geteuid() {
+    return 0;
+}
+#endif

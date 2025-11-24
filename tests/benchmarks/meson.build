@@ -182,6 +182,7 @@ ipc_stream_bench = executable('ipc_stream_bench', files('ipc_streaming_bench.cpp
     dependency('yams_benchmarks'),
     dependency('yams_daemon'),
     dependency('nlohmann_json'),
+    dependency('tl-expected'),
   ] + tracy_deps,
   cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
   install: false,

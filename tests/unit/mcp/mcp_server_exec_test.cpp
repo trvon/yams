@@ -1,6 +1,13 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#ifdef _WIN32
+#include <process.h>
+static int setenv(const char* name, const char* value, int overwrite) {
+    return _putenv_s(name, value);
+}
+#endif
+
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>

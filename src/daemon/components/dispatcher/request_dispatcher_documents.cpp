@@ -286,12 +286,12 @@ boost::asio::awaitable<Response> RequestDispatcher::handleListRequest(const List
             app::services::ListDocumentsRequest serviceReq;
 
             // Basic pagination and sorting
-            serviceReq.limit = req.limit;
-            serviceReq.offset = req.offset;
+            serviceReq.limit = static_cast<int>(req.limit);
+            serviceReq.offset = static_cast<int>(req.offset);
             if (req.recentCount > 0) {
-                serviceReq.recent = req.recentCount;
+                serviceReq.recent = static_cast<int>(req.recentCount);
             } else if (req.recent) {
-                serviceReq.recent = req.limit;
+                serviceReq.recent = static_cast<int>(req.limit);
             }
 
             // Format and display options

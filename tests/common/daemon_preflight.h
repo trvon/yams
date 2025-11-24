@@ -3,7 +3,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <string>
-#include <unistd.h>
+#include <yams/compat/unistd.h>
 
 namespace yams::tests::harnesses {
 struct DaemonPreflightConfig {

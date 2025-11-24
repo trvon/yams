@@ -11,6 +11,20 @@
 
 #include <yams/mcp/mcp_server.h>
 
+#ifdef _WIN32
+#include <cstdlib>
+// Windows implementation of setenv
+inline int setenv(const char *name, const char *value, int overwrite) {
+    int errcode = 0;
+    if (!overwrite) {
+        size_t envsize = 0;
+        errcode = getenv_s(&envsize, NULL, 0, name);
+        if (errcode || envsize) return errcode;
+    }
+    return _putenv_s(name, value);
+}
+#endif
+
 std::atomic<bool> g_running{true};
 
 void signalHandler(int signal) {

@@ -15,6 +15,14 @@ if host_machine.system() == 'darwin'
   add_global_link_arguments('-Wl,-no_warn_duplicate_libraries', language: 'cpp')
 endif
 
+if host_machine.system() == 'windows'
+  add_project_arguments('-D_WIN32_WINNT=0x0A00', language: 'cpp')
+  add_project_arguments('-D_CRT_SECURE_NO_WARNINGS', language: 'cpp')
+  add_project_arguments('-D_SILENCE_CXX20_OLD_SHARED_PTR_ATOMIC_SUPPORT_DEPRECATION_WARNING', language: 'cpp')
+  add_project_arguments('-DNOMINMAX', language: 'cpp')
+  add_project_arguments('-DWIN32_LEAN_AND_MEAN', language: 'cpp')
+endif
+
 # --- libc++ hardening mode ---
 # Apply hardening defines when using libc++ (Darwin always uses libc++, Linux when explicitly set)
 cpp = meson.get_compiler('cpp')
@@ -113,7 +121,10 @@ meson.override_dependency('boost', boost_dep)
 # --- Version header generation ---
 _override_version = get_option('yams-version')
 _effective_version = _override_version != '' ? _override_version : meson.project_version()
-_build_timestamp = run_command('date', '-u', '+%Y-%m-%dT%H:%M:%SZ', check: true).stdout().strip()
+
+python_exe = find_program('python3', 'python')
+_build_timestamp = run_command(python_exe, '-c', 'import datetime; print(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))', check: true).stdout().strip()
+
 _git_desc = ''
 _git_cmd = find_program('git', required: false)
 if _git_cmd.found()
@@ -155,9 +166,9 @@ subdir('src/compression')
 subdir('src/storage')
 subdir('src/wal')
 subdir('src/manifest')
+subdir('src/metadata')
 subdir('src/integrity')
 subdir('src/config')
-subdir('src/metadata')
 subdir('src/extraction')
 subdir('src/detection')
 subdir('src/content')

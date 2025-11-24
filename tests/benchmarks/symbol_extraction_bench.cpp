@@ -12,7 +12,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
-#include <dlfcn.h>
+#include <yams/compat/dlfcn.h>
 
 #include <yams/plugins/abi.h>
 #include <yams/plugins/symbol_extractor_v1.h>

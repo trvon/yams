@@ -867,7 +867,9 @@ std::vector<size_t> findNaturalBreaks(const std::string& text) {
     }
 
     // Find section breaks (markdown headers)
-    std::regex header_regex(R"(^#{1,6}\s+.*$)", std::regex::multiline);
+    // Note: std::regex does not support multiline mode (where ^ matches start of line).
+    // We simulate it by matching start of string or newline.
+    std::regex header_regex(R"((?:^|\n)#{1,6}\s+[^\n]*)");
     auto begin = std::sregex_iterator(text.begin(), text.end(), header_regex);
     auto end = std::sregex_iterator();
 

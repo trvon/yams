@@ -2,16 +2,16 @@
 os=Windows
 arch=x86_64
 compiler=msvc
-compiler.version=195
+compiler.version=193  # VS 2022 (required for Boost 1.85 compatibility)
 compiler.runtime=dynamic
-compiler.cppstd=23
+compiler.cppstd=23    # C++23 works fine with MSVC 193
 build_type=Release
 
 [options]
 
 [conf]
 tools.cmake.cmaketoolchain:generator=Ninja
-tools.microsoft.msbuild:vs_version=18
+tools.microsoft.msbuild:vs_version=17  # VS 2022
 
 [buildenv]
 

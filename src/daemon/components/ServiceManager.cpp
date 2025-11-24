@@ -16,6 +16,14 @@
 #include <system_error>
 #include <thread>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+#define getpid _getpid
+#else
+#include <unistd.h>
+#endif
+
 // Platform-specific malloc pressure relief for macOS
 #ifdef __APPLE__
 #include <malloc/malloc.h>
@@ -1202,6 +1210,7 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
                     if (p != std::string::npos)
                         t.erase(p + 1);
                 };
+
                 while (std::getline(in, line)) {
                     std::string l = line;
                     trim(l);
@@ -1335,11 +1344,39 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
                  exists ? "yes" : "no", cfg.create_if_missing ? "yes" : "no", cfg.embedding_dim);
 
     // Cross-process advisory lock to avoid concurrent init/extension loads
+#ifdef _WIN32
+    HANDLE hLock = INVALID_HANDLE_VALUE;
+#else
     int lock_fd = -1;
+#endif
     std::filesystem::path lockPath =
         std::filesystem::path(cfg.database_path).replace_extension(".lock");
     try {
         spdlog::info("[VectorInit] Opening lock file: {}", lockPath.string());
+#ifdef _WIN32
+        hLock = CreateFileA(lockPath.string().c_str(), GENERIC_READ | GENERIC_WRITE, 
+                            FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, 
+                            FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hLock != INVALID_HANDLE_VALUE) {
+            spdlog::info("[VectorInit] Acquiring lock on: {}", lockPath.string());
+            OVERLAPPED ov = {0};
+            if (!LockFileEx(hLock, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov)) {
+                spdlog::info("[VectorInit] skipped (lock busy by another process)");
+                CloseHandle(hLock);
+                hLock = INVALID_HANDLE_VALUE;
+                return Result<bool>(false);
+            } else {
+                spdlog::info("[VectorInit] Lock acquired.");
+                try {
+                    std::string stamp = std::to_string(static_cast<long long>(::getpid())) + "\n";
+                    DWORD written;
+                    WriteFile(hLock, stamp.data(), static_cast<DWORD>(stamp.size()), &written, NULL);
+                } catch (...) {}
+            }
+        } else {
+            spdlog::warn("[VectorInit] could not open lock file (continuing without lock)");
+        }
+#else
         lock_fd = ::open(lockPath.c_str(), O_CREAT | O_RDWR, 0644);
         if (lock_fd >= 0) {
             spdlog::info("[VectorInit] Acquiring lock on: {}", lockPath.string());
@@ -1368,6 +1405,7 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
         } else {
             spdlog::warn("[VectorInit] could not open lock file (continuing without lock)");
         }
+#endif
     } catch (...) {
         spdlog::warn("[VectorInit] lock setup error (continuing without lock)");
     }
@@ -1475,6 +1513,16 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
         }
     }
     // Release advisory lock if held
+#ifdef _WIN32
+    if (hLock != INVALID_HANDLE_VALUE) {
+        spdlog::info("[VectorInit] Releasing lock.");
+        OVERLAPPED ov = {0};
+        UnlockFileEx(hLock, 0, 1, 0, &ov);
+        CloseHandle(hLock);
+        hLock = INVALID_HANDLE_VALUE;
+        spdlog::info("[VectorInit] Lock released.");
+    }
+#else
     if (lock_fd >= 0) {
         spdlog::info("[VectorInit] Releasing lock.");
         struct flock fl{};
@@ -1487,6 +1535,7 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
         lock_fd = -1;
         spdlog::info("[VectorInit] Lock released.");
     }
+#endif
     if (!vectorDatabase_) {
         spdlog::error("[VectorInit] all {} attempt(s) failed; continuing without vector DB",
                       maxAttempts);
@@ -2240,11 +2289,17 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
         if (buildResult.has_value()) {
             const auto& built = buildResult.value();
-            std::lock_guard<std::shared_mutex> lk(searchEngineMutex_); // Exclusive write
-            searchEngine_ = built;
+            {
+                std::lock_guard<std::shared_mutex> lk(searchEngineMutex_); // Exclusive write
+                searchEngine_ = built;
+            }
+
+            // Update readiness indicators after successful rebuild
             state_.readiness.searchEngineReady = true;
             state_.readiness.searchProgress = 100;
+            state_.readiness.vectorIndexReady = true;
             writeBootstrapStatusFile(config_, state_);
+
             spdlog::info("HybridSearchEngine initialized and published to AppContext");
             try {
                 serviceFsm_.dispatch(SearchEngineBuiltEvent{});
@@ -2762,6 +2817,20 @@ Result<size_t> ServiceManager::adoptContentExtractorsFromHosts() {
     }
 }
 
+Result<size_t> ServiceManager::adoptSymbolExtractorsFromHosts() {
+    try {
+        size_t adopted = adoptPluginInterface<yams_symbol_extractor_v1, AbiSymbolExtractorAdapter,
+                                              yams::daemon::AbiSymbolExtractorAdapter>(
+            abiHost_.get(), "symbol_extractor_v1", YAMS_IFACE_SYMBOL_EXTRACTOR_V1_VERSION,
+            symbolExtractors_, [](const yams_symbol_extractor_v1* table) {
+                return table->abi_version == YAMS_IFACE_SYMBOL_EXTRACTOR_V1_VERSION;
+            });
+        return Result<size_t>(adopted);
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::Unknown, e.what()};
+    }
+}
+
 boost::asio::any_io_executor ServiceManager::getWorkerExecutor() const {
     if (workCoordinator_)
         return workCoordinator_->getExecutor();
@@ -2857,7 +2926,7 @@ boost::asio::awaitable<Result<size_t>> ServiceManager::autoloadPluginsNow() {
                                 "Plugin autoload(now): candidate '{}' path='{}' ifaces=[{}]",
                                 d.name, d.path.string(), [&]() {
                                     std::string s;
-                                    for (size_t i = 0; i < d.interfaces.size(); ++i) {
+                                    for (size_t i = 0; i < d.interfaces.size(); i++) {
                                         if (i)
                                             s += ",";
                                         s += d.interfaces[i];
@@ -2958,206 +3027,65 @@ boost::asio::awaitable<Result<size_t>> ServiceManager::autoloadPluginsNow() {
     }
 }
 
-void ServiceManager::preloadPreferredModelIfConfigured() {
+boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
+    spdlog::info("[ServiceManager] co_enableEmbeddingsAndRebuild: starting");
+
+    // Protect against concurrent rebuilds
+    bool buildingAlready = false;
+    try {
+        buildingAlready =
+            (serviceFsm_.snapshot().state == ServiceManagerState::BuildingSearchEngine);
+    } catch (...) {
+    }
+
+    if (buildingAlready) {
+        spdlog::info("[ServiceManager] co_enableEmbeddingsAndRebuild: rebuild already in progress, skipping");
+        co_return;
+    }
+
+    try {
+        // Phase 2.4: Use SearchEngineManager
+        auto graphService = graphComponent_ ? graphComponent_->getQueryService() : nullptr;
+        
+        // Get embedding generator from model provider if available
+        std::shared_ptr<vector::EmbeddingGenerator> embGen;
+        if (modelProvider_ && modelProvider_->isAvailable() && !embeddingModelName_.empty()) {
+            try {
+                embGen = modelProvider_->getEmbeddingGenerator(embeddingModelName_);
+            } catch (...) {
+            }
+        }
+
+        int build_timeout = 30000; // 30s timeout
+        auto rebuildResult = co_await searchEngineManager_.buildEngine(
+            metadataRepo_, vectorIndexManager_, embGen, graphService, "rebuild_enabled", build_timeout,
+            getWorkerExecutor());
+
+        if (rebuildResult.has_value()) {
+            const auto& rebuilt = rebuildResult.value();
+            {
+                std::lock_guard<std::shared_mutex> lk(searchEngineMutex_);
+                searchEngine_ = rebuilt;
+            }
+
+            // Update readiness indicators
+            state_.readiness.searchEngineReady = true;
+            state_.readiness.vectorIndexReady = true;
+            
+            spdlog::info("[ServiceManager] co_enableEmbeddingsAndRebuild: success");
+        } else {
+            spdlog::warn("[ServiceManager] co_enableEmbeddingsAndRebuild: failed");
+        }
+    } catch (const std::exception& e) {
+        spdlog::error("[ServiceManager] co_enableEmbeddingsAndRebuild: exception: {}", e.what());
+    }
+    co_return;
+}
+
+boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured() {
     // FSM-based idempotence: skip if already loading or ready
     if (embeddingFsm_.isLoadingOrReady()) {
         spdlog::debug("preloadPreferredModelIfConfigured: already loading or ready (FSM)");
-        return;
-    }
-
-    try {
-        (void)init::step<void>("schedule_model_preload", [&]() -> yams::Result<void> {
-            spdlog::info("Scheduling preferred model preload (async)");
-            return yams::Result<void>();
-        });
-        // Skip if embedding already ready (FSM is authoritative)
-        if (embeddingFsm_.isReady()) {
-            spdlog::debug("preloadPreferredModelIfConfigured: already ready (FSM)");
-            return;
-        }
-
-        if (!modelProvider_) {
-            spdlog::debug("preloadPreferredModelIfConfigured: no model provider available");
-            return;
-        }
-
-        std::string preferred = resolvePreferredModel();
-        if (preferred.empty()) {
-            spdlog::info("Model preload skipped: no preferred model configured (set "
-                         "embeddings.preferred_model in config or install a model)");
-            return;
-        }
-        spdlog::info("Preloading preferred model: {}", preferred);
-        try {
-            embeddingFsm_.dispatch(ModelLoadStartedEvent{preferred});
-        } catch (...) {
-        }
-
-        // Use the worker executor from the new io_context architecture
-        auto executor = getWorkerExecutor();
-        spdlog::info("Using io_context executor for preload of '{}'", preferred);
-
-        // Safely handle shared_from_this - it may not be available during early initialization
-        try {
-            spdlog::info("Attempting shared_from_this() for model load task '{}'", preferred);
-            auto self = shared_from_this();
-            spdlog::info(
-                "shared_from_this() succeeded, about to post model load task to executor for '{}'",
-                preferred);
-            boost::asio::post(executor, [self, preferred]() {
-                spdlog::info("***** INSIDE POSTED LAMBDA for '{}'", preferred);
-                spdlog::info("Model preload task started for '{}'", preferred);
-                try {
-                    spdlog::info("Calling modelProvider_->loadModel('{}')...", preferred);
-                    auto r = self->modelProvider_->loadModel(preferred);
-                    spdlog::info("modelProvider_->loadModel('{}') returned: success={}", preferred,
-                                 r.has_value());
-                    if (r) {
-                        self->state_.readiness.modelProviderReady.store(true,
-                                                                        std::memory_order_relaxed);
-                        self->state_.readiness.modelLoadProgress.store(100,
-                                                                       std::memory_order_relaxed);
-                        spdlog::info("Preferred model '{}' preloaded successfully", preferred);
-                        self->clearModelProviderError();
-                        try {
-                            std::size_t dim = 0;
-                            try {
-                                dim = self->getEmbeddingDimension();
-                            } catch (...) {
-                            }
-                            self->embeddingFsm_.dispatch(
-                                ModelLoadedEvent{self->embeddingModelName_, dim});
-                        } catch (...) {
-                        }
-                    } else {
-                        self->state_.readiness.modelLoadProgress.store(0,
-                                                                       std::memory_order_relaxed);
-                        spdlog::warn("Preferred model '{}' preload failed: {}", preferred,
-                                     r.error().message);
-                        const std::string errorMsg =
-                            std::string("preload failed: ") + r.error().message;
-                        try {
-                            self->embeddingFsm_.dispatch(ProviderDegradedEvent{errorMsg});
-                            self->lifecycleFsm_.setSubsystemDegraded("embeddings", true, errorMsg);
-                        } catch (...) {
-                        }
-                        try {
-                            if (self->modelProvider_)
-                                (void)self->modelProvider_->unloadModel(preferred);
-                        } catch (...) {
-                        }
-                        // Retry once after a short delay to tolerate slow filesystems
-                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
-                        auto r_retry = self->modelProvider_->loadModel(preferred);
-                        if (r_retry) {
-                            self->state_.readiness.modelProviderReady.store(
-                                true, std::memory_order_relaxed);
-                            self->state_.readiness.modelLoadProgress.store(
-                                100, std::memory_order_relaxed);
-                            spdlog::info("Preferred model '{}' preloaded on retry", preferred);
-                            self->clearModelProviderError();
-                            try {
-                                std::size_t dim = 0;
-                                try {
-                                    dim = self->getEmbeddingDimension();
-                                } catch (...) {
-                                }
-                                self->embeddingFsm_.dispatch(
-                                    ModelLoadedEvent{self->embeddingModelName_, dim});
-                                self->lifecycleFsm_.setSubsystemDegraded(
-                                    "embeddings", false); // Clear on retry success
-                            } catch (...) {
-                            }
-                        } else {
-#ifndef YAMS_USE_ONNX_RUNTIME
-                            spdlog::warn("ONNX runtime disabled in this build; model "
-                                         "preloading not supported by daemon binary");
-#endif
-                            spdlog::warn("Preferred model '{}' failed twice: {}", preferred,
-                                         r_retry.error().message);
-                            try {
-                                self->embeddingFsm_.dispatch(
-                                    LoadFailureEvent{r_retry.error().message});
-                                self->lifecycleFsm_.setSubsystemDegraded("embeddings", true,
-                                                                         r_retry.error().message);
-                            } catch (...) {
-                            }
-                        }
-                    }
-                } catch (const std::exception& e) {
-                    spdlog::warn("preloadPreferredModelIfConfigured lambda error: {}", e.what());
-                } catch (...) {
-                    spdlog::warn("preloadPreferredModelIfConfigured lambda: unknown error");
-                }
-            });
-        } catch (const std::bad_weak_ptr& e) {
-            // Fall back to synchronous loading if shared_from_this() is not available
-            spdlog::warn("shared_from_this() not available for '{}', falling back to raw pointer "
-                         "model load: {}",
-                         preferred, e.what());
-
-            // Capture necessary members by value/pointer for the lambda
-            auto* provider = modelProvider_.get();
-            auto* readiness = &state_.readiness;
-
-            boost::asio::post(executor, [this, provider, readiness, preferred]() {
-                try {
-                    auto r = provider->loadModel(preferred);
-                    if (r) {
-                        readiness->modelProviderReady.store(true, std::memory_order_relaxed);
-                        readiness->modelLoadProgress.store(100, std::memory_order_relaxed);
-                        spdlog::info("Preferred model '{}' preloaded (fallback)", preferred);
-                        try {
-                            std::size_t dim = 0;
-                            try {
-                                dim = this->getEmbeddingDimension();
-                            } catch (...) {
-                            }
-                            this->embeddingFsm_.dispatch(
-                                ModelLoadedEvent{this->embeddingModelName_, dim});
-                        } catch (...) {
-                        }
-                    } else {
-#ifndef YAMS_USE_ONNX_RUNTIME
-                        spdlog::warn("ONNX runtime disabled in this build; model preloading not "
-                                     "supported by daemon binary");
-#endif
-                        spdlog::warn("Preferred model '{}' failed (fallback): {}", preferred,
-                                     r.error().message);
-                    }
-                } catch (const std::exception& e) {
-                    spdlog::warn("Model preload task (fallback) threw: {}", e.what());
-                } catch (...) {
-                    spdlog::warn("Model preload task (fallback) threw unknown exception");
-                }
-            });
-        }
-    } catch (const std::exception& e) {
-        spdlog::warn("preloadPreferredModelIfConfigured error: {}", e.what());
-    } catch (...) {
-        spdlog::warn("preloadPreferredModelIfConfigured: unknown error");
-    }
-}
-
-Result<size_t> ServiceManager::adoptSymbolExtractorsFromHosts() {
-    try {
-        size_t adopted = adoptPluginInterface<yams_symbol_extractor_v1, AbiSymbolExtractorAdapter,
-                                              AbiSymbolExtractorAdapter>(
-            abiHost_.get(), YAMS_IFACE_SYMBOL_EXTRACTOR_V1, YAMS_IFACE_SYMBOL_EXTRACTOR_V1_VERSION,
-            symbolExtractors_, [](const yams_symbol_extractor_v1* table) {
-                return table->abi_version == YAMS_IFACE_SYMBOL_EXTRACTOR_V1_VERSION;
-            });
-        return Result<size_t>(adopted);
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::Unknown, e.what()};
-    }
-}
-
-boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
-    // FSM-based guard: if embedding already loading or ready, skip duplicate init
-    if (embeddingFsm_.isLoadingOrReady()) {
-        spdlog::debug("[Rebuild] skip: embedding already loading or ready (FSM)");
         co_return;
     }
 
@@ -3552,7 +3480,7 @@ ServiceManager::co_initContentStore(boost::asio::any_io_executor exec,
         }
 
         auto uniqueStore = std::move(store).value();
-        contentStore_ = std::shared_ptr<yams::api::IContentStore>(std::move(uniqueStore));
+        contentStore_ = std::shared_ptr<yams::api::IContentStore>(uniqueStore.release());
         spdlog::info("[ServiceManager::co_initContentStore] Content store initialized");
         co_return yams::Result<void>{};
 

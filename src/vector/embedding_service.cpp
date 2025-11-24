@@ -8,7 +8,18 @@
 #include <span>
 #include <thread>
 #include <tuple>
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#else
 #include <unistd.h>
+#include <fcntl.h>
+#endif
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 #ifndef _WIN32
 #include <pthread.h> // For setting thread priority
 #endif
@@ -20,7 +31,9 @@
 #include <nlohmann/json.hpp>
 #include <cerrno>
 #include <fstream>
+#ifndef _WIN32
 #include <sys/resource.h>
+#endif
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/integrity/repair_utils.h>
@@ -35,12 +48,48 @@ namespace yams::vector {
 
 namespace fs = std::filesystem;
 
+
+
 namespace {
-// Simple RAII file lock helper stamped with PID/time (advisory fcntl lock)
+// Simple RAII file lock helper stamped with PID/time
 struct FileLock {
     int fd{-1};
     fs::path path;
+#ifdef _WIN32
+    HANDLE hFile = INVALID_HANDLE_VALUE;
+#endif
+
     explicit FileLock(const fs::path& p) : path(p) {
+#ifdef _WIN32
+        // Windows implementation
+        _sopen_s(&fd, path.string().c_str(), _O_CREAT | _O_RDWR | _O_BINARY, _SH_DENYNO, _S_IREAD | _S_IWRITE);
+        if (fd >= 0) {
+            hFile = (HANDLE)_get_osfhandle(fd);
+            if (hFile != INVALID_HANDLE_VALUE) {
+                OVERLAPPED overlapped = {0};
+                // LockFileEx is equivalent to fcntl locking
+                if (!LockFileEx(hFile, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, MAXDWORD, MAXDWORD, &overlapped)) {
+                    _close(fd);
+                    fd = -1;
+                    hFile = INVALID_HANDLE_VALUE;
+                } else {
+                    // Best-effort: stamp PID and time
+                    try {
+                        _chsize_s(fd, 0);
+                        std::string stamp = std::to_string(static_cast<long long>(_getpid())) + " " +
+                                            std::to_string(static_cast<long long>(::time(nullptr))) +
+                                            "\n";
+                        _write(fd, stamp.data(), static_cast<unsigned int>(stamp.size()));
+                        _lseek(fd, 0, SEEK_SET);
+                    } catch (...) {}
+                }
+            } else {
+                _close(fd);
+                fd = -1;
+            }
+        }
+#else
+        // POSIX implementation
         fd = ::open(path.c_str(), O_CREAT | O_RDWR, 0644);
         if (fd >= 0) {
             struct flock fl{};
@@ -64,10 +113,20 @@ struct FileLock {
                 }
             }
         }
+#endif
     }
+
     bool locked() const { return fd >= 0; }
+
     ~FileLock() {
         if (fd >= 0) {
+#ifdef _WIN32
+            if (hFile != INVALID_HANDLE_VALUE) {
+                OVERLAPPED overlapped = {0};
+                UnlockFileEx(hFile, 0, MAXDWORD, MAXDWORD, &overlapped);
+            }
+            _close(fd);
+#else
             struct flock fl{};
             fl.l_type = F_UNLCK;
             fl.l_whence = SEEK_SET;
@@ -75,6 +134,7 @@ struct FileLock {
             fl.l_len = 0;
             (void)fcntl(fd, F_SETLK, &fl);
             ::close(fd);
+#endif
         }
     }
 };

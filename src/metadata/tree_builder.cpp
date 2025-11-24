@@ -398,9 +398,9 @@ bool TreeBuilder::shouldExclude(std::string_view path, std::string_view root,
         fs::path normFs(normPath);
         fs::path rootFs{std::string(root)};
         auto rel = normFs.lexically_relative(rootFs);
-        if (!ec && !rel.empty() && rel.native() != ".") {
+        if (!ec && !rel.empty() && rel != fs::path(".")) {
             relativePath = rel.generic_string();
-        } else if (!rel.empty() && rel.native() == ".") {
+        } else if (!rel.empty() && rel == fs::path(".")) {
             relativePath.clear();
         } else {
             const std::string rootString = rootFs.generic_string();

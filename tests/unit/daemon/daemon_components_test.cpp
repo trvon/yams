@@ -15,12 +15,23 @@
 #include <optional>
 #include <set>
 #include <thread>
+#include <yams/compat/unistd.h>
+
 
 #include <yams/daemon/components/SocketServer.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/socket_utils.h>
 #include <yams/daemon/resource/resource_pool.h>
+
+#ifdef _WIN32
+inline int geteuid() {
+    return 1000;
+}
+inline int getuid() {
+    return 1000;
+}
+#endif
 
 using namespace yams::daemon;
 using namespace std::chrono_literals;
@@ -238,7 +249,7 @@ TEST_CASE("Socket path resolution: Priority ordering", "[daemon][components][soc
 
         auto xdgDir = tempDir / "runtime";
         fs::create_directories(xdgDir);
-        setenv("XDG_RUNTIME_DIR", xdgDir.c_str(), 1);
+        setenv("XDG_RUNTIME_DIR", xdgDir.string().c_str(), 1);
 
         auto result = socket_utils::resolve_socket_path();
         REQUIRE(result.parent_path() == xdgDir);
@@ -280,7 +291,7 @@ TEST_CASE("Socket path resolution: Config file reading", "[daemon][components][s
         out << "socket_path = \"/opt/yams/daemon.sock\"\n";
         out.close();
 
-        setenv("XDG_CONFIG_HOME", configBase.c_str(), 1);
+        setenv("XDG_CONFIG_HOME", configBase.string().c_str(), 1);
         unsetenv("YAMS_DAEMON_SOCKET");
 
         auto result = socket_utils::resolve_socket_path_config_first();
@@ -292,7 +303,7 @@ TEST_CASE("Socket path resolution: Config file reading", "[daemon][components][s
         out << "invalid toml content ][[\n";
         out.close();
 
-        setenv("XDG_CONFIG_HOME", configBase.c_str(), 1);
+        setenv("XDG_CONFIG_HOME", configBase.string().c_str(), 1);
         unsetenv("YAMS_DAEMON_SOCKET");
 
         // Should fall back to default resolution (doesn't crash)

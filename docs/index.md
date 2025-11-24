@@ -107,7 +107,7 @@ meson install -C build/release
 - Build tools: meson, ninja-build, cmake, pkg-config, conan
 - System libs: libssl-dev, libsqlite3-dev, protobuf-compiler
 
-See [BUILD-GCC.md](BUILD-GCC.md) for detailed build instructions, compiler configuration, Conan profiles, and troubleshooting.
+See [BUILD.md](BUILD.md) for detailed build instructions, compiler configuration, Conan profiles, and troubleshooting.
 
 ## Quick Start
 
@@ -161,7 +161,7 @@ YAMS provides comprehensive versioning through content-addressed storage. Every 
 
 ## Troubleshooting
 
-**Build issues:** See [BUILD-GCC.md](BUILD-GCC.md) for compiler setup, Conan profiles, and dependency resolution.
+**Build issues:** See [BUILD.md](BUILD.md) for compiler setup, Conan profiles, and dependency resolution.
 
 **Plugin discovery:** Verify with `yams plugin list`. If empty:
 

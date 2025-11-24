@@ -187,7 +187,11 @@ std::optional<ArchiveMetadata> extractUsingLibArchive(const std::filesystem::pat
     archive_read_support_filter_all(a);
     archive_read_support_format_all(a);
 
+#ifdef _WIN32
+    r = archive_read_open_filename_w(a, path.c_str(), 10240);
+#else
     r = archive_read_open_filename(a, path.c_str(), 10240);
+#endif
     if (r != ARCHIVE_OK) {
         archive_read_free(a);
         return std::nullopt;
@@ -255,13 +259,21 @@ std::optional<ArchiveMetadata> extractUsingLibArchive(const std::filesystem::pat
 std::optional<ArchiveMetadata> extractUsingUnzip(const std::filesystem::path& path) {
     std::string cmd = yams::fmt_format("unzip -l \"{}\" 2>/dev/null", path.string());
 
+#ifdef _WIN32
+    if (FILE* pipe = _popen(cmd.c_str(), "r")) {
+#else
     if (FILE* pipe = popen(cmd.c_str(), "r")) {
+#endif
         char buffer[4096];
         std::string result;
         while (fgets(buffer, sizeof(buffer), pipe)) {
             result += buffer;
         }
+#ifdef _WIN32
+        int status = _pclose(pipe);
+#else
         int status = pclose(pipe);
+#endif
 
         if (status == 0) {
             ArchiveMetadata metadata;

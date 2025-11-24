@@ -74,8 +74,8 @@ public:
     void debug_dump_snapshots(std::size_t max_entries = 10) const noexcept;
 
     // Event ingress (call on IO thread)
-    void on_accept(int fd);
-    void on_connect(int fd);
+    void on_accept(uint64_t fd);
+    void on_connect(uint64_t fd);
     void on_readable(std::size_t n);
     void on_writable(std::size_t n);
     void on_header_parsed(const FrameInfo& info);
@@ -133,7 +133,7 @@ private:
     // Non-throwing transition; returns true if applied, false if illegal/no-op.
     bool transition(State next, const char* reason) noexcept;
     State state_{State::Disconnected};
-    int fd_{-1};
+    uint64_t fd_{static_cast<uint64_t>(-1)};
     // PIMPL hides tinyfsm, metrics, and snapshot details from the header
     std::unique_ptr<Impl> impl_;
 };

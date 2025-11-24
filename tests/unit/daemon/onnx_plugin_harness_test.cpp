@@ -7,10 +7,11 @@
 #include <cstdlib>
 #include <filesystem>
 #include <future>
-#include <unistd.h> // For getpid()
 #include <catch2/catch_test_macros.hpp>
+#include <yams/compat/unistd.h> // For getpid()
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/plugins/model_provider_v1.h>
+
 
 namespace yams::daemon {
 namespace fs = std::filesystem;

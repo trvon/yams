@@ -18,6 +18,13 @@
 #include <cstdint>
 #include <span>
 #include <vector>
+#include <cstdlib>
+
+#ifdef _WIN32
+#define bswap32 _byteswap_ulong
+#else
+#define bswap32 __builtin_bswap32
+#endif
 
 namespace yams::daemon {
 
@@ -91,22 +98,22 @@ public:
         // Convert to network byte order
         void to_network() noexcept {
             if constexpr (std::endian::native != std::endian::big) {
-                magic = __builtin_bswap32(magic);
-                version = __builtin_bswap32(version);
-                payload_size = __builtin_bswap32(payload_size);
-                checksum = __builtin_bswap32(checksum);
-                flags = __builtin_bswap32(flags);
+                magic = bswap32(magic);
+                version = bswap32(version);
+                payload_size = bswap32(payload_size);
+                checksum = bswap32(checksum);
+                flags = bswap32(flags);
             }
         }
 
         // Convert from network byte order
         void from_network() noexcept {
             if constexpr (std::endian::native != std::endian::big) {
-                magic = __builtin_bswap32(magic);
-                version = __builtin_bswap32(version);
-                payload_size = __builtin_bswap32(payload_size);
-                checksum = __builtin_bswap32(checksum);
-                flags = __builtin_bswap32(flags);
+                magic = bswap32(magic);
+                version = bswap32(version);
+                payload_size = bswap32(payload_size);
+                checksum = bswap32(checksum);
+                flags = bswap32(flags);
             }
         }
 

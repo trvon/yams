@@ -221,7 +221,7 @@ public:
             dreq.oldest = getOldest_;
 
             // Output options
-            dreq.outputPath = outputPath_;
+            dreq.outputPath = outputPath_.string();
             dreq.metadataOnly = metadataOnly_;
             dreq.maxBytes = maxBytes_;
             dreq.chunkSize = static_cast<uint32_t>(chunkSize_);

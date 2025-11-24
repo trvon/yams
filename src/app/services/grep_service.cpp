@@ -70,7 +70,7 @@ struct PathTreeConfigSettings {
     std::string mode{"fallback"};
 };
 
-static constexpr auto toLower = [](unsigned char c) constexpr noexcept {
+static auto toLower = [](unsigned char c) noexcept {
     return static_cast<char>(std::tolower(c));
 };
 

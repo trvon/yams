@@ -1,10 +1,11 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
-#include <dlfcn.h>
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <yams/compat/dlfcn.h>
+
 
 #include <tree_sitter/api.h>
 

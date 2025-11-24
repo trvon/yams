@@ -1,10 +1,11 @@
 #include <cstring>
-#include <dlfcn.h>
 #include <filesystem>
 #include <optional>
 #include <string>
 #include <vector>
 #include <gtest/gtest.h>
+#include <yams/compat/dlfcn.h>
+
 
 #include "../common/plugins.h"
 #include <yams/plugins/abi.h>

@@ -4,9 +4,11 @@
 #include <spdlog/spdlog.h>
 
 #include <atomic>
+#include <array>
 #include <cstring>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <thread>
 
@@ -544,7 +546,7 @@ void PluginProcess::Impl::read_stderr_loop() {
 
             // Log stderr output
             std::string_view msg =
-                span_to_string_view(std::span{buffer.begin(), static_cast<size_t>(bytes_read)});
+                span_to_string_view(std::span<const std::byte>(buffer.data(), static_cast<size_t>(bytes_read)));
             spdlog::debug("Plugin stderr: {}", msg);
         } else {
             std::this_thread::sleep_for(std::chrono::milliseconds{10});

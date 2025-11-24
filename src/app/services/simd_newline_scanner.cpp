@@ -1,4 +1,7 @@
 #include <cstring>
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif
 #include <yams/app/services/simd_newline_scanner.hpp>
 
 namespace yams {
@@ -31,7 +34,12 @@ size_t SimdNewlineScanner::findNewlineAVX2(const char* data, size_t size) {
 
         if (mask != 0) {
             // Found at least one newline, find first one
+#ifdef _MSC_VER
+            unsigned long offset;
+            _BitScanForward(&offset, mask);
+#else
             int offset = __builtin_ctz(mask);
+#endif
             return static_cast<size_t>(ptr - data) + static_cast<size_t>(offset);
         }
 
@@ -90,7 +98,12 @@ size_t SimdNewlineScanner::findNewlineSSE2(const char* data, size_t size) {
 
         if (mask != 0) {
             // Found at least one newline, find the first one
+#ifdef _MSC_VER
+            unsigned long offset;
+            _BitScanForward(&offset, mask);
+#else
             int offset = __builtin_ctz(mask);
+#endif
             return static_cast<size_t>(ptr - data) + static_cast<size_t>(offset);
         }
 

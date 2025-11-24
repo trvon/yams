@@ -15,8 +15,9 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
-#include <unistd.h>
 #include <sys/wait.h>
+#include <yams/compat/unistd.h>
+
 
 namespace fs = std::filesystem;
 

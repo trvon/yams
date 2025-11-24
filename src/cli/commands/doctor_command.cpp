@@ -25,7 +25,51 @@
 
 extern "C" int sqlite3_vec_init(sqlite3* db, char** pzErrMsg, const sqlite3_api_routines* pApi);
 #include <cstdlib>
+#ifdef _WIN32
+#include <windows.h>
+#define RTLD_LAZY 0
+#define RTLD_LOCAL 0
+
+static void* dlopen(const char* filename, int flags) {
+    return LoadLibraryA(filename);
+}
+
+static void* dlopen(const wchar_t* filename, int flags) {
+    return LoadLibraryW(filename);
+}
+
+static void* dlsym(void* handle, const char* symbol) {
+    return (void*)GetProcAddress((HMODULE)handle, symbol);
+}
+
+static int dlclose(void* handle) {
+    return FreeLibrary((HMODULE)handle) ? 0 : -1;
+}
+
+static const char* dlerror() {
+    static char buf[128];
+    FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, GetLastError(),
+                   MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), buf, sizeof(buf), NULL);
+    return buf;
+}
+
+static int setenv(const char* name, const char* value, int overwrite) {
+    int errcode = 0;
+    if (!overwrite) {
+        size_t envsize = 0;
+        errcode = getenv_s(&envsize, NULL, 0, name);
+        if (errcode || envsize)
+            return errcode;
+    }
+    return _putenv_s(name, value);
+}
+static int unsetenv(const char* name) {
+    return _putenv_s(name, "");
+}
+#else
 #include <dlfcn.h>
+#include <unistd.h>
+#endif
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -36,7 +80,9 @@ extern "C" int sqlite3_vec_init(sqlite3* db, char** pzErrMsg, const sqlite3_api_
 #include <set>
 #include <string>
 #include <thread>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -1819,9 +1865,9 @@ private:
         namespace fs = std::filesystem;
         printHeader("Vector DB Schema (vec0 module)");
 
-        fs::path dbPath =
-            cli_ ? cli_->getDataPath() / "vectors.db"
-                 : fs::path(std::getenv("HOME") ?: "/tmp") / ".local/share/yams/vectors.db";
+        fs::path dbPath = cli_ ? cli_->getDataPath() / "vectors.db"
+                               : fs::path(std::getenv("HOME") ? std::getenv("HOME") : "/tmp") /
+                                     ".local/share/yams/vectors.db";
 
         if (!fs::exists(dbPath)) {
             printWarn("Vector database does not exist yet: " + dbPath.string());

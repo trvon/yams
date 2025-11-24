@@ -128,7 +128,7 @@ public:
                         }
 
                         // Use the filename as fileName; store actual CAS path in filePath
-                        docInfo.filePath = finalResult.storedPath;
+                        docInfo.filePath = finalResult.storedPath.string();
                         docInfo.fileName = filename;
                         docInfo.fileExtension = "";
                         auto dotPos = filename.rfind('.');

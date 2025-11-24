@@ -13,6 +13,15 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/vector/vector_index_manager.h>
 
+#ifdef _WIN32
+#include <process.h>
+using pid_t = int;
+#define getpid _getpid
+static int setenv(const char* name, const char* value, int overwrite) {
+    return _putenv_s(name, value);
+}
+#endif
+
 namespace yams::daemon::test {
 
 namespace fs = std::filesystem;

@@ -1,3 +1,4 @@
+#define _CRT_SECURE_NO_WARNINGS
 #include <yams/api/content_store_builder.h>
 #include <yams/api/content_store_error.h>
 #include <yams/chunking/streaming_chunker.h>

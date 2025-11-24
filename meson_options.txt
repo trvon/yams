@@ -11,7 +11,7 @@ option('cli11-cmake-path', type: 'string', value: '', description: 'Optional pat
 option('onnxruntime-cmake-path', type: 'string', value: '', description: 'Optional path to onnxruntime CMake package dir (e.g., /opt/homebrew/opt/onnxruntime/lib/cmake/onnxruntime). Used to augment cmake_module_path for ORT discovery in Meson.')
 option('build-plugins', type: 'boolean', value: true, description: 'Build plugins under plugins/')
 option('plugin-s3', type: 'boolean', value: true, description: 'Build object_storage_s3 plugin')
-option('plugin-pdf', type: 'boolean', value: true, description: 'Build PDF extractor plugin (requires pdfium and app/services)')
+option('plugin-pdf', type: 'boolean', value: false, description: 'Build PDF extractor plugin (requires pdfium and app/services)')
 option('plugin-onnx', type: 'boolean', value: true, description: 'Build ONNX plugin (requires onnxruntime and vector lib)')
 option('build-tests', type: 'boolean', value: false, description: 'Build unit/integration tests under tests/')
 option('build-fuzzers', type: 'boolean', value: false, description: 'Build fuzzing harnesses under tools/fuzzing/')

@@ -252,13 +252,13 @@ private:
             ++l;
         while (r > l && !std::isalnum(static_cast<unsigned char>(*(r - 1))))
             --r;
-        return std::string_view(l, static_cast<std::size_t>(r - l));
+        if (l >= r)
+            return {};
+        return sv.substr(std::distance(sv.begin(), l), std::distance(l, r));
     }
 
-    std::string normalize(std::string s) const {
-        std::string out = s;
-        if (_config.case_insensitive)
-            out = toLower(std::move(out));
+    static std::string normalize(std::string s) {
+        std::string out = toLower(std::move(s));
         auto view = trimPunctView(out);
         return std::string(view);
     }

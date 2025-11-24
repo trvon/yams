@@ -159,7 +159,7 @@ YamsCLI::YamsCLI(boost::asio::any_io_executor executor) : executor_(std::move(ex
 
     // We intentionally do not bind envname() here so we can enforce precedence (config > env > CLI)
     storageOpt_ = app_->add_option("--data-dir,--storage", dataPath_, "Data directory for storage")
-                      ->default_val(defaultDataPath);
+                      ->default_val(defaultDataPath.string());
 
     app_->add_flag("-v,--verbose", verbose_, "Enable verbose output");
     app_->add_flag("--json", jsonOutput_, "Output in JSON format");

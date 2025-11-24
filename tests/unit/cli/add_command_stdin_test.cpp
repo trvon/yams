@@ -5,6 +5,18 @@
 #include <string>
 #include <gtest/gtest.h>
 
+#ifdef _WIN32
+#include <process.h>
+#define WIFEXITED(x) ((x) != -1)
+#define WEXITSTATUS(x) (x)
+static int setenv(const char* name, const char* value, int overwrite) {
+    return _putenv_s(name, value);
+}
+#define getpid _getpid
+#else
+#include <sys/wait.h>
+#endif
+
 namespace fs = std::filesystem;
 
 TEST(AddCommand, ReadsFromPipedStdinAndStoresContent) {
@@ -12,7 +24,7 @@ TEST(AddCommand, ReadsFromPipedStdinAndStoresContent) {
 
     fs::path tmp = fs::temp_directory_path() / ("yams_add_stdin_" + std::to_string(::getpid()));
     fs::create_directories(tmp);
-    setenv("YAMS_DATA_DIR", tmp.c_str(), 1);
+    setenv("YAMS_DATA_DIR", tmp.string().c_str(), 1);
 
     fs::path in = tmp / "stdin.txt";
     {

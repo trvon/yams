@@ -1,6 +1,17 @@
 #include <gtest/gtest.h>
 #include <yams/search/hybrid_search_engine.h>
 
+#ifdef _WIN32
+#include <cstdlib>
+static int setenv(const char* name, const char* value, int overwrite) {
+    if (!overwrite && getenv(name))
+        return 0;
+    return _putenv_s(name, value);
+}
+#else
+#include <cstdlib>
+#endif
+
 using namespace yams;
 using namespace yams::search;
 

@@ -1,18 +1,18 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cmath>
+#include <filesystem>
 #include <fstream>
-#include <ranges>
-#include <string>
-#include <unordered_set>
+#include <iostream>
+#include <span>
+#include <vector>
 #include <yams/common/format.h>
 #include <yams/content/binary_content_handler.h>
-#include <yams/detection/file_type_detector.h>
+#include <yams/core/types.h>
 
 namespace yams::content {
-
-BinaryContentHandler::BinaryContentHandler(BinaryProcessingConfig config)
-    : binaryConfig_{std::move(config)} {}
 
 std::vector<std::string> BinaryContentHandler::supportedMimeTypes() const {
     return {"*/*", "application/octet-stream"};
@@ -38,6 +38,9 @@ Result<void> BinaryContentHandler::validate(const std::filesystem::path& path) c
 
     return Result<void>{};
 }
+
+BinaryContentHandler::BinaryContentHandler(BinaryProcessingConfig config)
+    : binaryConfig_(std::move(config)) {}
 
 Result<ContentResult> BinaryContentHandler::process(const std::filesystem::path& path,
                                                     const ContentConfig& config) {
@@ -372,7 +375,8 @@ void BinaryContentHandler::extractFileMetadata(const std::filesystem::path& path
         auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
             lastWrite - std::filesystem::file_time_type::clock::now() +
             std::chrono::system_clock::now());
-        result.metadata["last_modified"] = yams::fmt_format("{:%Y-%m-%d %H:%M:%S}", sctp);
+        result.metadata["last_modified"] =
+            std::string(yams::fmt_format("{:%Y-%m-%d %H:%M:%S}", sctp));
 
     } catch (const std::filesystem::filesystem_error& e) {
         spdlog::warn("Failed to extract file metadata for {}: {}", path.string(), e.what());

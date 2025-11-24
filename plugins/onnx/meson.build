@@ -128,7 +128,7 @@ endif
 yams_onnx_plugin = shared_module('yams_onnx_plugin',
   yams_onnx_plugin_srcs,
   include_directories: [ include_directories('../../include') ],
-  dependencies: [onnx_dep, spdlog_dep, json_dep, yams_core, yams_vector],
+  dependencies: [onnx_dep, spdlog_dep, json_dep, yams_core, yams_vector, dependency('yams_daemon_client')],
   cpp_args: plugin_cppargs,
   install: true,
   install_dir: plugins_dir,

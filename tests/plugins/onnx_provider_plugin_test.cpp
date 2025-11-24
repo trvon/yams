@@ -1,9 +1,11 @@
 #include <nlohmann/json.hpp>
-#include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
 #include <string>
 #include <gtest/gtest.h>
+#include <yams/compat/dlfcn.h>
+#include <yams/compat/unistd.h>
+
 extern "C" {
 #include <yams/plugins/abi.h>
 #include <yams/plugins/model_provider_v1.h>
@@ -69,7 +71,7 @@ TEST(OnnxProviderPluginTest, ConfigPreloadParsingAndReady) {
     std::ofstream(tmp / "yams" / "config.toml")
         << "[plugins.onnx]\npreload=\"a,b\"\n\n[plugins.onnx.models.sentiment]\n"
         << "task=\"sentiment\"\n";
-    setenv("XDG_CONFIG_HOME", tmp.c_str(), 1);
+    setenv("XDG_CONFIG_HOME", tmp.string().c_str(), 1);
     setenv("YAMS_SKIP_MODEL_LOADING", "1", 1);
 
     void* h = nullptr;

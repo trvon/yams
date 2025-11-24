@@ -332,7 +332,7 @@ std::vector<TextSection> PdfExtractor::extractSections(const std::string& text) 
     std::vector<TextSection> sections;
 
     // Common section patterns in academic papers
-    std::regex sectionRegex("^\\s*(?:"
+    std::regex sectionRegex("(?:^|\\n)\\s*(?:"
                             "(?:\\d+\\.?\\s+)|"   // Numbered sections (1. or 1)
                             "(?:[IVX]+\\.?\\s+)|" // Roman numerals
                             "(?:[A-Z]\\.?\\s+)"   // Letter sections
@@ -341,7 +341,7 @@ std::vector<TextSection> PdfExtractor::extractSections(const std::string& text) 
                             "Related Work|Methodology|Methods|"
                             "Results|Discussion|Conclusion|References|"
                             "Appendix|Acknowledgments)",
-                            std::regex::icase | std::regex::multiline);
+                            std::regex::icase);
 
     std::string::const_iterator searchStart(text.cbegin());
     std::smatch match;

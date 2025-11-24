@@ -6,6 +6,7 @@
 #include <random>
 #include <unordered_map>
 #include <unordered_set>
+#include <array>
 #include <yams/compression/integrity_validator.h>
 
 namespace yams::compression {

@@ -36,6 +36,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <yams/compat/unistd.h>
+
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;

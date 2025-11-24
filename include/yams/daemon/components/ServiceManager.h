@@ -341,7 +341,7 @@ public:
     boost::asio::awaitable<Result<size_t>> autoloadPluginsNow();
     // Attempt to preload preferred model if a model provider is available.
     // Preferred model is resolved from env (YAMS_PREFERRED_MODEL) or by scanning ~/.yams/models.
-    void preloadPreferredModelIfConfigured();
+    boost::asio::awaitable<void> preloadPreferredModelIfConfigured();
 
     // Helper method to resolve the preferred model from env, config, or auto-detection
     std::string resolvePreferredModel() const;

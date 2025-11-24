@@ -192,7 +192,7 @@ protected:
         testDoc1_.id = 1;
         testDoc1_.sha256Hash = "abc123def456";
         testDoc1_.fileName = "test1.txt";
-        testDoc1_.filePath = testDir_ / "test1.txt";
+        testDoc1_.filePath = (testDir_ / "test1.txt").string();
         testDoc1_.fileSize = 1024;
         testDoc1_.indexedTime =
             std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
@@ -200,7 +200,7 @@ protected:
         testDoc2_.id = 2;
         testDoc2_.sha256Hash = "789xyz012";
         testDoc2_.fileName = "test2.md";
-        testDoc2_.filePath = testDir_ / "test2.md";
+        testDoc2_.filePath = (testDir_ / "test2.md").string();
         testDoc2_.fileSize = 2048;
         testDoc2_.indexedTime =
             std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());

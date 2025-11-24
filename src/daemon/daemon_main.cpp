@@ -13,14 +13,18 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <yams/compat/unistd.h>
 #include <yams/config/config_migration.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 
+
 // POSIX headers for daemonization
+#ifndef _WIN32
 #include <fcntl.h>     // for open(), O_RDONLY, O_RDWR
 #include <unistd.h>    // for fork(), setsid(), chdir(), close()
 #include <sys/types.h> // for pid_t
+#endif
 
 // Fatal signal/backtrace support
 #include <chrono>
@@ -598,10 +602,10 @@ int main(int argc, char* argv[]) {
                     // Expand ~ to home directory
                     if (!dataDir.empty() && dataDir[0] == '~') {
                         if (const char* homeEnv = std::getenv("HOME")) {
-                            dataDir = fs::path(homeEnv) / dataDir.substr(2);
+                            dataDir = (fs::path(homeEnv) / dataDir.substr(2)).string();
                         }
                     }
-                    config.dataDir = fs::path(dataDir);
+                    config.dataDir = fs::path(dataDir).string();
                 }
             }
         }
@@ -729,6 +733,9 @@ int main(int argc, char* argv[]) {
 
     // Daemonize if not running in foreground
     if (!foreground) {
+#ifdef _WIN32
+        spdlog::warn("Daemon mode not supported on Windows; running in foreground.");
+#else
         pid_t pid = fork();
         if (pid < 0) {
             std::cerr << "Failed to fork daemon process\n";
@@ -762,6 +769,7 @@ int main(int argc, char* argv[]) {
         open("/dev/null", O_RDONLY); // stdin
         open("/dev/null", O_RDWR);   // stdout
         open("/dev/null", O_RDWR);   // stderr
+#endif
     }
 
     try {

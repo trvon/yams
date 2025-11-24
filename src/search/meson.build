@@ -42,5 +42,6 @@ pkg.generate(yams_search,
 yams_search_dep = declare_dependency(
   link_with: yams_search,
   include_directories: include_directories('../../include'),
+  dependencies: [yams_core, yams_metadata, yams_vector, nlohmann_json_dep, spdlog_dep],
 )
 meson.override_dependency('yams_search', yams_search_dep)

@@ -2,13 +2,16 @@
 // Validates graceful/force shutdown, timing, idempotency, and in-flight operations
 
 #define CATCH_CONFIG_MAIN
+#include <spdlog/spdlog.h>
 #include <atomic>
 #include <thread>
 #include "test_async_helpers.h"
 #include "test_daemon_harness.h"
 #include <catch2/catch_session.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <yams/compat/unistd.h>
 #include <yams/daemon/client/daemon_client.h>
+
 
 using namespace yams::daemon;
 using namespace yams::test;
