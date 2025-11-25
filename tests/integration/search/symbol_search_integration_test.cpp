@@ -8,7 +8,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include <yams/compat/unistd.h>
 
-
 #include <yams/app/services/services.hpp>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/ServiceManager.h>

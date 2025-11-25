@@ -107,7 +107,7 @@ RequestDispatcher::handleGenerateEmbeddingRequest(const GenerateEmbeddingRequest
         co_return resp;
     } catch (const std::exception& e) {
         co_return makeErrorResponse(ErrorCode::InternalError,
-                            std::string("Embedding generation failed: ") + e.what());
+                                    std::string("Embedding generation failed: ") + e.what());
     }
 }
 
@@ -184,7 +184,7 @@ RequestDispatcher::handleBatchEmbeddingRequest(const BatchEmbeddingRequest& req)
         co_return resp;
     } catch (const std::exception& e) {
         co_return makeErrorResponse(ErrorCode::InternalError,
-                            std::string("Batch embedding failed: ") + e.what());
+                                    std::string("Batch embedding failed: ") + e.what());
     }
 }
 

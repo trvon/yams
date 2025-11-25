@@ -332,13 +332,13 @@ public:
         configure_common(curl, timeout, tls, proxy, /*followRedirects=*/true);
 
         CURLcode rc = curl_easy_perform(curl);
-        
+
         // Log HTTP status for debugging
         long http_status = 0;
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
-        spdlog::debug("HTTP probe: url={}, CURLcode={} ({}), HTTP status={}", 
-                     url, static_cast<int>(rc), curl_easy_strerror(rc), http_status);
-        
+        spdlog::debug("HTTP probe: url={}, CURLcode={} ({}), HTTP status={}", url,
+                      static_cast<int>(rc), curl_easy_strerror(rc), http_status);
+
         if (rc != CURLE_OK) {
             // Some servers reject HEAD; try GET range 0-0 as fallback
             spdlog::debug("HEAD probe failed ({}), attempting GET Range 0-0",

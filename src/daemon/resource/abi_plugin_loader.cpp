@@ -473,7 +473,8 @@ bool AbiPluginLoader::isTrusted(const std::filesystem::path& p) const {
             if (const char* localAppData = std::getenv("LOCALAPPDATA"))
                 defaults.push_back(std::filesystem::path(localAppData) / "yams" / "plugins");
             else if (const char* userProfile = std::getenv("USERPROFILE"))
-                defaults.push_back(std::filesystem::path(userProfile) / "AppData" / "Local" / "yams" / "plugins");
+                defaults.push_back(std::filesystem::path(userProfile) / "AppData" / "Local" /
+                                   "yams" / "plugins");
 #else
             if (const char* home = std::getenv("HOME"))
                 defaults.push_back(std::filesystem::path(home) / ".local" / "lib" / "yams" /

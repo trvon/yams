@@ -84,7 +84,8 @@ void setup_fatal_handlers() {
         // Log before exit so we can diagnose spurious signals
         try {
             spdlog::warn("SIGTERM received, requesting shutdown");
-        } catch (...) {}
+        } catch (...) {
+        }
         g_shutdown_requested.store(true, std::memory_order_relaxed);
     });
 #endif
@@ -93,7 +94,8 @@ void setup_fatal_handlers() {
         // Log before exit so we can diagnose spurious signals
         try {
             spdlog::warn("SIGINT received, requesting shutdown");
-        } catch (...) {}
+        } catch (...) {
+        }
         g_shutdown_requested.store(true, std::memory_order_relaxed);
     });
 #endif
@@ -808,8 +810,9 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        spdlog::info("Entering main loop: isRunning={}, isStopRequested={}, g_shutdown_requested={}",
-                     daemon.isRunning(), daemon.isStopRequested(), g_shutdown_requested.load());
+        spdlog::info(
+            "Entering main loop: isRunning={}, isStopRequested={}, g_shutdown_requested={}",
+            daemon.isRunning(), daemon.isStopRequested(), g_shutdown_requested.load());
 
         // Monitor signal flags and translate to daemon stop requests
         std::atomic<bool> watcherRunning{true};
@@ -843,16 +846,16 @@ int main(int argc, char* argv[]) {
         // Run the main daemon loop on this thread (handles FSM ticks, metrics refresh, etc.)
         // The loop exits when stopRequested is set (via signal handler or daemon.stop())
         spdlog::info("Calling daemon.runLoop()...");
-        spdlog::default_logger()->flush();  // Flush before potentially crashing call
+        spdlog::default_logger()->flush(); // Flush before potentially crashing call
         daemon.runLoop();
         spdlog::info("daemon.runLoop() returned");
-        
+
         // Stop the watcher thread
         watcherRunning.store(false, std::memory_order_relaxed);
         if (signalWatcher.joinable()) {
             signalWatcher.join();
         }
-        
+
         // Log reason for exit
         spdlog::info("Main loop exiting: isRunning={}, isStopRequested={}, g_shutdown_requested={}",
                      daemon.isRunning(), daemon.isStopRequested(), g_shutdown_requested.load());

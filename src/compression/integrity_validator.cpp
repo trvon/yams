@@ -1,12 +1,12 @@
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <mutex>
 #include <random>
 #include <unordered_map>
 #include <unordered_set>
-#include <array>
 #include <yams/compression/integrity_validator.h>
 
 namespace yams::compression {

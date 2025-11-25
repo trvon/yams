@@ -10,7 +10,8 @@ const std::vector<std::filesystem::path>& defaultAbiPluginDirs() noexcept {
         if (const char* localAppData = std::getenv("LOCALAPPDATA"))
             d.push_back(std::filesystem::path(localAppData) / "yams" / "plugins");
         else if (const char* userProfile = std::getenv("USERPROFILE"))
-            d.push_back(std::filesystem::path(userProfile) / "AppData" / "Local" / "yams" / "plugins");
+            d.push_back(std::filesystem::path(userProfile) / "AppData" / "Local" / "yams" /
+                        "plugins");
 #else
         if (const char* home = std::getenv("HOME"))
             d.push_back(std::filesystem::path(home) / ".local" / "lib" / "yams" / "plugins");

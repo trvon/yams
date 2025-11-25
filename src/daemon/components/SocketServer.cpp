@@ -143,7 +143,8 @@ Result<void> SocketServer::start() {
         acceptor_->listen(boost::asio::socket_base::max_listen_connections);
 
 #ifndef _WIN32
-        // Set socket permissions on Unix (Windows Unix sockets don't support filesystem permissions)
+        // Set socket permissions on Unix (Windows Unix sockets don't support filesystem
+        // permissions)
         std::filesystem::permissions(sockPath, std::filesystem::perms::owner_all |
                                                    std::filesystem::perms::group_read |
                                                    std::filesystem::perms::group_write);

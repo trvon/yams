@@ -54,10 +54,10 @@ public:
 
         bool operator==(const Iterator& other) const noexcept;
         bool operator!=(const Iterator& other) const noexcept;
-        
+
         Iterator& operator++();
         Iterator operator++(int);
-        
+
         std::optional<WALEntry> operator*() const;
 
     private:

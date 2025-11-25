@@ -1,10 +1,10 @@
 #pragma once
 
 #ifdef _WIN32
+#include <direct.h>
+#include <io.h>
 #include <process.h> // for _getpid
 #include <stdlib.h>
-#include <io.h>
-#include <direct.h>
 
 #define getpid _getpid
 #define access _access
@@ -12,7 +12,8 @@
 
 // setenv/unsetenv shims
 inline int setenv(const char* name, const char* value, int overwrite) {
-    if (!overwrite && getenv(name)) return 0;
+    if (!overwrite && getenv(name))
+        return 0;
     return _putenv_s(name, value);
 }
 

@@ -8,7 +8,6 @@
 #include <yams/app/services/session_service.hpp>
 #include <yams/compat/unistd.h>
 
-
 using namespace yams::app::services;
 
 namespace {

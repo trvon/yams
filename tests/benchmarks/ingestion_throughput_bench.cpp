@@ -17,7 +17,6 @@
 #include <vector>
 #include <yams/compat/unistd.h>
 
-
 #include <nlohmann/json.hpp>
 #include <numeric>
 #include <unordered_map>

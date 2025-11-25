@@ -5,8 +5,8 @@
 #include <yams/downloader/downloader.hpp>
 #include <yams/vector/vector_database.h>
 
-#include <fmt/format.h>
 #include <spdlog/spdlog.h>
+#include <fmt/format.h>
 
 #include <atomic>
 #include <chrono>
@@ -856,12 +856,18 @@ private:
             auto onProgress = [&label, &lastLen](const yams::downloader::ProgressEvent& ev) {
                 auto stageName = [](yams::downloader::ProgressStage s) {
                     switch (s) {
-                        case yams::downloader::ProgressStage::Resolving: return "resolving";
-                        case yams::downloader::ProgressStage::Connecting: return "connecting";
-                        case yams::downloader::ProgressStage::Downloading: return "downloading";
-                        case yams::downloader::ProgressStage::Verifying: return "verifying";
-                        case yams::downloader::ProgressStage::Finalizing: return "finalizing";
-                        default: return "";
+                        case yams::downloader::ProgressStage::Resolving:
+                            return "resolving";
+                        case yams::downloader::ProgressStage::Connecting:
+                            return "connecting";
+                        case yams::downloader::ProgressStage::Downloading:
+                            return "downloading";
+                        case yams::downloader::ProgressStage::Verifying:
+                            return "verifying";
+                        case yams::downloader::ProgressStage::Finalizing:
+                            return "finalizing";
+                        default:
+                            return "";
                     }
                 };
                 float pct = ev.percentage.value_or(0.0f);
@@ -869,11 +875,11 @@ private:
                 std::string content;
                 if (ev.totalBytes) {
                     double total_mb = static_cast<double>(*ev.totalBytes) / (1024.0 * 1024.0);
-                    content = fmt::format("  {} {:11s} {:3.0f}% [{:.1f}/{:.1f} MB]",
-                                          label, stageName(ev.stage), pct, done_mb, total_mb);
+                    content = fmt::format("  {} {:11s} {:3.0f}% [{:.1f}/{:.1f} MB]", label,
+                                          stageName(ev.stage), pct, done_mb, total_mb);
                 } else {
-                    content = fmt::format("  {} {:11s} [{:.1f} MB]",
-                                          label, stageName(ev.stage), done_mb);
+                    content =
+                        fmt::format("  {} {:11s} [{:.1f} MB]", label, stageName(ev.stage), done_mb);
                 }
                 std::string out = "\r" + content;
                 if (lastLen > content.size())
@@ -889,9 +895,9 @@ private:
 
             auto res = manager->download(req, onProgress, [] { return false; }, {});
             if (!res.ok() || !res.value().success) {
-                std::string msg = res.ok() 
-                    ? (res.value().error ? res.value().error->message : "download failed")
-                    : res.error().message;
+                std::string msg =
+                    res.ok() ? (res.value().error ? res.value().error->message : "download failed")
+                             : res.error().message;
                 return Error{ErrorCode::InternalError, label + ": " + msg};
             }
             return Result<void>{};
@@ -899,8 +905,10 @@ private:
 
         // Map model name to HuggingFace repo
         auto getHfRepo = [](const std::string& name) -> std::string {
-            if (name == "all-MiniLM-L6-v2") return "sentence-transformers/all-MiniLM-L6-v2";
-            if (name == "all-mpnet-base-v2") return "sentence-transformers/all-mpnet-base-v2";
+            if (name == "all-MiniLM-L6-v2")
+                return "sentence-transformers/all-MiniLM-L6-v2";
+            if (name == "all-mpnet-base-v2")
+                return "sentence-transformers/all-mpnet-base-v2";
             return "";
         };
 
@@ -930,8 +938,7 @@ private:
         std::vector<std::pair<std::string, std::string>> companions = {
             {"config.json", "config.json"},
             {"tokenizer.json", "tokenizer.json"},
-            {"sentence_bert_config.json", "sentence_bert_config.json"}
-        };
+            {"sentence_bert_config.json", "sentence_bert_config.json"}};
         for (const auto& [filename, localName] : companions) {
             std::string url = "https://huggingface.co/" + repo + "/resolve/main/" + filename;
             (void)downloadFile(url, outputDir / localName, filename);
@@ -973,15 +980,14 @@ private:
         // Check if model already exists
         fs::path modelDir = dataPath / "models" / selectedModel.name;
         fs::path modelPath = modelDir / "model.onnx";
-        
+
         if (fs::exists(modelPath)) {
             std::cout << "\nModel already downloaded at: " << modelPath.string() << "\n";
         } else {
             // Ask if user wants to download now
-            bool downloadNow = prompt_yes_no(
-                "\nDownload the model now? [Y/n]: ",
-                YesNoOptions{.defaultYes = true});
-            
+            bool downloadNow = prompt_yes_no("\nDownload the model now? [Y/n]: ",
+                                             YesNoOptions{.defaultYes = true});
+
             if (downloadNow) {
                 auto result = downloadModelFiles(selectedModel, modelDir);
                 if (!result) {

@@ -1,24 +1,24 @@
-#include <yams/wal/wal_file.h>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <cstring>
 #include <filesystem>
 #include <vector>
-#include <cstring>
+#include <yams/wal/wal_file.h>
 
 #ifdef _WIN32
 #define NOMINMAX
 #define _CRT_SECURE_NO_WARNINGS
-#include <windows.h>
-#include <io.h>
 #include <fcntl.h>
+#include <io.h>
+#include <windows.h>
 #include <sys/stat.h>
 #define fstat _fstat64
 #define stat _stat64
 #else
 #include <fcntl.h>
+#include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <unistd.h>
 #endif
 
 namespace yams::wal {
@@ -41,7 +41,8 @@ struct WALFile::Impl {
         if (mappedMemory) {
 #ifdef _WIN32
             UnmapViewOfFile(mappedMemory);
-            if (mappingHandle) CloseHandle(mappingHandle);
+            if (mappingHandle)
+                CloseHandle(mappingHandle);
 #else
             munmap(mappedMemory, mappedSize);
 #endif
@@ -93,7 +94,7 @@ struct WALFile::Impl {
 
         DWORD protect = (mode == Mode::Read) ? PAGE_READONLY : PAGE_READWRITE;
         DWORD access = (mode == Mode::Read) ? FILE_MAP_READ : FILE_MAP_WRITE;
-        
+
         // CreateFileMapping expects size in high/low DWORDs. For < 4GB, high is 0.
         mappingHandle = CreateFileMapping(hFile, NULL, protect, 0, (DWORD)mappedSize, NULL);
         if (!mappingHandle) {
@@ -144,7 +145,8 @@ struct WALFile::Impl {
         if (mappedMemory) {
 #ifdef _WIN32
             UnmapViewOfFile(mappedMemory);
-            if (mappingHandle) CloseHandle(mappingHandle);
+            if (mappingHandle)
+                CloseHandle(mappingHandle);
             mappingHandle = NULL;
 #else
             munmap(mappedMemory, mappedSize);
@@ -170,8 +172,8 @@ struct WALFile::Impl {
         DWORD protect = PAGE_READWRITE;
         mappingHandle = CreateFileMapping(hFile, NULL, protect, 0, (DWORD)mappedSize, NULL);
         if (!mappingHandle) {
-             spdlog::error("CreateFileMapping failed: {}", GetLastError());
-             return Result<void>(ErrorCode::Unknown);
+            spdlog::error("CreateFileMapping failed: {}", GetLastError());
+            return Result<void>(ErrorCode::Unknown);
         }
         mappedMemory = MapViewOfFile(mappingHandle, FILE_MAP_WRITE, 0, 0, mappedSize);
         if (!mappedMemory) {
@@ -223,7 +225,7 @@ Result<void> WALFile::open() {
             break;
     }
     flags |= _O_BINARY;
-    
+
     // Open file
     pImpl->fd = _wopen(pImpl->path.c_str(), flags, _S_IREAD | _S_IWRITE);
 #else
@@ -326,7 +328,8 @@ Result<size_t> WALFile::append(const WALEntry& entry) {
     }
 
     // Write to mapped memory
-    std::memcpy(static_cast<uint8_t*>(pImpl->mappedMemory) + pImpl->writePos, serialized.data(), serialized.size());
+    std::memcpy(static_cast<uint8_t*>(pImpl->mappedMemory) + pImpl->writePos, serialized.data(),
+                serialized.size());
 
     pImpl->writePos += serialized.size();
     pImpl->fileSize = pImpl->writePos;
@@ -394,7 +397,8 @@ struct WALFile::Iterator::Impl {
 
         // Read header
         WALEntry::Header header;
-        std::memcpy(&header, static_cast<uint8_t*>(file->pImpl->mappedMemory) + position, sizeof(header));
+        std::memcpy(&header, static_cast<uint8_t*>(file->pImpl->mappedMemory) + position,
+                    sizeof(header));
 
         // Validate header
         if (!header.isValid()) {
@@ -409,7 +413,9 @@ struct WALFile::Iterator::Impl {
 
         // Deserialize entry
         std::span<const std::byte> entryData(
-            reinterpret_cast<const std::byte*>(static_cast<uint8_t*>(file->pImpl->mappedMemory) + position), entrySize);
+            reinterpret_cast<const std::byte*>(static_cast<uint8_t*>(file->pImpl->mappedMemory) +
+                                               position),
+            entrySize);
 
         auto entry = WALEntry::deserialize(entryData);
         if (entry) {

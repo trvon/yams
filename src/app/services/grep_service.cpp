@@ -70,9 +70,7 @@ struct PathTreeConfigSettings {
     std::string mode{"fallback"};
 };
 
-static auto toLower = [](unsigned char c) noexcept {
-    return static_cast<char>(std::tolower(c));
-};
+static auto toLower = [](unsigned char c) noexcept { return static_cast<char>(std::tolower(c)); };
 
 static std::string toLowerCopy(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), toLower);

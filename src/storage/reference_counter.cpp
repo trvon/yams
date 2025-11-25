@@ -109,7 +109,8 @@ static std::filesystem::path findReferenceSchemaSql() {
             fs::path exePath(path);
             // Check relative to binary directory (for development/build)
             searchPaths.push_back(exePath.parent_path() / "sql" / "reference_schema.sql");
-            searchPaths.push_back(exePath.parent_path().parent_path() / "sql" / "reference_schema.sql");
+            searchPaths.push_back(exePath.parent_path().parent_path() / "sql" /
+                                  "reference_schema.sql");
             // Check ../share/yams/sql relative to binary (for installed binaries)
             searchPaths.push_back(exePath.parent_path().parent_path() / "share" / "yams" / "sql" /
                                   "reference_schema.sql");

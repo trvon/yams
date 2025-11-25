@@ -17,7 +17,6 @@
 #include <thread>
 #include <yams/compat/unistd.h>
 
-
 #include <yams/daemon/components/SocketServer.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/WorkCoordinator.h>

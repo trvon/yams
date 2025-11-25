@@ -5,7 +5,6 @@
 #include <gtest/gtest.h>
 #include <yams/compat/dlfcn.h>
 
-
 #include "../common/plugins.h"
 #include <yams/plugins/symbol_extractor_v1.h>
 
