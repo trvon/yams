@@ -1,6 +1,7 @@
 #include <yams/cli/command.h>
 #include <yams/cli/prompt_util.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
 #include <yams/downloader/downloader.hpp>
 #include <yams/vector/vector_database.h>
@@ -84,16 +85,11 @@ public:
 
     Result<void> execute() override {
         try {
-            // 1) Resolve directories using XDG Base Directory specification
+            // 1) Resolve directories using platform-specific helpers
             auto dataPath = cli_->getDataPath();
-            auto homeEnv = std::getenv("HOME");
-            fs::path homeDir = homeEnv ? fs::path(homeEnv) : fs::current_path();
 
-            // Use XDG_CONFIG_HOME if set, otherwise ~/.config
-            auto xdgConfigEnv = std::getenv("XDG_CONFIG_HOME");
-            fs::path configHome = xdgConfigEnv ? fs::path(xdgConfigEnv) : (homeDir / ".config");
-
-            fs::path configDir = configHome / "yams";
+            // Use platform-specific config directory
+            fs::path configDir = yams::config::get_config_dir();
             fs::path keysDir = configDir / "keys";
             fs::path configPath = configDir / "config.toml";
 

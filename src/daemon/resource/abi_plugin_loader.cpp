@@ -22,7 +22,12 @@ static int dlclose(void* handle) {
 
 static const char* dlerror() {
     static char buf[128];
-    FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, GetLastError(),
+    DWORD err = GetLastError();
+    SetLastError(0); // Clear the error (like Unix dlerror())
+    if (err == 0) {
+        return nullptr; // No error, like Unix dlerror()
+    }
+    FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, err,
                    MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), buf, sizeof(buf), NULL);
     return buf;
 }

@@ -344,6 +344,23 @@ void YamsDaemon::runLoop() {
 #if defined(TRACY_ENABLE)
         YAMS_FRAME_MARK_START("daemon_tick");
 #endif
+        // Check for external signals (shutdown, plugin reload, etc.) via hook
+        // This replaces the separate signal watcher thread to avoid thread exhaustion
+        if (signalCheckHook_) {
+            try {
+                if (signalCheckHook_()) {
+                    // Hook requested shutdown
+                    lifecycleFsm_.dispatch(ShutdownRequestedEvent{});
+#if defined(TRACY_ENABLE)
+                    YAMS_FRAME_MARK_END("daemon_tick");
+#endif
+                    break;
+                }
+            } catch (...) {
+                // Ignore hook errors
+            }
+        }
+        
         // Allow tuning of the main loop tick for metrics refresh and readiness nudges.
         // Read each iteration so env changes take effect without restart.
         uint32_t tick_ms = TuneAdvisor::statusTickMs();

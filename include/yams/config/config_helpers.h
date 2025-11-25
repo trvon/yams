@@ -78,6 +78,30 @@ std::string parse_config_value(const std::filesystem::path& config_path, const s
 // Get standard config path
 std::filesystem::path get_config_path(const std::string& override_path = "");
 
+// Platform-specific directory resolution (follows OS best practices)
+// Windows: APPDATA (roaming) for config, LOCALAPPDATA for data/cache/runtime
+// Unix/macOS: XDG Base Directory Specification
+
+/// Returns the user config directory
+/// Windows: %APPDATA%\yams
+/// Unix: $XDG_CONFIG_HOME/yams or ~/.config/yams
+std::filesystem::path get_config_dir();
+
+/// Returns the user data directory (databases, indices, persistent storage)
+/// Windows: %LOCALAPPDATA%\yams
+/// Unix: $XDG_DATA_HOME/yams or ~/.local/share/yams
+std::filesystem::path get_data_dir();
+
+/// Returns the user cache directory (temporary files, caches)
+/// Windows: %LOCALAPPDATA%\yams\cache
+/// Unix: $XDG_CACHE_HOME/yams or ~/.cache/yams
+std::filesystem::path get_cache_dir();
+
+/// Returns the runtime directory (sockets, PIDs, ephemeral files)
+/// Windows: %LOCALAPPDATA%\yams
+/// Unix: $XDG_RUNTIME_DIR/yams or /tmp/yams-$UID
+std::filesystem::path get_runtime_dir();
+
 // Daemon-specific config resolution (env → config → defaults)
 std::filesystem::path resolve_socket_path_from_config();
 std::filesystem::path resolve_data_dir_from_config();

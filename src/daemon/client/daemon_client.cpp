@@ -8,6 +8,8 @@
 #include <yams/daemon/ipc/message_framing.h>
 #include <yams/daemon/ipc/socket_utils.h>
 
+#include <yams/config/config_helpers.h>
+
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
@@ -120,15 +122,8 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_unique<
                 fs::path cfgPath;
                 if (const char* cfgEnv = std::getenv("YAMS_CONFIG"); cfgEnv && *cfgEnv) {
                     cfgPath = fs::path(cfgEnv);
-#ifdef _WIN32
-                } else if (const char* appData = std::getenv("APPDATA")) {
-                    cfgPath = fs::path(appData) / "yams" / "config.toml";
-#else
-                } else if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
-                    cfgPath = fs::path(xdg) / "yams" / "config.toml";
-                } else if (const char* home = std::getenv("HOME")) {
-                    cfgPath = fs::path(home) / ".config" / "yams" / "config.toml";
-#endif
+                } else {
+                    cfgPath = yams::config::get_config_path();
                 }
 
                 if (!cfgPath.empty() && fs::exists(cfgPath)) {
@@ -1555,13 +1550,13 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
 
 #ifdef _WIN32
     // Windows implementation using CreateProcess
-    
-    // Determine config file path (env override > APPDATA)
+
+    // Determine config file path (env override > platform default)
     std::string configPath;
     if (const char* cfgEnv = std::getenv("YAMS_CONFIG"); cfgEnv && *cfgEnv) {
         configPath = cfgEnv;
-    } else if (const char* appData = std::getenv("APPDATA")) {
-        auto cfgPath = std::filesystem::path(appData) / "yams" / "config.toml";
+    } else {
+        auto cfgPath = yams::config::get_config_path();
         if (std::filesystem::exists(cfgPath)) {
             configPath = cfgPath.string();
         }

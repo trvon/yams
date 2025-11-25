@@ -15,6 +15,7 @@
 #include <fstream>
 #include <iostream>
 #include <yams/compat/unistd.h>
+#include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
@@ -207,19 +208,8 @@ int main(int argc, char* argv[]) {
     // Load configuration from TOML file
     namespace fs = std::filesystem;
     if (configPath.empty()) {
-        // Default to standard config location
-#ifdef _WIN32
-        // Windows: APPDATA/yams/config.toml
-        if (const char* appData = std::getenv("APPDATA")) {
-            configPath = (fs::path(appData) / "yams" / "config.toml").string();
-        }
-#else
-        if (const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME")) {
-            configPath = (fs::path(xdgConfigHome) / "yams" / "config.toml").string();
-        } else if (const char* homeEnv = std::getenv("HOME")) {
-            configPath = (fs::path(homeEnv) / ".config" / "yams" / "config.toml").string();
-        }
-#endif
+        // Use platform-specific config path helper
+        configPath = yams::config::get_config_path().string();
     }
 
     // Load and parse config if it exists
@@ -734,19 +724,7 @@ int main(int argc, char* argv[]) {
     // Best-effort: notify about config v2 migration before daemonizing (visible to user)
     try {
         namespace fs = std::filesystem;
-        fs::path defaultConfigPath;
-#ifdef _WIN32
-        // Windows: APPDATA/yams/config.toml
-        if (const char* appData = std::getenv("APPDATA")) {
-            defaultConfigPath = fs::path(appData) / "yams" / "config.toml";
-        }
-#else
-        if (const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME")) {
-            defaultConfigPath = fs::path(xdgConfigHome) / "yams" / "config.toml";
-        } else if (const char* homeEnv = std::getenv("HOME")) {
-            defaultConfigPath = fs::path(homeEnv) / ".config" / "yams" / "config.toml";
-        }
-#endif
+        fs::path defaultConfigPath = yams::config::get_config_path();
         if (!defaultConfigPath.empty()) {
             yams::config::ConfigMigrator migrator;
             auto need = migrator.needsMigration(defaultConfigPath);
@@ -810,34 +788,34 @@ int main(int argc, char* argv[]) {
 
         spdlog::info("Entering main loop: isRunning={}, isStopRequested={}, g_shutdown_requested={}",
                      daemon.isRunning(), daemon.isStopRequested(), g_shutdown_requested.load());
+        spdlog::default_logger()->flush();
 
-        // Monitor signal flags and translate to daemon stop requests
-        std::atomic<bool> watcherRunning{true};
-        std::thread signalWatcher([&daemon, &watcherRunning]() {
-            spdlog::debug("Signal watcher thread started");
-            while (watcherRunning.load(std::memory_order_relaxed)) {
-                if (g_shutdown_requested.load(std::memory_order_relaxed)) {
-                    spdlog::info("Signal watcher: shutdown requested, stopping daemon");
-                    daemon.requestStop();
-                    break;
-                }
-                // Handle on-demand autoload via SIGUSR1
-                if (g_autoload_plugins_now.exchange(false, std::memory_order_relaxed)) {
-                    try {
-                        auto r = daemon.autoloadPluginsNow();
-                        if (r) {
-                            spdlog::info("On-demand plugin autoload completed: {} plugin(s) loaded",
-                                         r.value());
-                        } else {
-                            spdlog::warn("On-demand plugin autoload failed: {}", r.error().message);
-                        }
-                    } catch (const std::exception& e) {
-                        spdlog::warn("On-demand plugin autoload exception: {}", e.what());
-                    }
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        // On Windows, avoid creating extra threads due to thread resource limits.
+        // Instead, integrate signal checking into the main loop.
+        // The daemon's runLoop already has a periodic tick, so we check signals there.
+        
+        // Set up a hook for the daemon to check our global signal flags
+        daemon.setSignalCheckHook([&daemon]() {
+            if (g_shutdown_requested.load(std::memory_order_relaxed)) {
+                spdlog::info("Signal check: shutdown requested, stopping daemon");
+                daemon.requestStop();
+                return true;
             }
-            spdlog::debug("Signal watcher thread exiting");
+            // Handle on-demand autoload via SIGUSR1
+            if (g_autoload_plugins_now.exchange(false, std::memory_order_relaxed)) {
+                try {
+                    auto r = daemon.autoloadPluginsNow();
+                    if (r) {
+                        spdlog::info("On-demand plugin autoload completed: {} plugin(s) loaded",
+                                     r.value());
+                    } else {
+                        spdlog::warn("On-demand plugin autoload failed: {}", r.error().message);
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::warn("On-demand plugin autoload exception: {}", e.what());
+                }
+            }
+            return false;
         });
 
         // Run the main daemon loop on this thread (handles FSM ticks, metrics refresh, etc.)
@@ -846,12 +824,6 @@ int main(int argc, char* argv[]) {
         spdlog::default_logger()->flush();  // Flush before potentially crashing call
         daemon.runLoop();
         spdlog::info("daemon.runLoop() returned");
-        
-        // Stop the watcher thread
-        watcherRunning.store(false, std::memory_order_relaxed);
-        if (signalWatcher.joinable()) {
-            signalWatcher.join();
-        }
         
         // Log reason for exit
         spdlog::info("Main loop exiting: isRunning={}, isStopRequested={}, g_shutdown_requested={}",

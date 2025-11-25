@@ -3,6 +3,7 @@
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
 #include <yams/core/task.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -13,8 +14,9 @@
 #include <yams/downloader/downloader.hpp>
 #include <yams/mcp/error_handling.h>
 #include <yams/mcp/mcp_server.h>
-#include <yams/version.hpp>
 #include <yams/metadata/query_helpers.h>
+#include <yams/version.hpp>
+
 
 #ifdef _WIN32
 #include <cstdlib>
@@ -510,12 +512,7 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
         // Next: config.toml [mcp_server].prompts_dir
         if (promptsDir_.empty()) {
             std::map<std::string, std::map<std::string, std::string>> toml;
-            std::filesystem::path configPath;
-            if (const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME")) {
-                configPath = std::filesystem::path(xdgConfigHome) / "yams" / "config.toml";
-            } else if (const char* homeEnv = std::getenv("HOME")) {
-                configPath = std::filesystem::path(homeEnv) / ".config" / "yams" / "config.toml";
-            }
+            std::filesystem::path configPath = yams::config::get_config_path();
             if (!configPath.empty() && std::filesystem::exists(configPath)) {
                 yams::config::ConfigMigrator migrator;
                 if (auto parsed = migrator.parseTomlConfig(configPath)) {
@@ -535,18 +532,9 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
                 }
             }
         }
-        // Next: XDG_DATA_HOME/yams/prompts or ~/.local/share/yams/prompts
+        // Next: platform-specific data dir + prompts
         if (promptsDir_.empty()) {
-            std::filesystem::path base;
-            if (const char* xdgData = std::getenv("XDG_DATA_HOME")) {
-                base = std::filesystem::path(xdgData);
-            } else if (const char* home = std::getenv("HOME")) {
-                base = std::filesystem::path(home) / ".local" / "share";
-            }
-            if (!base.empty()) {
-                auto p = base / "yams" / "prompts";
-                promptsDir_ = p;
-            }
+            promptsDir_ = yams::config::get_data_dir() / "prompts";
         }
         // Last: local docs/prompts (useful for dev runs from the repo root)
         if (!std::filesystem::exists(promptsDir_)) {

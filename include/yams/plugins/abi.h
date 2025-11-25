@@ -2,7 +2,9 @@
 
 #include <stdint.h>
 
-#if defined(__GNUC__) || defined(__clang__)
+#if defined(_WIN32) || defined(_WIN64)
+#define YAMS_PLUGIN_API __declspec(dllexport)
+#elif defined(__GNUC__) || defined(__clang__)
 #define YAMS_PLUGIN_API __attribute__((visibility("default")))
 #else
 #define YAMS_PLUGIN_API

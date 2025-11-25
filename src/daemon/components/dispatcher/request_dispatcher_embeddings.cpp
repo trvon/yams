@@ -69,7 +69,7 @@ static inline ErrorResponse makeErrorResponse(ErrorCode code, const std::string&
 boost::asio::awaitable<Response>
 RequestDispatcher::handleGenerateEmbeddingRequest(const GenerateEmbeddingRequest& req) {
     try {
-        auto provRes = yams::daemon::dispatch::ensure_provider_available(serviceManager_);
+        auto provRes = yams::daemon::dispatch::check_provider_ready(serviceManager_);
         if (!provRes) {
             if (daemon_)
                 daemon_->setSubsystemDegraded("embedding", true, "provider_unavailable");
@@ -130,7 +130,7 @@ RequestDispatcher::handleBatchEmbeddingRequest(const BatchEmbeddingRequest& req)
                      "normalize={} batchSize={}",
                      req.modelName, req.modelName.size(), hex_preview(req.modelName),
                      req.texts.size(), req.normalize ? "true" : "false", req.batchSize);
-        auto provRes = yams::daemon::dispatch::ensure_provider_available(serviceManager_);
+        auto provRes = yams::daemon::dispatch::check_provider_ready(serviceManager_);
         if (!provRes)
             co_return makeErrorResponse(provRes.error().code, provRes.error().message);
         const auto& provider = provRes.value();

@@ -62,7 +62,7 @@ jobs:
     timeout-minutes: 70
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: false  # No submodules required; prevents stale gitlink errors

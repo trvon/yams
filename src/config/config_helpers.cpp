@@ -2,7 +2,108 @@
 #include <map>
 #include <yams/config/config_helpers.h>
 
+#ifdef _WIN32
+#include <shlobj.h>
+#include <windows.h>
+#else
+#include <unistd.h> // For getuid()
+#endif
+
 namespace yams::config {
+
+// Platform-specific directory helpers
+std::filesystem::path get_config_dir() {
+#ifdef _WIN32
+    // Windows: Use APPDATA (roaming) for config that should sync
+    if (const char* appData = std::getenv("APPDATA")) {
+        return std::filesystem::path(appData) / "yams";
+    }
+    // Fallback to USERPROFILE
+    if (const char* userProfile = std::getenv("USERPROFILE")) {
+        return std::filesystem::path(userProfile) / "AppData" / "Roaming" / "yams";
+    }
+#else
+    // Unix: Follow XDG Base Directory Specification
+    if (const char* xdgConfig = std::getenv("XDG_CONFIG_HOME")) {
+        return std::filesystem::path(xdgConfig) / "yams";
+    }
+    if (const char* home = std::getenv("HOME")) {
+        return std::filesystem::path(home) / ".config" / "yams";
+    }
+#endif
+    // Last resort: current directory
+    return std::filesystem::current_path() / ".yams";
+}
+
+std::filesystem::path get_data_dir() {
+#ifdef _WIN32
+    // Windows: Use LOCALAPPDATA for local data (databases, indices)
+    if (const char* localAppData = std::getenv("LOCALAPPDATA")) {
+        return std::filesystem::path(localAppData) / "yams";
+    }
+    // Fallback to USERPROFILE
+    if (const char* userProfile = std::getenv("USERPROFILE")) {
+        return std::filesystem::path(userProfile) / "AppData" / "Local" / "yams";
+    }
+#else
+    // Unix: Follow XDG Base Directory Specification
+    if (const char* xdgData = std::getenv("XDG_DATA_HOME")) {
+        return std::filesystem::path(xdgData) / "yams";
+    }
+    if (const char* home = std::getenv("HOME")) {
+        return std::filesystem::path(home) / ".local" / "share" / "yams";
+    }
+#endif
+    // Last resort: current directory
+    return std::filesystem::current_path() / "yams_data";
+}
+
+std::filesystem::path get_cache_dir() {
+#ifdef _WIN32
+    // Windows: Use LOCALAPPDATA\yams\cache
+    if (const char* localAppData = std::getenv("LOCALAPPDATA")) {
+        return std::filesystem::path(localAppData) / "yams" / "cache";
+    }
+    // Fallback to USERPROFILE
+    if (const char* userProfile = std::getenv("USERPROFILE")) {
+        return std::filesystem::path(userProfile) / "AppData" / "Local" / "yams" / "cache";
+    }
+#else
+    // Unix: Follow XDG Base Directory Specification
+    if (const char* xdgCache = std::getenv("XDG_CACHE_HOME")) {
+        return std::filesystem::path(xdgCache) / "yams";
+    }
+    if (const char* home = std::getenv("HOME")) {
+        return std::filesystem::path(home) / ".cache" / "yams";
+    }
+#endif
+    // Last resort
+    return std::filesystem::temp_directory_path() / "yams-cache";
+}
+
+std::filesystem::path get_runtime_dir() {
+#ifdef _WIN32
+    // Windows: Use LOCALAPPDATA for runtime (sockets, PIDs)
+    // Note: Windows doesn't have XDG_RUNTIME_DIR equivalent, so we use LOCALAPPDATA
+    if (const char* localAppData = std::getenv("LOCALAPPDATA")) {
+        return std::filesystem::path(localAppData) / "yams";
+    }
+    // Fallback to USERPROFILE
+    if (const char* userProfile = std::getenv("USERPROFILE")) {
+        return std::filesystem::path(userProfile) / "AppData" / "Local" / "yams";
+    }
+#else
+    // Unix: Use XDG_RUNTIME_DIR (typically /run/user/$UID)
+    if (const char* xdgRuntime = std::getenv("XDG_RUNTIME_DIR")) {
+        return std::filesystem::path(xdgRuntime) / "yams";
+    }
+    // Fallback to /tmp with user-specific subdirectory
+    std::string tmpDir = "/tmp/yams-" + std::to_string(getuid());
+    return std::filesystem::path(tmpDir);
+#endif
+    // Last resort
+    return std::filesystem::temp_directory_path() / "yams-runtime";
+}
 
 std::string parse_config_value(const std::filesystem::path& config_path, const std::string& section,
                                const std::string& key) {
@@ -65,20 +166,8 @@ std::filesystem::path get_config_path(const std::string& override_path) {
     if (!override_path.empty()) {
         return std::filesystem::path(override_path);
     }
-
-    const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME");
-    const char* homeEnv = std::getenv("HOME");
-
-    std::filesystem::path configHome;
-    if (xdgConfigHome) {
-        configHome = std::filesystem::path(xdgConfigHome);
-    } else if (homeEnv) {
-        configHome = std::filesystem::path(homeEnv) / ".config";
-    } else {
-        return std::filesystem::path("~/.config") / "yams" / "config.toml";
-    }
-
-    return configHome / "yams" / "config.toml";
+    // Use the platform-specific config directory helper
+    return get_config_dir() / "config.toml";
 }
 
 // Helper to parse path-specific config values with tilde expansion
@@ -172,15 +261,8 @@ std::filesystem::path resolve_data_dir_from_config() {
         }
     }
 
-    // 3) XDG/HOME defaults
-    if (const char* xdg_data = std::getenv("XDG_DATA_HOME")) {
-        return std::filesystem::path(xdg_data) / "yams";
-    }
-    if (const char* home = std::getenv("HOME")) {
-        return std::filesystem::path(home) / ".local" / "share" / "yams";
-    }
-
-    return std::filesystem::current_path() / "yams_data";
+    // 3) Use platform-specific data directory
+    return get_data_dir();
 }
 
 } // namespace yams::config

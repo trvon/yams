@@ -44,6 +44,7 @@
 #include <yams/api/content_store_builder.h>
 #include <yams/app/services/session_service.hpp>
 #include <yams/compat/thread_stop_compat.h>
+#include <yams/config/config_helpers.h>
 #include <yams/core/types.h>
 #include <yams/daemon/components/BackgroundTaskManager.h>
 #include <yams/daemon/components/DaemonMetrics.h>
@@ -574,6 +575,8 @@ bool ServiceManager::invokeInitCompleteOnce(bool success, const std::string& err
             initCompleteCallback_(success, error);
         }
         // Do not null out the callback pointer here; tests may introspect it.
+    } catch (const std::exception& e) {
+        spdlog::error("initCompleteCallback threw exception: {}", e.what());
     } catch (...) {
         // Swallow to avoid terminating threads
     }
@@ -624,11 +627,8 @@ yams::Result<void> ServiceManager::initialize() {
         std::string dirs;
         std::vector<std::filesystem::path> pluginDirs;
 #ifdef _WIN32
-        // Windows: use LOCALAPPDATA for user plugins
-        if (const char* localAppData = std::getenv("LOCALAPPDATA"))
-            pluginDirs.push_back(std::filesystem::path(localAppData) / "yams" / "plugins");
-        else if (const char* userProfile = std::getenv("USERPROFILE"))
-            pluginDirs.push_back(std::filesystem::path(userProfile) / "AppData" / "Local" / "yams" / "plugins");
+        // Windows: use platform-specific data directory for user plugins
+        pluginDirs.push_back(yams::config::get_data_dir() / "plugins");
 #else
         if (const char* home = std::getenv("HOME"))
             pluginDirs.push_back(std::filesystem::path(home) / ".local" / "lib" / "yams" / "plugins");
@@ -663,9 +663,12 @@ yams::Result<void> ServiceManager::initialize() {
 
     // Launch async initialization without blocking or using futures
     // Use detached coroutine with completion callback
+    // IMPORTANT: Capture shared_from_this() to prevent 'this' pointer corruption
+    // when the coroutine suspends across co_await points.
+    auto self = shared_from_this();
     boost::asio::co_spawn(
         workCoordinator_->getExecutor(),
-        [this]() -> boost::asio::awaitable<void> {
+        [self]() -> boost::asio::awaitable<void> {
             spdlog::info("Starting async resource initialization (coroutine)...");
 
             // Create a dummy stop_token since we're not using initThread_ anymore
@@ -673,27 +676,27 @@ yams::Result<void> ServiceManager::initialize() {
             auto token = stop_src.get_token();
 
             try {
-                auto result = co_await this->initializeAsyncAwaitable(token);
+                auto result = co_await self->initializeAsyncAwaitable(token);
 
                 if (!result) {
                     spdlog::error("Async resource initialization failed: {}",
                                   result.error().message);
                     try {
-                        serviceFsm_.dispatch(InitializationFailedEvent{result.error().message});
+                        self->serviceFsm_.dispatch(InitializationFailedEvent{result.error().message});
                     } catch (...) {
                     }
-                    (void)invokeInitCompleteOnce(false, result.error().message);
+                    (void)self->invokeInitCompleteOnce(false, result.error().message);
                 } else {
                     spdlog::info("All daemon services initialized successfully");
-                    (void)invokeInitCompleteOnce(true, "");
+                    (void)self->invokeInitCompleteOnce(true, "");
                 }
             } catch (const std::exception& e) {
                 spdlog::error("Async resource initialization exception: {}", e.what());
                 try {
-                    serviceFsm_.dispatch(InitializationFailedEvent{e.what()});
+                    self->serviceFsm_.dispatch(InitializationFailedEvent{e.what()});
                 } catch (...) {
                 }
-                (void)invokeInitCompleteOnce(false, e.what());
+                (void)self->invokeInitCompleteOnce(false, e.what());
             }
         }(),
         boost::asio::detached);
@@ -1661,7 +1664,10 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     // Defer Vector DB init to post-plugins phase; skip here
     spdlog::info("[ServiceManager] Phase: Vector DB Init (skipped pre-plugins).");
     spdlog::debug("ServiceManager(co): Initializing daemon resources");
+    spdlog::default_logger()->flush();  // Flush before potentially crashing
     writeBootstrapStatusFile(config_, state_);
+    spdlog::debug("ServiceManager(co): writeBootstrapStatusFile done");
+    spdlog::default_logger()->flush();
 
     auto read_timeout_ms = [](const char* env_name, int def_ms, int min_ms = 100) -> int {
         int ms = def_ms;
@@ -1677,7 +1683,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     };
 
     using namespace std::chrono_literals;
+    spdlog::debug("ServiceManager(co): about to co_await executor");
+    spdlog::default_logger()->flush();
     auto ex = co_await boost::asio::this_coro::executor;
+    spdlog::debug("ServiceManager(co): co_await executor done");
+    spdlog::default_logger()->flush();
 
     // Plugins step: mark ready (host scaffolding) and record duration uniformly
     spdlog::info("[ServiceManager] Phase: Plugins Ready.");
@@ -2895,12 +2905,8 @@ boost::asio::awaitable<Result<size_t>> ServiceManager::autoloadPluginsNow() {
         try {
             namespace fs = std::filesystem;
 #ifdef _WIN32
-            // Windows: use LOCALAPPDATA for user plugins
-            if (const char* localAppData = std::getenv("LOCALAPPDATA")) {
-                roots.push_back(fs::path(localAppData) / "yams" / "plugins");
-            } else if (const char* userProfile = std::getenv("USERPROFILE")) {
-                roots.push_back(fs::path(userProfile) / "AppData" / "Local" / "yams" / "plugins");
-            }
+            // Windows: use platform-specific data directory for user plugins
+            roots.push_back(yams::config::get_data_dir() / "plugins");
 #else
             if (const char* home = std::getenv("HOME")) {
                 roots.push_back(fs::path(home) / ".local" / "lib" / "yams" / "plugins");

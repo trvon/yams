@@ -364,11 +364,12 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                         spdlog::warn("Closing idle connection with {} in-flight requests after {} "
                                      "timeouts (fd={}) - "
                                      "client likely stopped reading",
-                                     inflight, consecutive_idle_timeouts, sock->native_handle());
+                                     inflight, consecutive_idle_timeouts,
+                                     (uint64_t)sock->native_handle());
                     } else {
                         spdlog::info(
                             "Closing idle connection after {} consecutive read timeouts (fd={})",
-                            consecutive_idle_timeouts, sock->native_handle());
+                            consecutive_idle_timeouts, (uint64_t)sock->native_handle());
                     }
                     boost::system::error_code ignore_ec;
                     sock->close(ignore_ec);

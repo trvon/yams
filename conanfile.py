@@ -139,9 +139,11 @@ class YamsConan(ConanFile):
             self.options["qpdf"].with_ssl = "openssl"
         
         # Configure ONNX Runtime if enabled
+        # Note: onnxruntime uses pre-built shared libraries (DLLs on Windows),
+        # so we set shared=True to ensure runtime_deploy copies them
         if self.options.enable_onnx:  # type: ignore
             self.options["onnxruntime"].fPIC = True
-            self.options["onnxruntime"].shared = False
+            self.options["onnxruntime"].shared = True
 
     def validate(self):
         check_min_cppstd(self, "20")

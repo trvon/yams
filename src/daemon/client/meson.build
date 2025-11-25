@@ -42,6 +42,7 @@ yams_daemon_client_lib = static_library('yams_daemon_client',
   ],
   dependencies: [
     dependency('yams_core'),
+    dependency('yams_config'),
     dependency('spdlog'),
     protobuf_dep,
     # Boost.Asio relies on these Boost components at link time
@@ -60,6 +61,7 @@ yams_daemon_client_dep = declare_dependency(
   dependencies: [
     tl_expected_dep,
     dependency('yams_core'),
+    dependency('yams_config'),
   ],
 )
 

@@ -7,6 +7,7 @@
 #include <yams/api/content_store_builder.h>
 #include <yams/cli/command_registry.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/metadata/database.h>
@@ -122,17 +123,8 @@ YamsCLI::YamsCLI(boost::asio::any_io_executor executor) : executor_(std::move(ex
 #endif
 
     // Global options
-    // Use XDG_DATA_HOME if set, otherwise ~/.local/share
-    const char* xdgDataHome = std::getenv("XDG_DATA_HOME");
-    const char* homeEnv = std::getenv("HOME");
-    std::filesystem::path defaultDataPath;
-    if (xdgDataHome) {
-        defaultDataPath = std::filesystem::path(xdgDataHome) / "yams";
-    } else if (homeEnv) {
-        defaultDataPath = std::filesystem::path(homeEnv) / ".local" / "share" / "yams";
-    } else {
-        defaultDataPath = std::filesystem::path(".") / "yams_data";
-    }
+    // Use platform-specific data directory (XDG_DATA_HOME on Unix, LOCALAPPDATA on Windows)
+    std::filesystem::path defaultDataPath = yams::config::get_data_dir();
 
     // Try to load default data dir from config.toml (core.data_dir)
     try {
@@ -1061,19 +1053,8 @@ YamsCLI::CompressionConfig YamsCLI::loadCompressionConfig() const {
 }
 
 fs::path YamsCLI::getConfigPath() const {
-    const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME");
-    const char* homeEnv = std::getenv("HOME");
-
-    fs::path configHome;
-    if (xdgConfigHome) {
-        configHome = fs::path(xdgConfigHome);
-    } else if (homeEnv) {
-        configHome = fs::path(homeEnv) / ".config";
-    } else {
-        return fs::path("~/.config") / "yams" / "config.toml";
-    }
-
-    return configHome / "yams" / "config.toml";
+    // Use platform-specific config path (XDG_CONFIG_HOME on Unix, APPDATA on Windows)
+    return yams::config::get_config_path();
 }
 
 std::map<std::string, std::string> YamsCLI::parseSimpleToml(const fs::path& path) const {

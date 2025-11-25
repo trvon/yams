@@ -10,6 +10,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -144,6 +145,9 @@ public:
     std::chrono::steady_clock::time_point repairReadySince_{};
     std::chrono::steady_clock::time_point repairRateWindowStart_{};
     uint64_t repairBatchesAtWindowStart_{0};
+    
+    // Signal check hook for integration with main loop (avoids separate thread)
+    std::function<bool()> signalCheckHook_;
 
 public:
     // On-demand plugin autoload bridge
@@ -151,6 +155,10 @@ public:
     ServiceManager* getServiceManager() const { return serviceManager_.get(); }
     void requestReload() { reloadRequested_.store(true, std::memory_order_relaxed); }
     void reloadTuningConfig();
+    
+    // Set a hook that will be called each iteration of runLoop() to check for signals
+    // Returns true if shutdown was requested
+    void setSignalCheckHook(std::function<bool()> hook) { signalCheckHook_ = std::move(hook); }
 };
 
 } // namespace yams::daemon
