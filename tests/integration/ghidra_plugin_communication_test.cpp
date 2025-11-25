@@ -18,7 +18,6 @@
 #include <sys/wait.h>
 #include <yams/compat/unistd.h>
 
-
 namespace fs = std::filesystem;
 
 namespace {

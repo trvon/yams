@@ -1580,8 +1580,7 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
                 cliDir.parent_path() / "daemon" / "yams-daemon.exe",
                 cliDir.parent_path().parent_path() / "daemon" / "yams-daemon.exe",
                 cliDir.parent_path().parent_path() / "yams-daemon.exe",
-                cliDir.parent_path().parent_path() / "src" / "daemon" / "yams-daemon.exe"
-            };
+                cliDir.parent_path().parent_path() / "src" / "daemon" / "yams-daemon.exe"};
             for (const auto& p : candidates) {
                 if (std::filesystem::exists(p)) {
                     exePath = p;
@@ -1598,7 +1597,7 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
     // Build command line
     std::wstring cmdLine = L"\"" + exePath.wstring() + L"\"";
     cmdLine += L" --socket \"" + socketPath.wstring() + L"\"";
-    
+
     if (!configPath.empty() && std::filesystem::exists(configPath)) {
         cmdLine += L" --config \"" + std::filesystem::path(configPath).wstring() + L"\"";
     }
@@ -1634,21 +1633,21 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
     cmdLineBuf.push_back(L'\0');
 
     BOOL success = CreateProcessW(
-        nullptr,                    // lpApplicationName - use cmdLine instead
-        cmdLineBuf.data(),          // lpCommandLine
-        nullptr,                    // lpProcessAttributes
-        nullptr,                    // lpThreadAttributes
-        FALSE,                      // bInheritHandles
-        DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,  // dwCreationFlags
-        nullptr,                    // lpEnvironment - inherit
-        nullptr,                    // lpCurrentDirectory - inherit
-        &si,                        // lpStartupInfo
-        &pi                         // lpProcessInformation
+        nullptr,           // lpApplicationName - use cmdLine instead
+        cmdLineBuf.data(), // lpCommandLine
+        nullptr,           // lpProcessAttributes
+        nullptr,           // lpThreadAttributes
+        FALSE,             // bInheritHandles
+        DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW, // dwCreationFlags
+        nullptr,                                                        // lpEnvironment - inherit
+        nullptr, // lpCurrentDirectory - inherit
+        &si,     // lpStartupInfo
+        &pi      // lpProcessInformation
     );
 
     if (!success) {
         DWORD err = GetLastError();
-        return Error{ErrorCode::InternalError, 
+        return Error{ErrorCode::InternalError,
                      "Failed to start daemon: CreateProcess error " + std::to_string(err)};
     }
 
@@ -1656,7 +1655,8 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
 
-    spdlog::info("Daemon process spawned (PID: {}), client will now poll for readiness", pi.dwProcessId);
+    spdlog::info("Daemon process spawned (PID: {}), client will now poll for readiness",
+                 pi.dwProcessId);
     return Result<void>();
 
 #else

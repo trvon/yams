@@ -3,7 +3,6 @@
 
 #include <spdlog/spdlog.h>
 
-
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -135,9 +134,11 @@ static std::unique_ptr<IStorageBackend> loadSpecific(const char* /*createSym*/,
         spdlog::warn("Failed to open {}: GetLastError={}", path.string(), GetLastError());
         return nullptr;
     }
-    
-    auto create = reinterpret_cast<CreateFn>(GetProcAddress(handle, "yams_plugin_create_object_storage"));
-    auto destroy = reinterpret_cast<DestroyFn>(GetProcAddress(handle, "yams_plugin_destroy_object_storage"));
+
+    auto create =
+        reinterpret_cast<CreateFn>(GetProcAddress(handle, "yams_plugin_create_object_storage"));
+    auto destroy =
+        reinterpret_cast<DestroyFn>(GetProcAddress(handle, "yams_plugin_destroy_object_storage"));
 #else
     void* handle = dlopen(path.c_str(), RTLD_LAZY | RTLD_LOCAL);
     if (!handle) {

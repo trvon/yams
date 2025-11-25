@@ -2,9 +2,9 @@
 #include <thread>
 #include <vector>
 
+#include <spdlog/spdlog.h>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
-#include <spdlog/spdlog.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/platform/windows_init.h>
 

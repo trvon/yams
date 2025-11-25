@@ -334,12 +334,12 @@ Result<void> YamsDaemon::start() {
 void YamsDaemon::runLoop() {
     spdlog::info("Daemon runLoop() entered.");
     set_current_thread_name("yams-daemon-main");
-    
+
     // Drive lifecycle FSM periodically
     lifecycleFsm_.tick();
-    
+
     spdlog::info("runLoop: stopRequested_={}, entering main loop", stopRequested_.load());
-    
+
     while (!stopRequested_.load()) {
 #if defined(TRACY_ENABLE)
         YAMS_FRAME_MARK_START("daemon_tick");
@@ -629,7 +629,8 @@ std::filesystem::path YamsDaemon::resolveSystemPath(PathType type) {
     namespace fs = std::filesystem;
 #ifdef _WIN32
     bool isRoot = false;
-    int uid = 0; // Not used for path generation on Windows usually, or use GetCurrentProcessId() if needed
+    int uid = 0; // Not used for path generation on Windows usually, or use GetCurrentProcessId() if
+                 // needed
 #else
     bool isRoot = (geteuid() == 0);
     uid_t uid = getuid();

@@ -16,9 +16,9 @@
 #include <bit>
 #include <concepts>
 #include <cstdint>
+#include <cstdlib>
 #include <span>
 #include <vector>
-#include <cstdlib>
 
 #ifdef _WIN32
 #define bswap32 _byteswap_ulong

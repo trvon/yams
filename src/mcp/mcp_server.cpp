@@ -17,16 +17,16 @@
 #include <yams/metadata/query_helpers.h>
 #include <yams/version.hpp>
 
-
 #ifdef _WIN32
 #include <cstdlib>
 // Windows implementation of setenv
-inline int setenv(const char *name, const char *value, int overwrite) {
+inline int setenv(const char* name, const char* value, int overwrite) {
     int errcode = 0;
     if (!overwrite) {
         size_t envsize = 0;
         errcode = getenv_s(&envsize, NULL, 0, name);
-        if (errcode || envsize) return errcode;
+        if (errcode || envsize)
+            return errcode;
     }
     return _putenv_s(name, value);
 }
@@ -1947,20 +1947,27 @@ json MCPServer::callTool(const std::string& name, const json& arguments) {
                 try {
                     std::rethrow_exception(e);
                 } catch (const std::exception& ex) {
-                    promise.set_value(json{{"content", json::array({json{{"type", "text"}, {"text", std::string("Error: ") + ex.what()}}})}, {"isError", true}});
+                    promise.set_value(
+                        json{{"content",
+                              json::array({json{{"type", "text"},
+                                                {"text", std::string("Error: ") + ex.what()}}})},
+                             {"isError", true}});
                 } catch (...) {
-                    promise.set_value(json{{"content", json::array({json{{"type", "text"}, {"text", "Unknown error"}}})}, {"isError", true}});
+                    promise.set_value(
+                        json{{"content",
+                              json::array({json{{"type", "text"}, {"text", "Unknown error"}}})},
+                             {"isError", true}});
                 }
             } else {
                 promise.set_value(result);
             }
-        }
-    );
+        });
 
     return future.get();
 }
 
-boost::asio::awaitable<json> MCPServer::callToolAsync(const std::string& name, const json& arguments) {
+boost::asio::awaitable<json> MCPServer::callToolAsync(const std::string& name,
+                                                      const json& arguments) {
     try {
         if (name == "search") {
             MCPSearchRequest req;
@@ -1968,7 +1975,10 @@ boost::asio::awaitable<json> MCPServer::callToolAsync(const std::string& name, c
             req.limit = arguments.value("limit", 20);
             // ... map other args
             auto res = co_await handleSearchDocuments(req);
-            if (!res) co_return json{{"content", json::array({json{{"type", "text"}, {"text", res.error().message}}})}, {"isError", true}};
+            if (!res)
+                co_return json{{"content", json::array({json{{"type", "text"},
+                                                             {"text", res.error().message}}})},
+                               {"isError", true}};
             // Convert response to json (simplified)
             json content = json::array();
             for (const auto& doc : res.value().results) {
@@ -1977,10 +1987,15 @@ boost::asio::awaitable<json> MCPServer::callToolAsync(const std::string& name, c
             co_return json{{"content", content}, {"isError", false}};
         }
         // Add other tools here...
-        
-        co_return json{{"content", json::array({json{{"type", "text"}, {"text", "Tool not implemented: " + name}}})}, {"isError", true}};
+
+        co_return json{{"content", json::array({json{{"type", "text"},
+                                                     {"text", "Tool not implemented: " + name}}})},
+                       {"isError", true}};
     } catch (const std::exception& e) {
-        co_return json{{"content", json::array({json{{"type", "text"}, {"text", std::string("Exception: ") + e.what()}}})}, {"isError", true}};
+        co_return json{
+            {"content", json::array({json{{"type", "text"},
+                                          {"text", std::string("Exception: ") + e.what()}}})},
+            {"isError", true}};
     }
 }
 
@@ -2083,7 +2098,8 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
                 out.mimeType = gr.mimeType;
                 if (!gr.content.empty()) {
                     constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024;
-                    out.content = gr.content.size() <= MAX_BYTES ? gr.content : gr.content.substr(0, MAX_BYTES);
+                    out.content = gr.content.size() <= MAX_BYTES ? gr.content
+                                                                 : gr.content.substr(0, MAX_BYTES);
                 }
                 co_return out;
             }

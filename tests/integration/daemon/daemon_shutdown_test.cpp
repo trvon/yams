@@ -12,7 +12,6 @@
 #include <yams/compat/unistd.h>
 #include <yams/daemon/client/daemon_client.h>
 
-
 using namespace yams::daemon;
 using namespace yams::test;
 using namespace std::chrono_literals;

@@ -29,9 +29,9 @@ private:
         work_guard_;
     std::vector<std::thread> io_threads_;
     std::mutex restart_mutex_;
-    std::once_flag init_flag_;  // For lazy initialization
-    
-    void ensure_initialized();  // Lazy init helper
+    std::once_flag init_flag_; // For lazy initialization
+
+    void ensure_initialized(); // Lazy init helper
 
     void restart();
 

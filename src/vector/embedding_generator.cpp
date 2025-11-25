@@ -1,6 +1,6 @@
 #define _CRT_SECURE_NO_WARNINGS
-#include <filesystem>
 #include <spdlog/spdlog.h>
+#include <filesystem>
 #include <future>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -330,8 +330,8 @@ public:
             info.load_time = std::chrono::system_clock::now();
 
             // Load ONNX model
-            info.session =
-                std::make_unique<Ort::Session>(env_, std::filesystem::path(model_path).c_str(), session_options_);
+            info.session = std::make_unique<Ort::Session>(
+                env_, std::filesystem::path(model_path).c_str(), session_options_);
 
             // Get model metadata from ONNX
             size_t num_input_nodes = info.session->GetInputCount();

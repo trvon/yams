@@ -2,6 +2,27 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "Debug: yams-daemon (Installed - Windows)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${env:LOCALAPPDATA}\\Programs\\yams\\bin\\yams-daemon.exe",
+      "args": [
+        "--foreground",
+        "--log-level",
+        "debug"
+      ],
+      "cwd": "${env:LOCALAPPDATA}\\yams",
+      "environment": [
+        {
+          "name": "YAMS_LOG_LEVEL",
+          "value": "debug"
+        }
+      ],
+      "stopAtEntry": false,
+      "console": "integratedTerminal",
+      "symbolSearchPath": "${workspaceFolder}\\build\\release"
+    },
+    {
       "name": "Debug: yams-daemon (builddir - Debug)",
       "type": "cppvsdbg",
       "request": "launch",

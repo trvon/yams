@@ -9,7 +9,6 @@
 #include <yams/crypto/hasher.h>
 #include <yams/storage/storage_engine.h>
 
-
 using namespace yams;
 using namespace yams::api;
 using namespace yams::storage;

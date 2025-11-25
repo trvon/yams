@@ -483,7 +483,7 @@ private:
                     auto cliDir = selfExe.parent_path();
 #ifdef _WIN32
                     std::vector<fs::path> candidates = {
-                        cliDir / "yams-daemon.exe", 
+                        cliDir / "yams-daemon.exe",
                         cliDir.parent_path() / "yams-daemon.exe",
                         cliDir.parent_path() / "daemon" / "yams-daemon.exe",
                         cliDir.parent_path().parent_path() / "daemon" / "yams-daemon.exe",
@@ -491,7 +491,8 @@ private:
                         cliDir.parent_path().parent_path() / "src" / "daemon" / "yams-daemon.exe"};
 #else
                     std::vector<fs::path> candidates = {
-                        cliDir / "yams-daemon", cliDir.parent_path() / "yams-daemon",
+                        cliDir / "yams-daemon",
+                        cliDir.parent_path() / "yams-daemon",
                         cliDir.parent_path() / "daemon" / "yams-daemon",
                         cliDir.parent_path().parent_path() / "daemon" / "yams-daemon",
                         cliDir.parent_path().parent_path() / "yams-daemon",

@@ -5,7 +5,6 @@
 #include <string>
 #include <yams/compat/dlfcn.h>
 
-
 #include <gtest/gtest.h>
 #include <yams/plugins/abi.h>
 

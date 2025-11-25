@@ -12,7 +12,6 @@
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/daemon.h>
 
-
 namespace yams::test {
 
 class DaemonHarness {

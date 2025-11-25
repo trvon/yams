@@ -23,8 +23,8 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#include <windows.h>
 #include <filesystem>
+#include <windows.h>
 
 namespace yams::platform {
 
@@ -70,9 +70,7 @@ namespace detail {
  * trigger DLL loading.
  */
 struct DllPathInitializer {
-    DllPathInitializer() {
-        setup_dll_search_path();
-    }
+    DllPathInitializer() { setup_dll_search_path(); }
 };
 
 // Global instance - constructor runs during static init

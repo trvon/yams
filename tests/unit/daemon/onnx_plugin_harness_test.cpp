@@ -12,7 +12,6 @@
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/plugins/model_provider_v1.h>
 
-
 namespace yams::daemon {
 namespace fs = std::filesystem;
 

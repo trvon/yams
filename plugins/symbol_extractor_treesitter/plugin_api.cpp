@@ -6,7 +6,6 @@
 #include <unordered_set>
 #include <yams/compat/dlfcn.h>
 
-
 #include <tree_sitter/api.h>
 
 #include <yams/plugins/abi.h>

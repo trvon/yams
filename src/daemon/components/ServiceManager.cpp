@@ -17,8 +17,8 @@
 #include <thread>
 
 #ifdef _WIN32
-#include <windows.h>
 #include <io.h>
+#include <windows.h>
 #define getpid _getpid
 #else
 #include <unistd.h>
@@ -627,16 +627,22 @@ yams::Result<void> ServiceManager::initialize() {
         std::string dirs;
         std::vector<std::filesystem::path> pluginDirs;
 #ifdef _WIN32
-        // Windows: use platform-specific data directory for user plugins
-        pluginDirs.push_back(yams::config::get_data_dir() / "plugins");
+        // Windows: use LOCALAPPDATA for user plugins
+        if (const char* localAppData = std::getenv("LOCALAPPDATA"))
+            pluginDirs.push_back(std::filesystem::path(localAppData) / "yams" / "plugins");
+        else if (const char* userProfile = std::getenv("USERPROFILE"))
+            pluginDirs.push_back(std::filesystem::path(userProfile) / "AppData" / "Local" / "yams" /
+                                 "plugins");
 #else
         if (const char* home = std::getenv("HOME"))
-            pluginDirs.push_back(std::filesystem::path(home) / ".local" / "lib" / "yams" / "plugins");
+            pluginDirs.push_back(std::filesystem::path(home) / ".local" / "lib" / "yams" /
+                                 "plugins");
         pluginDirs.push_back(std::filesystem::path("/usr/local/lib/yams/plugins"));
         pluginDirs.push_back(std::filesystem::path("/usr/lib/yams/plugins"));
 #endif
 #ifdef YAMS_INSTALL_PREFIX
-        pluginDirs.push_back(std::filesystem::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins");
+        pluginDirs.push_back(std::filesystem::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" /
+                             "plugins");
 #endif
         for (const auto& d : pluginDirs) {
             if (!dirs.empty())
@@ -1363,13 +1369,14 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
     try {
         spdlog::info("[VectorInit] Opening lock file: {}", lockPath.string());
 #ifdef _WIN32
-        hLock = CreateFileA(lockPath.string().c_str(), GENERIC_READ | GENERIC_WRITE, 
-                            FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, 
+        hLock = CreateFileA(lockPath.string().c_str(), GENERIC_READ | GENERIC_WRITE,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
                             FILE_ATTRIBUTE_NORMAL, NULL);
         if (hLock != INVALID_HANDLE_VALUE) {
             spdlog::info("[VectorInit] Acquiring lock on: {}", lockPath.string());
             OVERLAPPED ov = {0};
-            if (!LockFileEx(hLock, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov)) {
+            if (!LockFileEx(hLock, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0,
+                            &ov)) {
                 spdlog::info("[VectorInit] skipped (lock busy by another process)");
                 CloseHandle(hLock);
                 hLock = INVALID_HANDLE_VALUE;
@@ -1379,8 +1386,10 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
                 try {
                     std::string stamp = std::to_string(static_cast<long long>(::getpid())) + "\n";
                     DWORD written;
-                    WriteFile(hLock, stamp.data(), static_cast<DWORD>(stamp.size()), &written, NULL);
-                } catch (...) {}
+                    WriteFile(hLock, stamp.data(), static_cast<DWORD>(stamp.size()), &written,
+                              NULL);
+                } catch (...) {
+                }
             }
         } else {
             spdlog::warn("[VectorInit] could not open lock file (continuing without lock)");
@@ -3060,14 +3069,15 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
     }
 
     if (buildingAlready) {
-        spdlog::info("[ServiceManager] co_enableEmbeddingsAndRebuild: rebuild already in progress, skipping");
+        spdlog::info("[ServiceManager] co_enableEmbeddingsAndRebuild: rebuild already in progress, "
+                     "skipping");
         co_return;
     }
 
     try {
         // Phase 2.4: Use SearchEngineManager
         auto graphService = graphComponent_ ? graphComponent_->getQueryService() : nullptr;
-        
+
         // Get embedding generator from model provider if available
         std::shared_ptr<vector::EmbeddingGenerator> embGen;
         if (modelProvider_ && modelProvider_->isAvailable() && !embeddingModelName_.empty()) {
@@ -3079,8 +3089,8 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
 
         int build_timeout = 30000; // 30s timeout
         auto rebuildResult = co_await searchEngineManager_.buildEngine(
-            metadataRepo_, vectorIndexManager_, embGen, graphService, "rebuild_enabled", build_timeout,
-            getWorkerExecutor());
+            metadataRepo_, vectorIndexManager_, embGen, graphService, "rebuild_enabled",
+            build_timeout, getWorkerExecutor());
 
         if (rebuildResult.has_value()) {
             const auto& rebuilt = rebuildResult.value();
@@ -3092,7 +3102,7 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
             // Update readiness indicators
             state_.readiness.searchEngineReady = true;
             state_.readiness.vectorIndexReady = true;
-            
+
             spdlog::info("[ServiceManager] co_enableEmbeddingsAndRebuild: success");
         } else {
             spdlog::warn("[ServiceManager] co_enableEmbeddingsAndRebuild: failed");

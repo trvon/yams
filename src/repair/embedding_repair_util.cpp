@@ -14,8 +14,8 @@
 #include <filesystem>
 #include <thread>
 #ifdef _WIN32
-#include <windows.h>
 #include <io.h>
+#include <windows.h>
 #include <sys/stat.h>
 #else
 #include <unistd.h>
@@ -29,13 +29,15 @@ class VectorDbLock {
 public:
     explicit VectorDbLock(const std::filesystem::path& lockPath) : path_(lockPath), fd_(-1) {
 #ifdef _WIN32
-        int err = _sopen_s(&fd_, path_.string().c_str(), _O_RDWR | _O_CREAT | _O_BINARY, _SH_DENYNO, _S_IREAD | _S_IWRITE);
+        int err = _sopen_s(&fd_, path_.string().c_str(), _O_RDWR | _O_CREAT | _O_BINARY, _SH_DENYNO,
+                           _S_IREAD | _S_IWRITE);
         if (err == 0 && fd_ >= 0) {
             HANDLE hFile = (HANDLE)_get_osfhandle(fd_);
             if (hFile != INVALID_HANDLE_VALUE) {
                 OVERLAPPED overlapped = {0};
                 // Lock the first byte exclusively
-                if (!LockFileEx(hFile, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &overlapped)) {
+                if (!LockFileEx(hFile, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0,
+                                &overlapped)) {
                     _close(fd_);
                     fd_ = -1;
                 } else {

@@ -9,13 +9,13 @@
 #include <thread>
 #include <tuple>
 #ifdef _WIN32
-#include <windows.h>
-#include <io.h>
 #include <fcntl.h>
+#include <io.h>
+#include <windows.h>
 #include <sys/stat.h>
 #else
-#include <unistd.h>
 #include <fcntl.h>
+#include <unistd.h>
 #endif
 #ifndef _WIN32
 #include <unistd.h>
@@ -48,8 +48,6 @@ namespace yams::vector {
 
 namespace fs = std::filesystem;
 
-
-
 namespace {
 // Simple RAII file lock helper stamped with PID/time
 struct FileLock {
@@ -62,13 +60,15 @@ struct FileLock {
     explicit FileLock(const fs::path& p) : path(p) {
 #ifdef _WIN32
         // Windows implementation
-        _sopen_s(&fd, path.string().c_str(), _O_CREAT | _O_RDWR | _O_BINARY, _SH_DENYNO, _S_IREAD | _S_IWRITE);
+        _sopen_s(&fd, path.string().c_str(), _O_CREAT | _O_RDWR | _O_BINARY, _SH_DENYNO,
+                 _S_IREAD | _S_IWRITE);
         if (fd >= 0) {
             hFile = (HANDLE)_get_osfhandle(fd);
             if (hFile != INVALID_HANDLE_VALUE) {
                 OVERLAPPED overlapped = {0};
                 // LockFileEx is equivalent to fcntl locking
-                if (!LockFileEx(hFile, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, MAXDWORD, MAXDWORD, &overlapped)) {
+                if (!LockFileEx(hFile, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0,
+                                MAXDWORD, MAXDWORD, &overlapped)) {
                     _close(fd);
                     fd = -1;
                     hFile = INVALID_HANDLE_VALUE;
@@ -76,12 +76,13 @@ struct FileLock {
                     // Best-effort: stamp PID and time
                     try {
                         _chsize_s(fd, 0);
-                        std::string stamp = std::to_string(static_cast<long long>(_getpid())) + " " +
-                                            std::to_string(static_cast<long long>(::time(nullptr))) +
-                                            "\n";
+                        std::string stamp =
+                            std::to_string(static_cast<long long>(_getpid())) + " " +
+                            std::to_string(static_cast<long long>(::time(nullptr))) + "\n";
                         _write(fd, stamp.data(), static_cast<unsigned int>(stamp.size()));
                         _lseek(fd, 0, SEEK_SET);
-                    } catch (...) {}
+                    } catch (...) {
+                    }
                 }
             } else {
                 _close(fd);
