@@ -90,8 +90,58 @@ endif
 # --- Install prefix for plugin auto-trust ---
 # Pass the install prefix to C++ code so the daemon knows where system plugins are installed
 install_prefix = get_option('prefix')
-add_project_arguments('-DYAMS_INSTALL_PREFIX="' + install_prefix + '"', language: 'cpp')
+# Escape backslashes for Windows paths to avoid compiler warnings about unrecognized escape sequences
+install_prefix_escaped = install_prefix.replace('\\', '\\\\')
+add_project_arguments('-DYAMS_INSTALL_PREFIX="' + install_prefix_escaped + '"', language: 'cpp')
 message('YAMS install prefix: ' + install_prefix)
+
+# --- Windows DLL deployment ---
+# On Windows, DLLs must be in the same directory as the executable or in PATH.
+# We extract the DLL paths from the dependency's pkg-config `bindir` variable,
+# then use fs.copyfile() to deploy them to the build directory.
+#
+# This is the Meson-idiomatic approach that doesn't rely on Conan's runtime_deploy.
+windows_runtime_dlls = []  # List of [dll_name, dll_full_path] tuples
+if host_machine.system() == 'windows'
+  # Get TBB dependency and extract bindir
+  tbb_dep = dependency('tbb', required: false)
+  if tbb_dep.found()
+    tbb_prefix = tbb_dep.get_variable(pkgconfig: 'prefix', default_value: '')
+    tbb_bindir = tbb_dep.get_variable(pkgconfig: 'bindir', default_value: '')
+    if tbb_bindir != ''
+      # Resolve ${prefix} placeholder if present
+      tbb_bindir = tbb_bindir.replace('${prefix}', tbb_prefix)
+      foreach dll_name : ['tbb12.dll', 'tbbbind_2_5.dll', 'tbbmalloc.dll', 'tbbmalloc_proxy.dll']
+        dll_path = tbb_bindir / dll_name
+        if fs.exists(dll_path)
+          windows_runtime_dlls += [[dll_name, dll_path]]
+        endif
+      endforeach
+    endif
+  endif
+
+  # Get ONNX Runtime dependency and extract bindir
+  onnx_dep_check = dependency('onnxruntime', required: false)
+  if onnx_dep_check.found()
+    onnx_prefix = onnx_dep_check.get_variable(pkgconfig: 'prefix', default_value: '')
+    onnx_bindir = onnx_dep_check.get_variable(pkgconfig: 'bindir', default_value: '')
+    if onnx_bindir != ''
+      # Resolve ${prefix} placeholder if present
+      onnx_bindir = onnx_bindir.replace('${prefix}', onnx_prefix)
+      foreach dll_name : ['onnxruntime.dll', 'onnxruntime_providers_shared.dll']
+        dll_path = onnx_bindir / dll_name
+        if fs.exists(dll_path)
+          windows_runtime_dlls += [[dll_name, dll_path]]
+        endif
+      endforeach
+    endif
+  endif
+
+  # Log discovered DLLs
+  foreach dll_info : windows_runtime_dlls
+    message('Found runtime DLL: ' + dll_info[0] + ' at ' + dll_info[1])
+  endforeach
+endif
 
 onnx_opt = get_option('enable-onnx')
 
@@ -263,3 +313,7 @@ if get_option('b_coverage')
     warning('gcovr not found. Install gcovr to generate coverage reports.')
   endif
 endif
+
+# Note: Runtime DLLs are now deployed via Conan's runtime_deploy deployer during conan install
+# No custom meson install script needed
+

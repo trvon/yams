@@ -24,11 +24,14 @@ private:
     GlobalIOContext();
     ~GlobalIOContext();
 
-    boost::asio::io_context io_context_;
+    std::unique_ptr<boost::asio::io_context> io_context_;
     std::unique_ptr<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>
         work_guard_;
     std::vector<std::thread> io_threads_;
     std::mutex restart_mutex_;
+    std::once_flag init_flag_;  // For lazy initialization
+    
+    void ensure_initialized();  // Lazy init helper
 
     void restart();
 

@@ -83,6 +83,9 @@ public:
     // Lifecycle management
     Result<void> start();
     Result<void> stop();
+    /// Run the daemon main loop on the calling thread. Call after start().
+    /// Returns when stopRequested_ becomes true or requestStop() is called.
+    void runLoop();
     void requestStop() {
         stopRequested_ = true;
         stop_cv_.notify_all();
@@ -130,7 +133,7 @@ public:
     std::atomic<bool> running_{false};
     std::atomic<bool> stopRequested_{false};
     std::atomic<bool> reloadRequested_{false};
-    yams::compat::jthread daemonThread_;
+    // Note: daemonThread_ removed - main loop runs on calling thread via runLoop()
     std::mutex stop_mutex_;
     std::condition_variable stop_cv_;
     // Deferred repair startup control

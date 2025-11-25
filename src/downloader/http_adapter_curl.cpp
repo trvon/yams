@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -278,6 +279,11 @@ static void configure_common(CURL* curl, std::chrono::milliseconds timeout, cons
     if (!tls.caPath.empty()) {
         curl_easy_setopt(curl, CURLOPT_CAINFO, tls.caPath.c_str());
     }
+#ifdef _WIN32
+    // On Windows with OpenSSL backend, use native Windows CA store
+    // CURLSSLOPT_NATIVE_CA tells libcurl to use the OS certificate store
+    curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
+#endif
 
     // Proxy
     if (proxy && !proxy->empty()) {
@@ -326,6 +332,13 @@ public:
         configure_common(curl, timeout, tls, proxy, /*followRedirects=*/true);
 
         CURLcode rc = curl_easy_perform(curl);
+        
+        // Log HTTP status for debugging
+        long http_status = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
+        spdlog::debug("HTTP probe: url={}, CURLcode={} ({}), HTTP status={}", 
+                     url, static_cast<int>(rc), curl_easy_strerror(rc), http_status);
+        
         if (rc != CURLE_OK) {
             // Some servers reject HEAD; try GET range 0-0 as fallback
             spdlog::debug("HEAD probe failed ({}), attempting GET Range 0-0",
@@ -337,7 +350,6 @@ public:
             curl_easy_setopt(curl, CURLOPT_HTTPHEADER, range);
             rc = curl_easy_perform(curl);
             if (rc == CURLE_OK) {
-                long http_status = 0;
                 curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
                 // If 206, Range works; if 200, server ignored Range.
                 if (http_status == 206) {
@@ -489,6 +501,12 @@ public:
 /// Factory (optional): provide a way for higher layers to create a CURL adapter.
 /// The higher level can also construct CurlHttpAdapter directly if header is visible.
 std::unique_ptr<IHttpAdapter> makeCurlHttpAdapter() {
+    // Ensure libcurl is globally initialized (thread-safe, idempotent)
+    static std::once_flag curlInitFlag;
+    std::call_once(curlInitFlag, []() {
+        curl_global_init(CURL_GLOBAL_ALL);
+        spdlog::debug("libcurl global initialization complete");
+    });
     return std::make_unique<CurlHttpAdapter>();
 }
 

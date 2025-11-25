@@ -1,3 +1,5 @@
+fs = import('fs')
+
 deps = [
   dependency('yams_mcp'),
   dependency('yams_api'),
@@ -15,7 +17,7 @@ deps = [
   dependency('CLI11'),
 ]
 
-executable('yams-mcp-server',
+yams_mcp_exe = executable('yams-mcp-server',
   'main.cpp',
   include_directories: [
     include_directories('../../include'),
@@ -24,3 +26,13 @@ executable('yams-mcp-server',
   install: true,
   install_dir: get_option('bindir'),
 )
+
+# --- Windows: Copy runtime DLLs next to the MCP server executable ---
+if host_machine.system() == 'windows' and windows_runtime_dlls.length() > 0
+  foreach dll_info : windows_runtime_dlls
+    dll_name = dll_info[0]
+    dll_src = dll_info[1]
+    fs.copyfile(dll_src, dll_name, install: false)
+  endforeach
+endif
+

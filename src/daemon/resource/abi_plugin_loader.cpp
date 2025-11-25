@@ -460,11 +460,19 @@ bool AbiPluginLoader::isTrusted(const std::filesystem::path& p) const {
             // actually exist and contain the candidate path. This allows config-driven plugin
             // dirs to work without separate trust persistence in tests.
             std::vector<std::filesystem::path> defaults;
+#ifdef _WIN32
+            // Windows: use LOCALAPPDATA for user plugins
+            if (const char* localAppData = std::getenv("LOCALAPPDATA"))
+                defaults.push_back(std::filesystem::path(localAppData) / "yams" / "plugins");
+            else if (const char* userProfile = std::getenv("USERPROFILE"))
+                defaults.push_back(std::filesystem::path(userProfile) / "AppData" / "Local" / "yams" / "plugins");
+#else
             if (const char* home = std::getenv("HOME"))
                 defaults.push_back(std::filesystem::path(home) / ".local" / "lib" / "yams" /
                                    "plugins");
             defaults.push_back(std::filesystem::path("/usr/local/lib/yams/plugins"));
             defaults.push_back(std::filesystem::path("/usr/lib/yams/plugins"));
+#endif
 #ifdef YAMS_INSTALL_PREFIX
             defaults.push_back(std::filesystem::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" /
                                "plugins");

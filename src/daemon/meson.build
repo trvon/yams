@@ -1,7 +1,8 @@
 yams_daemon_client_dep = dependency('yams_daemon_client')
 protobuf_dep = dependency('protobuf')
-pb_includedir = protobuf_dep.get_variable(pkgconfig: 'includedir', default_value: '')
-pb_system_inc = pb_includedir != '' ? include_directories(pb_includedir, is_system: true) : []
+# pb_includedir = protobuf_dep.get_variable(pkgconfig: 'includedir', default_value: '')
+# pb_system_inc = pb_includedir != '' ? include_directories(pb_includedir, is_system: true) : []
+pb_system_inc = []
 # Prefer protoc from the protobuf dependency (Conan) to avoid header/runtime mismatch.
 proto_prefix = protobuf_dep.get_variable(pkgconfig: 'prefix', default_value: '')
 protoc_candidate = proto_prefix != '' ? join_paths(proto_prefix, 'bin', 'protoc') : 'protoc'
@@ -188,7 +189,7 @@ else
   daemon_install_rpath = '$ORIGIN/../lib'
 endif
 
-executable('yams-daemon',
+yams_daemon_exe = executable('yams-daemon',
   'daemon_main.cpp',
   dependencies: [
     yams_daemon_dep,
@@ -207,3 +208,15 @@ executable('yams-daemon',
   install_dir: get_option('bindir'),
   install_rpath: daemon_install_rpath,
 )
+
+# --- Windows: Copy runtime DLLs next to the daemon executable ---
+if host_machine.system() == 'windows' and windows_runtime_dlls.length() > 0
+  daemon_build_dir = meson.current_build_dir()
+  
+  foreach dll_info : windows_runtime_dlls
+    dll_name = dll_info[0]
+    dll_src = dll_info[1]
+    fs.copyfile(dll_src, dll_name, install: false)
+  endforeach
+endif
+

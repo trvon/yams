@@ -296,7 +296,8 @@ if ($env:YAMS_DISABLE_PDF -eq 'true') {
 
 Write-Host '--- Running conan install (Windows/MSVC)... ---'
 try {
-    conan install @conanArgs
+    # Use runtime_deploy to copy DLLs next to executables
+    conan install @conanArgs --deployer=runtime_deploy --deployer-folder=$buildDir
     if ($LASTEXITCODE -ne 0) {
         throw "Conan install failed with exit code $LASTEXITCODE"
     }
@@ -341,7 +342,16 @@ if (Test-Path $conanBuildPs1) {
 if ($env:YAMS_INSTALL_PREFIX) {
     $InstallPrefix = $env:YAMS_INSTALL_PREFIX
 } else {
-    $InstallPrefix = "C:\Program Files\yams"
+    # Check if running as Administrator
+    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    
+    if ($isAdmin) {
+        $InstallPrefix = "C:\Program Files\yams"
+    } else {
+        # Default to user-local install if not admin
+        $InstallPrefix = Join-Path $env:LOCALAPPDATA "Programs\yams"
+        Write-Host "Running as non-admin. Defaulting install prefix to user-local path." -ForegroundColor Yellow
+    }
 }
 Write-Host "Install Prefix:    $InstallPrefix"
 
@@ -357,8 +367,20 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
         $mesonToolchainArg $mesonToolchainFile `
         @extraMesonFlags
 } else {
-    Write-Host 'Meson builddir already configured, skipping setup.'
+    Write-Host 'Meson builddir already configured.'
+    Write-Host "Ensuring prefix is set to: $InstallPrefix"
+    meson configure $buildDir "-Dprefix=$InstallPrefix"
 }
 
 Write-Host 'Compiling...'
 meson compile -C $buildDir
+
+# Note: Windows runtime DLLs (onnxruntime.dll, tbb*.dll) are now deployed
+# automatically by Meson custom_target during the build phase.
+# See meson.build files in src/daemon, tools/yams-cli, tools/yams-mcp, and plugins/onnx.
+
+Write-Host "----------------------------------------------------------------"
+Write-Host "Build complete."
+Write-Host "To install, run: meson install -C $buildDir"
+Write-Host "Note: You may need to add '$InstallPrefix\bin' to your PATH."
+Write-Host "----------------------------------------------------------------"

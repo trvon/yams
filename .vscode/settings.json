@@ -1,8 +1,8 @@
 {
     "C_Cpp.default.configurationProvider": "mesonbuild.mesonbuild",
-    "C_Cpp.default.compileCommands": "${workspaceFolder}/build/debug/compile_commands.json",
+    "C_Cpp.default.compileCommands": "w:\\tools\\yams\\builddir/compile_commands.json",
     "mesonbuild.configureOnOpen": false,
-    "mesonbuild.buildFolder": "build/debug",
+    "mesonbuild.buildFolder": "builddir",
     "files.associations": {
         "*.h": "cpp",
         "*.hpp": "cpp"

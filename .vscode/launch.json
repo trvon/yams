@@ -2,62 +2,91 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Meson: Debug yams-daemon",
-      "type": "lldb",
+      "name": "Debug: yams-daemon (builddir - Debug)",
+      "type": "cppvsdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/${config:mesonbuild.buildFolder}/src/daemon/yams-daemon",
+      "program": "${workspaceFolder}\\builddir\\src\\daemon\\yams-daemon.exe",
       "args": [
+        "--foreground",
         "--log-level",
-        "${input:yamsLogLevel}",
-        "--foreground"
+        "${input:yamsLogLevel}"
       ],
       "cwd": "${workspaceFolder}",
-      "preLaunchTask": "meson: build",
-      "env": {
-        "YAMS_LOG_LEVEL": "${input:yamsLogLevel}",
-        "ASAN_OPTIONS": "fast_unwind_on_malloc=0:strict_string_checks=1"
-      },
-      "envFile": "${workspaceFolder}/${config:mesonbuild.buildFolder}/meson-vscode.env",
+      "preLaunchTask": "meson-build-debug",
+      "environment": [
+        {
+          "name": "YAMS_LOG_LEVEL",
+          "value": "${input:yamsLogLevel}"
+        }
+      ],
       "stopAtEntry": false,
-      "console": "integratedTerminal",
-      "windows": {
-        "type": "cppvsdbg",
-        "program": "${workspaceFolder}\\${config:mesonbuild.buildFolder}\\src\\daemon\\yams-daemon.exe",
-        "envFile": "${workspaceFolder}\\${config:mesonbuild.buildFolder}\\meson-vscode.env"
-      }
+      "console": "integratedTerminal"
     },
     {
-      "name": "Meson: Debug yams-cli",
-      "type": "lldb",
+      "name": "Debug: yams-daemon (build/release - Release)",
+      "type": "cppvsdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/${config:mesonbuild.buildFolder}/tools/yams-cli/yams-cli",
+      "program": "${workspaceFolder}\\build\\release\\src\\daemon\\yams-daemon.exe",
+      "args": [
+        "--foreground",
+        "--log-level",
+        "${input:yamsLogLevel}"
+      ],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "meson-build-release",
+      "environment": [
+        {
+          "name": "YAMS_LOG_LEVEL",
+          "value": "${input:yamsLogLevel}"
+        }
+      ],
+      "stopAtEntry": false,
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Debug: yams-cli (builddir - Debug)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}\\builddir\\tools\\yams-cli\\yams-cli.exe",
       "args": [
         "${input:yamsCliArguments}"
       ],
       "cwd": "${workspaceFolder}",
-      "preLaunchTask": "meson: build",
-      "env": {
-        "YAMS_LOG_LEVEL": "${input:yamsLogLevel}"
-      },
-      "envFile": "${workspaceFolder}/${config:mesonbuild.buildFolder}/meson-vscode.env",
+      "preLaunchTask": "meson-build-debug",
+      "environment": [
+        {
+          "name": "YAMS_LOG_LEVEL",
+          "value": "${input:yamsLogLevel}"
+        }
+      ],
       "stopAtEntry": false,
-      "console": "integratedTerminal",
-      "windows": {
-        "type": "cppvsdbg",
-        "program": "${workspaceFolder}\\${config:mesonbuild.buildFolder}\\tools\\yams-cli\\yams-cli.exe",
-        "envFile": "${workspaceFolder}\\${config:mesonbuild.buildFolder}\\meson-vscode.env"
-      }
+      "console": "integratedTerminal"
     },
     {
-      "name": "Meson: Attach to yams-daemon",
-      "type": "lldb",
-      "request": "attach",
-      "pid": "${command:pickProcess}",
+      "name": "Debug: yams-cli (build/release - Release)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}\\build\\release\\tools\\yams-cli\\yams-cli.exe",
+      "args": [
+        "${input:yamsCliArguments}"
+      ],
       "cwd": "${workspaceFolder}",
-      "env": {
-        "YAMS_LOG_LEVEL": "${input:yamsLogLevel}",
-        "LSAN_OPTIONS": "use_tls=0:verbosity=1:log_threads=1"
-      }
+      "preLaunchTask": "meson-build-release",
+      "environment": [
+        {
+          "name": "YAMS_LOG_LEVEL",
+          "value": "${input:yamsLogLevel}"
+        }
+      ],
+      "stopAtEntry": false,
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Attach to yams-daemon",
+      "type": "cppvsdbg",
+      "request": "attach",
+      "processId": "${command:pickProcess}",
+      "cwd": "${workspaceFolder}"
     }
   ],
   "inputs": [
@@ -72,7 +101,7 @@
         "warn",
         "error"
       ],
-      "default": "info"
+      "default": "debug"
     },
     {
       "id": "yamsCliArguments",

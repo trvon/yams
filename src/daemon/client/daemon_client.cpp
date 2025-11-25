@@ -6,6 +6,7 @@
 #include <yams/daemon/ipc/connection_fsm.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
+#include <yams/daemon/ipc/socket_utils.h>
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -31,6 +32,11 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#else
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #endif
 
 namespace yams::daemon {
@@ -114,10 +120,15 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_unique<
                 fs::path cfgPath;
                 if (const char* cfgEnv = std::getenv("YAMS_CONFIG"); cfgEnv && *cfgEnv) {
                     cfgPath = fs::path(cfgEnv);
+#ifdef _WIN32
+                } else if (const char* appData = std::getenv("APPDATA")) {
+                    cfgPath = fs::path(appData) / "yams" / "config.toml";
+#else
                 } else if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
                     cfgPath = fs::path(xdg) / "yams" / "config.toml";
                 } else if (const char* home = std::getenv("HOME")) {
                     cfgPath = fs::path(home) / ".config" / "yams" / "config.toml";
+#endif
                 }
 
                 if (!cfgPath.empty() && fs::exists(cfgPath)) {
@@ -1513,20 +1524,11 @@ DaemonClient::updateDocument(const UpdateDocumentRequest& req) {
 }
 
 std::filesystem::path DaemonClient::resolveSocketPath() {
-#ifdef _WIN32
-    // Use temp directory on Windows; AF_UNIX is supported via afunix.h on recent Windows.
-    return std::filesystem::temp_directory_path() / "yams-daemon.sock";
-#else
-    return yams::daemon::ConnectionFsm::resolve_socket_path();
-#endif
+    return yams::daemon::socket_utils::resolve_socket_path();
 }
 
 std::filesystem::path DaemonClient::resolveSocketPathConfigFirst() {
-#ifndef _WIN32
-    return yams::daemon::ConnectionFsm::resolve_socket_path_config_first();
-#else
-    return resolveSocketPath();
-#endif
+    return yams::daemon::socket_utils::resolve_socket_path_config_first();
 }
 
 bool DaemonClient::isDaemonRunning(const std::filesystem::path& socketPath) {
@@ -1537,9 +1539,6 @@ bool DaemonClient::isDaemonRunning(const std::filesystem::path& socketPath) {
 }
 
 Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
-#ifdef _WIN32
-    return Error{ErrorCode::InternalError, "Auto-start not supported on Windows"};
-#else
     spdlog::info("Starting YAMS daemon...");
 
     // Resolve socket path with unified precedence: explicit config > config.toml > env > defaults
@@ -1553,6 +1552,120 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
             dataDir = std::filesystem::path(env);
         }
     }
+
+#ifdef _WIN32
+    // Windows implementation using CreateProcess
+    
+    // Determine config file path (env override > APPDATA)
+    std::string configPath;
+    if (const char* cfgEnv = std::getenv("YAMS_CONFIG"); cfgEnv && *cfgEnv) {
+        configPath = cfgEnv;
+    } else if (const char* appData = std::getenv("APPDATA")) {
+        auto cfgPath = std::filesystem::path(appData) / "yams" / "config.toml";
+        if (std::filesystem::exists(cfgPath)) {
+            configPath = cfgPath.string();
+        }
+    }
+
+    // Find yams-daemon.exe
+    std::filesystem::path exePath;
+    if (const char* daemonBin = std::getenv("YAMS_DAEMON_BIN"); daemonBin && *daemonBin) {
+        exePath = daemonBin;
+    } else {
+        // Auto-detect relative to this process path
+        wchar_t selfPath[MAX_PATH];
+        DWORD len = GetModuleFileNameW(nullptr, selfPath, MAX_PATH);
+        if (len > 0 && len < MAX_PATH) {
+            std::filesystem::path selfExe(selfPath);
+            auto cliDir = selfExe.parent_path();
+            // Common build-tree locations
+            std::vector<std::filesystem::path> candidates = {
+                cliDir / "yams-daemon.exe",
+                cliDir.parent_path() / "yams-daemon.exe",
+                cliDir.parent_path() / "daemon" / "yams-daemon.exe",
+                cliDir.parent_path().parent_path() / "daemon" / "yams-daemon.exe",
+                cliDir.parent_path().parent_path() / "yams-daemon.exe",
+                cliDir.parent_path().parent_path() / "src" / "daemon" / "yams-daemon.exe"
+            };
+            for (const auto& p : candidates) {
+                if (std::filesystem::exists(p)) {
+                    exePath = p;
+                    break;
+                }
+            }
+        }
+        if (exePath.empty()) {
+            // Fall back to searching PATH
+            exePath = "yams-daemon.exe";
+        }
+    }
+
+    // Build command line
+    std::wstring cmdLine = L"\"" + exePath.wstring() + L"\"";
+    cmdLine += L" --socket \"" + socketPath.wstring() + L"\"";
+    
+    if (!configPath.empty() && std::filesystem::exists(configPath)) {
+        cmdLine += L" --config \"" + std::filesystem::path(configPath).wstring() + L"\"";
+    }
+    if (const char* ll = std::getenv("YAMS_LOG_LEVEL"); ll && *ll) {
+        std::wstring logLevel(ll, ll + strlen(ll));
+        cmdLine += L" --log-level " + logLevel;
+    }
+    if (!dataDir.empty()) {
+        cmdLine += L" --data-dir \"" + dataDir.wstring() + L"\"";
+    }
+
+    // Set up environment variables for the child process
+    if (!dataDir.empty()) {
+        SetEnvironmentVariableW(L"YAMS_STORAGE", dataDir.wstring().c_str());
+        SetEnvironmentVariableW(L"YAMS_DATA_DIR", dataDir.wstring().c_str());
+    }
+    if (!socketPath.empty()) {
+        SetEnvironmentVariableW(L"YAMS_DAEMON_SOCKET", socketPath.wstring().c_str());
+    }
+
+    // Create process with DETACHED_PROCESS flag so it doesn't share console
+    STARTUPINFOW si = {};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = INVALID_HANDLE_VALUE;
+    si.hStdOutput = INVALID_HANDLE_VALUE;
+    si.hStdError = INVALID_HANDLE_VALUE;
+
+    PROCESS_INFORMATION pi = {};
+
+    // cmdLine must be mutable for CreateProcessW
+    std::vector<wchar_t> cmdLineBuf(cmdLine.begin(), cmdLine.end());
+    cmdLineBuf.push_back(L'\0');
+
+    BOOL success = CreateProcessW(
+        nullptr,                    // lpApplicationName - use cmdLine instead
+        cmdLineBuf.data(),          // lpCommandLine
+        nullptr,                    // lpProcessAttributes
+        nullptr,                    // lpThreadAttributes
+        FALSE,                      // bInheritHandles
+        DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,  // dwCreationFlags
+        nullptr,                    // lpEnvironment - inherit
+        nullptr,                    // lpCurrentDirectory - inherit
+        &si,                        // lpStartupInfo
+        &pi                         // lpProcessInformation
+    );
+
+    if (!success) {
+        DWORD err = GetLastError();
+        return Error{ErrorCode::InternalError, 
+                     "Failed to start daemon: CreateProcess error " + std::to_string(err)};
+    }
+
+    // Close handles - we don't need to wait for the daemon
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    spdlog::info("Daemon process spawned (PID: {}), client will now poll for readiness", pi.dwProcessId);
+    return Result<void>();
+
+#else
+    // Unix implementation using fork/exec
 
     // Fork and exec yams-daemon
     pid_t pid = fork();
@@ -1598,14 +1711,12 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
             // On Linux, read /proc/self/exe
             std::error_code ec;
             std::filesystem::path selfExe;
-#ifndef _WIN32
             char buf[4096];
             ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
             if (n > 0) {
                 buf[n] = '\0';
                 selfExe = std::filesystem::path(buf);
             }
-#endif
             if (!selfExe.empty()) {
                 auto cliDir = selfExe.parent_path();
                 // Common build-tree locations

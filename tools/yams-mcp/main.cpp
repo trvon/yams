@@ -13,6 +13,7 @@
 
 #ifdef _WIN32
 #include <cstdlib>
+#include <yams/platform/windows_init.h>
 // Windows implementation of setenv
 inline int setenv(const char *name, const char *value, int overwrite) {
     int errcode = 0;

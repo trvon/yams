@@ -29,8 +29,10 @@ namespace daemon {
 using WorkGuard = boost::asio::executor_work_guard<boost::asio::io_context::executor_type>;
 
 GlobalIOContext& GlobalIOContext::instance() {
-    static GlobalIOContext* instance = new GlobalIOContext();
-    return *instance;
+    // Meyer's singleton: Thread-safe in C++11+ (guaranteed by standard §6.7 [stmt.dcl] p4)
+    // Constructed on first call, avoiding static initialization order fiasco
+    static GlobalIOContext instance;
+    return instance;
 }
 
 void GlobalIOContext::reset() {
@@ -59,7 +61,7 @@ void GlobalIOContext::restart() {
     }
 
     // Phase 2: Stop io_context (will cause run() to return in worker threads)
-    io_context_.stop();
+    io_context_->stop();
 
     // Phase 3: Join all worker threads with timeout protection
     for (auto& t : this->io_threads_) {
@@ -80,8 +82,8 @@ void GlobalIOContext::restart() {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     // Phase 5: Restart io_context and recreate work guard
-    io_context_.restart();
-    this->work_guard_ = std::make_unique<WorkGuard>(io_context_.get_executor());
+    io_context_->restart();
+    this->work_guard_ = std::make_unique<WorkGuard>(io_context_->get_executor());
 
     // Phase 6: Calculate thread count
     unsigned int thread_count = std::thread::hardware_concurrency();
@@ -96,13 +98,13 @@ void GlobalIOContext::restart() {
 
     try {
         for (unsigned int i = 0; i < thread_count; ++i) {
-            new_threads.emplace_back([this]() { io_context_.run(); });
+            new_threads.emplace_back([this]() { io_context_->run(); });
         }
         // All threads created successfully - move them to member variable
         this->io_threads_ = std::move(new_threads);
     } catch (...) {
         // Thread creation failed - clean up partial state
-        this->io_context_.stop();
+        this->io_context_->stop();
         for (auto& worker : new_threads) {
             if (worker.joinable()) {
                 try {
@@ -121,42 +123,54 @@ void GlobalIOContext::restart() {
 }
 
 boost::asio::io_context& GlobalIOContext::get_io_context() {
-    return io_context_;
+    ensure_initialized();
+    return *io_context_;
+}
+
+void GlobalIOContext::ensure_initialized() {
+    std::call_once(init_flag_, [this]() {
+        // Create io_context
+        io_context_ = std::make_unique<boost::asio::io_context>();
+        work_guard_ = std::make_unique<WorkGuard>(io_context_->get_executor());
+
+        // Calculate thread count
+        unsigned int thread_count = std::thread::hardware_concurrency();
+        if (thread_count == 0)
+            thread_count = 4;
+        thread_count = std::min(thread_count, 16u);
+
+        // Create worker threads
+        io_threads_.reserve(thread_count);
+        try {
+            for (unsigned int i = 0; i < thread_count; ++i) {
+                io_threads_.emplace_back([this]() { io_context_->run(); });
+            }
+        } catch (...) {
+            // Stop io_context first to wake any waiting threads
+            io_context_->stop();
+            // Join all successfully created threads
+            for (auto& worker : io_threads_) {
+                if (worker.joinable()) {
+                    try {
+                        worker.join();
+                    } catch (...) {
+                    }
+                }
+            }
+            // Clean up
+            if (work_guard_) {
+                work_guard_->reset();
+                work_guard_.reset();
+            }
+            io_threads_.clear();
+            throw;
+        }
+    });
 }
 
 GlobalIOContext::GlobalIOContext() {
-    this->work_guard_ = std::make_unique<WorkGuard>(io_context_.get_executor());
-
-    unsigned int thread_count = std::thread::hardware_concurrency();
-    if (thread_count == 0)
-        thread_count = 4;
-    thread_count = std::min(thread_count, 16u);
-
-    this->io_threads_.reserve(thread_count);
-    try {
-        for (unsigned int i = 0; i < thread_count; ++i) {
-            this->io_threads_.emplace_back([this]() { io_context_.run(); });
-        }
-    } catch (...) {
-        // Stop io_context first to wake any waiting threads
-        this->io_context_.stop();
-        // Join all successfully created threads before destroying work_guard
-        for (auto& worker : this->io_threads_) {
-            if (worker.joinable()) {
-                try {
-                    worker.join();
-                } catch (...) {
-                }
-            }
-        }
-        // NOW it's safe to destroy work_guard (no threads are using it)
-        if (this->work_guard_) {
-            this->work_guard_->reset();
-            this->work_guard_.reset();
-        }
-        this->io_threads_.clear();
-        throw;
-    }
+    // Trivial constructor - actual initialization deferred to ensure_initialized()
+    // This avoids Windows static initialization order fiasco with boost::asio::io_context
 }
 
 GlobalIOContext::~GlobalIOContext() {
@@ -165,7 +179,7 @@ GlobalIOContext::~GlobalIOContext() {
         this->work_guard_.reset();
     }
 
-    io_context_.stop();
+    io_context_->stop();
     for (auto& t : this->io_threads_) {
         if (t.joinable()) {
             t.join();

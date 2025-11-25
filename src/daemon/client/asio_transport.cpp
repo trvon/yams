@@ -75,7 +75,9 @@ AsioTransportAdapter::async_connect_with_timeout(const std::filesystem::path& pa
     auto socket = std::make_unique<boost::asio::local::stream_protocol::socket>(executor);
     boost::asio::local::stream_protocol::endpoint endpoint(path.string());
 
-    if (!std::filesystem::exists(path)) {
+    // Use error_code overload to avoid exceptions on Windows for Unix sockets
+    std::error_code exists_ec;
+    if (!std::filesystem::exists(path, exists_ec)) {
         std::string msg = "Daemon not started (socket not found at '" + path.string() +
                           "'). Set YAMS_DAEMON_SOCKET or update config (daemon.socket_path).";
         spdlog::debug("AsioTransportAdapter preflight: {}", msg);

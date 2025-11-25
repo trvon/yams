@@ -7,6 +7,10 @@
 #include <map>
 #include <memory>
 
+#ifdef _WIN32
+#include <yams/platform/windows_init.h>
+#endif
+
 namespace yams::tools {
 
 // Forward declare command classes

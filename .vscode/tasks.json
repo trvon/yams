@@ -4,7 +4,15 @@
 		{
 			"label": "setup (Debug)",
 			"type": "shell",
-			"command": "./setup.sh Debug",
+			"windows": {
+				"command": ".\\setup.ps1 Debug"
+			},
+			"linux": {
+				"command": "./setup.sh Debug"
+			},
+			"osx": {
+				"command": "./setup.sh Debug"
+			},
 			"problemMatcher": [],
 			"presentation": {
 				"reveal": "always",
@@ -18,7 +26,15 @@
 		{
 			"label": "setup (Release)",
 			"type": "shell",
-			"command": "./setup.sh Release",
+			"windows": {
+				"command": ".\\setup.ps1 Release"
+			},
+			"linux": {
+				"command": "./setup.sh Release"
+			},
+			"osx": {
+				"command": "./setup.sh Release"
+			},
 			"problemMatcher": [],
 			"presentation": {
 				"reveal": "always",
@@ -28,12 +44,17 @@
 		{
 			"label": "build (Debug)",
 			"type": "shell",
-			"dependsOn": [
-				"setup (Debug)"
-			],
-			"command": "meson compile -C builddir",
+			"windows": {
+				"command": "builddir\\build-debug\\conan\\conanbuild.ps1; meson compile -C builddir"
+			},
+			"linux": {
+				"command": "meson compile -C builddir"
+			},
+			"osx": {
+				"command": "meson compile -C builddir"
+			},
 			"problemMatcher": [
-				"$gcc"
+				"$msCompile"
 			],
 			"group": {
 				"kind": "build",
@@ -45,14 +66,61 @@
 			}
 		},
 		{
+			"label": "meson-build-debug",
+			"type": "shell",
+			"windows": {
+				"command": "if (Test-Path builddir\\build-debug\\conan\\conanbuild.ps1) { builddir\\build-debug\\conan\\conanbuild.ps1 }; meson compile -C builddir"
+			},
+			"linux": {
+				"command": "meson compile -C builddir"
+			},
+			"osx": {
+				"command": "meson compile -C builddir"
+			},
+			"problemMatcher": [
+				"$msCompile"
+			],
+			"group": "build",
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared"
+			}
+		},
+		{
 			"label": "build (Release)",
 			"type": "shell",
-			"dependsOn": [
-				"setup (Release)"
-			],
-			"command": "meson compile -C build/release",
+			"windows": {
+				"command": "build\\release\\build-release\\conan\\conanbuild.ps1; meson compile -C build/release"
+			},
+			"linux": {
+				"command": "meson compile -C build/release"
+			},
+			"osx": {
+				"command": "meson compile -C build/release"
+			},
 			"problemMatcher": [
-				"$gcc"
+				"$msCompile"
+			],
+			"group": "build",
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared"
+			}
+		},
+		{
+			"label": "meson-build-release",
+			"type": "shell",
+			"windows": {
+				"command": "if (Test-Path build\\release\\build-release\\conan\\conanbuild.ps1) { build\\release\\build-release\\conan\\conanbuild.ps1 }; meson compile -C build/release"
+			},
+			"linux": {
+				"command": "meson compile -C build/release"
+			},
+			"osx": {
+				"command": "meson compile -C build/release"
+			},
+			"problemMatcher": [
+				"$msCompile"
 			],
 			"group": "build",
 			"presentation": {
@@ -82,7 +150,15 @@
 		{
 			"label": "clean",
 			"type": "shell",
-			"command": "rm -rf builddir build",
+			"windows": {
+				"command": "Remove-Item -Recurse -Force builddir,build -ErrorAction SilentlyContinue"
+			},
+			"linux": {
+				"command": "rm -rf builddir build"
+			},
+			"osx": {
+				"command": "rm -rf builddir build"
+			},
 			"problemMatcher": [],
 			"group": "none"
 		},

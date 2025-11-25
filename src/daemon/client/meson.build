@@ -11,17 +11,19 @@ protoc_prog = find_program(protoc_candidate, required: protobuf_dep.found())
 proto_source_root = join_paths(meson.project_source_root(), 'include')
 proto_input = join_paths(proto_source_root, 'yams', 'daemon', 'ipc', 'proto', 'ipc_envelope.proto')
 
-# Use custom_target to control output location precisely
-# We output directly to the build directory, flattening the structure
-proto_generated = custom_target('ipc_envelope_proto',
-  input: proto_input,
-  output: ['ipc_envelope.pb.cc', 'ipc_envelope.pb.h'],
-  command: [
-    protoc_prog,
-    '--cpp_out=lite:@OUTDIR@',
-    '--proto_path=' + join_paths(proto_source_root, 'yams', 'daemon', 'ipc', 'proto'),
+# Use generator to preserve path structure matching the include hierarchy
+proto_generator = generator(protoc_prog,
+  output: ['@BASENAME@.pb.cc', '@BASENAME@.pb.h'],
+  arguments: [
+    '--cpp_out=lite:@BUILD_DIR@',
+    '--proto_path=' + proto_source_root,
     '@INPUT@'
   ]
+)
+
+proto_generated = proto_generator.process(
+  [proto_input],
+  preserve_path_from: proto_source_root
 )
 
 yams_daemon_client_lib = static_library('yams_daemon_client',

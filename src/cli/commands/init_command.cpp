@@ -2,8 +2,10 @@
 #include <yams/cli/prompt_util.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_migration.h>
+#include <yams/downloader/downloader.hpp>
 #include <yams/vector/vector_database.h>
 
+#include <fmt/format.h>
 #include <spdlog/spdlog.h>
 
 #include <atomic>
@@ -137,9 +139,17 @@ public:
             fs::path publicKeyPath = keysDir / "ed25519.pub";
             if (!noKeygen_) {
                 auto kg = generateEd25519Keypair(privateKeyPath, publicKeyPath, force_);
-                if (!kg)
-                    return kg;
-                spdlog::info("Authentication keys generated under {}", keysDir.string());
+                if (!kg) {
+                    // Keys already exist - warn but continue
+                    if (kg.error().code == ErrorCode::InvalidState) {
+                        spdlog::info("Authentication keys already exist at {}", keysDir.string());
+                    } else {
+                        // Actual error - report but don't fail init
+                        spdlog::warn("Key generation failed: {}", kg.error().message);
+                    }
+                } else {
+                    spdlog::info("Authentication keys generated under {}", keysDir.string());
+                }
             } else {
                 spdlog::debug("Skipping key generation (--no-keygen)");
             }
@@ -799,6 +809,138 @@ private:
         }
     }
 
+    // Download model using the unified downloader
+    Result<void> downloadModelFiles(const EmbeddingModel& model, const fs::path& outputDir) {
+        fs::create_directories(outputDir);
+        fs::path modelFile = outputDir / "model.onnx";
+
+        // Check if already downloaded
+        if (fs::exists(modelFile)) {
+            std::cout << "  Model already exists at: " << modelFile.string() << "\n";
+            return Result<void>{};
+        }
+
+        // Setup downloader
+        yams::downloader::StorageConfig storage{};
+        try {
+            fs::path dataDir = cli_ ? cli_->getDataPath() : fs::path{};
+            if (!dataDir.empty()) {
+                storage.objectsDir = dataDir / "storage" / "objects";
+                storage.stagingDir = dataDir / "staging" / "downloader";
+            } else {
+                auto tmp = fs::temp_directory_path();
+                storage.objectsDir = tmp / "yams" / "objects";
+                storage.stagingDir = tmp / "yams" / "downloader";
+            }
+        } catch (...) {
+            try {
+                auto tmp = fs::temp_directory_path();
+                storage.objectsDir = tmp / "yams" / "objects";
+                storage.stagingDir = tmp / "yams" / "downloader";
+            } catch (...) {
+            }
+        }
+
+        yams::downloader::DownloaderConfig dcfg{};
+        auto manager = yams::downloader::makeDownloadManager(storage, dcfg);
+
+        // Download helper with progress
+        auto downloadFile = [&](const std::string& url, const fs::path& outPath,
+                                const std::string& label) -> Result<void> {
+            yams::downloader::DownloadRequest req{};
+            req.url = url;
+            req.storeOnly = true;
+            req.exportPath = outPath;
+
+            size_t lastLen = 0;
+            auto onProgress = [&label, &lastLen](const yams::downloader::ProgressEvent& ev) {
+                auto stageName = [](yams::downloader::ProgressStage s) {
+                    switch (s) {
+                        case yams::downloader::ProgressStage::Resolving: return "resolving";
+                        case yams::downloader::ProgressStage::Connecting: return "connecting";
+                        case yams::downloader::ProgressStage::Downloading: return "downloading";
+                        case yams::downloader::ProgressStage::Verifying: return "verifying";
+                        case yams::downloader::ProgressStage::Finalizing: return "finalizing";
+                        default: return "";
+                    }
+                };
+                float pct = ev.percentage.value_or(0.0f);
+                double done_mb = static_cast<double>(ev.downloadedBytes) / (1024.0 * 1024.0);
+                std::string content;
+                if (ev.totalBytes) {
+                    double total_mb = static_cast<double>(*ev.totalBytes) / (1024.0 * 1024.0);
+                    content = fmt::format("  {} {:11s} {:3.0f}% [{:.1f}/{:.1f} MB]",
+                                          label, stageName(ev.stage), pct, done_mb, total_mb);
+                } else {
+                    content = fmt::format("  {} {:11s} [{:.1f} MB]",
+                                          label, stageName(ev.stage), done_mb);
+                }
+                std::string out = "\r" + content;
+                if (lastLen > content.size())
+                    out += std::string(lastLen - content.size(), ' ');
+                fmt::print("{}", out);
+                std::fflush(stdout);
+                lastLen = content.size();
+                if (ev.stage == yams::downloader::ProgressStage::Finalizing) {
+                    fmt::print("\n");
+                    lastLen = 0;
+                }
+            };
+
+            auto res = manager->download(req, onProgress, [] { return false; }, {});
+            if (!res.ok() || !res.value().success) {
+                std::string msg = res.ok() 
+                    ? (res.value().error ? res.value().error->message : "download failed")
+                    : res.error().message;
+                return Error{ErrorCode::InternalError, label + ": " + msg};
+            }
+            return Result<void>{};
+        };
+
+        // Map model name to HuggingFace repo
+        auto getHfRepo = [](const std::string& name) -> std::string {
+            if (name == "all-MiniLM-L6-v2") return "sentence-transformers/all-MiniLM-L6-v2";
+            if (name == "all-mpnet-base-v2") return "sentence-transformers/all-mpnet-base-v2";
+            return "";
+        };
+
+        std::string repo = getHfRepo(model.name);
+        if (repo.empty()) {
+            return Error{ErrorCode::InvalidArgument, "Unknown model: " + model.name};
+        }
+
+        std::cout << "\nDownloading model: " << model.name << " (~" << model.size_mb << " MB)...\n";
+
+        // Download model.onnx (try multiple paths)
+        std::vector<std::string> modelPaths = {"onnx/model.onnx", "model.onnx"};
+        bool downloaded = false;
+        for (const auto& path : modelPaths) {
+            std::string url = "https://huggingface.co/" + repo + "/resolve/main/" + path;
+            auto result = downloadFile(url, modelFile, "model.onnx");
+            if (result) {
+                downloaded = true;
+                break;
+            }
+        }
+        if (!downloaded) {
+            return Error{ErrorCode::NetworkError, "Failed to download model.onnx"};
+        }
+
+        // Download optional companion files (best effort)
+        std::vector<std::pair<std::string, std::string>> companions = {
+            {"config.json", "config.json"},
+            {"tokenizer.json", "tokenizer.json"},
+            {"sentence_bert_config.json", "sentence_bert_config.json"}
+        };
+        for (const auto& [filename, localName] : companions) {
+            std::string url = "https://huggingface.co/" + repo + "/resolve/main/" + filename;
+            (void)downloadFile(url, outputDir / localName, filename);
+        }
+
+        std::cout << "✓ Model downloaded successfully\n";
+        return Result<void>{};
+    }
+
     std::string promptForModel(const fs::path& dataPath) {
         // Build choice items
         std::vector<ChoiceItem> items;
@@ -828,16 +970,29 @@ private:
 
         const auto& selectedModel = EMBEDDING_MODELS[chosenIdx];
 
-        // Check if model already exists (best-effort path)
+        // Check if model already exists
         fs::path modelDir = dataPath / "models" / selectedModel.name;
         fs::path modelPath = modelDir / "model.onnx";
+        
         if (fs::exists(modelPath)) {
             std::cout << "\nModel already downloaded at: " << modelPath.string() << "\n";
         } else {
-            std::cout << "\nTo download this model via the unified downloader:\n"
-                      << "  yams model download " << selectedModel.name << "\n"
-                      << "  (or: yams model download --hf <org/name>)\n"
-                      << "\nSkipping automatic curl/wget download during init.\n";
+            // Ask if user wants to download now
+            bool downloadNow = prompt_yes_no(
+                "\nDownload the model now? [Y/n]: ",
+                YesNoOptions{.defaultYes = true});
+            
+            if (downloadNow) {
+                auto result = downloadModelFiles(selectedModel, modelDir);
+                if (!result) {
+                    spdlog::warn("Model download failed: {}", result.error().message);
+                    std::cout << "\nYou can download the model later with:\n"
+                              << "  yams model download " << selectedModel.name << "\n";
+                }
+            } else {
+                std::cout << "\nTo download this model later:\n"
+                          << "  yams model download " << selectedModel.name << "\n";
+            }
         }
         return selectedModel.name;
     }

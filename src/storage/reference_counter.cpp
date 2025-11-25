@@ -22,6 +22,11 @@ namespace yamsfmt = fmt;
 #include <linux/limits.h>
 #elif defined(__APPLE__)
 #include <mach-o/dyld.h>
+#elif defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #endif
 
 namespace yams::storage {
@@ -94,6 +99,18 @@ static std::filesystem::path findReferenceSchemaSql() {
         if (_NSGetExecutablePath(path, &size) == 0) {
             fs::path exePath(path);
             // Check ../share/yams/sql relative to binary
+            searchPaths.push_back(exePath.parent_path().parent_path() / "share" / "yams" / "sql" /
+                                  "reference_schema.sql");
+        }
+#elif defined(_WIN32)
+        wchar_t path[MAX_PATH];
+        DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH);
+        if (len > 0 && len < MAX_PATH) {
+            fs::path exePath(path);
+            // Check relative to binary directory (for development/build)
+            searchPaths.push_back(exePath.parent_path() / "sql" / "reference_schema.sql");
+            searchPaths.push_back(exePath.parent_path().parent_path() / "sql" / "reference_schema.sql");
+            // Check ../share/yams/sql relative to binary (for installed binaries)
             searchPaths.push_back(exePath.parent_path().parent_path() / "share" / "yams" / "sql" /
                                   "reference_schema.sql");
         }

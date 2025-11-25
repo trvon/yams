@@ -133,3 +133,13 @@ yams_onnx_plugin = shared_module('yams_onnx_plugin',
   install: true,
   install_dir: plugins_dir,
 )
+
+# --- Windows: Copy runtime DLLs next to the ONNX plugin ---
+if host_machine.system() == 'windows' and windows_runtime_dlls.length() > 0
+  foreach dll_info : windows_runtime_dlls
+    dll_name = dll_info[0]
+    dll_src = dll_info[1]
+    fs.copyfile(dll_src, dll_name, install: false)
+  endforeach
+endif
+

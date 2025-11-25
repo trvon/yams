@@ -1,0 +1,77 @@
+{
+  "configurations": [
+    {
+      "inheritEnvironments": [
+        "msvc_x64"
+      ],
+      "name": "x64-Debug",
+      "includePath": [
+        "${env.INCLUDE}",
+        "${workspaceRoot}\\include",
+        "${workspaceRoot}\\src",
+        "${workspaceRoot}\\tests",
+        "${workspaceRoot}\\builddir\\**",
+        "${workspaceRoot}\\build\\debug\\**",
+        "${workspaceRoot}\\build\\debug\\conan\\**",
+        "${env.USERPROFILE}\\.conan2\\**"
+      ],
+      "defines": [
+        "WIN32",
+        "_DEBUG",
+        "UNICODE",
+        "_UNICODE",
+        "YAMS_TESTING=1",
+        "_CRT_SECURE_NO_WARNINGS"
+      ],
+      "intelliSenseMode": "windows-msvc-x64",
+      "compilerPath": "${env.VCToolsInstallDir}\\bin\\Hostx64\\x64\\cl.exe",
+      "cStandard": "c17",
+      "cppStandard": "c++20",
+      "compileCommands": "${workspaceRoot}\\builddir\\compile_commands.json"
+    },
+    {
+      "inheritEnvironments": [
+        "msvc_x64"
+      ],
+      "name": "x64-Release",
+      "includePath": [
+        "${env.INCLUDE}",
+        "${workspaceRoot}\\include",
+        "${workspaceRoot}\\src",
+        "${workspaceRoot}\\tests",
+        "${workspaceRoot}\\build\\release\\**",
+        "${workspaceRoot}\\build\\release\\conan\\**",
+        "${env.USERPROFILE}\\.conan2\\**"
+      ],
+      "defines": [
+        "WIN32",
+        "NDEBUG",
+        "UNICODE",
+        "_UNICODE",
+        "_CRT_SECURE_NO_WARNINGS"
+      ],
+      "intelliSenseMode": "windows-msvc-x64",
+      "compilerPath": "${env.VCToolsInstallDir}\\bin\\Hostx64\\x64\\cl.exe",
+      "cStandard": "c17",
+      "cppStandard": "c++20",
+      "compileCommands": "${workspaceRoot}\\build\\release\\compile_commands.json"
+    },
+    {
+      "inheritEnvironments": [
+        "msvc_x86"
+      ],
+      "name": "x86-Release",
+      "includePath": [
+        "${env.INCLUDE}",
+        "${workspaceRoot}\\**"
+      ],
+      "defines": [
+        "WIN32",
+        "NDEBUG",
+        "UNICODE",
+        "_UNICODE"
+      ],
+      "intelliSenseMode": "windows-msvc-x86"
+    }
+  ]
+}

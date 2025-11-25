@@ -78,3 +78,7 @@ gitlab-ci.yml
 .project
 .cproject
 builddir
+
+# Meson subprojects
+/subprojects/*
+!/subprojects/*.wrap

@@ -24,9 +24,9 @@ static inline fs::path get_xdg_runtime_dir() {
 }
 
 static inline bool can_write_dir(const fs::path& dir) {
-    if (!fs::exists(dir))
-        return false;
     std::error_code ec;
+    if (!fs::exists(dir, ec))
+        return false;
     auto probe = dir / ".yams-writable-probe";
     std::ofstream f(probe);
     if (!f.good())
@@ -39,6 +39,19 @@ static inline bool can_write_dir(const fs::path& dir) {
 
 std::filesystem::path resolve_socket_path() {
 #ifdef _WIN32
+    // 1) Explicit environment override
+    if (const char* env = std::getenv("YAMS_DAEMON_SOCKET")) {
+        if (*env)
+            return fs::path(env);
+    }
+    // 2) Use LOCALAPPDATA/yams or temp directory
+    if (const char* localAppData = std::getenv("LOCALAPPDATA")) {
+        auto yamDir = fs::path(localAppData) / "yams";
+        std::error_code ec;
+        fs::create_directories(yamDir, ec);
+        if (can_write_dir(yamDir))
+            return yamDir / "yams-daemon.sock";
+    }
     return fs::temp_directory_path() / "yams-daemon.sock";
 #else
     // 1) Explicit environment override
@@ -61,10 +74,7 @@ std::filesystem::path resolve_socket_path() {
 }
 
 std::filesystem::path resolve_socket_path_config_first() {
-#ifdef _WIN32
-    return resolve_socket_path();
-#else
-    // 1) Env override wins
+    // 1) Env override wins (all platforms)
     if (const char* env = std::getenv("YAMS_DAEMON_SOCKET")) {
         if (*env)
             return fs::path(env);
@@ -72,12 +82,20 @@ std::filesystem::path resolve_socket_path_config_first() {
     // 2) config.toml if present
     try {
         fs::path cfgPath;
+#ifdef _WIN32
+        // Windows: APPDATA/yams/config.toml
+        if (const char* appData = std::getenv("APPDATA")) {
+            cfgPath = fs::path(appData) / "yams" / "config.toml";
+        }
+#else
         if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
             cfgPath = fs::path(xdg) / "yams" / "config.toml";
         } else if (const char* home = std::getenv("HOME")) {
             cfgPath = fs::path(home) / ".config" / "yams" / "config.toml";
         }
-        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+#endif
+        std::error_code cfgEc;
+        if (!cfgPath.empty() && fs::exists(cfgPath, cfgEc)) {
             std::ifstream in(cfgPath);
             if (in) {
                 std::string line;
@@ -140,7 +158,6 @@ std::filesystem::path resolve_socket_path_config_first() {
     }
     // 3) default resolution
     return resolve_socket_path();
-#endif
 }
 
 } // namespace yams::daemon::socket_utils

@@ -27,79 +27,82 @@
 namespace yams::detection {
 
 namespace {
-// Extension to MIME type mapping
-const std::unordered_map<std::string, std::string> EXTENSION_MIME_MAP = {
-    // Text formats
-    {".txt", "text/plain"},
-    {".html", "text/html"},
-    {".htm", "text/html"},
-    {".css", "text/css"},
-    {".js", "application/javascript"},
-    {".json", "application/json"},
-    {".xml", "application/xml"},
-    {".yaml", "application/x-yaml"},
-    {".yml", "application/x-yaml"},
-    {".md", "text/markdown"},
-    {".csv", "text/csv"},
+// Extension to MIME type mapping - wrapped in function to avoid static initialization order fiasco
+const std::unordered_map<std::string, std::string>& getExtensionMimeMap() {
+    static const std::unordered_map<std::string, std::string> EXTENSION_MIME_MAP = {
+        // Text formats
+        {".txt", "text/plain"},
+        {".html", "text/html"},
+        {".htm", "text/html"},
+        {".css", "text/css"},
+        {".js", "application/javascript"},
+        {".json", "application/json"},
+        {".xml", "application/xml"},
+        {".yaml", "application/x-yaml"},
+        {".yml", "application/x-yaml"},
+        {".md", "text/markdown"},
+        {".csv", "text/csv"},
 
-    // Documents
-    {".pdf", "application/pdf"},
-    {".doc", "application/msword"},
-    {".docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
-    {".xls", "application/vnd.ms-excel"},
-    {".xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
-    {".ppt", "application/vnd.ms-powerpoint"},
-    {".pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"},
+        // Documents
+        {".pdf", "application/pdf"},
+        {".doc", "application/msword"},
+        {".docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+        {".xls", "application/vnd.ms-excel"},
+        {".xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+        {".ppt", "application/vnd.ms-powerpoint"},
+        {".pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"},
 
-    // Images
-    {".jpg", "image/jpeg"},
-    {".jpeg", "image/jpeg"},
-    {".png", "image/png"},
-    {".gif", "image/gif"},
-    {".bmp", "image/bmp"},
-    {".svg", "image/svg+xml"},
-    {".webp", "image/webp"},
-    {".ico", "image/x-icon"},
+        // Images
+        {".jpg", "image/jpeg"},
+        {".jpeg", "image/jpeg"},
+        {".png", "image/png"},
+        {".gif", "image/gif"},
+        {".bmp", "image/bmp"},
+        {".svg", "image/svg+xml"},
+        {".webp", "image/webp"},
+        {".ico", "image/x-icon"},
 
-    // Audio/Video
-    {".mp3", "audio/mpeg"},
-    {".wav", "audio/wav"},
-    {".ogg", "audio/ogg"},
-    {".m4a", "audio/mp4"},
-    {".mp4", "video/mp4"},
-    {".avi", "video/x-msvideo"},
-    {".mkv", "video/x-matroska"},
-    {".webm", "video/webm"},
-    {".mov", "video/quicktime"},
+        // Audio/Video
+        {".mp3", "audio/mpeg"},
+        {".wav", "audio/wav"},
+        {".ogg", "audio/ogg"},
+        {".m4a", "audio/mp4"},
+        {".mp4", "video/mp4"},
+        {".avi", "video/x-msvideo"},
+        {".mkv", "video/x-matroska"},
+        {".webm", "video/webm"},
+        {".mov", "video/quicktime"},
 
-    // Archives
-    {".zip", "application/zip"},
-    {".tar", "application/x-tar"},
-    {".gz", "application/gzip"},
-    {".bz2", "application/x-bzip2"},
-    {".7z", "application/x-7z-compressed"},
-    {".rar", "application/x-rar-compressed"},
-    {".xz", "application/x-xz"},
+        // Archives
+        {".zip", "application/zip"},
+        {".tar", "application/x-tar"},
+        {".gz", "application/gzip"},
+        {".bz2", "application/x-bzip2"},
+        {".7z", "application/x-7z-compressed"},
+        {".rar", "application/x-rar-compressed"},
+        {".xz", "application/x-xz"},
 
-    // Programming
-    {".cpp", "text/x-c++"},
-    {".c", "text/x-c"},
-    {".h", "text/x-c"},
-    {".hpp", "text/x-c++"},
-    {".py", "text/x-python"},
-    {".java", "text/x-java"},
-    {".rs", "text/x-rust"},
-    {".go", "text/x-go"},
-    {".sh", "application/x-sh"},
-    {".bat", "application/x-msdos-program"},
+        // Programming
+        {".cpp", "text/x-c++"},
+        {".c", "text/x-c"},
+        {".h", "text/x-c"},
+        {".hpp", "text/x-c++"},
+        {".py", "text/x-python"},
+        {".java", "text/x-java"},
+        {".rs", "text/x-rust"},
+        {".go", "text/x-go"},
+        {".sh", "application/x-sh"},
+        {".bat", "application/x-msdos-program"},
 
-    // Executables
-    {".exe", "application/x-msdownload"},
-    {".dll", "application/x-msdownload"},
-    {".so", "application/x-sharedlib"},
-    {".dylib", "application/x-sharedlib"},
-    {".class", "application/java-vm"},
-    {".jar", "application/java-archive"}};
+        // Executables
+        {".exe", "application/x-msdownload"},
+        {".dll", "application/x-msdownload"},
+        {".so", "application/x-sharedlib"},
+        {".dylib", "application/x-sharedlib"},
+        {".class", "application/java-vm"},
+        {".jar", "application/java-archive"}};
+    return EXTENSION_MIME_MAP;
+}
 } // namespace
 
 class FileTypeDetector::Impl {
@@ -337,7 +340,7 @@ Result<void> FileTypeDetector::initialize(const FileTypeDetectorConfig& config) 
     }
 
     // Always populate extension-based MIME mappings
-    for (const auto& [ext, mime] : EXTENSION_MIME_MAP) {
+    for (const auto& [ext, mime] : getExtensionMimeMap()) {
         if (pImpl->mimeToFileType.find(mime) == pImpl->mimeToFileType.end()) {
             std::string fileType = "binary";
 
@@ -640,7 +643,7 @@ Result<void> FileTypeDetector::loadPatternsFromFile(const std::filesystem::path&
         }
 
         // Also add extension-based MIME types to maps
-        for (const auto& [ext, mime] : EXTENSION_MIME_MAP) {
+        for (const auto& [ext, mime] : getExtensionMimeMap()) {
             // Only add if not already present from patterns
             if (pImpl->mimeToFileType.find(mime) == pImpl->mimeToFileType.end()) {
                 // Determine file type from MIME
@@ -823,8 +826,9 @@ std::string FileTypeDetector::getMimeTypeFromExtension(const std::string& extens
     // Convert to lowercase
     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
-    auto it = EXTENSION_MIME_MAP.find(ext);
-    return it != EXTENSION_MIME_MAP.end() ? it->second : "application/octet-stream";
+    const auto& mimeMap = getExtensionMimeMap();
+    auto it = mimeMap.find(ext);
+    return it != mimeMap.end() ? it->second : "application/octet-stream";
 }
 
 bool FileTypeDetector::isTextMimeType(const std::string& mimeType) const {
@@ -852,7 +856,7 @@ std::vector<std::string> FileTypeDetector::getTextExtensions() const {
     std::vector<std::string> textExtensions;
 
     // Iterate through the extension-to-MIME mapping
-    for (const auto& [ext, mime] : EXTENSION_MIME_MAP) {
+    for (const auto& [ext, mime] : getExtensionMimeMap()) {
         if (isTextMimeType(mime)) {
             textExtensions.push_back(ext);
         }

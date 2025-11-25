@@ -21,6 +21,11 @@ on:
         required: false
         type: string
         default: ./conan/profiles/host-macos-apple-clang-x86
+      conan_profile_windows:
+        description: Path to Windows Conan host profile
+        required: false
+        type: string
+        default: ./conan/profiles/host-windows-msvc
       build_type:
         description: Conan build type for warming (Release/Debug)
         required: false
@@ -59,6 +64,11 @@ jobs:
             conan_host_profile: ${{ inputs.conan_profile_macos_x86 }}
             conan_arch: x86_64
             needs_rosetta: true
+          - suffix: windows-x86_64
+            runs_on: windows-latest
+            conan_host_profile: ${{ inputs.conan_profile_windows }}
+            conan_arch: x86_64
+            needs_rosetta: false
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 30
     steps:
@@ -107,6 +117,10 @@ jobs:
             brew install pipx || true
             python3 -m pipx ensurepath || true
             pipx install --python python3 conan || pipx install conan
+          elif [ "$RUNNER_OS" = "Windows" ]; then
+            python -m pip install --user --upgrade pipx || true
+            python -m pipx ensurepath || true
+            pipx install conan
           else
             python3 -m pip install --user --upgrade pipx || true
             python3 -m pipx ensurepath || true
@@ -147,6 +161,8 @@ jobs:
             export CONAN_CPU_COUNT=$(nproc)
           elif command -v sysctl >/dev/null 2>&1; then
             export CONAN_CPU_COUNT=$(sysctl -n hw.ncpu)
+          elif [ "$RUNNER_OS" = "Windows" ]; then
+            export CONAN_CPU_COUNT=$NUMBER_OF_PROCESSORS
           elif command -v getconf >/dev/null 2>&1; then
             export CONAN_CPU_COUNT=$(getconf _NPROCESSORS_ONLN)
           else

@@ -320,154 +320,8 @@ Result<void> YamsDaemon::start() {
 
     // Bootstrapped event already dispatched before service initialization to prevent race.
 
-    // Start lightweight main loop thread; no in-process IPC acceptor
-    daemonThread_ = yams::compat::jthread([this](const yams::compat::stop_token& token) {
-        set_current_thread_name("yams-daemon-main");
-        spdlog::debug("Daemon main loop started.");
-        // Drive lifecycle FSM periodically
-        lifecycleFsm_.tick();
-        while (!token.stop_requested() && !stopRequested_.load()) {
-#if defined(TRACY_ENABLE)
-            YAMS_FRAME_MARK_START("daemon_tick");
-#endif
-            // Allow tuning of the main loop tick for metrics refresh and readiness nudges.
-            // Read each iteration so env changes take effect without restart.
-            uint32_t tick_ms = TuneAdvisor::statusTickMs();
-            std::unique_lock<std::mutex> lock(stop_mutex_);
-            if (stop_cv_.wait_for(lock, std::chrono::milliseconds(tick_ms),
-                                  [&] { return stopRequested_.load(); })) {
-                // Shutdown requested: inform lifecycle FSM and exit loop
-                lifecycleFsm_.dispatch(ShutdownRequestedEvent{});
-
-#if defined(TRACY_ENABLE)
-                YAMS_FRAME_MARK_END("daemon_tick");
-#endif
-                break;
-            }
-            // Periodically refresh metrics snapshot cache to ensure fast status replies
-            try {
-                if (metrics_) {
-                    metrics_->refresh();
-                }
-            } catch (...) {
-            }
-            // Apply pending reload requests (e.g., SIGHUP) for tuning-only adjustments
-            if (reloadRequested_.load(std::memory_order_relaxed)) {
-                try {
-                    reloadTuningConfig();
-                } catch (...) {
-                }
-                reloadRequested_.store(false, std::memory_order_relaxed);
-            }
-            // Deferred background tasks: require FSM Ready
-            // Note: RepairCoordinator triggers lazy-loading of embeddings/vector DB,
-            // so we start it when FSM is Ready rather than waiting for searchEngineReady.
-            // This breaks the circular dependency where search engine waits for embeddings
-            // which wait for RepairCoordinator which waits for search engine.
-            auto snap = lifecycleFsm_.snapshot();
-            {
-                std::lock_guard<std::mutex> lock(repairCoordinatorMutex_);
-                spdlog::debug(
-                    "[DaemonLoop] FSM state={}, enableAutoRepair={}, repairCoordinator_exists={}",
-                    static_cast<int>(snap.state), config_.enableAutoRepair,
-                    (repairCoordinator_ != nullptr));
-                if (snap.state == LifecycleState::Ready) {
-                    if (config_.enableAutoRepair && !repairCoordinator_) {
-                        spdlog::info("[DaemonLoop] Starting RepairCoordinator...");
-                        try {
-                            RepairCoordinator::Config rcfg;
-                            rcfg.enable = true;
-                            rcfg.dataDir = config_.dataDir;
-                            rcfg.maxBatch = static_cast<std::uint32_t>(config_.autoRepairBatchSize);
-                            auto activeFn = [this]() -> size_t {
-                                return static_cast<size_t>(state_.stats.activeConnections.load());
-                            };
-                            repairCoordinator_ = std::make_unique<RepairCoordinator>(
-                                serviceManager_.get(), &state_, activeFn, rcfg);
-                            repairCoordinator_->start();
-                        } catch (const std::exception& e) {
-                            spdlog::warn("Failed to start RepairCoordinator: {}", e.what());
-                        }
-                    }
-
-                    static bool modelPreloadSkipped = false;
-                    if (!modelPreloadSkipped) {
-                        modelPreloadSkipped = true;
-                        spdlog::info("Model preload disabled - models will load on first use");
-                    }
-                }
-            }
-            {
-                std::lock_guard<std::mutex> lock(repairCoordinatorMutex_);
-                if (repairCoordinator_) {
-                    size_t active = static_cast<size_t>(state_.stats.activeConnections.load());
-                    uint32_t busyThresh = TuneAdvisor::repairBusyConnThreshold();
-                    auto now = std::chrono::steady_clock::now();
-                    static std::chrono::steady_clock::time_point rcBusySince{};
-                    static std::chrono::steady_clock::time_point rcReadySince{};
-                    bool isBusy = (active >= busyThresh);
-                    if (isBusy) {
-                        if (rcBusySince.time_since_epoch().count() == 0)
-                            rcBusySince = now;
-                        rcReadySince = {};
-                    } else {
-                        if (rcReadySince.time_since_epoch().count() == 0)
-                            rcReadySince = now;
-                        rcBusySince = {};
-                    }
-                    uint32_t degradeHold = TuneAdvisor::repairDegradeHoldMs();
-                    uint32_t readyHold = TuneAdvisor::repairReadyHoldMs();
-                    bool busyHeld =
-                        isBusy && rcBusySince.time_since_epoch().count() != 0 &&
-                        std::chrono::duration_cast<std::chrono::milliseconds>(now - rcBusySince)
-                                .count() >= degradeHold;
-                    bool idleHeld =
-                        !isBusy && rcReadySince.time_since_epoch().count() != 0 &&
-                        std::chrono::duration_cast<std::chrono::milliseconds>(now - rcReadySince)
-                                .count() >= readyHold;
-                    bool pending = state_.stats.repairQueueDepth.load() > 0;
-                    auto snap = lifecycleFsm_.snapshot();
-                    if (snap.state == LifecycleState::Ready) {
-                        if (pending && busyHeld)
-                            lifecycleFsm_.dispatch(DegradedEvent{});
-                    } else if (snap.state == LifecycleState::Degraded) {
-                        if (!pending || idleHeld)
-                            lifecycleFsm_.dispatch(HealthyEvent{});
-                    }
-                }
-            }
-            // Periodic tasks can be added here
-            // TODO(PBI-007-06): Prefer DaemonLifecycleFsm as lifecycle authority; call fsm_.tick()
-            // here once FSM is wired
-
-            // Readiness ticker: nudge searchProgress while long-running init is in progress
-            try {
-                if (!state_.readiness.searchEngineReady.load()) {
-                    auto now = std::chrono::steady_clock::now();
-                    auto elapsed = now - state_.stats.startTime;
-                    auto sec = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
-
-                    // Target ramps toward 90% over time; clamp to avoid claiming ready
-                    int target = 5 + static_cast<int>(std::min<int64_t>(sec * 3, 90));
-                    int cur = state_.readiness.searchProgress.load();
-
-                    if (cur < target) {
-                        state_.readiness.searchProgress.store(std::min(95, target),
-                                                              std::memory_order_relaxed);
-                        spdlog::debug("Readiness ticker: nudged searchProgress to {}%",
-                                      state_.readiness.searchProgress.load());
-                    }
-                }
-            } catch (...) {
-                // best-effort ticker; ignore errors
-            }
-
-#if defined(TRACY_ENABLE)
-            YAMS_FRAME_MARK_END("daemon_tick");
-#endif
-        }
-        spdlog::debug("Daemon main loop exiting.");
-    });
+    // Note: Main loop now runs on the calling thread via runLoop() instead of a separate thread.
+    // This avoids thread resource exhaustion on Windows (EAGAIN with 48+ threads).
 
     spdlog::info("YAMS daemon started successfully.");
     spdlog::info("Hint: If this is a new or migrated data directory, run 'yams repair "
@@ -475,6 +329,156 @@ Result<void> YamsDaemon::start() {
     spdlog::info("Hint: Use 'yams stats --verbose' to monitor worker pool (threads/active/queued) "
                  "and streaming metrics.");
     return Result<void>();
+}
+
+void YamsDaemon::runLoop() {
+    spdlog::info("Daemon runLoop() entered.");
+    set_current_thread_name("yams-daemon-main");
+    
+    // Drive lifecycle FSM periodically
+    lifecycleFsm_.tick();
+    
+    spdlog::info("runLoop: stopRequested_={}, entering main loop", stopRequested_.load());
+    
+    while (!stopRequested_.load()) {
+#if defined(TRACY_ENABLE)
+        YAMS_FRAME_MARK_START("daemon_tick");
+#endif
+        // Allow tuning of the main loop tick for metrics refresh and readiness nudges.
+        // Read each iteration so env changes take effect without restart.
+        uint32_t tick_ms = TuneAdvisor::statusTickMs();
+        std::unique_lock<std::mutex> lock(stop_mutex_);
+        if (stop_cv_.wait_for(lock, std::chrono::milliseconds(tick_ms),
+                              [&] { return stopRequested_.load(); })) {
+            // Shutdown requested: inform lifecycle FSM and exit loop
+            lifecycleFsm_.dispatch(ShutdownRequestedEvent{});
+
+#if defined(TRACY_ENABLE)
+            YAMS_FRAME_MARK_END("daemon_tick");
+#endif
+            break;
+        }
+        // Periodically refresh metrics snapshot cache to ensure fast status replies
+        try {
+            if (metrics_) {
+                metrics_->refresh();
+            }
+        } catch (...) {
+        }
+        // Apply pending reload requests (e.g., SIGHUP) for tuning-only adjustments
+        if (reloadRequested_.load(std::memory_order_relaxed)) {
+            try {
+                reloadTuningConfig();
+            } catch (...) {
+            }
+            reloadRequested_.store(false, std::memory_order_relaxed);
+        }
+        // Deferred background tasks: require FSM Ready
+        // Note: RepairCoordinator triggers lazy-loading of embeddings/vector DB,
+        // so we start it when FSM is Ready rather than waiting for searchEngineReady.
+        // This breaks the circular dependency where search engine waits for embeddings
+        // which wait for RepairCoordinator which waits for search engine.
+        auto snap = lifecycleFsm_.snapshot();
+        {
+            std::lock_guard<std::mutex> lk(repairCoordinatorMutex_);
+            spdlog::debug(
+                "[DaemonLoop] FSM state={}, enableAutoRepair={}, repairCoordinator_exists={}",
+                static_cast<int>(snap.state), config_.enableAutoRepair,
+                (repairCoordinator_ != nullptr));
+            if (snap.state == LifecycleState::Ready) {
+                if (config_.enableAutoRepair && !repairCoordinator_) {
+                    spdlog::info("[DaemonLoop] Starting RepairCoordinator...");
+                    try {
+                        RepairCoordinator::Config rcfg;
+                        rcfg.enable = true;
+                        rcfg.dataDir = config_.dataDir;
+                        rcfg.maxBatch = static_cast<std::uint32_t>(config_.autoRepairBatchSize);
+                        auto activeFn = [this]() -> size_t {
+                            return static_cast<size_t>(state_.stats.activeConnections.load());
+                        };
+                        repairCoordinator_ = std::make_unique<RepairCoordinator>(
+                            serviceManager_.get(), &state_, activeFn, rcfg);
+                        repairCoordinator_->start();
+                    } catch (const std::exception& e) {
+                        spdlog::warn("Failed to start RepairCoordinator: {}", e.what());
+                    }
+                }
+
+                static bool modelPreloadSkipped = false;
+                if (!modelPreloadSkipped) {
+                    modelPreloadSkipped = true;
+                    spdlog::info("Model preload disabled - models will load on first use");
+                }
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lk(repairCoordinatorMutex_);
+            if (repairCoordinator_) {
+                size_t active = static_cast<size_t>(state_.stats.activeConnections.load());
+                uint32_t busyThresh = TuneAdvisor::repairBusyConnThreshold();
+                auto now = std::chrono::steady_clock::now();
+                static std::chrono::steady_clock::time_point rcBusySince{};
+                static std::chrono::steady_clock::time_point rcReadySince{};
+                bool isBusy = (active >= busyThresh);
+                if (isBusy) {
+                    if (rcBusySince.time_since_epoch().count() == 0)
+                        rcBusySince = now;
+                    rcReadySince = {};
+                } else {
+                    if (rcReadySince.time_since_epoch().count() == 0)
+                        rcReadySince = now;
+                    rcBusySince = {};
+                }
+                uint32_t degradeHold = TuneAdvisor::repairDegradeHoldMs();
+                uint32_t readyHold = TuneAdvisor::repairReadyHoldMs();
+                bool busyHeld =
+                    isBusy && rcBusySince.time_since_epoch().count() != 0 &&
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now - rcBusySince)
+                            .count() >= degradeHold;
+                bool idleHeld =
+                    !isBusy && rcReadySince.time_since_epoch().count() != 0 &&
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now - rcReadySince)
+                            .count() >= readyHold;
+                bool pending = state_.stats.repairQueueDepth.load() > 0;
+                auto fsmSnap = lifecycleFsm_.snapshot();
+                if (fsmSnap.state == LifecycleState::Ready) {
+                    if (pending && busyHeld)
+                        lifecycleFsm_.dispatch(DegradedEvent{});
+                } else if (fsmSnap.state == LifecycleState::Degraded) {
+                    if (!pending || idleHeld)
+                        lifecycleFsm_.dispatch(HealthyEvent{});
+                }
+            }
+        }
+        // Periodic tasks can be added here
+
+        // Readiness ticker: nudge searchProgress while long-running init is in progress
+        try {
+            if (!state_.readiness.searchEngineReady.load()) {
+                auto now = std::chrono::steady_clock::now();
+                auto elapsed = now - state_.stats.startTime;
+                auto sec = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
+
+                // Target ramps toward 90% over time; clamp to avoid claiming ready
+                int target = 5 + static_cast<int>(std::min<int64_t>(sec * 3, 90));
+                int cur = state_.readiness.searchProgress.load();
+
+                if (cur < target) {
+                    state_.readiness.searchProgress.store(std::min(95, target),
+                                                          std::memory_order_relaxed);
+                    spdlog::debug("Readiness ticker: nudged searchProgress to {}%",
+                                  state_.readiness.searchProgress.load());
+                }
+            }
+        } catch (...) {
+            // best-effort ticker; ignore errors
+        }
+
+#if defined(TRACY_ENABLE)
+        YAMS_FRAME_MARK_END("daemon_tick");
+#endif
+    }
+    spdlog::debug("Daemon main loop exiting.");
 }
 
 Result<void> YamsDaemon::stop() {
@@ -528,16 +532,7 @@ Result<void> YamsDaemon::stop() {
         spdlog::debug("Service manager shutdown complete");
     }
 
-    // Wait for daemon thread to exit (should be quick since we notified stop_cv_)
-    if (daemonThread_.joinable()) {
-        spdlog::debug("Waiting for daemon thread to exit...");
-        try {
-            daemonThread_.join();
-            spdlog::debug("Daemon thread exited");
-        } catch (const std::exception& e) {
-            spdlog::warn("Daemon thread join failed: {}", e.what());
-        }
-    }
+    // Note: Main loop runs on caller's thread via runLoop(), no daemon thread to join
 
     {
         std::lock_guard<std::mutex> lock(repairCoordinatorMutex_);
@@ -597,11 +592,19 @@ void YamsDaemon::onDocumentRemoved(const std::string& hash) {
 // Path resolution helpers remain static methods of YamsDaemon
 namespace {
 std::filesystem::path getXDGStateHome() {
+#ifdef _WIN32
+    // Windows: Use LOCALAPPDATA for state/log files
+    if (const char* localAppData = std::getenv("LOCALAPPDATA")) {
+        return std::filesystem::path(localAppData);
+    }
+    return std::filesystem::path();
+#else
     const char* xdgState = std::getenv("XDG_STATE_HOME");
     if (xdgState)
         return std::filesystem::path(xdgState);
     const char* home = std::getenv("HOME");
     return home ? std::filesystem::path(home) / ".local" / "state" : std::filesystem::path();
+#endif
 }
 } // namespace
 
@@ -677,8 +680,19 @@ bool YamsDaemon::canWriteToDirectory(const std::filesystem::path& dir) {
 }
 
 std::filesystem::path YamsDaemon::getXDGRuntimeDir() {
+#ifdef _WIN32
+    // Windows: Use LOCALAPPDATA for runtime files (no true XDG equivalent)
+    if (const char* localAppData = std::getenv("LOCALAPPDATA")) {
+        auto yamDir = std::filesystem::path(localAppData) / "yams";
+        std::error_code ec;
+        std::filesystem::create_directories(yamDir, ec);
+        return yamDir;
+    }
+    return std::filesystem::temp_directory_path();
+#else
     const char* xdgRuntime = std::getenv("XDG_RUNTIME_DIR");
     return xdgRuntime ? std::filesystem::path(xdgRuntime) : std::filesystem::path();
+#endif
 }
 
 // getXDGStateHome() moved to anonymous namespace helper above

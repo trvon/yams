@@ -49,6 +49,14 @@ jobs:
             build_type: Debug
             coverage: false
             extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled"
+          - suffix: windows-x86_64
+            runs_on: windows-latest
+            conan_host_profile: ./conan/profiles/host-windows-msvc
+            conan_arch: x86_64
+            needs_rosetta: false
+            build_type: Debug
+            coverage: false
+            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled"
     runs-on: ${{ matrix.runs_on }}
     # Allow extra time for safety across runners.
     timeout-minutes: 70
@@ -83,6 +91,16 @@ jobs:
           command -v ninja >/dev/null 2>&1 || python3 -m pip install --user --upgrade 'ninja>=1.10'
           echo "meson version: $(meson --version || echo 'missing')"
           echo "ninja version: $(ninja --version || echo 'missing')"
+      - name: Install system dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade meson ninja
+          USER_BASE=$(python -m site --user-base)
+          export PATH="$USER_BASE/Scripts:$USER_BASE/bin:$PATH"
+          echo "meson version: $(meson --version || echo 'missing')"
+          echo "ninja version: $(ninja --version || echo 'missing')"
       - name: Cache Conan packages
         id: cache_conan
         uses: actions/cache@v4
@@ -114,20 +132,38 @@ jobs:
       - name: Install Conan (latest)
         shell: bash
         run: |
+          PYTHON_CMD="python3"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            PYTHON_CMD="python"
+          fi
+
           if [ "$RUNNER_OS" = "macOS" ]; then
             brew update
             brew install pipx || true
-            python3 -m pipx ensurepath || true
-            pipx install --python python3 conan || pipx install conan
+            $PYTHON_CMD -m pipx ensurepath || true
+            pipx install --python $PYTHON_CMD conan || pipx install conan
+          elif [ "$RUNNER_OS" = "Windows" ]; then
+            $PYTHON_CMD -m pip install --user --upgrade pipx || true
+            $PYTHON_CMD -m pipx ensurepath || true
+            pipx install conan
           else
-            python3 -m pip install --user --upgrade pipx || true
-            python3 -m pipx ensurepath || true
-            pipx install --python python3 conan || pipx install conan || pip3 install --user --upgrade conan
+            $PYTHON_CMD -m pip install --user --upgrade pipx || true
+            $PYTHON_CMD -m pipx ensurepath || true
+            pipx install --python $PYTHON_CMD conan || pipx install conan || pip3 install --user --upgrade conan
           fi
-          PY_USER_BIN="$(python3 -m site --user-base 2>/dev/null)/bin"
-          [ -d "$PY_USER_BIN" ] && echo "$PY_USER_BIN" >> "$GITHUB_PATH" || true
+          
+          USER_BASE=$($PYTHON_CMD -m site --user-base 2>/dev/null)
+          if [ -d "$USER_BASE/bin" ]; then
+             echo "$USER_BASE/bin" >> "$GITHUB_PATH"
+             export PATH="$USER_BASE/bin:$PATH"
+          fi
+          if [ -d "$USER_BASE/Scripts" ]; then
+             echo "$USER_BASE/Scripts" >> "$GITHUB_PATH"
+             export PATH="$USER_BASE/Scripts:$PATH"
+          fi
+
           [ -d "$HOME/.local/bin" ] && echo "$HOME/.local/bin" >> "$GITHUB_PATH" || true
-          export PATH="$HOME/.local/bin:$PY_USER_BIN:$PATH"
+          export PATH="$HOME/.local/bin:$PATH"
           conan --version
           mkdir -p ~/.conan2
           cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
@@ -248,8 +284,13 @@ jobs:
           export YAMS_CONAN_HOST_PROFILE="${{ matrix.conan_host_profile }}"
           export YAMS_CONAN_ARCH="${{ matrix.conan_arch }}"
           export YAMS_EXTRA_MESON_FLAGS="${{ matrix.extra_meson_flags }}"
-          $ARCH_PREFIX ./setup.sh Debug
-          $ARCH_PREFIX meson compile -C builddir
+          
+          if [ "$RUNNER_OS" = "Windows" ]; then
+             pwsh -File setup.ps1 Debug
+          else
+             $ARCH_PREFIX ./setup.sh Debug
+             $ARCH_PREFIX meson compile -C builddir
+          fi
 
       # - name: Check mobile ABI surface
       #   shell: bash

@@ -84,6 +84,15 @@ inline int setenv(const char* name, const char* value, int overwrite) {
 }
 #endif
 
+namespace {
+// Helper to safely check if a file/socket exists on Windows
+// std::filesystem::exists() can throw on Windows for Unix domain sockets
+inline bool safe_exists(const std::filesystem::path& p) {
+    std::error_code ec;
+    return std::filesystem::exists(p, ec);
+}
+} // namespace
+
 namespace yams::cli {
 
 class DaemonCommand : public ICommand {
@@ -313,7 +322,7 @@ private:
         // Remove socket file if it exists
         if (!socketPath.empty()) {
             std::filesystem::path sp{socketPath};
-            if (std::filesystem::exists(sp) && std::filesystem::remove(sp)) {
+            if (safe_exists(sp) && std::filesystem::remove(sp)) {
                 spdlog::debug("Removed stale socket file: {}", socketPath);
             }
         }
@@ -321,7 +330,7 @@ private:
         // Remove PID file if it exists
         if (!pidFilePath.empty()) {
             std::filesystem::path pp{pidFilePath};
-            if (std::filesystem::exists(pp) && std::filesystem::remove(pp)) {
+            if (safe_exists(pp) && std::filesystem::remove(pp)) {
                 spdlog::debug("Removed stale PID file: {}", pidFilePath);
             }
         }
@@ -456,7 +465,13 @@ private:
                 // Try to auto-detect relative to CLI binary location
                 std::error_code ec;
                 fs::path selfExe;
-#ifndef _WIN32
+#ifdef _WIN32
+                wchar_t buf[MAX_PATH];
+                DWORD n = GetModuleFileNameW(NULL, buf, MAX_PATH);
+                if (n > 0 && n < MAX_PATH) {
+                    selfExe = fs::path(buf);
+                }
+#else
                 char buf[4096];
                 ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
                 if (n > 0) {
@@ -466,11 +481,22 @@ private:
 #endif
                 if (!selfExe.empty()) {
                     auto cliDir = selfExe.parent_path();
+#ifdef _WIN32
+                    std::vector<fs::path> candidates = {
+                        cliDir / "yams-daemon.exe", 
+                        cliDir.parent_path() / "yams-daemon.exe",
+                        cliDir.parent_path() / "daemon" / "yams-daemon.exe",
+                        cliDir.parent_path().parent_path() / "daemon" / "yams-daemon.exe",
+                        cliDir.parent_path().parent_path() / "yams-daemon.exe",
+                        cliDir.parent_path().parent_path() / "src" / "daemon" / "yams-daemon.exe"};
+#else
                     std::vector<fs::path> candidates = {
                         cliDir / "yams-daemon", cliDir.parent_path() / "yams-daemon",
                         cliDir.parent_path() / "daemon" / "yams-daemon",
                         cliDir.parent_path().parent_path() / "daemon" / "yams-daemon",
-                        cliDir.parent_path().parent_path() / "yams-daemon"};
+                        cliDir.parent_path().parent_path() / "yams-daemon",
+                        cliDir.parent_path().parent_path() / "src" / "daemon" / "yams-daemon"};
+#endif
                     for (const auto& p : candidates) {
                         if (fs::exists(p)) {
                             exePath = p.string();
@@ -479,7 +505,11 @@ private:
                     }
                 }
                 if (exePath.empty()) {
+#ifdef _WIN32
+                    exePath = "yams-daemon.exe"; // fallback to PATH
+#else
                     exePath = "yams-daemon"; // fallback to PATH
+#endif
                 }
             }
 
@@ -801,7 +831,7 @@ private:
             }
         }
         // Check for stale socket (and show readiness summary if daemon responds)
-        bool socket_exists = !effectiveSocket.empty() && fs::exists(effectiveSocket);
+        bool socket_exists = !effectiveSocket.empty() && safe_exists(effectiveSocket);
         if (socket_exists) {
             std::cout << "\nDaemon Probe:\n";
             setenv("YAMS_CLIENT_DEBUG", "1", 1);

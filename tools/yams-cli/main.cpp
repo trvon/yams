@@ -1,14 +1,17 @@
-#include <spdlog/spdlog.h>
+#include <cstdio>
 #include <thread>
 #include <vector>
+
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
+#include <spdlog/spdlog.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/platform/windows_init.h>
 
 int main(int argc, char* argv[]) {
     try {
-        // Set up logging
-        spdlog::set_level(spdlog::level::info);
+        // Set up logging with conservative default; YamsCLI::run() adjusts based on flags
+        spdlog::set_level(spdlog::level::warn);
         spdlog::set_pattern("[%H:%M:%S] [%l] %v");
 
         // Create io_context for async operations
@@ -42,6 +45,9 @@ int main(int argc, char* argv[]) {
 
     } catch (const std::exception& e) {
         spdlog::error("Fatal error: {}", e.what());
+        return 1;
+    } catch (...) {
+        spdlog::error("Unknown fatal error");
         return 1;
     }
 }

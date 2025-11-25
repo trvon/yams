@@ -171,6 +171,10 @@ Cflags: -I${{includedir}}
             self.cpp_info.libdirs = ["lib"]
             # Add RPATH for runtime library discovery
             self.cpp_info.rpath_dirs = ["lib"]
+        elif self.settings.os == "Windows":
+            # On Windows, DLLs go in bin, .lib files in lib
+            self.cpp_info.libdirs = ["lib"]
+            self.cpp_info.bindirs = ["bin"]
         
         # CMake properties
         self.cpp_info.set_property("cmake_file_name", "onnxruntime")

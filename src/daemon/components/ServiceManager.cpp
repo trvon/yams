@@ -622,17 +622,23 @@ yams::Result<void> ServiceManager::initialize() {
     // Log plugin scan directories for troubleshooting
     try {
         std::string dirs;
-        for (const auto& d : std::vector<std::filesystem::path>{
-                 (std::getenv("HOME") ? std::filesystem::path(std::getenv("HOME")) / ".local" /
-                                            "lib" / "yams" / "plugins"
-                                      : std::filesystem::path()),
-                 std::filesystem::path("/usr/local/lib/yams/plugins"),
-                 std::filesystem::path("/usr/lib/yams/plugins")
-#ifdef YAMS_INSTALL_PREFIX
-                     ,
-                 std::filesystem::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins"
+        std::vector<std::filesystem::path> pluginDirs;
+#ifdef _WIN32
+        // Windows: use LOCALAPPDATA for user plugins
+        if (const char* localAppData = std::getenv("LOCALAPPDATA"))
+            pluginDirs.push_back(std::filesystem::path(localAppData) / "yams" / "plugins");
+        else if (const char* userProfile = std::getenv("USERPROFILE"))
+            pluginDirs.push_back(std::filesystem::path(userProfile) / "AppData" / "Local" / "yams" / "plugins");
+#else
+        if (const char* home = std::getenv("HOME"))
+            pluginDirs.push_back(std::filesystem::path(home) / ".local" / "lib" / "yams" / "plugins");
+        pluginDirs.push_back(std::filesystem::path("/usr/local/lib/yams/plugins"));
+        pluginDirs.push_back(std::filesystem::path("/usr/lib/yams/plugins"));
 #endif
-             }) {
+#ifdef YAMS_INSTALL_PREFIX
+        pluginDirs.push_back(std::filesystem::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins");
+#endif
+        for (const auto& d : pluginDirs) {
             if (!dirs.empty())
                 dirs += ";";
             dirs += d.string();
@@ -2888,11 +2894,20 @@ boost::asio::awaitable<Result<size_t>> ServiceManager::autoloadPluginsNow() {
         }
         try {
             namespace fs = std::filesystem;
+#ifdef _WIN32
+            // Windows: use LOCALAPPDATA for user plugins
+            if (const char* localAppData = std::getenv("LOCALAPPDATA")) {
+                roots.push_back(fs::path(localAppData) / "yams" / "plugins");
+            } else if (const char* userProfile = std::getenv("USERPROFILE")) {
+                roots.push_back(fs::path(userProfile) / "AppData" / "Local" / "yams" / "plugins");
+            }
+#else
             if (const char* home = std::getenv("HOME")) {
                 roots.push_back(fs::path(home) / ".local" / "lib" / "yams" / "plugins");
             }
             roots.push_back(std::filesystem::path("/usr/local/lib/yams/plugins"));
             roots.push_back(std::filesystem::path("/usr/lib/yams/plugins"));
+#endif
 #ifdef YAMS_INSTALL_PREFIX
             roots.push_back(std::filesystem::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" /
                             "plugins");

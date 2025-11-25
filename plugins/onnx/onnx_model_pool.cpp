@@ -5,6 +5,7 @@
 #include <nlohmann/json.hpp>
 #include <onnxruntime_cxx_api.h>
 #include <filesystem>
+
 static Ort::Env& get_global_ort_env() {
     static Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "YamsDaemon");
     return env;
