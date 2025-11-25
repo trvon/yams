@@ -321,12 +321,12 @@ Result<void> LifecycleComponent::createPidFile() {
     }
 
     std::string pid_str = std::to_string(getpid());
-    if (_chsize(pidFileFd_, 0) != 0) {
+    if (ftruncate(pidFileFd_, 0) != 0) {
         // handle error
     }
-    if (_write(pidFileFd_, pid_str.c_str(), static_cast<unsigned int>(pid_str.length())) !=
-        static_cast<int>(pid_str.length())) {
-        _close(pidFileFd_);
+    if (write(pidFileFd_, pid_str.c_str(), pid_str.length()) !=
+        static_cast<ssize_t>(pid_str.length())) {
+        close(pidFileFd_);
         pidFileFd_ = -1;
         return Error{ErrorCode::WriteError,
                      "Failed to write to PID file: " + std::string(strerror(errno))};

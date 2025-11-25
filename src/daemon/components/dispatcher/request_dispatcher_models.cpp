@@ -66,7 +66,7 @@ static inline ErrorResponse makeError(ErrorCode code, const std::string& msg) {
 boost::asio::awaitable<Response>
 RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
     try {
-        auto provRes = yams::daemon::dispatch::ensure_provider_available(serviceManager_);
+        auto provRes = yams::daemon::dispatch::check_provider_ready(serviceManager_);
         if (!provRes)
             co_return makeError(provRes.error().code, provRes.error().message);
         const auto& provider = provRes.value();
@@ -124,7 +124,7 @@ boost::asio::awaitable<Response>
 RequestDispatcher::handleUnloadModelRequest(const UnloadModelRequest& req) {
     co_return co_await yams::daemon::dispatch::guard_await(
         "unload_model", [this, req]() -> boost::asio::awaitable<Response> {
-            auto provRes = yams::daemon::dispatch::ensure_provider_available(serviceManager_);
+            auto provRes = yams::daemon::dispatch::check_provider_ready(serviceManager_);
             if (!provRes)
                 co_return ErrorResponse{provRes.error().code, provRes.error().message};
             const auto& provider = provRes.value();
