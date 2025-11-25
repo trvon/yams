@@ -234,8 +234,14 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
         fsm.on_connect(sock->native_handle());
         // Prepare write serialization for multiplexing
         if (config_.enable_multiplexing) {
-            // Serialize all writes through a per-connection strand (sole writer guard)
-            write_strand_exec_.emplace(boost::asio::make_strand(sock->get_executor()));
+            // Serialize all writes through a per-connection strand
+            // CRITICAL: Use worker_executor for write strand, NOT socket executor,
+            // to avoid deadlock when connection loop blocks on reads
+            if (config_.worker_executor) {
+                write_strand_exec_.emplace(boost::asio::make_strand(config_.worker_executor));
+            } else {
+                write_strand_exec_.emplace(boost::asio::make_strand(sock->get_executor()));
+            }
             inflight_.store(0, std::memory_order_relaxed);
         } else {
             write_strand_exec_.reset();
@@ -350,9 +356,20 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                         .count());
                 // Bound idle lifetime to avoid FD/backlog exhaustion if clients vanish silently
                 if (++consecutive_idle_timeouts >= kMaxIdleTimeouts) {
-                    spdlog::info(
-                        "Closing idle connection after {} consecutive read timeouts (fd={})",
-                        consecutive_idle_timeouts, (uint64_t)sock->native_handle());
+                    // Close connection even if there are in-flight requests, because if the client
+                    // stopped reading, those requests are stuck anyway and keeping the connection
+                    // open indefinitely just wastes resources.
+                    const auto inflight = inflight_.load(std::memory_order_acquire);
+                    if (config_.enable_multiplexing && inflight > 0) {
+                        spdlog::warn("Closing idle connection with {} in-flight requests after {} "
+                                     "timeouts (fd={}) - "
+                                     "client likely stopped reading",
+                                     inflight, consecutive_idle_timeouts, sock->native_handle());
+                    } else {
+                        spdlog::info(
+                            "Closing idle connection after {} consecutive read timeouts (fd={})",
+                            consecutive_idle_timeouts, sock->native_handle());
+                    }
                     boost::system::error_code ignore_ec;
                     sock->close(ignore_ec);
                     break;
@@ -485,7 +502,8 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                              message.requestId, message.expectsStreamingResponse);
                 if (config_.enable_multiplexing) {
                     auto cur = inflight_.load(std::memory_order_relaxed);
-                    spdlog::info("[MUX] req_id={} inflight={}/{}", message.requestId, cur, config_.max_inflight_per_connection);
+                    spdlog::info("[MUX] req_id={} inflight={}/{}", message.requestId, cur,
+                                 config_.max_inflight_per_connection);
                     if (cur >= config_.max_inflight_per_connection) {
                         (void)co_await send_error(*sock, ErrorCode::ResourceExhausted,
                                                   "Too many in-flight requests", message.requestId);
@@ -736,14 +754,19 @@ RequestHandler::write_message(boost::asio::local::stream_protocol::socket& socke
         auto frame_result = framer_.frame_message_into(message, frame);
         if (!frame_result)
             co_return frame_result.error();
-        if (write_strand_exec_ && socket.is_open())
-            co_await boost::asio::dispatch(*write_strand_exec_, use_awaitable);
+        spdlog::info("[WRITE_MSG] req_id={} enqueuing frame", message.requestId);
         auto enq = co_await enqueue_frame(message.requestId, std::move(frame), true);
-        if (!enq)
+        if (!enq) {
+            spdlog::warn("[WRITE_MSG] req_id={} enqueue failed: {}", message.requestId,
+                         enq.error().message);
             co_return enq.error();
-        if (!writer_running_) {
-            writer_running_ = true;
+        }
+        bool should_start_writer = enq.value();
+        if (should_start_writer) {
+            spdlog::info("[WRITE_MSG] req_id={} starting writer_drain", message.requestId);
             co_await writer_drain(socket);
+        } else {
+            spdlog::info("[WRITE_MSG] req_id={} writer already running", message.requestId);
         }
         co_return Result<void>();
     } else {
@@ -942,10 +965,10 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
                                   std::holds_alternative<PrepareSessionRequest>(request);
 
         if (!client_expects_streaming || force_unary || always_unary) {
-            spdlog::debug("handle_streaming_request: non-streaming path selected (request_id={} "
-                          "expects_streaming={} force_unary={} always_unary={})",
-                          request_id, client_expects_streaming, force_unary, always_unary);
+            spdlog::info("[HSR] req_id={} taking unary path", request_id);
             response_opt = co_await proc->process(request);
+            spdlog::info("[HSR] req_id={} process returned has_value={}", request_id,
+                         response_opt.has_value());
         } else {
             // Default behavior: attempt streaming (processor may return std::nullopt to indicate
             // chunked mode) so header is emitted early and progress can be delivered.
@@ -1372,8 +1395,6 @@ RequestHandler::write_header(boost::asio::local::stream_protocol::socket& socket
         auto framed = framer_.frame_message_header_into(response_msg, frame);
         if (!framed)
             co_return framed.error();
-        if (write_strand_exec_ && socket.is_open())
-            co_await boost::asio::dispatch(*write_strand_exec_, use_awaitable);
         auto enq = co_await enqueue_frame(request_id, std::move(frame), false, fsm);
         if (!enq) {
             if (enq.error().code == ErrorCode::RateLimited ||
@@ -1383,8 +1404,7 @@ RequestHandler::write_header(boost::asio::local::stream_protocol::socket& socket
             }
             co_return enq.error();
         }
-        if (!writer_running_) {
-            writer_running_ = true;
+        if (enq.value()) {
             co_await writer_drain(socket, fsm);
         }
         co_return Result<void>{};
@@ -1415,8 +1435,7 @@ RequestHandler::write_chunk(boost::asio::local::stream_protocol::socket& socket,
         auto framed = framer_.frame_message_chunk_into(response_msg, frame, last_chunk);
         if (!framed)
             co_return framed.error();
-        if (write_strand_exec_ && socket.is_open())
-            co_await boost::asio::dispatch(*write_strand_exec_, use_awaitable);
+        // Skip dispatch to avoid deadlock (matching write_header pattern)
         auto enq = co_await enqueue_frame(request_id, std::move(frame), last_chunk, fsm);
         if (!enq) {
             if (enq.error().code == ErrorCode::RateLimited ||
@@ -1426,8 +1445,7 @@ RequestHandler::write_chunk(boost::asio::local::stream_protocol::socket& socket,
             }
             co_return enq.error();
         }
-        if (!writer_running_) {
-            writer_running_ = true;
+        if (enq.value()) {
             co_await writer_drain(socket, fsm);
         }
         co_return Result<void>{};
@@ -1438,16 +1456,17 @@ RequestHandler::write_chunk(boost::asio::local::stream_protocol::socket& socket,
     }
 }
 
-boost::asio::awaitable<Result<void>> RequestHandler::enqueue_frame(uint64_t request_id,
-                                                                   std::vector<uint8_t> frame,
-                                                                   bool last, ConnectionFsm* fsm) {
+Result<bool> RequestHandler::enqueue_frame_sync(uint64_t request_id, std::vector<uint8_t> frame,
+                                                bool last, ConnectionFsm* fsm) {
+    std::lock_guard<std::mutex> lock(rr_mutex_);
+
     // Enforce caps with typed errors
     auto& q = rr_queues_[request_id];
     if (q.size() >= config_.per_request_queue_cap) {
-        co_return Error{ErrorCode::RateLimited, "per-request queue full"};
+        return Error{ErrorCode::RateLimited, "per-request queue full"};
     }
     if (total_queued_bytes_ + frame.size() > config_.total_queued_bytes_cap) {
-        co_return Error{ErrorCode::ResourceExhausted, "connection queue bytes cap"};
+        return Error{ErrorCode::ResourceExhausted, "connection queue bytes cap"};
     }
     bool was_empty = q.empty();
     auto sz = frame.size();
@@ -1468,7 +1487,22 @@ boost::asio::awaitable<Result<void>> RequestHandler::enqueue_frame(uint64_t requ
             it->second->bytes_enqueued.fetch_add(sz, std::memory_order_relaxed);
         }
     }
-    co_return Result<void>{};
+
+    // Check if we should start writer (atomically under lock)
+    bool should_start = !writer_running_;
+    if (should_start) {
+        writer_running_ = true;
+        spdlog::info("[ENQ_SYNC] req_id={} STARTING writer (was=false)", request_id);
+    } else {
+        spdlog::info("[ENQ_SYNC] req_id={} SKIPPING writer (already running)", request_id);
+    }
+    return should_start;
+}
+
+boost::asio::awaitable<Result<bool>> RequestHandler::enqueue_frame(uint64_t request_id,
+                                                                   std::vector<uint8_t> frame,
+                                                                   bool last, ConnectionFsm* fsm) {
+    co_return enqueue_frame_sync(request_id, std::move(frame), last, fsm);
 }
 
 // Immediate, queue-bypass error write used when enqueueing is denied due to caps.
@@ -1524,97 +1558,133 @@ RequestHandler::writer_drain(boost::asio::local::stream_protocol::socket& socket
 #if defined(TRACY_ENABLE)
     ZoneScopedN("RequestHandler::writer_drain");
 #endif
-    // Must be called on write strand
-    while (!rr_active_.empty()) {
-#if defined(TRACY_ENABLE)
-        ZoneScopedN("writer_drain:turn");
-#endif
-        auto rid = rr_active_.front();
-        rr_active_.pop_front();
-        auto it = rr_queues_.find(rid);
-        if (it == rr_queues_.end() || it->second.empty()) {
-            continue;
-        }
-        // Drain up to budget bytes for this request turn
-        // Dynamic budget: derive base from global mux metrics if set; otherwise config
-        size_t base_budget = config_.writer_budget_bytes_per_turn;
-        if (config_.writer_budget_ref)
-            base_budget = config_.writer_budget_ref->load(std::memory_order_relaxed);
+
+    while (true) {
+        uint64_t rid;
+        std::vector<FrameItem> frames_to_write;
+        size_t budget;
+
+        // Extract work under lock
         {
-            auto snap = MuxMetricsRegistry::instance().snapshot();
-            if (snap.writerBudgetBytes > 0)
-                base_budget = static_cast<size_t>(snap.writerBudgetBytes);
-        }
-        if (base_budget == 0)
-            base_budget = TuneAdvisor::writerBudgetBytesPerTurn();
-        if (base_budget == 0)
-            base_budget = 256ULL * 1024; // defensively cap to a sane minimum
-        size_t budget = base_budget;
-        const size_t active = rr_active_.size();
-        const size_t queued_bytes = total_queued_bytes_;
-        const size_t queued_cap = config_.total_queued_bytes_cap;
-        // Adaptive scaling via TuneAdvisor thresholds
-        if (active <= TuneAdvisor::writerActiveLow1Threshold() && queued_bytes < (queued_cap / 8)) {
-            budget = static_cast<size_t>(static_cast<double>(budget) *
-                                         TuneAdvisor::writerScaleActiveLow1Mul());
-        } else if (active <= TuneAdvisor::writerActiveLow2Threshold() &&
-                   queued_bytes < (queued_cap / 4)) {
-            budget = static_cast<size_t>(static_cast<double>(budget) *
-                                         TuneAdvisor::writerScaleActiveLow2Mul());
-        }
-        if (active > TuneAdvisor::writerActiveHigh1Threshold())
-            budget = static_cast<size_t>(static_cast<double>(budget) *
-                                         TuneAdvisor::writerScaleActiveHigh1Mul());
-        if (active > TuneAdvisor::writerActiveHigh2Threshold())
-            budget = static_cast<size_t>(static_cast<double>(budget) *
-                                         TuneAdvisor::writerScaleActiveHigh2Mul());
-        const double halfFrac = TuneAdvisor::writerQueuedHalfThresholdFraction();
-        const double threeQFrac = TuneAdvisor::writerQueuedThreeQuarterThresholdFraction();
-        if (queued_bytes > static_cast<size_t>(queued_cap * threeQFrac))
-            budget = static_cast<size_t>(static_cast<double>(budget) *
-                                         TuneAdvisor::writerScaleQueuedThreeQuarterMul());
-        else if (queued_bytes > static_cast<size_t>(queued_cap * halfFrac))
-            budget = static_cast<size_t>(static_cast<double>(budget) *
-                                         TuneAdvisor::writerScaleQueuedHalfMul());
-        // Cap budget to a safe maximum (centralized via TuneAdvisor)
-        size_t max_budget = TuneAdvisor::serverWriterBudgetMaxBytesPerTurn();
-        if (budget > max_budget)
-            budget = max_budget;
-        // Reflect dynamic budget in mux metrics for observability
-        MuxMetricsRegistry::instance().setWriterBudget(budget);
-        while (budget > 0 && it != rr_queues_.end() && !it->second.empty()) {
-            FrameItem item = std::move(it->second.front());
-            it->second.pop_front();
-            total_queued_bytes_ -= item.data.size();
-            MuxMetricsRegistry::instance().addQueuedBytes(-static_cast<int64_t>(item.data.size()));
-            // Adjust budget; allow single oversized frame to pass
-            if (item.data.size() >= budget)
-                budget = 0;
-            else
-                budget -= item.data.size();
-            // Write the frame
-            boost::system::error_code ec;
-            co_await boost::asio::async_write(socket, boost::asio::buffer(item.data),
-                                              boost::asio::redirect_error(use_awaitable, ec));
+            std::lock_guard<std::mutex> lock(rr_mutex_);
+
+            if (rr_active_.empty()) {
+                writer_running_ = false;
+                break;
+            }
+
+            rid = rr_active_.front();
+            rr_active_.pop_front();
+
+            auto it = rr_queues_.find(rid);
+            if (it == rr_queues_.end() || it->second.empty()) {
+                continue;
+            }
+
+            // Calculate budget
+            size_t base_budget = config_.writer_budget_bytes_per_turn;
+            if (config_.writer_budget_ref)
+                base_budget = config_.writer_budget_ref->load(std::memory_order_relaxed);
+            {
+                auto snap = MuxMetricsRegistry::instance().snapshot();
+                if (snap.writerBudgetBytes > 0)
+                    base_budget = static_cast<size_t>(snap.writerBudgetBytes);
+            }
+            if (base_budget == 0)
+                base_budget = TuneAdvisor::writerBudgetBytesPerTurn();
+            if (base_budget == 0)
+                base_budget = 256ULL * 1024;
+
+            budget = base_budget;
+            const size_t active = rr_active_.size();
+            const size_t queued_bytes = total_queued_bytes_;
+            const size_t queued_cap = config_.total_queued_bytes_cap;
+
+            // Adaptive scaling
+            if (active <= TuneAdvisor::writerActiveLow1Threshold() &&
+                queued_bytes < (queued_cap / 8)) {
+                budget = static_cast<size_t>(static_cast<double>(budget) *
+                                             TuneAdvisor::writerScaleActiveLow1Mul());
+            } else if (active <= TuneAdvisor::writerActiveLow2Threshold() &&
+                       queued_bytes < (queued_cap / 4)) {
+                budget = static_cast<size_t>(static_cast<double>(budget) *
+                                             TuneAdvisor::writerScaleActiveLow2Mul());
+            }
+            if (active > TuneAdvisor::writerActiveHigh1Threshold())
+                budget = static_cast<size_t>(static_cast<double>(budget) *
+                                             TuneAdvisor::writerScaleActiveHigh1Mul());
+            if (active > TuneAdvisor::writerActiveHigh2Threshold())
+                budget = static_cast<size_t>(static_cast<double>(budget) *
+                                             TuneAdvisor::writerScaleActiveHigh2Mul());
+            const double halfFrac = TuneAdvisor::writerQueuedHalfThresholdFraction();
+            const double threeQFrac = TuneAdvisor::writerQueuedThreeQuarterThresholdFraction();
+            if (queued_bytes > static_cast<size_t>(queued_cap * threeQFrac))
+                budget = static_cast<size_t>(static_cast<double>(budget) *
+                                             TuneAdvisor::writerScaleQueuedThreeQuarterMul());
+            else if (queued_bytes > static_cast<size_t>(queued_cap * halfFrac))
+                budget = static_cast<size_t>(static_cast<double>(budget) *
+                                             TuneAdvisor::writerScaleQueuedHalfMul());
+
+            size_t max_budget = TuneAdvisor::serverWriterBudgetMaxBytesPerTurn();
+            if (budget > max_budget)
+                budget = max_budget;
+
+            MuxMetricsRegistry::instance().setWriterBudget(budget);
+
+            // Extract frames up to budget
+            size_t current_budget = budget;
+            while (current_budget > 0 && !it->second.empty()) {
+                FrameItem item = std::move(it->second.front());
+                it->second.pop_front();
+                total_queued_bytes_ -= item.data.size();
+                MuxMetricsRegistry::instance().addQueuedBytes(
+                    -static_cast<int64_t>(item.data.size()));
+
+                if (item.data.size() >= current_budget)
+                    current_budget = 0;
+                else
+                    current_budget -= item.data.size();
+
+                bool is_last = item.last;
+                frames_to_write.push_back(std::move(item));
+
+                if (is_last && it->second.empty()) {
+                    rr_queues_.erase(it);
+                    it = rr_queues_.end();
+                    break;
+                }
+            }
+
+            // Re-enqueue if still has frames
+            if (it != rr_queues_.end() && !it->second.empty()) {
+                rr_active_.push_back(rid);
+            }
+        } // Release lock
+
+        // Write frames outside the lock
+        spdlog::info("[DRAIN] req_id={} writing {} frames", rid, frames_to_write.size());
+        for (auto& frame : frames_to_write) {
             if (fsm)
-                fsm->on_write_flushed(item.data.size());
+                fsm->on_write_queued(frame.data.size());
+
+            boost::system::error_code ec;
+            co_await boost::asio::async_write(socket, boost::asio::buffer(frame.data),
+                                              boost::asio::redirect_error(use_awaitable, ec));
+
+            if (fsm)
+                fsm->on_write_flushed(frame.data.size());
+
             if (ec) {
-                spdlog::debug("writer_drain: write error: {}", ec.message());
+                spdlog::warn("[DRAIN] req_id={} write error: {}", rid, ec.message());
+                std::lock_guard<std::mutex> lock(rr_mutex_);
                 rr_active_.clear();
-                break;
+                writer_running_ = false;
+                co_return;
             }
-            if (item.last && it->second.empty()) {
-                rr_queues_.erase(it);
-                break;
-            }
-        }
-        // Re-enqueue if still has frames
-        it = rr_queues_.find(rid);
-        if (it != rr_queues_.end() && !it->second.empty()) {
-            rr_active_.push_back(rid);
+            spdlog::info("[DRAIN] req_id={} wrote {} bytes successfully", rid, frame.data.size());
         }
     }
-    writer_running_ = false;
+
     co_return;
 }
 

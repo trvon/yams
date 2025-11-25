@@ -33,6 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Fixed RepairCoordinator access race by adding mutex protection around all accesses from TuningManager callbacks
   - Added mutex synchronization for RepairCoordinator lifecycle (creation, access, destruction)
   - Enabled ThreadSanitizer by default for Debug builds to catch race conditions early
+- **Streaming Response Hang**: Fixed coroutine race condition and idle timeout bypass causing streaming requests to hang
+  - Streaming requests would timeout after connection went idle due to writer_drain not completing properly
+  - Root cause 1: `enqueue_frame` coroutine suspension between flag check and flag set allowed multiple writers to start
+  - Root cause 2: Connections with in-flight requests bypassed idle timeout, staying open indefinitely (105+ minutes observed)
+  - Solution 1: Created synchronous `enqueue_frame_sync()` that sets `writer_running_` flag atomically before suspension
+  - Solution 2: Close idle connections even with in-flight requests - if client stopped reading, requests are stuck anyway
+  - Added comprehensive test suite (`writer_drain_test.cpp`) with 5 integration tests validating the fix
+  - Files: `src/daemon/ipc/request_handler.cpp`, `include/yams/daemon/ipc/request_handler.h`
 - **Document Retrieval**: Fixed "Document not found" error when multiple instances of a document exist
   - `yams get --name` now returns the most recently indexed document by default when multiple matches exist
   - Added `--oldest` flag support to retrieve the oldest indexed version instead

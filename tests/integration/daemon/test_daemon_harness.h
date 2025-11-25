@@ -167,9 +167,11 @@ public:
             // Each daemon creates ~48 threads (32 SocketServer + 16 ServiceManager).
             // macOS has strict per-process thread creation rate limits and needs time
             // to reclaim thread resources before next daemon starts creating threads.
-            // Testing shows: 250ms → crashes at daemon #6, 500ms should allow 10+ daemons.
+            // Testing shows: 250ms → crashes at daemon #6, 500ms allows ~10 daemons, 750ms more
+            // conservative. Increased to 750ms for improved stability on resource-constrained CI
+            // runners.
             std::this_thread::sleep_for(std::chrono::milliseconds(
-                500)); // Wait for socket file to be removed by daemon shutdown
+                750)); // Wait for socket file to be removed by daemon shutdown
             int socketRetries = 0;
             while (std::filesystem::exists(sock_) && socketRetries < 50) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));

@@ -357,7 +357,8 @@ fi
 # Always rebuild qpdf to ensure it's built with -fPIC for plugins
 CONAN_ARGS+=(--build=missing --build=qpdf/*)
 
-conan install . -of "${BUILD_DIR}" "${CONAN_ARGS[@]}"
+# Use runtime_deploy to copy shared libraries next to executables (mainly for Windows, no-op on Unix with RPATH)
+conan install . -of "${BUILD_DIR}" "${CONAN_ARGS[@]}" --deployer=runtime_deploy --deployer-folder="${BUILD_DIR}"
 
 # Check for either native or cross file (Conan generates cross file for cross-compilation)
 NATIVE_FILE="${BUILD_DIR}/${CONAN_SUBDIR}/conan/conan_meson_native.ini"

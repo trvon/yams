@@ -16,6 +16,9 @@
 
 #include <yams/daemon/components/WorkCoordinator.h>
 
+// Include test helpers for wait_for_condition utility
+#include "../../common/test_helpers.h"
+
 using namespace yams::daemon;
 using namespace std::chrono_literals;
 
@@ -106,9 +109,11 @@ TEST_CASE("WorkCoordinator work execution", "[daemon][work_coordinator][executio
             boost::asio::post(coordinator.getExecutor(), [&counter]() { counter.fetch_add(1); });
         }
 
-        // Wait for work to complete
-        std::this_thread::sleep_for(50ms);
+        // Wait for work to complete with timeout
+        bool completed = yams::test::wait_for_condition(
+            1000ms, 10ms, [&counter]() { return counter.load() == 10; });
 
+        REQUIRE(completed);
         REQUIRE(counter.load() == 10);
 
         coordinator.stop();
@@ -128,9 +133,11 @@ TEST_CASE("WorkCoordinator work execution", "[daemon][work_coordinator][executio
             on_different_thread = (std::this_thread::get_id() != main_thread_id);
         });
 
-        // Wait for work
-        std::this_thread::sleep_for(50ms);
+        // Wait for work with timeout
+        bool completed = yams::test::wait_for_condition(
+            1000ms, 10ms, [&work_executed]() { return work_executed.load(); });
 
+        REQUIRE(completed);
         REQUIRE(work_executed);
         REQUIRE(on_different_thread);
 
@@ -176,7 +183,11 @@ TEST_CASE("WorkCoordinator async operations", "[daemon][work_coordinator][async]
 
         boost::asio::co_spawn(coordinator.getExecutor(), coro(), boost::asio::detached);
 
-        std::this_thread::sleep_for(50ms);
+        // Wait for coroutine to complete with timeout
+        bool completed = yams::test::wait_for_condition(
+            1000ms, 10ms, [&result]() { return result.load() == 42; });
+
+        REQUIRE(completed);
         REQUIRE(result.load() == 42);
 
         coordinator.stop();
@@ -199,7 +210,11 @@ TEST_CASE("WorkCoordinator async operations", "[daemon][work_coordinator][async]
             boost::asio::co_spawn(coordinator.getExecutor(), coro(), boost::asio::detached);
         }
 
-        std::this_thread::sleep_for(100ms);
+        // Wait for all coroutines to complete with timeout
+        bool completed = yams::test::wait_for_condition(
+            2000ms, 10ms, [&counter, num_coros]() { return counter.load() == num_coros; });
+
+        REQUIRE(completed);
         REQUIRE(counter.load() == num_coros);
 
         coordinator.stop();
@@ -241,12 +256,20 @@ TEST_CASE("WorkCoordinator strand isolation", "[daemon][work_coordinator][strand
             work(i);
         }
 
-        std::this_thread::sleep_for(200ms);
+        // Wait for all work to complete with timeout
+        bool completed = yams::test::wait_for_condition(3000ms, 20ms, [&execution_order]() {
+            std::lock_guard<std::mutex> lk(order_mutex);
+            return execution_order.size() == 10;
+        });
 
+        REQUIRE(completed);
         // Strand guarantees FIFO order
-        REQUIRE(execution_order.size() == 10);
-        for (size_t i = 0; i < execution_order.size(); ++i) {
-            REQUIRE(execution_order[i] == static_cast<int>(i));
+        {
+            std::lock_guard<std::mutex> lk(order_mutex);
+            REQUIRE(execution_order.size() == 10);
+            for (size_t i = 0; i < execution_order.size(); ++i) {
+                REQUIRE(execution_order[i] == static_cast<int>(i));
+            }
         }
 
         coordinator.stop();
@@ -283,8 +306,11 @@ TEST_CASE("WorkCoordinator strand isolation", "[daemon][work_coordinator][strand
             }
         });
 
-        std::this_thread::sleep_for(150ms);
+        // Wait for both strands to complete with timeout
+        bool completed = yams::test::wait_for_condition(
+            3000ms, 20ms, [&]() { return strand1_work.load() == 5 && strand2_work.load() == 5; });
 
+        REQUIRE(completed);
         REQUIRE(strand1_work.load() == 5);
         REQUIRE(strand2_work.load() == 5);
         REQUIRE(concurrent_execution); // Strands ran in parallel
@@ -333,10 +359,18 @@ TEST_CASE("WorkCoordinator load handling", "[daemon][work_coordinator][load]") {
             });
         }
 
-        std::this_thread::sleep_for(100ms);
+        // Wait for work to be distributed across threads with timeout
+        bool completed = yams::test::wait_for_condition(2000ms, 20ms, [&]() {
+            std::lock_guard<std::mutex> lk(ids_mutex);
+            return thread_ids.size() >= 2;
+        });
 
+        REQUIRE(completed);
         // Work should be distributed across multiple threads
-        REQUIRE(thread_ids.size() >= 2);
+        {
+            std::lock_guard<std::mutex> lk(ids_mutex);
+            REQUIRE(thread_ids.size() >= 2);
+        }
 
         coordinator.stop();
         coordinator.join();
@@ -365,11 +399,11 @@ TEST_CASE("WorkCoordinator shutdown behavior", "[daemon][work_coordinator][shutd
 
         boost::asio::co_spawn(coordinator.getExecutor(), long_running(), boost::asio::detached);
 
-        // Wait for work to start
-        while (!work_started.load()) {
-            std::this_thread::sleep_for(1ms);
-        }
+        // Wait for work to start with timeout
+        bool started = yams::test::wait_for_condition(
+            2000ms, 5ms, [&work_started]() { return work_started.load(); });
 
+        REQUIRE(started);
         coordinator.stop();
         coordinator.join();
 

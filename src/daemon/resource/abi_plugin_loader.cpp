@@ -88,6 +88,9 @@ Result<void> AbiPluginLoader::trustAdd(const std::filesystem::path& p) {
         canon = p;
 
     // Refuse world-writable paths (and immediate parent)
+    // NOTE: On Windows, std::filesystem::permissions() returns synthetic values (all bits set)
+    // that do not reflect actual NTFS ACLs. Skip this POSIX-style check on Windows.
+#if !defined(_WIN32)
     auto perms = fs::status(canon, ec).permissions();
     if (!ec && ((perms & fs::perms::others_write) != fs::perms::none)) {
         return Error{ErrorCode::InvalidArgument, "Refusing world-writable path: " + canon.string()};
@@ -100,6 +103,7 @@ Result<void> AbiPluginLoader::trustAdd(const std::filesystem::path& p) {
                          "Refusing world-writable parent: " + parent.string()};
         }
     }
+#endif
 
     trusted_.insert(canon);
     saveTrust();
@@ -209,6 +213,9 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
         canon = file;
 
     // Refuse world-writable plugin path (and immediate parent)
+    // NOTE: On Windows, std::filesystem::permissions() returns synthetic values (all bits set)
+    // that do not reflect actual NTFS ACLs. Skip this POSIX-style check on Windows.
+#if !defined(_WIN32)
     auto perms = fs::status(canon, ec).permissions();
     if (!ec && ((perms & fs::perms::others_write) != fs::perms::none)) {
         return Error{ErrorCode::Unauthorized,
@@ -222,6 +229,7 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
                          "World-writable parent directory refused: " + parent.string()};
         }
     }
+#endif
 
     if (!isTrusted(canon)) {
         return Error{ErrorCode::Unauthorized, "Plugin path not trusted: " + canon.string()};

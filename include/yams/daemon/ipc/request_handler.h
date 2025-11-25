@@ -282,6 +282,8 @@ private:
         std::vector<uint8_t> data;
         bool last{false};
     };
+    mutable std::mutex
+        rr_mutex_; // Protects rr_queues_, rr_active_, writer_running_, total_queued_bytes_
     std::unordered_map<uint64_t, std::deque<FrameItem>> rr_queues_; // reqId -> frames
     std::deque<uint64_t> rr_active_;                                // rotation of active reqIds
     bool writer_running_{false};
@@ -299,7 +301,9 @@ private:
     std::unordered_map<uint64_t, std::shared_ptr<RequestContext>> contexts_;
 
     // Queue a frame for fair writing; must be called on write strand when present
-    boost::asio::awaitable<Result<void>> enqueue_frame(uint64_t request_id,
+    Result<bool> enqueue_frame_sync(uint64_t request_id, std::vector<uint8_t> frame, bool last,
+                                    ConnectionFsm* fsm = nullptr);
+    boost::asio::awaitable<Result<bool>> enqueue_frame(uint64_t request_id,
                                                        std::vector<uint8_t> frame, bool last,
                                                        ConnectionFsm* fsm = nullptr);
     boost::asio::awaitable<void> writer_drain(boost::asio::local::stream_protocol::socket& socket,
