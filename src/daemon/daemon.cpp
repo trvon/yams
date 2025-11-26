@@ -267,35 +267,6 @@ Result<void> YamsDaemon::start() {
     }
 #endif
 
-    // Plugin auto-loading is managed by ServiceManager after core readiness; avoid duplicate loads
-    // here
-
-    // Set callback to transition to Ready state when initialization completes
-    spdlog::info("[Startup] Phase: ServiceManager Set Callback");
-    serviceManager_->setInitCompleteCallback([this](bool success, const std::string& error) {
-        spdlog::info("Init complete callback invoked: success={}, error={}", success, error);
-        if (success) {
-            spdlog::info("Dispatching HealthyEvent to lifecycleFsm_");
-            lifecycleFsm_.dispatch(HealthyEvent{});
-            spdlog::info("HealthyEvent dispatched, lifecycle should now be Ready");
-            // Start background metrics polling to keep cache hot for fast status responses
-            try {
-                if (metrics_) {
-                    metrics_->startPolling();
-                    spdlog::info("DaemonMetrics background polling started");
-                }
-            } catch (const std::exception& e) {
-                spdlog::warn("Failed to start metrics polling: {}", e.what());
-            }
-            // Note: Actual RepairCoordinator start is deferred to daemon loop once
-            // searchEngineReady is true to avoid competing with search/vectors initialization.
-        } else {
-            spdlog::error("Init failed, dispatching FailureEvent: {}", error);
-            lifecycleFsm_.dispatch(FailureEvent{error});
-        }
-    });
-
-    // Kick off service initialization (async)
     spdlog::info("[Startup] Phase: ServiceManager Init");
     if (auto result = serviceManager_->initialize(); !result) {
         running_ = false;
@@ -335,40 +306,70 @@ Result<void> YamsDaemon::start() {
 void YamsDaemon::runLoop() {
     set_current_thread_name("yams-daemon-main");
 
-    // Trigger deferred async initialization now that the main loop is running.
-    // This prevents race conditions where background threads start before the
-    // main thread is fully established.
     if (serviceManager_) {
         spdlog::info("Triggering deferred service initialization...");
         serviceManager_->startAsyncInit(&asyncInitStartedPromise_, &asyncInitBarrierSet_);
-    }
 
-    // Wait for async init coroutine to enter before accessing shared resources.
-    // This prevents the race condition where runLoop() accesses stop_mutex_/stop_cv_
-    // while async init is still spawning coroutines.
-    if (asyncInitBarrierSet_.load(std::memory_order_acquire)) {
-        spdlog::info("runLoop: waiting for async init barrier...");
-        try {
-            asyncInitStartedFuture_.wait();
-            spdlog::info("runLoop: async init barrier passed");
-        } catch (const std::exception& e) {
-            spdlog::warn("runLoop: async init barrier wait failed: {}", e.what());
+        if (asyncInitBarrierSet_.load(std::memory_order_acquire)) {
+            spdlog::info("runLoop: waiting for async init barrier...");
+            try {
+                asyncInitStartedFuture_.wait();
+                spdlog::info("runLoop: async init barrier passed");
+            } catch (const std::exception& e) {
+                spdlog::warn("runLoop: async init barrier wait failed: {}", e.what());
+            }
         }
+
+        initWaiterThread_ = std::thread([this]() {
+            set_current_thread_name("yams-init-waiter");
+            spdlog::info("[InitWaiter] Thread started, waiting for ServiceManager terminal state...");
+
+            auto snapshot = serviceManager_->waitForServiceManagerTerminalState(300);
+
+            if (stopRequested_.load()) {
+                spdlog::info("[InitWaiter] Stop requested, exiting without dispatching events");
+                return;
+            }
+
+            initHandled_.store(true, std::memory_order_release);
+
+            if (snapshot.state == ServiceManagerState::Ready) {
+                spdlog::info("[InitWaiter] ServiceManager reached Ready state, dispatching HealthyEvent");
+                lifecycleFsm_.dispatch(HealthyEvent{});
+                try {
+                    if (metrics_) {
+                        metrics_->startPolling();
+                        spdlog::info("[InitWaiter] DaemonMetrics background polling started");
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::warn("[InitWaiter] Failed to start metrics polling: {}", e.what());
+                }
+            } else if (snapshot.state == ServiceManagerState::Failed) {
+                spdlog::error("[InitWaiter] ServiceManager failed: {}", snapshot.lastError);
+                lifecycleFsm_.dispatch(FailureEvent{snapshot.lastError});
+            } else {
+                spdlog::warn("[InitWaiter] ServiceManager in unexpected terminal state: {}",
+                             static_cast<int>(snapshot.state));
+            }
+            spdlog::info("[InitWaiter] Thread exiting");
+        });
+        spdlog::info("runLoop: init waiter thread spawned");
+    } else {
+        initHandled_.store(true, std::memory_order_release);
     }
 
-    // Drive lifecycle FSM periodically
     lifecycleFsm_.tick();
 
+    spdlog::info("runLoop: entering main while loop, stopRequested={}", stopRequested_.load());
+
     while (!stopRequested_.load()) {
+        spdlog::debug("runLoop: loop iteration, initHandled={}", initHandled_.load());
 #if defined(TRACY_ENABLE)
         YAMS_FRAME_MARK_START("daemon_tick");
 #endif
-        // Check for external signals (shutdown, plugin reload, etc.) via hook
-        // This replaces the separate signal watcher thread to avoid thread exhaustion
         if (signalCheckHook_) {
             try {
                 if (signalCheckHook_()) {
-                    // Hook requested shutdown
                     lifecycleFsm_.dispatch(ShutdownRequestedEvent{});
 #if defined(TRACY_ENABLE)
                     YAMS_FRAME_MARK_END("daemon_tick");
@@ -376,17 +377,14 @@ void YamsDaemon::runLoop() {
                     break;
                 }
             } catch (...) {
-                // Ignore hook errors
             }
         }
-        
-        // Allow tuning of the main loop tick for metrics refresh and readiness nudges.
-        // Read each iteration so env changes take effect without restart.
+
         uint32_t tick_ms = TuneAdvisor::statusTickMs();
+        spdlog::debug("runLoop: waiting on cv for {}ms", tick_ms);
         std::unique_lock<std::mutex> lock(stop_mutex_);
         if (stop_cv_.wait_for(lock, std::chrono::milliseconds(tick_ms),
                               [&] { return stopRequested_.load(); })) {
-            // Shutdown requested: inform lifecycle FSM and exit loop
             spdlog::info(
                 "runLoop: cv woke with stop requested, dispatching ShutdownRequestedEvent");
             lifecycleFsm_.dispatch(ShutdownRequestedEvent{});
@@ -396,7 +394,6 @@ void YamsDaemon::runLoop() {
 #endif
             break;
         }
-        // Periodically refresh metrics snapshot cache to ensure fast status replies
         try {
             if (metrics_) {
                 metrics_->refresh();
@@ -526,9 +523,17 @@ Result<void> YamsDaemon::stop() {
 
     spdlog::info("Stopping YAMS daemon...");
 
-    // Signal stop request FIRST and wake up the daemon thread
     stopRequested_.store(true, std::memory_order_release);
     stop_cv_.notify_all();
+
+    if (serviceManager_) {
+        serviceManager_->cancelServiceManagerWait();
+    }
+    if (initWaiterThread_.joinable()) {
+        spdlog::debug("Joining init waiter thread...");
+        initWaiterThread_.join();
+        spdlog::debug("Init waiter thread joined");
+    }
 
     // Stop components that use WorkCoordinator's io_context BEFORE stopping ServiceManager
     // (ServiceManager stops WorkCoordinator, which would prevent async operations from completing)

@@ -452,6 +452,18 @@ public:
                 } catch (...) {
                     // Non-fatal: indexing is opportunistic here
                 }
+
+                // Update path tree for this document (best-effort)
+                try {
+                    auto treeRes = ctx_.metadataRepo->upsertPathTreeForDocument(
+                        info, docId, true /* isNewDocument */, std::span<const float>());
+                    if (!treeRes) {
+                        spdlog::debug("Failed to update path tree for {}: {}", info.filePath,
+                                      treeRes.error().message);
+                    }
+                } catch (...) {
+                    // Non-fatal: path tree update is opportunistic
+                }
             }
         }
 

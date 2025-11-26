@@ -364,13 +364,32 @@ private:
 
     /**
      * Check if pattern looks like a file path (contains / or . or known prefixes)
+     * Excludes glob patterns that start with wildcards like *.md
      */
     bool isFilePathPattern(const std::string& pattern) {
         if (pattern.empty())
             return false;
-        return pattern.find('/') != std::string::npos || pattern.find('.') != std::string::npos ||
-               pattern.starts_with("src/") || pattern.starts_with("include/") ||
-               pattern.starts_with("docs/") || pattern.starts_with("tests/");
+
+        if (pattern.starts_with("*") || pattern.starts_with("?")) {
+            return false;
+        }
+
+        bool hasPathSeparator =
+            pattern.find('/') != std::string::npos || pattern.find('\\') != std::string::npos;
+        bool hasExtension = pattern.find('.') != std::string::npos;
+        bool hasKnownPrefix = pattern.starts_with("src/") || pattern.starts_with("include/") ||
+                              pattern.starts_with("docs/") || pattern.starts_with("tests/");
+
+        if (hasPathSeparator || hasKnownPrefix) {
+            return true;
+        }
+
+        if (hasExtension && !pattern.starts_with(".") && pattern.find('*') == std::string::npos &&
+            pattern.find('?') == std::string::npos) {
+            return true;
+        }
+
+        return false;
     }
 
     /**

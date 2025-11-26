@@ -28,6 +28,7 @@
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
 #include <yams/vector/vector_index_manager.h>
+#include <yams/integrity/repair_manager.h>
 
 namespace yams::cli {
 
@@ -52,6 +53,8 @@ public:
         cmd->add_flag("--duplicates", mergeDuplicates_, "Find and optionally merge duplicates");
         cmd->add_flag("--downloads", repairDownloads_,
                       "Repair download documents: add tags/metadata and normalize names");
+        cmd->add_flag("--path-tree", repairPathTree_,
+                      "Rebuild path tree index for documents missing from the tree");
         // Embeddings-specific options
         cmd->add_option("--include-mime", includeMime_,
                         "Additional MIME types to embed (e.g., application/pdf). Repeatable.")
@@ -127,7 +130,7 @@ public:
             // If no specific repair requested, default to orphans
             if (!repairOrphans_ && !repairMime_ && !repairChunks_ && !repairEmbeddings_ &&
                 !repairFts5_ && !optimizeDb_ && !verifyChecksums_ && !mergeDuplicates_ &&
-                !repairAll_) {
+                !repairPathTree_ && !repairAll_) {
                 repairOrphans_ = true;
             }
 
@@ -140,6 +143,7 @@ public:
                 repairFts5_ = true;
                 optimizeDb_ = true;
                 repairDownloads_ = true;
+                repairPathTree_ = true;
                 // verifyChecksums_ = true;  // Not implemented yet
                 // mergeDuplicates_ = true;  // Not implemented yet
             }
@@ -228,6 +232,14 @@ public:
                 anyRepairs = true;
             }
 
+            // Rebuild path tree index
+            if (repairPathTree_) {
+                auto result = rebuildPathTree(metadataRepo);
+                if (!result)
+                    return result;
+                anyRepairs = true;
+            }
+
             // Verify checksums (not implemented yet)
             if (verifyChecksums_) {
                 std::cout << "Checksum verification: Not implemented yet\n";
@@ -264,6 +276,7 @@ private:
     bool verifyChecksums_ = false;
     bool mergeDuplicates_ = false;
     bool repairDownloads_ = false;
+    bool repairPathTree_ = false;
     bool foreground_ = false; // default background
     std::vector<std::string> includeMime_;
     std::string embeddingModel_;
@@ -277,6 +290,9 @@ private:
 
     // Helper to rebuild FTS5 index for all documents (best-effort)
     Result<void> rebuildFts5Index(const app::services::AppContext& ctx);
+
+    // Helper to rebuild path tree index for documents missing from the tree
+    Result<void> rebuildPathTree(std::shared_ptr<metadata::IMetadataRepository> metadataRepo);
 
     Result<void>
     cleanOrphanedMetadata(std::shared_ptr<api::IContentStore> store,
@@ -1287,6 +1303,67 @@ Result<void> RepairCommand::rebuildFts5Index(const app::services::AppContext& ct
         progress.stop();
     std::cout << "FTS5 reindex complete: ok=" << ok << ", fail=" << fail << "\n";
     return {};
+}
+
+Result<void>
+RepairCommand::rebuildPathTree(std::shared_ptr<metadata::IMetadataRepository> metadataRepo) {
+    std::cout << "Rebuilding path tree index...\n";
+
+    if (!metadataRepo) {
+        return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
+    }
+
+    // Get the concrete MetadataRepository for RepairManager
+    auto concreteRepo = std::dynamic_pointer_cast<metadata::MetadataRepository>(metadataRepo);
+    if (!concreteRepo) {
+        return Error{ErrorCode::NotInitialized,
+                     "Could not get concrete MetadataRepository for path tree repair"};
+    }
+
+    integrity::RepairManager repairMgr(*concreteRepo);
+
+    if (dryRun_) {
+        // For dry run, just count how many documents are missing from path tree
+        auto docsResult = concreteRepo->queryDocuments(metadata::DocumentQueryOptions{});
+        if (!docsResult) {
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to query documents: " + docsResult.error().message};
+        }
+
+        uint64_t missing = 0;
+        for (const auto& doc : docsResult.value()) {
+            if (doc.filePath.empty())
+                continue;
+            auto existingNode = concreteRepo->findPathTreeNodeByFullPath(doc.filePath);
+            if (!existingNode || !existingNode.value().has_value()) {
+                missing++;
+            }
+        }
+
+        std::cout << "  [DRY RUN] Would rebuild path tree for " << missing
+                  << " documents missing from tree\n";
+        return Result<void>();
+    }
+
+    // Run the actual repair
+    auto progressFn = [this](uint64_t current, uint64_t total) {
+        if (verbose_ && current % 100 == 0) {
+            std::cout << "  Progress: " << current << "/" << total << "\n";
+        }
+    };
+
+    auto result = repairMgr.repairPathTree(progressFn);
+    if (!result) {
+        return result.error();
+    }
+
+    const auto& stats = result.value();
+    std::cout << "  ✓ Path tree rebuild complete\n";
+    std::cout << "    Documents scanned: " << stats.documentsScanned << "\n";
+    std::cout << "    Nodes created:     " << stats.nodesCreated << "\n";
+    std::cout << "    Errors:            " << stats.errors << "\n";
+
+    return Result<void>();
 }
 
 // Factory function

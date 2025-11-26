@@ -87,6 +87,20 @@ if enable_tsan
   endif
 endif
 
+# --- C++20 Modules Support (Experimental) ---
+# Detect and configure C++20 module compilation when enabled
+yams_modules_enabled = get_option('enable-modules')
+yams_modules_supported = false
+yams_module_args = []
+yams_module_flags = []
+yams_use_modules_def = []
+yams_module_cpp_args = []
+
+if yams_modules_enabled
+  # Include module detection and configuration
+  subdir('meson')
+endif
+
 # --- Install prefix for plugin auto-trust ---
 # Pass the install prefix to C++ code so the daemon knows where system plugins are installed
 install_prefix = get_option('prefix')

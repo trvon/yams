@@ -1,10 +1,12 @@
 #pragma once
 
-#include <spdlog/spdlog.h>
 #include <chrono>
+#include <condition_variable>
 #include <mutex>
 #include <optional>
 #include <string>
+
+#include <spdlog/spdlog.h>
 
 namespace yams::daemon {
 
@@ -114,9 +116,35 @@ public:
                snap_.state == ServiceManagerState::ShuttingDown;
     }
 
+    bool isTerminalState() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return snap_.state == ServiceManagerState::Ready ||
+               snap_.state == ServiceManagerState::Failed ||
+               snap_.state == ServiceManagerState::Stopped;
+    }
+
+    ServiceManagerSnapshot waitForTerminalState(int timeoutSeconds = 60) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        auto pred = [this]() {
+            return snap_.state == ServiceManagerState::Ready ||
+                   snap_.state == ServiceManagerState::Failed ||
+                   snap_.state == ServiceManagerState::Stopped;
+        };
+        bool completed = cv_.wait_for(lock, std::chrono::seconds(timeoutSeconds), pred);
+        if (!completed) {
+            spdlog::warn("[ServiceManagerFSM] waitForTerminalState timed out after {}s, current state={}",
+                         timeoutSeconds, static_cast<int>(snap_.state));
+        }
+        return snap_;
+    }
+
+    void cancelWait() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        cv_.notify_all();
+    }
+
 private:
     void transitionTo(ServiceManagerState next) {
-        // Note: mutex_ already held by caller
         auto prev = snap_.state;
         snap_.state = next;
         snap_.lastTransition = std::chrono::steady_clock::now();
@@ -125,10 +153,16 @@ private:
                          static_cast<int>(next));
         } catch (...) {
         }
+        if (next == ServiceManagerState::Ready ||
+            next == ServiceManagerState::Failed ||
+            next == ServiceManagerState::Stopped) {
+            cv_.notify_all();
+        }
     }
 
     ServiceManagerSnapshot snap_{};
     mutable std::mutex mutex_;
+    std::condition_variable cv_;
 };
 
 } // namespace yams::daemon

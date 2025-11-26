@@ -48,6 +48,7 @@
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/extraction/content_extractor.h>
 
+
 // Forward declarations for services
 namespace yams::api {
 class IContentStore;
@@ -86,8 +87,6 @@ class GraphComponent;
 
 class ServiceManager : public IComponent, public std::enable_shared_from_this<ServiceManager> {
 public:
-    using InitCompleteCallback = std::function<void(bool success, const std::string& error)>;
-
     ServiceManager(const DaemonConfig& config, StateComponent& state,
                    DaemonLifecycleFsm& lifecycleFsm);
     ~ServiceManager() override;
@@ -98,19 +97,10 @@ public:
     /// Does NOT start async initialization - call startAsyncInit() after main loop is running.
     Result<void> initialize() override;
 
-    /// Start the async initialization coroutine. Call this from the main loop after
-    /// the io_context is running to avoid race conditions.
-    /// @param barrierPromise Optional promise to signal when coroutine has safely started
-    /// @param barrierSet Optional atomic to indicate barrier was set up
     void startAsyncInit(std::promise<void>* barrierPromise = nullptr,
                         std::atomic<bool>* barrierSet = nullptr);
 
     void shutdown() override;
-
-    // Legacy initialization callback compatibility
-    void setInitCompleteCallback(InitCompleteCallback callback) {
-        initCompleteCallback_ = callback;
-    }
 
     // Start background task coroutines (must be called after shared_ptr construction)
     void startBackgroundTasks();
@@ -305,11 +295,6 @@ public:
     // Stop source for cancelling async initialization coroutine during shutdown
     yams::compat::stop_source asyncInitStopSource_;
 
-    // Promise/future to signal when async init coroutine has completed (success or failure)
-    // Shutdown waits on this to ensure coroutine isn't accessing resources being torn down
-    std::promise<void> asyncInitDonePromise_;
-    std::shared_future<void> asyncInitDoneFuture_;
-
     // ABI plugin loader access
     AbiPluginLoader* getAbiPluginLoader() const { return abiPluginLoader_.get(); }
     // Plugin host (C‑ABI)
@@ -332,6 +317,12 @@ public:
 
     // FSM snapshots (read-only) for status/diagnostics
     ServiceManagerSnapshot getServiceManagerFsmSnapshot() const { return serviceFsm_.snapshot(); }
+
+    ServiceManagerSnapshot waitForServiceManagerTerminalState(int timeoutSeconds = 60) {
+        return serviceFsm_.waitForTerminalState(timeoutSeconds);
+    }
+
+    void cancelServiceManagerWait() { serviceFsm_.cancelWait(); }
     ProviderSnapshot getEmbeddingProviderFsmSnapshot() const { return embeddingFsm_.snapshot(); }
     PluginHostSnapshot getPluginHostFsmSnapshot() const { return pluginHostFsm_.snapshot(); }
 
@@ -431,14 +422,8 @@ public:
     }
 
 private:
-    // Invoke init completion callback exactly once in a thread-safe manner.
-    // Returns true if this call fired the callback; false if it was already invoked.
-    bool invokeInitCompleteOnce(bool success, const std::string& error);
-
-    // Helper: Get embedding dimension from model provider (returns 0 if unavailable)
     size_t getEmbeddingDimension() const;
 
-    // Modern async initialization phases
     boost::asio::awaitable<yams::Result<void>>
     co_initContentStore(boost::asio::any_io_executor exec,
                         const boost::asio::cancellation_state& token);
@@ -535,10 +520,7 @@ private:
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> pluginStrand_;
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> modelStrand_;
 
-    // Legacy callback support (for transition period)
-    InitCompleteCallback initCompleteCallback_;
-    std::atomic<bool> initCompleteInvoked_{false};
-    std::atomic<bool> asyncInitStarted_{false}; // Guard against multiple startAsyncInit() calls
+    std::atomic<bool> asyncInitStarted_{false};
 
     std::filesystem::path resolvedDataDir_;
 

@@ -52,6 +52,14 @@ struct PruneResult {
     std::vector<std::string> failedPaths;
 };
 
+/// Result of path tree repair operation
+struct PathTreeRepairResult {
+    uint64_t documentsScanned{0};
+    uint64_t nodesCreated{0};
+    uint64_t nodesUpdated{0};
+    uint64_t errors{0};
+};
+
 /// Candidate file for pruning
 struct PruneCandidate {
     std::string hash;
@@ -70,6 +78,9 @@ public:
     RepairManager(storage::IStorageEngine& storage, metadata::MetadataRepository& repo,
                   RepairManagerConfig config = {});
 
+    /// Constructor for metadata-only operations (path tree repair, prune queries)
+    explicit RepairManager(metadata::MetadataRepository& repo);
+
     RepairManager(const RepairManager&) = delete;
     RepairManager& operator=(const RepairManager&) = delete;
 
@@ -87,6 +98,11 @@ public:
     /// Query metadata for prune candidates (static, doesn't need storage engine)
     [[nodiscard]] static std::vector<PruneCandidate>
     queryCandidatesForPrune(metadata::MetadataRepository& repo, const PruneConfig& config);
+
+    // Path tree repair operations
+    /// Rebuild path tree entries for all documents missing from the path tree
+    [[nodiscard]] Result<PathTreeRepairResult>
+    repairPathTree(std::function<void(uint64_t current, uint64_t total)> progress = nullptr);
 
 private:
     [[nodiscard]] bool storeIfValid(const std::string& blockHash,
@@ -107,9 +123,9 @@ private:
                                          int64_t maxSize) const noexcept;
 
 private:
-    storage::IStorageEngine& storage_;
+    storage::IStorageEngine* storage_{nullptr};
     RepairManagerConfig config_;
-    metadata::MetadataRepository* repo_{nullptr}; ///< Optional for prune operations
+    metadata::MetadataRepository* repo_{nullptr};
 };
 
 std::shared_ptr<RepairManager> makeRepairManager(storage::IStorageEngine& storage,

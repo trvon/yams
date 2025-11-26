@@ -1,38 +1,19 @@
-/**
- * @file service_manager_test_helper.h
- * @brief Helper for properly initializing ServiceManager in integration tests
- *
- * ServiceManager has a two-phase initialization:
- * 1. initialize() - spawns async thread that runs initializeAsyncAwaitable()
- * 2. Wait for async initialization to complete (PostIngestQueue created)
- *
- * This helper ensures both phases complete properly for testing.
- */
-
 #pragma once
-
-#include <yams/daemon/components/DaemonLifecycleFsm.h>
-#include <yams/daemon/components/ServiceManager.h>
-#include <yams/daemon/components/StateComponent.h>
-#include <yams/daemon/daemon.h>
 
 #include <chrono>
 #include <memory>
 #include <thread>
 
+#include <spdlog/spdlog.h>
+
+#include <yams/daemon/components/DaemonLifecycleFsm.h>
+#include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/ServiceManagerFsm.h>
+#include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/daemon.h>
+
 namespace yams::test {
 
-/**
- * @brief Initialize ServiceManager and wait for async initialization to complete
- *
- * ServiceManager::initialize() spawns a jthread that runs the async initialization
- * coroutine (see ServiceManager.cpp line 629-641). This helper calls initialize()
- * and waits for PostIngestQueue to be created, which indicates async init completed.
- *
- * @param serviceManager The ServiceManager to initialize
- * @param timeout Maximum time to wait for async initialization
- * @return true if initialization succeeded, false otherwise
- */
 inline bool
 initializeServiceManagerFully(std::shared_ptr<yams::daemon::ServiceManager> serviceManager,
                               std::chrono::milliseconds timeout = std::chrono::seconds(30)) {
@@ -41,47 +22,33 @@ initializeServiceManagerFully(std::shared_ptr<yams::daemon::ServiceManager> serv
         return false;
     }
 
-    auto start = std::chrono::steady_clock::now();
-
-    // Call initialize() - this spawns the async initialization jthread internally
-    // See ServiceManager.cpp line 638: initThread_ = jthread([this]...)
     auto initResult = serviceManager->initialize();
     if (!initResult) {
         spdlog::error("ServiceManager initialize() failed: {}", initResult.error().message);
         return false;
     }
 
-    spdlog::info("ServiceManager initialize() called, waiting for async initialization...");
+    spdlog::info("ServiceManager initialize() called, starting async initialization...");
 
-    // Wait for PostIngestQueue to be created (indicates async init completed)
-    // PostIngestQueue is created in initializeAsyncAwaitable() at line 1901
-    auto deadline = start + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        auto* queue = serviceManager->getPostIngestQueue();
-        if (queue != nullptr) {
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start);
-            spdlog::info("ServiceManager fully initialized in {}ms", elapsed.count());
+    serviceManager->startAsyncInit();
 
-            // Give a brief moment for any final setup to complete
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            return true;
-        }
+    int timeoutSeconds = static_cast<int>(
+        std::chrono::duration_cast<std::chrono::seconds>(timeout).count());
+    auto snapshot = serviceManager->waitForServiceManagerTerminalState(timeoutSeconds);
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (snapshot.state == yams::daemon::ServiceManagerState::Ready) {
+        spdlog::info("ServiceManager fully initialized");
+        return true;
+    } else if (snapshot.state == yams::daemon::ServiceManagerState::Failed) {
+        spdlog::error("ServiceManager async initialization failed: {}", snapshot.lastError);
+        return false;
     }
 
-    spdlog::error("ServiceManager async initialization timed out after {}ms", timeout.count());
+    spdlog::error("ServiceManager async initialization timed out or unexpected state: {}",
+                  static_cast<int>(snapshot.state));
     return false;
 }
 
-/**
- * @brief Wait for PostIngestQueue to exist and be ready
- *
- * @param serviceManager The ServiceManager to check
- * @param timeout Maximum time to wait
- * @return Pointer to PostIngestQueue if available, nullptr otherwise
- */
 inline yams::daemon::PostIngestQueue*
 waitForPostIngestQueue(std::shared_ptr<yams::daemon::ServiceManager> serviceManager,
                        std::chrono::milliseconds timeout = std::chrono::seconds(5)) {
@@ -98,4 +65,4 @@ waitForPostIngestQueue(std::shared_ptr<yams::daemon::ServiceManager> serviceMana
     return nullptr;
 }
 
-} // namespace yams::test
+}

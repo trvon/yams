@@ -138,6 +138,17 @@ private:
      */
     void launchOrphanScanTask();
 
+    /**
+     * @brief Launches the PathTreeRepair periodic task.
+     *
+     * Runs periodic scans to detect documents missing from the path tree index
+     * and creates the missing entries. This repairs documents that were added
+     * before the path tree feature was implemented.
+     *
+     * Initial delay: 2 minutes; runs once per daemon lifetime (not periodic).
+     */
+    void launchPathTreeRepairTask();
+
     Dependencies deps_;                ///< Dependency injection container
     std::atomic<bool> running_{false}; ///< Tracks whether tasks are active
 

@@ -38,16 +38,17 @@ yams plugin load /path/to/plugin.so
 
 See [PLUGINS.md](PLUGINS.md) for details.
 
-## Build Options
+## Build Options (Meson)
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `YAMS_BUILD_CLI` | ON | CLI with TUI browser |
-| `YAMS_BUILD_MCP_SERVER` | ON | MCP server |
-| `YAMS_BUILD_TESTS` | OFF | Tests |
-| `YAMS_ENABLE_PDF` | ON | PDF extraction |
-| `YAMS_ENABLE_TUI` | ON | TUI browser |
-| `YAMS_ENABLE_ONNX` | ON | ONNX Runtime |
+| `build-cli` | `true` | Build CLI binary |
+| `build-mcp-server` | `true` | Build MCP server |
+| `build-tests` | `false` | Build test suite |
+| `enable-pdf` | `enabled` | PDF text extraction (qpdf) |
+| `enable-onnx` | `enabled` | ONNX embedding models |
+
+See [BUILD.md](BUILD.md) for full build instructions.
 
 ## Links
 

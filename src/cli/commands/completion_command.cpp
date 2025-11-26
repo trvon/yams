@@ -50,9 +50,9 @@ Result<void> CompletionCommand::execute() {
 }
 
 std::vector<std::string> CompletionCommand::getAvailableCommands() const {
-    // Keep in sync with command list in yams_cli.cpp:105
+    // Keep in sync with command list in yams_cli.cpp:175
     return {"init",  "add",       "get",     "delete", "list",   "search", "config",    "auth",
-            "stats", "uninstall", "migrate", "update", "browse", "serve",  "completion"};
+            "stats", "uninstall", "migrate", "update", "serve",  "completion", "model"};
 }
 
 std::vector<std::string> CompletionCommand::getGlobalFlags() const {
@@ -463,12 +463,12 @@ std::string CompletionCommand::generateZshCompletion() const {
             oss << "Run database migrations";
         else if (cmd == "update")
             oss << "Update stored content";
-        else if (cmd == "browse")
-            oss << "Browse content interactively";
         else if (cmd == "serve")
             oss << "Start MCP server";
         else if (cmd == "completion")
             oss << "Generate shell completion scripts";
+        else if (cmd == "model")
+            oss << "Manage embedding models";
         oss << "'\n";
     }
     oss << "    )\n";
@@ -532,12 +532,12 @@ std::string CompletionCommand::generateFishCompletion() const {
             oss << " -d 'Run database migrations'";
         else if (cmd == "update")
             oss << " -d 'Update stored content'";
-        else if (cmd == "browse")
-            oss << " -d 'Browse content interactively'";
         else if (cmd == "serve")
             oss << " -d 'Start MCP server'";
         else if (cmd == "completion")
             oss << " -d 'Generate shell completion scripts'";
+        else if (cmd == "model")
+            oss << " -d 'Manage embedding models'";
         oss << "\n";
     }
     oss << "\n";

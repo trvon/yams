@@ -7,6 +7,7 @@
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/extraction/extraction_util.h>
+#include <yams/integrity/repair_manager.h>
 #include <yams/repair/embedding_repair_util.h>
 
 #include <boost/asio/awaitable.hpp>
@@ -68,6 +69,7 @@ void BackgroundTaskManager::start() {
         launchEmbedJobConsumer();
         launchFts5JobConsumer();
         launchOrphanScanTask();
+        launchPathTreeRepairTask();
         spdlog::info("[BackgroundTaskManager] Background tasks launched successfully");
     } catch (const std::exception& e) {
         spdlog::error("[BackgroundTaskManager] Failed to launch background tasks: {}", e.what());
@@ -406,6 +408,115 @@ void BackgroundTaskManager::launchOrphanScanTask() {
                 }
             }
             spdlog::debug("[OrphanScan] Task stopped");
+            co_return;
+        },
+        boost::asio::detached);
+}
+
+void BackgroundTaskManager::launchPathTreeRepairTask() {
+    auto self = deps_.serviceManager.lock();
+    if (!self) {
+        throw std::runtime_error(
+            "BackgroundTaskManager: ServiceManager weak_ptr expired in launchPathTreeRepairTask");
+    }
+
+    auto exec = deps_.executor;
+    auto stopFlag = stopRequested_;
+    auto& fsm = deps_.lifecycleFsm;
+
+    spdlog::debug("[BackgroundTaskManager] Launching PathTreeRepair task");
+    boost::asio::co_spawn(
+        exec,
+        [self, stopFlag, &fsm]() -> boost::asio::awaitable<void> {
+            using namespace std::chrono_literals;
+
+            auto executor = co_await boost::asio::this_coro::executor;
+            boost::asio::steady_timer timer(executor);
+
+            constexpr int maxWaitIterations = 60;
+            int waitIterations = 0;
+            bool fsmReady = false;
+
+            while (!fsmReady && waitIterations < maxWaitIterations) {
+                if (stopFlag->load(std::memory_order_acquire)) {
+                    co_return;
+                }
+
+                auto snap = fsm.snapshot();
+                auto degradedSubs = fsm.degradedSubsystems();
+                bool hasDegraded = std::any_of(degradedSubs.begin(), degradedSubs.end(),
+                                               [](const auto& p) { return p.second; });
+
+                if (snap.state == LifecycleState::Ready && !hasDegraded) {
+                    fsmReady = true;
+                    spdlog::debug("[PathTreeRepair] FSM ready, no degraded subsystems");
+                } else {
+                    waitIterations++;
+                    timer.expires_after(5s);
+                    try {
+                        co_await timer.async_wait(boost::asio::use_awaitable);
+                    } catch (const boost::system::system_error& e) {
+                        if (e.code() == boost::asio::error::operation_aborted) {
+                            co_return;
+                        }
+                        throw;
+                    }
+                }
+            }
+
+            if (!fsmReady) {
+                spdlog::warn("[PathTreeRepair] Timeout waiting for FSM ready state, skipping");
+                co_return;
+            }
+
+            timer.expires_after(30s);
+            try {
+                co_await timer.async_wait(boost::asio::use_awaitable);
+            } catch (const boost::system::system_error& e) {
+                if (e.code() == boost::asio::error::operation_aborted) {
+                    co_return;
+                }
+                throw;
+            }
+
+            if (stopFlag->load(std::memory_order_acquire)) {
+                co_return;
+            }
+
+            auto repairMgr = self->getRepairManager();
+            if (!repairMgr) {
+                spdlog::warn("[PathTreeRepair] RepairManager not available, skipping repair");
+                co_return;
+            }
+
+            spdlog::info("[PathTreeRepair] Starting path tree repair scan");
+
+            try {
+
+                auto result = repairMgr->repairPathTree([](uint64_t current, uint64_t total) {
+                    if (current % 500 == 0 && total > 0) {
+                        spdlog::debug("[PathTreeRepair] Progress: {}/{}", current, total);
+                    }
+                });
+
+                if (result) {
+                    const auto& stats = result.value();
+                    if (stats.nodesCreated > 0) {
+                        spdlog::info("[PathTreeRepair] Complete: scanned={} created={} errors={}",
+                                     stats.documentsScanned, stats.nodesCreated, stats.errors);
+                    } else {
+                        spdlog::debug("[PathTreeRepair] Complete: no missing entries found "
+                                      "(scanned {} docs)",
+                                      stats.documentsScanned);
+                    }
+                } else {
+                    spdlog::warn("[PathTreeRepair] Failed: {}", result.error().message);
+                }
+            } catch (const std::exception& e) {
+                spdlog::warn("[PathTreeRepair] Exception: {}", e.what());
+            }
+
+            spdlog::debug("[PathTreeRepair] Task completed");
             co_return;
         },
         boost::asio::detached);

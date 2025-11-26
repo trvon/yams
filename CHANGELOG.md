@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [v0.7.9] - Unreleased
 
+### Added
+- **Path Tree Repair**: New `yams repair --path-tree` command to rebuild path tree index for documents added before the feature was implemented
+  - Automatic background repair task runs after daemon reaches Ready state with no degraded subsystems
+  - FSM-based scheduling waits for optimal system load before starting repair scan
+  - Added metadata-only `RepairManager` constructor for path tree operations
+
 ### Removed
 - **TUI/Browse Interface**: Removed FTXUI-based terminal UI components in preparation for Flutter mobile application
   - Removed `src/cli/tui/` directory and all TUI source files
@@ -27,7 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Updated command registry and CLI help to remove browse references
 
 ### Fixed
-- **Windows Sypport**
+- **Tree Command**: Fixed "Metadata repository unavailable" error by ensuring storage initialization before accessing metadata
+  - Path tree now properly populated during document ingestion via `upsertPathTreeForDocument()`
+- **List Command**: Fixed `--name "*.md"` glob patterns being incorrectly treated as file paths
+  - Patterns starting with `*` or `?` now correctly handled as glob patterns instead of literal filenames
+- **Windows Support**
 - **Thread Safety**: Fixed critical race conditions detected by ThreadSanitizer (TSan)
   - Fixed AsioConnection destructor race by properly canceling and closing sockets before destruction
   - Fixed RepairCoordinator access race by adding mutex protection around all accesses from TuningManager callbacks

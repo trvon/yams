@@ -48,3 +48,6 @@ option('libcxx-hardening', type: 'combo', choices: ['none', 'fast', 'extensive',
 
 # Thread sanitizer (for detecting data races in debug builds)
 option('enable-tsan', type: 'boolean', value: false, description: 'Enable ThreadSanitizer for race detection (debug builds only, significant performance impact)')
+
+# C++20 Modules (experimental)
+option('enable-modules', type: 'boolean', value: false, description: 'Enable C++20 module compilation (experimental, requires GCC 13+/Clang 16+/MSVC 17.4+)')

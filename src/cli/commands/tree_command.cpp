@@ -147,6 +147,12 @@ public:
     }
 
     Result<void> execute() override {
+        // Ensure storage is initialized before accessing metadata
+        auto ensured = cli_->ensureStorageInitialized();
+        if (!ensured) {
+            return ensured;
+        }
+
         auto metadataRepo = cli_->getMetadataRepository();
         std::unique_ptr<metadata::ConnectionPool> fallbackPool;
         std::shared_ptr<metadata::MetadataRepository> fallbackRepo;

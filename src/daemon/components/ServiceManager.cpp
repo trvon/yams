@@ -335,8 +335,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                                DaemonLifecycleFsm& lifecycleFsm)
     : config_(config),
       state_(state),
-      lifecycleFsm_(lifecycleFsm),
-      asyncInitDoneFuture_(asyncInitDonePromise_.get_future().share()) {
+      lifecycleFsm_(lifecycleFsm) {
     spdlog::debug("[ServiceManager] Constructor start");
     tuningConfig_ = config_.tuning;
 
@@ -569,44 +568,6 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
     }
 }
 
-bool ServiceManager::invokeInitCompleteOnce(bool success, const std::string& error) {
-    bool expected = false;
-    if (!initCompleteInvoked_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-        return false; // already invoked
-    }
-    
-    // Dispatch lifecycle FSM event directly - this is the authoritative state transition
-    // The callback mechanism is deprecated but kept for test compatibility
-    try {
-        // Check if we're already shutting down - don't dispatch events during shutdown
-        auto snapshot = lifecycleFsm_.snapshot();
-        if (snapshot.state == LifecycleState::Stopping || 
-            snapshot.state == LifecycleState::Stopped) {
-            spdlog::debug("ServiceManager: skipping FSM dispatch, already shutting down");
-        } else if (success) {
-            spdlog::info("ServiceManager: dispatching HealthyEvent to lifecycleFsm_");
-            lifecycleFsm_.dispatch(HealthyEvent{});
-        } else {
-            spdlog::error("ServiceManager: dispatching FailureEvent: {}", error);
-            lifecycleFsm_.dispatch(FailureEvent{error});
-        }
-    } catch (const std::exception& e) {
-        spdlog::error("ServiceManager: lifecycle FSM dispatch failed: {}", e.what());
-    }
-    
-    // Also invoke legacy callback if set (for tests)
-    try {
-        if (initCompleteCallback_) {
-            initCompleteCallback_(success, error);
-        }
-    } catch (const std::exception& e) {
-        spdlog::error("initCompleteCallback threw exception: {}", e.what());
-    } catch (...) {
-        // Swallow to avoid terminating threads
-    }
-    return true;
-}
-
 ServiceManager::~ServiceManager() {
     shutdown();
 }
@@ -754,7 +715,6 @@ yams::Result<void> ServiceManager::initialize() {
 
 void ServiceManager::startAsyncInit(std::promise<void>* barrierPromise,
                                     std::atomic<bool>* barrierSet) {
-    // Guard against multiple calls
     bool expected = false;
     if (!asyncInitStarted_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
         spdlog::warn("ServiceManager::startAsyncInit() called more than once, ignoring");
@@ -762,27 +722,20 @@ void ServiceManager::startAsyncInit(std::promise<void>* barrierPromise,
     }
 
     spdlog::info("ServiceManager: Triggering deferred async initialization");
-    spdlog::default_logger()->flush();
 
-    // Mark that barrier was set up so caller knows to wait
     if (barrierSet) {
         barrierSet->store(true, std::memory_order_release);
     }
 
-    // Ensure WorkCoordinator is ready before posting work
     if (!workCoordinator_ || !workCoordinator_->isRunning()) {
         spdlog::error("ServiceManager: WorkCoordinator not ready, cannot start async init");
         if (barrierPromise) {
             barrierPromise->set_value();
         }
-        (void)invokeInitCompleteOnce(false, "WorkCoordinator not ready");
+        serviceFsm_.dispatch(InitializationFailedEvent{"WorkCoordinator not ready"});
         return;
     }
 
-    // Launch async initialization without blocking or using futures
-    // Use detached coroutine with completion callback
-    // IMPORTANT: Capture shared_from_this() to prevent 'this' pointer corruption
-    // when the coroutine suspends across co_await points.
     std::shared_ptr<ServiceManager> self;
     try {
         self = shared_from_this();
@@ -793,33 +746,26 @@ void ServiceManager::startAsyncInit(std::promise<void>* barrierPromise,
         if (barrierPromise) {
             barrierPromise->set_value();
         }
-        (void)invokeInitCompleteOnce(false, "shared_from_this() failed");
+        serviceFsm_.dispatch(InitializationFailedEvent{"shared_from_this() failed"});
         return;
     }
 
-    // Post a synchronization point first to ensure the main thread has fully started
-    // before we begin async initialization
     boost::asio::post(workCoordinator_->getExecutor(), [self, barrierPromise]() {
         spdlog::debug("ServiceManager: Async init sync point reached, spawning coroutine");
-        spdlog::default_logger()->flush();
 
         boost::asio::co_spawn(
             self->workCoordinator_->getExecutor(),
             [self, barrierPromise]() -> boost::asio::awaitable<void> {
                 spdlog::info("Starting async resource initialization (coroutine)...");
 
-                // Signal barrier that coroutine has safely started
                 if (barrierPromise) {
                     try {
                         barrierPromise->set_value();
                         spdlog::debug("ServiceManager: Async init barrier signaled");
                     } catch (...) {
-                        // Promise already satisfied, ignore
                     }
                 }
 
-                // Create a dummy stop_token since we're not using initThread_ anymore
-                // CRITICAL: Use the class-level stop_source so shutdown() can signal cancellation
                 auto token = self->asyncInitStopSource_.get_token();
 
                 try {
@@ -828,40 +774,18 @@ void ServiceManager::startAsyncInit(std::promise<void>* barrierPromise,
                     if (!result) {
                         spdlog::error("Async resource initialization failed: {}",
                                       result.error().message);
-                        try {
-                            self->serviceFsm_.dispatch(
-                                InitializationFailedEvent{result.error().message});
-                        } catch (...) {
-                        }
-                        (void)self->invokeInitCompleteOnce(false, result.error().message);
+                        self->serviceFsm_.dispatch(
+                            InitializationFailedEvent{result.error().message});
                     } else {
                         spdlog::info("All daemon services initialized successfully");
-                        (void)self->invokeInitCompleteOnce(true, "");
                     }
                 } catch (const std::exception& e) {
                     spdlog::error("Async resource initialization exception: {}", e.what());
-                    try {
-                        self->serviceFsm_.dispatch(InitializationFailedEvent{e.what()});
-                    } catch (...) {
-                    }
-                    (void)self->invokeInitCompleteOnce(false, e.what());
+                    self->serviceFsm_.dispatch(InitializationFailedEvent{e.what()});
                 }
-
-                // Signal that async init coroutine has completed (success or failure)
-                // This allows shutdown() to wait for the coroutine to finish
-                spdlog::info("Async init coroutine: signaling completion via promise");
-                spdlog::default_logger()->flush();
-                try {
-                    self->asyncInitDonePromise_.set_value();
-                    spdlog::info("Async init coroutine: promise set successfully");
-                } catch (...) {
-                    // Promise already satisfied, ignore
-                    spdlog::debug("Async init coroutine: promise already satisfied");
-                }
-                spdlog::default_logger()->flush();
             }(),
             boost::asio::detached);
-    }); // end boost::asio::post
+    });
 }
 
 void ServiceManager::shutdown() {

@@ -193,6 +193,35 @@ if ($env:YAMS_CPPSTD -eq '23' -and $msvcVersion -ge 190) {
     $env:YAMS_CPPSTD = '20'
 }
 
+# C++20 Modules auto-detection
+if (-not $env:YAMS_ENABLE_MODULES) {
+    $enableModules = $false
+    $moduleTestCode = 'export module test; export int foo() { return 42; }'
+    $moduleTestFile = [System.IO.Path]::GetTempFileName() + '.cppm'
+    try {
+        $moduleTestCode | Out-File -FilePath $moduleTestFile -Encoding utf8
+        $clOutput = & cl.exe /std:c++20 /interface /TP /c $moduleTestFile /Fo:NUL 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $enableModules = $true
+            Write-Host "Auto-detected C++20 module support (MSVC /interface)"
+        } else {
+            Write-Host "C++20 modules not fully supported by compiler, disabled"
+        }
+    } catch {
+        Write-Host "C++20 modules not fully supported by compiler, disabled"
+    } finally {
+        Remove-Item -Path $moduleTestFile -ErrorAction SilentlyContinue
+    }
+} else {
+    if ($env:YAMS_ENABLE_MODULES -eq 'true') {
+        $enableModules = $true
+        Write-Host "C++20 modules enabled via YAMS_ENABLE_MODULES=true"
+    } else {
+        $enableModules = $false
+        Write-Host "C++20 modules disabled via YAMS_ENABLE_MODULES=false"
+    }
+}
+
 # Ensure Python tools
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
     Write-Error 'python not found in PATH. Please install Python 3.x and retry.'
@@ -360,10 +389,12 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
     $buildTypeLower = $BuildType.ToLower()
     
     $extraMesonFlags = if ($env:YAMS_EXTRA_MESON_FLAGS) { $env:YAMS_EXTRA_MESON_FLAGS.Split(' ') } else { @() }
+    $enableModulesFlag = if ($enableModules) { 'true' } else { 'false' }
 
     meson setup $buildDir `
         --buildtype=$buildTypeLower `
         --prefix="$InstallPrefix" `
+        "-Denable-modules=$enableModulesFlag" `
         $mesonToolchainArg $mesonToolchainFile `
         @extraMesonFlags
 } else {

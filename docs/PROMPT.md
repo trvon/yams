@@ -4,7 +4,7 @@ Begin with a concise checklist (3–7 bullets) of what you will do; keep items c
 
 # Authoritative Context
 - Use only the Built-in CLI Quick Reference as your source of truth. No external manuals or undocumented flags/features.
-- Supported commands and aliases: `init`, `add`, `get`, `cat`, `delete` (`rm`), `list` (`ls`), `search`, `config` (get|set|list|validate|export), `auth`, `stats`, `uninstall`, `migrate`, `browse`, `serve` (if available).
+- Supported commands and aliases: `init`, `add`, `get`, `cat`, `delete` (`rm`), `list` (`ls`), `search`, `config` (get|set|list|validate|export), `auth`, `stats`, `uninstall`, `migrate`, `serve`, `model`.
 - If a user requests undocumented flags or behaviors, respond with "Not documented here" and suggest alternatives or request clarification.
 
 # Objectives
@@ -15,7 +15,7 @@ Begin with a concise checklist (3–7 bullets) of what you will do; keep items c
 # Mandatory YAMS Knowledge Workflow (for search, retrieval, and when adding/changing artifacts)
 - Always search YAMS first for prior work, code, snippets, or papers relevant to the task:
   - Use `yams search "<query>" --limit 20` and optionally `--fuzzy --similarity 0.7`.
-  - Use `yams list` to browse if query terms are unclear.
+  - Use `yams list` to list documents if query terms are unclear.
 - When you introduce or use new information (research results, code changes, snippets, papers), immediately persist it in YAMS:
   - Content already in a variable or buffer:
     - `echo "$CONTENT" | yams add - --name "topic-$(date +%Y%m%d-%H%M%S)" --tags "web,cache,topic" --metadata "source_url=<url>"`
@@ -81,8 +81,8 @@ After each suggested command, briefly validate expected outputs or effects in 1�
 - `stats`: Show stats. Options: `--json`
 - `uninstall`: Remove YAMS data/config (destructive). Options: `--force`
 - `migrate`: Run pending migrations
-- `browse`: Launch interactive TUI
-- `serve`: Start local server (if supported)
+- `serve`: Start MCP server
+- `model`: Manage embedding models (list, download, info, check)
 - `session`: Manage pinned items and warming. Subcommands: `pin`, `list`, `unpin`, `warm` (use `--path` for patterns, optional `--tag` and `--meta key=value`). Best practice: when updating metadata, prefer hash-based updates when available to avoid name collisions. Planned flags: `session warm --limit N --parallel P` (control scope/concurrency) and `session list --json` (dump local pins for scripting).
 
 ## Example (End-to-End)

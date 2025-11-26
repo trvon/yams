@@ -24,25 +24,30 @@ void DaemonLifecycleFsm::tick() {
 
 void DaemonLifecycleFsm::dispatch(const BootstrappedEvent&) {
     const auto current = snapshot();
+    spdlog::info("BootstrappedEvent received, current state={}", static_cast<int>(current.state));
     switch (current.state) {
         case LifecycleState::Unknown:
         case LifecycleState::Starting:
             transitionTo(LifecycleState::Initializing);
             break;
         default:
-            // ignore
+            spdlog::warn("BootstrappedEvent ignored, state {} not Unknown(0) or Starting(1)",
+                         static_cast<int>(current.state));
             break;
     }
 }
 
 void DaemonLifecycleFsm::dispatch(const HealthyEvent&) {
     const auto current = snapshot();
+    spdlog::info("HealthyEvent received, current state={}", static_cast<int>(current.state));
     switch (current.state) {
         case LifecycleState::Initializing:
         case LifecycleState::Degraded:
             transitionTo(LifecycleState::Ready);
             break;
         default:
+            spdlog::warn("HealthyEvent ignored, state {} not Initializing(2) or Degraded(4)",
+                         static_cast<int>(current.state));
             break;
     }
 }

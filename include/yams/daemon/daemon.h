@@ -144,6 +144,9 @@ public:
     std::shared_future<void> asyncInitStartedFuture_;
     std::atomic<bool> asyncInitBarrierSet_{false};
 
+    std::thread initWaiterThread_;
+    std::atomic<bool> initHandled_{false};
+
     // Deferred repair startup control
     std::atomic<bool> repairStarted_{false};
     std::chrono::steady_clock::time_point repairIdleSince_{};

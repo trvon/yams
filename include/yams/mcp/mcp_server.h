@@ -23,11 +23,11 @@
 #include <deque>
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <iosfwd>
 #include <memory>
 #include <mutex>
 #include <regex>
-#include <semaphore>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -40,17 +40,6 @@ using json = nlohmann::json;
 // Custom protocol / server-specific error codes
 // Reserve a code for unsupported protocol version negotiation failures
 static constexpr int kErrUnsupportedProtocolVersion = -32901;
-
-/**
- * MCP lifecycle states per 2025-06-18 specification
- */
-enum class McpLifecycleState {
-    Uninitialized, // Server created, no initialize request yet
-    Initialized,   // Received initialize request, sent response
-    Ready,         // Received notifications/initialized, ready for operations
-    ShuttingDown,  // Received shutdown request
-    Disconnected   // Transport closed or error
-};
 
 /**
  * Transport interface for MCP communication with modern error handling
@@ -76,13 +65,14 @@ public:
 class StdioTransport : public ITransport {
 public:
     StdioTransport();
-    ~StdioTransport();
-
+    ~StdioTransport(); // Ensures writer thread is joined/flushed for clean shutdown
     void send(const json& message) override;
+    // NDJSON send - same as send() for stdio (spec-compliant)
     void sendNdjson(const json& message);
+    // Enqueue a message for the writer thread (non-blocking for request handlers)
     void sendAsync(json message);
+    // Framed send helper for pre-serialized JSON payloads (legacy compatibility)
     void sendFramedSerialized(const std::string& payload);
-
     MessageResult receive() override;
     bool isConnected() const override { return state_.load() == TransportState::Connected; }
     void close() override { state_.store(TransportState::Closing); }
@@ -92,6 +82,9 @@ public:
     void setShutdownFlag(std::atomic<bool>* shutdown) { externalShutdown_ = shutdown; }
 
 private:
+    // Unified non-blocking sender for all transports. Uses async send when available
+    // and falls back to a best-effort synchronous send otherwise.
+
     std::atomic<TransportState> state_{TransportState::Connected};
     std::atomic<bool>* externalShutdown_{nullptr};
     std::atomic<size_t> errorCount_{0};
@@ -99,35 +92,29 @@ private:
     // Receive poll timeout (ms). Default 500ms; configurable via env YAMS_MCP_RECV_TIMEOUT_MS.
     int recvTimeoutMs_{500};
 
-    // Mutex for thread-safe output operations
+    // Mutex for thread-safe output operations (sending only) - instance member for proper RAII
     mutable std::mutex outMutex_;
+    // Outbound writer queue + thread to avoid blocking on stdout writes
+    std::mutex queueMutex_;
+    std::condition_variable queueCv_;
+    std::deque<std::string> outQueue_;
+    std::thread writerThread_;
+    std::atomic<bool> writerRunning_{false};
+    void writerLoop();
 
-    // Helper methods
+    // Helper for non-blocking stdin check
     bool isInputAvailable(int timeoutMs = 100) const;
-    bool readLineWithTimeout(std::string& line, int timeoutMs) const;
 
-    // Error recovery
+    // Error recovery and circuit breaker
     bool shouldRetryAfterError() const noexcept;
     void recordError() noexcept;
     void resetErrorCount() noexcept;
 };
 
+// WebSocket transport removed - not needed for current implementation
+// TODO: Add back if WebSocket support is required in the future
+
 /**
- * MCP Server implementation (stdio-only)
- *
- * This server implements the Model Context Protocol (MCP) specification
- * using stdio transport exclusively. HTTP/WebSocket transports have been
- * removed to simplify the implementation and focus on the core stdio use case.
- *
- * Transport: stdio (JSON-RPC over stdin/stdout with NDJSON framing)
- * Spec version: 2025-03-26 (with 2025-06-18 protocol enhancements)
- *
- * Key features:
- * - Newline-delimited JSON (NDJSON) message framing
- * - Synchronous request/response handling
- * - All logging directed to stderr (stdout reserved for protocol messages)
- * - Direct integration with YAMS daemon for search/storage operations
- *
  * MCP Server implementation
  */
 class MCPServer {
@@ -138,9 +125,9 @@ public:
     ~MCPServer();
 
     void start();
+    // Async variant (preferred) when transport supports async stdio
     boost::asio::awaitable<void> startAsync();
     void stop();
-    void shutdown(std::chrono::milliseconds timeout = std::chrono::milliseconds{2000});
     bool isRunning() const { return running_.load(); }
 
 #if defined(YAMS_TESTING)
@@ -153,20 +140,32 @@ public:
     void setDaemonClientSocketPathForTest(const std::filesystem::path& p) {
         daemon_client_config_.socketPath = p;
         daemon_client_ = nullptr;
-        daemon_client_unique_.reset();
+        daemon_client_lease_.reset();
+        yams::cli::cli_pool_reset_for_test();
     }
 #endif
 
-#ifdef YAMS_TESTING
-public:
-    // Testing-only wrappers (stdio-only mode doesn't use these)
+    // Public wrappers for HTTP mode (bridge to internal handlers)
     MessageResult handleRequestPublic(const nlohmann::json& request) {
         return handleRequest(request);
     }
     nlohmann::json callToolPublic(const std::string& name, const nlohmann::json& arguments) {
         return callTool(name, arguments);
     }
-#endif
+
+    // HTTP mode: per-request session context to route notifications via SSE
+    class SessionContext {
+    public:
+        SessionContext(MCPServer& server, std::string sessionId,
+                       std::function<void(const std::string&, const nlohmann::json&)> publisher)
+            : server_(server) {
+            server_.beginSessionContext(std::move(sessionId), std::move(publisher));
+        }
+        ~SessionContext() { server_.endSessionContext(); }
+
+    private:
+        MCPServer& server_;
+    };
 
 private:
     // Refactored members: No direct backend components
@@ -187,8 +186,6 @@ private:
     int autoReadyDelayMs_{150};   // YAMS_MCP_READY_DELAY_MS (minimum 20ms)
     bool strictProtocol_{
         false}; // YAMS_MCP_STRICT_PROTOCOL=1 to require explicit supported protocolVersion or fail
-    bool strictLifecycle_{
-        false}; // YAMS_MCP_STRICT_LIFECYCLE=1 to reject requests before initialized notification
     bool limitToolResultDup_{
         true}; // YAMS_MCP_LIMIT_DUP_CONTENT=0 to allow full data duplication for large tool results
     bool handshakeTrace_{
@@ -202,7 +199,6 @@ private:
     std::atomic<int> readyAutoCount_{0};
     std::atomic<int> readyClientCount_{0};
     std::atomic<bool> initializedNotificationSeen_{false};
-    std::atomic<McpLifecycleState> lifecycleState_{McpLifecycleState::Uninitialized};
     bool earlyFeatureUse_{
         false}; // Set when client invokes feature (tools/list, tools/call) pre-initialized
 
@@ -211,15 +207,12 @@ private:
     mutable std::mutex cancelMutex_;
     std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> cancelTokens_;
 
-    // Daemon client (created fresh per-request for MCP stdio reliability)
-    std::unique_ptr<yams::daemon::DaemonClient> daemon_client_unique_;
+    // Single multiplexed daemon client lease (shared transport context)
+    std::shared_ptr<yams::cli::DaemonClientPool::Lease> daemon_client_lease_;
     yams::daemon::DaemonClient* daemon_client_{nullptr};
     yams::daemon::ClientConfig daemon_client_config_{};
     std::filesystem::path daemonSocketOverride_;
     std::function<Result<void>(const yams::daemon::ClientConfig&)> testEnsureDaemonClientHook_{};
-
-    // Client creation mutex
-    std::mutex daemon_client_mutex_;
     struct ClientInfo {
         std::string name;
         std::string version;
@@ -236,13 +229,12 @@ private:
     nlohmann::json readResource(const std::string& uri);
     nlohmann::json listPrompts();
     void initializeToolRegistry();
-    static nlohmann::json createResponse(const nlohmann::json& id, const nlohmann::json& result);
-    static nlohmann::json createError(const nlohmann::json& id, int code,
-                                      const std::string& message);
+    nlohmann::json createResponse(const nlohmann::json& id, const nlohmann::json& result);
+    nlohmann::json createError(const nlohmann::json& id, int code, const std::string& message);
     void sendResponse(const nlohmann::json& message);
 
     // --- Initialization / lifecycle helpers (added for spec-aligned handshake flexibility) ---
-    static bool isMethodAllowedBeforeInitialization(const std::string& method);
+    bool isMethodAllowedBeforeInitialization(const std::string& method) const;
     void markClientInitialized(); // Accept canonical + legacy initialized notifications
     void handleExitRequest();     // Graceful handling of 'exit' to set exitRequested_
     // Cancellation helpers
@@ -258,7 +250,7 @@ private:
                       std::optional<nlohmann::json> progressToken = std::nullopt);
     // Auto-ready scheduling (fallback when client omits 'initialized')
     void scheduleAutoReady();
-    static bool shouldAutoInitialize();
+    bool shouldAutoInitialize() const;
     // Record that a feature was used prior to client 'initialized'
     void recordEarlyFeatureUse();
 
@@ -266,6 +258,27 @@ private:
 
     // YAMS extensions toggle (independent of strict mode which has been removed)
     bool areYamsExtensionsEnabled() const { return enableYamsExtensions_; }
+
+    // HTTP session context controls
+    void
+    beginSessionContext(std::string sessionId,
+                        std::function<void(const std::string&, const nlohmann::json&)> publisher);
+    void endSessionContext();
+
+    // --- Unified outbound mechanism (strand-like ordering on IO context) ---
+    void enqueueOutbound(std::string payload);
+    boost::asio::awaitable<void> outboundDrainAsync();
+
+    std::mutex outboundMutex_;
+    std::deque<std::string> outboundQueue_;
+    std::atomic<bool> outboundDraining_{false};
+    std::unique_ptr<boost::asio::strand<boost::asio::any_io_executor>> outboundStrand_;
+
+    // Notification routing for HTTP mode
+    static thread_local std::string tlsSessionId_;
+    // Spec-compliant progress token associated with the current in-flight request (if any)
+    static thread_local nlohmann::json tlsProgressToken_;
+    std::function<void(const std::string&, const nlohmann::json&)> httpPublisher_;
 
     // Telemetry counters (FSM-integrated)
     std::atomic<uint64_t> telemetrySentBytes_{0};
@@ -295,7 +308,7 @@ public:
     void testConfigureDaemonClient(const yams::daemon::ClientConfig& cfg) {
         daemon_client_config_ = cfg;
         daemon_client_ = nullptr;
-        daemon_client_unique_.reset();
+        daemon_client_lease_.reset();
     }
 
     // Expose modern handle* methods for testing
@@ -367,10 +380,10 @@ private:
     // Session start/stop (simplified surface)
     boost::asio::awaitable<Result<MCPSessionStartResponse>>
     handleSessionStart(const MCPSessionStartRequest& req);
-    static boost::asio::awaitable<Result<MCPSessionStopResponse>>
+    boost::asio::awaitable<Result<MCPSessionStopResponse>>
     handleSessionStop(const MCPSessionStopRequest& req);
     boost::asio::awaitable<Result<MCPSessionPinResponse>>
-    handleSessionPin(const MCPSessionPinRequest& req) const;
+    handleSessionPin(const MCPSessionPinRequest& req);
     boost::asio::awaitable<Result<MCPSessionUnpinResponse>>
     handleSessionUnpin(const MCPSessionUnpinRequest& req);
 

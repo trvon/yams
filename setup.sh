@@ -14,6 +14,7 @@
 #   YAMS_EXTRA_MESON_FLAGS   - Additional Meson setup flags
 #   YAMS_COMPILER            - Force compiler (clang or gcc)
 #   YAMS_CPPSTD              - C++ standard (17, 20, 23)
+#   YAMS_ENABLE_MODULES      - Enable C++20 modules (true/false, auto-detected if not set)
 #   YAMS_LIBCXX_HARDENING    - libc++ hardening mode (none, fast, extensive, debug)
 #   YAMS_INSTALL_PREFIX      - Installation prefix (default: /usr/local or Homebrew)
 #
@@ -124,6 +125,29 @@ case "${CPPSTD_INPUT}" in
 esac
 # Value for Meson project option
 MESON_CPPSTD="c++${CPPSTD}"
+
+if [[ -z "${YAMS_ENABLE_MODULES:-}" ]]; then
+  ENABLE_MODULES=false
+  if echo 'export module test; export int foo() { return 42; }' | \
+     "${CXX:-c++}" -std=c++20 -fmodules -fsyntax-only -x c++ - >/dev/null 2>&1; then
+    ENABLE_MODULES=true
+    echo "Auto-detected C++20 module support (Clang -fmodules)"
+  elif echo 'export module test; export int foo() { return 42; }' | \
+       "${CXX:-c++}" -std=c++20 -fmodules-ts -fsyntax-only -x c++ - >/dev/null 2>&1; then
+    ENABLE_MODULES=true
+    echo "Auto-detected C++20 module support (GCC -fmodules-ts)"
+  else
+    echo "C++20 modules not fully supported by compiler, disabled"
+  fi
+else
+  if [[ "${YAMS_ENABLE_MODULES}" == "true" ]]; then
+    ENABLE_MODULES=true
+    echo "C++20 modules enabled via YAMS_ENABLE_MODULES=true"
+  else
+    ENABLE_MODULES=false
+    echo "C++20 modules disabled via YAMS_ENABLE_MODULES=false"
+  fi
+fi
 
 # libc++ hardening mode (only applies when using libc++)
 # Options: none, fast, extensive, debug
@@ -392,7 +416,7 @@ if [[ -f "${INTRO_OPTS_JSON}" ]]; then
   PREV_CPPSTD=$(awk '/"name"\s*:\s*"cpp_std"/{flag=1} flag && /"value"/{gsub(/.*"value"\s*:\s*"|".*/,"",$0); print; exit}' "${INTRO_OPTS_JSON}" || true)
 fi
 
-MESON_OPTIONS=("-Dbuild-cli=true" "-Dcpp_std=${MESON_CPPSTD}")
+MESON_OPTIONS=("-Dbuild-cli=true" "-Dcpp_std=${MESON_CPPSTD}" "-Denable-modules=${ENABLE_MODULES}")
 
 # Add libc++ hardening mode if specified
 if [[ "${LIBCXX_HARDENING}" != "none" ]]; then

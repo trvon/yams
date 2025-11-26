@@ -14,11 +14,14 @@
 namespace yams::integrity {
 
 RepairManager::RepairManager(storage::IStorageEngine& storage, RepairManagerConfig config)
-    : storage_(storage), config_(std::move(config)), repo_(nullptr) {}
+    : storage_(&storage), config_(std::move(config)), repo_(nullptr) {}
 
 RepairManager::RepairManager(storage::IStorageEngine& storage, metadata::MetadataRepository& repo,
                              RepairManagerConfig config)
-    : storage_(storage), config_(std::move(config)), repo_(&repo) {}
+    : storage_(&storage), config_(std::move(config)), repo_(&repo) {}
+
+RepairManager::RepairManager(metadata::MetadataRepository& repo)
+    : storage_(nullptr), config_(), repo_(&repo) {}
 
 bool RepairManager::attemptRepair(const std::string& blockHash,
                                   const std::vector<RepairStrategy>& order) {
@@ -82,6 +85,11 @@ bool RepairManager::canRepair(const std::string& blockHash) const {
 
 bool RepairManager::storeIfValid(const std::string& blockHash,
                                  const Result<std::vector<std::byte>>& fetchResult) const {
+    if (!storage_) {
+        spdlog::error("Storage engine not available for repair");
+        return false;
+    }
+
     if (!fetchResult.has_value()) {
         spdlog::warn("Repair fetch failed for {}: {}", blockHash.substr(0, 8),
                      fetchResult.error().message);
@@ -100,8 +108,8 @@ bool RepairManager::storeIfValid(const std::string& blockHash,
     }
 
     auto storeRes =
-        storage_.store(blockHash, std::span<const std::byte>(fetchResult.value().data(),
-                                                             fetchResult.value().size()));
+        storage_->store(blockHash, std::span<const std::byte>(fetchResult.value().data(),
+                                                              fetchResult.value().size()));
     if (!storeRes.has_value()) {
         spdlog::error("Failed to store repaired block {}: {}", blockHash.substr(0, 8),
                       storeRes.error().message);
@@ -306,6 +314,84 @@ Result<PruneResult> RepairManager::pruneFiles(const PruneConfig& config,
 
     spdlog::info("Prune complete: deleted={} failed={} bytes_freed={}", result.filesDeleted,
                  result.filesFailed, result.totalBytesFreed);
+
+    return result;
+}
+
+// ============================================================================
+// Path Tree Repair Operations
+// ============================================================================
+
+Result<PathTreeRepairResult>
+RepairManager::repairPathTree(std::function<void(uint64_t, uint64_t)> progress) {
+    if (!repo_) {
+        return Error{ErrorCode::InvalidArgument, "MetadataRepository not initialized"};
+    }
+
+    PathTreeRepairResult result;
+
+    // Query all documents
+    auto docsResult = repo_->queryDocuments(metadata::DocumentQueryOptions{});
+    if (!docsResult) {
+        spdlog::error("Failed to query documents for path tree repair: {}",
+                      docsResult.error().message);
+        return docsResult.error();
+    }
+
+    auto& allDocs = docsResult.value();
+    const uint64_t total = allDocs.size();
+    spdlog::info("Path tree repair: scanning {} documents", total);
+
+    uint64_t processed = 0;
+    for (const auto& doc : allDocs) {
+        result.documentsScanned++;
+
+        // Report progress
+        if (progress && processed % 100 == 0) {
+            progress(processed, total);
+        }
+
+        // Skip documents without a valid path
+        if (doc.filePath.empty()) {
+            processed++;
+            continue;
+        }
+
+        // Check if this document already has a path tree entry
+        auto existingNode = repo_->findPathTreeNodeByFullPath(doc.filePath);
+        if (existingNode && existingNode.value().has_value()) {
+            // Node exists, skip (or could update doc_count if needed)
+            processed++;
+            continue;
+        }
+
+        // Create path tree entry for this document
+        try {
+            auto treeRes = repo_->upsertPathTreeForDocument(
+                doc, doc.id, true /* isNewDocument */, std::span<const float>());
+            if (treeRes) {
+                result.nodesCreated++;
+                spdlog::debug("Path tree repair: created entry for '{}'", doc.filePath);
+            } else {
+                result.errors++;
+                spdlog::warn("Path tree repair: failed for '{}': {}", doc.filePath,
+                             treeRes.error().message);
+            }
+        } catch (const std::exception& e) {
+            result.errors++;
+            spdlog::warn("Path tree repair: exception for '{}': {}", doc.filePath, e.what());
+        }
+
+        processed++;
+    }
+
+    // Final progress report
+    if (progress) {
+        progress(total, total);
+    }
+
+    spdlog::info("Path tree repair complete: scanned={} created={} errors={}", result.documentsScanned,
+                 result.nodesCreated, result.errors);
 
     return result;
 }
