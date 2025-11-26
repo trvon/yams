@@ -288,6 +288,7 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then
              pwsh -File setup.ps1 Debug
           else
+             chmod +x setup.sh
              $ARCH_PREFIX ./setup.sh Debug
              $ARCH_PREFIX meson compile -C builddir
           fi

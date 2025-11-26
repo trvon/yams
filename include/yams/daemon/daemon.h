@@ -90,9 +90,7 @@ public:
     /// Returns when stopRequested_ becomes true or requestStop() is called.
     void runLoop();
     void requestStop() {
-        std::fprintf(stderr, "requestStop() CALLED!\n");
-        std::fflush(stderr);
-        stopRequested_ = true;
+        stopRequested_.store(true, std::memory_order_release);
         stop_cv_.notify_all();
     }
     bool isRunning() const { return running_.load(); }

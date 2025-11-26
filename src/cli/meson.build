@@ -166,5 +166,105 @@ yams_cli_dep = declare_dependency(
 
 meson.override_dependency('yams_cli', yams_cli_dep)
 
+# ============================================================================
+# C++20 Modules Support (Experimental)
+# ============================================================================
+# When enable-modules=true and compiler supports modules, build module interfaces
+# alongside traditional headers for gradual migration.
+
+if yams_modules_enabled and yams_modules_supported
+  message('Building yams.cli.utils module')
+
+  # Utility sources that will be compiled as module implementation units
+  cli_utils_sources = [
+    'time_parser.cpp',
+    'progress_indicator.cpp',
+    'session_store.cpp',
+  ]
+
+  # Compiler-specific module interface compilation
+  cpp_id = meson.get_compiler('cpp').get_id()
+
+  if cpp_id == 'msvc' or cpp_id == 'clang-cl'
+    # MSVC: Use /interface flag for module interface units
+    # Note: MSVC expects .ixx extension by default, but we use .cppm with explicit flag
+    yams_cli_utils_module = custom_target('yams_cli_utils_module',
+      input: 'yams_cli_utils.cppm',
+      output: 'yams.cli.utils.ifc',
+      command: [
+        meson.get_compiler('cpp').cmd_array(),
+        '/std:c++20',
+        '/interface',
+        '/TP',  # Treat as C++
+        '/c',
+        '@INPUT@',
+        '/Fo' + '@OUTPUT@'.replace('.ifc', '.obj'),
+        '/ifcOutput', '@OUTPUT@',
+      ],
+      install: false,
+    )
+
+  elif cpp_id == 'clang'
+    # Clang: Use --precompile for module interface
+    yams_cli_utils_module = custom_target('yams_cli_utils_module',
+      input: 'yams_cli_utils.cppm',
+      output: 'yams.cli.utils.pcm',
+      command: [
+        meson.get_compiler('cpp').cmd_array(),
+        '-std=c++20',
+        '--precompile',
+        '-x', 'c++-module',
+        '-I', meson.project_source_root() / 'include',
+        '-c',
+        '@INPUT@',
+        '-o', '@OUTPUT@',
+      ],
+      install: false,
+    )
+
+  elif cpp_id == 'gcc'
+    # GCC: Use -fmodules-ts
+    yams_cli_utils_module = custom_target('yams_cli_utils_module',
+      input: 'yams_cli_utils.cppm',
+      output: 'yams.cli.utils.gcm',
+      command: [
+        meson.get_compiler('cpp').cmd_array(),
+        '-std=c++20',
+        '-fmodules-ts',
+        '-x', 'c++',
+        '-I', meson.project_source_root() / 'include',
+        '-c',
+        '@INPUT@',
+        '-o', '@OUTPUT@',
+      ],
+      install: false,
+    )
+  endif
+
+  # Build module implementation library
+  yams_cli_utils_module_impl = static_library('yams_cli_utils_module',
+    cli_utils_sources,
+    include_directories: include_directories('../../include'),
+    dependencies: [
+      dependency('yams_core'),
+      dependency('nlohmann_json'),
+    ],
+    cpp_args: yams_module_cpp_args + cli_cppargs,
+    install: false,
+  )
+
+  # Create module dependency for consumers
+  yams_cli_utils_module_dep = declare_dependency(
+    link_with: yams_cli_utils_module_impl,
+    compile_args: yams_module_cpp_args,
+    sources: [yams_cli_utils_module],
+  )
+
+  meson.override_dependency('yams_cli_utils_module', yams_cli_utils_module_dep)
+
+  message('  Module interface: yams_cli_utils.cppm')
+  message('  Module name: yams.cli.utils')
+  message('  Consumers can use: import yams.cli.utils;')
+endif
 
 # CLI executable is defined in tools/yams-cli (builds yams-cli and installs a 'yams' symlink)

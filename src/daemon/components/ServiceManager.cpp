@@ -47,6 +47,7 @@
 #include <yams/config/config_helpers.h>
 #include <yams/core/types.h>
 #include <yams/daemon/components/BackgroundTaskManager.h>
+#include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/EmbeddingService.h>
 #include <yams/daemon/components/EntityGraphService.h>
@@ -332,7 +333,10 @@ void ServiceManager::refreshPluginStatusSnapshot() {
 
 ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state,
                                DaemonLifecycleFsm& lifecycleFsm)
-    : config_(config), state_(state), lifecycleFsm_(lifecycleFsm) {
+    : config_(config),
+      state_(state),
+      lifecycleFsm_(lifecycleFsm),
+      asyncInitDoneFuture_(asyncInitDonePromise_.get_future().share()) {
     spdlog::debug("[ServiceManager] Constructor start");
     tuningConfig_ = config_.tuning;
 
@@ -570,11 +574,31 @@ bool ServiceManager::invokeInitCompleteOnce(bool success, const std::string& err
     if (!initCompleteInvoked_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
         return false; // already invoked
     }
+    
+    // Dispatch lifecycle FSM event directly - this is the authoritative state transition
+    // The callback mechanism is deprecated but kept for test compatibility
+    try {
+        // Check if we're already shutting down - don't dispatch events during shutdown
+        auto snapshot = lifecycleFsm_.snapshot();
+        if (snapshot.state == LifecycleState::Stopping || 
+            snapshot.state == LifecycleState::Stopped) {
+            spdlog::debug("ServiceManager: skipping FSM dispatch, already shutting down");
+        } else if (success) {
+            spdlog::info("ServiceManager: dispatching HealthyEvent to lifecycleFsm_");
+            lifecycleFsm_.dispatch(HealthyEvent{});
+        } else {
+            spdlog::error("ServiceManager: dispatching FailureEvent: {}", error);
+            lifecycleFsm_.dispatch(FailureEvent{error});
+        }
+    } catch (const std::exception& e) {
+        spdlog::error("ServiceManager: lifecycle FSM dispatch failed: {}", e.what());
+    }
+    
+    // Also invoke legacy callback if set (for tests)
     try {
         if (initCompleteCallback_) {
             initCompleteCallback_(success, error);
         }
-        // Do not null out the callback pointer here; tests may introspect it.
     } catch (const std::exception& e) {
         spdlog::error("initCompleteCallback threw exception: {}", e.what());
     } catch (...) {
@@ -795,8 +819,8 @@ void ServiceManager::startAsyncInit(std::promise<void>* barrierPromise,
                 }
 
                 // Create a dummy stop_token since we're not using initThread_ anymore
-                yams::compat::stop_source stop_src;
-                auto token = stop_src.get_token();
+                // CRITICAL: Use the class-level stop_source so shutdown() can signal cancellation
+                auto token = self->asyncInitStopSource_.get_token();
 
                 try {
                     auto result = co_await self->initializeAsyncAwaitable(token);
@@ -822,6 +846,19 @@ void ServiceManager::startAsyncInit(std::promise<void>* barrierPromise,
                     }
                     (void)self->invokeInitCompleteOnce(false, e.what());
                 }
+
+                // Signal that async init coroutine has completed (success or failure)
+                // This allows shutdown() to wait for the coroutine to finish
+                spdlog::info("Async init coroutine: signaling completion via promise");
+                spdlog::default_logger()->flush();
+                try {
+                    self->asyncInitDonePromise_.set_value();
+                    spdlog::info("Async init coroutine: promise set successfully");
+                } catch (...) {
+                    // Promise already satisfied, ignore
+                    spdlog::debug("Async init coroutine: promise already satisfied");
+                }
+                spdlog::default_logger()->flush();
             }(),
             boost::asio::detached);
     }); // end boost::asio::post
@@ -849,6 +886,13 @@ void ServiceManager::shutdown() {
 
     spdlog::info("[ServiceManager] Shutdown initiated");
     auto shutdownStart = std::chrono::steady_clock::now();
+
+    // Phase 0: Signal async init coroutine to stop and wait for it to complete
+    // This prevents the coroutine from accessing resources we're about to tear down
+    spdlog::info("[ServiceManager] Phase 0: Requesting async init stop");
+    if (asyncInitStopSource_.stop_possible()) {
+        asyncInitStopSource_.request_stop();
+    }
 
     // Phase 1: Stop background task consumers FIRST (before io_context stop)
     // This signals coroutines to exit gracefully before we stop the io_context
@@ -896,8 +940,18 @@ void ServiceManager::shutdown() {
         spdlog::info("[ServiceManager] Phase 4: WorkCoordinator stop() called");
     }
 
-    // Phase 5: Join worker threads (delegated to WorkCoordinator destructor)
-    spdlog::info("[ServiceManager] Phase 5: WorkCoordinator will join threads on destruction");
+    // Phase 5: Join worker threads IMMEDIATELY to ensure no threads are accessing
+    // shared resources when we start resetting them. This prevents race conditions
+    // during shutdown.
+    spdlog::info("[ServiceManager] Phase 5: Joining WorkCoordinator threads");
+    if (workCoordinator_) {
+        try {
+            workCoordinator_->join();
+            spdlog::info("[ServiceManager] Phase 5: WorkCoordinator threads joined");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 5: WorkCoordinator join failed: {}", e.what());
+        }
+    }
 
     // Phase 6: Stop services in reverse dependency order
     spdlog::info("[ServiceManager] Phase 6: Shutting down daemon services");

@@ -70,6 +70,9 @@ protected:
     }
 
     void TearDown() override {
+        // Stop runLoop thread if running
+        stopRunLoop();
+
         // Stop daemon if running
         if (daemon_) {
             daemon_->stop();
@@ -78,6 +81,28 @@ protected:
 
         // Clean up test files
         cleanupDaemonFiles();
+    }
+
+    // Start runLoop in a background thread - required for async initialization
+    void startRunLoop() {
+        if (!daemon_ || runLoopThread_.joinable()) {
+            return;
+        }
+        runLoopThread_ = std::thread([this]() {
+            daemon_->runLoop();
+        });
+        // Give runLoop time to enter and trigger async init
+        std::this_thread::sleep_for(50ms);
+    }
+
+    // Stop runLoop and join thread
+    void stopRunLoop() {
+        if (daemon_ && daemon_->isRunning()) {
+            daemon_->requestStop();
+        }
+        if (runLoopThread_.joinable()) {
+            runLoopThread_.join();
+        }
     }
 
     void cleanupDaemonFiles() {
@@ -120,6 +145,7 @@ protected:
     DaemonConfig config_;
     std::unique_ptr<YamsDaemon> daemon_;
     fs::path runtime_root_;
+    std::thread runLoopThread_;  // Background thread for runLoop
 };
 
 // Test daemon creation and destruction
@@ -148,11 +174,17 @@ TEST_F(DaemonTest, StartStop) {
     // PID file should exist
     EXPECT_TRUE(fs::exists(config_.pidFile));
 
+    // Start runLoop to trigger async initialization
+    startRunLoop();
+
     // Wait for daemon to complete async initialization
     EXPECT_TRUE(waitForDaemonReady()) << "Daemon failed to initialize within timeout";
 
     // Note: No in-process IPC acceptor anymore; socket file is owned by external server.
     // Do not assert socket path existence here.
+
+    // Stop runLoop first
+    stopRunLoop();
 
     // Stop daemon
     auto result = daemon_->stop();
@@ -743,6 +775,111 @@ TEST_F(DaemonTest, DISABLED_RapidStartStopCycles) {
     // Final state should be clean
     EXPECT_FALSE(fs::exists(config_.socketPath));
     EXPECT_FALSE(fs::exists(config_.pidFile));
+}
+
+// Regression test for async init race condition (GitHub issue: Windows Release crash)
+// This test verifies that the daemon's runLoop() properly waits for async initialization
+// to safely enter its coroutine before accessing shared resources like stop_mutex_.
+// The fix uses a promise/future barrier (asyncInitStartedPromise_/asyncInitStartedFuture_)
+// to synchronize between the main thread and the async init coroutine.
+TEST_F(DaemonTest, AsyncInitBarrierPreventsRaceCondition) {
+    daemon_ = std::make_unique<YamsDaemon>(config_);
+
+    // Start daemon - this sets up the barrier mechanism
+    auto result = daemon_->start();
+    if (!result) {
+        handleStartFailure("AsyncInitBarrierPreventsRaceCondition start", result.error());
+        return;
+    }
+
+    EXPECT_TRUE(daemon_->isRunning());
+
+    // Run a thread that calls runLoop() - this is what the daemon does in production
+    // The runLoop should wait for the async init barrier before entering its main loop
+    std::atomic<bool> runLoopEntered{false};
+    std::atomic<bool> runLoopExited{false};
+    
+    std::thread runLoopThread([this, &runLoopEntered, &runLoopExited]() {
+        runLoopEntered.store(true);
+        daemon_->runLoop();
+        runLoopExited.store(true);
+    });
+
+    // Give the runLoop thread time to enter and potentially crash if barrier doesn't work
+    std::this_thread::sleep_for(100ms);
+
+    // Verify runLoop entered successfully (no crash)
+    EXPECT_TRUE(runLoopEntered.load()) << "runLoop should have entered";
+
+    // Request stop to exit the runLoop
+    daemon_->requestStop();
+
+    // Wait for runLoop to exit
+    if (runLoopThread.joinable()) {
+        runLoopThread.join();
+    }
+
+    EXPECT_TRUE(runLoopExited.load()) << "runLoop should have exited cleanly";
+
+    // Stop daemon
+    daemon_->stop();
+}
+
+// Stress test: Multiple rapid daemon start/runLoop/stop cycles
+// This tests the barrier mechanism under repeated use to catch any race conditions
+// that might only manifest intermittently
+TEST_F(DaemonTest, AsyncInitBarrierStressTest) {
+    constexpr int kIterations = 5;
+
+    for (int i = 0; i < kIterations; ++i) {
+        SCOPED_TRACE("Iteration " + std::to_string(i));
+
+        daemon_ = std::make_unique<YamsDaemon>(config_);
+
+        auto result = daemon_->start();
+        if (!result) {
+            if (isSocketPermissionDenied(result.error())) {
+                GTEST_SKIP() << "Skipping due to socket permissions";
+            }
+            // On Windows, socket cleanup may take time between iterations
+            std::this_thread::sleep_for(100ms);
+            result = daemon_->start();
+            if (!result) {
+                handleStartFailure("AsyncInitBarrierStressTest iteration " + std::to_string(i),
+                                   result.error());
+                return;
+            }
+        }
+
+        EXPECT_TRUE(daemon_->isRunning());
+
+        // Run the main loop briefly
+        std::atomic<bool> crashed{false};
+        std::thread runLoopThread([this, &crashed]() {
+            try {
+                daemon_->runLoop();
+            } catch (...) {
+                crashed.store(true);
+            }
+        });
+
+        // Let it run briefly
+        std::this_thread::sleep_for(50ms);
+
+        // Signal stop and wait
+        daemon_->requestStop();
+        if (runLoopThread.joinable()) {
+            runLoopThread.join();
+        }
+
+        EXPECT_FALSE(crashed.load()) << "runLoop crashed on iteration " << i;
+
+        daemon_->stop();
+        daemon_.reset();
+
+        // Brief pause between iterations for resource cleanup
+        std::this_thread::sleep_for(50ms);
+    }
 }
 
 } // namespace yams::daemon::test

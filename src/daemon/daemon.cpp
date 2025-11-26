@@ -359,9 +359,6 @@ void YamsDaemon::runLoop() {
     // Drive lifecycle FSM periodically
     lifecycleFsm_.tick();
 
-    spdlog::info("runLoop: entering main loop");
-    spdlog::default_logger()->flush();
-
     while (!stopRequested_.load()) {
 #if defined(TRACY_ENABLE)
         YAMS_FRAME_MARK_START("daemon_tick");
@@ -378,35 +375,15 @@ void YamsDaemon::runLoop() {
 #endif
                     break;
                 }
-                std::fprintf(stderr, "runLoop: [D] signalCheckHook_() returned false\n");
-                std::fflush(stderr);
-                spdlog::info("runLoop: [D] signalCheckHook_() returned false");
-                spdlog::default_logger()->flush();
             } catch (...) {
-                std::fprintf(stderr, "runLoop: signalCheckHook_() threw exception\n");
-                std::fflush(stderr);
                 // Ignore hook errors
             }
         }
         
         // Allow tuning of the main loop tick for metrics refresh and readiness nudges.
         // Read each iteration so env changes take effect without restart.
-        std::fprintf(stderr, "runLoop: [E] getting tick_ms\n");
-        std::fflush(stderr);
-        spdlog::info("runLoop: [E] getting tick_ms");
-        spdlog::default_logger()->flush();
         uint32_t tick_ms = TuneAdvisor::statusTickMs();
-        std::fprintf(stderr, "runLoop: [F] tick_ms=%u, acquiring lock\n", tick_ms);
-        std::fflush(stderr);
-        std::fprintf(stderr, "runLoop: [F2] about to lock stop_mutex_ at %p\n", (void*)&stop_mutex_);
-        std::fflush(stderr);
         std::unique_lock<std::mutex> lock(stop_mutex_);
-        std::fprintf(stderr, "runLoop: [F3] lock acquired\n");
-        std::fflush(stderr);
-        spdlog::info("runLoop: [G] lock acquired, waiting on cv");
-        spdlog::default_logger()->flush();
-        std::fprintf(stderr, "runLoop: [G2] about to wait on cv at %p\n", (void*)&stop_cv_);
-        std::fflush(stderr);
         if (stop_cv_.wait_for(lock, std::chrono::milliseconds(tick_ms),
                               [&] { return stopRequested_.load(); })) {
             // Shutdown requested: inform lifecycle FSM and exit loop
@@ -419,19 +396,13 @@ void YamsDaemon::runLoop() {
 #endif
             break;
         }
-        spdlog::info("runLoop: [H] cv woke (timeout), refreshing metrics");
-        spdlog::default_logger()->flush();
         // Periodically refresh metrics snapshot cache to ensure fast status replies
         try {
             if (metrics_) {
-                spdlog::info("runLoop: [I] calling metrics_->refresh()");
-                spdlog::default_logger()->flush();
                 metrics_->refresh();
             }
         } catch (...) {
         }
-        spdlog::info("runLoop: [J] checking reloadRequested_");
-        spdlog::default_logger()->flush();
         // Apply pending reload requests (e.g., SIGHUP) for tuning-only adjustments
         if (reloadRequested_.load(std::memory_order_relaxed)) {
             try {

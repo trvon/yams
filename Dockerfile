@@ -46,13 +46,12 @@ RUN --mount=type=cache,target=/root/.conan2 \
   # Configure Conan remotes with retry
   for i in 1 2 3; do \
   conan --version && \
-  conan config set general.parallel_downloads=8 || true && \
   conan profile detect --force && \
   echo '=== Conan remotes ==='; conan remote list || true && \
   if ! conan remote list | grep -q 'conancenter'; then \
-  conan remote add conancenter https://center.conan.io; \
+  conan remote add conancenter https://center2.conan.io; \
   fi && \
-  conan remote update conancenter https://center.conan.io || true && \
+  conan remote update conancenter --url https://center2.conan.io || true && \
   conan search tree-sitter -r=conancenter || true && \
   break || \
   { echo "Conan setup attempt $i failed, retrying after 3s..."; sleep 3; }; \
@@ -64,10 +63,11 @@ RUN --mount=type=cache,target=/root/.conan2 \
   export YAMS_DISABLE_SYMBOL_EXTRACTION=true; \
   export YAMS_DISABLE_ONNX=true; \
   # Run setup.sh for dependency resolution and build configuration
+  sed -i 's/\r$//' setup.sh && chmod +x setup.sh && \
   if ! ./setup.sh Release; then \
   echo 'Initial setup.sh failed; attempting retry with cache clean.'; \
   rm -rf /root/.conan2/p/*/metadata.json 2>/dev/null || true; \
-  conan cache clean --temp --locks || true; \
+  conan cache clean "*" || true; \
   conan search tree-sitter/0.25.9 -r=conancenter || true; \
   ./setup.sh Release; \
   fi; \

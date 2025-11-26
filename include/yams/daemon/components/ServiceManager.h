@@ -302,6 +302,14 @@ public:
     yams::compat::stop_source sessionWatchStopSource_;
     std::future<void> sessionWatcherFuture_;
 
+    // Stop source for cancelling async initialization coroutine during shutdown
+    yams::compat::stop_source asyncInitStopSource_;
+
+    // Promise/future to signal when async init coroutine has completed (success or failure)
+    // Shutdown waits on this to ensure coroutine isn't accessing resources being torn down
+    std::promise<void> asyncInitDonePromise_;
+    std::shared_future<void> asyncInitDoneFuture_;
+
     // ABI plugin loader access
     AbiPluginLoader* getAbiPluginLoader() const { return abiPluginLoader_.get(); }
     // Plugin host (C‑ABI)
