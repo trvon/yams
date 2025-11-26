@@ -29,8 +29,14 @@ inline int dlclose(void* handle) {
 }
 
 inline char* dlerror() {
-    static char msg[256];
-    FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, GetLastError(),
+    // Thread-local buffer to avoid race conditions
+    thread_local char msg[256];
+    DWORD err = GetLastError();
+    SetLastError(0); // Clear the error (like Unix dlerror())
+    if (err == 0) {
+        return nullptr; // No error
+    }
+    FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, err,
                    MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), msg, sizeof(msg), NULL);
     return msg;
 }

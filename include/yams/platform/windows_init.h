@@ -10,6 +10,9 @@
  * in main.cpp of any YAMS executable that needs to find DLLs in the
  * application directory.
  *
+ * This also configures the Windows console for UTF-8 output, enabling
+ * proper display of Unicode characters (✓, ✗, ⚠, box-drawing, etc.).
+ *
  * Usage:
  *   #include <yams/platform/windows_init.h>
  *   // The static initializer will run automatically before main()
@@ -60,21 +63,54 @@ inline bool setup_dll_search_path() {
     return true;
 }
 
+/**
+ * @brief Set up Windows console for UTF-8 output
+ *
+ * Configures the Windows console to properly display UTF-8 encoded text.
+ * This enables Unicode characters like ✓, ✗, ⚠, box-drawing characters,
+ * and braille spinners to display correctly instead of appearing as
+ * garbled text (mojibake).
+ *
+ * @return true if setup succeeded, false otherwise
+ */
+inline bool setup_console_utf8() {
+    // Set console input and output code pages to UTF-8 (65001)
+    bool input_ok = SetConsoleCP(CP_UTF8) != 0;
+    bool output_ok = SetConsoleOutputCP(CP_UTF8) != 0;
+
+    // Enable virtual terminal processing for ANSI escape sequences
+    // This allows colored output to work properly in modern Windows terminals
+    HANDLE stdout_handle = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (stdout_handle != INVALID_HANDLE_VALUE) {
+        DWORD mode = 0;
+        if (GetConsoleMode(stdout_handle, &mode)) {
+            // ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+            mode |= 0x0004;
+            SetConsoleMode(stdout_handle, mode);
+        }
+    }
+
+    return input_ok && output_ok;
+}
+
 namespace detail {
 
 /**
  * @brief Static initializer that runs before main()
  *
  * This struct's constructor is called during static initialization,
- * ensuring DLL paths are configured before any code runs that might
- * trigger DLL loading.
+ * ensuring DLL paths and console encoding are configured before any
+ * code runs that might trigger DLL loading or produce output.
  */
-struct DllPathInitializer {
-    DllPathInitializer() { setup_dll_search_path(); }
+struct WindowsInitializer {
+    WindowsInitializer() {
+        setup_dll_search_path();
+        setup_console_utf8();
+    }
 };
 
 // Global instance - constructor runs during static init
-[[maybe_unused]] static DllPathInitializer dll_path_initializer;
+[[maybe_unused]] static WindowsInitializer windows_initializer;
 
 } // namespace detail
 

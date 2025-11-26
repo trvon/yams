@@ -9,8 +9,10 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <filesystem>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -88,6 +90,8 @@ public:
     /// Returns when stopRequested_ becomes true or requestStop() is called.
     void runLoop();
     void requestStop() {
+        std::fprintf(stderr, "requestStop() CALLED!\n");
+        std::fflush(stderr);
         stopRequested_ = true;
         stop_cv_.notify_all();
     }
@@ -137,6 +141,11 @@ public:
     // Note: daemonThread_ removed - main loop runs on calling thread via runLoop()
     std::mutex stop_mutex_;
     std::condition_variable stop_cv_;
+
+    std::promise<void> asyncInitStartedPromise_;
+    std::shared_future<void> asyncInitStartedFuture_;
+    std::atomic<bool> asyncInitBarrierSet_{false};
+
     // Deferred repair startup control
     std::atomic<bool> repairStarted_{false};
     std::chrono::steady_clock::time_point repairIdleSince_{};

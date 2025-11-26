@@ -1,5 +1,6 @@
 #pragma once
 
+#include <mutex>
 #include <string>
 
 namespace yams::daemon {
@@ -39,41 +40,63 @@ struct ProviderDegradedEvent {
 
 class EmbeddingProviderFsm {
 public:
-    ProviderSnapshot snapshot() const { return snap_; }
+    ProviderSnapshot snapshot() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return snap_;
+    }
 
     void dispatch(const ProviderAdoptedEvent&) {
+        std::lock_guard<std::mutex> lock(mutex_);
         transitionTo(EmbeddingProviderState::ProviderAdopted);
     }
     void dispatch(const ModelLoadStartedEvent& ev) {
+        std::lock_guard<std::mutex> lock(mutex_);
         snap_.modelName = ev.modelName;
         transitionTo(EmbeddingProviderState::ModelLoading);
     }
     void dispatch(const ModelLoadedEvent& ev) {
+        std::lock_guard<std::mutex> lock(mutex_);
         snap_.modelName = ev.modelName;
         snap_.embeddingDimension = ev.dimension;
         transitionTo(EmbeddingProviderState::ModelReady);
     }
     void dispatch(const LoadFailureEvent& ev) {
+        std::lock_guard<std::mutex> lock(mutex_);
         snap_.lastError = ev.error;
         transitionTo(EmbeddingProviderState::Failed);
     }
     void dispatch(const ProviderDegradedEvent& ev) {
+        std::lock_guard<std::mutex> lock(mutex_);
         snap_.lastError = ev.reason;
         transitionTo(EmbeddingProviderState::Degraded);
     }
 
-    bool isReady() const { return snap_.state == EmbeddingProviderState::ModelReady; }
-    bool isDegraded() const { return snap_.state == EmbeddingProviderState::Degraded; }
+    bool isReady() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return snap_.state == EmbeddingProviderState::ModelReady;
+    }
+    bool isDegraded() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return snap_.state == EmbeddingProviderState::Degraded;
+    }
     bool isLoadingOrReady() const {
+        std::lock_guard<std::mutex> lock(mutex_);
         return snap_.state == EmbeddingProviderState::ModelLoading ||
                snap_.state == EmbeddingProviderState::ModelReady;
     }
-    std::size_t dimension() const { return snap_.embeddingDimension; }
+    std::size_t dimension() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return snap_.embeddingDimension;
+    }
 
 private:
-    void transitionTo(EmbeddingProviderState next) { snap_.state = next; }
+    void transitionTo(EmbeddingProviderState next) {
+        // Note: mutex_ already held by caller
+        snap_.state = next;
+    }
 
     ProviderSnapshot snap_{};
+    mutable std::mutex mutex_;
 };
 
 } // namespace yams::daemon

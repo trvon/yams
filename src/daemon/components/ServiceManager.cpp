@@ -667,47 +667,8 @@ yams::Result<void> ServiceManager::initialize() {
     // io_context and workers already created in constructor; proceed with initialization
     spdlog::debug("ServiceManager: Using io_context from constructor");
 
-    // Launch async initialization without blocking or using futures
-    // Use detached coroutine with completion callback
-    // IMPORTANT: Capture shared_from_this() to prevent 'this' pointer corruption
-    // when the coroutine suspends across co_await points.
-    auto self = shared_from_this();
-    boost::asio::co_spawn(
-        workCoordinator_->getExecutor(),
-        [self]() -> boost::asio::awaitable<void> {
-            spdlog::info("Starting async resource initialization (coroutine)...");
-
-            // Create a dummy stop_token since we're not using initThread_ anymore
-            yams::compat::stop_source stop_src;
-            auto token = stop_src.get_token();
-
-            try {
-                auto result = co_await self->initializeAsyncAwaitable(token);
-
-                if (!result) {
-                    spdlog::error("Async resource initialization failed: {}",
-                                  result.error().message);
-                    try {
-                        self->serviceFsm_.dispatch(InitializationFailedEvent{result.error().message});
-                    } catch (...) {
-                    }
-                    (void)self->invokeInitCompleteOnce(false, result.error().message);
-                } else {
-                    spdlog::info("All daemon services initialized successfully");
-                    (void)self->invokeInitCompleteOnce(true, "");
-                }
-            } catch (const std::exception& e) {
-                spdlog::error("Async resource initialization exception: {}", e.what());
-                try {
-                    self->serviceFsm_.dispatch(InitializationFailedEvent{e.what()});
-                } catch (...) {
-                }
-                (void)self->invokeInitCompleteOnce(false, e.what());
-            }
-        }(),
-        boost::asio::detached);
-
-    // Removed: defensive 100ms sleep (unnecessary with proper async initialization)
+    // Async initialization is now triggered explicitly via startAsyncInit()
+    // to allow the daemon main loop to start first.
 
     // Configure PoolManager defaults from TuneAdvisor for known components
     try {
@@ -767,112 +728,103 @@ yams::Result<void> ServiceManager::initialize() {
     return Result<void>();
 }
 
-// Modern async initialization (Phase 0b): Sequential coroutine-based initialization
-// with structured concurrency and automatic rollback on error
-boost::asio::awaitable<yams::Result<void>>
-ServiceManager::initialize_async(boost::asio::any_io_executor exec) {
-    // Get cancellation state for checking cancellation requests
-    auto token = co_await boost::asio::this_coro::cancellation_state;
-    spdlog::info("[ServiceManager] Starting async initialization with structured concurrency");
+void ServiceManager::startAsyncInit(std::promise<void>* barrierPromise,
+                                    std::atomic<bool>* barrierSet) {
+    // Guard against multiple calls
+    bool expected = false;
+    if (!asyncInitStarted_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        spdlog::warn("ServiceManager::startAsyncInit() called more than once, ignoring");
+        return;
+    }
 
-    // Validate data directory synchronously to fail fast if unwritable
-    namespace fs = std::filesystem;
-    fs::path dataDir = config_.dataDir;
-    if (dataDir.empty()) {
-        if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME")) {
-            dataDir = fs::path(xdgDataHome) / "yams";
-        } else if (const char* homeEnv = std::getenv("HOME")) {
-            dataDir = fs::path(homeEnv) / ".local" / "share" / "yams";
-        } else {
-            dataDir = fs::path(".") / "yams_data";
+    spdlog::info("ServiceManager: Triggering deferred async initialization");
+    spdlog::default_logger()->flush();
+
+    // Mark that barrier was set up so caller knows to wait
+    if (barrierSet) {
+        barrierSet->store(true, std::memory_order_release);
+    }
+
+    // Ensure WorkCoordinator is ready before posting work
+    if (!workCoordinator_ || !workCoordinator_->isRunning()) {
+        spdlog::error("ServiceManager: WorkCoordinator not ready, cannot start async init");
+        if (barrierPromise) {
+            barrierPromise->set_value();
         }
+        (void)invokeInitCompleteOnce(false, "WorkCoordinator not ready");
+        return;
     }
 
-    // Check cancellation before each phase
-    if (token.cancelled() != boost::asio::cancellation_type::none) {
-        co_return yams::Result<void>(
-            Error{ErrorCode::OperationCancelled, "Initialization cancelled"});
-    }
-
-    // Phase 1: Content Store
-    spdlog::info("[ServiceManager] Phase: Content Store Init");
-    if (auto r = co_await co_initContentStore(exec, token); !r) {
-        spdlog::error("[ServiceManager] Content Store init failed: {}", r.error().message);
-        co_return yams::Result<void>(r.error());
-    }
-
-    // Check cancellation
-    if (token.cancelled() != boost::asio::cancellation_type::none) {
-        co_return yams::Result<void>(
-            Error{ErrorCode::OperationCancelled, "Initialization cancelled"});
-    }
-
-    // Phase 2: Database
-    spdlog::info("[ServiceManager] Phase: Database Init");
-    if (auto r = co_await co_initDatabase(exec, token); !r) {
-        spdlog::error("[ServiceManager] Database init failed: {}", r.error().message);
-        // Automatic cleanup: previous phases' RAII handles rollback
-        co_return yams::Result<void>(r.error());
-    }
-
-    // Check cancellation
-    if (token.cancelled() != boost::asio::cancellation_type::none) {
-        co_return yams::Result<void>(
-            Error{ErrorCode::OperationCancelled, "Initialization cancelled"});
-    }
-
-    // Phase 3: Search Engine
-    spdlog::info("[ServiceManager] Phase: Search Engine Init");
-    if (auto r = co_await co_initSearchEngine(exec, token); !r) {
-        spdlog::error("[ServiceManager] Search engine init failed: {}", r.error().message);
-        co_return yams::Result<void>(r.error());
-    }
-
-    // Check cancellation
-    if (token.cancelled() != boost::asio::cancellation_type::none) {
-        co_return yams::Result<void>(
-            Error{ErrorCode::OperationCancelled, "Initialization cancelled"});
-    }
-
-    // Phase 4: Vector System
-    spdlog::info("[ServiceManager] Phase: Vector System Init");
-    if (auto r = co_await co_initVectorSystem(exec, token); !r) {
-        spdlog::error("[ServiceManager] Vector system init failed: {}", r.error().message);
-        co_return yams::Result<void>(r.error());
-    }
-
-    // Check cancellation
-    if (token.cancelled() != boost::asio::cancellation_type::none) {
-        co_return yams::Result<void>(
-            Error{ErrorCode::OperationCancelled, "Initialization cancelled"});
-    }
-
-    // Phase 5: Plugin System
-    spdlog::info("[ServiceManager] Phase: Plugin System Init");
-    if (auto r = co_await co_initPluginSystem(exec, token); !r) {
-        spdlog::error("[ServiceManager] Plugin system init failed: {}", r.error().message);
-        co_return yams::Result<void>(r.error());
-    }
-
-    // Check cancellation
-    if (token.cancelled() != boost::asio::cancellation_type::none) {
-        co_return yams::Result<void>(
-            Error{ErrorCode::OperationCancelled, "Initialization cancelled"});
-    }
-
-    // Success: all phases completed
-    spdlog::info("[ServiceManager] All phases completed successfully");
-
-    // Invoke legacy callback if registered (compatibility with existing callback-based system)
-    if (initCompleteCallback_) {
-        try {
-            initCompleteCallback_(true, "");
-        } catch (...) {
-            spdlog::warn("Init complete callback threw exception; continuing");
+    // Launch async initialization without blocking or using futures
+    // Use detached coroutine with completion callback
+    // IMPORTANT: Capture shared_from_this() to prevent 'this' pointer corruption
+    // when the coroutine suspends across co_await points.
+    std::shared_ptr<ServiceManager> self;
+    try {
+        self = shared_from_this();
+    } catch (const std::bad_weak_ptr& e) {
+        spdlog::error(
+            "ServiceManager: shared_from_this() failed - object not managed by shared_ptr: {}",
+            e.what());
+        if (barrierPromise) {
+            barrierPromise->set_value();
         }
+        (void)invokeInitCompleteOnce(false, "shared_from_this() failed");
+        return;
     }
 
-    co_return yams::Result<void>{};
+    // Post a synchronization point first to ensure the main thread has fully started
+    // before we begin async initialization
+    boost::asio::post(workCoordinator_->getExecutor(), [self, barrierPromise]() {
+        spdlog::debug("ServiceManager: Async init sync point reached, spawning coroutine");
+        spdlog::default_logger()->flush();
+
+        boost::asio::co_spawn(
+            self->workCoordinator_->getExecutor(),
+            [self, barrierPromise]() -> boost::asio::awaitable<void> {
+                spdlog::info("Starting async resource initialization (coroutine)...");
+
+                // Signal barrier that coroutine has safely started
+                if (barrierPromise) {
+                    try {
+                        barrierPromise->set_value();
+                        spdlog::debug("ServiceManager: Async init barrier signaled");
+                    } catch (...) {
+                        // Promise already satisfied, ignore
+                    }
+                }
+
+                // Create a dummy stop_token since we're not using initThread_ anymore
+                yams::compat::stop_source stop_src;
+                auto token = stop_src.get_token();
+
+                try {
+                    auto result = co_await self->initializeAsyncAwaitable(token);
+
+                    if (!result) {
+                        spdlog::error("Async resource initialization failed: {}",
+                                      result.error().message);
+                        try {
+                            self->serviceFsm_.dispatch(
+                                InitializationFailedEvent{result.error().message});
+                        } catch (...) {
+                        }
+                        (void)self->invokeInitCompleteOnce(false, result.error().message);
+                    } else {
+                        spdlog::info("All daemon services initialized successfully");
+                        (void)self->invokeInitCompleteOnce(true, "");
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::error("Async resource initialization exception: {}", e.what());
+                    try {
+                        self->serviceFsm_.dispatch(InitializationFailedEvent{e.what()});
+                    } catch (...) {
+                    }
+                    (void)self->invokeInitCompleteOnce(false, e.what());
+                }
+            }(),
+            boost::asio::detached);
+    }); // end boost::asio::post
 }
 
 void ServiceManager::shutdown() {
@@ -3110,7 +3062,6 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
     } catch (const std::exception& e) {
         spdlog::error("[ServiceManager] co_enableEmbeddingsAndRebuild: exception: {}", e.what());
     }
-    co_return;
 }
 
 boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured() {
@@ -3412,9 +3363,8 @@ std::string ServiceManager::resolvePreferredModel() const {
                     if (eq != std::string::npos) {
                         std::string v = l.substr(eq + 1);
                         trim(v);
-                        if (!v.empty() && v.front() == '"' && v.back() == '"') {
+                        if (!v.empty() && v.front() == '"' && v.back() == '"')
                             v = v.substr(1, v.size() - 2);
-                        }
                         preferred = v;
                     }
                     if (!preferred.empty()) {
@@ -3570,6 +3520,7 @@ ServiceManager::co_initDatabase(boost::asio::any_io_executor exec,
 
     } catch (const std::exception& e) {
         spdlog::error("[ServiceManager::co_initDatabase] Exception: {}", e.what());
+
         co_return yams::Result<void>(
             Error{std::string("Database initialization failed: ") + e.what()});
     }
@@ -3579,7 +3530,7 @@ boost::asio::awaitable<std::shared_ptr<yams::search::HybridSearchEngine>>
 ServiceManager::co_buildEngine(int timeout_ms, const boost::asio::cancellation_state& /*token*/,
                                bool includeEmbeddingGenerator) {
     auto exec = getWorkerExecutor();
-    std::shared_ptr<yams::vector::EmbeddingGenerator> gen;
+    std::shared_ptr<vector::EmbeddingGenerator> gen;
     if (includeEmbeddingGenerator && modelProvider_ && modelProvider_->isAvailable() &&
         !embeddingModelName_.empty()) {
         try {

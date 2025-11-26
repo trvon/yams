@@ -114,24 +114,55 @@ void setup_fatal_handlers() {
 } // namespace
 
 int main(int argc, char* argv[]) {
+    // Early crash debugging - before anything else
+    std::fprintf(stderr, "YAMS daemon main() entered\n");
+    std::fflush(stderr);
+
     // Install fatal handlers as early as possible
     setup_fatal_handlers();
+
+    std::fprintf(stderr, "YAMS daemon fatal handlers installed\n");
+    std::fflush(stderr);
 
     // Set YAMS_IN_DAEMON=1 to signal we're running inside the daemon process
     // This prevents EmbeddingGenerator from trying to connect back to us via IPC
     setenv("YAMS_IN_DAEMON", "1", 1);
 
+    std::fprintf(stderr, "YAMS daemon setenv done\n");
+    std::fflush(stderr);
+
+    std::fprintf(stderr, "YAMS daemon creating config...\n");
+    std::fflush(stderr);
+
     yams::daemon::DaemonConfig config;
+
+    std::fprintf(stderr, "YAMS daemon config created\n");
+    std::fflush(stderr);
+
     std::string configPath;
+
+    std::fprintf(stderr, "YAMS daemon configPath created\n");
+    std::fflush(stderr);
+
     // Capture CLI-provided data dir separately to enforce precedence (config > env > CLI)
     std::filesystem::path cliDataDir;
+
+    std::fprintf(stderr, "YAMS daemon cliDataDir created\n");
+    std::fflush(stderr);
     bool cliProvidedDataDir = false;
     bool noPlugins = false;
     bool foreground = false;
 
+    std::fprintf(stderr, "YAMS daemon about to parse CLI\n");
+    std::fflush(stderr);
+
 #if YAMS_HAS_CLI11
     {
+        std::fprintf(stderr, "YAMS daemon CLI11 path\n");
+        std::fflush(stderr);
         CLI::App app{"YAMS Daemon - background service"};
+        std::fprintf(stderr, "YAMS daemon CLI11 app created\n");
+        std::fflush(stderr);
         app.add_option("--config", configPath, "Configuration file path");
         app.add_option("--socket", config.socketPath, "Unix domain socket path");
         auto* dataDirOpt =
@@ -145,9 +176,17 @@ int main(int argc, char* argv[]) {
         app.add_option("--plugin-dir", config.pluginDir, "Directory containing plugins");
         app.add_flag("--no-plugins", noPlugins, "Disable plugin loading");
         app.add_flag("-f,--foreground", foreground, "Run in foreground (don't daemonize)");
+        std::fprintf(stderr, "YAMS daemon CLI11 options added, about to parse\n");
+        std::fflush(stderr);
         CLI11_PARSE(app, argc, argv);
+        std::fprintf(stderr, "YAMS daemon CLI11 parsed\n");
+        std::fflush(stderr);
         cliProvidedDataDir = (dataDirOpt && dataDirOpt->count() > 0);
+        std::fprintf(stderr, "YAMS daemon CLI11 block done\n");
+        std::fflush(stderr);
     }
+    std::fprintf(stderr, "YAMS daemon post-CLI11 block\n");
+    std::fflush(stderr);
 #else
     // Minimal fallback parser for environments without CLI11 (e.g., some Linux builds)
     for (int i = 1; i < argc; ++i) {
@@ -202,48 +241,84 @@ int main(int argc, char* argv[]) {
         config.logLevel = "info";
 #endif
 
+    std::fprintf(stderr, "YAMS daemon post CLI parsing\n");
+    std::fflush(stderr);
+
     // Apply the no-plugins flag
     if (noPlugins) {
         config.autoLoadPlugins = false;
     }
 
+    std::fprintf(stderr, "YAMS daemon loading config from TOML\n");
+    std::fflush(stderr);
+
     // Load configuration from TOML file
     namespace fs = std::filesystem;
     if (configPath.empty()) {
+        std::fprintf(stderr, "YAMS daemon getting config path\n");
+        std::fflush(stderr);
         // Use platform-specific config path helper
         configPath = yams::config::get_config_path().string();
+        std::fprintf(stderr, "YAMS daemon config path: %s\n", configPath.c_str());
+        std::fflush(stderr);
     }
+
+    std::fprintf(stderr, "YAMS daemon checking if config exists\n");
+    std::fflush(stderr);
 
     // Load and parse config if it exists
     if (!configPath.empty() && fs::exists(configPath)) {
+        std::fprintf(stderr, "YAMS daemon config file exists, parsing\n");
+        std::fflush(stderr);
+
         // Record for reloads
         config.configFilePath = configPath;
         yams::config::ConfigMigrator migrator;
+        std::fprintf(stderr, "YAMS daemon parsing TOML\n");
+        std::fflush(stderr);
         auto parseResult = migrator.parseTomlConfig(configPath);
+        std::fprintf(stderr, "YAMS daemon TOML parsed\n");
+        std::fflush(stderr);
         if (parseResult) {
+            std::fprintf(stderr, "YAMS daemon TOML parse succeeded\n");
+            std::fflush(stderr);
             const auto& tomlConfig = parseResult.value();
 
             // Check if daemon section exists, if not use defaults
             bool hasDaemonSection = (tomlConfig.find("daemon") != tomlConfig.end());
+            std::fprintf(stderr, "YAMS daemon hasDaemonSection=%d\n", hasDaemonSection);
+            std::fflush(stderr);
 
             if (hasDaemonSection) {
+                std::fprintf(stderr, "YAMS daemon processing daemon section\n");
+                std::fflush(stderr);
                 // Load daemon configuration from file
                 const auto& daemonSection = tomlConfig.at("daemon");
+                std::fprintf(stderr, "YAMS daemon got daemon section\n");
+                std::fflush(stderr);
 
                 // Socket path
+                std::fprintf(stderr, "YAMS daemon checking socket_path\n");
+                std::fflush(stderr);
                 if (config.socketPath.empty() &&
                     daemonSection.find("socket_path") != daemonSection.end()) {
                     config.socketPath = fs::path(daemonSection.at("socket_path"));
                 }
 
                 // PID file
+                std::fprintf(stderr, "YAMS daemon checking pid_file\n");
+                std::fflush(stderr);
                 if (config.pidFile.empty() &&
                     daemonSection.find("pid_file") != daemonSection.end()) {
                     config.pidFile = fs::path(daemonSection.at("pid_file"));
                 }
 
                 // Data directory (aka storage) — allow multiple key forms for compatibility
+                std::fprintf(stderr, "YAMS daemon checking data_dir\n");
+                std::fflush(stderr);
                 if (config.dataDir.empty()) {
+                    std::fprintf(stderr, "YAMS daemon checking data_dir variants\n");
+                    std::fflush(stderr);
                     if (auto it = daemonSection.find("data_dir"); it != daemonSection.end()) {
                         config.dataDir = fs::path(it->second);
                     } else if (auto it2 = daemonSection.find("storage");
@@ -253,9 +328,13 @@ int main(int argc, char* argv[]) {
                                it3 != daemonSection.end()) {
                         config.dataDir = fs::path(it3->second);
                     }
+                    std::fprintf(stderr, "YAMS daemon data_dir done\n");
+                    std::fflush(stderr);
                 }
 
                 // Max memory
+                std::fprintf(stderr, "YAMS daemon checking max_memory\n");
+                std::fflush(stderr);
                 if (daemonSection.find("max_memory_gb") != daemonSection.end()) {
                     try {
                         config.maxMemoryGb = std::stoi(daemonSection.at("max_memory_gb"));
@@ -264,6 +343,8 @@ int main(int argc, char* argv[]) {
                 }
 
                 // Log level
+                std::fprintf(stderr, "YAMS daemon checking log_level\n");
+                std::fflush(stderr);
                 if (config.logLevel.empty() &&
                     daemonSection.find("log_level") != daemonSection.end()) {
                     config.logLevel = daemonSection.at("log_level");
@@ -780,24 +861,46 @@ int main(int argc, char* argv[]) {
     }
 
     try {
+        std::fprintf(stderr, "YAMS daemon creating YamsDaemon object\n");
+        std::fflush(stderr);
         yams::daemon::YamsDaemon daemon(config);
+        std::fprintf(stderr, "YAMS daemon YamsDaemon object created\n");
+        std::fflush(stderr);
 
+        std::fprintf(stderr, "YAMS daemon calling start()\n");
+        std::fflush(stderr);
         auto result = daemon.start();
+        std::fprintf(stderr, "YAMS daemon start() returned\n");
+        std::fflush(stderr);
         if (!result) {
             spdlog::error("Failed to start daemon: {}", result.error().message);
             return 1;
         }
 
+        std::fprintf(stderr, "YAMS daemon entering main loop area\n");
+        std::fflush(stderr);
+        std::fprintf(stderr, "YAMS daemon: isRunning=%d, isStopRequested=%d, g_shutdown=%d\n",
+                     daemon.isRunning(), daemon.isStopRequested(),
+                     (int)g_shutdown_requested.load());
+        std::fflush(stderr);
+        std::fprintf(stderr, "YAMS daemon: about to call spdlog::info\n");
+        std::fflush(stderr);
         spdlog::info(
             "Entering main loop: isRunning={}, isStopRequested={}, g_shutdown_requested={}",
             daemon.isRunning(), daemon.isStopRequested(), g_shutdown_requested.load());
+        std::fprintf(stderr, "YAMS daemon: spdlog::info returned\n");
+        std::fflush(stderr);
 
         // On Windows, avoid creating extra threads due to thread resource limits.
         // Instead, integrate signal checking into the main loop.
         // The daemon's runLoop already has a periodic tick, so we check signals there.
         
         // Set up a hook for the daemon to check our global signal flags
-        daemon.setSignalCheckHook([&daemon]() {
+        std::fprintf(stderr, "YAMS daemon: about to set signal check hook\n");
+        std::fflush(stderr);
+        std::fprintf(stderr, "YAMS daemon: creating lambda\n");
+        std::fflush(stderr);
+        auto hookLambda = [&daemon]() {
             if (g_shutdown_requested.load(std::memory_order_relaxed)) {
                 spdlog::info("Signal check: shutdown requested, stopping daemon");
                 daemon.requestStop();
@@ -818,7 +921,14 @@ int main(int argc, char* argv[]) {
                 }
             }
             return false;
-        });
+        };
+        std::fprintf(stderr, "YAMS daemon: lambda created, calling setSignalCheckHook\n");
+        std::fflush(stderr);
+        // Test: try setting a simple no-op hook first
+        std::fprintf(stderr, "YAMS daemon: testing simple hook first\n");
+        std::fflush(stderr);
+        daemon.setSignalCheckHook([]() { return false; });
+        daemon.setSignalCheckHook(hookLambda);
 
         // Run the main daemon loop on this thread (handles FSM ticks, metrics refresh, etc.)
         // The loop exits when stopRequested is set (via signal handler or daemon.stop())

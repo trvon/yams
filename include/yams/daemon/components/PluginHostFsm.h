@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -39,12 +40,17 @@ struct PluginLoadFailedEvent {
 
 class PluginHostFsm {
 public:
-    PluginHostSnapshot snapshot() const { return snap_; }
+    PluginHostSnapshot snapshot() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return snap_;
+    }
 
     void dispatch(const PluginScanStartedEvent&) {
+        std::lock_guard<std::mutex> lock(mutex_);
         transitionTo(PluginHostState::ScanningDirectories);
     }
     void dispatch(const PluginTrustVerifiedEvent&) {
+        std::lock_guard<std::mutex> lock(mutex_);
         // Trust verified - transition to VerifyingTrust state
         // This allows trust to be configured before scanning begins
         if (snap_.state == PluginHostState::NotInitialized) {
@@ -53,6 +59,7 @@ public:
         // Otherwise, stay in current state (don't regress)
     }
     void dispatch(const PluginLoadedEvent& ev) {
+        std::lock_guard<std::mutex> lock(mutex_);
         transitionTo(PluginHostState::LoadingPlugins);
         ++snap_.loadedCount;
         if (std::find(snap_.loadedPlugins.begin(), snap_.loadedPlugins.end(), ev.name) ==
@@ -61,10 +68,12 @@ public:
         }
     }
     void dispatch(const AllPluginsLoadedEvent& ev) {
+        std::lock_guard<std::mutex> lock(mutex_);
         snap_.loadedCount = ev.count;
         transitionTo(PluginHostState::Ready);
     }
     void dispatch(const PluginLoadFailedEvent& ev) {
+        std::lock_guard<std::mutex> lock(mutex_);
         snap_.lastError = ev.error;
         transitionTo(PluginHostState::Failed);
     }
@@ -72,6 +81,7 @@ public:
 private:
     void transitionTo(PluginHostState next) { snap_.state = next; }
 
+    mutable std::mutex mutex_;
     PluginHostSnapshot snap_{};
 };
 

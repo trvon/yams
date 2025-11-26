@@ -21,7 +21,8 @@ static int dlclose(void* handle) {
 }
 
 static const char* dlerror() {
-    static char buf[128];
+    // Thread-local buffer to avoid race conditions
+    thread_local char buf[256];
     DWORD err = GetLastError();
     SetLastError(0); // Clear the error (like Unix dlerror())
     if (err == 0) {

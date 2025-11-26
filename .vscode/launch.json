@@ -30,14 +30,14 @@
       "args": [
         "--foreground",
         "--log-level",
-        "${input:yamsLogLevel}"
+        "debug"
       ],
       "cwd": "${workspaceFolder}",
       "preLaunchTask": "meson-build-debug",
       "environment": [
         {
           "name": "YAMS_LOG_LEVEL",
-          "value": "${input:yamsLogLevel}"
+          "value": "debug"
         }
       ],
       "stopAtEntry": false,

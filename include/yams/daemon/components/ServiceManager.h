@@ -94,8 +94,17 @@ public:
 
     // IComponent interface
     const char* getName() const override { return "ServiceManager"; }
+    /// Synchronous initialization - validates config, creates directories, prepares resources.
+    /// Does NOT start async initialization - call startAsyncInit() after main loop is running.
     Result<void> initialize() override;
-    boost::asio::awaitable<Result<void>> initialize_async(boost::asio::any_io_executor exec);
+
+    /// Start the async initialization coroutine. Call this from the main loop after
+    /// the io_context is running to avoid race conditions.
+    /// @param barrierPromise Optional promise to signal when coroutine has safely started
+    /// @param barrierSet Optional atomic to indicate barrier was set up
+    void startAsyncInit(std::promise<void>* barrierPromise = nullptr,
+                        std::atomic<bool>* barrierSet = nullptr);
+
     void shutdown() override;
 
     // Legacy initialization callback compatibility
@@ -521,6 +530,7 @@ private:
     // Legacy callback support (for transition period)
     InitCompleteCallback initCompleteCallback_;
     std::atomic<bool> initCompleteInvoked_{false};
+    std::atomic<bool> asyncInitStarted_{false}; // Guard against multiple startAsyncInit() calls
 
     std::filesystem::path resolvedDataDir_;
 
