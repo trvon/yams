@@ -110,6 +110,9 @@ jobs:
   build-release:
     name: Build and Package (matrix)
     needs: warm
+    if: |
+      always() &&
+      (needs.warm.result == 'success' || needs.warm.result == 'skipped')
     strategy:
       fail-fast: false
       matrix:
