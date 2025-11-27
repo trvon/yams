@@ -398,10 +398,11 @@ Result<int64_t> MetadataRepository::insertDocument(const DocumentInfo& info) {
             if (auto bindRes = stmt2.bind(1, info.sha256Hash); !bindRes)
                 return bindRes.error();
 
-            if (auto execRes = stmt2.execute(); !execRes)
-                return execRes.error();
+            auto stepRes = stmt2.step();
+            if (!stepRes)
+                return stepRes.error();
 
-            if (!stmt2.step())
+            if (!stepRes.value())
                 return Error{ErrorCode::DatabaseError,
                              "Document insert was ignored but could not find existing document"};
 
