@@ -20,6 +20,9 @@ static int setenv(const char* name, const char* value, int overwrite) {
 namespace fs = std::filesystem;
 
 TEST(AddCommand, ReadsFromPipedStdinAndStoresContent) {
+#ifdef _WIN32
+    GTEST_SKIP() << "Test requires Unix shell with 'cat' and pipe support";
+#endif
     const std::string payload = "line1\nline2\n\tindent\n";
 
     fs::path tmp = fs::temp_directory_path() / ("yams_add_stdin_" + std::to_string(::getpid()));

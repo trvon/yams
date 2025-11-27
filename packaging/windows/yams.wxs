@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WiX v4 source file for YAMS MSI installer
+
+  Build with: wix build yams.wxs -o yams.msi -d Version=X.Y.Z -d StageDir=path/to/stage
+
+  Variables:
+    Version   - Product version (e.g., 0.1.0)
+    StageDir  - Path to meson install destdir output (containing bin/, etc.)
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <Package
+    Name="YAMS"
+    Manufacturer="YAMS Project"
+    Version="$(var.Version)"
+    UpgradeCode="69FC51D5-B9FC-4DA9-9CA3-C889EDF8AFB8"
+    Scope="perMachine"
+    Compressed="yes">
+
+    <SummaryInformation
+      Description="Yet Another Media Server - Content-addressable storage and indexing"
+      Manufacturer="YAMS Project" />
+
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of [ProductName] is already installed."
+      Schedule="afterInstallInitialize" />
+
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- Installation directory under Program Files -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="YAMS">
+        <Directory Id="BinDir" Name="bin">
+          <Component Id="YamsExe" Guid="6BCEBA1E-C995-46DA-8FF5-0BC6A53D74EA">
+            <File Id="yams_exe" Source="$(var.StageDir)\bin\yams.exe" KeyPath="yes" />
+          </Component>
+          <Component Id="PathEnvComponent" Guid="D817B79F-C5A1-4A6E-9AE0-8430AC0DEF48">
+            <Environment Id="PathEnv" Name="PATH" Value="[BinDir]" Permanent="no" Part="last" Action="set" System="yes" />
+            <RegistryValue Root="HKLM" Key="Software\YAMS" Name="PathSet" Type="integer" Value="1" KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- Main feature: YAMS binary -->
+    <Feature Id="MainFeature" Title="YAMS" Level="1" ConfigurableDirectory="INSTALLFOLDER">
+      <ComponentRef Id="YamsExe" />
+      <ComponentRef Id="PathEnvComponent" />
+    </Feature>
+
+    <!-- UI with license agreement -->
+    <ui:WixUI Id="WixUI_InstallDir" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.StageDir)\LICENSE.rtf" />
+
+  </Package>
+</Wix>

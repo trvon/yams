@@ -307,6 +307,8 @@ Result<void> LifecycleComponent::createPidFile() {
         return Error{ErrorCode::WriteError,
                      "Failed to write to PID file: " + std::string(strerror(errno))};
     }
+    // Flush the write buffer to disk on Windows
+    _commit(pidFileFd_);
 #else
     pidFileFd_ = open(pidFile_.c_str(), O_CREAT | O_RDWR, 0644);
     if (pidFileFd_ == -1) {

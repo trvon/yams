@@ -25,7 +25,8 @@ public:
 
 void setenv_strict(const char* k, const char* v) {
 #if defined(_WIN32)
-    _putenv_s(k, v);
+    // On Windows, _putenv_s cannot accept nullptr - use empty string to unset
+    _putenv_s(k, v ? v : "");
 #else
     if (v)
         ::setenv(k, v, 1);
