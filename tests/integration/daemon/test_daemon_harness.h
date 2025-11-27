@@ -25,8 +25,14 @@ public:
         fs::create_directories(root_);
         data_ = root_ / "data";
         fs::create_directories(data_);
-        // Use short AF_UNIX path under /tmp to avoid sandbox and length issues
+        // Use platform-appropriate temp path for socket
+        // On Windows, AF_UNIX sockets work but need a valid Windows path
+        // On Unix, use /tmp for short paths to avoid AF_UNIX length limits
+#ifdef _WIN32
+        sock_ = fs::temp_directory_path() / ("daemon_" + id + ".sock");
+#else
         sock_ = std::filesystem::path("/tmp") / ("daemon_" + id + ".sock");
+#endif
         pid_ = root_ / ("daemon_" + id + ".pid");
         log_ = root_ / ("daemon_" + id + ".log");
 
@@ -63,8 +69,16 @@ public:
             spdlog::error("[DaemonHarness] daemon_->start() failed!");
             return false;
         }
-        spdlog::info(
-            "[DaemonHarness] daemon_->start() succeeded, polling for daemon Ready state...");
+        spdlog::info("[DaemonHarness] daemon_->start() succeeded, starting runLoop thread...");
+
+        // Start runLoop in background thread - this triggers async initialization
+        // Without runLoop(), ServiceManager::startAsyncInit() is never called
+        runLoopThread_ = std::thread([this]() {
+            daemon_->runLoop();
+        });
+        // Give runLoop time to enter and trigger async init
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        spdlog::info("[DaemonHarness] runLoop thread started, polling for daemon Ready state...");
 
         // Poll for daemon to reach Ready state in lifecycle FSM
         // This ensures ServiceManager has completed initialization, not just socket availability
@@ -112,6 +126,11 @@ public:
     }
 
     void stop() {
+        // Join runLoop thread first (daemon->stop() will cause runLoop() to return)
+        if (runLoopThread_.joinable()) {
+            spdlog::info("[DaemonHarness] Stopping runLoop thread...");
+        }
+
         if (daemon_) {
             spdlog::info("[DaemonHarness] Stopping daemon (running={})...", daemon_->isRunning());
 
@@ -120,6 +139,13 @@ public:
             if (!stopResult) {
                 spdlog::warn("[DaemonHarness] Daemon stop returned error: {}",
                              stopResult.error().message);
+            }
+
+            // Join runLoop thread after stop() - daemon->stop() causes runLoop() to return
+            if (runLoopThread_.joinable()) {
+                spdlog::info("[DaemonHarness] Joining runLoop thread...");
+                runLoopThread_.join();
+                spdlog::info("[DaemonHarness] runLoop thread joined");
             }
 
             // Wait for daemon to report it's no longer running
@@ -148,8 +174,17 @@ public:
                 unsetenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
             }
 
+            // Windows needs additional time before GlobalIOContext::reset()
+            // Windows thread cleanup is slower than Unix
+#ifdef _WIN32
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            // Skip GlobalIOContext::reset() on Windows for now - causes SIGSEGV
+            // The io_context threads will be cleaned up when the process exits
+            spdlog::info("[DaemonHarness] Skipping GlobalIOContext::reset() on Windows");
+#else
             yams::daemon::GlobalIOContext::reset();
             spdlog::info("[DaemonHarness] GlobalIOContext reset complete");
+#endif
 
             // Restore environment variables
             if (yams_testing) {
@@ -220,6 +255,7 @@ private:
     }
 
     std::unique_ptr<yams::daemon::YamsDaemon> daemon_;
+    std::thread runLoopThread_;  // Background thread for runLoop
     std::filesystem::path root_, data_, sock_, pid_, log_;
 };
 

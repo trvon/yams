@@ -10,6 +10,13 @@
 #include <yams/plugins/abi.h>
 #include <yams/plugins/symbol_extractor_v1.h>
 
+// Grammar auto-download uses Unix shell commands (which, git clone, gcc) that don't work on Windows
+#ifdef _WIN32
+#define SKIP_ON_WINDOWS_NO_GRAMMAR() GTEST_SKIP() << "Solidity grammar auto-download not supported on Windows"
+#else
+#define SKIP_ON_WINDOWS_NO_GRAMMAR() (void)0
+#endif
+
 namespace {
 
 struct PluginAPI {
@@ -124,6 +131,7 @@ TEST(SymbolExtractorSolidity, SupportsLanguage) {
 }
 
 TEST(SymbolExtractorSolidity, ERC20TokenContract) {
+    SKIP_ON_WINDOWS_NO_GRAMMAR();
     auto plugin = loadPlugin();
     ASSERT_TRUE(plugin.has_value()) << "Failed to load symbol extractor plugin";
 
@@ -192,6 +200,7 @@ contract MyToken {
 }
 
 TEST(SymbolExtractorSolidity, ContractInheritance) {
+    SKIP_ON_WINDOWS_NO_GRAMMAR();
     auto plugin = loadPlugin();
     ASSERT_TRUE(plugin.has_value()) << "Failed to load symbol extractor plugin";
 
@@ -242,6 +251,7 @@ contract Token is IERC20 {
 }
 
 TEST(SymbolExtractorSolidity, StructsAndEnums) {
+    SKIP_ON_WINDOWS_NO_GRAMMAR();
     auto plugin = loadPlugin();
     ASSERT_TRUE(plugin.has_value()) << "Failed to load symbol extractor plugin";
 
@@ -286,6 +296,7 @@ contract DataTypes {
 }
 
 TEST(SymbolExtractorSolidity, LibraryDeclaration) {
+    SKIP_ON_WINDOWS_NO_GRAMMAR();
     auto plugin = loadPlugin();
     ASSERT_TRUE(plugin.has_value()) << "Failed to load symbol extractor plugin";
 
@@ -327,6 +338,7 @@ library SafeMath {
 }
 
 TEST(SymbolExtractorSolidity, EmptySolidityFile) {
+    SKIP_ON_WINDOWS_NO_GRAMMAR();
     auto plugin = loadPlugin();
     ASSERT_TRUE(plugin.has_value()) << "Failed to load symbol extractor plugin";
 
@@ -349,6 +361,7 @@ pragma solidity ^0.8.0;
 }
 
 TEST(SymbolExtractorSolidity, InvalidSolidityCode) {
+    SKIP_ON_WINDOWS_NO_GRAMMAR();
     auto plugin = loadPlugin();
     ASSERT_TRUE(plugin.has_value()) << "Failed to load symbol extractor plugin";
 

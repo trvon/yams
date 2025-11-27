@@ -10,7 +10,13 @@ plugin_tests = files(
 
 # Define plugin path based on build directory and platform
 plugin_build_dir = meson.project_build_root()
-plugin_ext = host_machine.system() == 'darwin' ? '.dylib' : '.so'
+if host_machine.system() == 'windows'
+  plugin_ext = '.dll'
+elif host_machine.system() == 'darwin'
+  plugin_ext = '.dylib'
+else
+  plugin_ext = '.so'
+endif
 plugin_path = join_paths(plugin_build_dir, 'plugins/symbol_extractor_treesitter/yams_symbol_extractor' + plugin_ext)
 
 plugin_exe = executable('yams_plugin_tests', plugin_tests,

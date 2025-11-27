@@ -29,9 +29,18 @@ using yams::metadata::SearchResult;
  * @brief Search parameters for query execution
  */
 struct SearchParams {
-    // TODO: Add filtering, faceting, pagination parameters as needed
     int limit = 100;
     int offset = 0;
+
+    // Tag-based search parameters
+    std::vector<std::string> tags;  // Tags to search for
+    bool matchAllTags = false;      // true = AND, false = OR
+
+    // Metadata filters (boost matching documents, don't exclude)
+    std::optional<std::string> mimeType;
+    std::optional<std::string> extension;
+    std::optional<int64_t> modifiedAfter;
+    std::optional<int64_t> modifiedBefore;
 };
 
 /**
@@ -43,11 +52,13 @@ struct SearchParams {
  */
 struct SearchEngineConfig {
     // Component weights (0.0 = disabled, 1.0 = full weight)
-    float fts5Weight = 0.35f;     // Full-text search weight
+    float fts5Weight = 0.30f;     // Full-text search weight
     float pathTreeWeight = 0.15f; // Path tree hierarchical weight
-    float symbolWeight = 0.20f;   // Symbol metadata weight
+    float symbolWeight = 0.15f;   // Symbol metadata weight
     float kgWeight = 0.10f;       // Knowledge graph weight
-    float vectorWeight = 0.20f;   // Vector similarity weight
+    float vectorWeight = 0.15f;   // Vector similarity weight
+    float tagWeight = 0.10f;      // Tag-based search weight
+    float metadataWeight = 0.05f; // Metadata attribute matching weight
 
     // Search parameters
     size_t maxResults = 100;                     // Maximum results to return
@@ -70,6 +81,8 @@ struct SearchEngineConfig {
     size_t symbolMaxResults = 150;   // Symbol search candidate limit
     size_t kgMaxResults = 50;        // KG traversal candidate limit
     size_t vectorMaxResults = 100;   // Vector search k
+    size_t tagMaxResults = 200;      // Tag search candidate limit
+    size_t metadataMaxResults = 150; // Metadata filter candidate limit
 
     // Performance tuning
     bool useConnectionPriority = true;   // Use High priority for search queries
@@ -249,6 +262,8 @@ public:
         std::atomic<uint64_t> symbolQueries{0};
         std::atomic<uint64_t> kgQueries{0};
         std::atomic<uint64_t> vectorQueries{0};
+        std::atomic<uint64_t> tagQueries{0};
+        std::atomic<uint64_t> metadataQueries{0};
 
         // Timing metrics (microseconds)
         std::atomic<uint64_t> totalQueryTimeMicros{0};
@@ -260,6 +275,8 @@ public:
         std::atomic<uint64_t> avgSymbolTimeMicros{0};
         std::atomic<uint64_t> avgKgTimeMicros{0};
         std::atomic<uint64_t> avgVectorTimeMicros{0};
+        std::atomic<uint64_t> avgTagTimeMicros{0};
+        std::atomic<uint64_t> avgMetadataTimeMicros{0};
 
         // Fusion metrics
         std::atomic<uint64_t> avgResultsPerQuery{0};

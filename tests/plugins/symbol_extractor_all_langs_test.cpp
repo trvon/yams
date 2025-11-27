@@ -83,7 +83,9 @@ void assert_has_kind(yams_symbol_extraction_result_v1* out, const char* kind,
 // Helper to load the plugin (refactored from test code)
 std::optional<PluginAPI> loadPlugin() {
 #ifndef PLUGIN_PATH
-#ifdef __APPLE__
+#ifdef _WIN32
+    const char* libname = "yams_symbol_extractor.dll";
+#elif defined(__APPLE__)
     const char* libname = "yams_symbol_extractor.dylib";
 #else
     const char* libname = "yams_symbol_extractor.so";
@@ -109,7 +111,9 @@ std::optional<PluginAPI> loadPlugin() {
 #else
     std::optional<PluginAPI> plug = load_extractor(PLUGIN_PATH);
     if (!plug.has_value()) {
-#ifdef __APPLE__
+#ifdef _WIN32
+        const char* libname = "yams_symbol_extractor.dll";
+#elif defined(__APPLE__)
         const char* libname = "yams_symbol_extractor.dylib";
 #else
         const char* libname = "yams_symbol_extractor.so";

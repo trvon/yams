@@ -100,8 +100,8 @@ class YamsConan(ConanFile):
 
     def build_requirements(self):
         self.tool_requires("pkgconf/2.1.0")
-        self.tool_requires("meson/1.9.1")
-        self.tool_requires("ninja/1.13.2")
+        self.tool_requires("meson/[>=1.2.2 <2]")
+        self.tool_requires("ninja/[>=1.10.2 <2]")
         
         # Use requires() instead of test_requires() to ensure pkg-config files
         # are generated for Meson to find gtest/benchmark dependencies

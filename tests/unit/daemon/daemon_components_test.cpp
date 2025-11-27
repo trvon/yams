@@ -243,6 +243,7 @@ TEST_CASE("Socket path resolution: Priority ordering", "[daemon][components][soc
         REQUIRE(resultConfigFirst.string() == testPath);
     }
 
+#ifndef _WIN32
     SECTION("XDG_RUNTIME_DIR used when env var not set") {
         unsetenv("YAMS_DAEMON_SOCKET");
 
@@ -267,6 +268,7 @@ TEST_CASE("Socket path resolution: Priority ordering", "[daemon][components][soc
             REQUIRE(result.filename() == "yams-daemon-" + uid + ".sock");
         }
     }
+#endif  // !_WIN32
 
     // Cleanup
     std::error_code ec;
@@ -284,6 +286,7 @@ TEST_CASE("Socket path resolution: Config file reading", "[daemon][components][s
     EnvGuard xdgConfigGuard("XDG_CONFIG_HOME");
     EnvGuard yamsSockGuard("YAMS_DAEMON_SOCKET");
 
+#ifndef _WIN32
     SECTION("Config file socket_path is used") {
         std::ofstream out(configFile);
         out << "[daemon]\n";
@@ -296,6 +299,7 @@ TEST_CASE("Socket path resolution: Config file reading", "[daemon][components][s
         auto result = socket_utils::resolve_socket_path_config_first();
         REQUIRE(result.string() == "/opt/yams/daemon.sock");
     }
+#endif  // !_WIN32
 
     SECTION("Invalid config falls back to default") {
         std::ofstream out(configFile);

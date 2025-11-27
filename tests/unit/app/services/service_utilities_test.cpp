@@ -103,15 +103,18 @@ TEST_CASE("Service Utils - Path Normalization", "[utils][service][paths]") {
 
         std::ofstream{targetFile} << "sample";
 
-        ScopedWorkingDirectory cwdScope(tempRoot);
-        NormalizedLookupPath result = normalizeLookupPath("./nested/../nested/file.txt");
+        {
+            ScopedWorkingDirectory cwdScope(tempRoot);
+            NormalizedLookupPath result = normalizeLookupPath("./nested/../nested/file.txt");
 
-        CHECK(result.changed);
-        CHECK_FALSE(result.hasWildcards);
-        CHECK(fs::weakly_canonical(targetFile).string() == result.normalized);
-        CHECK(result.original == "./nested/../nested/file.txt");
+            CHECK(result.changed);
+            CHECK_FALSE(result.hasWildcards);
+            CHECK(fs::weakly_canonical(targetFile).string() == result.normalized);
+            CHECK(result.original == "./nested/../nested/file.txt");
+        }  // cwdScope destructor restores original CWD before cleanup
 
-        fs::remove_all(tempRoot);
+        std::error_code ec;
+        fs::remove_all(tempRoot, ec);  // Ignore errors on cleanup
     }
 
     SECTION("Glob inputs canonicalize directory prefix but preserve pattern") {

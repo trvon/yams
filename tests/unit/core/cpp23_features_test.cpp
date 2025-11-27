@@ -175,10 +175,10 @@ TEST_CASE("C++ version is checked correctly", "[core][cpp23]") {
     // Should be at least C++20
     REQUIRE(cpp_ver >= 202002L);
 
-    // If constexpr containers are available, should be C++23 or later
-    if (YAMS_HAS_CONSTEXPR_CONTAINERS) {
-        REQUIRE(cpp_ver >= 202302L);
-    }
+    // Note: MSVC may report __cplusplus as 202002L even when C++23 features
+    // are available. The YAMS_HAS_CONSTEXPR_CONTAINERS macro is based on
+    // actual feature detection, not __cplusplus value.
+    // Therefore we only verify the minimum required version (C++20).
 }
 
 TEST_CASE("Deprecation macro compiles without errors", "[core][cpp23]") {

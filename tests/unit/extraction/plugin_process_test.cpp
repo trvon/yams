@@ -75,16 +75,36 @@ std::optional<json> read_response(PluginProcess& process, size_t& read_pos,
 
 } // anonymous namespace
 
-TEST_CASE("PluginProcess spawns and terminates", "[extraction][plugin]") {
-    // Find Python interpreter
-    const char* python = std::getenv("PYTHON");
-    if (!python) {
-        python = "python3";
+// Helper: Get platform-appropriate Python executable
+namespace {
+std::string getPythonExecutable() {
+    const char* python_env = std::getenv("PYTHON");
+    if (python_env) {
+        return python_env;
     }
+#ifdef _WIN32
+    return "python";  // Windows uses 'python' not 'python3'
+#else
+    return "python3";  // Unix typically uses python3
+#endif
+}
 
-    // Get mock plugin path
-    std::filesystem::path mock_plugin =
-        std::filesystem::current_path() / "tests" / "fixtures" / "mock_plugin.py";
+// Helper: Get mock plugin path relative to test source file
+std::filesystem::path getMockPluginPath() {
+    // __FILE__ is tests/unit/extraction/plugin_process_test.cpp
+    // Navigate up 3 levels to tests/, then into fixtures/
+    return std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() / "fixtures" / "mock_plugin.py";
+}
+}  // namespace
+
+TEST_CASE("PluginProcess spawns and terminates", "[extraction][plugin]") {
+    // Get Python interpreter and mock plugin path
+    std::string python = getPythonExecutable();
+    std::filesystem::path mock_plugin = getMockPluginPath();
+    
+    INFO("Python executable: " << python);
+    INFO("Mock plugin path: " << mock_plugin.string());
+    REQUIRE(std::filesystem::exists(mock_plugin));
 
     SECTION("Basic lifecycle") {
         PluginProcessConfig config{.executable = python, .args = {mock_plugin.string()}};
@@ -142,13 +162,12 @@ TEST_CASE("PluginProcess spawns and terminates", "[extraction][plugin]") {
 }
 
 TEST_CASE("PluginProcess I/O communication", "[extraction][plugin]") {
-    const char* python = std::getenv("PYTHON");
-    if (!python) {
-        python = "python3";
-    }
-
-    std::filesystem::path mock_plugin =
-        std::filesystem::current_path() / "tests" / "fixtures" / "mock_plugin.py";
+    std::string python = getPythonExecutable();
+    std::filesystem::path mock_plugin = getMockPluginPath();
+    
+    INFO("Python executable: " << python);
+    INFO("Mock plugin path: " << mock_plugin.string());
+    REQUIRE(std::filesystem::exists(mock_plugin));
 
     PluginProcessConfig config{.executable = python, .args = {mock_plugin.string()}};
 
@@ -236,28 +255,34 @@ TEST_CASE("PluginProcess I/O communication", "[extraction][plugin]") {
 }
 
 TEST_CASE("PluginProcess builder pattern configuration", "[extraction][plugin]") {
-    const char* python = std::getenv("PYTHON");
-    if (!python) {
-        python = "python3";
-    }
-
-    std::filesystem::path mock_plugin =
-        std::filesystem::current_path() / "tests" / "fixtures" / "mock_plugin.py";
+    std::string python = getPythonExecutable();
+    std::filesystem::path mock_plugin = getMockPluginPath();
+    
+    INFO("Python executable: " << python);
+    INFO("Mock plugin path: " << mock_plugin.string());
+    REQUIRE(std::filesystem::exists(mock_plugin));
 
     SECTION("Builder methods") {
         PluginProcessConfig config{.executable = python, .args = {mock_plugin.string()}};
+        auto current_dir = std::filesystem::current_path();
 
         config.with_env("TEST_VAR", "test_value")
             .with_timeout(std::chrono::seconds{30})
-            .in_directory(std::filesystem::current_path());
+            .in_directory(current_dir);
 
         REQUIRE(config.env["TEST_VAR"] == "test_value");
         REQUIRE(config.rpc_timeout == std::chrono::seconds{30});
-        REQUIRE(config.workdir == std::filesystem::current_path());
+        REQUIRE(config.workdir == current_dir);
     }
 }
 
 TEST_CASE("PluginProcess handles invalid executable", "[extraction][plugin][!mayfail]") {
+#ifdef _WIN32
+    // On Windows, CreateProcess fails immediately for nonexistent executables
+    // and throws an exception from PluginProcess constructor
+    PluginProcessConfig config{.executable = "/nonexistent/binary", .args = {}};
+    REQUIRE_THROWS(PluginProcess{std::move(config)});
+#else
     PluginProcessConfig config{.executable = "/nonexistent/binary", .args = {}};
 
     // Note: PluginProcess doesn't throw on invalid executable - the fork() succeeds but exec()
@@ -277,19 +302,17 @@ TEST_CASE("PluginProcess handles invalid executable", "[extraction][plugin][!may
 
     REQUIRE_FALSE(process.is_alive());
     REQUIRE(process.state() == ProcessState::Terminated);
+#endif
 }
 
 TEST_CASE("PluginProcess stderr capture", "[extraction][plugin]") {
-    const char* python = std::getenv("PYTHON");
-    if (!python) {
-        python = "python3";
-    }
+    std::string python = getPythonExecutable();
 
     // Create a test script that writes to stderr
     std::filesystem::path stderr_test = std::filesystem::temp_directory_path() / "stderr_test.py";
     {
         std::ofstream f{stderr_test};
-        f << "#!/usr/bin/env python3\n";
+        // Use platform-agnostic shebang (not actually used on Windows, but harmless)
         f << "import sys, json\n";
         f << "print('stderr message', file=sys.stderr, flush=True)\n";
         f << "for line in sys.stdin:\n";
@@ -302,10 +325,21 @@ TEST_CASE("PluginProcess stderr capture", "[extraction][plugin]") {
         .executable = python, .args = {stderr_test.string()}, .redirect_stderr = true};
 
     PluginProcess process{std::move(config)};
-    std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    
+    // Wait for Python to start and write to stderr - Windows needs more time
+    std::span<const std::byte> stderr_data;
+    auto start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - start < std::chrono::seconds{5}) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{100});
+        stderr_data = process.read_stderr();
+        if (!stderr_data.empty()) {
+            break;
+        }
+    }
 
     // Check that stderr was captured
-    auto stderr_data = process.read_stderr();
+    INFO("stderr_data size: " << stderr_data.size());
+    INFO("Process alive: " << process.is_alive());
     REQUIRE(!stderr_data.empty());
 
     std::string stderr_str = from_bytes(stderr_data);

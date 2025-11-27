@@ -254,6 +254,10 @@ float ResultFusion::getComponentWeight(const std::string& source) const {
         return config_.kgWeight;
     if (source == "vector")
         return config_.vectorWeight;
+    if (source == "tag")
+        return config_.tagWeight;
+    if (source == "metadata")
+        return config_.metadataWeight;
     return 0.0f;
 }
 
@@ -292,6 +296,8 @@ public:
         stats_.symbolQueries.store(0, std::memory_order_relaxed);
         stats_.kgQueries.store(0, std::memory_order_relaxed);
         stats_.vectorQueries.store(0, std::memory_order_relaxed);
+        stats_.tagQueries.store(0, std::memory_order_relaxed);
+        stats_.metadataQueries.store(0, std::memory_order_relaxed);
 
         stats_.totalQueryTimeMicros.store(0, std::memory_order_relaxed);
         stats_.avgQueryTimeMicros.store(0, std::memory_order_relaxed);
@@ -301,6 +307,8 @@ public:
         stats_.avgSymbolTimeMicros.store(0, std::memory_order_relaxed);
         stats_.avgKgTimeMicros.store(0, std::memory_order_relaxed);
         stats_.avgVectorTimeMicros.store(0, std::memory_order_relaxed);
+        stats_.avgTagTimeMicros.store(0, std::memory_order_relaxed);
+        stats_.avgMetadataTimeMicros.store(0, std::memory_order_relaxed);
 
         stats_.avgResultsPerQuery.store(0, std::memory_order_relaxed);
         stats_.avgComponentsPerResult.store(0, std::memory_order_relaxed);
@@ -315,6 +323,9 @@ private:
     Result<std::vector<ComponentResult>> querySymbols(const std::string& query);
     Result<std::vector<ComponentResult>> queryKnowledgeGraph(const std::string& query);
     Result<std::vector<ComponentResult>> queryVectorIndex(const std::vector<float>& embedding);
+    Result<std::vector<ComponentResult>> queryTags(const std::vector<std::string>& tags,
+                                                   bool matchAll);
+    Result<std::vector<ComponentResult>> queryMetadata(const SearchParams& params);
 
     std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<vector::VectorDatabase> vectorDb_;
@@ -430,6 +441,40 @@ Result<std::vector<SearchResult>> SearchEngine::Impl::search(const std::string& 
                 std::chrono::duration_cast<std::chrono::microseconds>(vectorEnd - vectorStart)
                     .count();
             stats_.avgVectorTimeMicros.store(duration, std::memory_order_relaxed);
+        }
+    }
+
+    // Tag-based search (if tags provided in params)
+    if (config_.tagWeight > 0.0f && !params.tags.empty()) {
+        auto tagStart = std::chrono::steady_clock::now();
+        auto tagResults = queryTags(params.tags, params.matchAllTags);
+        auto tagEnd = std::chrono::steady_clock::now();
+
+        if (tagResults) {
+            allComponentResults.insert(allComponentResults.end(), tagResults.value().begin(),
+                                       tagResults.value().end());
+            stats_.tagQueries.fetch_add(1, std::memory_order_relaxed);
+
+            auto duration =
+                std::chrono::duration_cast<std::chrono::microseconds>(tagEnd - tagStart).count();
+            stats_.avgTagTimeMicros.store(duration, std::memory_order_relaxed);
+        }
+    }
+
+    // Metadata attribute search (if filters provided in params)
+    if (config_.metadataWeight > 0.0f) {
+        auto metaStart = std::chrono::steady_clock::now();
+        auto metaResults = queryMetadata(params);
+        auto metaEnd = std::chrono::steady_clock::now();
+
+        if (metaResults && !metaResults.value().empty()) {
+            allComponentResults.insert(allComponentResults.end(), metaResults.value().begin(),
+                                       metaResults.value().end());
+            stats_.metadataQueries.fetch_add(1, std::memory_order_relaxed);
+
+            auto duration =
+                std::chrono::duration_cast<std::chrono::microseconds>(metaEnd - metaStart).count();
+            stats_.avgMetadataTimeMicros.store(duration, std::memory_order_relaxed);
         }
     }
 
@@ -710,6 +755,143 @@ SearchEngine::Impl::queryVectorIndex(const std::vector<float>& embedding) {
 
     } catch (const std::exception& e) {
         spdlog::warn("Vector search exception: {}", e.what());
+        return results;
+    }
+
+    return results;
+}
+
+Result<std::vector<ComponentResult>>
+SearchEngine::Impl::queryTags(const std::vector<std::string>& tags, bool matchAll) {
+    std::vector<ComponentResult> results;
+
+    if (!metadataRepo_ || tags.empty()) {
+        return results;
+    }
+
+    try {
+        auto tagResults = metadataRepo_->findDocumentsByTags(tags, matchAll);
+        if (!tagResults) {
+            spdlog::debug("Tag search failed: {}", tagResults.error().message);
+            return results;
+        }
+
+        for (size_t rank = 0; rank < tagResults.value().size() &&
+                             rank < config_.tagMaxResults;
+             ++rank) {
+            const auto& doc = tagResults.value()[rank];
+
+            ComponentResult result;
+            result.documentHash = doc.sha256Hash;
+            result.filePath = doc.filePath;
+
+            // Score based on how many requested tags the document has
+            // For matchAll=true, all docs have all tags, so score = 1.0
+            // For matchAll=false, score based on tag overlap
+            if (matchAll) {
+                result.score = 1.0f;
+            } else {
+                auto docTagsResult = metadataRepo_->getDocumentTags(doc.id);
+                if (docTagsResult) {
+                    std::set<std::string> docTagSet(docTagsResult.value().begin(),
+                                                    docTagsResult.value().end());
+                    size_t matchCount = 0;
+                    for (const auto& tag : tags) {
+                        if (docTagSet.count(tag) > 0) {
+                            matchCount++;
+                        }
+                    }
+                    result.score =
+                        static_cast<float>(matchCount) / static_cast<float>(tags.size());
+                } else {
+                    result.score = 0.5f;
+                }
+            }
+
+            result.source = "tag";
+            result.rank = rank;
+            result.debugInfo["matched_tags"] = std::to_string(tags.size());
+
+            results.push_back(std::move(result));
+        }
+
+        spdlog::debug("Tag query returned {} results for {} tags (matchAll={})", results.size(),
+                      tags.size(), matchAll);
+
+    } catch (const std::exception& e) {
+        spdlog::warn("Tag query exception: {}", e.what());
+        return results;
+    }
+
+    return results;
+}
+
+Result<std::vector<ComponentResult>>
+SearchEngine::Impl::queryMetadata(const SearchParams& params) {
+    std::vector<ComponentResult> results;
+
+    if (!metadataRepo_) {
+        return results;
+    }
+
+    // Only run if we have metadata filters
+    bool hasFilters = params.mimeType.has_value() || params.extension.has_value() ||
+                      params.modifiedAfter.has_value() || params.modifiedBefore.has_value();
+
+    if (!hasFilters) {
+        return results;
+    }
+
+    try {
+        yams::metadata::DocumentQueryOptions options;
+        options.mimeType = params.mimeType;
+        options.extension = params.extension;
+        options.modifiedAfter = params.modifiedAfter;
+        options.modifiedBefore = params.modifiedBefore;
+        options.limit = static_cast<int>(config_.metadataMaxResults);
+
+        auto docResults = metadataRepo_->queryDocuments(options);
+        if (!docResults) {
+            spdlog::debug("Metadata query failed: {}", docResults.error().message);
+            return results;
+        }
+
+        for (size_t rank = 0; rank < docResults.value().size(); ++rank) {
+            const auto& doc = docResults.value()[rank];
+
+            ComponentResult result;
+            result.documentHash = doc.sha256Hash;
+            result.filePath = doc.filePath;
+
+            // Score based on how many filters matched (all docs returned match all filters)
+            int filterCount = 0;
+            if (params.mimeType.has_value())
+                filterCount++;
+            if (params.extension.has_value())
+                filterCount++;
+            if (params.modifiedAfter.has_value())
+                filterCount++;
+            if (params.modifiedBefore.has_value())
+                filterCount++;
+
+            result.score = 1.0f; // All returned docs fully match the filters
+            result.source = "metadata";
+            result.rank = rank;
+            result.debugInfo["filter_count"] = std::to_string(filterCount);
+            if (params.mimeType.has_value()) {
+                result.debugInfo["mime_type"] = params.mimeType.value();
+            }
+            if (params.extension.has_value()) {
+                result.debugInfo["extension"] = params.extension.value();
+            }
+
+            results.push_back(std::move(result));
+        }
+
+        spdlog::debug("Metadata query returned {} results", results.size());
+
+    } catch (const std::exception& e) {
+        spdlog::warn("Metadata query exception: {}", e.what());
         return results;
     }
 

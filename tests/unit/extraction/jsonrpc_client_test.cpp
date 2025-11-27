@@ -6,14 +6,35 @@
 using namespace yams::extraction;
 using json = nlohmann::json;
 
-TEST_CASE("JsonRpcClient basic communication", "[extraction][jsonrpc]") {
-    const char* python = std::getenv("PYTHON");
-    if (!python) {
-        python = "python3";
+namespace {
+// Helper: Get platform-appropriate Python executable
+std::string getPythonExecutable() {
+    const char* python_env = std::getenv("PYTHON");
+    if (python_env) {
+        return python_env;
     }
+#ifdef _WIN32
+    return "python";  // Windows uses 'python' not 'python3'
+#else
+    return "python3";  // Unix typically uses python3
+#endif
+}
 
-    std::filesystem::path mock_plugin =
-        std::filesystem::current_path() / "tests" / "fixtures" / "mock_plugin.py";
+// Helper: Get mock plugin path relative to test source file
+std::filesystem::path getMockPluginPath() {
+    // __FILE__ is tests/unit/extraction/jsonrpc_client_test.cpp
+    // Navigate up 3 levels to tests/, then into fixtures/
+    return std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() / "fixtures" / "mock_plugin.py";
+}
+}  // namespace
+
+TEST_CASE("JsonRpcClient basic communication", "[extraction][jsonrpc]") {
+    std::string python = getPythonExecutable();
+    std::filesystem::path mock_plugin = getMockPluginPath();
+    
+    INFO("Python executable: " << python);
+    INFO("Mock plugin path: " << mock_plugin.string());
+    REQUIRE(std::filesystem::exists(mock_plugin));
 
     PluginProcessConfig config{.executable = python, .args = {mock_plugin.string()}};
     PluginProcess process{std::move(config)};
@@ -74,13 +95,12 @@ TEST_CASE("JsonRpcClient basic communication", "[extraction][jsonrpc]") {
 }
 
 TEST_CASE("JsonRpcClient typed calls", "[extraction][jsonrpc]") {
-    const char* python = std::getenv("PYTHON");
-    if (!python) {
-        python = "python3";
-    }
-
-    std::filesystem::path mock_plugin =
-        std::filesystem::current_path() / "tests" / "fixtures" / "mock_plugin.py";
+    std::string python = getPythonExecutable();
+    std::filesystem::path mock_plugin = getMockPluginPath();
+    
+    INFO("Python executable: " << python);
+    INFO("Mock plugin path: " << mock_plugin.string());
+    REQUIRE(std::filesystem::exists(mock_plugin));
 
     PluginProcessConfig config{.executable = python, .args = {mock_plugin.string()}};
     PluginProcess process{std::move(config)};

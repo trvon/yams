@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Automatic background repair task runs after daemon reaches Ready state with no degraded subsystems
   - FSM-based scheduling waits for optimal system load before starting repair scan
   - Added metadata-only `RepairManager` constructor for path tree operations
+- **Tag and Metadata Search**: Search engine now supports tag-based and metadata attribute search as fusion components
+  - New `queryTags()` component finds documents by tags with AND/OR matching
+  - New `queryMetadata()` component matches documents by mimeType, extension, and modified time filters
+  - Results are fused with other search components (FTS5, vector, path tree, etc.) using weighted scoring
+  - Added `SearchParams.tags`, `matchAllTags`, `mimeType`, `extension`, `modifiedAfter`, `modifiedBefore` fields
+  - Configurable weights: `tagWeight` (default 0.10) and `metadataWeight` (default 0.05)
 
 ### Removed
 - **TUI/Browse Interface**: Removed FTXUI-based terminal UI components in preparation for Flutter mobile application

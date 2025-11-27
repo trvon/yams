@@ -21,6 +21,8 @@ if host_machine.system() == 'windows'
   add_project_arguments('-D_SILENCE_CXX20_OLD_SHARED_PTR_ATOMIC_SUPPORT_DEPRECATION_WARNING', language: 'cpp')
   add_project_arguments('-DNOMINMAX', language: 'cpp')
   add_project_arguments('-DWIN32_LEAN_AND_MEAN', language: 'cpp')
+  # Large source files like mcp_server.cpp exceed MSVC's default section limit
+  add_project_arguments('/bigobj', language: 'cpp')
 endif
 
 # --- libc++ hardening mode ---

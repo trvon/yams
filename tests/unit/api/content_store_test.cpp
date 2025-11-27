@@ -528,13 +528,16 @@ TEST(ContentStoreBuilderTest, DefaultBuild) {
     auto tempDir = fs::temp_directory_path() / "builder_test";
     fs::create_directories(tempDir);
 
-    auto result = ContentStoreBuilder::createDefault(tempDir);
-    ASSERT_TRUE(result.has_value());
+    {
+        auto result = ContentStoreBuilder::createDefault(tempDir);
+        ASSERT_TRUE(result.has_value());
 
-    auto store = std::move(result).value();
-    EXPECT_NE(store, nullptr);
+        auto store = std::move(result).value();
+        EXPECT_NE(store, nullptr);
+    }  // Store goes out of scope, releasing file locks
 
-    fs::remove_all(tempDir);
+    std::error_code ec;
+    fs::remove_all(tempDir, ec);  // Ignore errors on cleanup
 }
 
 TEST(ContentStoreBuilderTest, CustomConfig) {
@@ -545,12 +548,14 @@ TEST(ContentStoreBuilderTest, CustomConfig) {
     config.compressionType = "zstd";
     config.compressionLevel = 5;
 
-    ContentStoreBuilder builder;
-    auto result = builder.withConfig(config).build();
+    {
+        ContentStoreBuilder builder;
+        auto result = builder.withConfig(config).build();
+        ASSERT_TRUE(result.has_value());
+    }  // Builder/store goes out of scope, releasing file locks
 
-    ASSERT_TRUE(result.has_value());
-
-    fs::remove_all(config.storagePath);
+    std::error_code ec;
+    fs::remove_all(config.storagePath, ec);  // Ignore errors on cleanup
 }
 
 TEST(ContentStoreBuilderTest, ValidationError) {
