@@ -141,9 +141,10 @@ MCP config (example):
 ### Cite
 ```aiignore
 @misc{yams,
-author = {Trevon Williams},
-title = {yams: Content addressable storage with excellent search },
-year = {2025},
-publisher = {GitHub},
-url = {https://github.com/trvon/yams}
-}```
+  author = {Trevon Williams},
+  title = {yams: Content addressable storage with   excellent search },
+  year = {2025},
+  publisher = {GitHub},
+  url = {https://github.com/trvon/yams}
+}
+```

@@ -43,7 +43,11 @@ class QpdfConan(ConanFile):
     def configure(self):
         if self.options.shared:
             self.options.rm_safe("fPIC")
-    
+
+    def package_id(self):
+        # Ensure binary compatibility - only rebuild when these change
+        del self.info.settings.compiler.cppstd  # C++ standard doesn't affect C library
+
     def layout(self):
         cmake_layout(self, src_folder="src")
     

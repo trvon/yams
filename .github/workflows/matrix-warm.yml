@@ -36,6 +36,11 @@ on:
         required: false
         type: boolean
         default: false
+      enable_pdf:
+        description: Enable PDF deps during warm (qpdf, libmediainfo)
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   warm:
@@ -69,8 +74,9 @@ jobs:
             conan_host_profile: ${{ inputs.conan_profile_windows }}
             conan_arch: x86_64
             needs_rosetta: false
+            timeout: 60
     runs-on: ${{ matrix.runs_on }}
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.timeout || 30 }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -147,10 +153,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Export custom qpdf recipe if it exists
-          if [ -f "conan/qpdf/conanfile.py" ]; then
-            echo "Exporting qpdf/11.9.0 from conan/qpdf/"
-            conan export conan/qpdf --name=qpdf --version=11.9.0
+          # Export custom qpdf recipe only if PDF support is enabled
+          if [ "${{ inputs.enable_pdf }}" = 'true' ] && [ -f "conan/qpdf/conanfile.py" ]; then
+            # Compute hash of the recipe file to check if we need to re-export
+            RECIPE_HASH=$(sha256sum conan/qpdf/conanfile.py | cut -d' ' -f1 | head -c 16)
+            MARKER_FILE="$HOME/.conan2/qpdf_recipe_hash"
+
+            if [ -f "$MARKER_FILE" ] && [ "$(cat "$MARKER_FILE")" = "$RECIPE_HASH" ]; then
+              echo "qpdf recipe unchanged (hash: $RECIPE_HASH), skipping export"
+            else
+              echo "Exporting qpdf/11.9.0 from conan/qpdf/ (hash: $RECIPE_HASH)"
+              conan export conan/qpdf --name=qpdf --version=11.9.0
+              echo "$RECIPE_HASH" > "$MARKER_FILE"
+            fi
+          else
+            echo "Skipping qpdf export (enable_pdf=${{ inputs.enable_pdf }})"
           fi
 
       - name: Warm dependencies (${{ inputs.build_type }})
@@ -169,15 +186,17 @@ jobs:
             export CONAN_CPU_COUNT=4
           fi
           ONNX=$([ "${{ inputs.enable_onnx }}" = 'true' ] && echo True || echo False)
-            conan install . \
-              -of build/warm-${{ inputs.build_type }} \
-              -pr:b=default \
-              -pr:h=${{ matrix.conan_host_profile }} \
-              -s build_type=${{ inputs.build_type }} \
-              -s:h arch=${{ matrix.conan_arch }} \
-              -o "sqlite3/*:fts5=True" \
-              -o "yams/*:enable_onnx=${ONNX}" \
-              --build=missing
+          PDF=$([ "${{ inputs.enable_pdf }}" = 'true' ] && echo True || echo False)
+          conan install . \
+            -of build/warm-${{ inputs.build_type }} \
+            -pr:b=default \
+            -pr:h=${{ matrix.conan_host_profile }} \
+            -s build_type=${{ inputs.build_type }} \
+            -s:h arch=${{ matrix.conan_arch }} \
+            -o "sqlite3/*:fts5=True" \
+            -o "yams/*:enable_onnx=${ONNX}" \
+            -o "yams/*:enable_pdf=${PDF}" \
+            --build=missing
 
       - name: Warm summary
         shell: bash

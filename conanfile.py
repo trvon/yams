@@ -132,6 +132,8 @@ class YamsConan(ConanFile):
         self.options["libarchive"].shared = False
         self.options["taglib"].shared = False
         self.options["spdlog"].header_only = False
+
+        # Configure qpdf only when PDF support is enabled
         if self.options.enable_pdf:  # type: ignore
             self.options["qpdf"].fPIC = True
             self.options["qpdf"].shared = False

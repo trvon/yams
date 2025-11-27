@@ -2,19 +2,6 @@
 
 YAMS provides multiple installation methods to suit different users and environments.
 
-### Environment Variables
-
-You can customize the installation by setting environment variables:
-
-```bash
-export YAMS_VERSION="1.0.0"              # Specific version
-export YAMS_INSTALL_DIR="/usr/local/bin" # Installation directory
-export YAMS_GITHUB_USER="trvon"          # GitHub username
-export YAMS_GITHUB_REPO="yams"          # Repository name
-
-curl -fsSL https://raw.githubusercontent.com/trvon/yams/main/install.sh | bash
-```
-
 ## Package Manager Installation
 
 ### Homebrew (macOS/Linux) - Coming Soon
@@ -266,6 +253,7 @@ Currently supported platforms:
 - Linux x86_64
 - macOS x86_64 (Intel)
 - macOS ARM64 (Apple Silicon)
+- Windows x86_64
 
 For other platforms, please [build from source](#build-from-source).
 
@@ -282,20 +270,6 @@ For other platforms, please [build from source](#build-from-source).
 - [GitHub Issues](https://github.com/your-username/yams/issues)
 - [Documentation](https://github.com/your-username/yams/tree/main/docs)
 - [Discussions](https://github.com/your-username/yams/discussions)
-
-## Security
-
-The installation script:
-- Downloads binaries only from official GitHub Releases
-- Verifies binary integrity where possible
-- Uses HTTPS for all downloads
-- Does not require root privileges by default
-
-For maximum security:
-1. Review the installation script before running
-2. Use package managers when available
-3. Verify checksums from releases page
-4. Consider building from source for sensitive environments
 
 ## Next Steps
 - CLI usage: yams add/search/get/list/stats
