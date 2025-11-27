@@ -142,6 +142,13 @@ jobs:
             build_packages: false
             meson_args: ""
             hosted: true
+          - os: windows-hosted
+            runs_on: windows-latest
+            suffix: windows-x86_64
+            packaging: msi
+            build_packages: true
+            meson_args: ""
+            hosted: true
     runs-on: ${{ matrix.runs_on }}
     env:
       STAGE_DIR: stage
@@ -573,8 +580,50 @@ jobs:
           done
           set -e
 
-      # Release build for ALL targets
+      # Windows: Install MSVC and build tools
+      - name: Setup MSVC (Windows only)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install build tools (Windows only)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Install Python dependencies
+          python -m pip install --upgrade pip
+          python -m pip install conan meson ninja
+
+          # Install WiX for MSI packaging
+          dotnet tool install --global wix
+          wix extension add -g WixToolset.UI.wixext
+
+          # Verify tools
+          conan --version
+          meson --version
+          ninja --version
+          wix --version
+
+      - name: Configure and Build Release (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "Building release for Windows x86_64"
+
+          # Set version
+          $env:YAMS_EXTRA_MESON_FLAGS = "-Dyams-version=${{ steps.meta.outputs.version }}"
+
+          # Run the build via setup.ps1
+          .\setup.ps1 -BuildType Release
+
+          # Set BUILD_DIR for subsequent steps
+          "BUILD_DIR=build/release" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # Release build for Linux/macOS targets
       - name: Configure and Build Release (Optimized)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           echo "Optimized release build for ${{ matrix.suffix }}"
@@ -658,7 +707,8 @@ jobs:
             cp ci-artifacts/benchmarks/*.json "$BUILD_DIR/bench_results/" || true
           fi
 
-      - name: Install
+      - name: Install (Linux/macOS)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           # Ensure BUILD_DIR is properly set
@@ -675,6 +725,48 @@ jobs:
             exit 1
           fi
           echo "STAGE_DIR=$BD/stage" >> "$GITHUB_ENV"
+
+      - name: Install and Package MSI (Windows)
+        if: runner.os == 'Windows' && inputs.fast_mode != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $buildDir = "build\release"
+          $stageDir = Join-Path (Resolve-Path $buildDir).Path "stage"
+          $version = "${{ steps.meta.outputs.version }}"
+
+          Write-Host "Staging install to: $stageDir"
+
+          # Remove old stage if exists
+          if (Test-Path $stageDir) {
+              Remove-Item -Recurse -Force $stageDir
+          }
+          New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
+
+          # Install to stage directory
+          meson install -C $buildDir --destdir $stageDir
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "Meson install failed"
+              exit 1
+          }
+
+          # Build MSI using the packaging script
+          $msiScript = "packaging\windows\build-msi.ps1"
+          & $msiScript -StageDir $stageDir -Version $version -OutputDir $buildDir
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "MSI build failed"
+              exit 1
+          }
+
+          # Move MSI to workspace root for artifact upload
+          Get-ChildItem $buildDir -Filter "*.msi" | ForEach-Object {
+              Copy-Item $_.FullName -Destination $env:GITHUB_WORKSPACE
+              Write-Host "Created MSI: $($_.Name)"
+          }
+
+          # Set environment variables for subsequent steps
+          "STAGE_DIR=$stageDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BUILD_DIR=$buildDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Generate release summary
         shell: bash
@@ -790,8 +882,8 @@ jobs:
         shell: bash
         run: |
           # Only generate once (linux-hosted) to avoid artifact name collision across matrix entries.
-          # Update to reflect current matrix total (4 platforms)
-          echo '{"total": 4}' > matrix.json
+          # Update to reflect current matrix total (5 platforms: linux-x86_64, linux-arm64, macos-arm64, macos-x86_64, windows-x86_64)
+          echo '{"total": 5}' > matrix.json
 
       - name: Upload matrix metadata
         if: matrix.os == 'linux-hosted' && github.actor != 'nektos/act'
@@ -809,6 +901,8 @@ jobs:
           path: |
             yams-*.tar.gz
             yams-*.zip
+            yams-*.msi
+            yams-*.msi.sha256
             ${{ env.BUILD_DIR }}/release_summary.md
             ${{ env.BUILD_DIR }}/bench_results/*.json
             yams-*.deb
@@ -960,6 +1054,8 @@ jobs:
             cp -v $dir/*.deb assets/ 2>/dev/null || true
             cp -v $dir/*.rpm assets/ 2>/dev/null || true
             cp -v $dir/*.AppImage assets/ 2>/dev/null || true
+            # Windows MSI packages
+            cp -v $dir/*.msi assets/ 2>/dev/null || true
             # Summaries & bench json
             if [ -d "$dir/bench_results" ]; then
               cp -v $dir/bench_results/*.json assets/ 2>/dev/null || true
@@ -979,8 +1075,8 @@ jobs:
           echo "Generating SHA256SUMS for release assets" >&2
           # Exclude bench JSON and summaries from checksum manifest (only distributable binaries)
           # Check if any distributable files exist before creating SHA256SUMS
-          if ls -1 | grep -qE '\.(tar.gz|zip|deb|rpm|AppImage|pkg)$' 2>/dev/null; then
-            ls -1 | grep -E '\.(tar.gz|zip|deb|rpm|AppImage|pkg)$' | while read -r f; do
+          if ls -1 | grep -qE '\.(tar.gz|zip|deb|rpm|AppImage|pkg|msi)$' 2>/dev/null; then
+            ls -1 | grep -E '\.(tar.gz|zip|deb|rpm|AppImage|pkg|msi)$' | while read -r f; do
               sha256sum "$f" >> SHA256SUMS
             done
             sort -o SHA256SUMS SHA256SUMS
@@ -1261,6 +1357,45 @@ jobs:
             echo "HOMEBREW_TAP_TOKEN not set; manual push required" >&2
           fi
           popd >/dev/null
+
+      - name: Generate winget manifest (stable only)
+        if: steps.meta.outputs.channel == 'stable'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "${{ steps.meta.outputs.version }}"
+          $tag = "${{ steps.meta.outputs.tag }}"
+
+          # Find the Windows MSI in assets
+          $msiFile = Get-ChildItem -Path "assets" -Filter "*.msi" | Select-Object -First 1
+          if (-not $msiFile) {
+              Write-Warning "No MSI file found in assets; skipping winget manifest generation"
+              exit 0
+          }
+
+          Write-Host "Generating winget manifest for version $version"
+          Write-Host "MSI file: $($msiFile.FullName)"
+
+          # Run the winget manifest generator
+          & ./packaging/windows/generate-winget-manifest.ps1 `
+              -Version $version `
+              -Tag $tag `
+              -MsiPath $msiFile.FullName `
+              -GitHubRepo "${{ github.repository }}" `
+              -OutputDir "winget-manifests"
+
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "Winget manifest generation failed"
+              exit 1
+          }
+
+      - name: Upload winget manifest artifact
+        if: steps.meta.outputs.channel == 'stable'
+        uses: actions/upload-artifact@v4
+        with:
+          name: winget-manifest
+          path: winget-manifests/
+          retention-days: 30
 
       - name: Build APT repository metadata (stable only, linux .deb present)
         if: steps.meta.outputs.channel == 'stable'

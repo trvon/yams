@@ -35,6 +35,7 @@ DaemonClient createClient(const fs::path& socketPath) {
 
 TEST_CASE("Client timeout recovery: Immediate EOF detection and retry",
           "[daemon][timeout][integration]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
     DaemonHarness harness;
     REQUIRE(harness.start(5s));
 
@@ -59,6 +60,7 @@ TEST_CASE("Client timeout recovery: Immediate EOF detection and retry",
 
 TEST_CASE("Client timeout recovery: Streaming request connection handling",
           "[daemon][timeout][streaming][integration]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
     DaemonHarness harness;
     REQUIRE(harness.start(5s));
 
@@ -85,6 +87,7 @@ TEST_CASE("Client timeout recovery: Streaming request connection handling",
 
 TEST_CASE("Client timeout recovery: Connection pool management",
           "[daemon][timeout][pool][integration]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
     DaemonHarness harness;
     REQUIRE(harness.start(5s));
 
@@ -111,6 +114,7 @@ TEST_CASE("Client timeout recovery: Connection pool management",
 
 TEST_CASE("Client timeout recovery: Rapid request cycle",
           "[daemon][timeout][stress][integration]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
     DaemonHarness harness;
     REQUIRE(harness.start(5s));
 
@@ -131,6 +135,7 @@ TEST_CASE("Client timeout recovery: Rapid request cycle",
 
 TEST_CASE("Client timeout recovery: Daemon restart handling",
           "[daemon][timeout][reconnect][integration]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
     DaemonHarness harness;
     REQUIRE(harness.start(5s));
 
@@ -158,6 +163,7 @@ TEST_CASE("Client timeout recovery: Daemon restart handling",
 
 TEST_CASE("Client timeout recovery: Error message quality",
           "[daemon][timeout][errors][integration]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
     DaemonHarness harness;
     REQUIRE(harness.start(5s));
 

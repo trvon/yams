@@ -27,6 +27,12 @@ struct MaterializedItem {
     std::string snippet; // may be empty
 };
 
+struct TreeBranchInfo {
+    std::string path;
+    int64_t docCount{0};
+    std::vector<std::string> childSegments;
+};
+
 class ISessionService {
 public:
     virtual ~ISessionService() = default;
@@ -75,6 +81,17 @@ public:
     // Convenience: get pinned patterns for a session (current when name not provided)
     virtual std::vector<std::string>
     getPinnedPatterns(const std::optional<std::string>& name = std::nullopt) const = 0;
+
+    // Tree-based session scope (uses path tree index for efficient queries)
+    // Get tree branch info for a path prefix within the session scope
+    virtual std::optional<TreeBranchInfo>
+    getTreeBranch(const std::string& pathPrefix,
+                  const std::optional<std::string>& name = std::nullopt) const = 0;
+
+    // Get all documents under a session's pinned paths using tree queries
+    virtual std::vector<MaterializedItem>
+    getDocumentsFromTree(std::size_t limit = 1000,
+                         const std::optional<std::string>& name = std::nullopt) const = 0;
 };
 
 std::shared_ptr<ISessionService> makeSessionService(const AppContext* ctx = nullptr);

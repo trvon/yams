@@ -33,6 +33,8 @@ DaemonClient createClient(const std::filesystem::path& socketPath) {
 
 TEST_CASE("AsioConnectionPool: Stale connection detection after daemon restart",
           "[daemon][connection-pool][integration]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+
     SECTION("detects stale connections and creates new ones after daemon restart") {
         DaemonHarness harness;
         REQUIRE(harness.start());

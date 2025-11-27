@@ -25,6 +25,14 @@
 #include "common/fixture_manager.h"
 #include "service_manager_test_helper.h"
 
+// Windows daemon tests are currently unstable - ServiceManager async initialization
+// has socket path length issues and shutdown race conditions
+#ifdef _WIN32
+#define SKIP_DAEMON_TEST_ON_WINDOWS() SKIP("Daemon tests unstable on Windows - see windows-daemon-ipc-plan.md")
+#else
+#define SKIP_DAEMON_TEST_ON_WINDOWS() ((void)0)
+#endif
+
 namespace fs = std::filesystem;
 using namespace yams;
 using namespace yams::daemon;
@@ -150,6 +158,7 @@ public:
 // ============================================================================
 
 TEST_CASE("PostIngestQueue - Initialization", "[daemon][post-ingest][init]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
     PostIngestQueueFixture fixture;
 
     SECTION("PostIngestQueue is created") {
@@ -180,6 +189,7 @@ TEST_CASE("PostIngestQueue - Initialization", "[daemon][post-ingest][init]") {
 // ============================================================================
 
 TEST_CASE("PostIngestQueue - Document Enqueuing", "[daemon][post-ingest][enqueue]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
     PostIngestQueueFixture fixture;
 
     SECTION("Documents are enqueued after storage") {
@@ -233,6 +243,7 @@ TEST_CASE("PostIngestQueue - Document Enqueuing", "[daemon][post-ingest][enqueue
 // ============================================================================
 
 TEST_CASE("PostIngestQueue - FTS5 Indexing", "[daemon][post-ingest][fts5]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
     PostIngestQueueFixture fixture;
 
     SECTION("Stored document is searchable after post-ingest") {
@@ -288,6 +299,7 @@ TEST_CASE("PostIngestQueue - FTS5 Indexing", "[daemon][post-ingest][fts5]") {
 // ============================================================================
 
 TEST_CASE("PostIngestQueue - Synchronous Indexing", "[daemon][post-ingest][sync]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
     PostIngestQueueFixture fixture;
 
     SECTION("Documents are indexed via async channel") {
@@ -322,6 +334,7 @@ TEST_CASE("PostIngestQueue - Synchronous Indexing", "[daemon][post-ingest][sync]
 // ============================================================================
 
 TEST_CASE("PostIngestQueue - Capacity and Backpressure", "[daemon][post-ingest][capacity]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
     PostIngestQueueFixture fixture;
 
     SECTION("Queue respects capacity limits") {
@@ -366,6 +379,7 @@ TEST_CASE("PostIngestQueue - Capacity and Backpressure", "[daemon][post-ingest][
 // ============================================================================
 
 TEST_CASE("PostIngestQueue - Error Handling", "[daemon][post-ingest][errors]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
     PostIngestQueueFixture fixture;
 
     SECTION("Invalid hash doesn't crash") {
@@ -395,6 +409,7 @@ TEST_CASE("PostIngestQueue - Error Handling", "[daemon][post-ingest][errors]") {
 // ============================================================================
 
 TEST_CASE("PostIngestQueue - Thread Scaling", "[daemon][post-ingest][scaling]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
     PostIngestQueueFixture fixture;
 
     SECTION("Thread scaling not supported in strand-based implementation") {

@@ -937,8 +937,8 @@ TEST_F(UiCliExpectationsIT, HashSearchPrefixTooShortIsRejected) {
 TEST_F(UiCliExpectationsIT, SearchDegradedFallbackStructure) {
     // Force degraded mode via environment (read by ServiceManager/SearchService)
 #if defined(_WIN32)
-    _putenv("YAMS_SEARCH_DEGRADED=1");
-    _putenv("YAMS_SEARCH_DEGRADED_REASON=maintenance");
+    _putenv_s("YAMS_SEARCH_DEGRADED", "1");
+    _putenv_s("YAMS_SEARCH_DEGRADED_REASON", "maintenance");
 #else
     setenv("YAMS_SEARCH_DEGRADED", "1", 1);
     setenv("YAMS_SEARCH_DEGRADED_REASON", "maintenance", 1);

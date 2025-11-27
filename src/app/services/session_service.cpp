@@ -168,40 +168,60 @@ public:
     }
 
     std::size_t warm(std::size_t limit, std::size_t snippetLen) override {
-        // Use DocumentService to materialize
         auto cur = current();
         if (!cur || !ctx_ || !ctx_->metadataRepo || !ctx_->store)
             return 0;
+
         auto patterns = listPathSelectors(*cur);
         std::size_t warmed = 0;
         json materialized = json::array();
         auto j = load_json(sessions_dir() / (*cur + ".json"));
+        std::size_t remaining = limit;
+
         try {
-            auto doc = makeDocumentService(*ctx_);
-            if (!doc)
-                return 0;
+            // Use tree-based queries for efficient document retrieval
             for (const auto& pat : patterns) {
-                app::services::ListDocumentsRequest lreq;
-                lreq.pattern = pat;
-                lreq.limit = limit;
-                lreq.showSnippets = true;
-                lreq.snippetLength = snippetLen;
-                auto lres = doc->list(lreq);
-                if (!lres)
+                if (remaining == 0)
+                    break;
+
+                auto docsResult = ctx_->metadataRepo->findDocumentsByPathTreePrefix(
+                    pat, true, static_cast<int>(remaining));
+
+                if (!docsResult)
                     continue;
-                for (const auto& d : lres.value().documents) {
+
+                for (const auto& doc : docsResult.value()) {
+                    if (remaining == 0)
+                        break;
+
                     json m;
-                    m["name"] = d.name;
-                    m["path"] = d.path;
-                    m["hash"] = d.hash;
-                    m["mime"] = d.mimeType;
-                    m["size"] = d.size;
-                    m["snippet"] = d.snippet ? *d.snippet : std::string();
+                    m["name"] = doc.fileName;
+                    m["path"] = doc.filePath;
+                    m["hash"] = doc.sha256Hash;
+                    m["mime"] = doc.mimeType;
+                    m["size"] = doc.fileSize;
+
+                    // Optionally fetch snippet if requested
+                    if (snippetLen > 0 && ctx_->store) {
+                        auto contentResult = ctx_->store->retrieveBytes(doc.sha256Hash);
+                        if (contentResult && !contentResult.value().empty()) {
+                            std::string content(
+                                reinterpret_cast<const char*>(contentResult.value().data()),
+                                std::min(contentResult.value().size(), snippetLen));
+                            m["snippet"] = content;
+                        } else {
+                            m["snippet"] = "";
+                        }
+                    } else {
+                        m["snippet"] = "";
+                    }
+
                     materialized.push_back(std::move(m));
                     ++warmed;
+                    --remaining;
                 }
             }
-            // TODO: enforce TTL/limits here (Phase 2)
+
             j["materialized"] = std::move(materialized);
             save_json(sessions_dir() / (*cur + ".json"), j);
         } catch (...) {
@@ -326,6 +346,71 @@ public:
         if (use.empty())
             return {};
         return listPathSelectors(use);
+    }
+
+    std::optional<TreeBranchInfo>
+    getTreeBranch(const std::string& pathPrefix,
+                  const std::optional<std::string>& name) const override {
+        auto use = name ? *name : current().value_or("");
+        if (use.empty() || !ctx_ || !ctx_->metadataRepo)
+            return std::nullopt;
+
+        auto nodeResult = ctx_->metadataRepo->findPathTreeNodeByFullPath(pathPrefix);
+        if (!nodeResult || !nodeResult.value().has_value())
+            return std::nullopt;
+
+        const auto& node = nodeResult.value().value();
+        TreeBranchInfo info;
+        info.path = node.fullPath;
+        info.docCount = node.docCount;
+
+        auto childrenResult = ctx_->metadataRepo->listPathTreeChildren(pathPrefix, 100);
+        if (childrenResult) {
+            for (const auto& child : childrenResult.value()) {
+                info.childSegments.push_back(child.pathSegment);
+            }
+        }
+
+        return info;
+    }
+
+    std::vector<MaterializedItem>
+    getDocumentsFromTree(std::size_t limit,
+                         const std::optional<std::string>& name) const override {
+        std::vector<MaterializedItem> out;
+        auto use = name ? *name : current().value_or("");
+        if (use.empty() || !ctx_ || !ctx_->metadataRepo)
+            return out;
+
+        auto patterns = listPathSelectors(use);
+        std::size_t remaining = limit;
+
+        for (const auto& pat : patterns) {
+            if (remaining == 0)
+                break;
+
+            auto docsResult = ctx_->metadataRepo->findDocumentsByPathTreePrefix(
+                pat, true, static_cast<int>(remaining));
+
+            if (!docsResult)
+                continue;
+
+            for (const auto& doc : docsResult.value()) {
+                if (remaining == 0)
+                    break;
+
+                MaterializedItem item;
+                item.name = doc.fileName;
+                item.path = doc.filePath;
+                item.hash = doc.sha256Hash;
+                item.mime = doc.mimeType;
+                item.size = doc.fileSize;
+                out.push_back(std::move(item));
+                --remaining;
+            }
+        }
+
+        return out;
     }
 
 private:

@@ -12,15 +12,6 @@
 #include <yams/compat/unistd.h>
 #include <yams/daemon/client/daemon_client.h>
 
-// Windows daemon IPC tests are currently unstable due to socket shutdown race conditions
-// The daemon's connection handler coroutines crash during cleanup when sockets are forcibly closed
-// See: docs/developer/windows-daemon-ipc-plan.md
-#ifdef _WIN32
-#define SKIP_DAEMON_TEST_ON_WINDOWS() SKIP("Daemon IPC tests unstable on Windows - see windows-daemon-ipc-plan.md")
-#else
-#define SKIP_DAEMON_TEST_ON_WINDOWS() ((void)0)
-#endif
-
 using namespace yams::daemon;
 using namespace yams::test;
 using namespace std::chrono_literals;

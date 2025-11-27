@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Results are fused with other search components (FTS5, vector, path tree, etc.) using weighted scoring
   - Added `SearchParams.tags`, `matchAllTags`, `mimeType`, `extension`, `modifiedAfter`, `modifiedBefore` fields
   - Configurable weights: `tagWeight` (default 0.10) and `metadataWeight` (default 0.05)
+- **Session Tree Integration**: SessionService now uses path tree index for efficient document queries
+  - New `getTreeBranch()` method returns tree node info with child segments for a path prefix
+  - New `getDocumentsFromTree()` method queries documents using `findDocumentsByPathTreePrefix()`
+  - `warm()` now uses tree-based queries instead of pattern matching for faster materialization
 
 ### Removed
 - **TUI/Browse Interface**: Removed FTXUI-based terminal UI components in preparation for Flutter mobile application

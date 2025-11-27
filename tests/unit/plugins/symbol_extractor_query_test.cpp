@@ -58,7 +58,11 @@ static yams_symbol_extractor_v1* load_plugin(const char* so_path) {
 }
 
 TEST(SymbolExtractorQueryTest, CppDetectsFunctionAndClass) {
-#ifdef __APPLE__
+#if defined(_WIN32)
+    GTEST_SKIP() << "Symbol extractor plugin not available on Windows in test environment";
+    return;
+#endif
+#if defined(__APPLE__)
     const char* so = "/usr/local/lib/yams/plugins/yams_symbol_extractor.dylib";
 #else
     const char* so = "/usr/local/lib/yams/plugins/yams_symbol_extractor.so";
@@ -91,7 +95,11 @@ TEST(SymbolExtractorQueryTest, CppDetectsFunctionAndClass) {
 }
 
 TEST(SymbolExtractorQueryTest, PythonDetectsFunction) {
-#ifdef __APPLE__
+#if defined(_WIN32)
+    GTEST_SKIP() << "Symbol extractor plugin not available on Windows in test environment";
+    return;
+#endif
+#if defined(__APPLE__)
     const char* so = "/usr/local/lib/yams/plugins/yams_symbol_extractor.dylib";
 #else
     const char* so = "/usr/local/lib/yams/plugins/yams_symbol_extractor.so";

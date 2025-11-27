@@ -23,7 +23,7 @@ class VersioningIndexerTest : public yams::test::YamsTest {};
 TEST_F(VersioningIndexerTest, PathSeries_NewThenUpdate_CreatesVersionEdgeAndFlags) {
     // Enable feature flag (default is on, but make explicit)
 #if defined(_WIN32)
-    _putenv("YAMS_ENABLE_VERSIONING=1");
+    _putenv_s("YAMS_ENABLE_VERSIONING", "1");
 #else
     setenv("YAMS_ENABLE_VERSIONING", "1", 1);
 #endif

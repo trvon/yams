@@ -504,7 +504,8 @@ TEST(CASHelpers, CasPathAndIdFormatting) {
 
     auto path = yams::downloader::casPathForSha256(objectsDir, digest);
     // Expected shard "01/23" for first four hex chars
-    EXPECT_TRUE(path.string().find("sha256/01/23/0123456789abcdef") != std::string::npos);
+    // Use generic_string() for cross-platform path comparison
+    EXPECT_TRUE(path.generic_string().find("sha256/01/23/0123456789abcdef") != std::string::npos);
 
     auto id = yams::downloader::makeSha256Id(digest);
     EXPECT_EQ(id, "sha256:" + digest);

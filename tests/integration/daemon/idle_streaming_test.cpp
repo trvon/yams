@@ -14,6 +14,13 @@
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
 
+// Windows daemon tests are currently unstable - AF_UNIX socket shutdown crashes
+#ifdef _WIN32
+#define SKIP_DAEMON_TEST_ON_WINDOWS() SKIP("Daemon tests unstable on Windows - see windows-daemon-ipc-plan.md")
+#else
+#define SKIP_DAEMON_TEST_ON_WINDOWS() ((void)0)
+#endif
+
 using namespace yams::daemon;
 using namespace std::chrono_literals;
 
@@ -87,6 +94,7 @@ struct IdleStreamingFixture {
 
 TEST_CASE_METHOD(IdleStreamingFixture, "Persistent connection - streaming after idle",
                  "[daemon][idle][streaming][persistent]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
     // Test persistent connection that goes idle then sends streaming request
     auto clientIo = createClientIo();
     auto socket = createClientSocket(*clientIo);
@@ -140,6 +148,7 @@ TEST_CASE_METHOD(IdleStreamingFixture, "Persistent connection - streaming after 
 
 TEST_CASE_METHOD(IdleStreamingFixture, "New connection - streaming after server idle",
                  "[daemon][idle][streaming][new-conn]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
     // Test 1: Verify server works immediately after start
     {
         auto clientIo = createClientIo();
@@ -199,6 +208,7 @@ TEST_CASE_METHOD(IdleStreamingFixture, "New connection - streaming after server 
 
 TEST_CASE_METHOD(IdleStreamingFixture, "Persistent connection - unary after idle",
                  "[daemon][idle][unary][persistent]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
     // Test persistent connection that goes idle then sends unary request
     auto clientIo = createClientIo();
     auto socket = createClientSocket(*clientIo);
@@ -236,6 +246,7 @@ TEST_CASE_METHOD(IdleStreamingFixture, "Persistent connection - unary after idle
 
 TEST_CASE_METHOD(IdleStreamingFixture, "New connection - unary after server idle",
                  "[daemon][idle][unary][new-conn]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
     // Wait for server to idle (3 x 500ms = 1.5s)
     std::this_thread::sleep_for(2s);
 

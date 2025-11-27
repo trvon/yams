@@ -1,6 +1,10 @@
 Param(
     [ValidateSet('Debug','Release','Profiling','Fuzzing')]
-    [string]$BuildType = 'Release'
+    [string]$BuildType = 'Release',
+
+    [switch]$Package,
+
+    [string]$Version = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -412,6 +416,65 @@ meson compile -C $buildDir
 
 Write-Host "----------------------------------------------------------------"
 Write-Host "Build complete."
-Write-Host "To install, run: meson install -C $buildDir"
-Write-Host "Note: You may need to add '$InstallPrefix\bin' to your PATH."
+
+if ($Package) {
+    Write-Host "----------------------------------------------------------------"
+    Write-Host "Packaging MSI installer..." -ForegroundColor Cyan
+
+    # Stage the install for MSI packaging (use absolute path to avoid meson nesting issues)
+    $stageDir = Join-Path (Resolve-Path $buildDir).Path "stage"
+    Write-Host "Staging install to: $stageDir"
+
+    # Remove old stage if exists
+    if (Test-Path $stageDir) {
+        Remove-Item -Recurse -Force $stageDir
+    }
+    New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
+
+    # Install to stage directory (destdir prepends to prefix, build-msi.ps1 handles finding files)
+    meson install -C $buildDir --destdir $stageDir
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Meson install failed"
+        exit 1
+    }
+
+    # Determine version
+    if ([string]::IsNullOrEmpty($Version)) {
+        # Try to extract from meson.build
+        $mesonBuild = Join-Path $PSScriptRoot "meson.build"
+        if (Test-Path $mesonBuild) {
+            $content = Get-Content $mesonBuild -Raw
+            if ($content -match "version\s*:\s*'([^']+)'") {
+                $Version = $matches[1]
+            }
+        }
+        if ([string]::IsNullOrEmpty($Version)) {
+            $Version = "0.0.0"
+        }
+    }
+    Write-Host "Package version: $Version"
+
+    # Build MSI - the script handles finding yams.exe wherever meson placed it
+    $msiScript = Join-Path $PSScriptRoot "packaging\windows\build-msi.ps1"
+    if (-not (Test-Path $msiScript)) {
+        Write-Error "MSI build script not found at: $msiScript"
+        exit 1
+    }
+
+    & $msiScript -StageDir $stageDir -Version $Version -OutputDir $buildDir
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "MSI build failed"
+        exit 1
+    }
+
+    Write-Host "----------------------------------------------------------------"
+    Write-Host "MSI package created in: $buildDir" -ForegroundColor Green
+    Get-ChildItem $buildDir -Filter "*.msi" | ForEach-Object {
+        Write-Host "  $($_.Name)" -ForegroundColor Green
+    }
+} else {
+    Write-Host "To install, run: meson install -C $buildDir"
+    Write-Host "To build MSI:    .\setup.ps1 -BuildType $BuildType -Package"
+    Write-Host "Note: You may need to add '$InstallPrefix\bin' to your PATH."
+}
 Write-Host "----------------------------------------------------------------"

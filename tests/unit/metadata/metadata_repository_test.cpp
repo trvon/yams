@@ -393,8 +393,21 @@ TEST_F(MetadataRepositoryTest, FuzzySearchReturnsContentMatches) {
     auto docId = insertResult.value();
 
     constexpr char kRareTerm[] = "blorptastic";
+    std::string contentText = std::string("The ") + kRareTerm;
+
+    // Insert content into document_content table (read by buildFuzzyIndex)
+    DocumentContent content;
+    content.documentId = docId;
+    content.contentText = contentText;
+    content.contentLength = static_cast<int64_t>(contentText.length());
+    content.extractionMethod = "test";
+    content.language = "en";
+    auto contentInsertResult = repository_->insertContent(content);
+    ASSERT_TRUE(contentInsertResult.has_value());
+
+    // Also index for FTS5 search
     auto indexResult = repository_->indexDocumentContent(
-        docId, doc.fileName, std::string("The ") + kRareTerm, "text/plain");
+        docId, doc.fileName, contentText, "text/plain");
     ASSERT_TRUE(indexResult.has_value());
 
     // Build the fuzzy index so the content-based entry is materialized.

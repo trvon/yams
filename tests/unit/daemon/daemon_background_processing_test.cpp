@@ -19,6 +19,7 @@
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/extraction/content_extractor.h>
 #include <yams/metadata/metadata_repository.h>
 
@@ -265,6 +266,10 @@ bool isMpmcEnabled() {
 TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][background][queue]") {
     BusToggleGuard busGuard(false); // Disable bus for direct queue testing
 
+    // WorkCoordinator is required for PostIngestQueue strand creation
+    WorkCoordinator coordinator;
+    coordinator.start(2);
+
     auto store = std::make_shared<StubContentStore>();
     auto metadataRepo = std::make_shared<StubMetadataRepository>();
 
@@ -285,7 +290,8 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
 
     SECTION("Process single task successfully") {
         auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
-                                                       nullptr, nullptr, 8);
+                                                       nullptr, &coordinator, 8);
+        queue->start();  // Start the channel poller
 
         PostIngestQueue::Task task{
             doc.sha256Hash, doc.mimeType, "", {}, PostIngestQueue::Task::Stage::Metadata};
@@ -316,7 +322,8 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
 
     SECTION("Queue shutdown drains pending tasks") {
         auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
-                                                       nullptr, nullptr, 8);
+                                                       nullptr, &coordinator, 8);
+        queue->start();  // Start the channel poller
 
         PostIngestQueue::Task task{
             doc.sha256Hash, doc.mimeType, "", {}, PostIngestQueue::Task::Stage::Metadata};
@@ -325,6 +332,10 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
         queue.reset();
         SUCCEED("Queue shutdown completed without hang");
     }
+
+    // Cleanup coordinator at test end
+    coordinator.stop();
+    coordinator.join();
 }
 
 // =============================================================================
@@ -339,6 +350,10 @@ TEST_CASE("PostIngestQueue: InternalEventBus integration and stress",
 
     BusToggleGuard busGuard(true); // Enable bus routing
 
+    // WorkCoordinator is required for PostIngestQueue strand creation
+    WorkCoordinator coordinator;
+    coordinator.start(4);
+
     auto store = std::make_shared<StubContentStore>();
     auto metadataRepo = std::make_shared<StubMetadataRepository>();
     auto extractor = std::make_shared<StubExtractor>();
@@ -351,7 +366,8 @@ TEST_CASE("PostIngestQueue: InternalEventBus integration and stress",
         const std::string payload = "hello world";
 
         auto pq = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
-                                                    nullptr, nullptr, 4096);
+                                                    nullptr, &coordinator, 4096);
+        pq->start();  // Start the channel poller
 
         // Spawn producers that publish into the InternalEventBus channel
         std::vector<std::thread> producers;
@@ -395,7 +411,13 @@ TEST_CASE("PostIngestQueue: InternalEventBus integration and stress",
 
         REQUIRE(static_cast<int>(pq->processed()) == expected);
         REQUIRE(pq->failed() == 0);
+
+        pq.reset();
     }
+
+    // Cleanup coordinator at test end
+    coordinator.stop();
+    coordinator.join();
 }
 
 // =============================================================================
