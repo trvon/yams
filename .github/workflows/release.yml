@@ -836,7 +836,7 @@ jobs:
           cat "$SUMMARY_FILE"
 
       - name: Package
-        if: ${{ inputs.fast_mode != 'true' && github.actor != 'nektos/act' }}
+        if: ${{ inputs.fast_mode != 'true' && github.actor != 'nektos/act' && matrix.packaging != 'msi' }}
         shell: bash
         run: |
           STAGE_PATH="${{ env.STAGE_DIR }}"
