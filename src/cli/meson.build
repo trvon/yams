@@ -248,6 +248,7 @@ if yams_modules_enabled and yams_modules_supported
     dependencies: [
       dependency('yams_core'),
       dependency('nlohmann_json'),
+      dependency('spdlog'),
     ],
     cpp_args: yams_module_cpp_args + cli_cppargs,
     install: false,

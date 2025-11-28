@@ -402,7 +402,7 @@ jobs:
             brew update
             brew install pipx || true
             python3 -m pipx ensurepath || true
-          else
+          elif [ "$RUNNER_OS" = "Linux" ]; then
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends pipx || true
             python3 -m pipx ensurepath || true
@@ -427,7 +427,7 @@ jobs:
           if [ "$RUNNER_OS" = "macOS" ]; then
             brew update || true
             brew install meson ninja ccache || true
-          else
+          elif [ "$RUNNER_OS" = "Linux" ]; then
             python3 -m pip install --user --upgrade meson 'ninja>=1.10' || python -m pip install --user --upgrade meson 'ninja>=1.10'
             if [ -n "${GITHUB_PATH:-}" ]; then
               echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -645,7 +645,7 @@ jobs:
                 ARCH="x86_64" 
                 ;;
             esac
-          else
+          elif [ "$RUNNER_OS" = "Linux" ]; then
             HOST_PROFILE="./conan/profiles/host-linux-clang"
             case "${{ matrix.suffix }}" in
               linux-arm64) ARCH="armv8" ;;
