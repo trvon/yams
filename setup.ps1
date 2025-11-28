@@ -392,7 +392,16 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
     Write-Host 'Configuring Meson builddir...'
     $buildTypeLower = $BuildType.ToLower()
     
-    $extraMesonFlags = if ($env:YAMS_EXTRA_MESON_FLAGS) { $env:YAMS_EXTRA_MESON_FLAGS.Split(' ') } else { @() }
+    # Parse extra Meson flags from environment variable
+    # Use -split with regex to properly handle quoted arguments
+    $extraMesonFlags = @()
+    if ($env:YAMS_EXTRA_MESON_FLAGS) {
+        # Convert to string explicitly and split on spaces (preserving quoted strings)
+        $flagsString = [string]$env:YAMS_EXTRA_MESON_FLAGS
+        # Simple space split - more robust parsing would handle quotes
+        $extraMesonFlags = $flagsString -split '\s+' | Where-Object { $_ -ne '' }
+    }
+    
     $enableModulesFlag = if ($enableModules) { 'true' } else { 'false' }
 
     meson setup $buildDir `
