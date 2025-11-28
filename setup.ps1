@@ -393,23 +393,33 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
     $buildTypeLower = $BuildType.ToLower()
     
     # Parse extra Meson flags from environment variable
-    # Use -split with regex to properly handle quoted arguments
+    # PowerShell can expand environment variables character-by-character in some contexts
+    # We need to ensure we get a proper string array
     $extraMesonFlags = @()
     if ($env:YAMS_EXTRA_MESON_FLAGS) {
-        # Convert to string explicitly and split on spaces (preserving quoted strings)
-        $flagsString = [string]$env:YAMS_EXTRA_MESON_FLAGS
-        # Simple space split - more robust parsing would handle quotes
-        $extraMesonFlags = $flagsString -split '\s+' | Where-Object { $_ -ne '' }
+        # Force conversion to string and trim any whitespace
+        $flagsString = "$($env:YAMS_EXTRA_MESON_FLAGS)".Trim()
+        Write-Host "DEBUG: Raw YAMS_EXTRA_MESON_FLAGS = '$flagsString'"
+        
+        # Split on whitespace, filter empty entries
+        $extraMesonFlags = @($flagsString -split '\s+' | Where-Object { $_.Length -gt 0 })
+        
+        Write-Host "DEBUG: Parsed $($extraMesonFlags.Count) flag(s):"
+        for ($i = 0; $i < $extraMesonFlags.Count; $i++) {
+            Write-Host "DEBUG:   [$i] = '$($extraMesonFlags[$i])'"
+        }
     }
     
     $enableModulesFlag = if ($enableModules) { 'true' } else { 'false' }
 
-    meson setup $buildDir `
-        --buildtype=$buildTypeLower `
-        --prefix="$InstallPrefix" `
-        "-Denable-modules=$enableModulesFlag" `
-        $mesonToolchainArg $mesonToolchainFile `
-        @extraMesonFlags
+    # Build meson command arguments as a proper array
+    $mesonArgs = @('setup', $buildDir, "--buildtype=$buildTypeLower", "--prefix=$InstallPrefix", "-Denable-modules=$enableModulesFlag")
+    if ($mesonToolchainArg) { $mesonArgs += $mesonToolchainArg }
+    if ($mesonToolchainFile) { $mesonArgs += $mesonToolchainFile }
+    $mesonArgs += $extraMesonFlags
+    
+    Write-Host "DEBUG: Final meson command: meson $($mesonArgs -join ' ')"
+    & meson @mesonArgs
 } else {
     Write-Host 'Meson builddir already configured.'
     Write-Host "Ensuring prefix is set to: $InstallPrefix"
