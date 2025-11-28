@@ -405,7 +405,7 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
         $extraMesonFlags = @($flagsString -split '\s+' | Where-Object { $_.Length -gt 0 })
         
         Write-Host "DEBUG: Parsed $($extraMesonFlags.Count) flag(s):"
-        for ($i = 0; $i < $extraMesonFlags.Count; $i++) {
+        foreach ($i in 0..($extraMesonFlags.Count - 1)) {
             Write-Host "DEBUG:   [$i] = '$($extraMesonFlags[$i])'"
         }
     }
