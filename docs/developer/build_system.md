@@ -3,13 +3,22 @@
 Compact overview of how to build, test, and extend YAMS. Start with the **Quick Loop**, then dive deeper.
 
 ## 1. Stack
+
 | Layer | Tool |
 |-------|------|
 | Build | Meson ≥ 1.2 |
 | Dependencies | Conan 2.x |
 | Generator | Ninja (preferred) |
-| Compilers | Clang ≥14 / GCC ≥11 |
+| Compilers | Clang ≥14 / GCC ≥11 / MSVC 193+ |
 | Optional | ccache, lld, clang-tidy |
+
+### Compiler Support
+
+| Platform | Compiler | Minimum | Recommended |
+|----------|----------|---------|-------------|
+| Linux/macOS | GCC | 11+ | 13+ |
+| Linux/macOS | Clang | 14+ | 16+ |
+| Windows | MSVC | 193 (VS 2022) | 194+ (VS 2022 17.10+) |
 
 ## 2. Directory Layout
 Out-of-source builds under `builddir/`:
@@ -22,6 +31,8 @@ conan profile detect --force
 ```
 
 ## 4. Quick Loop
+
+### Linux/macOS
 
 **Using setup script (recommended):**
 ```bash
@@ -50,7 +61,41 @@ ninja -C builddir
 meson test -C builddir
 ```
 
-See [setup.sh](../../setup.sh) for environment variables and advanced options (coverage, cross-compilation, compiler selection).
+### Windows
+
+**Using setup script (recommended):**
+```pwsh
+# Debug build (includes tests)
+./setup.ps1 Debug
+meson compile -C builddir
+
+# Test
+meson test -C builddir
+```
+
+**Manual (Conan + Meson):**
+```pwsh
+# Export local recipes (required once)
+conan export conan/qpdf --name=qpdf --version=11.9.0
+conan export conan/onnxruntime --name=onnxruntime --version=1.23.2
+
+# Debug dependencies
+conan install . -of build\debug `
+  -pr:h conan/profiles/host-windows-msvc -pr:b default `
+  -s build_type=Debug --build=missing
+
+# Initial configure
+meson setup builddir `
+  --native-file build\debug\build-debug\conan\conan_meson_native.ini
+
+# Build
+meson compile -C builddir
+
+# Test
+meson test -C builddir
+```
+
+See [setup.sh](../../setup.sh) / [setup.ps1](../../setup.ps1) for environment variables and advanced options.
 
 ## 5. ONNX / GenAI Paths
 Options (Conan scope):
@@ -214,6 +259,10 @@ Cache `~/.conan` + optionally `build/`.
 | Link errors after dep change | Delete `builddir` and reconfigure from scratch |
 | Tests undiscovered | Use `meson test -C builddir --list`; ensure `enable-tests=true` |
 | Slow incremental builds | Enable ccache or check Unity build settings |
+| qpdf: "recompile with -fPIC" | `conan remove 'qpdf/*' -c` then re-setup |
+| Clang: "cannot find -lstdc++" | Install libstdc++ or use `YAMS_COMPILER=gcc` |
+| Windows: Boost build failures | Install v143 toolset via VS Installer, clean Boost cache |
+| Windows: Missing recipes | Export qpdf and onnxruntime recipes (see Quick Loop) |
 
 ## 13. Conventions
 

@@ -14,27 +14,39 @@ Thank you for your interest in contributing to YAMS. This guide defines how to p
 4. Ensure CI passes; address review feedback promptly.
 
 ### Build and test
-Release:
+
+**Linux/macOS:**
 ```bash
-conan profile detect --force
-conan install . --output-folder=build/yams-release -s build_type=Release --build=missing
-cmake --preset yams-release
-cmake --build --preset yams-release
-ctest --preset yams-release --output-on-failure
+# Release
+./setup.sh Release
+meson compile -C build/release
+meson test -C build/release --print-errorlogs
+
+# Debug
+./setup.sh Debug
+meson compile -C builddir
+meson test -C builddir --print-errorlogs
 ```
 
-Debug:
-```bash
-conan install . --output-folder=build/yams-debug -s build_type=Debug --build=missing
-cmake --preset yams-debug
-cmake --build --preset yams-debug
-ctest --preset yams-debug --output-on-failure
+**Windows:**
+```pwsh
+# Release
+./setup.ps1 Release
+meson compile -C build/release
+meson test -C build/release --print-errorlogs
+
+# Debug
+./setup.ps1 Debug
+meson compile -C builddir
+meson test -C builddir --print-errorlogs
 ```
 
-Optional (sanitizers in Debug):
+**Sanitizers (Debug, Linux/macOS):**
 ```bash
-cmake --preset yams-debug -DYA_ENABLE_ASAN=ON -DYA_ENABLE_UBSAN=ON
-cmake --build --preset yams-debug
+CFLAGS='-fsanitize=address,undefined' CXXFLAGS='-fsanitize=address,undefined' \
+  meson setup builddir --reconfigure
+meson compile -C builddir
+meson test -C builddir
 ```
 
 ## Commit messages
