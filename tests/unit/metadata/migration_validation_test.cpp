@@ -34,7 +34,7 @@ public:
     MigrationTestFixture() {
         // Create unique temporary database path to avoid conflicts between sections
         auto timestamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        temp_db_path_ = std::filesystem::temp_directory_path() / 
+        temp_db_path_ = std::filesystem::temp_directory_path() /
                         ("yams_migration_test_" + std::to_string(timestamp));
         std::filesystem::create_directories(temp_db_path_);
 

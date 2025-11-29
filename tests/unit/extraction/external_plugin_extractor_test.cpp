@@ -15,20 +15,20 @@ namespace {
 // Helper to get platform-appropriate python executable
 std::string getPythonExecutable() {
 #ifdef _WIN32
-    return "python";  // Windows uses 'python' not 'python3'
+    return "python"; // Windows uses 'python' not 'python3'
 #else
-    return "/usr/bin/env";  // Unix uses env to find python3
+    return "/usr/bin/env"; // Unix uses env to find python3
 #endif
 }
 
 std::vector<std::string> getPythonArgs() {
 #ifdef _WIN32
-    return {"-u"};  // Just unbuffered flag, python is the executable
+    return {"-u"}; // Just unbuffered flag, python is the executable
 #else
-    return {"python3", "-u"};  // Use env to find python3
+    return {"python3", "-u"}; // Use env to find python3
 #endif
 }
-}  // namespace
+} // namespace
 
 TEST_CASE("ExternalPluginExtractorConfig builder pattern", "[extraction][external_plugin]") {
     auto config = ExternalPluginExtractorConfig{}
@@ -66,7 +66,8 @@ TEST_CASE("ExternalPluginExtractor full lifecycle", "[extraction][external_plugi
     // Get test fixture path - navigate from source file location
     // __FILE__ is tests/unit/extraction/external_plugin_extractor_test.cpp
     // Navigate up 3 levels to tests/, then into fixtures/
-    auto plugin_path = fs::path(__FILE__).parent_path().parent_path().parent_path() / "fixtures" / "mock_plugin.py";
+    auto plugin_path = fs::path(__FILE__).parent_path().parent_path().parent_path() / "fixtures" /
+                       "mock_plugin.py";
 
     INFO("Plugin path: " << plugin_path.string());
     REQUIRE(fs::exists(plugin_path));
@@ -75,7 +76,7 @@ TEST_CASE("ExternalPluginExtractor full lifecycle", "[extraction][external_plugi
     auto config = ExternalPluginExtractorConfig{}
                       .with_executable(getPythonExecutable())
                       .with_timeout(std::chrono::milliseconds(3000));
-    
+
     for (const auto& arg : getPythonArgs()) {
         config = std::move(config).with_arg(arg);
     }
@@ -138,7 +139,8 @@ TEST_CASE("ExternalPluginExtractor full lifecycle", "[extraction][external_plugi
 
 TEST_CASE("ExternalPluginExtractor multiple extractions", "[extraction][external_plugin]") {
     // Navigate from source file location to fixtures directory
-    auto plugin_path = fs::path(__FILE__).parent_path().parent_path().parent_path() / "fixtures" / "mock_plugin.py";
+    auto plugin_path = fs::path(__FILE__).parent_path().parent_path().parent_path() / "fixtures" /
+                       "mock_plugin.py";
 
     INFO("Plugin path: " << plugin_path.string());
     REQUIRE(fs::exists(plugin_path));
@@ -146,7 +148,7 @@ TEST_CASE("ExternalPluginExtractor multiple extractions", "[extraction][external
     auto config = ExternalPluginExtractorConfig{}
                       .with_executable(getPythonExecutable())
                       .with_timeout(std::chrono::milliseconds(3000));
-    
+
     for (const auto& arg : getPythonArgs()) {
         config = std::move(config).with_arg(arg);
     }
@@ -181,15 +183,15 @@ TEST_CASE("ExternalPluginExtractor invalid executable", "[extraction][external_p
 
 TEST_CASE("ExternalPluginExtractor RAII cleanup", "[extraction][external_plugin]") {
     // Navigate from source file location to fixtures directory
-    auto plugin_path = fs::path(__FILE__).parent_path().parent_path().parent_path() / "fixtures" / "mock_plugin.py";
+    auto plugin_path = fs::path(__FILE__).parent_path().parent_path().parent_path() / "fixtures" /
+                       "mock_plugin.py";
 
     INFO("Plugin path: " << plugin_path.string());
     REQUIRE(fs::exists(plugin_path));
 
     {
-        auto config = ExternalPluginExtractorConfig{}
-                          .with_executable(getPythonExecutable());
-        
+        auto config = ExternalPluginExtractorConfig{}.with_executable(getPythonExecutable());
+
         for (const auto& arg : getPythonArgs()) {
             config = std::move(config).with_arg(arg);
         }

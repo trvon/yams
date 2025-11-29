@@ -225,7 +225,8 @@ TEST_CASE("Socket memory pressure - native_handle safety",
         REQUIRE(connResult.has_value());
 
         // Let connection idle to trigger the timeout path that logs the fd
-        // From crash log line 371: "Closing idle connection after {} consecutive read timeouts (fd={})"
+        // From crash log line 371: "Closing idle connection after {} consecutive read timeouts
+        // (fd={})"
         std::this_thread::sleep_for(7s);
 
         // Try to reconnect - daemon should be stable
@@ -263,21 +264,21 @@ TEST_CASE("Socket memory pressure - stress test with mixed operations",
 
                     // Mix of operations
                     switch (op % 3) {
-                    case 0:
-                        // Quick status check
-                        {
-                            yams::cli::run_sync(client.status(), 1s);
-                        }
-                        break;
-                    case 1:
-                        // Idle timeout path
-                        std::this_thread::sleep_for(1s);
-                        break;
-                    case 2:
-                        // Rapid reconnect
-                        client.disconnect();
-                        yams::cli::run_sync(client.connect(), 2s);
-                        break;
+                        case 0:
+                            // Quick status check
+                            {
+                                yams::cli::run_sync(client.status(), 1s);
+                            }
+                            break;
+                        case 1:
+                            // Idle timeout path
+                            std::this_thread::sleep_for(1s);
+                            break;
+                        case 2:
+                            // Rapid reconnect
+                            client.disconnect();
+                            yams::cli::run_sync(client.connect(), 2s);
+                            break;
                     }
 
                     totalOps.fetch_add(1);

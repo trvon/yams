@@ -16,7 +16,8 @@
 // The daemon's connection handler coroutines crash during cleanup when sockets are forcibly closed
 // See: docs/developer/windows-daemon-ipc-plan.md
 #ifdef _WIN32
-#define SKIP_DAEMON_TEST_ON_WINDOWS() SKIP("Daemon IPC tests unstable on Windows - see windows-daemon-ipc-plan.md")
+#define SKIP_DAEMON_TEST_ON_WINDOWS()                                                              \
+    SKIP("Daemon IPC tests unstable on Windows - see windows-daemon-ipc-plan.md")
 #else
 #define SKIP_DAEMON_TEST_ON_WINDOWS() ((void)0)
 #endif
@@ -82,9 +83,7 @@ public:
 
         // Start runLoop in background thread - this triggers async initialization
         // Without runLoop(), ServiceManager::startAsyncInit() is never called
-        runLoopThread_ = std::thread([this]() {
-            daemon_->runLoop();
-        });
+        runLoopThread_ = std::thread([this]() { daemon_->runLoop(); });
         // Give runLoop time to enter and trigger async init
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         spdlog::info("[DaemonHarness] runLoop thread started, polling for daemon Ready state...");
@@ -264,7 +263,7 @@ private:
     }
 
     std::unique_ptr<yams::daemon::YamsDaemon> daemon_;
-    std::thread runLoopThread_;  // Background thread for runLoop
+    std::thread runLoopThread_; // Background thread for runLoop
     std::filesystem::path root_, data_, sock_, pid_, log_;
 };
 

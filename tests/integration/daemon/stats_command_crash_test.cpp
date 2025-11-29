@@ -22,8 +22,7 @@ using namespace yams::daemon;
 using namespace yams::test;
 using namespace std::chrono_literals;
 
-TEST_CASE("Stats command - missing requestCounts keys",
-          "[stats][command][crash][integration]") {
+TEST_CASE("Stats command - missing requestCounts keys", "[stats][command][crash][integration]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     DaemonHarness harness;
@@ -74,11 +73,10 @@ TEST_CASE("Stats command - missing requestCounts keys",
         const auto& st = sres.value();
 
         // Even if requestCounts is empty, we shouldn't crash
-        for (const char* key : {"storage_documents", "storage_logical_bytes",
-                                "storage_physical_bytes", "casDedupSavedBytes",
-                                "casCompressSavedBytes", "metadataPhysicalBytes",
-                                "indexPhysicalBytes", "vectorPhysicalBytes",
-                                "logsTmpPhysicalBytes"}) {
+        for (const char* key :
+             {"storage_documents", "storage_logical_bytes", "storage_physical_bytes",
+              "casDedupSavedBytes", "casCompressSavedBytes", "metadataPhysicalBytes",
+              "indexPhysicalBytes", "vectorPhysicalBytes", "logsTmpPhysicalBytes"}) {
             bool hasKey = st.requestCounts.count(key) > 0;
             INFO("Key '" << key << "' present: " << hasKey);
         }

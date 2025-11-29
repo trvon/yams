@@ -534,10 +534,10 @@ TEST(ContentStoreBuilderTest, DefaultBuild) {
 
         auto store = std::move(result).value();
         EXPECT_NE(store, nullptr);
-    }  // Store goes out of scope, releasing file locks
+    } // Store goes out of scope, releasing file locks
 
     std::error_code ec;
-    fs::remove_all(tempDir, ec);  // Ignore errors on cleanup
+    fs::remove_all(tempDir, ec); // Ignore errors on cleanup
 }
 
 TEST(ContentStoreBuilderTest, CustomConfig) {
@@ -552,10 +552,10 @@ TEST(ContentStoreBuilderTest, CustomConfig) {
         ContentStoreBuilder builder;
         auto result = builder.withConfig(config).build();
         ASSERT_TRUE(result.has_value());
-    }  // Builder/store goes out of scope, releasing file locks
+    } // Builder/store goes out of scope, releasing file locks
 
     std::error_code ec;
-    fs::remove_all(config.storagePath, ec);  // Ignore errors on cleanup
+    fs::remove_all(config.storagePath, ec); // Ignore errors on cleanup
 }
 
 TEST(ContentStoreBuilderTest, ValidationError) {

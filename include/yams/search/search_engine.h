@@ -33,8 +33,8 @@ struct SearchParams {
     int offset = 0;
 
     // Tag-based search parameters
-    std::vector<std::string> tags;  // Tags to search for
-    bool matchAllTags = false;      // true = AND, false = OR
+    std::vector<std::string> tags; // Tags to search for
+    bool matchAllTags = false;     // true = AND, false = OR
 
     // Metadata filters (boost matching documents, don't exclude)
     std::optional<std::string> mimeType;

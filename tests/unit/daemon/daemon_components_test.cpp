@@ -268,7 +268,7 @@ TEST_CASE("Socket path resolution: Priority ordering", "[daemon][components][soc
             REQUIRE(result.filename() == "yams-daemon-" + uid + ".sock");
         }
     }
-#endif  // !_WIN32
+#endif // !_WIN32
 
     // Cleanup
     std::error_code ec;
@@ -299,7 +299,7 @@ TEST_CASE("Socket path resolution: Config file reading", "[daemon][components][s
         auto result = socket_utils::resolve_socket_path_config_first();
         REQUIRE(result.string() == "/opt/yams/daemon.sock");
     }
-#endif  // !_WIN32
+#endif // !_WIN32
 
     SECTION("Invalid config falls back to default") {
         std::ofstream out(configFile);

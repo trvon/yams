@@ -570,9 +570,8 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
                      std::filesystem::path overrideSocket,
                      std::optional<boost::asio::any_io_executor> executor)
     : transport_(std::move(transport)), externalShutdown_(externalShutdown),
-      daemonSocketOverride_(std::move(overrideSocket)),
-      eagerReadyEnabled_(false), autoReadyEnabled_(false), strictProtocol_(true),
-      limitToolResultDup_(false) {
+      daemonSocketOverride_(std::move(overrideSocket)), eagerReadyEnabled_(false),
+      autoReadyEnabled_(false), strictProtocol_(true), limitToolResultDup_(false) {
     (void)executor; // Reserved for future use
     // Ensure logging goes to stderr to keep stdout clean for MCP framing
     if (auto existing = spdlog::get("yams-mcp")) {

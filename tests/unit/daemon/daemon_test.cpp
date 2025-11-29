@@ -14,9 +14,9 @@
 #include <yams/vector/vector_index_manager.h>
 
 #ifdef _WIN32
-#include <process.h>
-#include <io.h>
 #include <fcntl.h>
+#include <io.h>
+#include <process.h>
 #include <share.h>
 using pid_t = int;
 #define getpid _getpid
@@ -96,9 +96,7 @@ protected:
         if (!daemon_ || runLoopThread_.joinable()) {
             return;
         }
-        runLoopThread_ = std::thread([this]() {
-            daemon_->runLoop();
-        });
+        runLoopThread_ = std::thread([this]() { daemon_->runLoop(); });
         // Give runLoop time to enter and trigger async init
         std::this_thread::sleep_for(50ms);
     }
@@ -153,7 +151,7 @@ protected:
     DaemonConfig config_;
     std::unique_ptr<YamsDaemon> daemon_;
     fs::path runtime_root_;
-    std::thread runLoopThread_;  // Background thread for runLoop
+    std::thread runLoopThread_; // Background thread for runLoop
 };
 
 // Test daemon creation and destruction
@@ -814,7 +812,7 @@ TEST_F(DaemonTest, AsyncInitBarrierPreventsRaceCondition) {
     // The runLoop should wait for the async init barrier before entering its main loop
     std::atomic<bool> runLoopEntered{false};
     std::atomic<bool> runLoopExited{false};
-    
+
     std::thread runLoopThread([this, &runLoopEntered, &runLoopExited]() {
         runLoopEntered.store(true);
         daemon_->runLoop();

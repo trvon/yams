@@ -12,7 +12,8 @@
 
 // Grammar auto-download uses Unix shell commands (which, git clone, gcc) that don't work on Windows
 #ifdef _WIN32
-#define SKIP_ON_WINDOWS_NO_GRAMMAR() GTEST_SKIP() << "Solidity grammar auto-download not supported on Windows"
+#define SKIP_ON_WINDOWS_NO_GRAMMAR()                                                               \
+    GTEST_SKIP() << "Solidity grammar auto-download not supported on Windows"
 #else
 #define SKIP_ON_WINDOWS_NO_GRAMMAR() (void)0
 #endif

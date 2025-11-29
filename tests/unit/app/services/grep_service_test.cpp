@@ -167,10 +167,10 @@ TEST_CASE("GrepService - Basic Functionality", "[grep][service][basic]") {
     }
 
     SECTION("Hybrid mode includes semantic suggestions") {
-        // Skip semantic search on Windows - ONNX initialization hangs
-        #ifdef _WIN32
+// Skip semantic search on Windows - ONNX initialization hangs
+#ifdef _WIN32
         SKIP("Semantic search unavailable on Windows - ONNX init issues");
-        #endif
+#endif
 
         GrepRequest req;
 
@@ -221,10 +221,10 @@ TEST_CASE("GrepService - Output Modes", "[grep][service][modes]") {
     fixture.addDocument("a.txt", "programming content\n");
 
     SECTION("Count mode allows semantic suggestions") {
-        // Skip semantic search on Windows - ONNX initialization hangs
-        #ifdef _WIN32
+// Skip semantic search on Windows - ONNX initialization hangs
+#ifdef _WIN32
         SKIP("Semantic search unavailable on Windows - ONNX init issues");
-        #endif
+#endif
 
         GrepRequest req;
 
@@ -243,10 +243,10 @@ TEST_CASE("GrepService - Output Modes", "[grep][service][modes]") {
     }
 
     SECTION("Files-only mode allows semantic suggestions") {
-        // Skip semantic search on Windows - ONNX initialization hangs
-        #ifdef _WIN32
+// Skip semantic search on Windows - ONNX initialization hangs
+#ifdef _WIN32
         SKIP("Semantic search unavailable on Windows - ONNX init issues");
-        #endif
+#endif
 
         GrepRequest req;
 
@@ -265,10 +265,10 @@ TEST_CASE("GrepService - Output Modes", "[grep][service][modes]") {
     }
 
     SECTION("Paths-only mode allows semantic suggestions") {
-        // Skip semantic search on Windows - ONNX initialization hangs
-        #ifdef _WIN32
+// Skip semantic search on Windows - ONNX initialization hangs
+#ifdef _WIN32
         SKIP("Semantic search unavailable on Windows - ONNX init issues");
-        #endif
+#endif
 
         GrepRequest req;
 

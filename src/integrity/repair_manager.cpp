@@ -367,8 +367,8 @@ RepairManager::repairPathTree(std::function<void(uint64_t, uint64_t)> progress) 
 
         // Create path tree entry for this document
         try {
-            auto treeRes = repo_->upsertPathTreeForDocument(
-                doc, doc.id, true /* isNewDocument */, std::span<const float>());
+            auto treeRes = repo_->upsertPathTreeForDocument(doc, doc.id, true /* isNewDocument */,
+                                                            std::span<const float>());
             if (treeRes) {
                 result.nodesCreated++;
                 spdlog::debug("Path tree repair: created entry for '{}'", doc.filePath);
@@ -390,8 +390,8 @@ RepairManager::repairPathTree(std::function<void(uint64_t, uint64_t)> progress) 
         progress(total, total);
     }
 
-    spdlog::info("Path tree repair complete: scanned={} created={} errors={}", result.documentsScanned,
-                 result.nodesCreated, result.errors);
+    spdlog::info("Path tree repair complete: scanned={} created={} errors={}",
+                 result.documentsScanned, result.nodesCreated, result.errors);
 
     return result;
 }

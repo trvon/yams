@@ -352,8 +352,8 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
 
                 // Get socket handle BEFORE any potential close operations to avoid use-after-free
                 const uint64_t sock_fd = sock && sock->is_open()
-                    ? static_cast<uint64_t>(sock->native_handle())
-                    : static_cast<uint64_t>(-1);
+                                             ? static_cast<uint64_t>(sock->native_handle())
+                                             : static_cast<uint64_t>(-1);
 
                 spdlog::debug(
                     "Read timeout (persistent) on socket {} after {} ms — keeping connection open",
@@ -1174,8 +1174,8 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
         if (config_.close_after_response) {
             // Get socket fd BEFORE closing to avoid use-after-free
             const uint64_t sock_fd = socket.is_open()
-                ? static_cast<uint64_t>(socket.native_handle())
-                : static_cast<uint64_t>(-1);
+                                         ? static_cast<uint64_t>(socket.native_handle())
+                                         : static_cast<uint64_t>(-1);
 
             // Optional graceful half-close: shutdown send side then briefly drain peer
             if (config_.graceful_half_close) {
@@ -1200,8 +1200,8 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
             }
         } else {
             const uint64_t sock_fd = socket.is_open()
-                ? static_cast<uint64_t>(socket.native_handle())
-                : static_cast<uint64_t>(-1);
+                                         ? static_cast<uint64_t>(socket.native_handle())
+                                         : static_cast<uint64_t>(-1);
             spdlog::debug("keeping socket open after response (request_id={} fd={})", request_id,
                           sock_fd);
         }
@@ -1868,9 +1868,8 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
     spdlog::debug("Sent {} chunks for streaming response (request_id={})", chunk_count, request_id);
     if (config_.close_after_response) {
         // Get socket fd BEFORE closing to avoid use-after-free
-        const uint64_t sock_fd = socket.is_open()
-            ? static_cast<uint64_t>(socket.native_handle())
-            : static_cast<uint64_t>(-1);
+        const uint64_t sock_fd = socket.is_open() ? static_cast<uint64_t>(socket.native_handle())
+                                                  : static_cast<uint64_t>(-1);
 
         if (config_.graceful_half_close) {
             boost::system::error_code ig;
@@ -1895,9 +1894,8 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
             fsm->on_close_request();
         }
     } else {
-        const uint64_t sock_fd = socket.is_open()
-            ? static_cast<uint64_t>(socket.native_handle())
-            : static_cast<uint64_t>(-1);
+        const uint64_t sock_fd = socket.is_open() ? static_cast<uint64_t>(socket.native_handle())
+                                                  : static_cast<uint64_t>(-1);
         spdlog::debug("keeping socket open after streaming response (request_id={} fd={})",
                       request_id, sock_fd);
     }

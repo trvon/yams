@@ -16,7 +16,8 @@
 
 // Windows daemon tests are currently unstable - AF_UNIX socket shutdown crashes
 #ifdef _WIN32
-#define SKIP_DAEMON_TEST_ON_WINDOWS() SKIP("Daemon tests unstable on Windows - see windows-daemon-ipc-plan.md")
+#define SKIP_DAEMON_TEST_ON_WINDOWS()                                                              \
+    SKIP("Daemon tests unstable on Windows - see windows-daemon-ipc-plan.md")
 #else
 #define SKIP_DAEMON_TEST_ON_WINDOWS() ((void)0)
 #endif

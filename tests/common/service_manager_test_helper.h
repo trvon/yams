@@ -32,8 +32,8 @@ initializeServiceManagerFully(std::shared_ptr<yams::daemon::ServiceManager> serv
 
     serviceManager->startAsyncInit();
 
-    int timeoutSeconds = static_cast<int>(
-        std::chrono::duration_cast<std::chrono::seconds>(timeout).count());
+    int timeoutSeconds =
+        static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(timeout).count());
     auto snapshot = serviceManager->waitForServiceManagerTerminalState(timeoutSeconds);
 
     if (snapshot.state == yams::daemon::ServiceManagerState::Ready) {
@@ -65,4 +65,4 @@ waitForPostIngestQueue(std::shared_ptr<yams::daemon::ServiceManager> serviceMana
     return nullptr;
 }
 
-}
+} // namespace yams::test

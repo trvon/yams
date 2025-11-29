@@ -111,10 +111,10 @@ TEST_CASE("Service Utils - Path Normalization", "[utils][service][paths]") {
             CHECK_FALSE(result.hasWildcards);
             CHECK(fs::weakly_canonical(targetFile).string() == result.normalized);
             CHECK(result.original == "./nested/../nested/file.txt");
-        }  // cwdScope destructor restores original CWD before cleanup
+        } // cwdScope destructor restores original CWD before cleanup
 
         std::error_code ec;
-        fs::remove_all(tempRoot, ec);  // Ignore errors on cleanup
+        fs::remove_all(tempRoot, ec); // Ignore errors on cleanup
     }
 
     SECTION("Glob inputs canonicalize directory prefix but preserve pattern") {

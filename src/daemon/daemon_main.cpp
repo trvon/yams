@@ -797,7 +797,7 @@ int main(int argc, char* argv[]) {
         // On Windows, avoid creating extra threads due to thread resource limits.
         // Instead, integrate signal checking into the main loop.
         // The daemon's runLoop already has a periodic tick, so we check signals there.
-        
+
         // Set up a hook for the daemon to check our global signal flags
         auto hookLambda = [&daemon]() {
             if (g_shutdown_requested.load(std::memory_order_relaxed)) {
@@ -828,7 +828,7 @@ int main(int argc, char* argv[]) {
         spdlog::info("Calling daemon.runLoop()...");
         daemon.runLoop();
         spdlog::info("daemon.runLoop() returned");
-        
+
         // Log reason for exit
         spdlog::info("Main loop exiting: isRunning={}, isStopRequested={}, g_shutdown_requested={}",
                      daemon.isRunning(), daemon.isStopRequested(), g_shutdown_requested.load());

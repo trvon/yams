@@ -132,8 +132,9 @@ public:
         };
         bool completed = cv_.wait_for(lock, std::chrono::seconds(timeoutSeconds), pred);
         if (!completed) {
-            spdlog::warn("[ServiceManagerFSM] waitForTerminalState timed out after {}s, current state={}",
-                         timeoutSeconds, static_cast<int>(snap_.state));
+            spdlog::warn(
+                "[ServiceManagerFSM] waitForTerminalState timed out after {}s, current state={}",
+                timeoutSeconds, static_cast<int>(snap_.state));
         }
         return snap_;
     }
@@ -153,8 +154,7 @@ private:
                          static_cast<int>(next));
         } catch (...) {
         }
-        if (next == ServiceManagerState::Ready ||
-            next == ServiceManagerState::Failed ||
+        if (next == ServiceManagerState::Ready || next == ServiceManagerState::Failed ||
             next == ServiceManagerState::Stopped) {
             cv_.notify_all();
         }

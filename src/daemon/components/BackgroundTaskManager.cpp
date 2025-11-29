@@ -492,7 +492,6 @@ void BackgroundTaskManager::launchPathTreeRepairTask() {
             spdlog::info("[PathTreeRepair] Starting path tree repair scan");
 
             try {
-
                 auto result = repairMgr->repairPathTree([](uint64_t current, uint64_t total) {
                     if (current % 500 == 0 && total > 0) {
                         spdlog::debug("[PathTreeRepair] Progress: {}/{}", current, total);

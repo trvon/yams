@@ -375,8 +375,7 @@ public:
     }
 
     std::vector<MaterializedItem>
-    getDocumentsFromTree(std::size_t limit,
-                         const std::optional<std::string>& name) const override {
+    getDocumentsFromTree(std::size_t limit, const std::optional<std::string>& name) const override {
         std::vector<MaterializedItem> out;
         auto use = name ? *name : current().value_or("");
         if (use.empty() || !ctx_ || !ctx_->metadataRepo)

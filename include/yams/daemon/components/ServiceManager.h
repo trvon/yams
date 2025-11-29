@@ -48,7 +48,6 @@
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/extraction/content_extractor.h>
 
-
 // Forward declarations for services
 namespace yams::api {
 class IContentStore;

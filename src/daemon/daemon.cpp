@@ -322,7 +322,8 @@ void YamsDaemon::runLoop() {
 
         initWaiterThread_ = std::thread([this]() {
             set_current_thread_name("yams-init-waiter");
-            spdlog::info("[InitWaiter] Thread started, waiting for ServiceManager terminal state...");
+            spdlog::info(
+                "[InitWaiter] Thread started, waiting for ServiceManager terminal state...");
 
             auto snapshot = serviceManager_->waitForServiceManagerTerminalState(300);
 
@@ -334,7 +335,8 @@ void YamsDaemon::runLoop() {
             initHandled_.store(true, std::memory_order_release);
 
             if (snapshot.state == ServiceManagerState::Ready) {
-                spdlog::info("[InitWaiter] ServiceManager reached Ready state, dispatching HealthyEvent");
+                spdlog::info(
+                    "[InitWaiter] ServiceManager reached Ready state, dispatching HealthyEvent");
                 lifecycleFsm_.dispatch(HealthyEvent{});
                 try {
                     if (metrics_) {

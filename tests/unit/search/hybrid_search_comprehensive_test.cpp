@@ -52,7 +52,8 @@
 // Windows: ONNX runtime global cleanup causes crashes even when tests pass.
 // Skip all hybrid search tests on Windows until ONNX compatibility is resolved.
 #ifdef _WIN32
-#define SKIP_HYBRID_ON_WINDOWS() SKIP("HybridSearch tests crash on Windows due to ONNX cleanup issues")
+#define SKIP_HYBRID_ON_WINDOWS()                                                                   \
+    SKIP("HybridSearch tests crash on Windows due to ONNX cleanup issues")
 #else
 #define SKIP_HYBRID_ON_WINDOWS() ((void)0)
 #endif
@@ -236,15 +237,15 @@ private:
         appContext_.searchExecutor = nullptr; // Optional
         appContext_.workerExecutor = boost::asio::system_executor();
 
-        // Initialize hybrid search engine for integration testing
-        // Note: This requires vector DB and embeddings to be available
-        // Tests will skip when YAMS_DISABLE_VECTORS is set or embeddings unavailable
-        // On Windows, ONNX initialization hangs - always skip vectors
-        #ifdef _WIN32
+// Initialize hybrid search engine for integration testing
+// Note: This requires vector DB and embeddings to be available
+// Tests will skip when YAMS_DISABLE_VECTORS is set or embeddings unavailable
+// On Windows, ONNX initialization hangs - always skip vectors
+#ifdef _WIN32
         const bool skipVectors = true;
-        #else
+#else
         const bool skipVectors = (std::getenv("YAMS_DISABLE_VECTORS") != nullptr);
-        #endif
+#endif
 
         if (!skipVectors) {
             try {

@@ -333,9 +333,7 @@ void ServiceManager::refreshPluginStatusSnapshot() {
 
 ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state,
                                DaemonLifecycleFsm& lifecycleFsm)
-    : config_(config),
-      state_(state),
-      lifecycleFsm_(lifecycleFsm) {
+    : config_(config), state_(state), lifecycleFsm_(lifecycleFsm) {
     spdlog::debug("[ServiceManager] Constructor start");
     tuningConfig_ = config_.tuning;
 
@@ -1603,7 +1601,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     // Defer Vector DB init to post-plugins phase; skip here
     spdlog::info("[ServiceManager] Phase: Vector DB Init (skipped pre-plugins).");
     spdlog::debug("ServiceManager(co): Initializing daemon resources");
-    spdlog::default_logger()->flush();  // Flush before potentially crashing
+    spdlog::default_logger()->flush(); // Flush before potentially crashing
     writeBootstrapStatusFile(config_, state_);
     spdlog::debug("ServiceManager(co): writeBootstrapStatusFile done");
     spdlog::default_logger()->flush();

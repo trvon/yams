@@ -83,9 +83,9 @@ std::string getPythonExecutable() {
         return python_env;
     }
 #ifdef _WIN32
-    return "python";  // Windows uses 'python' not 'python3'
+    return "python"; // Windows uses 'python' not 'python3'
 #else
-    return "python3";  // Unix typically uses python3
+    return "python3"; // Unix typically uses python3
 #endif
 }
 
@@ -93,15 +93,16 @@ std::string getPythonExecutable() {
 std::filesystem::path getMockPluginPath() {
     // __FILE__ is tests/unit/extraction/plugin_process_test.cpp
     // Navigate up 3 levels to tests/, then into fixtures/
-    return std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() / "fixtures" / "mock_plugin.py";
+    return std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() / "fixtures" /
+           "mock_plugin.py";
 }
-}  // namespace
+} // namespace
 
 TEST_CASE("PluginProcess spawns and terminates", "[extraction][plugin]") {
     // Get Python interpreter and mock plugin path
     std::string python = getPythonExecutable();
     std::filesystem::path mock_plugin = getMockPluginPath();
-    
+
     INFO("Python executable: " << python);
     INFO("Mock plugin path: " << mock_plugin.string());
     REQUIRE(std::filesystem::exists(mock_plugin));
@@ -164,7 +165,7 @@ TEST_CASE("PluginProcess spawns and terminates", "[extraction][plugin]") {
 TEST_CASE("PluginProcess I/O communication", "[extraction][plugin]") {
     std::string python = getPythonExecutable();
     std::filesystem::path mock_plugin = getMockPluginPath();
-    
+
     INFO("Python executable: " << python);
     INFO("Mock plugin path: " << mock_plugin.string());
     REQUIRE(std::filesystem::exists(mock_plugin));
@@ -257,7 +258,7 @@ TEST_CASE("PluginProcess I/O communication", "[extraction][plugin]") {
 TEST_CASE("PluginProcess builder pattern configuration", "[extraction][plugin]") {
     std::string python = getPythonExecutable();
     std::filesystem::path mock_plugin = getMockPluginPath();
-    
+
     INFO("Python executable: " << python);
     INFO("Mock plugin path: " << mock_plugin.string());
     REQUIRE(std::filesystem::exists(mock_plugin));
@@ -325,7 +326,7 @@ TEST_CASE("PluginProcess stderr capture", "[extraction][plugin]") {
         .executable = python, .args = {stderr_test.string()}, .redirect_stderr = true};
 
     PluginProcess process{std::move(config)};
-    
+
     // Wait for Python to start and write to stderr - Windows needs more time
     std::span<const std::byte> stderr_data;
     auto start = std::chrono::steady_clock::now();

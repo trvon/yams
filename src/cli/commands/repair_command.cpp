@@ -24,11 +24,11 @@
 #include <yams/daemon/client/asio_transport.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/extraction/extraction_util.h>
+#include <yams/integrity/repair_manager.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
 #include <yams/vector/vector_index_manager.h>
-#include <yams/integrity/repair_manager.h>
 
 namespace yams::cli {
 

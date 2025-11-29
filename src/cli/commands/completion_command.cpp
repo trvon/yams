@@ -51,8 +51,8 @@ Result<void> CompletionCommand::execute() {
 
 std::vector<std::string> CompletionCommand::getAvailableCommands() const {
     // Keep in sync with command list in yams_cli.cpp:175
-    return {"init",  "add",       "get",     "delete", "list",   "search", "config",    "auth",
-            "stats", "uninstall", "migrate", "update", "serve",  "completion", "model"};
+    return {"init",  "add",       "get",     "delete", "list",  "search",     "config", "auth",
+            "stats", "uninstall", "migrate", "update", "serve", "completion", "model"};
 }
 
 std::vector<std::string> CompletionCommand::getGlobalFlags() const {

@@ -406,8 +406,8 @@ TEST_F(MetadataRepositoryTest, FuzzySearchReturnsContentMatches) {
     ASSERT_TRUE(contentInsertResult.has_value());
 
     // Also index for FTS5 search
-    auto indexResult = repository_->indexDocumentContent(
-        docId, doc.fileName, contentText, "text/plain");
+    auto indexResult =
+        repository_->indexDocumentContent(docId, doc.fileName, contentText, "text/plain");
     ASSERT_TRUE(indexResult.has_value());
 
     // Build the fuzzy index so the content-based entry is materialized.

@@ -776,8 +776,7 @@ SearchEngine::Impl::queryTags(const std::vector<std::string>& tags, bool matchAl
             return results;
         }
 
-        for (size_t rank = 0; rank < tagResults.value().size() &&
-                             rank < config_.tagMaxResults;
+        for (size_t rank = 0; rank < tagResults.value().size() && rank < config_.tagMaxResults;
              ++rank) {
             const auto& doc = tagResults.value()[rank];
 
@@ -801,8 +800,7 @@ SearchEngine::Impl::queryTags(const std::vector<std::string>& tags, bool matchAl
                             matchCount++;
                         }
                     }
-                    result.score =
-                        static_cast<float>(matchCount) / static_cast<float>(tags.size());
+                    result.score = static_cast<float>(matchCount) / static_cast<float>(tags.size());
                 } else {
                     result.score = 0.5f;
                 }
@@ -826,8 +824,7 @@ SearchEngine::Impl::queryTags(const std::vector<std::string>& tags, bool matchAl
     return results;
 }
 
-Result<std::vector<ComponentResult>>
-SearchEngine::Impl::queryMetadata(const SearchParams& params) {
+Result<std::vector<ComponentResult>> SearchEngine::Impl::queryMetadata(const SearchParams& params) {
     std::vector<ComponentResult> results;
 
     if (!metadataRepo_) {

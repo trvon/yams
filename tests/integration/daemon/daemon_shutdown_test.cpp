@@ -30,7 +30,7 @@ DaemonClient createClient(const std::filesystem::path& socketPath,
 
 TEST_CASE("Daemon shutdown timing", "[daemon][shutdown][timing]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
-    
+
     DaemonHarness harness;
     REQUIRE(harness.start());
 
@@ -49,7 +49,7 @@ TEST_CASE("Daemon shutdown timing", "[daemon][shutdown][timing]") {
 
 TEST_CASE("Daemon shutdown with in-flight operations", "[daemon][shutdown][operations]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
-    
+
     DaemonHarness harness;
     REQUIRE(harness.start());
 
@@ -116,7 +116,7 @@ TEST_CASE("Daemon shutdown with in-flight operations", "[daemon][shutdown][opera
 
 TEST_CASE("Daemon shutdown idempotency", "[daemon][shutdown][idempotent]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
-    
+
     DaemonHarness harness;
     REQUIRE(harness.start());
 
@@ -155,7 +155,7 @@ TEST_CASE("Daemon shutdown idempotency", "[daemon][shutdown][idempotent]") {
 
 TEST_CASE("Daemon shutdown after operations", "[daemon][shutdown][lifecycle]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
-    
+
     DaemonHarness harness;
     REQUIRE(harness.start());
 
@@ -196,7 +196,7 @@ TEST_CASE("Daemon shutdown after operations", "[daemon][shutdown][lifecycle]") {
 
 TEST_CASE("Daemon shutdown under load", "[daemon][shutdown][stress]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
-    
+
     DaemonHarness harness;
     REQUIRE(harness.start());
 
@@ -243,7 +243,7 @@ TEST_CASE("Daemon shutdown under load", "[daemon][shutdown][stress]") {
 
 TEST_CASE("Daemon graceful shutdown behavior", "[daemon][shutdown][graceful]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
-    
+
     SECTION("daemon stops after shutdown request") {
         DaemonHarness harness;
         REQUIRE(harness.start());

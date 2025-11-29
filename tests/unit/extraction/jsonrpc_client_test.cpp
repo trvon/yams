@@ -14,9 +14,9 @@ std::string getPythonExecutable() {
         return python_env;
     }
 #ifdef _WIN32
-    return "python";  // Windows uses 'python' not 'python3'
+    return "python"; // Windows uses 'python' not 'python3'
 #else
-    return "python3";  // Unix typically uses python3
+    return "python3"; // Unix typically uses python3
 #endif
 }
 
@@ -24,14 +24,15 @@ std::string getPythonExecutable() {
 std::filesystem::path getMockPluginPath() {
     // __FILE__ is tests/unit/extraction/jsonrpc_client_test.cpp
     // Navigate up 3 levels to tests/, then into fixtures/
-    return std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() / "fixtures" / "mock_plugin.py";
+    return std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() / "fixtures" /
+           "mock_plugin.py";
 }
-}  // namespace
+} // namespace
 
 TEST_CASE("JsonRpcClient basic communication", "[extraction][jsonrpc]") {
     std::string python = getPythonExecutable();
     std::filesystem::path mock_plugin = getMockPluginPath();
-    
+
     INFO("Python executable: " << python);
     INFO("Mock plugin path: " << mock_plugin.string());
     REQUIRE(std::filesystem::exists(mock_plugin));
@@ -97,7 +98,7 @@ TEST_CASE("JsonRpcClient basic communication", "[extraction][jsonrpc]") {
 TEST_CASE("JsonRpcClient typed calls", "[extraction][jsonrpc]") {
     std::string python = getPythonExecutable();
     std::filesystem::path mock_plugin = getMockPluginPath();
-    
+
     INFO("Python executable: " << python);
     INFO("Mock plugin path: " << mock_plugin.string());
     REQUIRE(std::filesystem::exists(mock_plugin));
