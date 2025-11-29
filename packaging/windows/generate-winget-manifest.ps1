@@ -229,3 +229,6 @@ Write-Host "  2. Copy manifests to: manifests/y/YAMSProject/YAMS/$Version/" -For
 Write-Host "  3. Create a pull request" -ForegroundColor White
 Write-Host "`nOr use wingetcreate:" -ForegroundColor Cyan
 Write-Host "  wingetcreate submit $manifestDir" -ForegroundColor White
+
+# Explicitly exit with success
+exit 0

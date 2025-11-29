@@ -35,6 +35,14 @@ else
     'writer_drain_test.cpp',
   )
 
+  socket_memory_pressure_srcs = files(
+    'socket_memory_pressure_test.cpp',
+  )
+
+  stats_command_crash_srcs = files(
+    'stats_command_crash_test.cpp',
+  )
+
   dbg = (get_option('buildtype') == 'debug')
   if (get_option('enable-integration-tests') or dbg) and (get_option('enable-daemon-integration') or dbg)
     # Catch2 needs its main library
@@ -168,6 +176,44 @@ else
     test('writer_drain',
       writer_drain_exe,
       suite: ['integration', 'daemon', 'catch2', 'writer-drain', 'streaming'],
+      env: {
+        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+        'YAMS_DISABLE_VECTORS': '1',
+      },
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+    )
+
+    socket_memory_pressure_exe = executable('yams_socket_memory_pressure_tests_catch2',
+      socket_memory_pressure_srcs,
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep, test_deps],
+      cpp_args: ['-DYAMS_TESTING=1'],
+      install: false,
+    )
+
+    test('socket_memory_pressure',
+      socket_memory_pressure_exe,
+      suite: ['integration', 'daemon', 'catch2', 'socket', 'memory-pressure', 'crash'],
+      env: {
+        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+        'YAMS_DISABLE_VECTORS': '1',
+      },
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+    )
+
+    stats_command_crash_exe = executable('yams_stats_command_crash_tests_catch2',
+      stats_command_crash_srcs,
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep, test_deps],
+      cpp_args: ['-DYAMS_TESTING=1'],
+      install: false,
+    )
+
+    test('stats_command_crash',
+      stats_command_crash_exe,
+      suite: ['integration', 'daemon', 'catch2', 'stats', 'crash'],
       env: {
         'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
         'YAMS_DISABLE_VECTORS': '1',

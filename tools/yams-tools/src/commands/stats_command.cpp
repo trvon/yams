@@ -84,55 +84,56 @@ public:
                 if (!sres)
                     break;
                 const auto& st = sres.value();
+
+                // Safe helper to get value from requestCounts without throwing
+                auto safeGet = [&](const char* key) -> int64_t {
+                    auto it = st.requestCounts.find(key);
+                    return (it != st.requestCounts.end()) ? it->second : 0;
+                };
+
                 // Render a compact breakdown using requestCounts keys if present
                 if (outputFormat_ == "json") {
                     nlohmann::json j;
-                    j["docs"] = st.requestCounts.count("storage_documents")
-                                    ? st.requestCounts.at("storage_documents")
-                                    : 0;
-                    j["logical_bytes"] = st.requestCounts.count("storage_logical_bytes")
-                                             ? st.requestCounts.at("storage_logical_bytes")
-                                             : 0;
-                    j["physical_bytes"] = st.requestCounts.count("storage_physical_bytes")
-                                              ? st.requestCounts.at("storage_physical_bytes")
-                                              : 0;
+                    j["docs"] = safeGet("storage_documents");
+                    j["logical_bytes"] = safeGet("storage_logical_bytes");
+                    j["physical_bytes"] = safeGet("storage_physical_bytes");
+
                     // CAS savings if available
-                    if (st.requestCounts.count("casDedupSavedBytes"))
-                        j["cas_dedup_saved_bytes"] = st.requestCounts.at("casDedupSavedBytes");
-                    if (st.requestCounts.count("casCompressSavedBytes"))
-                        j["cas_compress_saved_bytes"] =
-                            st.requestCounts.at("casCompressSavedBytes");
+                    int64_t dedupSaved = safeGet("casDedupSavedBytes");
+                    int64_t compressSaved = safeGet("casCompressSavedBytes");
+                    if (dedupSaved > 0)
+                        j["cas_dedup_saved_bytes"] = dedupSaved;
+                    if (compressSaved > 0)
+                        j["cas_compress_saved_bytes"] = compressSaved;
+
                     // Overheads if available
                     const char* overheadKeys[] = {"metadataPhysicalBytes", "indexPhysicalBytes",
                                                   "vectorPhysicalBytes", "logsTmpPhysicalBytes"};
                     for (auto* k : overheadKeys) {
-                        if (st.requestCounts.count(k))
-                            j["overhead"][k] = st.requestCounts.at(k);
+                        int64_t val = safeGet(k);
+                        if (val > 0)
+                            j["overhead"][k] = val;
                     }
                     std::cout << j.dump(2) << std::endl;
                 } else {
                     auto fmt = [&](const char* k) -> std::string {
-                        if (!st.requestCounts.count(k))
+                        int64_t val = safeGet(k);
+                        if (val == 0)
                             return std::string("n/a");
-                        return formatSize(static_cast<uint64_t>(st.requestCounts.at(k)));
+                        return formatSize(static_cast<uint64_t>(val));
                     };
-                    uint64_t docs = st.requestCounts.count("storage_documents")
-                                        ? st.requestCounts.at("storage_documents")
-                                        : 0;
+
+                    uint64_t docs = static_cast<uint64_t>(std::max<int64_t>(0, safeGet("storage_documents")));
                     std::cout << "STOR : ok, docs=" << docs
                               << ", logical=" << fmt("storage_logical_bytes")
                               << ", physical=" << fmt("storage_physical_bytes");
+
                     // Show savings if available
-                    if (st.requestCounts.count("casDedupSavedBytes") ||
-                        st.requestCounts.count("casCompressSavedBytes")) {
-                        std::cout << ", saved="
-                                  << formatSize(static_cast<uint64_t>(
-                                         (st.requestCounts.count("casDedupSavedBytes")
-                                              ? st.requestCounts.at("casDedupSavedBytes")
-                                              : 0) +
-                                         (st.requestCounts.count("casCompressSavedBytes")
-                                              ? st.requestCounts.at("casCompressSavedBytes")
-                                              : 0)))
+                    int64_t dedupSaved = safeGet("casDedupSavedBytes");
+                    int64_t compressSaved = safeGet("casCompressSavedBytes");
+                    int64_t totalSaved = dedupSaved + compressSaved;
+                    if (totalSaved > 0) {
+                        std::cout << ", saved=" << formatSize(static_cast<uint64_t>(totalSaved))
                                   << " (dedup=" << fmt("casDedupSavedBytes")
                                   << ", compress=" << fmt("casCompressSavedBytes") << ")";
                     }

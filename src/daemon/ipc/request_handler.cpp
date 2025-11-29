@@ -349,9 +349,15 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                 // IMPORTANT: Do not signal FSM on idle timeouts. The FSM's on_timeout()
                 // is reserved for operation deadlines (header/payload/write). Calling it
                 // while in Connected (idle) can spuriously transition to Error.
+
+                // Get socket handle BEFORE any potential close operations to avoid use-after-free
+                const uint64_t sock_fd = sock && sock->is_open()
+                    ? static_cast<uint64_t>(sock->native_handle())
+                    : static_cast<uint64_t>(-1);
+
                 spdlog::debug(
                     "Read timeout (persistent) on socket {} after {} ms — keeping connection open",
-                    (uint64_t)sock->native_handle(),
+                    sock_fd,
                     std::chrono::duration_cast<std::chrono::milliseconds>(config_.read_timeout)
                         .count());
                 // Bound idle lifetime to avoid FD/backlog exhaustion if clients vanish silently
@@ -364,12 +370,11 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                         spdlog::warn("Closing idle connection with {} in-flight requests after {} "
                                      "timeouts (fd={}) - "
                                      "client likely stopped reading",
-                                     inflight, consecutive_idle_timeouts,
-                                     (uint64_t)sock->native_handle());
+                                     inflight, consecutive_idle_timeouts, sock_fd);
                     } else {
                         spdlog::info(
                             "Closing idle connection after {} consecutive read timeouts (fd={})",
-                            consecutive_idle_timeouts, (uint64_t)sock->native_handle());
+                            consecutive_idle_timeouts, sock_fd);
                     }
                     boost::system::error_code ignore_ec;
                     sock->close(ignore_ec);
@@ -1167,6 +1172,11 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
                 config_.close_after_response, ConnectionFsm::to_string(fsm->state()), request_id);
         }
         if (config_.close_after_response) {
+            // Get socket fd BEFORE closing to avoid use-after-free
+            const uint64_t sock_fd = socket.is_open()
+                ? static_cast<uint64_t>(socket.native_handle())
+                : static_cast<uint64_t>(-1);
+
             // Optional graceful half-close: shutdown send side then briefly drain peer
             if (config_.graceful_half_close) {
                 boost::system::error_code ig;
@@ -1182,15 +1192,18 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
                 // Close regardless after drain/timeout
                 socket.close();
                 spdlog::debug("graceful half-close complete (request_id={} fd={})", request_id,
-                              (uint64_t)socket.native_handle());
+                              sock_fd);
             } else {
                 spdlog::debug("closing socket after response (request_id={} fd={})", request_id,
-                              (uint64_t)socket.native_handle());
+                              sock_fd);
                 socket.close();
             }
         } else {
+            const uint64_t sock_fd = socket.is_open()
+                ? static_cast<uint64_t>(socket.native_handle())
+                : static_cast<uint64_t>(-1);
             spdlog::debug("keeping socket open after response (request_id={} fd={})", request_id,
-                          (uint64_t)socket.native_handle());
+                          sock_fd);
         }
 
         auto duration = std::chrono::steady_clock::now() - start_time;
@@ -1854,6 +1867,11 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
 
     spdlog::debug("Sent {} chunks for streaming response (request_id={})", chunk_count, request_id);
     if (config_.close_after_response) {
+        // Get socket fd BEFORE closing to avoid use-after-free
+        const uint64_t sock_fd = socket.is_open()
+            ? static_cast<uint64_t>(socket.native_handle())
+            : static_cast<uint64_t>(-1);
+
         if (config_.graceful_half_close) {
             boost::system::error_code ig;
             socket.shutdown(boost::asio::socket_base::shutdown_send, ig);
@@ -1867,18 +1885,21 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                       timer.async_wait(boost::asio::use_awaitable));
             socket.close();
             spdlog::debug("graceful half-close complete (streaming) (request_id={} fd={})",
-                          request_id, (uint64_t)socket.native_handle());
+                          request_id, sock_fd);
         } else {
             spdlog::debug("closing socket after streaming response (request_id={} fd={})",
-                          request_id, (uint64_t)socket.native_handle());
+                          request_id, sock_fd);
             socket.close();
         }
         if (fsm) {
             fsm->on_close_request();
         }
     } else {
+        const uint64_t sock_fd = socket.is_open()
+            ? static_cast<uint64_t>(socket.native_handle())
+            : static_cast<uint64_t>(-1);
         spdlog::debug("keeping socket open after streaming response (request_id={} fd={})",
-                      request_id, (uint64_t)socket.native_handle());
+                      request_id, sock_fd);
     }
     co_return Result<void>();
 }
