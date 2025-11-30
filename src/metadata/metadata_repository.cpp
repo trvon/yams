@@ -1122,6 +1122,7 @@ Result<void> MetadataRepository::deleteSavedQuery(int64_t id) {
 Result<void> MetadataRepository::indexDocumentContent(int64_t documentId, const std::string& title,
                                                       const std::string& content,
                                                       const std::string& contentType) {
+    (void)contentType; // No longer indexed in FTS5 (v18 migration removed it)
     auto result = executeQuery<void>([&](Database& db) -> Result<void> {
         // First check if FTS5 is available
         auto fts5Result = db.hasFTS5();
@@ -1142,16 +1143,17 @@ Result<void> MetadataRepository::indexDocumentContent(int64_t documentId, const 
         const std::string sanitizedContent = common::sanitizeUtf8(content);
         const std::string sanitizedTitle = common::sanitizeUtf8(title);
 
+        // Note: content_type removed from FTS5 in migration v18 - never used in MATCH queries
         auto stmtResult = db.prepare(R"(
-            INSERT INTO documents_fts (rowid, content, title, content_type)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO documents_fts (rowid, content, title)
+            VALUES (?, ?, ?)
         )");
 
         if (!stmtResult)
             return stmtResult.error();
 
         Statement stmt = std::move(stmtResult).value();
-        auto bindResult = stmt.bindAll(documentId, sanitizedContent, sanitizedTitle, contentType);
+        auto bindResult = stmt.bindAll(documentId, sanitizedContent, sanitizedTitle);
         if (!bindResult)
             return bindResult.error();
 

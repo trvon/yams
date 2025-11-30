@@ -31,7 +31,10 @@
 #include <yams/daemon/components/EmbeddingService.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PluginHostFsm.h>
+#include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/PoolManager.h>
+#include <yams/daemon/components/VectorSystemManager.h>
+#include <yams/daemon/components/DatabaseManager.h>
 #include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/SearchEngineFsm.h>
 #include <yams/daemon/components/SearchEngineManager.h>
@@ -106,17 +109,36 @@ public:
 
     // Service Accessors
     std::shared_ptr<api::IContentStore> getContentStore() const { return contentStore_; }
-    std::shared_ptr<metadata::MetadataRepository> getMetadataRepo() const { return metadataRepo_; }
+    std::shared_ptr<metadata::MetadataRepository> getMetadataRepo() const {
+        // PBI-088: Delegate to DatabaseManager if available
+        if (databaseManager_) {
+            auto repo = databaseManager_->getMetadataRepo();
+            if (repo) return repo;
+        }
+        return metadataRepo_; // Fallback to old member
+    }
     std::shared_ptr<search::SearchExecutor> getSearchExecutor() const {
         return std::atomic_load(&searchExecutor_);
     }
     std::shared_ptr<IModelProvider> getModelProvider() const { return modelProvider_; }
     std::shared_ptr<yams::search::HybridSearchEngine> getSearchEngineSnapshot() const;
     std::shared_ptr<vector::VectorIndexManager> getVectorIndexManager() const {
-        return vectorIndexManager_;
+        // PBI-088: Delegate to VectorSystemManager if available
+        if (vectorSystemManager_) {
+            auto mgr = vectorSystemManager_->getVectorIndexManager();
+            if (mgr) return mgr;
+        }
+        return vectorIndexManager_; // Fallback to old member
     }
     std::string getEmbeddingModelName() const { return embeddingModelName_; }
-    std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const { return vectorDatabase_; }
+    std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const {
+        // PBI-088: Delegate to VectorSystemManager if available
+        if (vectorSystemManager_) {
+            auto db = vectorSystemManager_->getVectorDatabase();
+            if (db) return db;
+        }
+        return vectorDatabase_; // Fallback to old member
+    }
     std::shared_ptr<WorkerPool> getWorkerPool() const { return nullptr; }
     WorkCoordinator* getWorkCoordinator() const { return workCoordinator_.get(); }
     // Resize the worker pool to a target size; creates pool on demand.
@@ -260,7 +282,14 @@ public:
     }
 
     // Knowledge Graph Store (PBI-059)
-    std::shared_ptr<metadata::KnowledgeGraphStore> getKgStore() const { return kgStore_; }
+    std::shared_ptr<metadata::KnowledgeGraphStore> getKgStore() const {
+        // PBI-088: Delegate to DatabaseManager if available
+        if (databaseManager_) {
+            auto store = databaseManager_->getKgStore();
+            if (store) return store;
+        }
+        return kgStore_; // Fallback to old member
+    }
 
     // Graph Component (PBI-009)
     std::shared_ptr<GraphComponent> getGraphComponent() const { return graphComponent_; }
@@ -298,6 +327,11 @@ public:
     AbiPluginLoader* getAbiPluginLoader() const { return abiPluginLoader_.get(); }
     // Plugin host (C‑ABI)
     AbiPluginHost* getAbiPluginHost() const { return abiHost_.get(); }
+
+    // PBI-088: New component accessors
+    PluginManager* getPluginManager() const { return pluginManager_.get(); }
+    VectorSystemManager* getVectorSystemManager() const { return vectorSystemManager_.get(); }
+    DatabaseManager* getDatabaseManager() const { return databaseManager_.get(); }
 
     // Worker pool metrics accessors
     std::size_t getWorkerActive() const { return poolActive_.load(std::memory_order_relaxed); }
@@ -462,8 +496,8 @@ private:
     std::shared_ptr<metadata::Database> database_;
     std::shared_ptr<metadata::ConnectionPool> connectionPool_;
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
-    std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_; // PBI-043: tree diff KG integration
-    std::shared_ptr<GraphComponent> graphComponent_; // PBI-009: centralized graph management
+    std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_;
+    std::shared_ptr<GraphComponent> graphComponent_;
     std::shared_ptr<search::SearchExecutor> searchExecutor_;
     std::shared_ptr<vector::VectorIndexManager> vectorIndexManager_;
     std::shared_ptr<vector::VectorDatabase> vectorDatabase_;
@@ -572,7 +606,10 @@ private:
     // Phase 2.4: Extracted managers (consolidate lifecycle management)
     SearchEngineManager searchEngineManager_;
 
-    // Plugin status snapshot cache (PBI-046: non-blocking status)
+    std::unique_ptr<PluginManager> pluginManager_;
+    std::unique_ptr<VectorSystemManager> vectorSystemManager_;
+    std::unique_ptr<DatabaseManager> databaseManager_;
+
     mutable std::shared_mutex pluginStatusMutex_;
     PluginStatusSnapshot pluginStatusSnapshot_{};
     std::atomic<std::uint32_t> cachedModelProviderModelCount_{0};

@@ -45,9 +45,10 @@ static const std::vector<EmbeddingModel> EMBEDDING_MODELS = {
     {"all-MiniLM-L6-v2",
      "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx",
      "Lightweight model for semantic search", 90, 384},
-    {"all-mpnet-base-v2",
-     "https://huggingface.co/sentence-transformers/all-mpnet-base-v2/resolve/main/onnx/model.onnx",
-     "High-quality embeddings for better accuracy", 420, 768}};
+    {"multi-qa-MiniLM-L6-cos-v1",
+     "https://huggingface.co/sentence-transformers/multi-qa-MiniLM-L6-cos-v1/resolve/main/onnx/"
+     "model.onnx",
+     "Optimized for semantic search on QA pairs (215M training samples)", 90, 384}};
 
 class InitCommand : public ICommand {
 public:
@@ -64,6 +65,9 @@ public:
 
         cmd->add_flag("--non-interactive", nonInteractive_,
                       "Run without prompts, using defaults and flags");
+        cmd->add_flag("--auto", autoInit_,
+                      "Auto-initialize with all defaults for containerized/headless environments "
+                      "(enables vector DB, plugins, default model; skips S3)");
         cmd->add_flag("--force", force_, "Overwrite existing config/keys if already initialized");
         cmd->add_flag("--no-keygen", noKeygen_, "Skip authentication key generation");
         cmd->add_flag("--print", printConfig_,
@@ -85,6 +89,14 @@ public:
 
     Result<void> execute() override {
         try {
+            // Handle --auto flag: sets sensible defaults for containerized environments
+            if (autoInit_) {
+                nonInteractive_ = true;
+                enablePlugins_ = true;
+                // noKeygen_ remains false (generate keys by default)
+                spdlog::info("Auto-initialization mode: using defaults for headless environment");
+            }
+
             // 1) Resolve directories using platform-specific helpers
             auto dataPath = cli_->getDataPath();
 
@@ -151,9 +163,13 @@ public:
             }
 
             // 6) Vector Database Setup
-            bool enableVectorDB = false;
+            bool enableVectorDB = autoInit_; // Auto mode enables vector DB by default
             std::string selectedModel;
-            if (!nonInteractive_) {
+            if (autoInit_) {
+                // Use the default model (first in the list) for auto-init
+                selectedModel = EMBEDDING_MODELS[0].name;
+                spdlog::info("Using default embedding model: {}", selectedModel);
+            } else if (!nonInteractive_) {
                 enableVectorDB =
                     prompt_yes_no("\nEnable vector database for semantic search? [Y/n]: ",
                                   YesNoOptions{.defaultYes = true});
@@ -903,6 +919,8 @@ private:
         auto getHfRepo = [](const std::string& name) -> std::string {
             if (name == "all-MiniLM-L6-v2")
                 return "sentence-transformers/all-MiniLM-L6-v2";
+            if (name == "multi-qa-MiniLM-L6-cos-v1")
+                return "sentence-transformers/multi-qa-MiniLM-L6-cos-v1";
             if (name == "all-mpnet-base-v2")
                 return "sentence-transformers/all-mpnet-base-v2";
             return "";
@@ -1005,6 +1023,7 @@ private:
 
     YamsCLI* cli_ = nullptr;
     bool nonInteractive_ = false;
+    bool autoInit_ = false;
     bool force_ = false;
     bool noKeygen_ = false;
     bool printConfig_ = false;

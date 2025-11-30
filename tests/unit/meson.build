@@ -50,6 +50,7 @@ if tests_has_cli
     'cli/config_command_test.cpp',
     'cli/daemon_command_test.cpp',
     'cli/doctor_command_test.cpp',
+    'cli/init_command_test.cpp',
     'cli/model_command_test.cpp',
     'cli/recommendation_util_test.cpp',
     'cli/session_command_test.cpp',

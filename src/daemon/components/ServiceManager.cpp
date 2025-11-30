@@ -57,6 +57,10 @@
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PoolManager.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/ConfigResolver.h>
+#include <yams/daemon/components/DatabaseManager.h>
+#include <yams/daemon/components/PluginManager.h>
+#include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/ipc/retrieval_session.h>
@@ -77,141 +81,34 @@
 #include <yams/vector/vector_database.h>
 
 namespace {
-// Minimal helpers - prefer using components directly
-std::optional<size_t> read_db_embedding_dim(const std::filesystem::path& dbPath) {
-    try {
-        namespace fs = std::filesystem;
-        if (dbPath.empty() || !fs::exists(dbPath))
-            return std::nullopt;
-        yams::vector::SqliteVecBackend backend;
-        auto r = backend.initialize(dbPath.string());
-        if (!r)
-            return std::nullopt;
-        auto dimOpt = backend.getStoredEmbeddingDimension();
-        backend.close();
-        if (dimOpt && *dimOpt > 0)
-            return dimOpt;
-    } catch (const std::exception& e) {
-        spdlog::debug("Failed to read embedding dimension from {}: {}", dbPath.string(), e.what());
-    } catch (...) {
-        spdlog::debug("Failed to read embedding dimension from {}: unknown error", dbPath.string());
-    }
-    return std::nullopt;
+// Convenience aliases for ConfigResolver methods (reduces verbosity in this file)
+inline bool env_truthy(const char* value) {
+    return yams::daemon::ConfigResolver::envTruthy(value);
 }
 
-void write_vector_sentinel(const std::filesystem::path& dataDir, size_t dim,
-                           const std::string& /*tableName*/, int schemaVersion) {
-    try {
-        namespace fs = std::filesystem;
-        fs::create_directories(dataDir);
-        nlohmann::json j;
-        j["embedding_dim"] = dim;
-        j["schema_version"] = schemaVersion;
-        j["written_at"] = std::time(nullptr);
-        std::ofstream out(dataDir / "vectors_sentinel.json");
-        if (out)
-            out << j.dump(2);
-    } catch (const std::exception& e) {
-        spdlog::debug("Failed to write vector sentinel: {}", e.what());
-    } catch (...) {
-        spdlog::debug("Failed to write vector sentinel: unknown error");
-    }
+inline std::filesystem::path resolveDefaultConfigPath() {
+    return yams::daemon::ConfigResolver::resolveDefaultConfigPath();
 }
 
-bool env_truthy(const char* value) {
-    if (!value || !*value) {
-        return false;
-    }
-    std::string v(value);
-    std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return std::tolower(c); });
-    return !(v == "0" || v == "false" || v == "off" || v == "no");
+inline std::map<std::string, std::string> parseSimpleTomlFlat(const std::filesystem::path& path) {
+    return yams::daemon::ConfigResolver::parseSimpleTomlFlat(path);
 }
 
-std::optional<size_t> read_vector_sentinel_dim(const std::filesystem::path& dataDir) {
-    try {
-        namespace fs = std::filesystem;
-        auto p = dataDir / "vectors_sentinel.json";
-        if (!fs::exists(p))
-            return std::nullopt;
-        std::ifstream in(p);
-        if (!in)
-            return std::nullopt;
-        nlohmann::json j;
-        in >> j;
-        if (j.contains("embedding_dim"))
-            return j["embedding_dim"].get<size_t>();
-    } catch (const std::exception& e) {
-        spdlog::debug("Failed to read vector sentinel: {}", e.what());
-    } catch (...) {
-        spdlog::debug("Failed to read vector sentinel: unknown error");
-    }
-    return std::nullopt;
+inline std::optional<size_t> read_db_embedding_dim(const std::filesystem::path& dbPath) {
+    return yams::daemon::ConfigResolver::readDbEmbeddingDim(dbPath);
 }
 
-std::filesystem::path resolveDefaultConfigPath() {
-    if (const char* explicitPath = std::getenv("YAMS_CONFIG_PATH")) {
-        std::filesystem::path p{explicitPath};
-        if (std::filesystem::exists(p))
-            return p;
-    }
-    if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
-        std::filesystem::path p = std::filesystem::path(xdg) / "yams" / "config.toml";
-        if (std::filesystem::exists(p))
-            return p;
-    }
-    if (const char* home = std::getenv("HOME")) {
-        std::filesystem::path p = std::filesystem::path(home) / ".config" / "yams" / "config.toml";
-        if (std::filesystem::exists(p))
-            return p;
-    }
-    return {};
+inline std::optional<size_t> read_vector_sentinel_dim(const std::filesystem::path& dataDir) {
+    return yams::daemon::ConfigResolver::readVectorSentinelDim(dataDir);
 }
 
-std::map<std::string, std::string> parseSimpleTomlFlat(const std::filesystem::path& path) {
-    std::map<std::string, std::string> config;
-    std::ifstream file(path);
-    if (!file)
-        return config;
+inline void write_vector_sentinel(const std::filesystem::path& dataDir, size_t dim,
+                                  const std::string& tableName, int schemaVersion) {
+    yams::daemon::ConfigResolver::writeVectorSentinel(dataDir, dim, tableName, schemaVersion);
+}
 
-    std::string line;
-    std::string currentSection;
-    auto trim = [](std::string s) {
-        auto issp = [](unsigned char c) { return std::isspace(c) != 0; };
-        while (!s.empty() && issp(static_cast<unsigned char>(s.front())))
-            s.erase(s.begin());
-        while (!s.empty() && issp(static_cast<unsigned char>(s.back())))
-            s.pop_back();
-        return s;
-    };
-
-    while (std::getline(file, line)) {
-        auto comment = line.find('#');
-        if (comment != std::string::npos)
-            line = line.substr(0, comment);
-        line = trim(line);
-        if (line.empty())
-            continue;
-
-        if (line.front() == '[' && line.back() == ']') {
-            currentSection = line.substr(1, line.size() - 2);
-            continue;
-        }
-
-        auto eq = line.find('=');
-        if (eq == std::string::npos)
-            continue;
-        std::string key = trim(line.substr(0, eq));
-        std::string value = trim(line.substr(eq + 1));
-        if (!value.empty() && value.front() == '"' && value.back() == '"') {
-            value = value.substr(1, value.size() - 2);
-        }
-        if (!currentSection.empty()) {
-            config[currentSection + "." + key] = value;
-        } else {
-            config[key] = value;
-        }
-    }
-    return config;
+inline int read_timeout_ms(const char* envName, int defaultMs, int minMs) {
+    return yams::daemon::ConfigResolver::readTimeoutMs(envName, defaultMs, minMs);
 }
 
 // Template-based plugin adoption helper to reduce code duplication
@@ -560,6 +457,36 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                          e.what());
         } catch (...) {
             spdlog::warn("ServiceManager: unknown error initializing IngestService scaffold");
+        }
+
+        // PBI-088: Create extracted managers (wiring in progress)
+        try {
+            // Create PluginManager
+            PluginManager::Dependencies pluginDeps;
+            pluginDeps.config = &config_;
+            pluginDeps.state = &state_;
+            pluginDeps.lifecycleFsm = &lifecycleFsm_;
+            pluginDeps.dataDir = config_.dataDir;
+            pluginDeps.resolvePreferredModel = [this]() { return this->resolvePreferredModel(); };
+            pluginManager_ = std::make_unique<PluginManager>(pluginDeps);
+            spdlog::debug("[ServiceManager] PluginManager created");
+
+            // Create VectorSystemManager
+            VectorSystemManager::Dependencies vectorDeps;
+            vectorDeps.state = &state_;
+            vectorDeps.serviceFsm = &serviceFsm_;
+            vectorDeps.resolvePreferredModel = [this]() { return this->resolvePreferredModel(); };
+            vectorDeps.getEmbeddingDimension = [this]() { return this->getEmbeddingDimension(); };
+            vectorSystemManager_ = std::make_unique<VectorSystemManager>(vectorDeps);
+            spdlog::debug("[ServiceManager] VectorSystemManager created");
+
+            // Create DatabaseManager
+            DatabaseManager::Dependencies dbDeps;
+            dbDeps.state = &state_;
+            databaseManager_ = std::make_unique<DatabaseManager>(dbDeps);
+            spdlog::debug("[ServiceManager] DatabaseManager created");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Failed to create extracted managers: {}", e.what());
         }
     } catch (const std::exception& e) {
         spdlog::warn("Exception during ServiceManager constructor setup: {}", e.what());
@@ -1053,6 +980,36 @@ void ServiceManager::shutdown() {
         spdlog::info("[ServiceManager] Phase 9.2: ABI host reset");
     } catch (...) {
         spdlog::warn("[ServiceManager] Phase 9.2: Exception resetting ABI host");
+    }
+
+    // PBI-088: Shutdown extracted managers
+    spdlog::info("[ServiceManager] Phase 10: Releasing extracted managers");
+    try {
+        if (pluginManager_) {
+            pluginManager_->shutdown();
+            pluginManager_.reset();
+            spdlog::info("[ServiceManager] Phase 10.1: PluginManager reset");
+        }
+    } catch (...) {
+        spdlog::warn("[ServiceManager] Phase 10.1: Exception resetting PluginManager");
+    }
+    try {
+        if (vectorSystemManager_) {
+            vectorSystemManager_->shutdown();
+            vectorSystemManager_.reset();
+            spdlog::info("[ServiceManager] Phase 10.2: VectorSystemManager reset");
+        }
+    } catch (...) {
+        spdlog::warn("[ServiceManager] Phase 10.2: Exception resetting VectorSystemManager");
+    }
+    try {
+        if (databaseManager_) {
+            databaseManager_->shutdown();
+            databaseManager_.reset();
+            spdlog::info("[ServiceManager] Phase 10.3: DatabaseManager reset");
+        }
+    } catch (...) {
+        spdlog::warn("[ServiceManager] Phase 10.3: Exception resetting DatabaseManager");
     }
 
     auto shutdownDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1606,18 +1563,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     spdlog::debug("ServiceManager(co): writeBootstrapStatusFile done");
     spdlog::default_logger()->flush();
 
-    auto read_timeout_ms = [](const char* env_name, int def_ms, int min_ms = 100) -> int {
-        int ms = def_ms;
-        if (const char* env = std::getenv(env_name)) {
-            try {
-                ms = std::stoi(env);
-            } catch (...) {
-            }
-        }
-        if (ms < min_ms)
-            ms = min_ms;
-        return ms;
-    };
+    // read_timeout_ms is now provided by ConfigResolver alias above
 
     using namespace std::chrono_literals;
     spdlog::debug("ServiceManager(co): about to co_await executor");
@@ -3240,33 +3186,7 @@ bool ServiceManager::applySearchConcurrencyTarget(std::size_t target) {
 // (Namespace yams::daemon remains open for subsequent member definitions)
 
 bool ServiceManager::detectEmbeddingPreloadFlag() const {
-    bool flag = false;
-
-    // Config file precedence
-    std::filesystem::path cfgPath = config_.configFilePath;
-    if (cfgPath.empty())
-        cfgPath = resolveDefaultConfigPath();
-    if (!cfgPath.empty()) {
-        try {
-            auto kv = parseSimpleTomlFlat(cfgPath);
-            auto it = kv.find("embeddings.preload_on_startup");
-            if (it != kv.end()) {
-                std::string lower = it->second;
-                std::transform(lower.begin(), lower.end(), lower.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                flag = (lower == "1" || lower == "true" || lower == "yes" || lower == "on");
-            }
-        } catch (const std::exception& e) {
-            spdlog::debug("[Warmup] failed to read config for preload flag: {}", e.what());
-        }
-    }
-
-    // Environment override wins
-    if (const char* env = std::getenv("YAMS_EMBED_PRELOAD_ON_STARTUP")) {
-        flag = env_truthy(env);
-    }
-
-    return flag;
+    return ConfigResolver::detectEmbeddingPreloadFlag(config_);
 }
 
 size_t ServiceManager::getEmbeddingDimension() const {

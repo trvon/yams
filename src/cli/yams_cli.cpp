@@ -22,8 +22,9 @@
 #include <yams/vector/vector_database.h>
 #include <yams/vector/vector_index_manager.h>
 #include <yams/version.hpp>
-#if __has_include(<yams/version_generated.h>)
-#include <yams/version_generated.h>
+// Generated version header (builddir/version_generated.h via generated_inc)
+#if __has_include(<version_generated.h>)
+#include <version_generated.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -106,11 +107,16 @@ YamsCLI::YamsCLI(boost::asio::any_io_executor executor) : executor_(std::move(ex
     app_ = std::make_unique<CLI::App>("YAMS", "yams");
     app_->prefix_command(); // Allow global options before and after subcommands
     // Prefer generated effective version if present; otherwise fallback to existing macros.
-#if __has_include(<yams/version_generated.h>)
+#if __has_include(<version_generated.h>)
     {
         yams::VersionInfo ver{};
         std::string long_version = std::string(ver.effective_version);
-        if (std::string(ver.git_describe).size()) {
+        // Show commit hash if available (for dev builds)
+        std::string commit = ver.git_commit ? std::string(ver.git_commit) : "";
+        if (!commit.empty()) {
+            long_version += " (commit: " + commit + ")";
+        } else if (std::string(ver.git_describe).size()) {
+            // Fallback to git describe if commit not available
             long_version += " (" + std::string(ver.git_describe) + ")";
         }
         long_version += " built:" + std::string(ver.build_timestamp);

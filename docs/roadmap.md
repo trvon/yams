@@ -53,7 +53,7 @@
 - Streaming IPC with protobuf serialization, multiplexing, and backpressure
 
 ### Plugin System (ABI-stable C interface)
-- **ONNX Runtime provider**: all-MiniLM-L6-v2 (default), all-mpnet-base-v2, nomic-embed-text-v1.5
+- **ONNX Runtime provider**: all-MiniLM-L6-v2 (default), multi-qa-MiniLM-L6-cos-v1, nomic-embed-text-v1.5
 - **Tree-sitter symbol extractor**: auto-downloads grammars (v13-15), 15+ languages
 - **PDF extractor**: content_extractor_v1 + search_provider_v1 interfaces
 - Plugin discovery: `YAMS_PLUGIN_DIR`, standard directories, trust policies
@@ -67,6 +67,11 @@
 - **Connection state machine**: tinyfsm-based `ConnectionFsm` with clean transitions
 - **Async-first**: C++20 coroutines (`asio::awaitable`), `as_tuple` error handling
 - **Streaming**: header-first chunked transfer, persistent sockets, TTFB metrics
+
+### CLI Enhancements (v0.8)
+- **Auto-init mode**: `yams init --auto` for containerized/headless environments
+- **Git-based versioning**: Auto-detects version from semver tags, shows commit hash
+- **Consistent 384-dim models**: Both embedding model options use same dimensions
 
 ### Packaging & Distribution
 - **Build**: Meson + Conan 2.x; Release/Debug/Profiling configurations
@@ -82,20 +87,20 @@
 Focus: **Stability, polish, and production readiness**
 
 ### CLI & Developer Experience
-- [ ] Path tree repair automation (background daemon task)
-- [ ] Improved error messages with actionable hints
-- [ ] Consistent `--json` output across all commands
-- [ ] Incremental `yams add` with predictable include/exclude
+- [x] Path tree repair automation (background daemon task)
+- [ ] Improved error messages with actionable hints (partial: doctor command has extensive hints)
+- [ ] Consistent `--json` output across all commands (partial: ~50% of commands support it)
+- [x] Incremental `yams add` with predictable include/exclude
 
 ### Search Quality
-- [ ] FTS5 hygiene: index only queried fields
-- [ ] Optional post-ingest `VACUUM`/`optimize`
-- [ ] Content-type-aware defaults (code vs. prose vs. docs)
+- [x] FTS5 hygiene: index only queried fields (v18 migration removes content_type column)
+- [x] Optional post-ingest `VACUUM`/`optimize` (via `yams repair --optimize`)
+- [x] Content-type-aware defaults (code vs. prose vs. docs) (`CorpusProfile` enum with auto-detection)
 
 ### Stability
-- [ ] Thread safety hardening (TSan enabled in Debug CI)
-- [ ] Connection pool reliability fixes
-- [ ] Streaming response timeout handling
+- [ ] Thread safety hardening (TSan enabled in Debug CI) (partial: TSan support exists, not in CI)
+- [x] Connection pool reliability fixes (comprehensive ConnectionPool with health checks)
+- [x] Streaming response timeout handling (TTFB metrics, configurable timeouts)
 
 ### Documentation
 - [ ] Managed hosting early access guide
@@ -124,6 +129,7 @@ Focus: **Stability, polish, and production readiness**
 
 | Version | Highlights | Changelog |
 |---------|------------|-----------|
+| **v0.8** | Auto-init for containers, git-based versioning, multi-qa-MiniLM model, consistent 384-dim embeddings | [v0.8](../CHANGELOG.md) |
 | **v0.7** | WorkCoordinator thread pool, hierarchical embeddings, KG-boosted search, tree-sitter symbol extraction, grep SIMD optimizations, parallel post-processing | [v0.7](changelogs/v0.7.md) |
 | **v0.6** | Protobuf IPC, connection FSM, tuning profiles, RRF fusion, post-ingest pipeline, plugin system v0.1 | [v0.6](changelogs/v0.6.md) |
 | **v0.5** | Service architecture, HNSW index, daemon pooling, repair coordinator, PDF extraction | [v0.5](changelogs/v0.5.md) |

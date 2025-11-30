@@ -8,11 +8,15 @@
 #include <yams/vector/vector_database.h>
 #include <yams/vector/vector_index_manager.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // Forward declarations
@@ -51,6 +55,24 @@ struct SearchParams {
  * and fuses results with configurable ranking.
  */
 struct SearchEngineConfig {
+    /**
+     * @brief Corpus content type profile for automatic weight tuning
+     *
+     * Auto-detects dominant content type and adjusts search weights accordingly.
+     * - CODE: Heavy symbol/path emphasis, lower FTS5 weight
+     * - PROSE: Heavy FTS5/vector emphasis, minimal symbol weight
+     * - DOCS: Balanced FTS5/vector, moderate path weight
+     * - MIXED: Default balanced weights
+     * - CUSTOM: User-specified weights (ignores profile)
+     */
+    enum class CorpusProfile {
+        CODE,   // Primarily source code (.py, .cpp, .rs, .go, etc.)
+        PROSE,  // Primarily text documents (.md, .txt, .pdf)
+        DOCS,   // Technical documentation (mixed code snippets + prose)
+        MIXED,  // Balanced corpus (default)
+        CUSTOM  // User-specified weights
+    } corpusProfile = CorpusProfile::MIXED;
+
     // Component weights (0.0 = disabled, 1.0 = full weight)
     float fts5Weight = 0.30f;     // Full-text search weight
     float pathTreeWeight = 0.15f; // Path tree hierarchical weight
@@ -90,6 +112,133 @@ struct SearchEngineConfig {
 
     // Debugging
     bool includeDebugInfo = false; // Include per-component scores in results
+
+    /**
+     * @brief Get preset configuration for a corpus profile
+     *
+     * Returns a SearchEngineConfig with weights tuned for the given profile:
+     * - CODE: fts5=0.20, symbol=0.30, path=0.20, vector=0.10, kg=0.10, tag=0.05, meta=0.05
+     * - PROSE: fts5=0.40, symbol=0.05, path=0.10, vector=0.25, kg=0.05, tag=0.10, meta=0.05
+     * - DOCS: fts5=0.30, symbol=0.15, path=0.15, vector=0.20, kg=0.10, tag=0.05, meta=0.05
+     * - MIXED: Default balanced weights
+     */
+    static SearchEngineConfig forProfile(CorpusProfile profile) {
+        SearchEngineConfig config;
+        config.corpusProfile = profile;
+
+        switch (profile) {
+        case CorpusProfile::CODE:
+            // Code-heavy: prioritize symbols, paths, and structured search
+            config.fts5Weight = 0.20f;
+            config.pathTreeWeight = 0.20f;
+            config.symbolWeight = 0.30f;
+            config.kgWeight = 0.10f;
+            config.vectorWeight = 0.10f;
+            config.tagWeight = 0.05f;
+            config.metadataWeight = 0.05f;
+            break;
+
+        case CorpusProfile::PROSE:
+            // Prose-heavy: prioritize FTS5 and semantic vector search
+            config.fts5Weight = 0.40f;
+            config.pathTreeWeight = 0.10f;
+            config.symbolWeight = 0.05f;
+            config.kgWeight = 0.05f;
+            config.vectorWeight = 0.25f;
+            config.tagWeight = 0.10f;
+            config.metadataWeight = 0.05f;
+            break;
+
+        case CorpusProfile::DOCS:
+            // Documentation: balanced FTS5/vector with moderate symbol/path
+            config.fts5Weight = 0.30f;
+            config.pathTreeWeight = 0.15f;
+            config.symbolWeight = 0.15f;
+            config.kgWeight = 0.10f;
+            config.vectorWeight = 0.20f;
+            config.tagWeight = 0.05f;
+            config.metadataWeight = 0.05f;
+            break;
+
+        case CorpusProfile::MIXED:
+        case CorpusProfile::CUSTOM:
+        default:
+            // Keep default balanced weights
+            break;
+        }
+
+        return config;
+    }
+
+    /**
+     * @brief Detect corpus profile from document extension distribution
+     *
+     * Analyzes the distribution of file extensions to determine the dominant
+     * content type. Uses thresholds:
+     * - CODE: >60% source code extensions (.py, .cpp, .h, .rs, .go, .js, etc.)
+     * - PROSE: >60% text/document extensions (.md, .txt, .pdf, .docx)
+     * - DOCS: 30-60% code + significant docs (README, docs/, etc.)
+     * - MIXED: No dominant type
+     *
+     * @param extensionCounts Map of extension -> count from getDocumentCountsByExtension()
+     * @return Detected CorpusProfile
+     */
+    static CorpusProfile detectProfile(
+        const std::unordered_map<std::string, int64_t>& extensionCounts) {
+        if (extensionCounts.empty()) {
+            return CorpusProfile::MIXED;
+        }
+
+        // Code file extensions
+        static const std::unordered_set<std::string> codeExtensions = {
+            ".py",   ".cpp", ".c",   ".h",     ".hpp",  ".cc",  ".cxx", ".rs", ".go",
+            ".js",   ".ts",  ".jsx", ".tsx",   ".java", ".kt",  ".rb",  ".cs", ".swift",
+            ".m",    ".mm",  ".php", ".scala", ".lua",  ".pl",  ".sh",  ".bash"};
+
+        // Prose/document extensions
+        static const std::unordered_set<std::string> proseExtensions = {
+            ".md",  ".txt",  ".pdf",  ".docx", ".doc", ".rtf",
+            ".tex", ".html", ".htm",  ".xml",  ".rst", ".adoc"};
+
+        int64_t totalDocs = 0;
+        int64_t codeDocs = 0;
+        int64_t proseDocs = 0;
+
+        for (const auto& [ext, count] : extensionCounts) {
+            totalDocs += count;
+            std::string lowerExt = ext;
+            std::transform(lowerExt.begin(), lowerExt.end(), lowerExt.begin(), ::tolower);
+
+            if (codeExtensions.count(lowerExt)) {
+                codeDocs += count;
+            } else if (proseExtensions.count(lowerExt)) {
+                proseDocs += count;
+            }
+        }
+
+        if (totalDocs == 0) {
+            return CorpusProfile::MIXED;
+        }
+
+        float codeRatio = static_cast<float>(codeDocs) / static_cast<float>(totalDocs);
+        float proseRatio = static_cast<float>(proseDocs) / static_cast<float>(totalDocs);
+
+        // Thresholds for classification
+        constexpr float kDominantThreshold = 0.60f;
+        constexpr float kSignificantThreshold = 0.30f;
+
+        if (codeRatio >= kDominantThreshold) {
+            return CorpusProfile::CODE;
+        }
+        if (proseRatio >= kDominantThreshold) {
+            return CorpusProfile::PROSE;
+        }
+        if (codeRatio >= kSignificantThreshold && proseRatio >= kSignificantThreshold) {
+            return CorpusProfile::DOCS; // Mix of code and prose = documentation
+        }
+
+        return CorpusProfile::MIXED;
+    }
 };
 
 /**
