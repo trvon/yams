@@ -1375,6 +1375,10 @@ private:
 
     // doctor (no args): quick combined
     void runAll() {
+        // JSON output mode: collect data into structured object
+        nlohmann::json jsonResult;
+        bool useJson = jsonOutput_ || (cli_ && cli_->getJsonOutput());
+        
         // SQLite + FTS status and migration health
         // FTS checks removed to avoid blocking/hangs; use 'yams daemon status -d' for readiness.
         // Minimal structured recommendations example (will expand in future audits)
@@ -1384,19 +1388,28 @@ private:
         // - Installed models
         // - Vector DB dimension check
 
-        // Show loading indicator immediately
-        std::cout << yams::cli::ui::colorize("◷ Collecting system information...",
-                                             yams::cli::ui::Ansi::CYAN)
-                  << "\n"
-                  << std::flush;
+        // Show loading indicator immediately (skip for JSON mode)
+        if (!useJson) {
+            std::cout << yams::cli::ui::colorize("◷ Collecting system information...",
+                                                 yams::cli::ui::Ansi::CYAN)
+                      << "\n"
+                      << std::flush;
+        }
 
         // Daemon light check first; if not running, fast-fail and only run local checks
         bool daemon_up = false;
+        std::string effectiveSocket;
         {
             using namespace yams::daemon;
-            std::string effectiveSocket =
+            effectiveSocket =
                 daemon::DaemonClient::resolveSocketPathConfigFirst().string();
             daemon_up = daemon::DaemonClient::isDaemonRunning(effectiveSocket);
+        }
+        
+        // Record daemon connectivity for JSON
+        if (useJson) {
+            jsonResult["daemon"]["socket"] = effectiveSocket;
+            jsonResult["daemon"]["running"] = daemon_up;
         }
 
         // Fetch daemon status once if available (reuse throughout)
@@ -1439,7 +1452,107 @@ private:
         }
 
         // Clear loading message
-        std::cout << "\r" << std::string(50, ' ') << "\r" << std::flush;
+        if (!useJson) {
+            std::cout << "\r" << std::string(50, ' ') << "\r" << std::flush;
+        }
+        
+        // For JSON mode, collect all data and output at end
+        if (useJson) {
+            // Daemon status
+            if (cachedStatus) {
+                const auto& s = cachedStatus.value();
+                jsonResult["daemon"]["ready"] = s.ready;
+                jsonResult["daemon"]["running"] = s.running;
+                jsonResult["daemon"]["version"] = s.version;
+                jsonResult["daemon"]["lifecycle_state"] = s.lifecycleState;
+                jsonResult["daemon"]["active_connections"] = s.activeConnections;
+                jsonResult["daemon"]["memory_mb"] = s.memoryUsageMb;
+                jsonResult["daemon"]["cpu_percent"] = s.cpuUsagePercent;
+                
+                // Embedding info
+                jsonResult["embedding"]["available"] = s.embeddingAvailable;
+                jsonResult["embedding"]["backend"] = s.embeddingBackend;
+                jsonResult["embedding"]["model"] = s.embeddingModel;
+                jsonResult["embedding"]["path"] = s.embeddingModelPath;
+                jsonResult["embedding"]["dimension"] = s.embeddingDim;
+                jsonResult["embedding"]["threads_intra"] = s.embeddingThreadsIntra;
+                jsonResult["embedding"]["threads_inter"] = s.embeddingThreadsInter;
+                
+                // Readiness states
+                for (const auto& [k, v] : s.readinessStates) {
+                    jsonResult["readiness"][k] = v;
+                }
+                
+                // Plugins/providers
+                nlohmann::json pluginsJson = nlohmann::json::array();
+                for (const auto& p : s.providers) {
+                    nlohmann::json pj;
+                    pj["name"] = p.name;
+                    pj["ready"] = p.ready;
+                    pj["degraded"] = p.degraded;
+                    pj["is_provider"] = p.isProvider;
+                    pj["models_loaded"] = p.modelsLoaded;
+                    if (!p.error.empty()) pj["error"] = p.error;
+                    pluginsJson.push_back(std::move(pj));
+                }
+                jsonResult["plugins"] = std::move(pluginsJson);
+            }
+            
+            // Models (installed)
+            namespace fs = std::filesystem;
+            fs::path modelsPath = cli_ ? cli_->getDataPath() / "models" : fs::path();
+            nlohmann::json modelsJson = nlohmann::json::array();
+            std::error_code ec;
+            if (!modelsPath.empty() && fs::exists(modelsPath, ec) && fs::is_directory(modelsPath, ec)) {
+                for (const auto& entry : fs::directory_iterator(modelsPath, ec)) {
+                    if (!entry.is_directory()) continue;
+                    fs::path modelOnnx = entry.path() / "model.onnx";
+                    if (fs::exists(modelOnnx, ec)) {
+                        nlohmann::json mj;
+                        mj["name"] = entry.path().filename().string();
+                        mj["has_config"] = fs::exists(entry.path() / "config.json", ec) || 
+                                           fs::exists(entry.path() / "sentence_bert_config.json", ec);
+                        mj["has_tokenizer"] = fs::exists(entry.path() / "tokenizer.json", ec);
+                        modelsJson.push_back(std::move(mj));
+                    }
+                }
+            }
+            jsonResult["models"] = std::move(modelsJson);
+            
+            // Vector DB info
+            fs::path vecDbPath = cli_ ? cli_->getDataPath() / "vectors.db" : fs::path();
+            jsonResult["vector_db"]["path"] = vecDbPath.string();
+            jsonResult["vector_db"]["exists"] = !vecDbPath.empty() && fs::exists(vecDbPath, ec);
+            
+            // Knowledge graph stats (if db available)
+            try {
+                auto db = cli_->getDatabase();
+                if (db && db->isOpen()) {
+                    auto countTable = [&](const char* sql) -> long long {
+                        auto stR = db->prepare(sql);
+                        if (!stR) return -1;
+                        auto st = std::move(stR).value();
+                        auto step = st.step();
+                        if (step && step.value()) return st.getInt64(0);
+                        return -1;
+                    };
+                    jsonResult["knowledge_graph"]["nodes"] = countTable("SELECT COUNT(1) FROM kg_nodes");
+                    jsonResult["knowledge_graph"]["edges"] = countTable("SELECT COUNT(1) FROM kg_edges");
+                    jsonResult["knowledge_graph"]["aliases"] = countTable("SELECT COUNT(1) FROM kg_aliases");
+                    jsonResult["knowledge_graph"]["embeddings"] = countTable("SELECT COUNT(1) FROM kg_node_embeddings");
+                    jsonResult["knowledge_graph"]["doc_entities"] = countTable("SELECT COUNT(1) FROM doc_entities");
+                }
+            } catch (...) {}
+            
+            // Recommendations
+            if (!recs.empty()) {
+                jsonResult["recommendations"] = yams::cli::recommendationsToJson(recs);
+            }
+            
+            // Output JSON and return early
+            std::cout << jsonResult.dump(2) << "\n";
+            return;
+        }
 
         checkDaemon(cachedStatus);
         if (!daemon_up) {
@@ -2052,6 +2165,7 @@ private:
     }
 
     YamsCLI* cli_{nullptr};
+    bool jsonOutput_{false};
     bool fixEmbeddings_{false};
     bool fixFts5_{false};
     bool fixGraph_{false};
@@ -2102,6 +2216,7 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
     cli_ = cli;
     auto* doctor = app.add_subcommand(getName(), getDescription());
     doctor->require_subcommand(0); // allow bare doctor
+    doctor->add_flag("--json", jsonOutput_, "Output results in JSON format");
     doctor->add_flag("--fix", fixAllTop_, "Fix everything (embeddings + FTS5)");
     doctor->add_flag("--fix-config-dims", fixConfigDims_,
                      "Align config embedding dims to target (non-interactive)");

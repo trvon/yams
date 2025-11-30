@@ -12,7 +12,7 @@ namespace yams::cli {
 class YamsCLI;
 
 /**
- * Command to generate shell completion scripts for bash, zsh, and fish
+ * Command to generate shell completion scripts for bash, zsh, fish, and PowerShell
  * Since CLI11 v2.4.1 doesn't support built-in completions, we generate
  * them manually with hardcoded knowledge of YAMS command structure.
  */
@@ -26,12 +26,13 @@ public:
 
 private:
     YamsCLI* cli_ = nullptr;
-    std::string shell_; // bash, zsh, fish
+    std::string shell_; // bash, zsh, fish, powershell
 
     // Shell-specific completion script generators
     std::string generateBashCompletion() const;
     std::string generateZshCompletion() const;
     std::string generateFishCompletion() const;
+    std::string generatePowerShellCompletion() const;
 
     // Helper to get list of available commands dynamically
     std::vector<std::string> getAvailableCommands() const;
