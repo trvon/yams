@@ -71,7 +71,7 @@ yams [OPTIONS] <command> [command-options]
 
 ### User Interface
 - `serve` - Start MCP (Model Context Protocol) server
-- `completion` - Generate shell completion scripts (bash/zsh/fish)
+- `completion` - Generate shell completion scripts (bash/zsh/fish/powershell)
 
 ### Utilities
 - `uninstall` - Remove YAMS from your system
@@ -1194,22 +1194,76 @@ Synopsis:
 - yams completion bash
 - yams completion zsh
 - yams completion fish
+- yams completion powershell
 
 Notes:
-- Bash: if bash-completion isn’t installed, a minimal fallback is baked into the script.
-- Zsh: the generated script auto-runs compinit if needed to prevent “_arguments: command not found”.
+- Bash: if bash-completion isn't installed, a minimal fallback is baked into the script.
+- Zsh: the generated script auto-runs compinit if needed to prevent "_arguments: command not found".
 - Fish: installs via standard fish completions.
+- PowerShell: uses `Register-ArgumentCompleter` for native tab completion.
 
-Examples:
-```
+### Installation Instructions
+
+**Bash (Linux/macOS):**
+```bash
 # Quick use without installing
 source <(yams completion bash)
 
 # Install for current user
+mkdir -p ~/.local/share/bash-completion/completions
 yams completion bash > ~/.local/share/bash-completion/completions/yams
-yams completion zsh  > ~/.local/share/zsh/site-functions/_yams
+
+# Or install system-wide (requires sudo)
+yams completion bash | sudo tee /etc/bash_completion.d/yams > /dev/null
+```
+
+**Zsh (Linux/macOS):**
+```bash
+# Quick use without installing
+source <(yams completion zsh)
+
+# Install for current user (Oh My Zsh)
+yams completion zsh > ~/.oh-my-zsh/completions/_yams
+
+# Or standard location
+mkdir -p ~/.local/share/zsh/site-functions
+yams completion zsh > ~/.local/share/zsh/site-functions/_yams
+```
+
+**Fish:**
+```bash
 yams completion fish > ~/.config/fish/completions/yams.fish
 ```
+
+**PowerShell (Windows/Linux/macOS):**
+```powershell
+# Quick use for current session
+Invoke-Expression (yams completion powershell | Out-String)
+
+# Install permanently (add to profile)
+yams completion powershell | Out-File -Encoding utf8 $PROFILE.CurrentUserAllHosts -Append
+
+# Or create a separate completion file
+$completionPath = "$HOME\.config\yams\completions"
+New-Item -ItemType Directory -Path $completionPath -Force
+yams completion powershell | Out-File -Encoding utf8 "$completionPath\yams.ps1"
+# Then add to your profile: . "$HOME\.config\yams\completions\yams.ps1"
+```
+
+### Verifying Installation
+
+After installing, restart your shell or reload your profile:
+
+```bash
+# Bash/Zsh
+source ~/.bashrc   # or ~/.zshrc
+
+# PowerShell
+. $PROFILE
+```
+
+Then test by typing `yams ` and pressing Tab.
+
 
 ## Exit Codes
 

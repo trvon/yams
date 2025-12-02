@@ -468,7 +468,12 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             pluginDeps.lifecycleFsm = &lifecycleFsm_;
             pluginDeps.dataDir = config_.dataDir;
             pluginDeps.resolvePreferredModel = [this]() { return this->resolvePreferredModel(); };
+            pluginDeps.sharedPluginHost = abiHost_.get();
             pluginManager_ = std::make_unique<PluginManager>(pluginDeps);
+            if (auto initResult = pluginManager_->initialize(); !initResult) {
+                spdlog::warn("[ServiceManager] PluginManager init failed: {}",
+                             initResult.error().message);
+            }
             spdlog::debug("[ServiceManager] PluginManager created");
 
             // Create VectorSystemManager
@@ -1030,7 +1035,15 @@ yams::Result<bool>
 ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDir) {
     if (vectorSystemManager_) {
         auto result = vectorSystemManager_->initializeOnce(dataDir);
-        if (result) {
+        if (result && result.value()) {
+            // Database initialized successfully - now init the index manager
+            size_t dim = vectorSystemManager_->getEmbeddingDimension();
+            if (dim > 0) {
+                vectorSystemManager_->initializeIndexManager(dataDir, dim);
+                // Try to load persisted index
+                auto indexPath = dataDir / "vector_index.bin";
+                vectorSystemManager_->loadPersistedIndex(indexPath);
+            }
             // Sync local members from VectorSystemManager for backward compatibility
             vectorDatabase_ = vectorSystemManager_->getVectorDatabase();
             vectorIndexManager_ = vectorSystemManager_->getVectorIndexManager();

@@ -255,7 +255,7 @@ std::string CompletionCommand::generateBashCompletion() const {
     // Completion command
     oss << "        completion)\n";
     oss << "            if [[ $cword -eq 2 ]]; then\n";
-    oss << "                COMPREPLY=($(compgen -W \"bash zsh fish\" -- \"$cur\"))\n";
+    oss << "                COMPREPLY=($(compgen -W \"bash zsh fish powershell\" -- \"$cur\"))\n";
     oss << "            else\n";
     oss << "                COMPREPLY=($(compgen -W \"--help\" -- \"$cur\"))\n";
     oss << "            fi\n";
@@ -428,7 +428,7 @@ std::string CompletionCommand::generateZshCompletion() const {
 
     // Completion command
     oss << "                completion)\n";
-    oss << "                    _arguments '1:shell:(bash zsh fish)'\n";
+    oss << "                    _arguments '1:shell:(bash zsh fish powershell)'\n";
     oss << "                    ;;\n";
 
     oss << "            esac\n";

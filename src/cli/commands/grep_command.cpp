@@ -1,4 +1,5 @@
 #include <spdlog/spdlog.h>
+#include <nlohmann/json.hpp>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -107,6 +108,7 @@ private:
     std::optional<std::string> sessionOverride_;
     bool noSession_{false};
     std::vector<std::string> sessionPatterns_;
+    bool jsonOutput_ = false;
 
     // Helpers for configuration discovery
     std::map<std::string, std::string> parseSimpleToml(const std::filesystem::path& path) const {
@@ -267,6 +269,7 @@ public:
         // Session scoping controls
         cmd->add_option("--session", sessionOverride_, "Use this session for scoping");
         cmd->add_flag("--no-session", noSession_, "Bypass session scoping");
+        cmd->add_flag("--json", jsonOutput_, "Output results as JSON");
 
         cmd->callback([this]() {
             if (pattern_.empty() && !paths_.empty()) {
@@ -432,7 +435,36 @@ public:
                     dreq.sessionName = *sessionOverride_;
                 }
 
-                auto render = [&](const yams::daemon::GrepResponse& resp) -> Result<void> {
+                bool jsonMode = jsonOutput_ || (cli_ && cli_->getJsonOutput());
+
+                auto render = [&, jsonMode](const yams::daemon::GrepResponse& resp) -> Result<void> {
+                    // JSON output mode
+                    if (jsonMode) {
+                        nlohmann::json j;
+                        j["pattern"] = pattern_;
+                        j["total_matches"] = resp.matches.size();
+                        j["matches"] = nlohmann::json::array();
+                        for (const auto& match : resp.matches) {
+                            nlohmann::json m;
+                            m["file"] = match.file;
+                            m["line_number"] = match.lineNumber;
+                            m["line"] = match.line;
+                            m["match_type"] = match.matchType;
+                            if (match.matchType == "semantic") {
+                                m["confidence"] = match.confidence;
+                            }
+                            if (!match.contextBefore.empty()) {
+                                m["context_before"] = match.contextBefore;
+                            }
+                            if (!match.contextAfter.empty()) {
+                                m["context_after"] = match.contextAfter;
+                            }
+                            j["matches"].push_back(m);
+                        }
+                        std::cout << j.dump(2) << std::endl;
+                        return Result<void>();
+                    }
+
                     // Informative note: reflect the normalized command actually executed (debug
                     // only)
                     if (spdlog::get_level() <= spdlog::level::debug) {

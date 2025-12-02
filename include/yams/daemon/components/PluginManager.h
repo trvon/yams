@@ -92,6 +92,9 @@ public:
 
         /// Function to resolve preferred model name
         std::function<std::string()> resolvePreferredModel;
+
+        /// Optional: shared plugin host (if null, PluginManager creates its own)
+        AbiPluginHost* sharedPluginHost{nullptr};
     };
 
     explicit PluginManager(Dependencies deps);
@@ -250,11 +253,16 @@ public:
 #endif
 
 private:
+    AbiPluginHost* getActivePluginHost() const {
+        return sharedPluginHost_ ? sharedPluginHost_ : pluginHost_.get();
+    }
+
     Dependencies deps_;
 
     // Plugin infrastructure
     std::unique_ptr<AbiPluginLoader> pluginLoader_;
-    std::unique_ptr<AbiPluginHost> pluginHost_;
+    std::unique_ptr<AbiPluginHost> pluginHost_;       // Owned when created internally
+    AbiPluginHost* sharedPluginHost_{nullptr};         // Non-owning when shared from ServiceManager
 
     // FSMs for state tracking
     PluginHostFsm pluginHostFsm_;

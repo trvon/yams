@@ -22,6 +22,8 @@
 #include <yams/vector/vector_database.h>
 #include <yams/vector/vector_index_manager.h>
 #include <yams/version.hpp>
+// Error hints for actionable error messages
+#include <yams/cli/error_hints.h>
 // Generated version header (builddir/version_generated.h via generated_inc)
 #if __has_include(<version_generated.h>)
 #include <version_generated.h>
@@ -424,11 +426,14 @@ int YamsCLI::run(int argc, char* argv[]) {
             auto status = fut.wait_for(std::chrono::minutes(10));
             if (status != std::future_status::ready) {
                 spdlog::error("Command timed out");
+                std::cerr << formatErrorWithHint(ErrorCode::Timeout, "Command timed out") << "\n";
                 return 1;
             }
             auto result = fut.get();
             if (!result) {
-                spdlog::error("{}", result.error().message);
+                // Use error hints for actionable feedback
+                std::cerr << formatErrorWithHint(result.error().code, result.error().message)
+                          << "\n";
                 return 1;
             }
         }
@@ -450,20 +455,17 @@ Result<void> YamsCLI::ensureStorageInitialized() {
     }
     auto initResult = initializeStorage();
     if (!initResult) {
-        // Map common DB/init errors to actionable guidance
-        const std::string& em = initResult.error().message;
-        std::string hint;
-        // FTS5/tokenizer issues often arise during migrations creating virtual tables
-        if (em.find("FTS5") != std::string::npos || em.find("tokenize") != std::string::npos) {
-            hint = " (hint: run 'yams repair --fts5')";
-        } else if (em.find("constraint failed") != std::string::npos) {
-            // Likely uniqueness or foreign-key constraints; suggest safe, scoped repairs
-            hint = " (hint: try 'yams repair --orphans' or 'yams doctor --fix')";
-        } else {
-            // Default: storage onboarding
-            hint = " (tip: run 'yams init')";
+        // Use centralized error hints for actionable guidance
+        auto hint = getErrorHint(initResult.error().code, initResult.error().message);
+        std::string enhancedMessage = initResult.error().message;
+        if (!hint.hint.empty()) {
+            enhancedMessage += " (hint: " + hint.hint;
+            if (!hint.command.empty()) {
+                enhancedMessage += "; try '" + hint.command + "'";
+            }
+            enhancedMessage += ")";
         }
-        return Error{initResult.error().code, em + hint};
+        return Error{initResult.error().code, enhancedMessage};
     }
     return Result<void>();
 }

@@ -260,7 +260,8 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
         std::uint32_t consecutive_idle_timeouts = 0;
         // C++ IPC should be fast: 3 idle timeouts = 6s max idle with 2s read_timeout
         // This ensures connections don't hang during shutdown or idle periods
-        constexpr std::uint32_t kMaxIdleTimeouts = 3;
+        // PBI-089: Made configurable via TuneAdvisor to allow backpressure-aware tolerance
+        const std::uint32_t kMaxIdleTimeouts = TuneAdvisor::maxIdleTimeouts();
         while (!token.stop_requested() && sock->is_open()) {
             // Pause reads when backpressured to avoid amplifying write pressure
             if (fsm.backpressured()) {

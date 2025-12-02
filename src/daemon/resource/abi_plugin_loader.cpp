@@ -50,17 +50,25 @@ extern void registerModelProvider(const std::string& name, ModelProviderFactory 
 // macOS provides dlopen_preflight in <dlfcn.h>; no forward decl needed
 
 static std::vector<std::string> parseInterfacesFromManifest(const std::string& manifestJson) {
-    // Minimal, dependency-light parsing: look for "interfaces": ["id", ...]
     std::vector<std::string> out;
     try {
-        std::regex ifaceArray("\\\"interfaces\\\"\\s*:\\s*\\[(.*?)\\]");
+        std::regex ifaceArray("\\\"interfaces\\\"\\s*:\\s*\\[([^\\]]*)\\]");
         std::smatch m;
         if (std::regex_search(manifestJson, m, ifaceArray)) {
             std::string inner = m[1].str();
-            std::regex strItem("\\\"([^\\\"]+)\\\"");
-            for (std::sregex_iterator it(inner.begin(), inner.end(), strItem), end; it != end;
-                 ++it) {
-                out.push_back((*it)[1].str());
+            bool hasObjects = inner.find('{') != std::string::npos;
+            if (hasObjects) {
+                std::regex idPattern("\\\"id\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
+                for (std::sregex_iterator it(inner.begin(), inner.end(), idPattern), end;
+                     it != end; ++it) {
+                    out.push_back((*it)[1].str());
+                }
+            } else {
+                std::regex strItem("\\\"([^\\\"]+)\\\"");
+                for (std::sregex_iterator it(inner.begin(), inner.end(), strItem), end;
+                     it != end; ++it) {
+                    out.push_back((*it)[1].str());
+                }
             }
         }
     } catch (...) {

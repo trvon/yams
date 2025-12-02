@@ -70,3 +70,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Model download mapping**: Added `multi-qa-MiniLM-L6-cos-v1` to HuggingFace repo mapping
   - Ensures model download works for new model option
+- **Version display**: Fixed `yams --version` showing fallback values instead of actual version
+  - Added generated include directory to CLI build to resolve `version_generated.h`
+  - Version now correctly shows git tag and commit hash
+
+### CLI Improvements
+- **PowerShell completion**: Added `yams completion powershell` for PowerShell auto-complete
+  - Uses `Register-ArgumentCompleter` with dynamic subcommand and option completion
+  - Supports bash, zsh, fish, and PowerShell shells
+- **Consistent `--json` output**: Extended JSON output support across commands
+  - `yams doctor --json`: Machine-readable health check results
+  - `yams delete --json`: Deletion results as JSON array
+  - `yams grep --json`: Match results with file, line, matchType, confidence
+- **Actionable error hints**: Centralized error hint system (`error_hints.h`)
+  - Pattern-based hints for FTS5, embedding, daemon, database errors
+  - Error code fallback hints for generic error types
+  - Format: `💡 Hint:` with suggested `📋 Try:` command
+- **Daemon error messages**: Enhanced daemon start/stop failure messages
+  - Clear hints for common issues (daemon already running, permission denied)
+  - Suggested recovery commands (`yams daemon stop --force`, `pkill yams-daemon`)
+

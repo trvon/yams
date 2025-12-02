@@ -88,9 +88,10 @@ Focus: **Stability, polish, and production readiness**
 
 ### CLI & Developer Experience
 - [x] Path tree repair automation (background daemon task)
-- [ ] Improved error messages with actionable hints (partial: doctor command has extensive hints)
-- [ ] Consistent `--json` output across all commands (partial: ~50% of commands support it)
+- [x] Improved error messages with actionable hints (centralized error_hints.h, formatErrorWithHint)
+- [x] Consistent `--json` output across all commands (doctor, delete, grep, search, list, status, add)
 - [x] Incremental `yams add` with predictable include/exclude
+- [x] PowerShell shell completion support (bash, zsh, fish, PowerShell)
 
 ### Search Quality
 - [x] FTS5 hygiene: index only queried fields (v18 migration removes content_type column)

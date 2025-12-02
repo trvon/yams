@@ -84,12 +84,15 @@ Result<void> PluginManager::initialize() {
     // Create plugin loader
     pluginLoader_ = std::make_unique<AbiPluginLoader>();
 
-    // Determine trust file path (default to dataDir/plugins.trust)
-    std::filesystem::path trustFile = deps_.dataDir / "plugins.trust";
-
-    // Create plugin host (pass nullptr for ServiceManager - we don't need circular dep)
-    // The host only uses ServiceManager for config, which we pass via deps_
-    pluginHost_ = std::make_unique<AbiPluginHost>(nullptr, trustFile);
+    // Use shared plugin host if provided, otherwise create our own
+    if (deps_.sharedPluginHost) {
+        sharedPluginHost_ = deps_.sharedPluginHost;
+        spdlog::info("[PluginManager] Using shared plugin host from ServiceManager");
+    } else {
+        std::filesystem::path trustFile = deps_.dataDir / "plugins.trust";
+        pluginHost_ = std::make_unique<AbiPluginHost>(nullptr, trustFile);
+        spdlog::info("[PluginManager] Initialized with trust file: {}", trustFile.string());
+    }
 
     // Configure name policy
     if (deps_.config) {
@@ -104,7 +107,6 @@ Result<void> PluginManager::initialize() {
             pluginLoader_->setNamePolicy(AbiPluginLoader::NamePolicy::Relaxed);
     }
 
-    spdlog::info("[PluginManager] Initialized with trust file: {}", trustFile.string());
     return Result<void>{};
 }
 
@@ -117,10 +119,10 @@ void PluginManager::shutdown() {
     symbolExtractors_.clear();
 
     // Unload plugins
-    if (pluginHost_) {
-        for (const auto& d : pluginHost_->listLoaded()) {
+    if (getActivePluginHost()) {
+        for (const auto& d : getActivePluginHost()->listLoaded()) {
             try {
-                pluginHost_->unload(d.name);
+                getActivePluginHost()->unload(d.name);
             } catch (...) {
             }
         }
@@ -131,21 +133,21 @@ void PluginManager::shutdown() {
 }
 
 std::vector<std::filesystem::path> PluginManager::trustList() const {
-    if (!pluginHost_)
+    if (!getActivePluginHost())
         return {};
-    return pluginHost_->trustList();
+    return getActivePluginHost()->trustList();
 }
 
 Result<void> PluginManager::trustAdd(const std::filesystem::path& path) {
-    if (!pluginHost_)
+    if (!getActivePluginHost())
         return Error{ErrorCode::InvalidState, "Plugin host not initialized"};
-    return pluginHost_->trustAdd(path);
+    return getActivePluginHost()->trustAdd(path);
 }
 
 Result<void> PluginManager::trustRemove(const std::filesystem::path& path) {
-    if (!pluginHost_)
+    if (!getActivePluginHost())
         return Error{ErrorCode::InvalidState, "Plugin host not initialized"};
-    return pluginHost_->trustRemove(path);
+    return getActivePluginHost()->trustRemove(path);
 }
 
 boost::asio::awaitable<Result<size_t>>
@@ -178,8 +180,8 @@ PluginManager::autoloadPlugins(boost::asio::any_io_executor executor) {
         std::vector<std::filesystem::path> roots;
 
         // Add trust list paths
-        if (pluginHost_) {
-            for (const auto& p : pluginHost_->trustList())
+        if (getActivePluginHost()) {
+            for (const auto& p : getActivePluginHost()->trustList())
                 roots.push_back(p);
         }
 
@@ -211,10 +213,10 @@ PluginManager::autoloadPlugins(boost::asio::any_io_executor executor) {
         for (const auto& root : roots) {
             spdlog::info("[PluginManager] scanning: {}", root.string());
 
-            if (!pluginHost_)
+            if (!getActivePluginHost())
                 continue;
 
-            auto scanResult = pluginHost_->scanDirectory(root);
+            auto scanResult = getActivePluginHost()->scanDirectory(root);
             if (!scanResult) {
                 spdlog::debug("[PluginManager] scan failed for {}: {}", root.string(),
                               scanResult.error().message);
@@ -285,12 +287,12 @@ PluginManager::autoloadPlugins(boost::asio::any_io_executor executor) {
 }
 
 Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName) {
-    if (!pluginHost_) {
+    if (!getActivePluginHost()) {
         return Error{ErrorCode::InvalidState, "Plugin host not initialized"};
     }
 
     try {
-        auto loaded = pluginHost_->listLoaded();
+        auto loaded = getActivePluginHost()->listLoaded();
 
         auto pathFor = [&](const std::string& name) -> std::string {
             for (const auto& d : loaded) {
@@ -307,9 +309,10 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
         };
 
         auto tryAdopt = [&](const std::string& pluginName) -> bool {
-            auto ifaceRes = pluginHost_->getInterface(pluginName, "model_provider_v1", 2);
+            auto ifaceRes = getActivePluginHost()->getInterface(pluginName, "model_provider_v1", 2);
             if (!ifaceRes) {
-                spdlog::debug("[PluginManager] No model_provider_v1 interface for '{}'", pluginName);
+                spdlog::info("[PluginManager] No model_provider_v1 interface for '{}': {}",
+                             pluginName, ifaceRes.error().message);
                 return false;
             }
 
@@ -374,20 +377,26 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
         }
 
         // Try all loaded plugins
+        spdlog::info("[PluginManager] adoptModelProvider: {} loaded plugins to try", loaded.size());
         for (const auto& d : loaded) {
+            spdlog::info("[PluginManager] Trying plugin name='{}' path='{}'", d.name, d.path.string());
             if (tryAdopt(d.name))
                 return Result<bool>(true);
 
             // Try path stem as alternate name
             try {
                 std::string alt = std::filesystem::path(d.path).stem().string();
-                if (!alt.empty() && alt != d.name && tryAdopt(alt))
-                    return Result<bool>(true);
+                if (!alt.empty() && alt != d.name) {
+                    spdlog::info("[PluginManager] Trying alternate name='{}'", alt);
+                    if (tryAdopt(alt))
+                        return Result<bool>(true);
+                }
             } catch (...) {
             }
         }
 
         // No provider found
+        spdlog::warn("[PluginManager] No model provider adopted from any plugin");
         embeddingFsm_.dispatch(ProviderDegradedEvent{"no provider adopted"});
         refreshStatusSnapshot();
         return Result<bool>(false);
@@ -484,8 +493,8 @@ void PluginManager::refreshStatusSnapshot() {
     }
 
     // Build plugin records
-    if (pluginHost_) {
-        for (const auto& d : pluginHost_->listLoaded()) {
+    if (getActivePluginHost()) {
+        for (const auto& d : getActivePluginHost()->listLoaded()) {
             PluginStatusRecord rec;
             rec.name = d.name;
             rec.isProvider = (d.name == adoptedProviderPluginName_);
