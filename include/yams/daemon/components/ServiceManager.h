@@ -359,7 +359,13 @@ public:
     }
 
     void cancelServiceManagerWait() { serviceFsm_.cancelWait(); }
-    ProviderSnapshot getEmbeddingProviderFsmSnapshot() const { return embeddingFsm_.snapshot(); }
+    // PBI-088: Delegate to PluginManager FSM when available (it owns the provider lifecycle)
+    ProviderSnapshot getEmbeddingProviderFsmSnapshot() const {
+        if (pluginManager_) {
+            return pluginManager_->getEmbeddingProviderFsmSnapshot();
+        }
+        return embeddingFsm_.snapshot();
+    }
     PluginHostSnapshot getPluginHostFsmSnapshot() const { return pluginHostFsm_.snapshot(); }
 
     // PBI-008-11: FSM hook scaffolds for session preparation lifecycle (no-op for now)

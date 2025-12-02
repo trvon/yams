@@ -35,8 +35,6 @@ struct SearchConfig {
 
     // Performance settings
     std::chrono::milliseconds timeout{30000}; // Search timeout
-    bool enableQueryCache = true;             // Enable query result caching
-    size_t cacheSize = 1000;                  // Maximum cached queries
 
     // Ranking configuration
     RankingConfig rankingConfig;
@@ -126,8 +124,6 @@ public:
         std::uint32_t active{0};
         std::uint32_t queued{0};
         std::uint64_t executed{0};
-        std::uint64_t cacheHits{0};
-        std::uint64_t cacheMisses{0};
         std::uint64_t avgLatencyUs{0};
         std::uint32_t concurrencyLimit{0};
     };
@@ -140,8 +136,6 @@ public:
      */
     struct SearchExecutorStats {
         size_t totalSearches = 0;
-        size_t cacheHits = 0;
-        size_t cacheMisses = 0;
         std::chrono::milliseconds avgSearchTime{0};
         std::chrono::milliseconds avgRankingTime{0};
         std::chrono::milliseconds maxSearchTime{0};
@@ -151,7 +145,8 @@ public:
     SearchExecutorStats getStatistics() const { return stats_; }
 
     /**
-     * @brief Clear search cache
+     * @brief Clear search cache (no-op, cache removed)
+     * @deprecated Cache has been removed; this method is kept for API compatibility
      */
     void clearCache();
 
@@ -163,10 +158,6 @@ private:
     // Components
     std::unique_ptr<QueryParser> queryParser_;
     std::unique_ptr<ResultRanker> ranker_;
-
-    // Cache (simple implementation)
-    mutable std::unordered_map<std::string, SearchResults> queryCache_;
-    mutable std::vector<std::string> cacheOrder_; // For LRU eviction
 
     // Statistics
     mutable SearchExecutorStats stats_;
@@ -191,8 +182,6 @@ private:
     mutable std::atomic<std::uint32_t> activeSearches_{0};
     mutable std::atomic<std::uint32_t> queuedSearches_{0};
     mutable std::atomic<std::uint64_t> totalSearches_{0};
-    mutable std::atomic<std::uint64_t> totalCacheHits_{0};
-    mutable std::atomic<std::uint64_t> totalCacheMisses_{0};
     mutable std::atomic<std::uint64_t> totalLatencyUs_{0};
 
     /**
@@ -229,14 +218,6 @@ private:
     void sortResults(std::vector<SearchResultItem>& results, SearchConfig::SortOrder sortOrder);
 
     /**
-     * @brief Cache management
-     */
-    void cacheResult(const std::string& cacheKey, const SearchResults& response) const;
-    std::optional<SearchResults> getCachedResult(const std::string& cacheKey) const;
-    std::string generateCacheKey(const SearchRequest& request) const;
-    void evictOldestCacheEntry() const;
-
-    /**
      * @brief Error handling
      */
     SearchResults createErrorResponse(const std::string& error, const SearchRequest& request) const;
@@ -245,7 +226,7 @@ private:
      * @brief Performance tracking
      */
     void updateStatistics(const std::chrono::milliseconds& searchTime,
-                          const std::chrono::milliseconds& rankingTime, bool cacheHit) const;
+                          const std::chrono::milliseconds& rankingTime) const;
 };
 
 /**

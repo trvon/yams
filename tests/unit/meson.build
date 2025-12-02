@@ -226,7 +226,6 @@ unit_search = files(
   'search/kg_scorer_simple_test.cpp',
   'search/query_parser_test.cpp',
   'search/query_qualifiers_test.cpp',
-  'search/search_cache_test.cpp',
   'search/search_executor_test.cpp',
   'search/search_smoke_test.cpp',
 )

@@ -7,7 +7,6 @@
 #include <chrono>
 #include <cmath>
 #include <future>
-#include <map>
 #include <set>
 #include <string>
 #include <thread>
@@ -89,7 +88,7 @@ ResultFusion::fuseWeightedSum(const std::vector<ComponentResult>& results) {
 
     // Calculate weighted sum for each document
     std::vector<SearchResult> fusedResults;
-    fusedResults.reserve(grouped.size());
+    fusedResults.reserve(std::min(grouped.size(), config_.maxResults));
 
     for (const auto& [docHash, components] : grouped) {
         SearchResult result;
@@ -111,13 +110,16 @@ ResultFusion::fuseWeightedSum(const std::vector<ComponentResult>& results) {
         fusedResults.push_back(std::move(result));
     }
 
-    // Sort by final score (descending)
-    std::sort(fusedResults.begin(), fusedResults.end(),
-              [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
-
-    // Limit results
+    // Use partial_sort if we only need top maxResults (faster than full sort)
     if (fusedResults.size() > config_.maxResults) {
+        std::partial_sort(
+            fusedResults.begin(), fusedResults.begin() + static_cast<ptrdiff_t>(config_.maxResults),
+            fusedResults.end(),
+            [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
         fusedResults.resize(config_.maxResults);
+    } else {
+        std::sort(fusedResults.begin(), fusedResults.end(),
+                  [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
     }
 
     return fusedResults;
@@ -127,7 +129,7 @@ std::vector<SearchResult>
 ResultFusion::fuseReciprocalRank(const std::vector<ComponentResult>& results) {
     auto grouped = groupByDocument(results);
     std::vector<SearchResult> fusedResults;
-    fusedResults.reserve(grouped.size());
+    fusedResults.reserve(std::min(grouped.size(), config_.maxResults));
 
     const float k = 60.0f; // RRF constant
 
@@ -149,11 +151,16 @@ ResultFusion::fuseReciprocalRank(const std::vector<ComponentResult>& results) {
         fusedResults.push_back(std::move(result));
     }
 
-    std::sort(fusedResults.begin(), fusedResults.end(),
-              [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
-
+    // Use partial_sort for better performance when maxResults << total
     if (fusedResults.size() > config_.maxResults) {
+        std::partial_sort(
+            fusedResults.begin(), fusedResults.begin() + static_cast<ptrdiff_t>(config_.maxResults),
+            fusedResults.end(),
+            [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
         fusedResults.resize(config_.maxResults);
+    } else {
+        std::sort(fusedResults.begin(), fusedResults.end(),
+                  [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
     }
 
     return fusedResults;
@@ -163,7 +170,7 @@ std::vector<SearchResult>
 ResultFusion::fuseBordaCount(const std::vector<ComponentResult>& results) {
     auto grouped = groupByDocument(results);
     std::vector<SearchResult> fusedResults;
-    fusedResults.reserve(grouped.size());
+    fusedResults.reserve(std::min(grouped.size(), config_.maxResults));
 
     for (const auto& [docHash, components] : grouped) {
         SearchResult result;
@@ -184,11 +191,16 @@ ResultFusion::fuseBordaCount(const std::vector<ComponentResult>& results) {
         fusedResults.push_back(std::move(result));
     }
 
-    std::sort(fusedResults.begin(), fusedResults.end(),
-              [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
-
+    // Use partial_sort for better performance when maxResults << total
     if (fusedResults.size() > config_.maxResults) {
+        std::partial_sort(
+            fusedResults.begin(), fusedResults.begin() + static_cast<ptrdiff_t>(config_.maxResults),
+            fusedResults.end(),
+            [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
         fusedResults.resize(config_.maxResults);
+    } else {
+        std::sort(fusedResults.begin(), fusedResults.end(),
+                  [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
     }
 
     return fusedResults;
@@ -198,7 +210,7 @@ std::vector<SearchResult>
 ResultFusion::fuseWeightedReciprocal(const std::vector<ComponentResult>& results) {
     auto grouped = groupByDocument(results);
     std::vector<SearchResult> fusedResults;
-    fusedResults.reserve(grouped.size());
+    fusedResults.reserve(std::min(grouped.size(), config_.maxResults));
 
     const float k = 60.0f;
 
@@ -222,19 +234,25 @@ ResultFusion::fuseWeightedReciprocal(const std::vector<ComponentResult>& results
         fusedResults.push_back(std::move(result));
     }
 
-    std::sort(fusedResults.begin(), fusedResults.end(),
-              [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
-
+    // Use partial_sort for better performance when maxResults << total
     if (fusedResults.size() > config_.maxResults) {
+        std::partial_sort(
+            fusedResults.begin(), fusedResults.begin() + static_cast<ptrdiff_t>(config_.maxResults),
+            fusedResults.end(),
+            [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
         fusedResults.resize(config_.maxResults);
+    } else {
+        std::sort(fusedResults.begin(), fusedResults.end(),
+                  [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
     }
 
     return fusedResults;
 }
 
-std::map<std::string, std::vector<ComponentResult>>
+std::unordered_map<std::string, std::vector<ComponentResult>>
 ResultFusion::groupByDocument(const std::vector<ComponentResult>& results) const {
-    std::map<std::string, std::vector<ComponentResult>> grouped;
+    std::unordered_map<std::string, std::vector<ComponentResult>> grouped;
+    grouped.reserve(results.size()); // Worst case: each result is unique document
 
     for (const auto& result : results) {
         grouped[result.documentHash].push_back(result);
@@ -355,6 +373,23 @@ Result<std::vector<SearchResult>> SearchEngine::Impl::search(const std::string& 
     }
 
     std::vector<ComponentResult> allComponentResults;
+    // Pre-allocate based on expected total results from all enabled components
+    size_t estimatedResults = 0;
+    if (config_.fts5Weight > 0.0f)
+        estimatedResults += config_.fts5MaxResults;
+    if (config_.kgWeight > 0.0f)
+        estimatedResults += config_.kgMaxResults;
+    if (config_.pathTreeWeight > 0.0f)
+        estimatedResults += config_.pathTreeMaxResults;
+    if (config_.symbolWeight > 0.0f)
+        estimatedResults += config_.symbolMaxResults;
+    if (config_.vectorWeight > 0.0f)
+        estimatedResults += config_.vectorMaxResults;
+    if (config_.tagWeight > 0.0f)
+        estimatedResults += config_.tagMaxResults;
+    if (config_.metadataWeight > 0.0f)
+        estimatedResults += config_.metadataMaxResults;
+    allComponentResults.reserve(estimatedResults);
 
     if (config_.enableParallelExecution) {
         // ========================================================================

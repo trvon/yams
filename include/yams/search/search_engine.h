@@ -305,8 +305,8 @@ private:
     std::vector<SearchResult> fuseBordaCount(const std::vector<ComponentResult>& results);
     std::vector<SearchResult> fuseWeightedReciprocal(const std::vector<ComponentResult>& results);
 
-    // Helper: Group component results by document
-    std::map<std::string, std::vector<ComponentResult>>
+    // Helper: Group component results by document (uses unordered_map for O(1) lookup)
+    std::unordered_map<std::string, std::vector<ComponentResult>>
     groupByDocument(const std::vector<ComponentResult>& results) const;
 
     // Helper: Get weight for component source

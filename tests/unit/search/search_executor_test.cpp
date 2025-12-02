@@ -43,7 +43,6 @@ protected:
 
         // Create search executor using direct database handle (metadata repo optional)
         SearchConfig config;
-        config.enableQueryCache = false; // Disable cache for testing
         config.maxResults = 100;
 
         executor_ = std::make_unique<SearchExecutor>(database_, nullptr, config);
@@ -391,21 +390,17 @@ TEST_F(SearchExecutorTest, ExecutorStatistics) {
 }
 
 TEST_F(SearchExecutorTest, ClearCache) {
-    // Enable cache for this test
-    SearchConfig config;
-    config.enableQueryCache = true;
-    config.cacheSize = 10;
+    // Cache has been removed - clearCache() is now a no-op for API compatibility
+    // This test verifies the no-op does not crash
 
-    auto cachedExecutor = std::make_unique<SearchExecutor>(database_, nullptr, config);
+    // Perform search
+    executor_->search("learning");
 
-    // Perform search to populate cache
-    cachedExecutor->search("learning");
+    // Clear cache (no-op)
+    executor_->clearCache();
 
-    // Clear cache
-    cachedExecutor->clearCache();
-
-    // Cache should be empty (no direct way to test this, but it should not crash)
-    auto stats = cachedExecutor->getStatistics();
+    // Verify executor still works after clearCache()
+    auto stats = executor_->getStatistics();
     EXPECT_GE(stats.totalSearches, 1u);
 }
 

@@ -994,48 +994,49 @@ void ServiceManager::shutdown() {
     malloc_zone_pressure_relief(nullptr, 0);
 #endif
 
-    spdlog::info("[ServiceManager] Phase 9: Releasing plugin infrastructure");
-    try {
-        abiPluginLoader_.reset();
-        spdlog::info("[ServiceManager] Phase 9.1: ABI plugin loader reset");
-    } catch (...) {
-        spdlog::warn("[ServiceManager] Phase 9.1: Exception resetting ABI plugin loader");
-    }
-    try {
-        abiHost_.reset();
-        spdlog::info("[ServiceManager] Phase 9.2: ABI host reset");
-    } catch (...) {
-        spdlog::warn("[ServiceManager] Phase 9.2: Exception resetting ABI host");
-    }
-
-    // PBI-088: Shutdown extracted managers
-    spdlog::info("[ServiceManager] Phase 10: Releasing extracted managers");
+    // PBI-088: Shutdown extracted managers BEFORE plugin infrastructure
+    // (PluginManager holds raw pointer to abiHost_ via sharedPluginHost_)
+    spdlog::info("[ServiceManager] Phase 9: Releasing extracted managers");
     try {
         if (pluginManager_) {
             pluginManager_->shutdown();
             pluginManager_.reset();
-            spdlog::info("[ServiceManager] Phase 10.1: PluginManager reset");
+            spdlog::info("[ServiceManager] Phase 9.1: PluginManager reset");
         }
     } catch (...) {
-        spdlog::warn("[ServiceManager] Phase 10.1: Exception resetting PluginManager");
+        spdlog::warn("[ServiceManager] Phase 9.1: Exception resetting PluginManager");
     }
     try {
         if (vectorSystemManager_) {
             vectorSystemManager_->shutdown();
             vectorSystemManager_.reset();
-            spdlog::info("[ServiceManager] Phase 10.2: VectorSystemManager reset");
+            spdlog::info("[ServiceManager] Phase 9.2: VectorSystemManager reset");
         }
     } catch (...) {
-        spdlog::warn("[ServiceManager] Phase 10.2: Exception resetting VectorSystemManager");
+        spdlog::warn("[ServiceManager] Phase 9.2: Exception resetting VectorSystemManager");
     }
     try {
         if (databaseManager_) {
             databaseManager_->shutdown();
             databaseManager_.reset();
-            spdlog::info("[ServiceManager] Phase 10.3: DatabaseManager reset");
+            spdlog::info("[ServiceManager] Phase 9.3: DatabaseManager reset");
         }
     } catch (...) {
-        spdlog::warn("[ServiceManager] Phase 10.3: Exception resetting DatabaseManager");
+        spdlog::warn("[ServiceManager] Phase 9.3: Exception resetting DatabaseManager");
+    }
+
+    spdlog::info("[ServiceManager] Phase 10: Releasing plugin infrastructure");
+    try {
+        abiPluginLoader_.reset();
+        spdlog::info("[ServiceManager] Phase 10.1: ABI plugin loader reset");
+    } catch (...) {
+        spdlog::warn("[ServiceManager] Phase 10.1: Exception resetting ABI plugin loader");
+    }
+    try {
+        abiHost_.reset();
+        spdlog::info("[ServiceManager] Phase 10.2: ABI host reset");
+    } catch (...) {
+        spdlog::warn("[ServiceManager] Phase 10.2: Exception resetting ABI host");
     }
 
     auto shutdownDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2559,11 +2560,7 @@ ServiceManager::SearchLoadMetrics ServiceManager::getSearchLoadMetrics() const {
     metrics.executed = load.executed;
     metrics.avgLatencyUs = load.avgLatencyUs;
     metrics.concurrencyLimit = load.concurrencyLimit;
-    const auto cacheTotal = load.cacheHits + load.cacheMisses;
-    if (cacheTotal > 0) {
-        metrics.cacheHitRate =
-            static_cast<double>(load.cacheHits) / static_cast<double>(cacheTotal);
-    }
+    // Note: cache metrics removed - cache has been removed from SearchExecutor
     return metrics;
 }
 
