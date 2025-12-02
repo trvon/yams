@@ -97,7 +97,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Affects ONNX plugin and other plugins with versioned interface declarations
   - Location: `src/daemon/resource/abi_plugin_loader.cpp`
 
-- **Plugin host sharing**: Fixed model provider adoption failure after PBI-088 component extraction
+- **Plugin host sharing**: Fixed model provider adoption failure 
   - `ServiceManager::autoloadPluginsNow()` loaded plugins into `abiHost_`
   - `PluginManager::adoptModelProvider()` was querying its own empty `pluginHost_`
   - Added `sharedPluginHost` option to `PluginManager::Dependencies` for host sharing

@@ -14,7 +14,6 @@
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
-#include <yams/search/hybrid_search_factory.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/embedding_service.h>
@@ -506,15 +505,18 @@ std::shared_ptr<app::services::AppContext> YamsCLI::getAppContext() {
         appContext_->kgStore = getKnowledgeGraphStore(); // PBI-043: tree diff KG integration
         appContext_->workerExecutor = executor_;         // 066-59: Thread executor through services
 
-        // Initialize HybridSearchEngine so SearchService can use hybrid search by default
+        // Initialize SearchEngine so SearchService can use hybrid search by default
         try {
             auto vecMgr = getVectorIndexManager();
+            auto vecDb = getVectorDatabase();
             auto repo = getMetadataRepository();
 
             if (vecMgr && repo) {
                 yams::search::SearchEngineBuilder builder;
-                builder.withVectorIndex(vecMgr).withMetadataRepo(repo).withKGStore(
-                    getKnowledgeGraphStore());
+                builder.withVectorIndex(vecMgr)
+                    .withVectorDatabase(vecDb)
+                    .withMetadataRepo(repo)
+                    .withKGStore(getKnowledgeGraphStore());
 
                 // Reuse a shared embedding generator if available
                 if (auto emb = getEmbeddingGenerator()) {
@@ -524,20 +526,20 @@ std::shared_ptr<app::services::AppContext> YamsCLI::getAppContext() {
                 auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
                 auto engRes = builder.buildEmbedded(opts);
                 if (engRes) {
-                    appContext_->hybridEngine = engRes.value();
-                    spdlog::info("HybridSearchEngine initialized for AppContext (KG {}abled)",
-                                 appContext_->hybridEngine->getConfig().enable_kg ? "en" : "dis");
+                    appContext_->searchEngine = engRes.value();
+                    appContext_->vectorDatabase = vecDb;
+                    spdlog::info("SearchEngine initialized for AppContext");
                 } else {
-                    spdlog::warn("HybridSearchEngine initialization failed: {}",
+                    spdlog::warn("SearchEngine initialization failed: {}",
                                  engRes.error().message);
-                    appContext_->hybridEngine = nullptr;
+                    appContext_->searchEngine = nullptr;
                 }
             } else {
-                appContext_->hybridEngine = nullptr;
+                appContext_->searchEngine = nullptr;
             }
         } catch (const std::exception& e) {
-            spdlog::warn("HybridSearchEngine bring-up error (ignored): {}", e.what());
-            appContext_->hybridEngine = nullptr;
+            spdlog::warn("SearchEngine bring-up error (ignored): {}", e.what());
+            appContext_->searchEngine = nullptr;
         }
 
         spdlog::debug("Created AppContext for services");
@@ -890,8 +892,9 @@ Result<void> YamsCLI::initializeStorage() {
                 vdbConfig.database_path = (dataPath_ / "vectors.db").string();
                 vdbConfig.embedding_dim = vectorDimension;
 
-                auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
+                auto vectorDb = std::make_shared<vector::VectorDatabase>(vdbConfig);
                 if (vectorDb->initialize()) {
+                    vectorDatabase_ = vectorDb;
                     if (verbose_) {
                         spdlog::info("Vector database initialized at: {}", vdbConfig.database_path);
                     }

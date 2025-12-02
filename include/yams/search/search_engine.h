@@ -404,6 +404,7 @@ public:
         std::atomic<uint64_t> totalQueries{0};
         std::atomic<uint64_t> successfulQueries{0};
         std::atomic<uint64_t> failedQueries{0};
+        std::atomic<uint64_t> timedOutQueries{0};  // Parallel component timeouts
 
         // Component metrics
         std::atomic<uint64_t> fts5Queries{0};

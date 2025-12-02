@@ -571,7 +571,7 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
                      std::optional<boost::asio::any_io_executor> executor)
     : transport_(std::move(transport)), externalShutdown_(externalShutdown),
       daemonSocketOverride_(std::move(overrideSocket)), eagerReadyEnabled_(false),
-      autoReadyEnabled_(false), strictProtocol_(true), limitToolResultDup_(false) {
+      autoReadyEnabled_(false), strictProtocol_(false), limitToolResultDup_(false) {
     (void)executor; // Reserved for future use
     // Ensure logging goes to stderr to keep stdout clean for MCP framing
     if (auto existing = spdlog::get("yams-mcp")) {
@@ -1270,9 +1270,9 @@ MessageResult MCPServer::handleRequest(const json& request) {
 }
 
 json MCPServer::initialize(const json& params) {
-    // Supported protocol versions (latest first)
-    static const std::vector<std::string> kSupported = {"2025-03-26", "2024-11-05"};
-    const std::string latest = "2025-03-26"; // Align with latest published MCP stdio spec
+    static const std::vector<std::string> kSupported = {
+        "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05", "2024-10-07"};
+    const std::string latest = "2025-11-25";
 
     // Extract requested version (optional)
     std::string requested = latest;
@@ -5599,16 +5599,10 @@ bool MCPServer::isCanceled(const nlohmann::json& id) const {
 }
 
 json MCPServer::buildServerCapabilities() const {
-    json caps = {{"tools", json({{"listChanged", false}})},
-                 {"prompts", json({{"listChanged", false}})},
-                 {"resources", json({{"subscribe", false}, {"listChanged", false}})},
-                 {"logging", json::object()}};
-    // Augment with extended flags
-    caps["experimental"] = json::object();
-    caps["experimental"]["cancellation"] = cancellationSupported_;
-    caps["experimental"]["progress"] = progressSupported_;
-
-    return caps;
+    return {{"tools", {{"listChanged", false}}},
+            {"prompts", {{"listChanged", false}}},
+            {"resources", {{"subscribe", false}, {"listChanged", false}}},
+            {"logging", json::object()}};
 }
 
 // --- Cancel & Progress Helper Implementations ---

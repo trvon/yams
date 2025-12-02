@@ -110,6 +110,7 @@ unit_daemon_base = files(
   'daemon/components/plugin_manager_test.cpp',
   'daemon/components/database_manager_test.cpp',
   'daemon/components/request_queue_test.cpp',
+  'daemon/components/checkpoint_manager_test.cpp',
 
   # Legacy GTest tests (to be migrated)
   'daemon/daemon_test.cpp',
@@ -222,11 +223,7 @@ unit_search = files(
   'search/bk_tree_test.cpp',
   'search/chunk_coverage_test.cpp',
   'search/entity_linker_test.cpp',
-  'search/hierarchical_search_test.cpp',
-  'search/hybrid_grouping_smoke_test.cpp',
-  'search/hybrid_search_engine_test.cpp',
   'search/kg_scorer_simple_test.cpp',
-  'search/learned_fusion_smoke_test.cpp',
   'search/query_parser_test.cpp',
   'search/query_qualifiers_test.cpp',
   'search/search_cache_test.cpp',

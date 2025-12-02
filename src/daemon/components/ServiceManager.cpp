@@ -57,6 +57,7 @@
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PoolManager.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/DatabaseManager.h>
 #include <yams/daemon/components/PluginManager.h>
@@ -490,6 +491,26 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             dbDeps.state = &state_;
             databaseManager_ = std::make_unique<DatabaseManager>(dbDeps);
             spdlog::debug("[ServiceManager] DatabaseManager created");
+
+            // Create CheckpointManager
+            CheckpointManager::Config checkpointConfig;
+            checkpointConfig.checkpoint_interval =
+                std::chrono::seconds(TuneAdvisor::checkpointIntervalSeconds());
+            checkpointConfig.vector_index_insert_threshold =
+                TuneAdvisor::checkpointInsertThreshold();
+            checkpointConfig.enable_hotzone_persistence =
+                TuneAdvisor::enableHotzoneCheckpoint();
+            checkpointConfig.data_dir = config_.dataDir;
+
+            CheckpointManager::Dependencies checkpointDeps;
+            checkpointDeps.vectorSystemManager = vectorSystemManager_.get();
+            checkpointDeps.hotzoneManager = nullptr;
+            checkpointDeps.executor = workCoordinator_->getExecutor();
+            checkpointDeps.stopRequested = std::make_shared<std::atomic<bool>>(false);
+
+            checkpointManager_ = std::make_unique<CheckpointManager>(
+                std::move(checkpointConfig), std::move(checkpointDeps));
+            spdlog::debug("[ServiceManager] CheckpointManager created");
         } catch (const std::exception& e) {
             spdlog::warn("[ServiceManager] Failed to create extracted managers: {}", e.what());
         }
@@ -1743,7 +1764,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         }
     }
 
-    // Build HybridSearchEngine with timeout
+    // Build SearchEngine with timeout
     try {
         state_.readiness.searchProgress = 10;
         writeBootstrapStatusFile(config_, state_);
@@ -1789,9 +1810,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             } catch (...) {
             }
         }
-        auto graphService = graphComponent_ ? graphComponent_->getQueryService() : nullptr;
         auto buildResult = co_await searchEngineManager_.buildEngine(
-            metadataRepo_, vectorIndexManager_, embGen, graphService, "initial", build_timeout,
+            metadataRepo_, vectorDatabase_, vectorIndexManager_, embGen, "initial", build_timeout,
             getWorkerExecutor());
 
         if (buildResult.has_value()) {
@@ -1807,7 +1827,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             state_.readiness.vectorIndexReady = true;
             writeBootstrapStatusFile(config_, state_);
 
-            spdlog::info("HybridSearchEngine initialized and published to AppContext");
+            spdlog::info("SearchEngine initialized and published to AppContext");
             try {
                 serviceFsm_.dispatch(SearchEngineBuiltEvent{});
             } catch (...) {
@@ -1822,7 +1842,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             spdlog::warn("[SearchBuild] initial engine build not ready; continuing degraded");
         }
     } catch (const std::exception& e) {
-        spdlog::warn("Exception wiring HybridSearchEngine: {}", e.what());
+        spdlog::warn("Exception wiring SearchEngine: {}", e.what());
     }
     spdlog::info("[ServiceManager] Phase: Search Engine Built.");
     if (ingestService_) {
@@ -2339,7 +2359,7 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
 
         int build_timeout = 30000; // 30s timeout
         auto rebuildResult = co_await searchEngineManager_.buildEngine(
-            metadataRepo_, vectorIndexManager_, embGen, graphService, "rebuild_enabled",
+            metadataRepo_, vectorDatabase_, vectorIndexManager_, embGen, "rebuild_enabled",
             build_timeout, getWorkerExecutor());
 
         if (rebuildResult.has_value()) {
@@ -2402,9 +2422,8 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
             }
 
             // Phase 2.4: Use SearchEngineManager instead of co_buildEngine
-            auto graphService = graphComponent_ ? graphComponent_->getQueryService() : nullptr;
             auto rebuildResult = co_await searchEngineManager_.buildEngine(
-                metadataRepo_, vectorIndexManager_, embGen, graphService, "rebuild", build_timeout,
+                metadataRepo_, vectorDatabase_, vectorIndexManager_, embGen, "rebuild", build_timeout,
                 getWorkerExecutor());
 
             if (rebuildResult.has_value()) {
@@ -2444,7 +2463,7 @@ std::function<void(bool)> ServiceManager::getWorkerJobSignal() {
     };
 }
 
-std::shared_ptr<search::HybridSearchEngine> ServiceManager::getSearchEngineSnapshot() const {
+std::shared_ptr<search::SearchEngine> ServiceManager::getSearchEngineSnapshot() const {
     std::shared_lock lock(searchEngineMutex_); // Concurrent reads - no blocking!
     return searchEngine_;
 }
@@ -2459,7 +2478,8 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
     spdlog::debug("[getAppContext] about to set metadataRepo");
     ctx.metadataRepo = metadataRepo_;
     spdlog::debug("[getAppContext] about to call getSearchEngineSnapshot()");
-    ctx.hybridEngine = getSearchEngineSnapshot();
+    ctx.searchEngine = getSearchEngineSnapshot();
+    ctx.vectorDatabase = getVectorDatabase();
     spdlog::debug("[getAppContext] getSearchEngineSnapshot() returned");
     ctx.kgStore = this->kgStore_; // PBI-043: tree diff KG integration
     spdlog::debug("[getAppContext] about to call graphComponent_->getQueryService()");
@@ -2798,7 +2818,7 @@ ServiceManager::co_initDatabase(boost::asio::any_io_executor exec,
     }
 }
 
-boost::asio::awaitable<std::shared_ptr<yams::search::HybridSearchEngine>>
+boost::asio::awaitable<std::shared_ptr<yams::search::SearchEngine>>
 ServiceManager::co_buildEngine(int timeout_ms, const boost::asio::cancellation_state& /*token*/,
                                bool includeEmbeddingGenerator) {
     auto exec = getWorkerExecutor();
@@ -2810,13 +2830,12 @@ ServiceManager::co_buildEngine(int timeout_ms, const boost::asio::cancellation_s
         } catch (...) {
         }
     }
-    auto graphService = graphComponent_ ? graphComponent_->getQueryService() : nullptr;
     auto res = co_await searchEngineManager_.buildEngine(
-        metadataRepo_, vectorIndexManager_, gen, graphService, "co_buildEngine", timeout_ms, exec);
+        metadataRepo_, vectorDatabase_, vectorIndexManager_, gen, "co_buildEngine", timeout_ms, exec);
     if (res.has_value()) {
         co_return res.value();
     }
-    co_return std::shared_ptr<yams::search::HybridSearchEngine>{};
+    co_return std::shared_ptr<yams::search::SearchEngine>{};
 }
 
 boost::asio::awaitable<yams::Result<void>>

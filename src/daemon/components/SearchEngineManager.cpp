@@ -1,8 +1,9 @@
 #include <yams/daemon/components/SearchEngineManager.h>
 #include <yams/metadata/metadata_repository.h>
-#include <yams/search/hybrid_search_engine.h>
+#include <yams/search/search_engine.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/vector/embedding_generator.h>
+#include <yams/vector/vector_database.h>
 #include <yams/vector/vector_index_manager.h>
 
 #include <spdlog/spdlog.h>
@@ -18,7 +19,7 @@
 
 namespace yams::daemon {
 
-yams::search::HybridSearchEngine* SearchEngineManager::getCachedEngine() const {
+yams::search::SearchEngine* SearchEngineManager::getCachedEngine() const {
     std::shared_lock lock(snapshotMutex_);
     return cachedEngine_;
 }
@@ -27,12 +28,12 @@ SearchEngineSnapshot SearchEngineManager::getSnapshot() const {
     return fsm_.snapshot();
 }
 
-std::shared_ptr<yams::search::HybridSearchEngine> SearchEngineManager::getEngine() const {
+std::shared_ptr<yams::search::SearchEngine> SearchEngineManager::getEngine() const {
     std::shared_lock lock(engineMutex_);
     return engine_;
 }
 
-void SearchEngineManager::setEngine(const std::shared_ptr<yams::search::HybridSearchEngine>& engine,
+void SearchEngineManager::setEngine(const std::shared_ptr<yams::search::SearchEngine>& engine,
                                     bool vectorEnabled) {
     {
         std::unique_lock lock(engineMutex_);
@@ -50,7 +51,7 @@ void SearchEngineManager::setEngine(const std::shared_ptr<yams::search::HybridSe
 }
 
 void SearchEngineManager::refreshSnapshot() {
-    std::shared_ptr<yams::search::HybridSearchEngine> eng;
+    std::shared_ptr<yams::search::SearchEngine> eng;
     {
         std::shared_lock lock(engineMutex_);
         eng = engine_;
@@ -60,12 +61,12 @@ void SearchEngineManager::refreshSnapshot() {
     cachedEngine_ = eng.get();
 }
 
-boost::asio::awaitable<Result<std::shared_ptr<yams::search::HybridSearchEngine>>>
+boost::asio::awaitable<Result<std::shared_ptr<yams::search::SearchEngine>>>
 SearchEngineManager::buildEngine(
     std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo,
+    std::shared_ptr<yams::vector::VectorDatabase> vectorDatabase,
     std::shared_ptr<yams::vector::VectorIndexManager> vectorManager,
     std::shared_ptr<yams::vector::EmbeddingGenerator> embeddingGen,
-    std::shared_ptr<yams::app::services::IGraphQueryService> graphService,
     const std::string& reason, int timeoutMs, boost::asio::any_io_executor workerExecutor) {
     using namespace boost::asio::experimental::awaitable_operators;
 
@@ -96,16 +97,16 @@ SearchEngineManager::buildEngine(
     // Create builder and configure
     auto builder = std::make_shared<yams::search::SearchEngineBuilder>();
     builder->withMetadataRepo(metadataRepo);
+    if (vectorDatabase)
+        builder->withVectorDatabase(vectorDatabase);
     if (vectorManager)
         builder->withVectorIndex(vectorManager);
     if (embeddingGen)
         builder->withEmbeddingGenerator(embeddingGen);
-    if (graphService)
-        builder->withGraphQueryService(graphService);
 
     auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
 
-    using RetT = Result<std::shared_ptr<yams::search::HybridSearchEngine>>;
+    using RetT = Result<std::shared_ptr<yams::search::SearchEngine>>;
     boost::asio::experimental::concurrent_channel<
         boost::asio::any_io_executor, void(boost::system::error_code, std::shared_ptr<RetT>)>
         ch(ex, 1);
@@ -141,7 +142,7 @@ SearchEngineManager::buildEngine(
             } catch (...) {
             }
             spdlog::info("[SearchEngineManager] Build completed synchronously (fallback)");
-            co_return Result<std::shared_ptr<yams::search::HybridSearchEngine>>(newEngine);
+            co_return Result<std::shared_ptr<yams::search::SearchEngine>>(newEngine);
         }
         spdlog::warn("[SearchEngineManager] Build failed synchronously (fallback)");
         try {
@@ -150,7 +151,7 @@ SearchEngineManager::buildEngine(
             fsm_.dispatch(ev);
         } catch (...) {
         }
-        co_return Result<std::shared_ptr<yams::search::HybridSearchEngine>>(
+        co_return Result<std::shared_ptr<yams::search::SearchEngine>>(
             Error{ErrorCode::InternalError, "sync_build_failed"});
     }
 
@@ -170,7 +171,7 @@ SearchEngineManager::buildEngine(
             fsm_.dispatch(ev);
         } catch (...) {
         }
-        co_return Result<std::shared_ptr<yams::search::HybridSearchEngine>>(
+        co_return Result<std::shared_ptr<yams::search::SearchEngine>>(
             Error{ErrorCode::InternalError, "build_timeout"});
     }
 
@@ -191,7 +192,7 @@ SearchEngineManager::buildEngine(
             fsm_.dispatch(ev);
         } catch (...) {
         }
-        co_return Result<std::shared_ptr<yams::search::HybridSearchEngine>>(
+        co_return Result<std::shared_ptr<yams::search::SearchEngine>>(
             Error{ErrorCode::InternalError, errMsg});
     }
 
@@ -212,7 +213,7 @@ SearchEngineManager::buildEngine(
     }
 
     spdlog::info("[SearchEngineManager] Build completed: vector={}", vectorEnabled);
-    co_return Result<std::shared_ptr<yams::search::HybridSearchEngine>>(newEngine);
+    co_return Result<std::shared_ptr<yams::search::SearchEngine>>(newEngine);
 }
 
 } // namespace yams::daemon

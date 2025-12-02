@@ -347,7 +347,7 @@ public:
     explicit SearchServiceImpl(const AppContext& ctx) : ctx_(ctx) {
         // Initialize degraded mode from AppContext repair flags (preferred), falling back to env
         // vars
-        degraded_ = ctx_.searchRepairInProgress || (ctx_.hybridEngine == nullptr);
+        degraded_ = ctx_.searchRepairInProgress || (ctx_.searchEngine == nullptr);
         if (const char* d = std::getenv("YAMS_SEARCH_DEGRADED")) {
             std::string v(d);
             std::transform(v.begin(), v.end(), v.begin(),
@@ -506,7 +506,7 @@ public:
         }
 
         if (type == "hybrid" || type == "semantic") {
-            if (degraded_ || !ctx_.hybridEngine) {
+            if (degraded_ || !ctx_.searchEngine) {
                 spdlog::warn("SearchService: hybrid/semantic search not ready{}",
                              repairDetails_.empty() ? "" : (std::string(": ") + repairDetails_));
                 co_return Error{
@@ -798,9 +798,9 @@ private:
 
         const std::string requested = req.type.empty() ? "hybrid" : req.type;
         const bool wantsHybrid = (requested == "hybrid" || requested == "semantic");
-        const bool hybridDisabled = degraded_ || !ctx_.hybridEngine;
+        const bool searchDisabled = degraded_ || !ctx_.searchEngine;
 
-        if (wantsHybrid && hybridDisabled) {
+        if (wantsHybrid && searchDisabled) {
             if (forcedHybridFallback)
                 *forcedHybridFallback = true;
             return "keyword";
@@ -1197,102 +1197,52 @@ private:
                                         const yams::search::ExtractScope& scope,
                                         MetadataTelemetry* telemetry,
                                         const std::string& pathPattern) {
-        // Expect ctx_.hybridEngine->search(query, limit) returning Result<vector<...>>
-        // Shape inferred from existing MCP code: each result has:
-        //  - id
-        //  - metadata map with "title" and "path"
-        //  - hybrid_score, vector_score, keyword_score, kg_entity_score, structural_score
-        //  - content snippet (optional)
-        yams::vector::SearchFilter filter;
-        if (!scope.name.empty()) {
-            filter.metadata_filters["name"] = scope.name;
-        }
-        if (!pathPattern.empty()) {
-            filter.metadata_filters["path"] = pathPattern;
-        }
+        // Build SearchParams for the new SearchEngine API
+        yams::search::SearchParams params;
+        params.limit = req.limit;
+        params.offset = 0;
+
+        // Apply scope filters
         if (!scope.ext.empty()) {
             std::string ext = scope.ext;
             std::transform(ext.begin(), ext.end(), ext.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             if (!ext.empty() && ext.front() == '.')
                 ext.erase(ext.begin());
-            filter.metadata_filters["extension"] = ext;
+            params.extension = ext;
         }
         if (!scope.mime.empty()) {
-            filter.metadata_filters["mime_type"] = scope.mime;
+            params.mimeType = scope.mime;
         }
-        yams::search::SearchStageBudgets stageBudgets{};
-        bool vectorTimedOut = false;
-        bool keywordTimedOut = false;
-        stageBudgets.vector_timed_out = &vectorTimedOut;
-        stageBudgets.keyword_timed_out = &keywordTimedOut;
 
-        bool budgetsActive = false;
-        const auto engineConfig = ctx_.hybridEngine->getConfig();
-        auto applyBudget = [&](int requestMs, std::chrono::milliseconds configValue,
-                               std::optional<std::chrono::milliseconds>& target) {
-            if (requestMs > 0) {
-                target = std::chrono::milliseconds(requestMs);
-                budgetsActive = true;
-            } else if (configValue.count() > 0) {
-                target = configValue;
-                budgetsActive = true;
-            }
-        };
+        // Defensive limit: cap engine query to prevent memory exhaustion
+        constexpr int kMaxSearchResults = 10000;
+        params.limit = std::min(params.limit, kMaxSearchResults);
 
-        applyBudget(req.vectorStageTimeoutMs, engineConfig.vector_timeout_ms,
-                    stageBudgets.vector_timeout);
-        applyBudget(req.keywordStageTimeoutMs, engineConfig.keyword_timeout_ms,
-                    stageBudgets.keyword_timeout);
-
-        // Defensive limit: cap hybrid engine query to prevent memory exhaustion
-        constexpr size_t kMaxHybridResults = 10000;
-        const size_t effectiveLimit = std::min(static_cast<size_t>(req.limit), kMaxHybridResults);
-
-        auto hres = ctx_.hybridEngine->search(req.query, effectiveLimit, filter,
-                                              budgetsActive ? &stageBudgets : nullptr);
-        if (!hres) {
-            // Graceful degradation: if hybrid search fails (e.g., embeddings unavailable),
-            // fall back to keyword-only search
-            spdlog::warn("Hybrid search failed ({}), falling back to keyword-only search",
-                         hres.error().message);
+        auto searchRes = ctx_.searchEngine->search(req.query, params);
+        if (!searchRes) {
+            // Graceful degradation: if search fails, fall back to keyword-only search
+            spdlog::warn("Search failed ({}), falling back to keyword-only search",
+                         searchRes.error().message);
             return metadataSearch(req, telemetry);
         }
 
-        const auto& vec = hres.value();
+        const auto& vec = searchRes.value();
 
         // Safety check: if result set is unexpectedly large, truncate with warning
-        if (vec.size() > kMaxHybridResults) {
-            spdlog::warn("Hybrid search returned {} results, truncating to {} to prevent crash",
-                         vec.size(), kMaxHybridResults);
+        if (vec.size() > static_cast<size_t>(kMaxSearchResults)) {
+            spdlog::warn("Search returned {} results, truncating to {} to prevent crash",
+                         vec.size(), kMaxSearchResults);
         }
 
         SearchResponse resp;
         resp.type = "hybrid";
         resp.usedHybrid = true;
 
-        if (budgetsActive) {
-            if (stageBudgets.vector_timeout.has_value()) {
-                resp.searchStats["vector_budget_ms"] =
-                    std::to_string(stageBudgets.vector_timeout->count());
-            }
-            if (stageBudgets.keyword_timeout.has_value()) {
-                resp.searchStats["keyword_budget_ms"] =
-                    std::to_string(stageBudgets.keyword_timeout->count());
-            }
-        }
-        if (vectorTimedOut) {
-            resp.searchStats["vector_timeout_hit"] = "true";
-        }
-        if (keywordTimedOut) {
-            resp.searchStats["keyword_timeout_hit"] = "true";
-        }
-
         if (req.pathsOnly) {
             for (const auto& r : vec) {
-                auto itPath = r.metadata.find("path");
-                if (itPath != r.metadata.end()) {
-                    resp.paths.push_back(itPath->second);
+                if (!r.document.filePath.empty()) {
+                    resp.paths.push_back(r.document.filePath);
                 }
             }
             resp.total = resp.paths.size();
@@ -1318,19 +1268,13 @@ private:
                     const auto& r = vec[i];
                     SearchItem it;
                     it.id = static_cast<int64_t>(i + 1);
-                    if (auto itTitle = r.metadata.find("title"); itTitle != r.metadata.end())
-                        it.title = itTitle->second;
-                    if (auto itPath = r.metadata.find("path"); itPath != r.metadata.end())
-                        it.path = itPath->second;
-                    it.score = static_cast<double>(r.hybrid_score);
-                    if (!r.content.empty())
-                        it.snippet = r.content;
-                    if (req.verbose) {
-                        it.vectorScore = r.vector_score;
-                        it.keywordScore = r.keyword_score;
-                        it.kgEntityScore = r.kg_entity_score;
-                        it.structuralScore = r.structural_score;
-                    }
+                    it.title = r.document.fileName;  // Use fileName since DocumentInfo has no title
+                    it.path = r.document.filePath;
+                    it.score = r.score;
+                    if (!r.snippet.empty())
+                        it.snippet = r.snippet;
+                    // Note: New SearchEngine provides unified score, not component scores
+                    // verbose mode component scores are not available in the new engine
                     slots[i] = std::move(it);
                 }
             };

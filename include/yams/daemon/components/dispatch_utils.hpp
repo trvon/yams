@@ -19,6 +19,7 @@
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
+#include <yams/search/search_engine.h>
 
 #include <filesystem>
 
@@ -181,7 +182,7 @@ inline VectorDiag collect_vector_diag(ServiceManager* sm) {
         if (cachedEngine) {
             try {
                 const auto& cfg = cachedEngine->getConfig();
-                d.scoringEnabled = (cfg.vector_weight > 0.0f) && d.embeddingsAvailable;
+                d.scoringEnabled = (cfg.vectorWeight > 0.0f) && d.embeddingsAvailable;
             } catch (...) {
             }
         }

@@ -149,6 +149,8 @@ private:
      */
     void launchPathTreeRepairTask();
 
+    void launchCheckpointTask();
+
     Dependencies deps_;                ///< Dependency injection container
     std::atomic<bool> running_{false}; ///< Tracks whether tasks are active
 

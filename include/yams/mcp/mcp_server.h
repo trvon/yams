@@ -13,7 +13,7 @@
 #include <yams/mcp/error_handling.h>
 #include <yams/mcp/tool_registry.h>
 #include <yams/metadata/metadata_repository.h>
-#include <yams/search/hybrid_search_engine.h>
+#include <yams/search/search_engine.h>
 #include <yams/search/search_executor.h>
 #include <yams/version.hpp>
 
@@ -454,7 +454,7 @@ private:
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<search::SearchExecutor> searchExecutor_;
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
-    std::shared_ptr<search::HybridSearchEngine> hybridEngine_;
+    std::shared_ptr<search::SearchEngine> searchEngine_;
 
     // App context and services for business logic
     app::services::AppContext appContext_;

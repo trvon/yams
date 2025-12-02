@@ -1,13 +1,7 @@
 #pragma once
 
 #include <chrono>
-#include <memory>
 #include <string>
-
-// Forward declaration to avoid circular dependency
-namespace yams::search {
-class HybridSearchEngine;
-}
 
 namespace yams::daemon {
 

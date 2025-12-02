@@ -65,7 +65,7 @@ class RepairManager;
 } // namespace yams::integrity
 namespace yams::search {
 class SearchExecutor;
-class HybridSearchEngine;
+class SearchEngine;
 class SearchEngineBuilder;
 } // namespace yams::search
 namespace yams::vector {
@@ -80,6 +80,7 @@ class IModelProvider;
 class RetrievalSessionManager;
 class WorkerPool;
 class TuningManager;
+class CheckpointManager;
 } // namespace yams::daemon
 
 namespace yams::daemon {
@@ -121,7 +122,7 @@ public:
         return std::atomic_load(&searchExecutor_);
     }
     std::shared_ptr<IModelProvider> getModelProvider() const { return modelProvider_; }
-    std::shared_ptr<yams::search::HybridSearchEngine> getSearchEngineSnapshot() const;
+    std::shared_ptr<yams::search::SearchEngine> getSearchEngineSnapshot() const;
     std::shared_ptr<vector::VectorIndexManager> getVectorIndexManager() const {
         // PBI-088: Delegate to VectorSystemManager if available
         if (vectorSystemManager_) {
@@ -235,7 +236,7 @@ public:
     SearchEngineSnapshot getSearchEngineFsmSnapshot() const {
         return searchEngineManager_.getSnapshot();
     }
-    yams::search::HybridSearchEngine* getCachedSearchEngine() const {
+    yams::search::SearchEngine* getCachedSearchEngine() const {
         return searchEngineManager_.getCachedEngine();
     }
 
@@ -344,6 +345,8 @@ public:
     }
 
     RetrievalSessionManager* getRetrievalSessionManager() const { return retrievalSessions_.get(); }
+
+    CheckpointManager* getCheckpointManager() const { return checkpointManager_.get(); }
 
     // Get AppContext for app services
     app::services::AppContext getAppContext() const;
@@ -483,7 +486,7 @@ private:
     boost::asio::awaitable<bool> co_openDatabase(const std::filesystem::path& dbPath,
                                                  int timeout_ms, yams::compat::stop_token token);
     boost::asio::awaitable<bool> co_migrateDatabase(int timeout_ms, yams::compat::stop_token token);
-    boost::asio::awaitable<std::shared_ptr<yams::search::HybridSearchEngine>>
+    boost::asio::awaitable<std::shared_ptr<yams::search::SearchEngine>>
     co_buildEngine(int timeout_ms, const boost::asio::cancellation_state& token,
                    bool includeEmbeddingGenerator = true);
     bool detectEmbeddingPreloadFlag() const;
@@ -518,6 +521,7 @@ private:
     std::unique_ptr<AbiPluginLoader> abiPluginLoader_;
     std::unique_ptr<AbiPluginHost> abiHost_;
     std::unique_ptr<RetrievalSessionManager> retrievalSessions_;
+    std::unique_ptr<CheckpointManager> checkpointManager_;
 
     // Phase 1 (PBI-002): Background task coordination
     // CRITICAL: Must be declared BEFORE jthreads so it destructs AFTER threads
@@ -536,7 +540,7 @@ private:
 
     bool embeddingPreloadOnStartup_{false};
 
-    std::shared_ptr<yams::search::HybridSearchEngine> searchEngine_;
+    std::shared_ptr<yams::search::SearchEngine> searchEngine_;
     mutable std::shared_mutex searchEngineMutex_; // Allow concurrent reads
 
     // Modern async architecture (Phase 0c): WorkCoordinator delegates threading complexity

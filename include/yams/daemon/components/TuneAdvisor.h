@@ -1175,6 +1175,60 @@ public:
         requestQueueBackpressure_.store(v, std::memory_order_relaxed);
     }
 
+    static uint32_t checkpointIntervalSeconds() {
+        uint32_t ov = checkpointIntervalSecondsOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_CHECKPOINT_INTERVAL_SECONDS")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 10 && v <= 3600)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 300;
+    }
+    static void setCheckpointIntervalSeconds(uint32_t v) {
+        checkpointIntervalSecondsOverride_.store(v, std::memory_order_relaxed);
+    }
+
+    static uint32_t checkpointInsertThreshold() {
+        uint32_t ov = checkpointInsertThresholdOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_CHECKPOINT_INSERT_THRESHOLD")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1 && v <= 100000)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 1000;
+    }
+    static void setCheckpointInsertThreshold(uint32_t v) {
+        checkpointInsertThresholdOverride_.store(v, std::memory_order_relaxed);
+    }
+
+    static bool enableHotzoneCheckpoint() {
+        int ov = enableHotzoneCheckpointOverride_.load(std::memory_order_relaxed);
+        if (ov >= 0)
+            return ov > 0;
+        if (const char* s = std::getenv("YAMS_ENABLE_HOTZONE_PERSISTENCE")) {
+            std::string v{s};
+            std::transform(v.begin(), v.end(), v.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (v == "1" || v == "true" || v == "on" || v == "yes")
+                return true;
+            return false;
+        }
+        return false;
+    }
+    static void setEnableHotzoneCheckpoint(bool en) {
+        enableHotzoneCheckpointOverride_.store(en ? 1 : 0, std::memory_order_relaxed);
+    }
+
 private:
     // Runtime policy storage (single process); defaults chosen to reduce CPU when busy
     static inline std::atomic<AutoEmbedPolicy> autoEmbedPolicy_{AutoEmbedPolicy::Idle};
@@ -1230,6 +1284,11 @@ private:
     static inline std::atomic<uint32_t> maxIdleTimeoutsOverride_{0};
     static inline std::atomic<uint32_t> requestQueueDepth_{0};
     static inline std::atomic<bool> requestQueueBackpressure_{false};
+
+    // PBI-090: CheckpointManager overrides
+    static inline std::atomic<uint32_t> checkpointIntervalSecondsOverride_{0};
+    static inline std::atomic<uint32_t> checkpointInsertThresholdOverride_{0};
+    static inline std::atomic<int> enableHotzoneCheckpointOverride_{-1};
 };
 
 } // namespace yams::daemon

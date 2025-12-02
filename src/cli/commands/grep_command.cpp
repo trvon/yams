@@ -19,8 +19,10 @@
 #include <yams/cli/command.h>
 #include <yams/cli/session_store.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
+#include <yams/search/search_engine.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/vector/vector_index_manager.h>
 // Daemon client API for daemon-first grep
@@ -1067,55 +1069,59 @@ private:
 
         // If not regex-only mode, also perform semantic search (even in files-only/paths-only/count
         // modes)
-        std::vector<search::HybridSearchResult> semanticResults;
+        std::vector<yams::metadata::SearchResult> semanticResults;
         if (!regexOnly_) {
             try {
-                // Build HybridSearchEngine for semantic search
+                // Build SearchEngine for semantic search
                 auto vecMgr = std::make_shared<yams::vector::VectorIndexManager>();
                 yams::search::SearchEngineBuilder builder;
                 builder.withVectorIndex(vecMgr)
                     .withMetadataRepo(metadataRepo)
                     .withKGStore(cli_->getKnowledgeGraphStore());
 
+                // Add VectorDatabase if available
+                if (auto vecDb = cli_->getVectorDatabase()) {
+                    builder.withVectorDatabase(vecDb);
+                }
+
                 auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
                 // Prefer fast, exact FTS5 keyword results over vector similarity for grep-like use
-                opts.hybrid.final_top_k = semanticLimit_ * 3; // Get more results to filter
-                opts.hybrid.vector_weight = 0.40f;
-                opts.hybrid.keyword_weight = 0.60f;
-                opts.hybrid.enable_kg = false; // Disable KG for grep scenarios
+                opts.config.maxResults = semanticLimit_ * 3; // Get more results to filter
+                opts.config.vectorWeight = 0.40f;
+                opts.config.fts5Weight = 0.60f;
+                opts.config.kgWeight = 0.0f; // Disable KG for grep scenarios
 
                 auto engRes = builder.buildEmbedded(opts);
                 if (engRes) {
                     const auto& eng = engRes.value();
-                    auto hres = eng->search(pattern_, semanticLimit_ * 3);
-                    if (hres) {
+                    yams::search::SearchParams params;
+                    params.limit = static_cast<int>(semanticLimit_ * 3);
+                    auto searchRes = eng->search(pattern_, params);
+                    if (searchRes) {
                         // Filter semantic results to only include files from searched paths
                         if (!paths_.empty()) {
-                            std::vector<search::HybridSearchResult> filteredResults;
-                            for (const auto& result : hres.value()) {
-                                auto pathIt = result.metadata.find("path");
-                                if (pathIt != result.metadata.end()) {
-                                    std::string resultPath = pathIt->second;
-                                    // Check if this result is within any of the specified paths
-                                    bool inSearchPath = false;
-                                    for (const auto& searchPath : paths_) {
-                                        if (resultPath.find(searchPath) != std::string::npos) {
-                                            inSearchPath = true;
-                                            break;
-                                        }
+                            std::vector<yams::metadata::SearchResult> filteredResults;
+                            for (const auto& result : searchRes.value()) {
+                                const std::string& resultPath = result.document.filePath;
+                                // Check if this result is within any of the specified paths
+                                bool inSearchPath = false;
+                                for (const auto& searchPath : paths_) {
+                                    if (resultPath.find(searchPath) != std::string::npos) {
+                                        inSearchPath = true;
+                                        break;
                                     }
-                                    if (inSearchPath) {
-                                        filteredResults.push_back(result);
-                                        if (filteredResults.size() >= semanticLimit_) {
-                                            break;
-                                        }
+                                }
+                                if (inSearchPath) {
+                                    filteredResults.push_back(result);
+                                    if (filteredResults.size() >= semanticLimit_) {
+                                        break;
                                     }
                                 }
                             }
                             semanticResults = filteredResults;
                         } else {
                             // No path filter, take top results
-                            semanticResults = hres.value();
+                            semanticResults = searchRes.value();
                             if (semanticResults.size() > semanticLimit_) {
                                 semanticResults.resize(semanticLimit_);
                             }
@@ -1136,18 +1142,14 @@ private:
 
             // Merge semantic paths (only when not already matched by regex)
             for (const auto& result : semanticResults) {
-                auto pathIt = result.metadata.find("path");
-                if (pathIt != result.metadata.end()) {
-                    const std::string& p = pathIt->second;
-                    if (files.find(p) == files.end()) {
-                        double conf =
-                            result.hybrid_score > 0 ? result.hybrid_score : result.vector_score;
-                        auto itc = semOnlyConf.find(p);
-                        if (itc == semOnlyConf.end() || conf > itc->second) {
-                            semOnlyConf[p] = conf;
-                        }
-                        files.insert(p);
+                const std::string& p = result.document.filePath;
+                if (files.find(p) == files.end()) {
+                    double conf = result.score;
+                    auto itc = semOnlyConf.find(p);
+                    if (itc == semOnlyConf.end() || conf > itc->second) {
+                        semOnlyConf[p] = conf;
                     }
+                    files.insert(p);
                 }
             }
 
@@ -1232,9 +1234,8 @@ private:
                 for (size_t i = 0; i < semanticResults.size() && i < semanticLimit_; i++) {
                     const auto& result = semanticResults[i];
 
-                    // Extract path from metadata
-                    auto pathIt = result.metadata.find("path");
-                    std::string path = (pathIt != result.metadata.end()) ? pathIt->second : "";
+                    // Get path from document
+                    const std::string& path = result.document.filePath;
 
                     // Skip if this file already shown in regex matches
                     if (allRegexMatches.find(path) != allRegexMatches.end()) {
@@ -1242,11 +1243,11 @@ private:
                     }
 
                     std::cout << (i + 1) << ". ";
-                    auto titleIt = result.metadata.find("title");
-                    if (titleIt != result.metadata.end()) {
-                        std::cout << titleIt->second;
+                    // Use fileName as title
+                    if (!result.document.fileName.empty()) {
+                        std::cout << result.document.fileName;
                     } else {
-                        std::cout << result.id;
+                        std::cout << result.document.id;
                     }
 
                     if (!path.empty()) {
@@ -1255,8 +1256,8 @@ private:
                     std::cout << std::endl;
 
                     // Show snippet if available
-                    if (!result.content.empty()) {
-                        std::string snippet = truncateSnippet(result.content, 200);
+                    if (!result.snippet.empty()) {
+                        std::string snippet = truncateSnippet(result.snippet, 200);
                         std::cout << "   " << snippet << std::endl;
                     }
                     std::cout << std::endl;

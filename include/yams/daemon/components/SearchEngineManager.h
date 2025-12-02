@@ -12,7 +12,7 @@ class IGraphQueryService;
 }
 
 namespace yams::search {
-class HybridSearchEngine;
+class SearchEngine;
 class SearchEngineBuilder;
 } // namespace yams::search
 
@@ -22,6 +22,7 @@ class MetadataRepository;
 
 namespace yams::vector {
 class VectorIndexManager;
+class VectorDatabase;
 class EmbeddingGenerator;
 } // namespace yams::vector
 
@@ -36,7 +37,7 @@ namespace yams::daemon {
  *
  * Owns:
  * - SearchEngineFsm (state machine)
- * - HybridSearchEngine pointer (actual engine)
+ * - SearchEngine pointer (actual engine)
  * - Build coordination logic (async build coroutine)
  * - Mutexes for safe concurrent access
  * - Cached snapshot for non-blocking reads
@@ -56,19 +57,19 @@ public:
      * Build or rebuild the search engine asynchronously.
      *
      * @param metadataRepo Metadata repository dependency
+     * @param vectorDatabase Vector database (required for SearchEngine)
      * @param vectorManager Optional vector index manager (for vector search)
      * @param embeddingGen Optional embedding generator (for vector search)
-     * @param graphService Optional graph query service (for enhanced KG scoring)
      * @param reason Human-readable reason for build (e.g., "user_initiated", "auto_repair")
      * @param timeoutMs Build timeout in milliseconds
      * @param workerExecutor Executor for blocking build operations
      * @return Awaitable that resolves to Result containing engine pointer or error
      */
-    boost::asio::awaitable<Result<std::shared_ptr<yams::search::HybridSearchEngine>>>
+    boost::asio::awaitable<Result<std::shared_ptr<yams::search::SearchEngine>>>
     buildEngine(std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo,
+                std::shared_ptr<yams::vector::VectorDatabase> vectorDatabase,
                 std::shared_ptr<yams::vector::VectorIndexManager> vectorManager,
                 std::shared_ptr<yams::vector::EmbeddingGenerator> embeddingGen,
-                std::shared_ptr<yams::app::services::IGraphQueryService> graphService,
                 const std::string& reason, int timeoutMs,
                 boost::asio::any_io_executor workerExecutor);
 
@@ -77,7 +78,7 @@ public:
      * Returns nullptr if no engine is available or engine is building.
      * Thread-safe via snapshot mutex (does NOT block on build operations).
      */
-    yams::search::HybridSearchEngine* getCachedEngine() const;
+    yams::search::SearchEngine* getCachedEngine() const;
 
     /**
      * Get current FSM snapshot (state, build reason, vector enabled, etc.)
@@ -89,13 +90,13 @@ public:
      * Get shared pointer to current engine (may block if build in progress).
      * Prefer getCachedEngine() for status/diagnostic reads.
      */
-    std::shared_ptr<yams::search::HybridSearchEngine> getEngine() const;
+    std::shared_ptr<yams::search::SearchEngine> getEngine() const;
 
     /**
      * Set search engine from external source (e.g., during initialization).
      * Updates FSM state and cached snapshot.
      */
-    void setEngine(const std::shared_ptr<yams::search::HybridSearchEngine>& engine,
+    void setEngine(const std::shared_ptr<yams::search::SearchEngine>& engine,
                    bool vectorEnabled);
 
     /**
@@ -115,12 +116,12 @@ private:
     SearchEngineFsm fsm_;
 
     // Actual search engine (guarded by engineMutex_)
-    std::shared_ptr<yams::search::HybridSearchEngine> engine_;
+    std::shared_ptr<yams::search::SearchEngine> engine_;
     mutable std::shared_mutex engineMutex_;
 
     // Cached snapshot for non-blocking reads (guarded by snapshotMutex_)
     mutable std::shared_mutex snapshotMutex_;
-    yams::search::HybridSearchEngine* cachedEngine_{nullptr};
+    yams::search::SearchEngine* cachedEngine_{nullptr};
 };
 
 } // namespace yams::daemon

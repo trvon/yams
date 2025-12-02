@@ -1,11 +1,11 @@
 #include <yams/api/semantic_search_api.h>
 /*
- TODO(yams): Composition point for KG-enabled HybridSearchEngine:
- - Build or obtain vector and keyword engines
- - Load HybridSearchConfig (with enable_kg, weights, kg_max_neighbors, kg_max_hops, kg_budget_ms)
+ TODO(yams): Composition point for KG-enabled SearchEngine:
+ - Build SearchEngine with SearchEngineBuilder
+ - Configure SearchEngineConfig (weights, kg settings, etc.)
  - Create a KnowledgeGraphStore (SQLite) using the metadata DB path
- - Create a SimpleKGScorer from the store and call engine.setKGScorer(...)
- - Initialize engine and pass into SemanticSearchAPI
+ - Pass KG store into SearchEngine constructor
+ - Initialize and pass into SemanticSearchAPI
 */
 
 #include <algorithm>
@@ -381,7 +381,7 @@ private:
 
 class SemanticSearchAPI::Impl {
 public:
-    Impl(std::shared_ptr<search::HybridSearchEngine> search_engine,
+    Impl(std::shared_ptr<search::SearchEngine> search_engine,
          std::shared_ptr<vector::DocumentChunker> chunker,
          std::shared_ptr<vector::EmbeddingGenerator> embedder, const SearchAPIConfig& config)
         : search_engine_(std::move(search_engine)),
@@ -398,13 +398,8 @@ public:
             return Result<void>(Error{ErrorCode::InvalidArgument, "Missing required components"});
         }
 
-        // Initialize search engine
-        if (!search_engine_->isInitialized()) {
-            auto result = search_engine_->initialize();
-            if (!result.has_value()) {
-                return result;
-            }
-        }
+        // SearchEngine doesn't require explicit initialization
+        // (components are initialized via constructor injection)
 
         // Start cleanup thread for sessions
         cleanup_thread_ = std::thread([this]() {
@@ -429,9 +424,7 @@ public:
             cleanup_thread_.join();
         }
 
-        if (search_engine_) {
-            search_engine_->shutdown();
-        }
+        // SearchEngine doesn't have explicit shutdown (RAII cleanup)
     }
 
     Result<std::string> ingestDocument(const std::string& content,
@@ -452,16 +445,13 @@ public:
 
         auto& result = processing_result.value();
 
-        // Add chunks to vector index
-        for (size_t i = 0; i < result.chunk_ids.size(); ++i) {
-            auto add_result = search_engine_->addDocument(
-                result.chunk_ids[i], content.substr(0, 1000), // First 1000 chars as preview
-                result.embeddings[i], {{"parent_doc", result.document_id}});
-
-            if (!add_result.has_value()) {
-                return Result<std::string>(add_result.error());
-            }
-        }
+        // TODO: Document ingestion now goes through the IndexingService, not SearchEngine
+        // This API needs refactoring to work with the new architecture.
+        // For now, just store document metadata locally.
+        // Proper integration would use:
+        //   - IndexingService for document ingestion
+        //   - MetadataRepository for document storage
+        //   - VectorDatabase for embedding storage
 
         // Store document metadata
         {
@@ -487,13 +477,14 @@ public:
             // Process query
             auto processed_query = query_processor_->processQuery(request.query);
 
-            // Convert to hybrid search request
-            vector::SearchFilter vector_filter;
-            // TODO: Convert API filters to vector filters
+            // Convert to SearchParams
+            search::SearchParams searchParams;
+            searchParams.limit = static_cast<int>(request.results_per_page);
+            searchParams.offset = static_cast<int>((request.page - 1) * request.results_per_page);
+            // TODO: Convert API filters to SearchParams filters
 
             // Perform search
-            auto search_result = search_engine_->search(processed_query.normalized_query,
-                                                        request.results_per_page, vector_filter);
+            auto search_result = search_engine_->search(processed_query.normalized_query, searchParams);
 
             if (!search_result.has_value()) {
                 return Result<SearchResponse>(search_result.error());
@@ -511,21 +502,23 @@ public:
             response.results_per_page = request.results_per_page;
             response.mode_used = request.options.mode;
 
-            // Convert hybrid search results to API results
-            for (const auto& hybrid_result : search_result.value()) {
+            // Convert search engine results to API results
+            for (const auto& result : search_result.value()) {
                 SearchResult api_result;
-                api_result.id = hybrid_result.id;
-                api_result.content = hybrid_result.content;
-                api_result.score = hybrid_result.hybrid_score;
-                api_result.vector_score = hybrid_result.vector_score;
-                api_result.keyword_score = hybrid_result.keyword_score;
-                api_result.highlighted_terms = hybrid_result.matched_keywords;
-                api_result.explanation = hybrid_result.explanation;
+                api_result.id = result.document.sha256Hash;
+                api_result.title = result.document.fileName;
+                api_result.url = result.document.filePath;
+                api_result.content = result.snippet;
+                api_result.score = static_cast<float>(result.score);
+                api_result.highlighted_terms = result.matchedTerms;
+                // Note: SearchEngine provides unified score, not separate component scores
 
                 // Generate snippets if requested
-                if (request.options.include_snippets) {
-                    api_result.snippets = result_utils::generateSnippets(api_result.content,
-                                                                         processed_query.keywords);
+                if (request.options.include_snippets && !result.snippet.empty()) {
+                    TextSnippet snippet;
+                    snippet.text = result.snippet;
+                    snippet.relevance_score = static_cast<float>(result.score);
+                    api_result.snippets.push_back(std::move(snippet));
                 }
 
                 response.results.push_back(std::move(api_result));
@@ -570,11 +563,11 @@ public:
     }
 
     bool isHealthy() const {
-        return initialized_ && search_engine_ && search_engine_->isInitialized();
+        return initialized_ && search_engine_ != nullptr;
     }
 
 private:
-    std::shared_ptr<search::HybridSearchEngine> search_engine_;
+    std::shared_ptr<search::SearchEngine> search_engine_;
     std::unique_ptr<DocumentProcessor> document_processor_;
     std::unique_ptr<QueryProcessor> query_processor_;
     std::unique_ptr<SessionManager> session_manager_;
@@ -609,7 +602,7 @@ private:
 // SemanticSearchAPI Public Interface
 // =============================================================================
 
-SemanticSearchAPI::SemanticSearchAPI(std::shared_ptr<search::HybridSearchEngine> search_engine,
+SemanticSearchAPI::SemanticSearchAPI(std::shared_ptr<search::SearchEngine> search_engine,
                                      std::shared_ptr<vector::DocumentChunker> chunker,
                                      std::shared_ptr<vector::EmbeddingGenerator> embedder,
                                      const SearchAPIConfig& config)

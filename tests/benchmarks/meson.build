@@ -83,8 +83,8 @@ if benchmark_dep.found()
 
   alias_target('bench_tree_list_filter', tree_list_filter_bench)
 
-  # Search engine comparison benchmark
-  engine_comparison_bench_deps = [
+  # Common dependencies for search-related benchmarks
+  search_bench_deps = [
     dependency('yams_metadata'),
     dependency('yams_search'),
     dependency('yams_vector'),
@@ -92,29 +92,8 @@ if benchmark_dep.found()
     dependency('spdlog')
   ] + tracy_deps + [benchmark_dep]
 
-  engine_comparison_bench = executable('engine_comparison_bench',
-    files('../../src/search/benchmarks/engine_comparison_bench.cpp'),
-    include_directories: incs,
-    dependencies: engine_comparison_bench_deps,
-    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
-    install: false,
-  )
-
-  alias_target('bench_engine_comparison', engine_comparison_bench)
-
-  # Hybrid search CLI benchmark
-  hybrid_search_bench = executable('hybrid_search_bench',
-    files('../../src/search/benchmarks/hybrid_search_bench.cpp'),
-    include_directories: incs,
-    dependencies: engine_comparison_bench_deps,
-    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
-    install: false,
-  )
-
-  alias_target('bench_hybrid_search', hybrid_search_bench)
-
   # RAG retrieval quality benchmark
-  retrieval_quality_bench_deps = engine_comparison_bench_deps + [test_deps]
+  retrieval_quality_bench_deps = search_bench_deps + [test_deps]
 
   retrieval_quality_bench = executable('retrieval_quality_bench',
     files('../../src/search/benchmarks/retrieval_quality_bench.cpp'),
@@ -127,7 +106,7 @@ if benchmark_dep.found()
   alias_target('bench_retrieval_quality', retrieval_quality_bench)
 
   # PBI-004: End-to-end ingestion pipeline benchmark
-  ingestion_e2e_bench_deps = engine_comparison_bench_deps + [test_deps]
+  ingestion_e2e_bench_deps = search_bench_deps + [test_deps]
 
   ingestion_e2e_bench = executable('ingestion_e2e_bench',
     files('../../src/search/benchmarks/ingestion_e2e_bench.cpp'),

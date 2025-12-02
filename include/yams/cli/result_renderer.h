@@ -133,15 +133,15 @@ public:
 };
 
 /**
- * @brief Adapter for search::SearchResultItem (hybrid search engine results)
+ * @brief Adapter for search::SearchResultItem (search engine results)
  */
-class HybridSearchResultAdapter {
+class SearchResultItemAdapter {
 private:
     const search::SearchResultItem& item_;
 
 public:
     // Allow implicit conversion from SearchResultItem for ranges compatibility
-    HybridSearchResultAdapter(const search::SearchResultItem& item) : item_(item) {}
+    SearchResultItemAdapter(const search::SearchResultItem& item) : item_(item) {}
 
     [[nodiscard]] std::string_view path() const noexcept { return item_.path; }
 
@@ -213,8 +213,8 @@ public:
 // Verify our adapters satisfy the concepts
 static_assert(SearchResultAdapter<MetadataSearchResultAdapter>);
 static_assert(DocumentInfoAdapter<DocumentInfoResultAdapter>);
-static_assert(SearchResultAdapter<HybridSearchResultAdapter>);
-static_assert(DocumentInfoAdapter<HybridSearchResultAdapter>);
+static_assert(SearchResultAdapter<SearchResultItemAdapter>);
+static_assert(DocumentInfoAdapter<SearchResultItemAdapter>);
 static_assert(ResultAdapter<FilePathAdapter>);
 
 // ============================================================================
@@ -652,7 +652,7 @@ inline auto createHybridSearchResultRenderer(const std::string& pathFilter = "",
     config.showFullHash = showFullHash;
     config.showScores = true;
     config.showTimestamps = showTimestamps;
-    return ResultRenderer<HybridSearchResultAdapter>{config};
+    return ResultRenderer<SearchResultItemAdapter>{config};
 }
 
 /**

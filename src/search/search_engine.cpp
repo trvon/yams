@@ -354,127 +354,231 @@ Result<std::vector<SearchResult>> SearchEngine::Impl::search(const std::string& 
         }
     }
 
-    // Execute component queries (sequential for now, parallel TBD)
     std::vector<ComponentResult> allComponentResults;
 
-    // FTS5 search
-    if (config_.fts5Weight > 0.0f) {
-        auto fts5Start = std::chrono::steady_clock::now();
-        auto fts5Results = queryFTS5(query);
-        auto fts5End = std::chrono::steady_clock::now();
+    if (config_.enableParallelExecution) {
+        // ========================================================================
+        // PARALLEL EXECUTION: Launch all component queries simultaneously
+        // ========================================================================
 
-        if (fts5Results) {
-            allComponentResults.insert(allComponentResults.end(), fts5Results.value().begin(),
-                                       fts5Results.value().end());
-            stats_.fts5Queries.fetch_add(1, std::memory_order_relaxed);
+        // Futures for parallel component queries
+        std::future<Result<std::vector<ComponentResult>>> fts5Future;
+        std::future<Result<std::vector<ComponentResult>>> kgFuture;
+        std::future<Result<std::vector<ComponentResult>>> pathFuture;
+        std::future<Result<std::vector<ComponentResult>>> symbolFuture;
+        std::future<Result<std::vector<ComponentResult>>> vectorFuture;
+        std::future<Result<std::vector<ComponentResult>>> tagFuture;
+        std::future<Result<std::vector<ComponentResult>>> metaFuture;
 
-            auto duration =
-                std::chrono::duration_cast<std::chrono::microseconds>(fts5End - fts5Start).count();
-            stats_.avgFts5TimeMicros.store(duration, std::memory_order_relaxed);
+        // Launch parallel queries
+        if (config_.fts5Weight > 0.0f) {
+            fts5Future = std::async(std::launch::async, [this, &query]() {
+                return queryFTS5(query);
+            });
         }
-    }
 
-    // Knowledge Graph search
-    if (config_.kgWeight > 0.0f && kgStore_) {
-        auto kgStart = std::chrono::steady_clock::now();
-        auto kgResults = queryKnowledgeGraph(query);
-        auto kgEnd = std::chrono::steady_clock::now();
-
-        if (kgResults) {
-            allComponentResults.insert(allComponentResults.end(), kgResults.value().begin(),
-                                       kgResults.value().end());
-            stats_.kgQueries.fetch_add(1, std::memory_order_relaxed);
-
-            auto duration =
-                std::chrono::duration_cast<std::chrono::microseconds>(kgEnd - kgStart).count();
-            stats_.avgKgTimeMicros.store(duration, std::memory_order_relaxed);
+        if (config_.kgWeight > 0.0f && kgStore_) {
+            kgFuture = std::async(std::launch::async, [this, &query]() {
+                return queryKnowledgeGraph(query);
+            });
         }
-    }
 
-    // Path tree search
-    if (config_.pathTreeWeight > 0.0f) {
-        auto pathStart = std::chrono::steady_clock::now();
-        auto pathResults = queryPathTree(query);
-        auto pathEnd = std::chrono::steady_clock::now();
-
-        if (pathResults) {
-            allComponentResults.insert(allComponentResults.end(), pathResults.value().begin(),
-                                       pathResults.value().end());
-            stats_.pathTreeQueries.fetch_add(1, std::memory_order_relaxed);
-
-            auto duration =
-                std::chrono::duration_cast<std::chrono::microseconds>(pathEnd - pathStart).count();
-            stats_.avgPathTreeTimeMicros.store(duration, std::memory_order_relaxed);
+        if (config_.pathTreeWeight > 0.0f) {
+            pathFuture = std::async(std::launch::async, [this, &query]() {
+                return queryPathTree(query);
+            });
         }
-    }
 
-    // Symbol metadata search
-    if (config_.symbolWeight > 0.0f) {
-        auto symbolStart = std::chrono::steady_clock::now();
-        auto symbolResults = querySymbols(query);
-        auto symbolEnd = std::chrono::steady_clock::now();
-
-        if (symbolResults) {
-            allComponentResults.insert(allComponentResults.end(), symbolResults.value().begin(),
-                                       symbolResults.value().end());
-            stats_.symbolQueries.fetch_add(1, std::memory_order_relaxed);
-
-            auto duration =
-                std::chrono::duration_cast<std::chrono::microseconds>(symbolEnd - symbolStart)
-                    .count();
-            stats_.avgSymbolTimeMicros.store(duration, std::memory_order_relaxed);
+        if (config_.symbolWeight > 0.0f) {
+            symbolFuture = std::async(std::launch::async, [this, &query]() {
+                return querySymbols(query);
+            });
         }
-    }
 
-    // Vector search (if query embedding was generated)
-    if (config_.vectorWeight > 0.0f && queryEmbedding.has_value() && vectorIndex_) {
-        auto vectorStart = std::chrono::steady_clock::now();
-        auto vectorResults = queryVectorIndex(queryEmbedding.value());
-        auto vectorEnd = std::chrono::steady_clock::now();
-
-        if (vectorResults) {
-            allComponentResults.insert(allComponentResults.end(), vectorResults.value().begin(),
-                                       vectorResults.value().end());
-            stats_.vectorQueries.fetch_add(1, std::memory_order_relaxed);
-
-            auto duration =
-                std::chrono::duration_cast<std::chrono::microseconds>(vectorEnd - vectorStart)
-                    .count();
-            stats_.avgVectorTimeMicros.store(duration, std::memory_order_relaxed);
+        if (config_.vectorWeight > 0.0f && queryEmbedding.has_value() && vectorIndex_) {
+            vectorFuture = std::async(std::launch::async, [this, &queryEmbedding]() {
+                return queryVectorIndex(queryEmbedding.value());
+            });
         }
-    }
 
-    // Tag-based search (if tags provided in params)
-    if (config_.tagWeight > 0.0f && !params.tags.empty()) {
-        auto tagStart = std::chrono::steady_clock::now();
-        auto tagResults = queryTags(params.tags, params.matchAllTags);
-        auto tagEnd = std::chrono::steady_clock::now();
-
-        if (tagResults) {
-            allComponentResults.insert(allComponentResults.end(), tagResults.value().begin(),
-                                       tagResults.value().end());
-            stats_.tagQueries.fetch_add(1, std::memory_order_relaxed);
-
-            auto duration =
-                std::chrono::duration_cast<std::chrono::microseconds>(tagEnd - tagStart).count();
-            stats_.avgTagTimeMicros.store(duration, std::memory_order_relaxed);
+        if (config_.tagWeight > 0.0f && !params.tags.empty()) {
+            tagFuture = std::async(std::launch::async, [this, &params]() {
+                return queryTags(params.tags, params.matchAllTags);
+            });
         }
-    }
 
-    // Metadata attribute search (if filters provided in params)
-    if (config_.metadataWeight > 0.0f) {
-        auto metaStart = std::chrono::steady_clock::now();
-        auto metaResults = queryMetadata(params);
-        auto metaEnd = std::chrono::steady_clock::now();
+        if (config_.metadataWeight > 0.0f) {
+            metaFuture = std::async(std::launch::async, [this, &params]() {
+                return queryMetadata(params);
+            });
+        }
 
-        if (metaResults && !metaResults.value().empty()) {
-            allComponentResults.insert(allComponentResults.end(), metaResults.value().begin(),
-                                       metaResults.value().end());
-            stats_.metadataQueries.fetch_add(1, std::memory_order_relaxed);
+        // Collect results with timeout handling
+        auto collectResults = [&](auto& future, const char* name,
+                                  std::atomic<uint64_t>& queryCount,
+                                  std::atomic<uint64_t>& avgTime) {
+            if (!future.valid()) return;
 
-            auto duration =
-                std::chrono::duration_cast<std::chrono::microseconds>(metaEnd - metaStart).count();
-            stats_.avgMetadataTimeMicros.store(duration, std::memory_order_relaxed);
+            auto waitStart = std::chrono::steady_clock::now();
+            auto status = future.wait_for(config_.componentTimeout);
+
+            if (status == std::future_status::ready) {
+                try {
+                    auto results = future.get();
+                    auto waitEnd = std::chrono::steady_clock::now();
+                    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
+                        waitEnd - waitStart).count();
+
+                    if (results) {
+                        allComponentResults.insert(allComponentResults.end(),
+                                                   results.value().begin(),
+                                                   results.value().end());
+                        queryCount.fetch_add(1, std::memory_order_relaxed);
+                        avgTime.store(duration, std::memory_order_relaxed);
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::warn("Parallel {} query failed: {}", name, e.what());
+                }
+            } else {
+                spdlog::warn("Parallel {} query timed out after {} ms", name,
+                             config_.componentTimeout.count());
+                stats_.timedOutQueries.fetch_add(1, std::memory_order_relaxed);
+            }
+        };
+
+        // Collect all results (order doesn't matter due to fusion)
+        collectResults(fts5Future, "FTS5", stats_.fts5Queries, stats_.avgFts5TimeMicros);
+        collectResults(kgFuture, "KnowledgeGraph", stats_.kgQueries, stats_.avgKgTimeMicros);
+        collectResults(pathFuture, "PathTree", stats_.pathTreeQueries, stats_.avgPathTreeTimeMicros);
+        collectResults(symbolFuture, "Symbol", stats_.symbolQueries, stats_.avgSymbolTimeMicros);
+        collectResults(vectorFuture, "Vector", stats_.vectorQueries, stats_.avgVectorTimeMicros);
+        collectResults(tagFuture, "Tag", stats_.tagQueries, stats_.avgTagTimeMicros);
+        collectResults(metaFuture, "Metadata", stats_.metadataQueries, stats_.avgMetadataTimeMicros);
+
+    } else {
+        // ========================================================================
+        // SEQUENTIAL EXECUTION: Run queries one at a time
+        // ========================================================================
+
+        // FTS5 search
+        if (config_.fts5Weight > 0.0f) {
+            auto fts5Start = std::chrono::steady_clock::now();
+            auto fts5Results = queryFTS5(query);
+            auto fts5End = std::chrono::steady_clock::now();
+
+            if (fts5Results) {
+                allComponentResults.insert(allComponentResults.end(), fts5Results.value().begin(),
+                                           fts5Results.value().end());
+                stats_.fts5Queries.fetch_add(1, std::memory_order_relaxed);
+
+                auto duration =
+                    std::chrono::duration_cast<std::chrono::microseconds>(fts5End - fts5Start).count();
+                stats_.avgFts5TimeMicros.store(duration, std::memory_order_relaxed);
+            }
+        }
+
+        // Knowledge Graph search
+        if (config_.kgWeight > 0.0f && kgStore_) {
+            auto kgStart = std::chrono::steady_clock::now();
+            auto kgResults = queryKnowledgeGraph(query);
+            auto kgEnd = std::chrono::steady_clock::now();
+
+            if (kgResults) {
+                allComponentResults.insert(allComponentResults.end(), kgResults.value().begin(),
+                                           kgResults.value().end());
+                stats_.kgQueries.fetch_add(1, std::memory_order_relaxed);
+
+                auto duration =
+                    std::chrono::duration_cast<std::chrono::microseconds>(kgEnd - kgStart).count();
+                stats_.avgKgTimeMicros.store(duration, std::memory_order_relaxed);
+            }
+        }
+
+        // Path tree search
+        if (config_.pathTreeWeight > 0.0f) {
+            auto pathStart = std::chrono::steady_clock::now();
+            auto pathResults = queryPathTree(query);
+            auto pathEnd = std::chrono::steady_clock::now();
+
+            if (pathResults) {
+                allComponentResults.insert(allComponentResults.end(), pathResults.value().begin(),
+                                           pathResults.value().end());
+                stats_.pathTreeQueries.fetch_add(1, std::memory_order_relaxed);
+
+                auto duration =
+                    std::chrono::duration_cast<std::chrono::microseconds>(pathEnd - pathStart).count();
+                stats_.avgPathTreeTimeMicros.store(duration, std::memory_order_relaxed);
+            }
+        }
+
+        // Symbol metadata search
+        if (config_.symbolWeight > 0.0f) {
+            auto symbolStart = std::chrono::steady_clock::now();
+            auto symbolResults = querySymbols(query);
+            auto symbolEnd = std::chrono::steady_clock::now();
+
+            if (symbolResults) {
+                allComponentResults.insert(allComponentResults.end(), symbolResults.value().begin(),
+                                           symbolResults.value().end());
+                stats_.symbolQueries.fetch_add(1, std::memory_order_relaxed);
+
+                auto duration =
+                    std::chrono::duration_cast<std::chrono::microseconds>(symbolEnd - symbolStart)
+                        .count();
+                stats_.avgSymbolTimeMicros.store(duration, std::memory_order_relaxed);
+            }
+        }
+
+        // Vector search (if query embedding was generated)
+        if (config_.vectorWeight > 0.0f && queryEmbedding.has_value() && vectorIndex_) {
+            auto vectorStart = std::chrono::steady_clock::now();
+            auto vectorResults = queryVectorIndex(queryEmbedding.value());
+            auto vectorEnd = std::chrono::steady_clock::now();
+
+            if (vectorResults) {
+                allComponentResults.insert(allComponentResults.end(), vectorResults.value().begin(),
+                                           vectorResults.value().end());
+                stats_.vectorQueries.fetch_add(1, std::memory_order_relaxed);
+
+                auto duration =
+                    std::chrono::duration_cast<std::chrono::microseconds>(vectorEnd - vectorStart)
+                        .count();
+                stats_.avgVectorTimeMicros.store(duration, std::memory_order_relaxed);
+            }
+        }
+
+        // Tag-based search (if tags provided in params)
+        if (config_.tagWeight > 0.0f && !params.tags.empty()) {
+            auto tagStart = std::chrono::steady_clock::now();
+            auto tagResults = queryTags(params.tags, params.matchAllTags);
+            auto tagEnd = std::chrono::steady_clock::now();
+
+            if (tagResults) {
+                allComponentResults.insert(allComponentResults.end(), tagResults.value().begin(),
+                                           tagResults.value().end());
+                stats_.tagQueries.fetch_add(1, std::memory_order_relaxed);
+
+                auto duration =
+                    std::chrono::duration_cast<std::chrono::microseconds>(tagEnd - tagStart).count();
+                stats_.avgTagTimeMicros.store(duration, std::memory_order_relaxed);
+            }
+        }
+
+        // Metadata attribute search (if filters provided in params)
+        if (config_.metadataWeight > 0.0f) {
+            auto metaStart = std::chrono::steady_clock::now();
+            auto metaResults = queryMetadata(params);
+            auto metaEnd = std::chrono::steady_clock::now();
+
+            if (metaResults && !metaResults.value().empty()) {
+                allComponentResults.insert(allComponentResults.end(), metaResults.value().begin(),
+                                           metaResults.value().end());
+                stats_.metadataQueries.fetch_add(1, std::memory_order_relaxed);
+
+                auto duration =
+                    std::chrono::duration_cast<std::chrono::microseconds>(metaEnd - metaStart).count();
+                stats_.avgMetadataTimeMicros.store(duration, std::memory_order_relaxed);
+            }
         }
     }
 

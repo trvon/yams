@@ -1,7 +1,7 @@
 #pragma once
 
 #include <yams/core/types.h>
-#include <yams/search/hybrid_search_engine.h>
+#include <yams/search/search_engine.h>
 #include <yams/vector/document_chunker.h>
 #include <yams/vector/embedding_generator.h>
 
@@ -177,6 +177,15 @@ struct QueryCorrection {
 };
 
 /**
+ * Relevance explanation for search results
+ */
+struct RelevanceExplanation {
+    std::string description;                         ///< Human-readable explanation
+    std::map<std::string, float> componentScores;    ///< Per-component score breakdown
+    std::vector<std::string> matchedFeatures;        ///< Features that contributed to the match
+};
+
+/**
  * Search result
  */
 struct SearchResult {
@@ -200,7 +209,7 @@ struct SearchResult {
     DocumentMetadata metadata;
 
     // Relevance explanation
-    std::optional<search::HybridSearchResult::Explanation> explanation;
+    std::optional<RelevanceExplanation> explanation;
 
     // Interaction tracking
     size_t click_count = 0;
@@ -439,7 +448,7 @@ struct SearchAPIConfig {
  */
 class SemanticSearchAPI {
 public:
-    SemanticSearchAPI(std::shared_ptr<search::HybridSearchEngine> search_engine,
+    SemanticSearchAPI(std::shared_ptr<search::SearchEngine> search_engine,
                       std::shared_ptr<vector::DocumentChunker> chunker,
                       std::shared_ptr<vector::EmbeddingGenerator> embedder,
                       const SearchAPIConfig& config = {});

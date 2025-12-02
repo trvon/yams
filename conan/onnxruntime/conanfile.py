@@ -1,6 +1,7 @@
 from conan import ConanFile
 from conan.tools.files import get, copy, save, mkdir
 import os
+import shutil
 
 
 class OnnxRuntimeConan(ConanFile):
@@ -109,28 +110,36 @@ class OnnxRuntimeConan(ConanFile):
              dst=os.path.join(self.package_folder, "include"), 
              keep_path=True)
         
-        # Copy libraries
+        # Copy libraries, preserving symlinks for proper ldconfig behavior
         lib_src = os.path.join(extracted_dir, "lib")
-        copy(self, "*.so*", 
-             src=lib_src,
-             dst=os.path.join(self.package_folder, "lib"), 
-             keep_path=False)
-        copy(self, "*.a", 
-             src=lib_src,
-             dst=os.path.join(self.package_folder, "lib"), 
-             keep_path=False)
-        copy(self, "*.dylib*", 
-             src=lib_src,
-             dst=os.path.join(self.package_folder, "lib"), 
-             keep_path=False)
-        copy(self, "*.dll", 
-             src=lib_src,
-             dst=os.path.join(self.package_folder, "bin"), 
-             keep_path=False)
-        copy(self, "*.lib", 
-             src=lib_src,
-             dst=os.path.join(self.package_folder, "lib"), 
-             keep_path=False)
+        lib_dst = os.path.join(self.package_folder, "lib")
+        bin_dst = os.path.join(self.package_folder, "bin")
+        mkdir(self, lib_dst)
+
+        # Process library files, preserving symlinks to avoid ldconfig warnings
+        # ("is not a symbolic link" error occurs when symlinks are copied as files)
+        for item in os.listdir(lib_src):
+            src_path = os.path.join(lib_src, item)
+
+            # Determine destination based on file type
+            if item.endswith('.dll'):
+                mkdir(self, bin_dst)
+                dst_path = os.path.join(bin_dst, item)
+            elif item.endswith(('.so', '.a', '.dylib', '.lib')) or '.so.' in item or '.dylib.' in item:
+                dst_path = os.path.join(lib_dst, item)
+            else:
+                continue  # Skip non-library files
+
+            if os.path.islink(src_path):
+                # Preserve symbolic links exactly as they are
+                link_target = os.readlink(src_path)
+                if os.path.exists(dst_path) or os.path.islink(dst_path):
+                    os.remove(dst_path)
+                os.symlink(link_target, dst_path)
+                self.output.info(f"Preserved symlink: {item} -> {link_target}")
+            elif os.path.isfile(src_path):
+                shutil.copy2(src_path, dst_path)
+                self.output.info(f"Copied library: {item}")
         
         # Copy license if present
         license_path = os.path.join(extracted_dir, "LICENSE")

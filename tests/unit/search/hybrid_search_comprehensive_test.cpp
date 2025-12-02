@@ -1,9 +1,10 @@
 /**
  * @file hybrid_search_comprehensive_test.cpp
- * @brief Integration tests for HybridSearchEngine (PBI-071)
+ * @brief Integration tests for SearchEngine (PBI-071, updated for PBI-091)
  *
  * Integration test coverage focusing on:
- * - Fusion strategies (LINEAR_COMBINATION, RRF)
+ * - Multi-component search (FTS5, vector, symbol, KG, path tree)
+ * - Fusion strategies (WEIGHTED_SUM, RRF, BORDA_COUNT, WEIGHTED_RECIPROCAL)
  * - Fallback scenarios (degraded mode, timeouts)
  * - Real component integration (actual indexes, engines)
  * - Performance characteristics
@@ -21,7 +22,7 @@
 #include <yams/metadata/database.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
-#include <yams/search/hybrid_search_engine.h>
+#include <yams/search/search_engine.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/search/search_executor.h>
 #include <yams/vector/embedding_generator.h>
@@ -275,11 +276,11 @@ private:
                     auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
                     auto engineResult = builder.buildEmbedded(opts);
                     if (engineResult) {
-                        appContext_.hybridEngine = engineResult.value();
+                        appContext_.searchEngine = engineResult.value();
                     }
                 }
             } catch (...) {
-                // Hybrid engine initialization failed - tests will expect InvalidState errors
+                // Search engine initialization failed - tests will expect InvalidState errors
             }
         }
 

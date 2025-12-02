@@ -10,7 +10,7 @@
 #include <yams/core/types.h>
 #include <yams/downloader/downloader.hpp>
 #include <yams/metadata/metadata_repository.h>
-#include <yams/search/hybrid_search_engine.h>
+#include <yams/search/search_engine.h>
 #include <yams/search/search_executor.h>
 // Required for yams::extraction::IContentExtractor
 #include <yams/extraction/content_extractor.h>
@@ -34,6 +34,11 @@ class ServiceManager;
 // Forward declare KnowledgeGraphStore for AppContext
 namespace yams::metadata {
 class KnowledgeGraphStore;
+}
+
+// Forward declare VectorDatabase for AppContext
+namespace yams::vector {
+class VectorDatabase;
 }
 
 namespace yams::app::services::utils {
@@ -89,9 +94,10 @@ struct AppContext {
     std::shared_ptr<api::IContentStore> store;
     std::shared_ptr<search::SearchExecutor> searchExecutor;
     std::shared_ptr<metadata::MetadataRepository> metadataRepo;
-    std::shared_ptr<search::HybridSearchEngine> hybridEngine; // Keep as HybridSearchEngine for now
-    std::shared_ptr<metadata::KnowledgeGraphStore> kgStore;   // PBI-043: tree diff KG integration
-    std::shared_ptr<IGraphQueryService> graphQueryService;    // PBI-009: centralized graph queries
+    std::shared_ptr<search::SearchEngine> searchEngine;     // New SearchEngine
+    std::shared_ptr<vector::VectorDatabase> vectorDatabase; // For SearchEngineBuilder
+    std::shared_ptr<metadata::KnowledgeGraphStore> kgStore; // PBI-043: tree diff KG integration
+    std::shared_ptr<IGraphQueryService> graphQueryService;  // PBI-009: centralized graph queries
     // Optional: externally-provided content extractors (plugins)
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors;
 
