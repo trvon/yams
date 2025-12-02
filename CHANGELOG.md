@@ -90,3 +90,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Clear hints for common issues (daemon already running, permission denied)
   - Suggested recovery commands (`yams daemon stop --force`, `pkill yams-daemon`)
 
+### Fixed
+- **Plugin interface parsing**: Fixed `parseInterfacesFromManifest` to handle object-format interfaces
+  - Plugins using `[{"id": "model_provider_v1", "version": 2}]` format now parse correctly
+  - Previously only simple string arrays `["interface_name"]` were supported
+  - Affects ONNX plugin and other plugins with versioned interface declarations
+  - Location: `src/daemon/resource/abi_plugin_loader.cpp`
+
+- **Plugin host sharing**: Fixed model provider adoption failure after PBI-088 component extraction
+  - `ServiceManager::autoloadPluginsNow()` loaded plugins into `abiHost_`
+  - `PluginManager::adoptModelProvider()` was querying its own empty `pluginHost_`
+  - Added `sharedPluginHost` option to `PluginManager::Dependencies` for host sharing
+  - `PluginManager` now uses shared host from ServiceManager when provided
+  - Location: `include/yams/daemon/components/PluginManager.h`, `src/daemon/components/PluginManager.cpp`
+
+- **VectorIndexManager initialization**: Fixed search engine build failure "VectorIndexManager not provided"
+  - `VectorSystemManager::initializeOnce()` only initialized vector database, not index manager
+  - Added call to `initializeIndexManager()` after successful database init
+  - Added call to `loadPersistedIndex()` to restore saved index on startup
+  - Location: `src/daemon/components/ServiceManager.cpp`
