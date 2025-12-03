@@ -46,7 +46,7 @@ struct ServerUnderTest {
         std::shared_ptr<yams::api::IContentStore> store;          // nullptr ok for schema tests
         std::shared_ptr<yams::search::SearchExecutor> searchExec; // nullptr ok for schema tests
         std::shared_ptr<yams::metadata::MetadataRepository> repo; // nullptr ok for schema tests
-        std::shared_ptr<yams::search::HybridSearchEngine> hybrid; // nullptr ok for schema tests
+        std::shared_ptr<yams::search::SearchEngine> searchEngine; // nullptr ok for schema tests
         return std::make_unique<yams::mcp::MCPServer>(std::move(transport));
     }
 };
@@ -295,7 +295,7 @@ protected:
         std::shared_ptr<yams::api::IContentStore> store;
         std::shared_ptr<yams::search::SearchExecutor> searchExec;
         std::shared_ptr<yams::metadata::MetadataRepository> repo;
-        std::shared_ptr<yams::search::HybridSearchEngine> hybrid;
+        std::shared_ptr<yams::search::SearchEngine> searchEngine;
         server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
     }
 
@@ -455,8 +455,8 @@ protected:
         // Construct server with working store + repo
         auto transport = std::make_unique<NullTransport>();
         std::shared_ptr<yams::search::SearchExecutor> searchExec; // not required for these tests
-        std::shared_ptr<yams::search::HybridSearchEngine>
-            hybrid; // null -> fallback to repo fuzzy/fts
+        std::shared_ptr<yams::search::SearchEngine>
+            searchEngine; // null -> fallback to repo fuzzy/fts
         server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
     }
 

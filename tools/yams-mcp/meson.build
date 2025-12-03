@@ -28,11 +28,12 @@ yams_mcp_exe = executable('yams-mcp-server',
 )
 
 # --- Windows: Copy runtime DLLs next to the MCP server executable ---
+# Use install: true so DLLs are included in meson install output for MSI packaging
 if host_machine.system() == 'windows' and windows_runtime_dlls.length() > 0
   foreach dll_info : windows_runtime_dlls
     dll_name = dll_info[0]
     dll_src = dll_info[1]
-    fs.copyfile(dll_src, dll_name, install: false)
+    fs.copyfile(dll_src, dll_name, install: true, install_dir: get_option('bindir'))
   endforeach
 endif
 

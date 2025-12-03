@@ -101,6 +101,9 @@ private:
     std::optional<std::string> sessionOverride_;
     bool noSession_{false};
 
+    // CWD scoping
+    bool scopeToCwd_{false};
+
     // Grouping of multiple versions per path (UI-only feature)
     bool groupVersions_{true};           // default: enabled
     std::string versionsMode_{"latest"}; // latest | all
@@ -346,6 +349,10 @@ public:
         cmd->add_option("--session", sessionOverride_, "Use this session for scoping");
         cmd->add_flag("--no-session", noSession_, "Bypass session scoping");
 
+        // CWD scoping
+        cmd->add_flag("--cwd,--here", scopeToCwd_,
+                      "Scope search to current working directory (adds CWD as path prefix filter)");
+
         cmd->add_option("--header-timeout", headerTimeoutMs_,
                         "Timeout for receiving response headers (milliseconds)")
             ->default_val(15000);
@@ -561,6 +568,24 @@ public:
                 includeGlobsExpanded.push_back(pathFilter_);
             }
 
+            // CWD scoping: add current directory as a path prefix filter
+            std::string cwdPrefix;
+            if (scopeToCwd_) {
+                std::error_code ec;
+                auto cwd = std::filesystem::current_path(ec);
+                if (!ec) {
+                    cwdPrefix = cwd.string();
+                    // Normalize path separators for Windows
+                    std::replace(cwdPrefix.begin(), cwdPrefix.end(), '\\', '/');
+                    if (!cwdPrefix.empty() && cwdPrefix.back() != '/') {
+                        cwdPrefix += '/';
+                    }
+                    // Add glob pattern to match all files under CWD
+                    includeGlobsExpanded.push_back(cwdPrefix + "**/*");
+                    spdlog::debug("[CLI] Scoping search to CWD: {}", cwdPrefix);
+                }
+            }
+
             yams::daemon::ClientConfig clientConfig;
             clientConfig.headerTimeout = std::chrono::milliseconds(headerTimeoutMs_);
             clientConfig.bodyTimeout = std::chrono::milliseconds(bodyTimeoutMs_);
@@ -647,8 +672,12 @@ public:
             }
 
             auto render = [&](const yams::daemon::SearchResponse& resp) -> Result<void> {
-                // No client-side filtering needed - daemon now handles multiple path patterns
-                const auto& items = resp.results;
+                // Apply limit client-side as defense-in-depth (daemon should also respect it)
+                std::vector<yams::daemon::SearchResult> items;
+                items.reserve(std::min(resp.results.size(), limit_));
+                for (size_t i = 0; i < resp.results.size() && i < limit_; ++i) {
+                    items.push_back(resp.results[i]);
+                }
 
                 if (pathsOnly_) {
                     const bool enableStreamEffective = clientConfig.enableChunkedResponses;
@@ -717,7 +746,7 @@ public:
                             }
                             std::cout << "\n";
                         }
-                        std::cout << "Found " << resp.totalCount << " results in "
+                        std::cout << "Found " << items.size() << " results in "
                                   << resp.elapsed.count() << "ms" << std::endl;
                     } else {
                         // Build groups keyed by canonical path
@@ -874,7 +903,7 @@ public:
                                     std::cout << "    (+" << (vec.size() - cap) << " more)\n";
                                 }
                             }
-                            std::cout << "Found " << resp.totalCount << " results in "
+                            std::cout << "Found " << items.size() << " results in "
                                       << resp.elapsed.count() << "ms" << std::endl;
                         }
                     }
@@ -1222,7 +1251,7 @@ public:
                 done.set_value(r.error());
                 co_return;
             };
-            boost::asio::co_spawn(getExecutor(), work(), boost::asio::detached);
+            auto coroFut = boost::asio::co_spawn(getExecutor(), work(), boost::asio::use_future);
             if (fut.wait_for(std::chrono::seconds(30)) != std::future_status::ready) {
                 spdlog::warn("search: daemon call timed out; falling back to local execution");
                 auto fb = fallback();
@@ -1231,6 +1260,10 @@ public:
                 return Result<void>();
             }
             auto rv = fut.get();
+            // Ensure coroutine cleanup completes before destroying captured references
+            if (coroFut.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) {
+                spdlog::debug("search: coroutine cleanup still in progress");
+            }
             if (rv)
                 return Result<void>();
             // Fallback to local when daemon path returns error
@@ -1314,6 +1347,20 @@ public:
         if (includeGlobsExpanded.empty() && !pathFilter_.empty())
             includeGlobsExpanded.push_back(pathFilter_);
 
+        // CWD scoping: add current directory as a path prefix filter
+        if (scopeToCwd_) {
+            std::error_code ec;
+            auto cwd = std::filesystem::current_path(ec);
+            if (!ec) {
+                std::string cwdPrefix = cwd.string();
+                std::replace(cwdPrefix.begin(), cwdPrefix.end(), '\\', '/');
+                if (!cwdPrefix.empty() && cwdPrefix.back() != '/') {
+                    cwdPrefix += '/';
+                }
+                includeGlobsExpanded.push_back(cwdPrefix + "**/*");
+            }
+        }
+
         // Daemon client config
         yams::daemon::DaemonClient::setTimeoutEnvVars(std::chrono::milliseconds(headerTimeoutMs_),
                                                       std::chrono::milliseconds(bodyTimeoutMs_));
@@ -1394,10 +1441,12 @@ public:
         dreq.indexedBefore = indexedBefore_;
 
         auto render = [&](const yams::daemon::SearchResponse& resp) -> Result<void> {
+            // Apply limit client-side as defense-in-depth (daemon should also respect it)
             std::vector<yams::daemon::SearchResult> items;
-            items.reserve(resp.results.size());
+            items.reserve(std::min(resp.results.size(), limit_));
             if (!includeGlobsExpanded.empty()) {
                 for (const auto& r : resp.results) {
+                    if (items.size() >= limit_) break;
                     std::string path =
                         !r.path.empty()
                             ? r.path
@@ -1406,7 +1455,9 @@ public:
                         items.push_back(r);
                 }
             } else {
-                items = resp.results;
+                for (size_t i = 0; i < resp.results.size() && i < limit_; ++i) {
+                    items.push_back(resp.results[i]);
+                }
             }
             if (pathsOnly_) {
                 if (items.empty()) {
@@ -1460,7 +1511,7 @@ public:
                     std::cout << "\n    " << truncateSnippet(r.snippet, 200);
                 std::cout << "\n";
             }
-            std::cout << "Found " << resp.totalCount << " results in " << resp.elapsed.count()
+            std::cout << "Found " << items.size() << " results in " << resp.elapsed.count()
                       << "ms" << std::endl;
             return Result<void>();
         };

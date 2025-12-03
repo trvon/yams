@@ -150,9 +150,12 @@ if get_option('build-mcp-server')
   cli_cppargs += ['-DYAMS_BUILD_MCP_SERVER=1']
 endif
 
+# Include both source include dir and builddir for generated headers (version_generated.h)
+cli_inc_dirs = [include_directories('../../include'), generated_inc]
+
 yams_cli_lib = static_library('yams_cli',
   yams_cli_sources,
-  include_directories: include_directories('../../include'),
+  include_directories: cli_inc_dirs,
   dependencies: cli_deps,
   cpp_args: cli_cppargs,
   install: true,
@@ -160,7 +163,7 @@ yams_cli_lib = static_library('yams_cli',
 
 yams_cli_dep = declare_dependency(
   link_with: yams_cli_lib,
-  include_directories: include_directories('../../include'),
+  include_directories: cli_inc_dirs,
   dependencies: cli_deps,
 )
 

@@ -104,7 +104,7 @@ struct GrepFixture {
         ctx_.store = store_;
         ctx_.searchExecutor = nullptr;
         ctx_.metadataRepo = repo_;
-        ctx_.hybridEngine = nullptr;
+        ctx_.searchEngine = nullptr;
 
         grepService_ = makeGrepService(ctx_);
     }

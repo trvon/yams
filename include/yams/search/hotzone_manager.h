@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -40,6 +41,14 @@ public:
 
     const HotzoneConfig& config() const { return cfg_; }
     void setConfig(const HotzoneConfig& c) { cfg_ = c; }
+
+    bool save(const std::filesystem::path& path) const;
+    bool load(const std::filesystem::path& path);
+
+    size_t size() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return map_.size();
+    }
 
 private:
     struct Node {

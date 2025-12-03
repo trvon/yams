@@ -46,7 +46,6 @@
 #include <yams/extraction/extraction_util.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/repair/embedding_repair_util.h>
-#include <yams/search/hybrid_search_engine.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/search/search_executor.h>
 #include <yams/search/search_results.h>

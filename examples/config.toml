@@ -156,6 +156,9 @@ use_in_memory = false
 auto_create = true
 # Auto-repair on corruption
 auto_repair = true
+# Maximum number of vectors in index (for large corpuses, increase this)
+# Default: 100000. For very large repositories, use 500000 or 1000000
+max_elements = 100000
 
 [embeddings]
 # Enable embedding generation

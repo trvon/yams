@@ -18,6 +18,7 @@
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
+#include <yams/daemon/components/CheckpointManager.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
 #include <yams/version.hpp>
@@ -800,6 +801,35 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 }
             } catch (...) {
                 // Metrics unavailable, leave defaults (0, 0, empty string)
+            }
+            // Checkpoint manager stats (PBI-090)
+            try {
+                if (auto* cm = services_->getCheckpointManager()) {
+                    out.checkpointVectorCount = cm->vectorCheckpointCount();
+                    out.checkpointHotzoneCount = cm->hotzoneCheckpointCount();
+                    out.checkpointErrorCount = cm->checkpointErrorCount();
+
+                    auto epochToIso = [](uint64_t epochMs) -> std::string {
+                        if (epochMs == 0)
+                            return "";
+                        auto tp =
+                            std::chrono::system_clock::time_point(std::chrono::milliseconds(epochMs));
+                        std::time_t tt = std::chrono::system_clock::to_time_t(tp);
+                        std::tm tm;
+#ifdef _WIN32
+                        ::gmtime_s(&tm, &tt);
+#else
+                        ::gmtime_r(&tt, &tm);
+#endif
+                        std::ostringstream oss;
+                        oss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+                        return oss.str();
+                    };
+
+                    out.lastVectorCheckpointTime = epochToIso(cm->lastVectorCheckpointEpoch());
+                    out.lastHotzoneCheckpointTime = epochToIso(cm->lastHotzoneCheckpointEpoch());
+                }
+            } catch (...) {
             }
             // Content store stats and sizes (logical always, deep stats when detailed)
             bool disableStoreStats = false;

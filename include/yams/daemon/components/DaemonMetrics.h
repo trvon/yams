@@ -121,6 +121,13 @@ struct MetricsSnapshot {
     std::uint64_t fts5FailIndex{0};      // FTS5 indexing failed (DB error)
     std::uint64_t fts5FailException{0};  // unexpected exceptions
 
+    // Checkpoint manager stats (PBI-090)
+    std::uint64_t checkpointVectorCount{0};
+    std::uint64_t checkpointHotzoneCount{0};
+    std::uint64_t checkpointErrorCount{0};
+    std::string lastVectorCheckpointTime;   // ISO8601 timestamp
+    std::string lastHotzoneCheckpointTime;  // ISO8601 timestamp
+
     // Content store & compression snapshot (best-effort)
     std::uint64_t storeObjects{0};
     std::uint64_t uniqueBlocks{0};

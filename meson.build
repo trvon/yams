@@ -186,18 +186,49 @@ meson.override_dependency('boost', boost_dep)
 
 # --- Version header generation ---
 _override_version = get_option('yams-version')
-_effective_version = _override_version != '' ? _override_version : meson.project_version()
+
+# Detect version from git tags if not overridden
+_git_version = ''
+_git_cmd = find_program('git', required: false)
+if _git_cmd.found() and _override_version == ''
+  # Try to get the most recent semver tag (v*)
+  _r = run_command(_git_cmd, ['describe', '--tags', '--match', 'v*', '--abbrev=0'], check: false)
+  if _r.returncode() == 0
+    _tag = _r.stdout().strip()
+    # Strip leading 'v' if present
+    if _tag.startswith('v')
+      _git_version = _tag.substring(1)
+    else
+      _git_version = _tag
+    endif
+  endif
+endif
+
+# Priority: command-line override > git tag > meson.project_version()
+if _override_version != ''
+  _effective_version = _override_version
+elif _git_version != ''
+  _effective_version = _git_version
+else
+  _effective_version = meson.project_version()
+endif
 
 python_exe = find_program('python3', 'python')
 _build_timestamp = run_command(python_exe, '-c', 'import datetime; print(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))', check: true).stdout().strip()
 
 _git_desc = ''
+_git_commit = ''
 _git_cmd = find_program('git', required: false)
 if _git_cmd.found()
   # Capture short git describe (best-effort; ignore errors quietly)
   _r = run_command(_git_cmd, ['describe', '--tags', '--always', '--dirty'], check: false)
   if _r.returncode() == 0
     _git_desc = _r.stdout().strip()
+  endif
+  # Capture short commit hash for dev builds
+  _r = run_command(_git_cmd, ['rev-parse', '--short', 'HEAD'], check: false)
+  if _r.returncode() == 0
+    _git_commit = _r.stdout().strip()
   endif
 endif
 
@@ -207,8 +238,11 @@ version_config.set('YAMS_PROJECT_VERSION', meson.project_version())
 version_config.set('YAMS_OVERRIDE_VERSION', _override_version)
 version_config.set('YAMS_BUILD_TIMESTAMP', _build_timestamp)
 version_config.set('YAMS_GIT_DESCRIBE', _git_desc)
+version_config.set('YAMS_GIT_COMMIT', _git_commit)
 
-configure_file(
+# Generate version header - will be at builddir/version_generated.h
+# CLI includes it via builddir in include path
+version_header = configure_file(
   output: 'version_generated.h',
   install: true,
   install_dir: get_option('includedir') / 'yams',
@@ -216,6 +250,10 @@ configure_file(
   format: 'cmake', # Simple @VAR@ substitution; header template below.
   input: files('include/yams/version_generated.h.in')
 )
+
+# Make builddir available as include path for generated headers
+# CLI will include as "version_generated.h" directly
+generated_inc = include_directories('.')
 
 yams_build_cli = get_option('build-cli')
 yams_build_mcp = get_option('build-mcp-server')

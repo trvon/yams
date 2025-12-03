@@ -324,7 +324,7 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             createTreeSnapshotsSchema(),  createTreeDiffsSchema(),
             addPathIndexingSchema(),      chunkedPathIndexingBackfill(),
             createPathTreeSchema(),       createSymbolMetadataSchema(),
-            addFTS5PorterStemmer()};
+            addFTS5PorterStemmer(),       removeFTS5ContentType()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -1812,6 +1812,171 @@ Migration YamsMetadataMigrations::addFTS5PorterStemmer() {
         return db.execute(R"(
             DROP TABLE IF EXISTS documents_fts_new;
         )");
+    };
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::removeFTS5ContentType() {
+    Migration m;
+    m.version = 18;
+    m.name = "Remove unused content_type column from FTS5 index";
+    m.created = std::chrono::system_clock::now();
+
+    m.upFunc = [](Database& db) -> Result<void> {
+        auto fts5Result = db.hasFTS5();
+        if (!fts5Result)
+            return fts5Result.error();
+        if (!fts5Result.value())
+            return {};
+
+        Result<void> rc;
+
+        // Drop any leftover temp table from previous failed attempts
+        (void)db.execute("DROP TABLE IF EXISTS documents_fts_new;");
+
+        // Create a new FTS5 table WITHOUT content_type column
+        // content_type is never queried via FTS MATCH - filtering by mime_type
+        // is done via JOIN on documents table. Removing it saves index space.
+        rc = db.execute(R"(
+            CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts_new USING fts5(
+                content,
+                title,
+                tokenize='porter unicode61 tokenchars ''_-'''
+            );
+        )");
+        if (!rc)
+            return rc;
+
+        // Backfill from existing extracted content in chunks
+        auto countStmtRes = db.prepare(R"(
+            SELECT COUNT(*) FROM documents WHERE content_extracted = 1
+        )");
+        if (!countStmtRes)
+            return countStmtRes.error();
+        {
+            auto stmt = std::move(countStmtRes).value();
+            auto step = stmt.step();
+            if (!step)
+                return step.error();
+            std::int64_t total = 0;
+            if (step.value()) {
+                total = stmt.getInt64(0);
+            }
+            const std::int64_t kChunk = 10000;
+            for (std::int64_t offset = 0; offset < total; offset += kChunk) {
+                // Only insert content and title - no content_type
+                auto ins = db.prepare(R"(
+                    INSERT OR REPLACE INTO documents_fts_new (rowid, content, title)
+                    SELECT d.id,
+                           COALESCE(dc.content_text, ''),
+                           d.file_name
+                    FROM documents d
+                    LEFT JOIN document_content dc ON dc.document_id = d.id
+                    WHERE d.content_extracted = 1
+                    ORDER BY d.id
+                    LIMIT ? OFFSET ?
+                )");
+                if (!ins)
+                    return ins.error();
+                auto q = std::move(ins).value();
+                auto b1 = q.bind(1, static_cast<std::int64_t>(kChunk));
+                if (!b1)
+                    return b1;
+                auto b2 = q.bind(2, offset);
+                if (!b2)
+                    return b2;
+                auto ex = q.execute();
+                if (!ex)
+                    return ex;
+                if ((offset / kChunk) % 10 == 0) {
+                    spdlog::info("[FTS5 v18] Removing content_type, progress: {}/{} rows", offset,
+                                 total);
+                }
+            }
+            spdlog::info("[FTS5 v18] FTS5 hygiene migration complete: {} rows", total);
+        }
+
+        // Swap tables
+        rc = db.execute(R"(
+            DROP TABLE IF EXISTS documents_fts;
+            ALTER TABLE documents_fts_new RENAME TO documents_fts;
+        )");
+        if (!rc)
+            return rc;
+        return rc;
+    };
+
+    m.downFunc = [](Database& db) -> Result<void> {
+        // Rollback: recreate with content_type for backward compatibility
+        auto fts5Result = db.hasFTS5();
+        if (!fts5Result)
+            return fts5Result.error();
+        if (!fts5Result.value())
+            return {};
+
+        Result<void> rc;
+        (void)db.execute("DROP TABLE IF EXISTS documents_fts_new;");
+
+        rc = db.execute(R"(
+            CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts_new USING fts5(
+                content,
+                title,
+                content_type,
+                tokenize='porter unicode61 tokenchars ''_-'''
+            );
+        )");
+        if (!rc)
+            return rc;
+
+        auto countStmtRes = db.prepare(R"(
+            SELECT COUNT(*) FROM documents WHERE content_extracted = 1
+        )");
+        if (!countStmtRes)
+            return countStmtRes.error();
+        {
+            auto stmt = std::move(countStmtRes).value();
+            auto step = stmt.step();
+            if (!step)
+                return step.error();
+            std::int64_t total = 0;
+            if (step.value()) {
+                total = stmt.getInt64(0);
+            }
+            const std::int64_t kChunk = 10000;
+            for (std::int64_t offset = 0; offset < total; offset += kChunk) {
+                auto ins = db.prepare(R"(
+                    INSERT OR REPLACE INTO documents_fts_new (rowid, content, title, content_type)
+                    SELECT d.id,
+                           COALESCE(dc.content_text, ''),
+                           d.file_name,
+                           COALESCE(d.mime_type, '')
+                    FROM documents d
+                    LEFT JOIN document_content dc ON dc.document_id = d.id
+                    WHERE d.content_extracted = 1
+                    ORDER BY d.id
+                    LIMIT ? OFFSET ?
+                )");
+                if (!ins)
+                    return ins.error();
+                auto q = std::move(ins).value();
+                auto b1 = q.bind(1, static_cast<std::int64_t>(kChunk));
+                if (!b1)
+                    return b1;
+                auto b2 = q.bind(2, offset);
+                if (!b2)
+                    return b2;
+                auto ex = q.execute();
+                if (!ex)
+                    return ex;
+            }
+        }
+
+        rc = db.execute(R"(
+            DROP TABLE IF EXISTS documents_fts;
+            ALTER TABLE documents_fts_new RENAME TO documents_fts;
+        )");
+        return rc;
     };
 
     return m;

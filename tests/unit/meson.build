@@ -50,6 +50,7 @@ if tests_has_cli
     'cli/config_command_test.cpp',
     'cli/daemon_command_test.cpp',
     'cli/doctor_command_test.cpp',
+    'cli/init_command_test.cpp',
     'cli/model_command_test.cpp',
     'cli/recommendation_util_test.cpp',
     'cli/session_command_test.cpp',
@@ -83,26 +84,34 @@ endif
 unit_daemon_base = files(
   # Daemon FSM tests migrated to Catch2 (see tests/meson.build catch2_test_sources)
   # Previously: 14 FSM test files now consolidated in daemon_fsm_suite_test.cpp
-  
+
   # Daemon metrics/status tests migrated to Catch2 (daemon_metrics_status_test.cpp)
   # Removed: get_stats_wal_metrics_test.cpp, daemon_plugins_degraded_status_test.cpp,
   #          daemon_plugins_recovery_status_test.cpp, status_response_proto_test.cpp
-  
+
   # Daemon component tests migrated to Catch2 (daemon_components_test.cpp)
   # Removed: ipc_server_test.cpp (empty), socket_server_lifecycle_test.cpp,
   #          socket_utils_test.cpp, resource_pool_test.cpp
-  
+
   # Daemon protocol tests migrated to Catch2 (daemon_protocol_test.cpp)
   # Removed: download_protocol_test.cpp, message_framing_test.cpp, grep_response_proto_test.cpp,
   #          response_of_test.cpp, ipc_message_type_test.cpp, proto_roundtrip_test.cpp
-  
+
   # Daemon background processing tests migrated to Catch2 (daemon_background_processing_test.cpp)
   # Removed: post_ingest_queue_test.cpp, post_ingest_queue_bus_stress_test.cpp,
   #          internal_event_bus_concurrency_test.cpp
-  
+
   # Daemon plugin harness migrated to Catch2 (onnx_plugin_harness_test.cpp)
   # Now uses Catch2 with timeout handling and enhanced isolation
-  
+
+  # Extracted component tests (PBI-088)
+  'daemon/components/config_resolver_test.cpp',
+  'daemon/components/vector_system_manager_test.cpp',
+  'daemon/components/plugin_manager_test.cpp',
+  'daemon/components/database_manager_test.cpp',
+  'daemon/components/request_queue_test.cpp',
+  'daemon/components/checkpoint_manager_test.cpp',
+
   # Legacy GTest tests (to be migrated)
   'daemon/daemon_test.cpp',
   # Migrated to Catch2 - see tests/meson.build (plugin_infrastructure_test.cpp)
@@ -214,14 +223,9 @@ unit_search = files(
   'search/bk_tree_test.cpp',
   'search/chunk_coverage_test.cpp',
   'search/entity_linker_test.cpp',
-  'search/hierarchical_search_test.cpp',
-  'search/hybrid_grouping_smoke_test.cpp',
-  'search/hybrid_search_engine_test.cpp',
   'search/kg_scorer_simple_test.cpp',
-  'search/learned_fusion_smoke_test.cpp',
   'search/query_parser_test.cpp',
   'search/query_qualifiers_test.cpp',
-  'search/search_cache_test.cpp',
   'search/search_executor_test.cpp',
   'search/search_smoke_test.cpp',
 )

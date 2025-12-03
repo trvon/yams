@@ -14,7 +14,6 @@
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
-#include <yams/search/hybrid_search_factory.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/embedding_service.h>
@@ -22,8 +21,11 @@
 #include <yams/vector/vector_database.h>
 #include <yams/vector/vector_index_manager.h>
 #include <yams/version.hpp>
-#if __has_include(<yams/version_generated.h>)
-#include <yams/version_generated.h>
+// Error hints for actionable error messages
+#include <yams/cli/error_hints.h>
+// Generated version header (builddir/version_generated.h via generated_inc)
+#if __has_include(<version_generated.h>)
+#include <version_generated.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -106,11 +108,16 @@ YamsCLI::YamsCLI(boost::asio::any_io_executor executor) : executor_(std::move(ex
     app_ = std::make_unique<CLI::App>("YAMS", "yams");
     app_->prefix_command(); // Allow global options before and after subcommands
     // Prefer generated effective version if present; otherwise fallback to existing macros.
-#if __has_include(<yams/version_generated.h>)
+#if __has_include(<version_generated.h>)
     {
         yams::VersionInfo ver{};
         std::string long_version = std::string(ver.effective_version);
-        if (std::string(ver.git_describe).size()) {
+        // Show commit hash if available (for dev builds)
+        std::string commit = ver.git_commit ? std::string(ver.git_commit) : "";
+        if (!commit.empty()) {
+            long_version += " (commit: " + commit + ")";
+        } else if (std::string(ver.git_describe).size()) {
+            // Fallback to git describe if commit not available
             long_version += " (" + std::string(ver.git_describe) + ")";
         }
         long_version += " built:" + std::string(ver.build_timestamp);
@@ -418,11 +425,14 @@ int YamsCLI::run(int argc, char* argv[]) {
             auto status = fut.wait_for(std::chrono::minutes(10));
             if (status != std::future_status::ready) {
                 spdlog::error("Command timed out");
+                std::cerr << formatErrorWithHint(ErrorCode::Timeout, "Command timed out") << "\n";
                 return 1;
             }
             auto result = fut.get();
             if (!result) {
-                spdlog::error("{}", result.error().message);
+                // Use error hints for actionable feedback
+                std::cerr << formatErrorWithHint(result.error().code, result.error().message)
+                          << "\n";
                 return 1;
             }
         }
@@ -444,20 +454,17 @@ Result<void> YamsCLI::ensureStorageInitialized() {
     }
     auto initResult = initializeStorage();
     if (!initResult) {
-        // Map common DB/init errors to actionable guidance
-        const std::string& em = initResult.error().message;
-        std::string hint;
-        // FTS5/tokenizer issues often arise during migrations creating virtual tables
-        if (em.find("FTS5") != std::string::npos || em.find("tokenize") != std::string::npos) {
-            hint = " (hint: run 'yams repair --fts5')";
-        } else if (em.find("constraint failed") != std::string::npos) {
-            // Likely uniqueness or foreign-key constraints; suggest safe, scoped repairs
-            hint = " (hint: try 'yams repair --orphans' or 'yams doctor --fix')";
-        } else {
-            // Default: storage onboarding
-            hint = " (tip: run 'yams init')";
+        // Use centralized error hints for actionable guidance
+        auto hint = getErrorHint(initResult.error().code, initResult.error().message);
+        std::string enhancedMessage = initResult.error().message;
+        if (!hint.hint.empty()) {
+            enhancedMessage += " (hint: " + hint.hint;
+            if (!hint.command.empty()) {
+                enhancedMessage += "; try '" + hint.command + "'";
+            }
+            enhancedMessage += ")";
         }
-        return Error{initResult.error().code, em + hint};
+        return Error{initResult.error().code, enhancedMessage};
     }
     return Result<void>();
 }
@@ -498,15 +505,18 @@ std::shared_ptr<app::services::AppContext> YamsCLI::getAppContext() {
         appContext_->kgStore = getKnowledgeGraphStore(); // PBI-043: tree diff KG integration
         appContext_->workerExecutor = executor_;         // 066-59: Thread executor through services
 
-        // Initialize HybridSearchEngine so SearchService can use hybrid search by default
+        // Initialize SearchEngine so SearchService can use hybrid search by default
         try {
             auto vecMgr = getVectorIndexManager();
+            auto vecDb = getVectorDatabase();
             auto repo = getMetadataRepository();
 
             if (vecMgr && repo) {
                 yams::search::SearchEngineBuilder builder;
-                builder.withVectorIndex(vecMgr).withMetadataRepo(repo).withKGStore(
-                    getKnowledgeGraphStore());
+                builder.withVectorIndex(vecMgr)
+                    .withVectorDatabase(vecDb)
+                    .withMetadataRepo(repo)
+                    .withKGStore(getKnowledgeGraphStore());
 
                 // Reuse a shared embedding generator if available
                 if (auto emb = getEmbeddingGenerator()) {
@@ -516,20 +526,20 @@ std::shared_ptr<app::services::AppContext> YamsCLI::getAppContext() {
                 auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
                 auto engRes = builder.buildEmbedded(opts);
                 if (engRes) {
-                    appContext_->hybridEngine = engRes.value();
-                    spdlog::info("HybridSearchEngine initialized for AppContext (KG {}abled)",
-                                 appContext_->hybridEngine->getConfig().enable_kg ? "en" : "dis");
+                    appContext_->searchEngine = engRes.value();
+                    appContext_->vectorDatabase = vecDb;
+                    spdlog::info("SearchEngine initialized for AppContext");
                 } else {
-                    spdlog::warn("HybridSearchEngine initialization failed: {}",
+                    spdlog::warn("SearchEngine initialization failed: {}",
                                  engRes.error().message);
-                    appContext_->hybridEngine = nullptr;
+                    appContext_->searchEngine = nullptr;
                 }
             } else {
-                appContext_->hybridEngine = nullptr;
+                appContext_->searchEngine = nullptr;
             }
         } catch (const std::exception& e) {
-            spdlog::warn("HybridSearchEngine bring-up error (ignored): {}", e.what());
-            appContext_->hybridEngine = nullptr;
+            spdlog::warn("SearchEngine bring-up error (ignored): {}", e.what());
+            appContext_->searchEngine = nullptr;
         }
 
         spdlog::debug("Created AppContext for services");
@@ -882,8 +892,9 @@ Result<void> YamsCLI::initializeStorage() {
                 vdbConfig.database_path = (dataPath_ / "vectors.db").string();
                 vdbConfig.embedding_dim = vectorDimension;
 
-                auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
+                auto vectorDb = std::make_shared<vector::VectorDatabase>(vdbConfig);
                 if (vectorDb->initialize()) {
+                    vectorDatabase_ = vectorDb;
                     if (verbose_) {
                         spdlog::info("Vector database initialized at: {}", vdbConfig.database_path);
                     }

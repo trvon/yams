@@ -1221,14 +1221,17 @@ public:
                 size_t topk = static_cast<size_t>(std::max(1, req.semanticLimit)) * 3;
 
                 // Use cached engine if available, build fresh if needed
-                std::shared_ptr<yams::search::HybridSearchEngine> eng = ctx_.hybridEngine;
+                std::shared_ptr<yams::search::SearchEngine> eng = ctx_.searchEngine;
                 if (!eng) {
                     auto build_start_time = std::chrono::steady_clock::now();
                     auto vecMgr = std::make_shared<yams::vector::VectorIndexManager>();
                     yams::search::SearchEngineBuilder builder;
                     builder.withVectorIndex(vecMgr).withMetadataRepo(ctx_.metadataRepo);
+                    if (ctx_.vectorDatabase) {
+                        builder.withVectorDatabase(ctx_.vectorDatabase);
+                    }
                     auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
-                    opts.hybrid.final_top_k = topk;
+                    opts.config.maxResults = topk;
                     auto engRes = builder.buildEmbedded(opts);
                     if (engRes) {
                         eng = engRes.value();
@@ -1236,24 +1239,25 @@ public:
                     auto build_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
                                               std::chrono::steady_clock::now() - build_start_time)
                                               .count();
-                    spdlog::debug("[GrepTrace] Built fresh HybridSearchEngine for semantic "
+                    spdlog::debug("[GrepTrace] Built fresh SearchEngine for semantic "
                                   "search in {}ms.",
                                   build_duration);
                 }
 
                 if (eng) {
-                    auto hres = eng->search(req.pattern, topk);
+                    yams::search::SearchParams params;
+                    params.limit = static_cast<int>(topk);
+                    auto hres = eng->search(req.pattern, params);
                     if (hres) {
                         std::set<std::string> regexFiles;
                         for (const auto& fr : response.results)
                             regexFiles.insert(fr.file);
-                        std::vector<yams::search::HybridSearchResult> sem = hres.value();
+                        std::vector<yams::metadata::SearchResult> sem = hres.value();
                         int taken = 0;
                         for (const auto& r : sem) {
-                            auto itPath = r.metadata.find("path");
-                            if (itPath == r.metadata.end())
+                            const std::string& path = r.document.filePath;
+                            if (path.empty())
                                 continue;
-                            const std::string& path = itPath->second;
                             if (!pathFilterMatch(path, req.paths))
                                 continue;
                             if (!req.includePatterns.empty()) {
@@ -1302,15 +1306,15 @@ public:
                             fr.fileName = std::filesystem::path(path).filename().string();
                             GrepMatch gm;
                             gm.matchType = "semantic";
-                            float conf = r.hybrid_score > 0.0f ? r.hybrid_score : r.vector_score;
+                            float conf = static_cast<float>(r.score);
                             if (conf < 0.0f)
                                 conf = 0.0f;
                             if (conf > 1.0f)
                                 conf = 1.0f;
                             gm.confidence = conf;
                             gm.lineNumber = 0;
-                            if (!r.content.empty())
-                                gm.line = yams::common::sanitizeUtf8(r.content);
+                            if (!r.snippet.empty())
+                                gm.line = yams::common::sanitizeUtf8(r.snippet);
                             fr.matches.push_back(std::move(gm));
                             fr.matchCount = 1;
                             fr.wasSemanticSearch = true;

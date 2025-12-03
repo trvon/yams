@@ -1,4 +1,5 @@
 #include <spdlog/spdlog.h>
+#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <future>
 #include <iomanip>
@@ -34,6 +35,7 @@ private:
     bool keepRefs_ = false;
     bool verbose_ = false;
     bool recursive_ = false;
+    bool jsonOutput_ = false;
 
 public:
     std::string getName() const override { return "delete"; }
@@ -68,6 +70,7 @@ public:
         cmd->add_flag("--keep-refs", keepRefs_, "Keep reference counts (don't decrement)");
         cmd->add_flag("-v,--verbose", verbose_, "Enable verbose output");
         cmd->add_flag("--recursive,-r", recursive_, "Delete directory contents recursively");
+        cmd->add_flag("--json", jsonOutput_, "Output results as JSON");
 
         cmd->callback([this]() { cli_->setPendingCommand(this); });
     }
@@ -151,12 +154,34 @@ public:
             // Capture verbose flag by value to avoid referencing local variables after co_await
             bool verboseMode = dreq.verbose;
             bool forceMode = force_;
+            bool jsonMode = jsonOutput_ || (cli_ && cli_->getJsonOutput());
 
-            auto render = [verboseMode, forceMode](const auto& response) -> Result<void> {
+            auto render = [verboseMode, forceMode, jsonMode](const auto& response) -> Result<void> {
                 // Handle both DeleteResponse and SuccessResponse
                 if constexpr (std::is_same_v<std::decay_t<decltype(response)>,
                                              yams::daemon::DeleteResponse>) {
                     const auto& resp = response;
+                    
+                    if (jsonMode) {
+                        nlohmann::json j;
+                        j["dry_run"] = resp.dryRun;
+                        j["success_count"] = resp.successCount;
+                        j["failure_count"] = resp.failureCount;
+                        j["results"] = nlohmann::json::array();
+                        for (const auto& result : resp.results) {
+                            nlohmann::json item;
+                            item["name"] = result.name;
+                            item["hash"] = result.hash;
+                            item["success"] = result.success;
+                            if (!result.error.empty()) {
+                                item["error"] = result.error;
+                            }
+                            j["results"].push_back(item);
+                        }
+                        std::cout << j.dump(2) << std::endl;
+                        return Result<void>();
+                    }
+                    
                     if (resp.dryRun) {
                         std::cout << "[DRY RUN] Documents that would be deleted:\n";
                         for (const auto& result : resp.results) {

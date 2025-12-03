@@ -197,6 +197,9 @@ private:
 
     // Version 17: Enable FTS5 Porter stemmer for better search
     static Migration addFTS5PorterStemmer();
+
+    // Version 18: Remove content_type from FTS5 index (never queried via MATCH)
+    static Migration removeFTS5ContentType();
 };
 
 /**

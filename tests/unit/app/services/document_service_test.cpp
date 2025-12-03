@@ -13,7 +13,7 @@
 #include <yams/metadata/database.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
-#include <yams/search/hybrid_search_engine.h>
+#include <yams/search/search_engine.h>
 #include <yams/search/search_executor.h>
 
 using namespace yams;
@@ -32,7 +32,7 @@ struct DocumentFixture {
     ~DocumentFixture() {
         documentService_.reset();
         searchExecutor_.reset();
-        hybridEngine_.reset();
+        searchEngine_.reset();
         contentStore_.reset();
 
         if (database_) {
@@ -97,12 +97,12 @@ struct DocumentFixture {
             const_cast<std::unique_ptr<IContentStore>&>(uniqueStore).release());
 
         searchExecutor_ = nullptr;
-        hybridEngine_ = nullptr;
+        searchEngine_ = nullptr;
 
         appContext_.store = contentStore_;
         appContext_.metadataRepo = metadataRepo_;
         appContext_.searchExecutor = searchExecutor_;
-        appContext_.hybridEngine = hybridEngine_;
+        appContext_.searchEngine = searchEngine_;
 
         documentService_ = makeDocumentService(appContext_);
     }
@@ -144,7 +144,7 @@ struct DocumentFixture {
     std::shared_ptr<MetadataRepository> metadataRepo_;
     std::shared_ptr<IContentStore> contentStore_;
     std::shared_ptr<search::SearchExecutor> searchExecutor_;
-    std::shared_ptr<search::HybridSearchEngine> hybridEngine_;
+    std::shared_ptr<search::SearchEngine> searchEngine_;
     AppContext appContext_;
     std::shared_ptr<IDocumentService> documentService_;
     std::string testHash1_;

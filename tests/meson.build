@@ -746,14 +746,7 @@ if catch2_dep.found()
     install: false,
   )
   
-  catch2_metadata_search_exe = executable('catch2_metadata_search',
-    files('unit/metadata/search_metadata_interface_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  # Removed: catch2_metadata_search (search_metadata_interface_test.cpp) - HybridSearchEngine specific
   
   catch2_metadata_symbol_exe = executable('catch2_metadata_symbol',
     files('unit/metadata/symbol_metadata_schema_test.cpp'),
@@ -986,11 +979,7 @@ if catch2_dep.found()
     timeout: 60
   )
   
-  test('metadata_search', catch2_metadata_search_exe,
-    suite: ['catch2', 'unit', 'metadata', 'search'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
+  # Removed: metadata_search test - HybridSearchEngine specific
   
   test('metadata_symbol_schema', catch2_metadata_symbol_exe,
     suite: ['catch2', 'unit', 'metadata', 'symbol'],

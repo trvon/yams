@@ -2,6 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+
+#include <nlohmann/json.hpp>
 
 namespace yams::search {
 
@@ -71,6 +75,87 @@ void HotzoneManager::decaySweep(std::chrono::system_clock::time_point now) {
             ++it;
         }
     }
+}
+
+bool HotzoneManager::save(const std::filesystem::path& path) const {
+    std::lock_guard<std::mutex> lk(mu_);
+
+    if (map_.empty()) {
+        return true;
+    }
+
+    nlohmann::json j;
+    j["version"] = 1;
+    j["half_life_hours"] = cfg_.half_life_hours;
+    j["max_boost_factor"] = cfg_.max_boost_factor;
+
+    nlohmann::json entries = nlohmann::json::array();
+    for (const auto& [key, node] : map_) {
+        auto epoch = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         node.updated.time_since_epoch())
+                         .count();
+        entries.push_back({{"key", key}, {"score", node.score}, {"updated_ms", epoch}});
+    }
+    j["entries"] = entries;
+
+    auto tempPath = path;
+    tempPath += ".tmp";
+
+    std::ofstream ofs(tempPath);
+    if (!ofs) {
+        return false;
+    }
+
+    ofs << j.dump(2);
+    ofs.close();
+
+    if (!ofs) {
+        return false;
+    }
+
+    std::error_code ec;
+    std::filesystem::rename(tempPath, path, ec);
+    return !ec;
+}
+
+bool HotzoneManager::load(const std::filesystem::path& path) {
+    if (!std::filesystem::exists(path)) {
+        return false;
+    }
+
+    std::ifstream ifs(path);
+    if (!ifs) {
+        return false;
+    }
+
+    nlohmann::json j;
+    try {
+        ifs >> j;
+    } catch (...) {
+        return false;
+    }
+
+    if (!j.contains("version") || !j.contains("entries")) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lk(mu_);
+    map_.clear();
+
+    for (const auto& entry : j["entries"]) {
+        if (!entry.contains("key") || !entry.contains("score") || !entry.contains("updated_ms")) {
+            continue;
+        }
+
+        Node node;
+        node.score = entry["score"].get<double>();
+        auto epoch_ms = entry["updated_ms"].get<int64_t>();
+        node.updated = std::chrono::system_clock::time_point(std::chrono::milliseconds(epoch_ms));
+
+        map_[entry["key"].get<std::string>()] = node;
+    }
+
+    return true;
 }
 
 } // namespace yams::search

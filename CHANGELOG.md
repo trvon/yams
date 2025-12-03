@@ -16,68 +16,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
-## [v0.7.9] - Unreleased
+## [v0.8.0] - Unreleased
 
 ### Added
-- **Path Tree Repair**: New `yams repair --path-tree` command to rebuild path tree index for documents added before the feature was implemented
-  - Automatic background repair task runs after daemon reaches Ready state with no degraded subsystems
-  - FSM-based scheduling waits for optimal system load before starting repair scan
-  - Added metadata-only `RepairManager` constructor for path tree operations
-- **Tag and Metadata Search**: Search engine now supports tag-based and metadata attribute search as fusion components
-  - New `queryTags()` component finds documents by tags with AND/OR matching
-  - New `queryMetadata()` component matches documents by mimeType, extension, and modified time filters
-  - Results are fused with other search components (FTS5, vector, path tree, etc.) using weighted scoring
-  - Added `SearchParams.tags`, `matchAllTags`, `mimeType`, `extension`, `modifiedAfter`, `modifiedBefore` fields
-  - Configurable weights: `tagWeight` (default 0.10) and `metadataWeight` (default 0.05)
-- **Session Tree Integration**: SessionService now uses path tree index for efficient document queries
-  - New `getTreeBranch()` method returns tree node info with child segments for a path prefix
-  - New `getDocumentsFromTree()` method queries documents using `findDocumentsByPathTreePrefix()`
-  - `warm()` now uses tree-based queries instead of pattern matching for faster materialization
-
-### Removed
-- **TUI/Browse Interface**: Removed FTXUI-based terminal UI components in preparation for Flutter mobile application
-  - Removed `src/cli/tui/` directory and all TUI source files
-  - Removed `include/yams/cli/tui/` directory and TUI headers
-  - Removed browse command (`src/cli/commands/browse_command.cpp`)
-  - Removed FTXUI dependencies from build system
-  - Updated command registry and CLI help to remove browse references
-
-### Fixed
-- **Tree Command**: Fixed "Metadata repository unavailable" error by ensuring storage initialization before accessing metadata
-  - Path tree now properly populated during document ingestion via `upsertPathTreeForDocument()`
-- **List Command**: Fixed `--name "*.md"` glob patterns being incorrectly treated as file paths
-  - Patterns starting with `*` or `?` now correctly handled as glob patterns instead of literal filenames
-- **Windows Support**
-- **Thread Safety**: Fixed critical race conditions detected by ThreadSanitizer (TSan)
-  - Fixed AsioConnection destructor race by properly canceling and closing sockets before destruction
-  - Fixed RepairCoordinator access race by adding mutex protection around all accesses from TuningManager callbacks
-  - Added mutex synchronization for RepairCoordinator lifecycle (creation, access, destruction)
-  - Enabled ThreadSanitizer by default for Debug builds to catch race conditions early
-- **Streaming Response Hang**: Fixed coroutine race condition and idle timeout bypass causing streaming requests to hang
-  - Streaming requests would timeout after connection went idle due to writer_drain not completing properly
-  - Root cause 1: `enqueue_frame` coroutine suspension between flag check and flag set allowed multiple writers to start
-  - Root cause 2: Connections with in-flight requests bypassed idle timeout, staying open indefinitely (105+ minutes observed)
-  - Solution 1: Created synchronous `enqueue_frame_sync()` that sets `writer_running_` flag atomically before suspension
-  - Solution 2: Close idle connections even with in-flight requests - if client stopped reading, requests are stuck anyway
-  - Added comprehensive test suite (`writer_drain_test.cpp`) with 5 integration tests validating the fix
-  - Files: `src/daemon/ipc/request_handler.cpp`, `include/yams/daemon/ipc/request_handler.h`
-- **Document Retrieval**: Fixed "Document not found" error when multiple instances of a document exist
-  - `yams get --name` now returns the most recently indexed document by default when multiple matches exist
-  - Added `--oldest` flag support to retrieve the oldest indexed version instead
-  - Updated `resolveNameToHash` to accept disambiguation strategy parameter
-  - Non-blocking for LLM usage - always returns a result without requiring manual selection
-- **Snapshot Creation**: Fixed "File found in index but not in any snapshot" error
-  - Simplified snapshot logic to always create snapshots on every ingestion
-  - Removed conditional 24-hour check that prevented snapshot creation for existing documents
-  - All documents now properly tracked in version history via `yams list <filename>`
-- **Connection Pool Reliability**: Simplified connection lifecycle management following daemon-managed best practices
-  - Removed all client-side staleness prediction logic (`is_stale()`, age-based checks, peek logic)
-  - Daemon now fully controls connection lifecycle via idle timeout (6 seconds)
-  - Client pool simplified to only remove expired weak_ptrs, no health prediction
-  - Read loop starts immediately on connection creation for proper request/response flow
-  - Client reacts to natural I/O errors with automatic retry instead of trying to predict failures
-  - Removed synchronization complexity (`read_loop_ready` flag and polling)
+- **Auto-init mode**: New `yams init --auto` flag for containerized/headless environments
+  - Enables vector database with default model (`all-MiniLM-L6-v2`)
+  - Enables plugins directory setup
+  - Generates authentication keys
+  - Skips S3 configuration (uses local storage)
+  - Non-interactive: no prompts, uses sensible defaults
+- **New embedding model option**: Added `multi-qa-MiniLM-L6-cos-v1` as second model choice
+  - Trained on 215M question-answer pairs for semantic search optimization
+  - Same dimensions (384) as default model for compatibility
+  - Replaces `all-mpnet-base-v2` (768 dim) in model selection
+- **Git-based version detection**: Build system now auto-detects version from git tags
+  - Uses most recent semver tag (`v*`) as effective version
+  - Falls back to project version only if no tags exist
+  - Command-line override (`-Dyams-version=X.Y.Z`) takes highest priority
+- **Commit hash in version output**: `yams --version` now shows short commit hash
+  - Format: `0.7.9 (commit: c16939f) built:2025-11-29T17:30:15Z`
+  - Helps identify exact build for bug reports and debugging
+- **Init command tests**: New test suite for init command model download functionality
+  - Tests for valid HuggingFace URLs, model dimensions, naming conventions
+  - CLI flag acceptance tests (`--auto`, `--non-interactive`, `--force`)
+- **Content-type-aware search profiles**: New `CorpusProfile` enum and auto-detection
+  - `CODE`: Boosts symbol/path search for source code repositories (60%+ code files)
+  - `PROSE`: Boosts FTS5/vector search for text-heavy corpora (60%+ docs)
+  - `DOCS`: Balanced weights for mixed code/documentation
+  - `MIXED`: Default balanced weights for heterogeneous corpora
+  - `SearchEngineConfig::detectProfile()`: Auto-detects from file extension distribution
+  - `SearchEngineConfig::forProfile()`: Returns preset weights for a profile
 
 ### Changed
-- **Build System**: Removed `enable-tui` build option from meson_options.txt
-- **Developer Experience**: ThreadSanitizer now enabled by default in Debug builds via setup.sh
+- **Embedding model list**: Both recommended models now have 384 dimensions
+  - `all-MiniLM-L6-v2`: Lightweight general-purpose semantic search (default)
+  - `multi-qa-MiniLM-L6-cos-v1`: Optimized for question-answer semantic search
+- **ServiceManager Decomposition (PBI-088)**: Extracted focused components from monolithic ServiceManager
+  - New `ConfigResolver`: Static config/env resolution utilities (248 lines)
+  - New `VectorSystemManager`: Vector DB and index lifecycle (397 lines)
+  - New `DatabaseManager`: Metadata DB, connection pool, KG store lifecycle (254 lines)
+  - New `PluginManager`: Plugin host, loader, and interface adoption (515 lines)
+  - ServiceManager accessors now delegate to extracted managers
+- **Configurable Vector DB Capacity**: Vector index `max_elements` now configurable
+  - Environment variable: `YAMS_VECTOR_MAX_ELEMENTS`
+  - Config file: `[vector_database] max_elements`
+  - Default: 100,000 (range: 1,000 - 10,000,000)
+- **FTS5 index hygiene (migration v18)**: Removed unused `content_type` column from FTS5 index
+  - `content_type` was indexed but never queried via FTS MATCH
+  - Content type filtering uses JOIN on `documents.mime_type` instead
+  - Reduces FTS5 index size and improves indexing performance
+  - Automatic migration rebuilds index on first database open
+
+### Fixed
+- **Model download mapping**: Added `multi-qa-MiniLM-L6-cos-v1` to HuggingFace repo mapping
+  - Ensures model download works for new model option
+- **Version display**: Fixed `yams --version` showing fallback values instead of actual version
+  - Added generated include directory to CLI build to resolve `version_generated.h`
+  - Version now correctly shows git tag and commit hash
+
+### CLI Improvements
+- **PowerShell completion**: Added `yams completion powershell` for PowerShell auto-complete
+  - Uses `Register-ArgumentCompleter` with dynamic subcommand and option completion
+  - Supports bash, zsh, fish, and PowerShell shells
+- **Consistent `--json` output**: Extended JSON output support across commands
+  - `yams doctor --json`: Machine-readable health check results
+  - `yams delete --json`: Deletion results as JSON array
+  - `yams grep --json`: Match results with file, line, matchType, confidence
+- **Actionable error hints**: Centralized error hint system (`error_hints.h`)
+  - Pattern-based hints for FTS5, embedding, daemon, database errors
+  - Error code fallback hints for generic error types
+  - Format: `💡 Hint:` with suggested `📋 Try:` command
+- **Daemon error messages**: Enhanced daemon start/stop failure messages
+  - Clear hints for common issues (daemon already running, permission denied)
+  - Suggested recovery commands (`yams daemon stop --force`, `pkill yams-daemon`)
+
+### Fixed
+- **Plugin interface parsing**: Fixed `parseInterfacesFromManifest` to handle object-format interfaces
+  - Plugins using `[{"id": "model_provider_v1", "version": 2}]` format now parse correctly
+  - Previously only simple string arrays `["interface_name"]` were supported
+  - Affects ONNX plugin and other plugins with versioned interface declarations
+  - Location: `src/daemon/resource/abi_plugin_loader.cpp`
+
+- **Plugin host sharing**: Fixed model provider adoption failure 
+  - `ServiceManager::autoloadPluginsNow()` loaded plugins into `abiHost_`
+  - `PluginManager::adoptModelProvider()` was querying its own empty `pluginHost_`
+  - Added `sharedPluginHost` option to `PluginManager::Dependencies` for host sharing
+  - `PluginManager` now uses shared host from ServiceManager when provided
+  - Location: `include/yams/daemon/components/PluginManager.h`, `src/daemon/components/PluginManager.cpp`
+
+- **VectorIndexManager initialization**: Fixed search engine build failure "VectorIndexManager not provided"
+  - `VectorSystemManager::initializeOnce()` only initialized vector database, not index manager
+  - Added call to `initializeIndexManager()` after successful database init
+  - Added call to `loadPersistedIndex()` to restore saved index on startup
+  - Location: `src/daemon/components/ServiceManager.cpp`

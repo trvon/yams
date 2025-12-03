@@ -6,6 +6,7 @@
 #include <boost/asio/use_future.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/error_hints.h>
 #include <yams/cli/progress_indicator.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
@@ -606,7 +607,10 @@ private:
             auto result = daemon::DaemonClient::startDaemon(config);
             if (!result) {
                 spdlog::error("Failed to start daemon: {}", result.error().message);
-                std::cerr << "[FAIL] Failed to start daemon: " << result.error().message << "\n";
+                std::cerr << formatErrorWithHint(result.error().code, 
+                    "Failed to start daemon: " + result.error().message) << "\n";
+                std::cerr << "  💡 Hint: Check if another daemon is already running\n";
+                std::cerr << "  📋 Try: yams daemon stop && yams daemon start\n";
                 std::exit(1);
             }
 
@@ -749,7 +753,9 @@ private:
         } else {
             spdlog::error("Failed to stop YAMS daemon");
             std::cerr << "[FAIL] Failed to stop YAMS daemon\n";
-            std::cerr << "[INFO] You may need to manually kill the process: pkill yams-daemon\n";
+            std::cerr << "  💡 Hint: The daemon may be unresponsive or owned by another user\n";
+            std::cerr << "  📋 Try: yams daemon stop --force\n";
+            std::cerr << "  📋 Or manually: pkill yams-daemon\n";
             std::exit(1);
         }
     }

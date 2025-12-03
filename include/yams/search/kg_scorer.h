@@ -74,7 +74,7 @@ struct KGScoringConfig {
  * - Return scores normalized to [0, 1]
  * - Optionally provide explanations for debugging/traceability
  *
- * Typical usage within HybridSearchEngine:
+ * Typical usage within SearchEngine:
  * 1) Collect candidate ids from vector/keyword engines.
  * 2) Call score(query_text, candidate_ids).
  * 3) Blend returned KGScore into the final hybrid score using configured weights.

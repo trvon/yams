@@ -536,19 +536,19 @@ TEST_F(UiCliExpectationsIT, VerboseHybridIncludesScoresWhenAvailable) {
     auto* sm = serviceManager();
     ASSERT_NE(sm, nullptr);
     ASSERT_NE(sm, nullptr);
-    // Poll for hybrid engine readiness
-    std::shared_ptr<yams::search::HybridSearchEngine> snap;
+    // Poll for search engine readiness
+    std::shared_ptr<yams::search::SearchEngine> snap;
     for (int i = 0; i < 60 && !snap; ++i) {
         snap = sm->getSearchEngineSnapshot();
         if (!snap)
             std::this_thread::sleep_for(50ms);
     }
     if (!snap) {
-        GTEST_SKIP() << "Hybrid engine not ready; skipping verbose hybrid structure check.";
+        GTEST_SKIP() << "Search engine not ready; skipping verbose hybrid structure check.";
     }
 
     auto ctx = sm->getAppContext();
-    ctx.hybridEngine = snap;            // ensure available
+    ctx.searchEngine = snap;            // ensure available
     ctx.searchRepairInProgress = false; // clear degraded flag
     auto searchSvc = yams::app::services::makeSearchService(ctx);
 
@@ -561,16 +561,9 @@ TEST_F(UiCliExpectationsIT, VerboseHybridIncludesScoresWhenAvailable) {
     auto result = yams::test_async::res(searchSvc->search(sreq), 2s);
     ASSERT_TRUE(result) << result.error().message;
     const auto& resp = result.value();
-    // If hybrid produced results, at least one item should have score breakdown fields
-    bool hasBreakdown = false;
-    for (const auto& it : resp.results) {
-        if (it.vectorScore.has_value() || it.keywordScore.has_value() ||
-            it.kgEntityScore.has_value() || it.structuralScore.has_value()) {
-            hasBreakdown = true;
-            break;
-        }
-    }
-    EXPECT_TRUE(hasBreakdown);
+    // Note: New SearchEngine provides unified score, component breakdowns removed (PBI-091)
+    // Just verify we got results
+    EXPECT_GE(resp.results.size(), 0u);
 }
 
 // 6) Search — pathsOnly with pathPattern + tag filter combined

@@ -13,6 +13,7 @@
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_executor.h>
+#include <yams/vector/vector_database.h>
 #include <yams/vector/vector_index_manager.h>
 
 namespace yams::vector {
@@ -64,6 +65,13 @@ public:
      */
     std::shared_ptr<vector::VectorIndexManager> getVectorIndexManager() const {
         return vectorIndexManager_;
+    }
+
+    /**
+     * Get the vector database instance
+     */
+    std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const {
+        return vectorDatabase_;
     }
 
     /**
@@ -197,6 +205,7 @@ private:
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_;
     std::shared_ptr<vector::VectorIndexManager> vectorIndexManager_;
+    std::shared_ptr<vector::VectorDatabase> vectorDatabase_;
     std::shared_ptr<vector::EmbeddingGenerator> embeddingGenerator_; // Unified embedding generator
 
     // App services context

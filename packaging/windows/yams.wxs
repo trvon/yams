@@ -36,6 +36,17 @@
           <Component Id="YamsExe" Guid="6BCEBA1E-C995-46DA-8FF5-0BC6A53D74EA">
             <File Id="yams_exe" Source="$(var.StageDir)\bin\yams.exe" KeyPath="yes" />
           </Component>
+          <!-- ONNX Runtime DLLs - required for embeddings -->
+          <Component Id="OnnxRuntimeDll" Guid="A7E3B2C1-5D4F-4E6A-8B9C-1D2E3F4A5B6C">
+            <File Id="onnxruntime_dll" Source="$(var.StageDir)\bin\onnxruntime.dll" KeyPath="yes" />
+          </Component>
+          <Component Id="OnnxRuntimeProvidersSharedDll" Guid="B8F4C3D2-6E5A-4F7B-9C0D-2E3F4A5B6C7D">
+            <File Id="onnxruntime_providers_shared_dll" Source="$(var.StageDir)\bin\onnxruntime_providers_shared.dll" KeyPath="yes" />
+          </Component>
+          <!-- TBB Runtime DLLs - required for parallel processing -->
+          <Component Id="TbbDll" Guid="C9A5D4E3-7F6B-4A8C-0D1E-3F4A5B6C7D8E">
+            <File Id="tbb12_dll" Source="$(var.StageDir)\bin\tbb12.dll" KeyPath="yes" />
+          </Component>
           <Component Id="PathEnvComponent" Guid="D817B79F-C5A1-4A6E-9AE0-8430AC0DEF48">
             <Environment Id="PathEnv" Name="PATH" Value="[BinDir]" Permanent="no" Part="last" Action="set" System="yes" />
             <RegistryValue Root="HKLM" Key="Software\YAMS" Name="PathSet" Type="integer" Value="1" KeyPath="yes" />
@@ -44,9 +55,12 @@
       </Directory>
     </StandardDirectory>
 
-    <!-- Main feature: YAMS binary -->
+    <!-- Main feature: YAMS binary and runtime dependencies -->
     <Feature Id="MainFeature" Title="YAMS" Level="1" ConfigurableDirectory="INSTALLFOLDER">
       <ComponentRef Id="YamsExe" />
+      <ComponentRef Id="OnnxRuntimeDll" />
+      <ComponentRef Id="OnnxRuntimeProvidersSharedDll" />
+      <ComponentRef Id="TbbDll" />
       <ComponentRef Id="PathEnvComponent" />
     </Feature>
 

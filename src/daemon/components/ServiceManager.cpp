@@ -57,6 +57,11 @@
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PoolManager.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/CheckpointManager.h>
+#include <yams/daemon/components/ConfigResolver.h>
+#include <yams/daemon/components/DatabaseManager.h>
+#include <yams/daemon/components/PluginManager.h>
+#include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/ipc/retrieval_session.h>
@@ -77,141 +82,34 @@
 #include <yams/vector/vector_database.h>
 
 namespace {
-// Minimal helpers - prefer using components directly
-std::optional<size_t> read_db_embedding_dim(const std::filesystem::path& dbPath) {
-    try {
-        namespace fs = std::filesystem;
-        if (dbPath.empty() || !fs::exists(dbPath))
-            return std::nullopt;
-        yams::vector::SqliteVecBackend backend;
-        auto r = backend.initialize(dbPath.string());
-        if (!r)
-            return std::nullopt;
-        auto dimOpt = backend.getStoredEmbeddingDimension();
-        backend.close();
-        if (dimOpt && *dimOpt > 0)
-            return dimOpt;
-    } catch (const std::exception& e) {
-        spdlog::debug("Failed to read embedding dimension from {}: {}", dbPath.string(), e.what());
-    } catch (...) {
-        spdlog::debug("Failed to read embedding dimension from {}: unknown error", dbPath.string());
-    }
-    return std::nullopt;
+// Convenience aliases for ConfigResolver methods (reduces verbosity in this file)
+inline bool env_truthy(const char* value) {
+    return yams::daemon::ConfigResolver::envTruthy(value);
 }
 
-void write_vector_sentinel(const std::filesystem::path& dataDir, size_t dim,
-                           const std::string& /*tableName*/, int schemaVersion) {
-    try {
-        namespace fs = std::filesystem;
-        fs::create_directories(dataDir);
-        nlohmann::json j;
-        j["embedding_dim"] = dim;
-        j["schema_version"] = schemaVersion;
-        j["written_at"] = std::time(nullptr);
-        std::ofstream out(dataDir / "vectors_sentinel.json");
-        if (out)
-            out << j.dump(2);
-    } catch (const std::exception& e) {
-        spdlog::debug("Failed to write vector sentinel: {}", e.what());
-    } catch (...) {
-        spdlog::debug("Failed to write vector sentinel: unknown error");
-    }
+inline std::filesystem::path resolveDefaultConfigPath() {
+    return yams::daemon::ConfigResolver::resolveDefaultConfigPath();
 }
 
-bool env_truthy(const char* value) {
-    if (!value || !*value) {
-        return false;
-    }
-    std::string v(value);
-    std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return std::tolower(c); });
-    return !(v == "0" || v == "false" || v == "off" || v == "no");
+inline std::map<std::string, std::string> parseSimpleTomlFlat(const std::filesystem::path& path) {
+    return yams::daemon::ConfigResolver::parseSimpleTomlFlat(path);
 }
 
-std::optional<size_t> read_vector_sentinel_dim(const std::filesystem::path& dataDir) {
-    try {
-        namespace fs = std::filesystem;
-        auto p = dataDir / "vectors_sentinel.json";
-        if (!fs::exists(p))
-            return std::nullopt;
-        std::ifstream in(p);
-        if (!in)
-            return std::nullopt;
-        nlohmann::json j;
-        in >> j;
-        if (j.contains("embedding_dim"))
-            return j["embedding_dim"].get<size_t>();
-    } catch (const std::exception& e) {
-        spdlog::debug("Failed to read vector sentinel: {}", e.what());
-    } catch (...) {
-        spdlog::debug("Failed to read vector sentinel: unknown error");
-    }
-    return std::nullopt;
+inline std::optional<size_t> read_db_embedding_dim(const std::filesystem::path& dbPath) {
+    return yams::daemon::ConfigResolver::readDbEmbeddingDim(dbPath);
 }
 
-std::filesystem::path resolveDefaultConfigPath() {
-    if (const char* explicitPath = std::getenv("YAMS_CONFIG_PATH")) {
-        std::filesystem::path p{explicitPath};
-        if (std::filesystem::exists(p))
-            return p;
-    }
-    if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
-        std::filesystem::path p = std::filesystem::path(xdg) / "yams" / "config.toml";
-        if (std::filesystem::exists(p))
-            return p;
-    }
-    if (const char* home = std::getenv("HOME")) {
-        std::filesystem::path p = std::filesystem::path(home) / ".config" / "yams" / "config.toml";
-        if (std::filesystem::exists(p))
-            return p;
-    }
-    return {};
+inline std::optional<size_t> read_vector_sentinel_dim(const std::filesystem::path& dataDir) {
+    return yams::daemon::ConfigResolver::readVectorSentinelDim(dataDir);
 }
 
-std::map<std::string, std::string> parseSimpleTomlFlat(const std::filesystem::path& path) {
-    std::map<std::string, std::string> config;
-    std::ifstream file(path);
-    if (!file)
-        return config;
+inline void write_vector_sentinel(const std::filesystem::path& dataDir, size_t dim,
+                                  const std::string& tableName, int schemaVersion) {
+    yams::daemon::ConfigResolver::writeVectorSentinel(dataDir, dim, tableName, schemaVersion);
+}
 
-    std::string line;
-    std::string currentSection;
-    auto trim = [](std::string s) {
-        auto issp = [](unsigned char c) { return std::isspace(c) != 0; };
-        while (!s.empty() && issp(static_cast<unsigned char>(s.front())))
-            s.erase(s.begin());
-        while (!s.empty() && issp(static_cast<unsigned char>(s.back())))
-            s.pop_back();
-        return s;
-    };
-
-    while (std::getline(file, line)) {
-        auto comment = line.find('#');
-        if (comment != std::string::npos)
-            line = line.substr(0, comment);
-        line = trim(line);
-        if (line.empty())
-            continue;
-
-        if (line.front() == '[' && line.back() == ']') {
-            currentSection = line.substr(1, line.size() - 2);
-            continue;
-        }
-
-        auto eq = line.find('=');
-        if (eq == std::string::npos)
-            continue;
-        std::string key = trim(line.substr(0, eq));
-        std::string value = trim(line.substr(eq + 1));
-        if (!value.empty() && value.front() == '"' && value.back() == '"') {
-            value = value.substr(1, value.size() - 2);
-        }
-        if (!currentSection.empty()) {
-            config[currentSection + "." + key] = value;
-        } else {
-            config[key] = value;
-        }
-    }
-    return config;
+inline int read_timeout_ms(const char* envName, int defaultMs, int minMs) {
+    return yams::daemon::ConfigResolver::readTimeoutMs(envName, defaultMs, minMs);
 }
 
 // Template-based plugin adoption helper to reduce code duplication
@@ -560,6 +458,61 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                          e.what());
         } catch (...) {
             spdlog::warn("ServiceManager: unknown error initializing IngestService scaffold");
+        }
+
+        // PBI-088: Create extracted managers (wiring in progress)
+        try {
+            // Create PluginManager
+            PluginManager::Dependencies pluginDeps;
+            pluginDeps.config = &config_;
+            pluginDeps.state = &state_;
+            pluginDeps.lifecycleFsm = &lifecycleFsm_;
+            pluginDeps.dataDir = config_.dataDir;
+            pluginDeps.resolvePreferredModel = [this]() { return this->resolvePreferredModel(); };
+            pluginDeps.sharedPluginHost = abiHost_.get();
+            pluginManager_ = std::make_unique<PluginManager>(pluginDeps);
+            if (auto initResult = pluginManager_->initialize(); !initResult) {
+                spdlog::warn("[ServiceManager] PluginManager init failed: {}",
+                             initResult.error().message);
+            }
+            spdlog::debug("[ServiceManager] PluginManager created");
+
+            // Create VectorSystemManager
+            VectorSystemManager::Dependencies vectorDeps;
+            vectorDeps.state = &state_;
+            vectorDeps.serviceFsm = &serviceFsm_;
+            vectorDeps.resolvePreferredModel = [this]() { return this->resolvePreferredModel(); };
+            vectorDeps.getEmbeddingDimension = [this]() { return this->getEmbeddingDimension(); };
+            vectorSystemManager_ = std::make_unique<VectorSystemManager>(vectorDeps);
+            spdlog::debug("[ServiceManager] VectorSystemManager created");
+
+            // Create DatabaseManager
+            DatabaseManager::Dependencies dbDeps;
+            dbDeps.state = &state_;
+            databaseManager_ = std::make_unique<DatabaseManager>(dbDeps);
+            spdlog::debug("[ServiceManager] DatabaseManager created");
+
+            // Create CheckpointManager
+            CheckpointManager::Config checkpointConfig;
+            checkpointConfig.checkpoint_interval =
+                std::chrono::seconds(TuneAdvisor::checkpointIntervalSeconds());
+            checkpointConfig.vector_index_insert_threshold =
+                TuneAdvisor::checkpointInsertThreshold();
+            checkpointConfig.enable_hotzone_persistence =
+                TuneAdvisor::enableHotzoneCheckpoint();
+            checkpointConfig.data_dir = config_.dataDir;
+
+            CheckpointManager::Dependencies checkpointDeps;
+            checkpointDeps.vectorSystemManager = vectorSystemManager_.get();
+            checkpointDeps.hotzoneManager = nullptr;
+            checkpointDeps.executor = workCoordinator_->getExecutor();
+            checkpointDeps.stopRequested = std::make_shared<std::atomic<bool>>(false);
+
+            checkpointManager_ = std::make_unique<CheckpointManager>(
+                std::move(checkpointConfig), std::move(checkpointDeps));
+            spdlog::debug("[ServiceManager] CheckpointManager created");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Failed to create extracted managers: {}", e.what());
         }
     } catch (const std::exception& e) {
         spdlog::warn("Exception during ServiceManager constructor setup: {}", e.what());
@@ -1041,18 +994,49 @@ void ServiceManager::shutdown() {
     malloc_zone_pressure_relief(nullptr, 0);
 #endif
 
-    spdlog::info("[ServiceManager] Phase 9: Releasing plugin infrastructure");
+    // PBI-088: Shutdown extracted managers BEFORE plugin infrastructure
+    // (PluginManager holds raw pointer to abiHost_ via sharedPluginHost_)
+    spdlog::info("[ServiceManager] Phase 9: Releasing extracted managers");
+    try {
+        if (pluginManager_) {
+            pluginManager_->shutdown();
+            pluginManager_.reset();
+            spdlog::info("[ServiceManager] Phase 9.1: PluginManager reset");
+        }
+    } catch (...) {
+        spdlog::warn("[ServiceManager] Phase 9.1: Exception resetting PluginManager");
+    }
+    try {
+        if (vectorSystemManager_) {
+            vectorSystemManager_->shutdown();
+            vectorSystemManager_.reset();
+            spdlog::info("[ServiceManager] Phase 9.2: VectorSystemManager reset");
+        }
+    } catch (...) {
+        spdlog::warn("[ServiceManager] Phase 9.2: Exception resetting VectorSystemManager");
+    }
+    try {
+        if (databaseManager_) {
+            databaseManager_->shutdown();
+            databaseManager_.reset();
+            spdlog::info("[ServiceManager] Phase 9.3: DatabaseManager reset");
+        }
+    } catch (...) {
+        spdlog::warn("[ServiceManager] Phase 9.3: Exception resetting DatabaseManager");
+    }
+
+    spdlog::info("[ServiceManager] Phase 10: Releasing plugin infrastructure");
     try {
         abiPluginLoader_.reset();
-        spdlog::info("[ServiceManager] Phase 9.1: ABI plugin loader reset");
+        spdlog::info("[ServiceManager] Phase 10.1: ABI plugin loader reset");
     } catch (...) {
-        spdlog::warn("[ServiceManager] Phase 9.1: Exception resetting ABI plugin loader");
+        spdlog::warn("[ServiceManager] Phase 10.1: Exception resetting ABI plugin loader");
     }
     try {
         abiHost_.reset();
-        spdlog::info("[ServiceManager] Phase 9.2: ABI host reset");
+        spdlog::info("[ServiceManager] Phase 10.2: ABI host reset");
     } catch (...) {
-        spdlog::warn("[ServiceManager] Phase 9.2: Exception resetting ABI host");
+        spdlog::warn("[ServiceManager] Phase 10.2: Exception resetting ABI host");
     }
 
     auto shutdownDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1068,426 +1052,29 @@ void ServiceManager::shutdown() {
 
 // Single-attempt vector database initialization. Safe to call multiple times; only
 // the first invocation performs work. Subsequent calls are cheap no-ops.
+// NOTE: Implementation delegated to VectorSystemManager (PBI-088 decomposition)
 yams::Result<bool>
 ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDir) {
-    // In-process guard
-    // Guard (first-wins); may be reset if we intentionally defer
-    if (vectorDbInitAttempted_.exchange(true, std::memory_order_acq_rel)) {
-        spdlog::debug("[VectorInit] skipped (already attempted in this process)");
-        try {
-            state_.readiness.vectorDbInitAttempted = true;
-        } catch (...) {
-            // Intentionally ignored - best-effort state update
-        }
-        return Result<bool>(false);
-    }
-
-    // Honor global disable flags
-    auto is_on = [](const char* v) {
-        if (!v)
-            return false;
-        std::string s(v);
-        std::transform(s.begin(), s.end(), s.begin(), ::tolower);
-        return s == "1" || s == "true" || s == "yes" || s == "on";
-    };
-    if (is_on(std::getenv("YAMS_DISABLE_VECTORS")) ||
-        is_on(std::getenv("YAMS_DISABLE_VECTOR_DB"))) {
-        spdlog::warn("[VectorInit] disabled via env flag");
-        return Result<bool>(false);
-    }
-
-    if (vectorDatabase_) {
-        spdlog::debug("[VectorInit] vectorDatabase_ already present; nothing to do");
-        return Result<bool>(false);
-    }
-
-    namespace fs = std::filesystem;
-    vector::VectorDatabaseConfig cfg;
-    cfg.database_path = (dataDir / "vectors.db").string();
-    bool exists = fs::exists(cfg.database_path);
-    // Always allow table creation (DB file may exist without virtual tables)
-    cfg.create_if_missing = true;
-
-    // Resolve embedding dimension with precedence:
-    // 1. Existing DB DDL (if present)
-    // 2. Config file ~/.config/yams/config.toml
-    // 3. Env YAMS_EMBED_DIM
-    // 4. Embedding generator (if already available)
-    // 5. Provider preferred model (no hardcoded fallback)
-    std::optional<size_t> dim;
-    if (exists) {
-        try {
-            auto ddlDim = read_db_embedding_dim(cfg.database_path);
-            if (ddlDim && *ddlDim > 0)
-                dim = *ddlDim;
-            try {
-                spdlog::info("[VectorInit] probe: ddl dim={}", ddlDim ? *ddlDim : 0);
-            } catch (const std::exception& e) {
-                spdlog::debug("Failed to log DDL dimension: {}", e.what());
-            } catch (...) {
-                spdlog::debug("Failed to log DDL dimension: unknown error");
+    if (vectorSystemManager_) {
+        auto result = vectorSystemManager_->initializeOnce(dataDir);
+        if (result && result.value()) {
+            // Database initialized successfully - now init the index manager
+            size_t dim = vectorSystemManager_->getEmbeddingDimension();
+            if (dim > 0) {
+                vectorSystemManager_->initializeIndexManager(dataDir, dim);
+                // Try to load persisted index
+                auto indexPath = dataDir / "vector_index.bin";
+                vectorSystemManager_->loadPersistedIndex(indexPath);
             }
-        } catch (const std::exception& e) {
-            spdlog::debug("Failed to read DDL dimension: {}", e.what());
-        } catch (...) {
-            spdlog::debug("Failed to read DDL dimension: unknown error");
+            // Sync local members from VectorSystemManager for backward compatibility
+            vectorDatabase_ = vectorSystemManager_->getVectorDatabase();
+            vectorIndexManager_ = vectorSystemManager_->getVectorIndexManager();
         }
+        return result;
     }
-    // Config file (only if no provider available)
-    if (!dim && (!modelProvider_ || !modelProvider_->isAvailable())) {
-        try {
-            fs::path cfgHome;
-            if (const char* xdg = std::getenv("XDG_CONFIG_HOME"))
-                cfgHome = fs::path(xdg);
-            else if (const char* home = std::getenv("HOME"))
-                cfgHome = fs::path(home) / ".config";
-            fs::path cpath = cfgHome / "yams" / "config.toml";
-            if (!cpath.empty() && fs::exists(cpath)) {
-                std::ifstream in(cpath);
-                std::string line;
-                auto trim = [](std::string& t) {
-                    if (t.empty())
-                        return;
-                    t.erase(0, t.find_first_not_of(" \t"));
-                    auto p = t.find_last_not_of(" \t");
-                    if (p != std::string::npos)
-                        t.erase(p + 1);
-                };
-
-                while (std::getline(in, line)) {
-                    std::string l = line;
-                    trim(l);
-                    if (l.empty() || l[0] == '#')
-                        continue;
-                    if (l.find("embeddings.embedding_dim") != std::string::npos) {
-                        auto eq = l.find('=');
-                        if (eq != std::string::npos) {
-                            std::string v = l.substr(eq + 1);
-                            trim(v);
-                            if (!v.empty() && v.front() == '"' && v.back() == '"')
-                                v = v.substr(1, v.size() - 2);
-                            try {
-                                dim = static_cast<size_t>(std::stoul(v));
-                                spdlog::info("[VectorInit] probe: config dim={}", *dim);
-
-                            } catch (const std::exception& e) {
-                                spdlog::debug("Failed to parse config embedding_dim: {}", e.what());
-                            } catch (...) {
-                                spdlog::debug(
-                                    "Failed to parse config embedding_dim: unknown error");
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-        } catch (const std::exception& e) {
-            spdlog::debug("Failed to read config file for embedding dimension: {}", e.what());
-        } catch (...) {
-            spdlog::debug("Failed to read config file for embedding dimension: unknown error");
-        }
-    }
-    // Env (only if no provider available)
-    if (!dim && (!modelProvider_ || !modelProvider_->isAvailable())) {
-        try {
-            if (const char* envd = std::getenv("YAMS_EMBED_DIM"))
-                dim = static_cast<size_t>(std::stoul(envd));
-        } catch (...) {
-            spdlog::info("[VectorInit] probe: config/env dim={}", (dim ? *dim : 0));
-        }
-    }
-    // Ask provider preferred model first; optionally try a short load if dim remains 0
-    if (!dim) {
-        try {
-            std::string preferred = resolvePreferredModel();
-            if (!preferred.empty() && modelProvider_ && modelProvider_->isAvailable()) {
-                size_t prov = modelProvider_->getEmbeddingDim(preferred);
-                spdlog::info("[VectorInit] probe: provider preferred='{}' prov_dim={} (pre-load)",
-                             preferred, prov);
-                if (prov == 0) {
-                    // Attempt a bounded model load to obtain authoritative dim
-                    int load_ms = 0;
-                    if (const char* s = std::getenv("YAMS_PROVIDER_LOAD_DIM_TIMEOUT_MS")) {
-                        try {
-                            load_ms = std::max(0, std::stoi(s));
-                        } catch (const std::exception& e) {
-                            spdlog::debug("Failed to parse YAMS_PROVIDER_LOAD_DIM_TIMEOUT_MS: {}",
-                                          e.what());
-                        } catch (...) {
-                            spdlog::debug(
-                                "Failed to parse YAMS_PROVIDER_LOAD_DIM_TIMEOUT_MS: unknown error");
-                        }
-                    }
-                    if (load_ms > 0) {
-                        auto r = modelProvider_->loadModel(preferred);
-                        spdlog::info("[VectorInit] provider loadModel('{}') status={}", preferred,
-                                     r ? 0 : -1);
-                        prov = modelProvider_->getEmbeddingDim(preferred);
-                        spdlog::info(
-                            "[VectorInit] probe: provider preferred='{}' prov_dim={} (post-load)",
-                            preferred, prov);
-                    }
-                }
-                if (prov > 0) {
-                    dim = prov;
-                    spdlog::info("[VectorInit] using provider dim={} from '{}'", *dim, preferred);
-                } else {
-                    spdlog::info("[VectorInit] provider did not report dim for '{}' yet; will "
-                                 "fallback/defer",
-                                 preferred);
-                }
-            }
-        } catch (const std::exception& e) {
-            spdlog::debug("Failed to probe model provider dimension: {}", e.what());
-        } catch (...) {
-            spdlog::debug("Failed to probe model provider dimension: unknown error");
-        }
-    }
-    // Generator (only if no provider available)
-    if (!dim && (!modelProvider_ || !modelProvider_->isAvailable())) {
-        try {
-            spdlog::info("[VectorInit] probe: generator dim={}", (dim ? *dim : 0));
-
-            {
-                size_t g = getEmbeddingDimension();
-                if (g > 0)
-                    dim = g;
-            }
-        } catch (const std::exception& e) {
-            spdlog::debug("Failed to get embedding dimension from generator: {}", e.what());
-        } catch (...) {
-            spdlog::debug("Failed to get embedding dimension from generator: unknown error");
-        }
-    }
-    if (!dim) {
-        spdlog::info("[VectorInit] deferring initialization (provider dim unresolved)");
-        try {
-            state_.readiness.vectorDbInitAttempted = false;
-        } catch (...) {
-            // Intentionally ignored - best-effort state reset
-        }
-        try {
-            vectorDbInitAttempted_.store(false, std::memory_order_release);
-        } catch (...) {
-            // Intentionally ignored - best-effort atomic reset
-        }
-        return Result<bool>(false);
-    }
-
-    if (!dim) {
-        spdlog::warn("[VectorInit] embedding_dim unresolved (DB/config/env/provider). Vector DB "
-                     "will initialize without embeddings.");
-    }
-    cfg.embedding_dim = *dim;
-
-    // Log start with PID/TID
-    auto tid = std::this_thread::get_id();
-    spdlog::info("[VectorInit] start pid={} tid={} path={} exists={} create={} dim={}",
-                 static_cast<long long>(::getpid()), (void*)(&tid), cfg.database_path,
-                 exists ? "yes" : "no", cfg.create_if_missing ? "yes" : "no", cfg.embedding_dim);
-
-    // Cross-process advisory lock to avoid concurrent init/extension loads
-#ifdef _WIN32
-    HANDLE hLock = INVALID_HANDLE_VALUE;
-#else
-    int lock_fd = -1;
-#endif
-    std::filesystem::path lockPath =
-        std::filesystem::path(cfg.database_path).replace_extension(".lock");
-    try {
-        spdlog::info("[VectorInit] Opening lock file: {}", lockPath.string());
-#ifdef _WIN32
-        hLock = CreateFileA(lockPath.string().c_str(), GENERIC_READ | GENERIC_WRITE,
-                            FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
-                            FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hLock != INVALID_HANDLE_VALUE) {
-            spdlog::info("[VectorInit] Acquiring lock on: {}", lockPath.string());
-            OVERLAPPED ov = {0};
-            if (!LockFileEx(hLock, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0,
-                            &ov)) {
-                spdlog::info("[VectorInit] skipped (lock busy by another process)");
-                CloseHandle(hLock);
-                hLock = INVALID_HANDLE_VALUE;
-                return Result<bool>(false);
-            } else {
-                spdlog::info("[VectorInit] Lock acquired.");
-                try {
-                    std::string stamp = std::to_string(static_cast<long long>(::getpid())) + "\n";
-                    DWORD written;
-                    WriteFile(hLock, stamp.data(), static_cast<DWORD>(stamp.size()), &written,
-                              NULL);
-                } catch (...) {
-                }
-            }
-        } else {
-            spdlog::warn("[VectorInit] could not open lock file (continuing without lock)");
-        }
-#else
-        lock_fd = ::open(lockPath.c_str(), O_CREAT | O_RDWR, 0644);
-        if (lock_fd >= 0) {
-            spdlog::info("[VectorInit] Acquiring lock on: {}", lockPath.string());
-            struct flock fl{};
-            fl.l_type = F_WRLCK;
-            fl.l_whence = SEEK_SET;
-            fl.l_start = 0;
-            fl.l_len = 0;
-            if (fcntl(lock_fd, F_SETLK, &fl) == -1) {
-                spdlog::info("[VectorInit] skipped (lock busy by another process)");
-                ::close(lock_fd);
-                lock_fd = -1;
-                return Result<bool>(false);
-            } else {
-                spdlog::info("[VectorInit] Lock acquired.");
-                // Stamp pid for diagnostics
-                try {
-                    (void)ftruncate(lock_fd, 0);
-                    std::string stamp = std::to_string(static_cast<long long>(::getpid())) + "\n";
-                    (void)::write(lock_fd, stamp.data(), stamp.size());
-                    (void)lseek(lock_fd, 0, SEEK_SET);
-                } catch (...) {
-                    // Intentionally ignored - best-effort lock file update
-                }
-            }
-        } else {
-            spdlog::warn("[VectorInit] could not open lock file (continuing without lock)");
-        }
-#endif
-    } catch (...) {
-        spdlog::warn("[VectorInit] lock setup error (continuing without lock)");
-    }
-
-    const int maxAttempts = 3;
-    int attempt = 0;
-    for (; attempt < maxAttempts; ++attempt) {
-        if (attempt > 0) {
-            // Exponential-ish backoff: 100ms, 300ms
-            int backoff_ms = (attempt == 1 ? 100 : 300);
-            std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
-            spdlog::info("[VectorInit] retrying attempt {} of {}", attempt + 1, maxAttempts);
-        }
-        try {
-            auto vdb = std::make_shared<vector::VectorDatabase>(cfg);
-            try {
-                if (!vdb->initialize()) {
-                    auto err = vdb->getLastError();
-                    spdlog::warn("[VectorInit] initialization attempt {} failed: {}", attempt + 1,
-                                 err);
-                    goto init_failed_path;
-                }
-                spdlog::info("[VectorInit] vdb->initialize() succeeded.");
-                vectorDatabase_ = std::move(vdb);
-                goto init_success_path;
-            } catch (...) {
-                spdlog::warn("[VectorInit] initialization attempt {} raised exception",
-                             attempt + 1);
-                goto init_failed_path;
-            }
-
-        init_failed_path:
-            spdlog::info("[VectorInit] Calling vdb->initialize() attempt {}", attempt + 1);
-            if (!vdb->initialize()) {
-                auto err = vdb->getLastError();
-                spdlog::warn("[VectorInit] initialization attempt {} failed: {}", attempt + 1, err);
-                // Heuristic: retry on lock/busy/timeout errors; otherwise abort early
-                std::string el = err;
-                std::transform(el.begin(), el.end(), el.begin(), ::tolower);
-                bool transient = (el.find("busy") != std::string::npos) ||
-                                 (el.find("lock") != std::string::npos) ||
-                                 (el.find("locked") != std::string::npos) ||
-                                 (el.find("timeout") != std::string::npos);
-                if (!transient && attempt + 1 < maxAttempts) {
-                    // Non-transient: break out without further retries
-                    attempt = maxAttempts - 1; // signal final
-                }
-            } else {
-                spdlog::info("[VectorInit] vdb->initialize() succeeded.");
-                vectorDatabase_ = std::move(vdb);
-
-            init_success_path:
-                // Initialize component-owned metrics (sync with DB once at startup)
-                try {
-                    vectorDatabase_->initializeCounter();
-                } catch (const std::exception& e) {
-                    spdlog::debug("Failed to initialize vector database counter: {}", e.what());
-                } catch (...) {
-                    spdlog::debug("Failed to initialize vector database counter: unknown error");
-                }
-                spdlog::info("[VectorInit] end pid={} tid={} path={} dim={} attempts={}",
-                             static_cast<long long>(::getpid()), (void*)(&tid), cfg.database_path,
-                             cfg.embedding_dim, attempt + 1);
-                try {
-                    state_.readiness.vectorDbReady = true;
-                    state_.readiness.vectorDbDim = static_cast<uint32_t>(cfg.embedding_dim);
-                } catch (...) {
-                    // Intentionally ignored - best-effort state update
-                }
-                try {
-                    serviceFsm_.dispatch(VectorsInitializedEvent{cfg.embedding_dim});
-                } catch (const std::exception& e) {
-                    spdlog::debug("FSM dispatch failed for VectorsInitializedEvent: {}", e.what());
-                } catch (...) {
-                    spdlog::debug("FSM dispatch failed for VectorsInitializedEvent: unknown error");
-                }
-                // Sentinel write & quick health probes (best-effort)
-                try {
-                    write_vector_sentinel(dataDir, cfg.embedding_dim, "vec0", 1);
-                } catch (...) {
-                    // Intentionally ignored - best-effort sentinel write
-                }
-                try {
-                    std::size_t rows = vectorDatabase_->getVectorCount();
-                    spdlog::debug("[VectorInit] current row count={} (initial, cached)", rows);
-                } catch (...) {
-                    // Intentionally ignored - best-effort row count probe
-                }
-                try {
-                    auto sdim = read_vector_sentinel_dim(dataDir);
-                    if (sdim && *sdim != cfg.embedding_dim) {
-                        spdlog::warn("[VectorInit] sentinel dimension mismatch sentinel={} "
-                                     "actual={} — run 'yams doctor' if needed",
-                                     *sdim, cfg.embedding_dim);
-                    }
-                } catch (...) {
-                    // Intentionally ignored - best-effort sentinel dimension check
-                }
-                break; // success
-            }
-        } catch (const std::exception& e) {
-            spdlog::warn("[VectorInit] exception attempt {}: {}", attempt + 1, e.what());
-        } catch (...) {
-            spdlog::warn("[VectorInit] unknown exception attempt {}", attempt + 1);
-        }
-    }
-    // Release advisory lock if held
-#ifdef _WIN32
-    if (hLock != INVALID_HANDLE_VALUE) {
-        spdlog::info("[VectorInit] Releasing lock.");
-        OVERLAPPED ov = {0};
-        UnlockFileEx(hLock, 0, 1, 0, &ov);
-        CloseHandle(hLock);
-        hLock = INVALID_HANDLE_VALUE;
-        spdlog::info("[VectorInit] Lock released.");
-    }
-#else
-    if (lock_fd >= 0) {
-        spdlog::info("[VectorInit] Releasing lock.");
-        struct flock fl{};
-        fl.l_type = F_UNLCK;
-        fl.l_whence = SEEK_SET;
-        fl.l_start = 0;
-        fl.l_len = 0;
-        (void)fcntl(lock_fd, F_SETLK, &fl);
-        ::close(lock_fd);
-        lock_fd = -1;
-        spdlog::info("[VectorInit] Lock released.");
-    }
-#endif
-    if (!vectorDatabase_) {
-        spdlog::error("[VectorInit] all {} attempt(s) failed; continuing without vector DB",
-                      maxAttempts);
-        return Error{ErrorCode::DatabaseError, "vector database init failed after retries"};
-    }
-    return Result<bool>(true);
+    // Fallback if VectorSystemManager not available (shouldn't happen in normal flow)
+    spdlog::warn("[VectorInit] VectorSystemManager not initialized");
+    return Result<bool>(false);
 }
 
 // Best-effort: write bootstrap status JSON so CLI can show progress before IPC is ready
@@ -1606,18 +1193,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     spdlog::debug("ServiceManager(co): writeBootstrapStatusFile done");
     spdlog::default_logger()->flush();
 
-    auto read_timeout_ms = [](const char* env_name, int def_ms, int min_ms = 100) -> int {
-        int ms = def_ms;
-        if (const char* env = std::getenv(env_name)) {
-            try {
-                ms = std::stoi(env);
-            } catch (...) {
-            }
-        }
-        if (ms < min_ms)
-            ms = min_ms;
-        return ms;
-    };
+    // read_timeout_ms is now provided by ConfigResolver alias above
 
     using namespace std::chrono_literals;
     spdlog::debug("ServiceManager(co): about to co_await executor");
@@ -2189,7 +1765,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         }
     }
 
-    // Build HybridSearchEngine with timeout
+    // Build SearchEngine with timeout
     try {
         state_.readiness.searchProgress = 10;
         writeBootstrapStatusFile(config_, state_);
@@ -2235,9 +1811,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             } catch (...) {
             }
         }
-        auto graphService = graphComponent_ ? graphComponent_->getQueryService() : nullptr;
         auto buildResult = co_await searchEngineManager_.buildEngine(
-            metadataRepo_, vectorIndexManager_, embGen, graphService, "initial", build_timeout,
+            metadataRepo_, vectorDatabase_, vectorIndexManager_, embGen, "initial", build_timeout,
             getWorkerExecutor());
 
         if (buildResult.has_value()) {
@@ -2253,7 +1828,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             state_.readiness.vectorIndexReady = true;
             writeBootstrapStatusFile(config_, state_);
 
-            spdlog::info("HybridSearchEngine initialized and published to AppContext");
+            spdlog::info("SearchEngine initialized and published to AppContext");
             try {
                 serviceFsm_.dispatch(SearchEngineBuiltEvent{});
             } catch (...) {
@@ -2268,7 +1843,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             spdlog::warn("[SearchBuild] initial engine build not ready; continuing degraded");
         }
     } catch (const std::exception& e) {
-        spdlog::warn("Exception wiring HybridSearchEngine: {}", e.what());
+        spdlog::warn("Exception wiring SearchEngine: {}", e.what());
     }
     spdlog::info("[ServiceManager] Phase: Search Engine Built.");
     if (ingestService_) {
@@ -2519,269 +2094,37 @@ boost::asio::awaitable<bool> ServiceManager::co_migrateDatabase(int timeout_ms,
     }
 }
 
+// NOTE: Implementation delegated to PluginManager (PBI-088 decomposition)
 Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& preferredName) {
-    try {
-        if (abiHost_) {
-            auto loaded = abiHost_->listLoaded();
-
-            auto path_for = [&](const std::string& name) -> std::string {
-                for (const auto& d : loaded) {
-                    if (d.name == name)
-                        return d.path.string();
-                    try {
-                        auto stem = std::filesystem::path(d.path).stem().string();
-                        if (stem == name)
-                            return d.path.string();
-                    } catch (...) {
-                    }
-                }
-                return std::string{};
-            };
-
-            auto try_adopt = [&](const std::string& pluginName) -> bool {
-                auto ifaceRes = abiHost_->getInterface(pluginName, "model_provider_v1", 2);
-                if (!ifaceRes) {
-                    spdlog::warn("Model provider iface not found for plugin '{}' (path='{}') : {}",
-                                 pluginName, path_for(pluginName), ifaceRes.error().message);
-                    try {
-                        embeddingFsm_.dispatch(
-                            ProviderDegradedEvent{std::string("iface not found: ") + pluginName});
-                    } catch (...) {
-                    }
-                    return false;
-                }
-                auto* table = reinterpret_cast<yams_model_provider_v1*>(ifaceRes.value());
-                if (!table) {
-                    spdlog::debug("Null model provider table for plugin '{}' (path='{}')",
-                                  pluginName, path_for(pluginName));
-                    return false;
-                }
-                if (table->abi_version != YAMS_IFACE_MODEL_PROVIDER_V1_VERSION) {
-                    spdlog::debug(
-                        "ABI mismatch for '{}' (path='{}'): got v{}, expected v{} — skipping",
-                        pluginName, path_for(pluginName), table->abi_version,
-                        (int)YAMS_IFACE_MODEL_PROVIDER_V1_VERSION);
-                    try {
-                        embeddingFsm_.dispatch(
-                            ProviderDegradedEvent{std::string("abi mismatch: ") + pluginName});
-                    } catch (...) {
-                    }
-                    return false;
-                }
-                modelProvider_ = std::make_shared<AbiModelProviderAdapter>(table);
-                state_.readiness.modelProviderReady = (modelProvider_ != nullptr);
-                spdlog::info("Adopted model provider from plugin: {} (path='{}', abi={})",
-                             pluginName, path_for(pluginName), (int)table->abi_version);
-                adoptedProviderPluginName_ = pluginName;
-                clearModelProviderError();
-                try {
-                    auto count = static_cast<std::uint32_t>(modelProvider_->getLoadedModelCount());
-                    setCachedModelProviderModelCount(count);
-                } catch (...) {
-                    setCachedModelProviderModelCount(0);
-                }
-                refreshPluginStatusSnapshot();
-                try {
-                    embeddingFsm_.dispatch(ProviderAdoptedEvent{pluginName});
-                } catch (...) {
-                }
-
-                try {
-                    if (modelProvider_ && modelProvider_->isAvailable()) {
-                        std::string modelName = resolvePreferredModel();
-                        size_t dimension = modelProvider_->getEmbeddingDim(modelName);
-                        spdlog::info("[Provider] Model provider ready: model='{}', dim={}",
-                                     modelName, dimension);
-                        embeddingFsm_.dispatch(ModelLoadedEvent{modelName, dimension});
-                        lifecycleFsm_.setSubsystemDegraded("embeddings", false);
-                    } else {
-                        spdlog::warn("[Provider] Model provider not available after adoption");
-                    }
-                } catch (const std::exception& e) {
-                    spdlog::warn("[Provider] Failed to check provider availability: {}", e.what());
-                }
-
-                try {
-                    namespace fs = std::filesystem;
-                    fs::path cfgPath;
-                    if (const char* xdg = std::getenv("XDG_CONFIG_HOME"))
-                        cfgPath = fs::path(xdg) / "yams" / "config.toml";
-                    else if (const char* home = std::getenv("HOME"))
-                        cfgPath = fs::path(home) / ".config" / "yams" / "config.toml";
-                    if (!cfgPath.empty()) {
-                        std::string content;
-                        if (fs::exists(cfgPath)) {
-                            std::ifstream in(cfgPath);
-                            std::ostringstream ss;
-                            ss << in.rdbuf();
-                            content = ss.str();
-                        }
-                        auto hasKey =
-                            content.find("embeddings.preferred_model") != std::string::npos ||
-                            content.find("[embeddings]") != std::string::npos;
-                        auto nomicDefault =
-                            content.find("nomic-embed-text-v1.5") != std::string::npos;
-                        // Only write when not set or set to known non-ONNX default
-                        if (!hasKey || nomicDefault) {
-                            spdlog::info("Selecting ONNX preferred model 'all-MiniLM-L6-v2' (auto) "
-                                         "since user preference not set");
-                            std::map<std::string, std::map<std::string, std::string>> sections;
-                            // Minimal TOML writer: parse existing into sections map
-                            {
-                                std::istringstream iss(content);
-                                std::string line;
-                                std::string section;
-                                auto trim = [](std::string& s) {
-                                    if (s.empty())
-                                        return;
-                                    s.erase(0, s.find_first_not_of(" \t"));
-                                    auto p = s.find_last_not_of(" \t");
-                                    if (p != std::string::npos)
-                                        s.erase(p + 1);
-                                };
-                                while (std::getline(iss, line)) {
-                                    std::string l = line;
-                                    trim(l);
-                                    if (l.empty() || l[0] == '#')
-                                        continue;
-                                    if (!l.empty() && l.front() == '[') {
-                                        auto end = l.find(']');
-                                        if (end != std::string::npos)
-                                            section = l.substr(1, end - 1);
-                                        else
-                                            section.clear();
-                                        continue;
-                                    }
-                                    auto eq = l.find('=');
-                                    if (eq == std::string::npos)
-                                        continue;
-                                    std::string key = l.substr(0, eq);
-                                    std::string val = l.substr(eq + 1);
-                                    trim(key);
-                                    trim(val);
-                                    if (!val.empty() && val.front() == '"' && val.back() == '"')
-                                        val = val.substr(1, val.size() - 2);
-                                    sections[section][key] = val;
-                                }
-                            }
-                            sections["embeddings"]["preferred_model"] = "all-MiniLM-L6-v2";
-                            fs::create_directories(cfgPath.parent_path());
-                            std::ofstream out(cfgPath);
-                            if (out) {
-                                for (const auto& [sec, kv] : sections) {
-                                    if (!sec.empty())
-                                        out << "[" << sec << "]\n";
-                                    for (const auto& [k, v] : kv)
-                                        out << k << " = \"" << v << "\"\n";
-                                    out << "\n";
-                                }
-                            }
-                        }
-                    }
-                } catch (...) {
-                    // non-fatal
-                }
-                return true;
-            };
-            if (!preferredName.empty()) {
-                if (try_adopt(preferredName))
-                    return Result<bool>(true);
-            }
-
-            for (const auto& d : loaded) {
-                spdlog::debug("Trying model provider adoption from loaded plugin {} (path='{}')",
-                              d.name, d.path.string());
-                if (try_adopt(d.name))
-                    return Result<bool>(true);
-                // Try stem of path as alternate plugin name
-                try {
-                    std::string alt = std::filesystem::path(d.path).stem().string();
-                    if (!alt.empty() && alt != d.name) {
-                        spdlog::debug(
-                            "Trying model provider adoption from plugin path stem {} (path='{}')",
-                            alt, d.path.string());
-                        if (try_adopt(alt))
-                            return Result<bool>(true);
-                    }
-                } catch (...) {
-                }
-                // Try alternate ABI versions if available
-                for (int vv : {1, 0, 2}) {
-                    try {
-                        auto ifaceAlt = abiHost_->getInterface(d.name, "model_provider_v1", vv);
-                        if (!ifaceAlt) {
-                            spdlog::debug(
-                                "getInterface(model_provider_v1,{}) failed for {} (path='{}')", vv,
-                                d.name, d.path.string());
-                            continue;
-                        }
-                        auto* table = reinterpret_cast<yams_model_provider_v1*>(ifaceAlt.value());
-                        if (!table) {
-                            spdlog::debug("Null provider table for {} (path='{}')", d.name,
-                                          d.path.string());
-                            continue;
-                        }
-                        spdlog::info(
-                            "Adopted model provider (alt ABI v{}) from plugin: {} (path='{}')", vv,
-                            d.name, d.path.string());
-                        modelProvider_ = std::make_shared<AbiModelProviderAdapter>(table);
-                        state_.readiness.modelProviderReady = (modelProvider_ != nullptr);
-                        adoptedProviderPluginName_ = d.name;
-                        clearModelProviderError();
-                        try {
-                            auto count =
-                                static_cast<std::uint32_t>(modelProvider_->getLoadedModelCount());
-                            setCachedModelProviderModelCount(count);
-                        } catch (...) {
-                            setCachedModelProviderModelCount(0);
-                        }
-                        refreshPluginStatusSnapshot();
-                        return Result<bool>(true);
-                    } catch (...) {
-                    }
-                }
-            }
+    if (pluginManager_) {
+        auto result = pluginManager_->adoptModelProvider(preferredName);
+        if (result && result.value()) {
+            // Sync local members from PluginManager for backward compatibility
+            modelProvider_ = pluginManager_->getModelProvider();
+            state_.readiness.modelProviderReady = (modelProvider_ != nullptr);
         }
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::Unknown, e.what()};
+        return result;
     }
-    // No suitable provider was adopted. Surface a degraded state so clients/tests
-    // can detect and present actionable diagnostics.
-    try {
-        embeddingFsm_.dispatch(ProviderDegradedEvent{"no provider adopted"});
-    } catch (...) {
-        // best-effort: FSM dispatch should not interfere with result propagation
-    }
-    refreshPluginStatusSnapshot();
+    spdlog::warn("[Plugin] PluginManager not initialized");
     return Result<bool>(false);
 }
 
+// NOTE: Implementation delegated to PluginManager (PBI-088 decomposition)
 Result<size_t> ServiceManager::adoptContentExtractorsFromHosts() {
-    try {
-        size_t adopted = adoptPluginInterface<yams_content_extractor_v1, AbiContentExtractorAdapter,
-                                              yams::extraction::IContentExtractor>(
-            abiHost_.get(), "content_extractor_v1", YAMS_IFACE_CONTENT_EXTRACTOR_V1_VERSION,
-            contentExtractors_, [](const yams_content_extractor_v1* table) {
-                return table->abi_version == YAMS_IFACE_CONTENT_EXTRACTOR_V1_VERSION;
-            });
-        return Result<size_t>(adopted);
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::Unknown, e.what()};
+    if (pluginManager_) {
+        return pluginManager_->adoptContentExtractors();
     }
+    spdlog::warn("[Plugin] PluginManager not initialized");
+    return Result<size_t>(0);
 }
 
+// NOTE: Implementation delegated to PluginManager (PBI-088 decomposition)
 Result<size_t> ServiceManager::adoptSymbolExtractorsFromHosts() {
-    try {
-        size_t adopted = adoptPluginInterface<yams_symbol_extractor_v1, AbiSymbolExtractorAdapter,
-                                              yams::daemon::AbiSymbolExtractorAdapter>(
-            abiHost_.get(), "symbol_extractor_v1", YAMS_IFACE_SYMBOL_EXTRACTOR_V1_VERSION,
-            symbolExtractors_, [](const yams_symbol_extractor_v1* table) {
-                return table->abi_version == YAMS_IFACE_SYMBOL_EXTRACTOR_V1_VERSION;
-            });
-        return Result<size_t>(adopted);
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::Unknown, e.what()};
+    if (pluginManager_) {
+        return pluginManager_->adoptSymbolExtractors();
     }
+    spdlog::warn("[Plugin] PluginManager not initialized");
+    return Result<size_t>(0);
 }
 
 boost::asio::any_io_executor ServiceManager::getWorkerExecutor() const {
@@ -3017,7 +2360,7 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
 
         int build_timeout = 30000; // 30s timeout
         auto rebuildResult = co_await searchEngineManager_.buildEngine(
-            metadataRepo_, vectorIndexManager_, embGen, graphService, "rebuild_enabled",
+            metadataRepo_, vectorDatabase_, vectorIndexManager_, embGen, "rebuild_enabled",
             build_timeout, getWorkerExecutor());
 
         if (rebuildResult.has_value()) {
@@ -3080,9 +2423,8 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
             }
 
             // Phase 2.4: Use SearchEngineManager instead of co_buildEngine
-            auto graphService = graphComponent_ ? graphComponent_->getQueryService() : nullptr;
             auto rebuildResult = co_await searchEngineManager_.buildEngine(
-                metadataRepo_, vectorIndexManager_, embGen, graphService, "rebuild", build_timeout,
+                metadataRepo_, vectorDatabase_, vectorIndexManager_, embGen, "rebuild", build_timeout,
                 getWorkerExecutor());
 
             if (rebuildResult.has_value()) {
@@ -3122,7 +2464,7 @@ std::function<void(bool)> ServiceManager::getWorkerJobSignal() {
     };
 }
 
-std::shared_ptr<search::HybridSearchEngine> ServiceManager::getSearchEngineSnapshot() const {
+std::shared_ptr<search::SearchEngine> ServiceManager::getSearchEngineSnapshot() const {
     std::shared_lock lock(searchEngineMutex_); // Concurrent reads - no blocking!
     return searchEngine_;
 }
@@ -3137,7 +2479,8 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
     spdlog::debug("[getAppContext] about to set metadataRepo");
     ctx.metadataRepo = metadataRepo_;
     spdlog::debug("[getAppContext] about to call getSearchEngineSnapshot()");
-    ctx.hybridEngine = getSearchEngineSnapshot();
+    ctx.searchEngine = getSearchEngineSnapshot();
+    ctx.vectorDatabase = getVectorDatabase();
     spdlog::debug("[getAppContext] getSearchEngineSnapshot() returned");
     ctx.kgStore = this->kgStore_; // PBI-043: tree diff KG integration
     spdlog::debug("[getAppContext] about to call graphComponent_->getQueryService()");
@@ -3217,11 +2560,7 @@ ServiceManager::SearchLoadMetrics ServiceManager::getSearchLoadMetrics() const {
     metrics.executed = load.executed;
     metrics.avgLatencyUs = load.avgLatencyUs;
     metrics.concurrencyLimit = load.concurrencyLimit;
-    const auto cacheTotal = load.cacheHits + load.cacheMisses;
-    if (cacheTotal > 0) {
-        metrics.cacheHitRate =
-            static_cast<double>(load.cacheHits) / static_cast<double>(cacheTotal);
-    }
+    // Note: cache metrics removed - cache has been removed from SearchExecutor
     return metrics;
 }
 
@@ -3240,33 +2579,7 @@ bool ServiceManager::applySearchConcurrencyTarget(std::size_t target) {
 // (Namespace yams::daemon remains open for subsequent member definitions)
 
 bool ServiceManager::detectEmbeddingPreloadFlag() const {
-    bool flag = false;
-
-    // Config file precedence
-    std::filesystem::path cfgPath = config_.configFilePath;
-    if (cfgPath.empty())
-        cfgPath = resolveDefaultConfigPath();
-    if (!cfgPath.empty()) {
-        try {
-            auto kv = parseSimpleTomlFlat(cfgPath);
-            auto it = kv.find("embeddings.preload_on_startup");
-            if (it != kv.end()) {
-                std::string lower = it->second;
-                std::transform(lower.begin(), lower.end(), lower.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                flag = (lower == "1" || lower == "true" || lower == "yes" || lower == "on");
-            }
-        } catch (const std::exception& e) {
-            spdlog::debug("[Warmup] failed to read config for preload flag: {}", e.what());
-        }
-    }
-
-    // Environment override wins
-    if (const char* env = std::getenv("YAMS_EMBED_PRELOAD_ON_STARTUP")) {
-        flag = env_truthy(env);
-    }
-
-    return flag;
+    return ConfigResolver::detectEmbeddingPreloadFlag(config_);
 }
 
 size_t ServiceManager::getEmbeddingDimension() const {
@@ -3502,7 +2815,7 @@ ServiceManager::co_initDatabase(boost::asio::any_io_executor exec,
     }
 }
 
-boost::asio::awaitable<std::shared_ptr<yams::search::HybridSearchEngine>>
+boost::asio::awaitable<std::shared_ptr<yams::search::SearchEngine>>
 ServiceManager::co_buildEngine(int timeout_ms, const boost::asio::cancellation_state& /*token*/,
                                bool includeEmbeddingGenerator) {
     auto exec = getWorkerExecutor();
@@ -3514,13 +2827,12 @@ ServiceManager::co_buildEngine(int timeout_ms, const boost::asio::cancellation_s
         } catch (...) {
         }
     }
-    auto graphService = graphComponent_ ? graphComponent_->getQueryService() : nullptr;
     auto res = co_await searchEngineManager_.buildEngine(
-        metadataRepo_, vectorIndexManager_, gen, graphService, "co_buildEngine", timeout_ms, exec);
+        metadataRepo_, vectorDatabase_, vectorIndexManager_, gen, "co_buildEngine", timeout_ms, exec);
     if (res.has_value()) {
         co_return res.value();
     }
-    co_return std::shared_ptr<yams::search::HybridSearchEngine>{};
+    co_return std::shared_ptr<yams::search::SearchEngine>{};
 }
 
 boost::asio::awaitable<yams::Result<void>>

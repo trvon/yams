@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <yams/daemon/components/BackgroundTaskManager.h>
+#include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -70,6 +71,7 @@ void BackgroundTaskManager::start() {
         launchFts5JobConsumer();
         launchOrphanScanTask();
         launchPathTreeRepairTask();
+        launchCheckpointTask();
         spdlog::info("[BackgroundTaskManager] Background tasks launched successfully");
     } catch (const std::exception& e) {
         spdlog::error("[BackgroundTaskManager] Failed to launch background tasks: {}", e.what());
@@ -519,6 +521,23 @@ void BackgroundTaskManager::launchPathTreeRepairTask() {
             co_return;
         },
         boost::asio::detached);
+}
+
+void BackgroundTaskManager::launchCheckpointTask() {
+    auto self = deps_.serviceManager.lock();
+    if (!self) {
+        throw std::runtime_error(
+            "BackgroundTaskManager: ServiceManager weak_ptr expired in launchCheckpointTask");
+    }
+
+    auto checkpointMgr = self->getCheckpointManager();
+    if (!checkpointMgr) {
+        spdlog::debug("[BackgroundTaskManager] CheckpointManager not available, skipping task");
+        return;
+    }
+
+    checkpointMgr->start();
+    spdlog::debug("[BackgroundTaskManager] CheckpointManager started");
 }
 
 } // namespace yams::daemon

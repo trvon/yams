@@ -48,20 +48,6 @@ Result<SearchResults> SearchExecutor::search(const SearchRequest& request) {
         releaseCalled = true;
     };
 
-    // Check cache first
-    std::string cacheKey = generateCacheKey(request);
-    if (config_.enableQueryCache) {
-        auto cachedResult = getCachedResult(cacheKey);
-        if (cachedResult) {
-            updateStatistics(std::chrono::milliseconds(0), std::chrono::milliseconds(0), true);
-            totalCacheHits_.fetch_add(1, std::memory_order_relaxed);
-            release();
-            return *cachedResult;
-        }
-    }
-
-    totalCacheMisses_.fetch_add(1, std::memory_order_relaxed);
-
     SearchResults response;
     auto& stats = response.getStatistics();
     stats.originalQuery = request.query;
@@ -167,14 +153,8 @@ Result<SearchResults> SearchExecutor::search(const SearchRequest& request) {
 
     response.setStatistics(stats);
 
-    // Cache result
-    if (config_.enableQueryCache) {
-        cacheResult(cacheKey, response);
-    }
-
     // Update statistics
-    updateStatistics(stats.searchTime + std::chrono::milliseconds(0), std::chrono::milliseconds(0),
-                     false);
+    updateStatistics(stats.searchTime, std::chrono::milliseconds(0));
 
     release();
     return response;
@@ -255,8 +235,7 @@ SearchExecutor::getFacets(const std::string& query, const std::vector<std::strin
 }
 
 void SearchExecutor::clearCache() {
-    queryCache_.clear();
-    cacheOrder_.clear();
+    // Cache removed - this is now a no-op for API compatibility
 }
 
 Result<std::vector<SearchResultItem>>
@@ -528,45 +507,6 @@ void SearchExecutor::sortResults(std::vector<SearchResultItem>& results,
     }
 }
 
-void SearchExecutor::cacheResult(const std::string& cacheKey, const SearchResults& response) const {
-    if (queryCache_.size() >= config_.cacheSize) {
-        evictOldestCacheEntry();
-    }
-
-    queryCache_[cacheKey] = response;
-    cacheOrder_.push_back(cacheKey);
-}
-
-std::optional<SearchResults> SearchExecutor::getCachedResult(const std::string& cacheKey) const {
-    auto it = queryCache_.find(cacheKey);
-    if (it != queryCache_.end()) {
-        return it->second;
-    }
-    return std::nullopt;
-}
-
-std::string SearchExecutor::generateCacheKey(const SearchRequest& request) const {
-    std::ostringstream oss;
-    oss << request.query << "|" << request.offset << "|" << request.limit << "|"
-        << static_cast<int>(request.sortOrder) << "|" << request.includeHighlights << "|"
-        << request.includeFacets << "|lt=" << (request.literalText ? 1 : 0);
-
-    // Include filter information in cache key
-    if (request.filters.hasFilters()) {
-        oss << "|filters:" << request.filters.getFilterCount();
-    }
-
-    return oss.str();
-}
-
-void SearchExecutor::evictOldestCacheEntry() const {
-    if (!cacheOrder_.empty()) {
-        std::string oldestKey = cacheOrder_.front();
-        cacheOrder_.erase(cacheOrder_.begin());
-        queryCache_.erase(oldestKey);
-    }
-}
-
 void SearchExecutor::ConcurrencyLimiter::set_limit(std::uint32_t limit) {
     std::lock_guard<std::mutex> lock(mutex_);
     limit_ = (limit == 0) ? kUnlimited : limit;
@@ -602,8 +542,6 @@ SearchExecutor::LoadMetrics SearchExecutor::getLoadMetrics() const {
     snapshot.active = activeSearches_.load(std::memory_order_relaxed);
     snapshot.queued = queuedSearches_.load(std::memory_order_relaxed);
     snapshot.executed = totalSearches_.load(std::memory_order_relaxed);
-    snapshot.cacheHits = totalCacheHits_.load(std::memory_order_relaxed);
-    snapshot.cacheMisses = totalCacheMisses_.load(std::memory_order_relaxed);
     const auto executed = snapshot.executed;
     snapshot.avgLatencyUs =
         executed > 0 ? totalLatencyUs_.load(std::memory_order_relaxed) / executed : 0;
@@ -629,15 +567,8 @@ SearchResults SearchExecutor::createErrorResponse(const std::string& /*error*/,
 }
 
 void SearchExecutor::updateStatistics(const std::chrono::milliseconds& searchTime,
-                                      const std::chrono::milliseconds& rankingTime,
-                                      bool cacheHit) const {
+                                      const std::chrono::milliseconds& rankingTime) const {
     stats_.totalSearches++;
-
-    if (cacheHit) {
-        stats_.cacheHits++;
-    } else {
-        stats_.cacheMisses++;
-    }
 
     // Update timing statistics
     auto totalTime = searchTime + rankingTime;
@@ -672,8 +603,6 @@ std::unique_ptr<SearchExecutor> SearchExecutorFactory::createHighPerformance(
     SearchConfig config;
     config.maxResults = 10000;
     config.defaultPageSize = 50;
-    config.enableQueryCache = true;
-    config.cacheSize = 5000;
     config.timeout = std::chrono::milliseconds(60000);
 
     return std::make_unique<SearchExecutor>(database, metadataRepo, config);
