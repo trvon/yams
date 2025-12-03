@@ -19,6 +19,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.8.0] - Unreleased
 
 ### Added
+- **ExternalPluginHost**: New plugin host for Python/process-based plugins (RFC-EPH-001)
+  - Implements `IPluginHost` interface for external plugins running as separate processes
+  - JSON-RPC 2.0 communication over stdio using existing `PluginProcess` and `JsonRpcClient`
+  - Supported plugin types: Python (`.py`), Node.js (`.js`), any executable with JSON-RPC support
+  - Process lifecycle management: spawn, monitor, health checks, graceful shutdown
+  - Automatic crash recovery with configurable restart policy (max retries, backoff)
+  - Trust-based security model with persistent trust file
+  - RPC gateway for calling arbitrary plugin methods (`callRpc`)
+  - Plugin statistics tracking (uptime, restart count, health status)
+  - State change callbacks for monitoring plugin lifecycle events
+  - Location: `include/yams/daemon/resource/external_plugin_host.h`, `src/daemon/resource/external_plugin_host.cpp`
 - **Auto-init mode**: New `yams init --auto` flag for containerized/headless environments
   - Enables vector database with default model (`all-MiniLM-L6-v2`)
   - Enables plugins directory setup

@@ -697,7 +697,7 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
             }
         } catch (...) {
         }
-        RequestHandler handler(disp, handlerConfig);
+        auto handler = std::make_shared<RequestHandler>(disp, handlerConfig);
 
         // Wrap socket in shared_ptr for tracking and use modern C++20 move semantics
         // Use the server's stop_source token so we can cancel connections during shutdown
@@ -713,7 +713,7 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
             boost::asio::steady_timer lifetimeTimer(sock->get_executor());
             lifetimeTimer.expires_after(config_.maxConnectionLifetime);
 
-            auto handleOrTimeout = co_await (handler.handle_connection(sock, token, conn_token) ||
+            auto handleOrTimeout = co_await (handler->handle_connection(sock, token, conn_token) ||
                                              lifetimeTimer.async_wait(use_awaitable));
 
             if (handleOrTimeout.index() == 1) {
@@ -732,7 +732,7 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
                 sock->close(ec);
             }
         } else {
-            co_await handler.handle_connection(sock, token, conn_token);
+            co_await handler->handle_connection(sock, token, conn_token);
         }
     } catch (const std::exception& e) {
         spdlog::error("SocketServer::handle_connection error: {}", e.what());

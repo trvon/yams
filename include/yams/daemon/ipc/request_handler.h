@@ -65,7 +65,7 @@ public:
 };
 
 // Coroutine-based request handler
-class RequestHandler {
+class RequestHandler : public std::enable_shared_from_this<RequestHandler> {
 public:
     using ProcessorFunc = std::function<boost::asio::awaitable<Response>(const Request&)>;
 

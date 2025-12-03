@@ -533,26 +533,26 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                                                                   : sock->get_executor();
                         boost::asio::co_spawn(
                             spawn_exec,
-                            [this, sock, req = std::move(routed_request), req_id = request_id,
+                            [self = shared_from_this(), sock, req = std::move(routed_request), req_id = request_id,
                              expects = expects_streaming]() -> boost::asio::awaitable<void> {
                                 spdlog::info(
                                     "handle_streaming_request spawn req_id={} type={} expects={}",
                                     req_id, static_cast<int>(getMessageType(req)), expects);
-                                auto r = co_await handle_streaming_request(*sock, req, req_id,
+                                auto r = co_await self->handle_streaming_request(*sock, req, req_id,
                                                                            nullptr, expects);
                                 if (!r) {
                                     spdlog::debug("Multiplexed request failed (requestId={}): {}",
                                                   req_id, r.error().message);
                                 }
-                                inflight_.fetch_sub(1, std::memory_order_relaxed);
+                                self->inflight_.fetch_sub(1, std::memory_order_relaxed);
                                 MuxMetricsRegistry::instance().incrementActiveHandlers(-1);
                                 {
-                                    std::lock_guard<std::mutex> lk(ctx_mtx_);
-                                    auto it = contexts_.find(req_id);
-                                    if (it != contexts_.end()) {
+                                    std::lock_guard<std::mutex> lk(self->ctx_mtx_);
+                                    auto it = self->contexts_.find(req_id);
+                                    if (it != self->contexts_.end()) {
                                         it->second->completed.store(true,
                                                                     std::memory_order_relaxed);
-                                        contexts_.erase(it);
+                                        self->contexts_.erase(it);
                                     }
                                 }
                                 RequestContextRegistry::instance().deregister_context(req_id);
