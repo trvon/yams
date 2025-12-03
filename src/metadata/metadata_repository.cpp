@@ -447,6 +447,72 @@ Result<std::optional<DocumentInfo>> MetadataRepository::getDocument(int64_t id) 
         });
 }
 
+// Internal helper that uses an existing connection to avoid nested connection acquisition deadlock
+Result<std::optional<DocumentInfo>> MetadataRepository::getDocumentInternal(Database& db, int64_t id) {
+    using yams::metadata::sql::QuerySpec;
+    const char* cols = hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
+    QuerySpec spec{};
+    spec.table = "documents";
+    spec.columns = {cols};
+    spec.conditions = {"id = ?"};
+    auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
+
+    if (!stmtResult)
+        return stmtResult.error();
+
+    Statement stmt = std::move(stmtResult).value();
+    auto bindResult = stmt.bind(1, id);
+    if (!bindResult)
+        return bindResult.error();
+
+    auto stepResult = stmt.step();
+    if (!stepResult)
+        return stepResult.error();
+
+    if (!stepResult.value()) {
+        return std::optional<DocumentInfo>{};
+    }
+
+    return std::optional<DocumentInfo>{mapDocumentRow(stmt)};
+}
+
+// Internal helper that uses an existing connection to avoid nested connection acquisition deadlock
+Result<std::unordered_map<std::string, MetadataValue>>
+MetadataRepository::getAllMetadataInternal(Database& db, int64_t documentId) {
+    using yams::metadata::sql::QuerySpec;
+    QuerySpec spec{};
+    spec.table = "metadata";
+    spec.columns = {"key", "value", "value_type"};
+    spec.conditions = {"document_id = ?"};
+    auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
+
+    if (!stmtResult)
+        return stmtResult.error();
+
+    Statement stmt = std::move(stmtResult).value();
+    auto bindResult = stmt.bind(1, documentId);
+    if (!bindResult)
+        return bindResult.error();
+
+    std::unordered_map<std::string, MetadataValue> result;
+
+    while (true) {
+        auto stepResult = stmt.step();
+        if (!stepResult)
+            return stepResult.error();
+        if (!stepResult.value())
+            break;
+
+        std::string key = stmt.getString(0);
+        MetadataValue value;
+        value.value = stmt.getString(1);
+        value.type = MetadataValueTypeUtils::fromString(stmt.getString(2));
+        result[key] = value;
+    }
+
+    return result;
+}
+
 Result<std::optional<DocumentInfo>> MetadataRepository::getDocumentByHash(const std::string& hash) {
     return executeQuery<std::optional<DocumentInfo>>(
         [&](Database& db) -> Result<std::optional<DocumentInfo>> {
@@ -4040,7 +4106,7 @@ Result<void> MetadataRepository::buildFuzzyIndex() {
 }
 
 Result<void> MetadataRepository::updateFuzzyIndex(int64_t documentId) {
-    return executeQuery<void>([&]([[maybe_unused]] Database& db) -> Result<void> {
+    return executeQuery<void>([&](Database& db) -> Result<void> {
         std::unique_lock<std::shared_mutex> lock(fuzzyIndexMutex_);
 
         if (!fuzzySearchIndex_) {
@@ -4048,17 +4114,19 @@ Result<void> MetadataRepository::updateFuzzyIndex(int64_t documentId) {
             return Result<void>();
         }
 
-        // Get document info
-        auto docResult = getDocument(documentId);
+        // Get document info using internal helper to avoid nested connection acquisition deadlock
+        // Previously this called getDocument() which would try to acquire another connection
+        // from the pool while we already hold one, causing "resource deadlock would occur"
+        auto docResult = getDocumentInternal(db, documentId);
         if (!docResult || !docResult.value().has_value()) {
             return Error{ErrorCode::NotFound, "Document not found"};
         }
 
         auto doc = docResult.value().value();
 
-        // Get document tags
+        // Get document tags using internal helper to avoid nested connection acquisition
         std::vector<std::string> keywords;
-        auto metadataResult = getAllMetadata(documentId);
+        auto metadataResult = getAllMetadataInternal(db, documentId);
         if (metadataResult) {
             for (const auto& [key, value] : metadataResult.value()) {
                 if (key == "tag" && value.type == MetadataValueType::String) {
