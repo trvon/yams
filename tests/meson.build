@@ -734,6 +734,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_external_plugin_host_exe = executable('catch2_external_plugin_host',
+    files('unit/daemon/external_plugin_host_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: plugin_test_cpp_args,
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # Metadata Test Suites (4 executables)
   # --------------------------------------------------------------------------
   
@@ -1146,6 +1155,12 @@ if catch2_dep.found()
 
   test('plugin_infrastructure', catch2_plugin_infrastructure_exe,
     suite: ['catch2', 'unit', 'daemon', 'plugin', 'infrastructure'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('external_plugin_host', catch2_external_plugin_host_exe,
+    suite: ['catch2', 'unit', 'daemon', 'plugin', 'external'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
