@@ -530,8 +530,7 @@ std::shared_ptr<app::services::AppContext> YamsCLI::getAppContext() {
                     appContext_->vectorDatabase = vecDb;
                     spdlog::info("SearchEngine initialized for AppContext");
                 } else {
-                    spdlog::warn("SearchEngine initialization failed: {}",
-                                 engRes.error().message);
+                    spdlog::warn("SearchEngine initialization failed: {}", engRes.error().message);
                     appContext_->searchEngine = nullptr;
                 }
             } else {

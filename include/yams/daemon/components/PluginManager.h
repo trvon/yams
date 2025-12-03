@@ -174,7 +174,8 @@ public:
     std::shared_ptr<IModelProvider> getModelProvider() const { return modelProvider_; }
     const std::string& getAdoptedProviderPluginName() const { return adoptedProviderPluginName_; }
 
-    const std::vector<std::shared_ptr<extraction::IContentExtractor>>& getContentExtractors() const {
+    const std::vector<std::shared_ptr<extraction::IContentExtractor>>&
+    getContentExtractors() const {
         return contentExtractors_;
     }
 
@@ -261,8 +262,8 @@ private:
 
     // Plugin infrastructure
     std::unique_ptr<AbiPluginLoader> pluginLoader_;
-    std::unique_ptr<AbiPluginHost> pluginHost_;       // Owned when created internally
-    AbiPluginHost* sharedPluginHost_{nullptr};         // Non-owning when shared from ServiceManager
+    std::unique_ptr<AbiPluginHost> pluginHost_; // Owned when created internally
+    AbiPluginHost* sharedPluginHost_{nullptr};  // Non-owning when shared from ServiceManager
 
     // FSMs for state tracking
     PluginHostFsm pluginHostFsm_;

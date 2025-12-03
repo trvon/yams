@@ -24,8 +24,9 @@ class CheckpointManagerTest : public ::testing::Test {
 protected:
     void SetUp() override {
         io_ = std::make_shared<boost::asio::io_context>();
-        work_guard_ = std::make_unique<boost::asio::executor_work_guard<
-            boost::asio::io_context::executor_type>>(io_->get_executor());
+        work_guard_ = std::make_unique<
+            boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>(
+            io_->get_executor());
         io_thread_ = std::thread([this]() { io_->run(); });
 
         stopRequested_ = std::make_shared<std::atomic<bool>>(false);
@@ -65,8 +66,8 @@ protected:
     }
 
     std::shared_ptr<boost::asio::io_context> io_;
-    std::unique_ptr<boost::asio::executor_work_guard<
-        boost::asio::io_context::executor_type>> work_guard_;
+    std::unique_ptr<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>
+        work_guard_;
     std::thread io_thread_;
     std::shared_ptr<std::atomic<bool>> stopRequested_;
     std::filesystem::path temp_dir_;

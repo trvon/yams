@@ -129,7 +129,8 @@ public:
     }
 
     // Helper: Execute search request
-    ::yams::app::services::SearchResponse executeSearch(const ::yams::app::services::SearchRequest& req) {
+    ::yams::app::services::SearchResponse
+    executeSearch(const ::yams::app::services::SearchRequest& req) {
         auto result = runAwait(searchService_->search(req));
         REQUIRE(result);
         return result.value();

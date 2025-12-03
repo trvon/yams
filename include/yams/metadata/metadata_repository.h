@@ -525,8 +525,8 @@ private:
     // Internal helpers that accept an existing Database& to avoid nested connection acquisition
     // These are used within executeQuery lambdas to prevent deadlock when sub-queries are needed
     Result<std::optional<DocumentInfo>> getDocumentInternal(Database& db, int64_t id);
-    Result<std::unordered_map<std::string, MetadataValue>> getAllMetadataInternal(Database& db,
-                                                                                   int64_t documentId);
+    Result<std::unordered_map<std::string, MetadataValue>>
+    getAllMetadataInternal(Database& db, int64_t documentId);
 
     std::optional<DocumentInfo> lookupPathCache(const std::string& normalizedPath) const;
     void storePathCache(const DocumentInfo& info) const;

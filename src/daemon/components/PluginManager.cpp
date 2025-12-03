@@ -1,9 +1,10 @@
 // Copyright 2025 The YAMS Authors
 // SPDX-License-Identifier: Apache-2.0
 
-#include <yams/daemon/components/PluginManager.h>
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
+#include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/resource/abi_content_extractor_adapter.h>
@@ -12,9 +13,8 @@
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
-#include <yams/config/config_helpers.h>
-#include <yams/plugins/model_provider_v1.h>
 #include <yams/plugins/content_extractor_v1.h>
+#include <yams/plugins/model_provider_v1.h>
 #include <yams/plugins/symbol_extractor_v1.h>
 
 #include <boost/asio/co_spawn.hpp>
@@ -32,7 +32,8 @@ namespace yams::daemon {
 // Template-based plugin adoption helper
 template <typename AbiTableType, typename AdapterType, typename ContainerValueType>
 static size_t
-adoptPluginInterfaceImpl(AbiPluginHost* host, const std::string& interfaceName, int interfaceVersion,
+adoptPluginInterfaceImpl(AbiPluginHost* host, const std::string& interfaceName,
+                         int interfaceVersion,
                          std::vector<std::shared_ptr<ContainerValueType>>& targetContainer,
                          const std::function<bool(const AbiTableType*)>& validateTable = nullptr) {
     size_t adopted = 0;
@@ -76,7 +77,9 @@ adoptPluginInterfaceImpl(AbiPluginHost* host, const std::string& interfaceName, 
 
 PluginManager::PluginManager(Dependencies deps) : deps_(std::move(deps)) {}
 
-PluginManager::~PluginManager() { shutdown(); }
+PluginManager::~PluginManager() {
+    shutdown();
+}
 
 Result<void> PluginManager::initialize() {
     spdlog::debug("[PluginManager] Initializing");
@@ -379,7 +382,8 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
         // Try all loaded plugins
         spdlog::info("[PluginManager] adoptModelProvider: {} loaded plugins to try", loaded.size());
         for (const auto& d : loaded) {
-            spdlog::info("[PluginManager] Trying plugin name='{}' path='{}'", d.name, d.path.string());
+            spdlog::info("[PluginManager] Trying plugin name='{}' path='{}'", d.name,
+                         d.path.string());
             if (tryAdopt(d.name))
                 return Result<bool>(true);
 
@@ -408,13 +412,13 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
 
 Result<size_t> PluginManager::adoptContentExtractors() {
     try {
-        size_t adopted = adoptPluginInterfaceImpl<yams_content_extractor_v1,
-                                                   AbiContentExtractorAdapter,
-                                                   extraction::IContentExtractor>(
-            pluginHost_.get(), "content_extractor_v1", YAMS_IFACE_CONTENT_EXTRACTOR_V1_VERSION,
-            contentExtractors_, [](const yams_content_extractor_v1* table) {
-                return table->abi_version == YAMS_IFACE_CONTENT_EXTRACTOR_V1_VERSION;
-            });
+        size_t adopted =
+            adoptPluginInterfaceImpl<yams_content_extractor_v1, AbiContentExtractorAdapter,
+                                     extraction::IContentExtractor>(
+                pluginHost_.get(), "content_extractor_v1", YAMS_IFACE_CONTENT_EXTRACTOR_V1_VERSION,
+                contentExtractors_, [](const yams_content_extractor_v1* table) {
+                    return table->abi_version == YAMS_IFACE_CONTENT_EXTRACTOR_V1_VERSION;
+                });
         return Result<size_t>(adopted);
     } catch (const std::exception& e) {
         return Error{ErrorCode::Unknown, e.what()};

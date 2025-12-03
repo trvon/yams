@@ -484,7 +484,8 @@ public:
             // TODO: Convert API filters to SearchParams filters
 
             // Perform search
-            auto search_result = search_engine_->search(processed_query.normalized_query, searchParams);
+            auto search_result =
+                search_engine_->search(processed_query.normalized_query, searchParams);
 
             if (!search_result.has_value()) {
                 return Result<SearchResponse>(search_result.error());
@@ -562,9 +563,7 @@ public:
         return Result<std::vector<std::string>>(Error{ErrorCode::NotFound, "Session not found"});
     }
 
-    bool isHealthy() const {
-        return initialized_ && search_engine_ != nullptr;
-    }
+    bool isHealthy() const { return initialized_ && search_engine_ != nullptr; }
 
 private:
     std::shared_ptr<search::SearchEngine> search_engine_;

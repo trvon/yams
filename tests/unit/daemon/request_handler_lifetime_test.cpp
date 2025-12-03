@@ -1,10 +1,10 @@
-#include <gtest/gtest.h>
-#include <yams/daemon/ipc/request_handler.h>
-#include <boost/asio.hpp>
-#include <boost/asio/experimental/awaitable_operators.hpp>
+#include <chrono>
 #include <memory>
 #include <thread>
-#include <chrono>
+#include <boost/asio.hpp>
+#include <boost/asio/experimental/awaitable_operators.hpp>
+#include <gtest/gtest.h>
+#include <yams/daemon/ipc/request_handler.h>
 
 using namespace yams::daemon;
 using namespace boost::asio;
@@ -15,7 +15,8 @@ public:
         co_return SuccessResponse{"OK"};
     }
 
-    boost::asio::awaitable<std::optional<Response>> process_streaming(const Request& request) override {
+    boost::asio::awaitable<std::optional<Response>>
+    process_streaming(const Request& request) override {
         // Simulate long running operation
         boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
         timer.expires_after(std::chrono::milliseconds(100));
@@ -23,20 +24,19 @@ public:
         co_return SuccessResponse{"Streamed"};
     }
 
-    bool supports_streaming(const Request& request) const override {
-        return true;
-    }
+    bool supports_streaming(const Request& request) const override { return true; }
 };
 
 TEST(RequestHandlerLifetime, DetachedCoroutineSurvivesHandlerDestruction) {
     boost::asio::io_context io;
-    
+
     // Create a socket pair
     boost::asio::local::stream_protocol::socket client_sock(io);
     boost::asio::local::stream_protocol::socket server_sock(io);
     boost::asio::local::connect_pair(client_sock, server_sock);
 
-    auto server_sock_ptr = std::make_shared<boost::asio::local::stream_protocol::socket>(std::move(server_sock));
+    auto server_sock_ptr =
+        std::make_shared<boost::asio::local::stream_protocol::socket>(std::move(server_sock));
 
     // Create handler
     RequestHandler::Config config;
@@ -51,11 +51,13 @@ TEST(RequestHandlerLifetime, DetachedCoroutineSurvivesHandlerDestruction) {
     std::promise<void> handler_finished;
     auto handler_future = handler_finished.get_future();
 
-    boost::asio::co_spawn(io, 
-        [&, handler, server_sock_ptr, token = stop_source.get_token()]() mutable -> boost::asio::awaitable<void> {
+    boost::asio::co_spawn(
+        io,
+        [&, handler, server_sock_ptr,
+         token = stop_source.get_token()]() mutable -> boost::asio::awaitable<void> {
             co_await handler->handle_connection(server_sock_ptr, token, 1);
             handler_finished.set_value();
-        }, 
+        },
         boost::asio::detached);
 
     // Send a request that triggers streaming (and thus detached coroutine)
@@ -67,7 +69,7 @@ TEST(RequestHandlerLifetime, DetachedCoroutineSurvivesHandlerDestruction) {
     msg.expectsStreamingResponse = true;
     msg.payload = req;
 
-    MessageFramer framer(1024*1024);
+    MessageFramer framer(1024 * 1024);
     std::vector<uint8_t> frame;
     auto res = framer.frame_message_into(msg, frame);
     ASSERT_TRUE(res);
@@ -82,7 +84,7 @@ TEST(RequestHandlerLifetime, DetachedCoroutineSurvivesHandlerDestruction) {
 
     // Run IO until handle_connection finishes
     io.run_for(std::chrono::milliseconds(10));
-    
+
     // Verify handler_connection finished
     ASSERT_EQ(handler_future.wait_for(std::chrono::seconds(0)), std::future_status::ready);
 
@@ -90,19 +92,22 @@ TEST(RequestHandlerLifetime, DetachedCoroutineSurvivesHandlerDestruction) {
     std::weak_ptr<RequestHandler> weak_handler = handler;
     handler.reset();
 
-    // At this point, if the detached coroutine captured shared_from_this, 
+    // At this point, if the detached coroutine captured shared_from_this,
     // weak_handler should still be lockable (or at least the object alive).
     // But wait, the detached coroutine might have finished if the socket close caused write error.
     // However, the MockRequestProcessor waits 100ms.
     // We only ran for 20ms total.
     // So the detached coroutine should still be waiting on the timer.
 
-    // If the fix is working, the handler should still be alive because the detached coroutine holds a shared_ptr.
-    ASSERT_FALSE(weak_handler.expired()) << "RequestHandler should be kept alive by detached coroutine";
+    // If the fix is working, the handler should still be alive because the detached coroutine holds
+    // a shared_ptr.
+    ASSERT_FALSE(weak_handler.expired())
+        << "RequestHandler should be kept alive by detached coroutine";
 
     // Run IO to let the detached coroutine finish (timer expires)
     io.run_for(std::chrono::milliseconds(200));
 
     // Now the detached coroutine should be done, and handler destroyed
-    ASSERT_TRUE(weak_handler.expired()) << "RequestHandler should be destroyed after detached coroutine finishes";
+    ASSERT_TRUE(weak_handler.expired())
+        << "RequestHandler should be destroyed after detached coroutine finishes";
 }

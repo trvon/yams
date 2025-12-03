@@ -6,8 +6,8 @@
 #include <yams/core/types.h>
 #include <yams/daemon/components/IComponent.h>
 
-#include <boost/asio/awaitable.hpp>
 #include <boost/asio/any_io_executor.hpp>
+#include <boost/asio/awaitable.hpp>
 
 #include <filesystem>
 #include <memory>
@@ -66,7 +66,7 @@ public:
      * @return Awaitable<bool> - true if opened successfully
      */
     boost::asio::awaitable<bool> open(const std::filesystem::path& dbPath, int timeoutMs,
-                                       boost::asio::any_io_executor executor);
+                                      boost::asio::any_io_executor executor);
 
     /**
      * @brief Run database migrations with timeout.

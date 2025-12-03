@@ -533,13 +533,14 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                                                                   : sock->get_executor();
                         boost::asio::co_spawn(
                             spawn_exec,
-                            [self = shared_from_this(), sock, req = std::move(routed_request), req_id = request_id,
+                            [self = shared_from_this(), sock, req = std::move(routed_request),
+                             req_id = request_id,
                              expects = expects_streaming]() -> boost::asio::awaitable<void> {
                                 spdlog::info(
                                     "handle_streaming_request spawn req_id={} type={} expects={}",
                                     req_id, static_cast<int>(getMessageType(req)), expects);
                                 auto r = co_await self->handle_streaming_request(*sock, req, req_id,
-                                                                           nullptr, expects);
+                                                                                 nullptr, expects);
                                 if (!r) {
                                     spdlog::debug("Multiplexed request failed (requestId={}): {}",
                                                   req_id, r.error().message);

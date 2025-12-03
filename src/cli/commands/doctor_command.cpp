@@ -1378,7 +1378,7 @@ private:
         // JSON output mode: collect data into structured object
         nlohmann::json jsonResult;
         bool useJson = jsonOutput_ || (cli_ && cli_->getJsonOutput());
-        
+
         // SQLite + FTS status and migration health
         // FTS checks removed to avoid blocking/hangs; use 'yams daemon status -d' for readiness.
         // Minimal structured recommendations example (will expand in future audits)
@@ -1401,11 +1401,10 @@ private:
         std::string effectiveSocket;
         {
             using namespace yams::daemon;
-            effectiveSocket =
-                daemon::DaemonClient::resolveSocketPathConfigFirst().string();
+            effectiveSocket = daemon::DaemonClient::resolveSocketPathConfigFirst().string();
             daemon_up = daemon::DaemonClient::isDaemonRunning(effectiveSocket);
         }
-        
+
         // Record daemon connectivity for JSON
         if (useJson) {
             jsonResult["daemon"]["socket"] = effectiveSocket;
@@ -1455,7 +1454,7 @@ private:
         if (!useJson) {
             std::cout << "\r" << std::string(50, ' ') << "\r" << std::flush;
         }
-        
+
         // For JSON mode, collect all data and output at end
         if (useJson) {
             // Daemon status
@@ -1468,7 +1467,7 @@ private:
                 jsonResult["daemon"]["active_connections"] = s.activeConnections;
                 jsonResult["daemon"]["memory_mb"] = s.memoryUsageMb;
                 jsonResult["daemon"]["cpu_percent"] = s.cpuUsagePercent;
-                
+
                 // Embedding info
                 jsonResult["embedding"]["available"] = s.embeddingAvailable;
                 jsonResult["embedding"]["backend"] = s.embeddingBackend;
@@ -1477,12 +1476,12 @@ private:
                 jsonResult["embedding"]["dimension"] = s.embeddingDim;
                 jsonResult["embedding"]["threads_intra"] = s.embeddingThreadsIntra;
                 jsonResult["embedding"]["threads_inter"] = s.embeddingThreadsInter;
-                
+
                 // Readiness states
                 for (const auto& [k, v] : s.readinessStates) {
                     jsonResult["readiness"][k] = v;
                 }
-                
+
                 // Plugins/providers
                 nlohmann::json pluginsJson = nlohmann::json::array();
                 for (const auto& p : s.providers) {
@@ -1492,63 +1491,75 @@ private:
                     pj["degraded"] = p.degraded;
                     pj["is_provider"] = p.isProvider;
                     pj["models_loaded"] = p.modelsLoaded;
-                    if (!p.error.empty()) pj["error"] = p.error;
+                    if (!p.error.empty())
+                        pj["error"] = p.error;
                     pluginsJson.push_back(std::move(pj));
                 }
                 jsonResult["plugins"] = std::move(pluginsJson);
             }
-            
+
             // Models (installed)
             namespace fs = std::filesystem;
             fs::path modelsPath = cli_ ? cli_->getDataPath() / "models" : fs::path();
             nlohmann::json modelsJson = nlohmann::json::array();
             std::error_code ec;
-            if (!modelsPath.empty() && fs::exists(modelsPath, ec) && fs::is_directory(modelsPath, ec)) {
+            if (!modelsPath.empty() && fs::exists(modelsPath, ec) &&
+                fs::is_directory(modelsPath, ec)) {
                 for (const auto& entry : fs::directory_iterator(modelsPath, ec)) {
-                    if (!entry.is_directory()) continue;
+                    if (!entry.is_directory())
+                        continue;
                     fs::path modelOnnx = entry.path() / "model.onnx";
                     if (fs::exists(modelOnnx, ec)) {
                         nlohmann::json mj;
                         mj["name"] = entry.path().filename().string();
-                        mj["has_config"] = fs::exists(entry.path() / "config.json", ec) || 
-                                           fs::exists(entry.path() / "sentence_bert_config.json", ec);
+                        mj["has_config"] =
+                            fs::exists(entry.path() / "config.json", ec) ||
+                            fs::exists(entry.path() / "sentence_bert_config.json", ec);
                         mj["has_tokenizer"] = fs::exists(entry.path() / "tokenizer.json", ec);
                         modelsJson.push_back(std::move(mj));
                     }
                 }
             }
             jsonResult["models"] = std::move(modelsJson);
-            
+
             // Vector DB info
             fs::path vecDbPath = cli_ ? cli_->getDataPath() / "vectors.db" : fs::path();
             jsonResult["vector_db"]["path"] = vecDbPath.string();
             jsonResult["vector_db"]["exists"] = !vecDbPath.empty() && fs::exists(vecDbPath, ec);
-            
+
             // Knowledge graph stats (if db available)
             try {
                 auto db = cli_->getDatabase();
                 if (db && db->isOpen()) {
                     auto countTable = [&](const char* sql) -> long long {
                         auto stR = db->prepare(sql);
-                        if (!stR) return -1;
+                        if (!stR)
+                            return -1;
                         auto st = std::move(stR).value();
                         auto step = st.step();
-                        if (step && step.value()) return st.getInt64(0);
+                        if (step && step.value())
+                            return st.getInt64(0);
                         return -1;
                     };
-                    jsonResult["knowledge_graph"]["nodes"] = countTable("SELECT COUNT(1) FROM kg_nodes");
-                    jsonResult["knowledge_graph"]["edges"] = countTable("SELECT COUNT(1) FROM kg_edges");
-                    jsonResult["knowledge_graph"]["aliases"] = countTable("SELECT COUNT(1) FROM kg_aliases");
-                    jsonResult["knowledge_graph"]["embeddings"] = countTable("SELECT COUNT(1) FROM kg_node_embeddings");
-                    jsonResult["knowledge_graph"]["doc_entities"] = countTable("SELECT COUNT(1) FROM doc_entities");
+                    jsonResult["knowledge_graph"]["nodes"] =
+                        countTable("SELECT COUNT(1) FROM kg_nodes");
+                    jsonResult["knowledge_graph"]["edges"] =
+                        countTable("SELECT COUNT(1) FROM kg_edges");
+                    jsonResult["knowledge_graph"]["aliases"] =
+                        countTable("SELECT COUNT(1) FROM kg_aliases");
+                    jsonResult["knowledge_graph"]["embeddings"] =
+                        countTable("SELECT COUNT(1) FROM kg_node_embeddings");
+                    jsonResult["knowledge_graph"]["doc_entities"] =
+                        countTable("SELECT COUNT(1) FROM doc_entities");
                 }
-            } catch (...) {}
-            
+            } catch (...) {
+            }
+
             // Recommendations
             if (!recs.empty()) {
                 jsonResult["recommendations"] = yams::cli::recommendationsToJson(recs);
             }
-            
+
             // Output JSON and return early
             std::cout << jsonResult.dump(2) << "\n";
             return;

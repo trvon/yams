@@ -1244,10 +1244,10 @@ private:
         resp.contributingComponents = engineResponse.contributingComponents;
 
         if (resp.isDegraded) {
-            spdlog::info("Search completed in degraded mode: {} timed out, {} failed, {} contributing",
-                         resp.timedOutComponents.size(),
-                         resp.failedComponents.size(),
-                         resp.contributingComponents.size());
+            spdlog::info(
+                "Search completed in degraded mode: {} timed out, {} failed, {} contributing",
+                resp.timedOutComponents.size(), resp.failedComponents.size(),
+                resp.contributingComponents.size());
         }
 
         if (req.pathsOnly) {
@@ -1279,7 +1279,7 @@ private:
                     const auto& r = vec[i];
                     SearchItem it;
                     it.id = static_cast<int64_t>(i + 1);
-                    it.title = r.document.fileName;  // Use fileName since DocumentInfo has no title
+                    it.title = r.document.fileName; // Use fileName since DocumentInfo has no title
                     it.path = r.document.filePath;
                     it.score = r.score;
                     if (!r.snippet.empty())

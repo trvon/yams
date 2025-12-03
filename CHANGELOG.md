@@ -84,6 +84,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Version display**: Fixed `yams --version` showing fallback values instead of actual version
   - Added generated include directory to CLI build to resolve `version_generated.h`
   - Version now correctly shows git tag and commit hash
+- **Socket crash on shutdown**: Fixed `EXC_BAD_ACCESS` in `kqueue_reactor::deregister_descriptor` during program exit
+  - Added `ConnectionRegistry` to track all daemon client connections globally
+  - Sockets are now released before `io_context` shutdown to prevent reactor access after destruction
+  - Fixes race condition where coroutine frames holding socket references were destroyed during scheduler shutdown
+  - Related: [boost/asio#1347](https://github.com/chriskohlhoff/asio/issues/1347)
 
 ### CLI Improvements
 - **PowerShell completion**: Added `yams completion powershell` for PowerShell auto-complete

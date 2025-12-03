@@ -64,7 +64,8 @@ public:
      * @param path Path to TOML file
      * @return Map of flattened keys to values
      */
-    static std::map<std::string, std::string> parseSimpleTomlFlat(const std::filesystem::path& path);
+    static std::map<std::string, std::string>
+    parseSimpleTomlFlat(const std::filesystem::path& path);
 
     /**
      * @brief Read embedding dimension from vector database.

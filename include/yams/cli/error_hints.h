@@ -10,14 +10,14 @@ namespace yams::cli {
  * Provides actionable hints based on error codes and message patterns.
  */
 struct ErrorHint {
-    std::string hint;     // Short actionable suggestion
-    std::string command;  // Suggested command to run (if any)
-    std::string docLink;  // Documentation link (if any)
+    std::string hint;    // Short actionable suggestion
+    std::string command; // Suggested command to run (if any)
+    std::string docLink; // Documentation link (if any)
 };
 
 /**
  * Get an actionable hint for a given error.
- * 
+ *
  * @param code The ErrorCode enum value
  * @param message The error message (used for pattern matching)
  * @param command The command that was executing (for context)
@@ -132,7 +132,9 @@ inline ErrorHint getErrorHint(ErrorCode code, std::string_view message,
 
         case ErrorCode::InvalidArgument:
             hint.hint = "Check command syntax";
-            hint.command = command.empty() ? "yams --help" : std::string("yams ") + std::string(command) + " --help";
+            hint.command = command.empty()
+                               ? "yams --help"
+                               : std::string("yams ") + std::string(command) + " --help";
             break;
 
         case ErrorCode::CorruptedData:
@@ -155,7 +157,7 @@ inline ErrorHint getErrorHint(ErrorCode code, std::string_view message,
 
 /**
  * Format an error message with an actionable hint.
- * 
+ *
  * @param code The ErrorCode enum value
  * @param message The error message
  * @param command The command that was executing (for context)

@@ -192,9 +192,7 @@ private:
         return colorize(std::string(icon) + " " + text, color);
     }
 
-    std::string neutral(const std::string& text) const {
-        return colorize(text, Ansi::WHITE);
-    }
+    std::string neutral(const std::string& text) const { return colorize(text, Ansi::WHITE); }
 
     // Render JSON output for daemon stats
     void renderDaemonStatsJson(const yams::daemon::StatusResponse& st,
@@ -213,8 +211,8 @@ private:
             j["cas_compress_saved_bytes"] = compressSaved;
 
         // Disk usage breakdown
-        const char* overheadKeys[] = {"metadataPhysicalBytes", "indexPhysicalBytes",
-                                      "vectorPhysicalBytes", "logsTmpPhysicalBytes",
+        const char* overheadKeys[] = {"metadataPhysicalBytes",       "indexPhysicalBytes",
+                                      "vectorPhysicalBytes",         "logsTmpPhysicalBytes",
                                       "storageObjectsPhysicalBytes", "storageRefsDbPhysicalBytes"};
         for (auto* k : overheadKeys) {
             int64_t val = safeGet(k);
@@ -284,7 +282,8 @@ private:
             double ratio = static_cast<double>(logicalBytes) / static_cast<double>(physicalBytes);
             std::ostringstream ratioStr;
             ratioStr << std::fixed << std::setprecision(2) << ratio << ":1";
-            Severity sev = ratio >= 1.5 ? Severity::Good : (ratio >= 1.0 ? Severity::Warn : Severity::Bad);
+            Severity sev =
+                ratio >= 1.5 ? Severity::Good : (ratio >= 1.0 ? Severity::Warn : Severity::Bad);
             overview.push_back({"Compression", paint(sev, ratioStr.str()), ""});
         }
         render_rows(std::cout, overview);
@@ -299,22 +298,31 @@ private:
             std::vector<Row> dedupRows;
 
             if (totalSaved > 0) {
-                dedupRows.push_back({"Total saved", paint(Severity::Good, format_bytes(static_cast<uint64_t>(totalSaved))), ""});
+                dedupRows.push_back(
+                    {"Total saved",
+                     paint(Severity::Good, format_bytes(static_cast<uint64_t>(totalSaved))), ""});
                 if (dedupSaved > 0) {
-                    dedupRows.push_back({"  Dedup savings", format_bytes(static_cast<uint64_t>(dedupSaved)), "block-level"});
+                    dedupRows.push_back({"  Dedup savings",
+                                         format_bytes(static_cast<uint64_t>(dedupSaved)),
+                                         "block-level"});
                 }
                 if (compressSaved > 0) {
-                    dedupRows.push_back({"  Compress savings", format_bytes(static_cast<uint64_t>(compressSaved)), "lz4/zstd"});
+                    dedupRows.push_back({"  Compress savings",
+                                         format_bytes(static_cast<uint64_t>(compressSaved)),
+                                         "lz4/zstd"});
                 }
             }
 
             int64_t totalBlocks = safeGet("cas_total_blocks");
             int64_t uniqueBlocks = safeGet("cas_unique_blocks");
             if (totalBlocks > 0 || uniqueBlocks > 0) {
-                dedupRows.push_back({"Total blocks", format_number(static_cast<uint64_t>(totalBlocks)), ""});
-                dedupRows.push_back({"Unique blocks", format_number(static_cast<uint64_t>(uniqueBlocks)), ""});
+                dedupRows.push_back(
+                    {"Total blocks", format_number(static_cast<uint64_t>(totalBlocks)), ""});
+                dedupRows.push_back(
+                    {"Unique blocks", format_number(static_cast<uint64_t>(uniqueBlocks)), ""});
                 if (uniqueBlocks > 0 && totalBlocks > uniqueBlocks) {
-                    double dedupRatio = static_cast<double>(totalBlocks) / static_cast<double>(uniqueBlocks);
+                    double dedupRatio =
+                        static_cast<double>(totalBlocks) / static_cast<double>(uniqueBlocks);
                     std::ostringstream ratioStr;
                     ratioStr << std::fixed << std::setprecision(2) << dedupRatio << ":1";
                     dedupRows.push_back({"Dedup ratio", ratioStr.str(), ""});
@@ -338,31 +346,41 @@ private:
             std::vector<Row> diskRows;
 
             if (storageObjects > 0) {
-                diskRows.push_back({"CAS objects", format_bytes(static_cast<uint64_t>(storageObjects)), "content blocks"});
+                diskRows.push_back({"CAS objects",
+                                    format_bytes(static_cast<uint64_t>(storageObjects)),
+                                    "content blocks"});
             }
             if (storageRefsDb > 0) {
-                diskRows.push_back({"Reference DB", format_bytes(static_cast<uint64_t>(storageRefsDb)), "refs.db"});
+                diskRows.push_back({"Reference DB",
+                                    format_bytes(static_cast<uint64_t>(storageRefsDb)), "refs.db"});
             }
             if (metadataBytes > 0) {
-                diskRows.push_back({"Metadata", format_bytes(static_cast<uint64_t>(metadataBytes)), "metadata.db"});
+                diskRows.push_back({"Metadata", format_bytes(static_cast<uint64_t>(metadataBytes)),
+                                    "metadata.db"});
             }
             if (indexBytes > 0) {
-                diskRows.push_back({"Search index", format_bytes(static_cast<uint64_t>(indexBytes)), "tantivy"});
+                diskRows.push_back(
+                    {"Search index", format_bytes(static_cast<uint64_t>(indexBytes)), "tantivy"});
             }
             if (vectorBytes > 0) {
-                diskRows.push_back({"Vector DB", format_bytes(static_cast<uint64_t>(vectorBytes)), "vectors.db"});
+                diskRows.push_back(
+                    {"Vector DB", format_bytes(static_cast<uint64_t>(vectorBytes)), "vectors.db"});
             }
             if (vectorIndexBytes > 0) {
-                diskRows.push_back({"Vector index", format_bytes(static_cast<uint64_t>(vectorIndexBytes)), "HNSW"});
+                diskRows.push_back({"Vector index",
+                                    format_bytes(static_cast<uint64_t>(vectorIndexBytes)), "HNSW"});
             }
             if (logsTmpBytes > 0) {
-                diskRows.push_back({"Logs/tmp", format_bytes(static_cast<uint64_t>(logsTmpBytes)), ""});
+                diskRows.push_back(
+                    {"Logs/tmp", format_bytes(static_cast<uint64_t>(logsTmpBytes)), ""});
             }
 
             // Total overhead (non-CAS)
-            int64_t overhead = metadataBytes + indexBytes + vectorBytes + vectorIndexBytes + logsTmpBytes + storageRefsDb;
+            int64_t overhead = metadataBytes + indexBytes + vectorBytes + vectorIndexBytes +
+                               logsTmpBytes + storageRefsDb;
             if (overhead > 0 && storageObjects > 0) {
-                double overheadPct = 100.0 * static_cast<double>(overhead) / static_cast<double>(storageObjects + overhead);
+                double overheadPct = 100.0 * static_cast<double>(overhead) /
+                                     static_cast<double>(storageObjects + overhead);
                 std::ostringstream pctStr;
                 pctStr << std::fixed << std::setprecision(1) << overheadPct << "% overhead";
                 diskRows.push_back({"", "", pctStr.str()});
@@ -376,7 +394,9 @@ private:
             std::vector<Row> vecRows;
 
             Severity sev = st.embeddingAvailable ? Severity::Good : Severity::Warn;
-            vecRows.push_back({"Embeddings", paint(sev, st.embeddingAvailable ? "Available" : "Unavailable"), ""});
+            vecRows.push_back({"Embeddings",
+                               paint(sev, st.embeddingAvailable ? "Available" : "Unavailable"),
+                               ""});
 
             if (!st.embeddingModel.empty()) {
                 vecRows.push_back({"Model", st.embeddingModel, ""});
@@ -393,7 +413,8 @@ private:
 
             int64_t vectorCount = safeGet("vector_count");
             if (vectorCount > 0) {
-                vecRows.push_back({"Vectors indexed", format_number(static_cast<uint64_t>(vectorCount)), ""});
+                vecRows.push_back(
+                    {"Vectors indexed", format_number(static_cast<uint64_t>(vectorCount)), ""});
             }
             render_rows(std::cout, vecRows);
         }
@@ -403,7 +424,8 @@ private:
             std::cout << "\n" << section_header("Search Metrics") << "\n\n";
             std::vector<Row> searchRows;
 
-            searchRows.push_back({"Queries executed", format_number(st.searchMetrics.executed), ""});
+            searchRows.push_back(
+                {"Queries executed", format_number(st.searchMetrics.executed), ""});
 
             if (st.searchMetrics.active > 0 || st.searchMetrics.queued > 0) {
                 std::ostringstream active;
@@ -411,25 +433,32 @@ private:
                 if (st.searchMetrics.queued > 0) {
                     active << " · " << st.searchMetrics.queued << " queued";
                 }
-                Severity sev = st.searchMetrics.queued > 50 ? Severity::Bad
-                             : (st.searchMetrics.queued > 10 ? Severity::Warn : Severity::Good);
+                Severity sev =
+                    st.searchMetrics.queued > 50
+                        ? Severity::Bad
+                        : (st.searchMetrics.queued > 10 ? Severity::Warn : Severity::Good);
                 searchRows.push_back({"Active", paint(sev, active.str()), ""});
             }
 
             if (st.searchMetrics.cacheHitRate > 0) {
                 std::ostringstream hitRate;
-                hitRate << std::fixed << std::setprecision(1) << (st.searchMetrics.cacheHitRate * 100.0) << "%";
-                Severity sev = st.searchMetrics.cacheHitRate >= 0.5 ? Severity::Good
-                             : (st.searchMetrics.cacheHitRate >= 0.2 ? Severity::Warn : Severity::Bad);
+                hitRate << std::fixed << std::setprecision(1)
+                        << (st.searchMetrics.cacheHitRate * 100.0) << "%";
+                Severity sev =
+                    st.searchMetrics.cacheHitRate >= 0.5
+                        ? Severity::Good
+                        : (st.searchMetrics.cacheHitRate >= 0.2 ? Severity::Warn : Severity::Bad);
                 searchRows.push_back({"Cache hit rate", paint(sev, hitRate.str()), ""});
             }
 
             if (st.searchMetrics.avgLatencyUs > 0) {
                 std::ostringstream latency;
                 if (st.searchMetrics.avgLatencyUs >= 1000000) {
-                    latency << std::fixed << std::setprecision(2) << (st.searchMetrics.avgLatencyUs / 1000000.0) << "s";
+                    latency << std::fixed << std::setprecision(2)
+                            << (st.searchMetrics.avgLatencyUs / 1000000.0) << "s";
                 } else if (st.searchMetrics.avgLatencyUs >= 1000) {
-                    latency << std::fixed << std::setprecision(1) << (st.searchMetrics.avgLatencyUs / 1000.0) << "ms";
+                    latency << std::fixed << std::setprecision(1)
+                            << (st.searchMetrics.avgLatencyUs / 1000.0) << "ms";
                 } else {
                     latency << st.searchMetrics.avgLatencyUs << "µs";
                 }
@@ -510,7 +539,8 @@ private:
 
         // Convert size histogram to readable format
         for (const auto& [size, count] : sizeHistogram) {
-            stats.blockSizeDistribution[format_bytes(size) + "-" + format_bytes(size + 1024)] = count;
+            stats.blockSizeDistribution[format_bytes(size) + "-" + format_bytes(size + 1024)] =
+                count;
         }
 
         // Sort and get top referenced blocks
@@ -550,16 +580,21 @@ private:
 
         std::ostringstream ratioStr;
         ratioStr << std::fixed << std::setprecision(2) << stats.deduplicationRatio << ":1";
-        Severity ratioSev = stats.deduplicationRatio >= 1.5 ? Severity::Good
-                          : (stats.deduplicationRatio >= 1.0 ? Severity::Warn : Severity::Bad);
+        Severity ratioSev =
+            stats.deduplicationRatio >= 1.5
+                ? Severity::Good
+                : (stats.deduplicationRatio >= 1.0 ? Severity::Warn : Severity::Bad);
         dedupRows.push_back({"Dedup ratio", paint(ratioSev, ratioStr.str()), ""});
 
         double savings = stats.spacesSavings;
-        if (savings < 0.0) savings = 0.0;
-        if (savings > 0.999999) savings = 0.999999;
+        if (savings < 0.0)
+            savings = 0.0;
+        if (savings > 0.999999)
+            savings = 0.999999;
         std::ostringstream savingsStr;
         savingsStr << std::fixed << std::setprecision(1) << (savings * 100.0) << "%";
-        Severity savingsSev = savings >= 0.3 ? Severity::Good : (savings >= 0.1 ? Severity::Warn : Severity::Bad);
+        Severity savingsSev =
+            savings >= 0.3 ? Severity::Good : (savings >= 0.1 ? Severity::Warn : Severity::Bad);
         dedupRows.push_back({"Space savings", paint(savingsSev, savingsStr.str()), ""});
 
         dedupRows.push_back({"Logical size", localFormatSize(stats.deduplicatedSize), ""});
@@ -605,7 +640,8 @@ private:
         healthRows.push_back({"Unreferenced", paint(unrefSev, unrefPctStr.str()), ""});
 
         if (unrefPct > 0.10) {
-            healthRows.push_back({"Status", paint(Severity::Warn, "Consider running garbage collection"), ""});
+            healthRows.push_back(
+                {"Status", paint(Severity::Warn, "Consider running garbage collection"), ""});
         } else {
             healthRows.push_back({"Status", paint(Severity::Good, "Healthy"), ""});
         }

@@ -27,14 +27,13 @@
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/core/types.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
+#include <yams/daemon/components/DatabaseManager.h>
 #include <yams/daemon/components/EmbeddingProviderFsm.h>
 #include <yams/daemon/components/EmbeddingService.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PluginHostFsm.h>
 #include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/PoolManager.h>
-#include <yams/daemon/components/VectorSystemManager.h>
-#include <yams/daemon/components/DatabaseManager.h>
 #include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/SearchEngineFsm.h>
 #include <yams/daemon/components/SearchEngineManager.h>
@@ -42,6 +41,7 @@
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningConfig.h>
+#include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/components/WalMetricsProvider.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/daemon.h>
@@ -114,7 +114,8 @@ public:
         // PBI-088: Delegate to DatabaseManager if available
         if (databaseManager_) {
             auto repo = databaseManager_->getMetadataRepo();
-            if (repo) return repo;
+            if (repo)
+                return repo;
         }
         return metadataRepo_; // Fallback to old member
     }
@@ -127,7 +128,8 @@ public:
         // PBI-088: Delegate to VectorSystemManager if available
         if (vectorSystemManager_) {
             auto mgr = vectorSystemManager_->getVectorIndexManager();
-            if (mgr) return mgr;
+            if (mgr)
+                return mgr;
         }
         return vectorIndexManager_; // Fallback to old member
     }
@@ -136,7 +138,8 @@ public:
         // PBI-088: Delegate to VectorSystemManager if available
         if (vectorSystemManager_) {
             auto db = vectorSystemManager_->getVectorDatabase();
-            if (db) return db;
+            if (db)
+                return db;
         }
         return vectorDatabase_; // Fallback to old member
     }
@@ -287,7 +290,8 @@ public:
         // PBI-088: Delegate to DatabaseManager if available
         if (databaseManager_) {
             auto store = databaseManager_->getKgStore();
-            if (store) return store;
+            if (store)
+                return store;
         }
         return kgStore_; // Fallback to old member
     }

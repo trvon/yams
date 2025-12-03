@@ -109,8 +109,8 @@ TEST(InitCommandCLI, NonInteractiveFlagWorks) {
     auto tempDir = fs::temp_directory_path() / "yams-test-init-ni";
     fs::create_directories(tempDir);
 
-    const char* argv[] = {"yams", "--data-dir", tempDir.string().c_str(), "init",
-                          "--non-interactive", "--no-keygen"};
+    const char* argv[] = {"yams", "--data-dir",        tempDir.string().c_str(),
+                          "init", "--non-interactive", "--no-keygen"};
     // Note: We just verify it doesn't crash; actual init may fail due to missing deps
     (void)cli.run(static_cast<int>(std::size(argv)), const_cast<char**>(argv));
 
@@ -126,8 +126,8 @@ TEST(InitCommandCLI, AutoFlagAccepted) {
     auto tempDir = fs::temp_directory_path() / "yams-test-init-auto";
     fs::create_directories(tempDir);
 
-    const char* argv[] = {"yams", "--data-dir", tempDir.string().c_str(), "init", "--auto",
-                          "--no-keygen"};
+    const char* argv[] = {"yams", "--data-dir", tempDir.string().c_str(),
+                          "init", "--auto",     "--no-keygen"};
     // Note: We just verify it doesn't crash; actual init may fail due to missing deps
     (void)cli.run(static_cast<int>(std::size(argv)), const_cast<char**>(argv));
 
@@ -142,8 +142,9 @@ TEST(InitCommandCLI, ForceFlagAccepted) {
     auto tempDir = fs::temp_directory_path() / "yams-test-init-force";
     fs::create_directories(tempDir);
 
-    const char* argv[] = {"yams", "--data-dir", tempDir.string().c_str(), "init",
-                          "--non-interactive", "--force", "--no-keygen"};
+    const char* argv[] = {"yams",       "--data-dir",        tempDir.string().c_str(),
+                          "init",       "--non-interactive", "--force",
+                          "--no-keygen"};
     (void)cli.run(static_cast<int>(std::size(argv)), const_cast<char**>(argv));
 
     // Cleanup

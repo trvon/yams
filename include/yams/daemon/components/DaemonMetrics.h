@@ -125,8 +125,8 @@ struct MetricsSnapshot {
     std::uint64_t checkpointVectorCount{0};
     std::uint64_t checkpointHotzoneCount{0};
     std::uint64_t checkpointErrorCount{0};
-    std::string lastVectorCheckpointTime;   // ISO8601 timestamp
-    std::string lastHotzoneCheckpointTime;  // ISO8601 timestamp
+    std::string lastVectorCheckpointTime;  // ISO8601 timestamp
+    std::string lastHotzoneCheckpointTime; // ISO8601 timestamp
 
     // Content store & compression snapshot (best-effort)
     std::uint64_t storeObjects{0};

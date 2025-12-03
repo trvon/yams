@@ -6,9 +6,9 @@
 #include <filesystem>
 #include <gtest/gtest.h>
 
+#include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/StateComponent.h>
-#include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/daemon.h>
 
 #ifdef _WIN32

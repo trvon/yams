@@ -180,9 +180,9 @@ struct QueryCorrection {
  * Relevance explanation for search results
  */
 struct RelevanceExplanation {
-    std::string description;                         ///< Human-readable explanation
-    std::map<std::string, float> componentScores;    ///< Per-component score breakdown
-    std::vector<std::string> matchedFeatures;        ///< Features that contributed to the match
+    std::string description;                      ///< Human-readable explanation
+    std::map<std::string, float> componentScores; ///< Per-component score breakdown
+    std::vector<std::string> matchedFeatures;     ///< Features that contributed to the match
 };
 
 /**

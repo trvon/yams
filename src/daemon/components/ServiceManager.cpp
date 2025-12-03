@@ -47,23 +47,23 @@
 #include <yams/config/config_helpers.h>
 #include <yams/core/types.h>
 #include <yams/daemon/components/BackgroundTaskManager.h>
+#include <yams/daemon/components/CheckpointManager.h>
+#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
+#include <yams/daemon/components/DatabaseManager.h>
 #include <yams/daemon/components/EmbeddingService.h>
 #include <yams/daemon/components/EntityGraphService.h>
 #include <yams/daemon/components/GraphComponent.h>
 #include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/init_utils.hpp>
 #include <yams/daemon/components/InternalEventBus.h>
+#include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/PoolManager.h>
 #include <yams/daemon/components/ServiceManager.h>
-#include <yams/daemon/components/CheckpointManager.h>
-#include <yams/daemon/components/ConfigResolver.h>
-#include <yams/daemon/components/DatabaseManager.h>
-#include <yams/daemon/components/PluginManager.h>
-#include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/ipc/retrieval_session.h>
 
 #include <yams/daemon/resource/abi_content_extractor_adapter.h>
@@ -498,8 +498,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                 std::chrono::seconds(TuneAdvisor::checkpointIntervalSeconds());
             checkpointConfig.vector_index_insert_threshold =
                 TuneAdvisor::checkpointInsertThreshold();
-            checkpointConfig.enable_hotzone_persistence =
-                TuneAdvisor::enableHotzoneCheckpoint();
+            checkpointConfig.enable_hotzone_persistence = TuneAdvisor::enableHotzoneCheckpoint();
             checkpointConfig.data_dir = config_.dataDir;
 
             CheckpointManager::Dependencies checkpointDeps;
@@ -508,8 +507,8 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             checkpointDeps.executor = workCoordinator_->getExecutor();
             checkpointDeps.stopRequested = std::make_shared<std::atomic<bool>>(false);
 
-            checkpointManager_ = std::make_unique<CheckpointManager>(
-                std::move(checkpointConfig), std::move(checkpointDeps));
+            checkpointManager_ = std::make_unique<CheckpointManager>(std::move(checkpointConfig),
+                                                                     std::move(checkpointDeps));
             spdlog::debug("[ServiceManager] CheckpointManager created");
         } catch (const std::exception& e) {
             spdlog::warn("[ServiceManager] Failed to create extracted managers: {}", e.what());
@@ -2424,8 +2423,8 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
 
             // Phase 2.4: Use SearchEngineManager instead of co_buildEngine
             auto rebuildResult = co_await searchEngineManager_.buildEngine(
-                metadataRepo_, vectorDatabase_, vectorIndexManager_, embGen, "rebuild", build_timeout,
-                getWorkerExecutor());
+                metadataRepo_, vectorDatabase_, vectorIndexManager_, embGen, "rebuild",
+                build_timeout, getWorkerExecutor());
 
             if (rebuildResult.has_value()) {
                 const auto& rebuilt = rebuildResult.value();
@@ -2827,8 +2826,9 @@ ServiceManager::co_buildEngine(int timeout_ms, const boost::asio::cancellation_s
         } catch (...) {
         }
     }
-    auto res = co_await searchEngineManager_.buildEngine(
-        metadataRepo_, vectorDatabase_, vectorIndexManager_, gen, "co_buildEngine", timeout_ms, exec);
+    auto res = co_await searchEngineManager_.buildEngine(metadataRepo_, vectorDatabase_,
+                                                         vectorIndexManager_, gen, "co_buildEngine",
+                                                         timeout_ms, exec);
     if (res.has_value()) {
         co_return res.value();
     }

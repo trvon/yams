@@ -33,6 +33,7 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 // Timers and coroutine executor helpers for guard race
+#include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
 
@@ -1446,7 +1447,8 @@ public:
             items.reserve(std::min(resp.results.size(), limit_));
             if (!includeGlobsExpanded.empty()) {
                 for (const auto& r : resp.results) {
-                    if (items.size() >= limit_) break;
+                    if (items.size() >= limit_)
+                        break;
                     std::string path =
                         !r.path.empty()
                             ? r.path
@@ -1511,8 +1513,8 @@ public:
                     std::cout << "\n    " << truncateSnippet(r.snippet, 200);
                 std::cout << "\n";
             }
-            std::cout << "Found " << items.size() << " results in " << resp.elapsed.count()
-                      << "ms" << std::endl;
+            std::cout << "Found " << items.size() << " results in " << resp.elapsed.count() << "ms"
+                      << std::endl;
             return Result<void>();
         };
 
@@ -1535,14 +1537,33 @@ public:
                 std::make_shared<std::promise<Result<yams::daemon::SearchResponse>>>();
             auto fut = prom->get_future();
 
+            // Shared timer that can be cancelled when streaming wins
+            auto timer = std::make_shared<boost::asio::steady_timer>(getExecutor());
+            timer->expires_after(std::chrono::seconds(2));
+
+            // Track completion of both coroutines to ensure clean shutdown
+            auto completionCount = std::make_shared<std::atomic_int>(0);
+            auto allDone = std::make_shared<std::promise<void>>();
+            auto allDoneFut = allDone->get_future();
+            auto signalDone = [completionCount, allDone]() {
+                if (completionCount->fetch_add(1) == 1) {
+                    allDone->set_value();
+                }
+            };
+
             // Launch streaming
             boost::asio::co_spawn(
                 getExecutor(),
-                [&, decided, prom, leaseHandle]() -> boost::asio::awaitable<void> {
+                [&, decided, prom, leaseHandle, timer,
+                 signalDone]() -> boost::asio::awaitable<void> {
                     auto& cliRef = **leaseHandle;
                     auto sr = co_await cliRef.streamingSearch(dreq);
-                    if (!decided->exchange(true))
+                    if (!decided->exchange(true)) {
                         prom->set_value(std::move(sr));
+                        // Cancel the fallback timer since streaming won
+                        timer->cancel();
+                    }
+                    signalDone();
                     co_return;
                 },
                 boost::asio::detached);
@@ -1550,16 +1571,19 @@ public:
             // Launch delayed unary fallback (2 seconds after start)
             boost::asio::co_spawn(
                 getExecutor(),
-                [&, decided, prom, leaseHandle]() -> boost::asio::awaitable<void> {
-                    boost::asio::steady_timer t(co_await boost::asio::this_coro::executor);
-                    t.expires_after(std::chrono::seconds(2));
-                    co_await t.async_wait(boost::asio::use_awaitable);
-                    if (!decided->load()) {
+                [&, decided, prom, leaseHandle, timer,
+                 signalDone]() -> boost::asio::awaitable<void> {
+                    boost::system::error_code ec;
+                    co_await timer->async_wait(
+                        boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+                    // Only proceed if timer wasn't cancelled and no result yet
+                    if (!ec && !decided->load()) {
                         auto& cliRef = **leaseHandle;
                         auto ur = co_await cliRef.call(dreq);
                         if (!decided->exchange(true))
                             prom->set_value(std::move(ur));
                     }
+                    signalDone();
                     co_return;
                 },
                 boost::asio::detached);
@@ -1571,6 +1595,11 @@ public:
             } else {
                 result_stream_or_unary = Error{ErrorCode::Timeout, "Search timed out"};
             }
+
+            // Wait for both coroutines to complete before returning to avoid use-after-free
+            // when io_context is destroyed. Give them a reasonable grace period.
+            timer->cancel(); // Ensure timer is cancelled if we got here via timeout
+            allDoneFut.wait_for(std::chrono::seconds(5));
         } else {
             // Non-streaming path (cold): unary only
             result_stream_or_unary = co_await client.call(dreq);

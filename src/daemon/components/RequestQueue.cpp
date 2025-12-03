@@ -17,8 +17,7 @@
 namespace yams::daemon {
 
 RequestQueue::RequestQueue(Config config, boost::asio::any_io_executor executor)
-    : config_(std::move(config)),
-      executor_(std::move(executor)),
+    : config_(std::move(config)), executor_(std::move(executor)),
       stop_flag_(std::make_shared<std::atomic<bool>>(false)) {
     spdlog::debug("[RequestQueue] Created with capacity={}, high_watermark={}%, low_watermark={}%",
                   config_.max_queue_size, config_.high_watermark_percent,
@@ -43,15 +42,13 @@ void RequestQueue::start() {
 
     // Launch eviction coroutine
     boost::asio::co_spawn(
-        executor_,
-        [this]() -> boost::asio::awaitable<void> { co_await eviction_loop(); },
+        executor_, [this]() -> boost::asio::awaitable<void> { co_await eviction_loop(); },
         boost::asio::detached);
 
     // Launch aging coroutine (promotes stale low-priority requests)
     if (config_.enable_priority_queuing) {
         boost::asio::co_spawn(
-            executor_,
-            [this]() -> boost::asio::awaitable<void> { co_await aging_loop(); },
+            executor_, [this]() -> boost::asio::awaitable<void> { co_await aging_loop(); },
             boost::asio::detached);
     }
 }
@@ -147,11 +144,11 @@ std::optional<QueuedRequest> RequestQueue::try_dequeue() {
             // Update metrics
             metrics_.dequeued.fetch_add(1, std::memory_order_relaxed);
             auto now = std::chrono::steady_clock::now();
-            auto wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                               now - request.enqueued_at)
-                               .count();
+            auto wait_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - request.enqueued_at)
+                    .count();
             metrics_.total_wait_time_ms.fetch_add(static_cast<uint64_t>(wait_ms),
-                                                   std::memory_order_relaxed);
+                                                  std::memory_order_relaxed);
 
             update_depth_metrics();
             check_watermarks();
@@ -227,8 +224,7 @@ uint32_t RequestQueue::calculate_retry_after_ms() const noexcept {
     // Add component based on average wait time
     uint64_t dequeued = metrics_.dequeued.load(std::memory_order_relaxed);
     if (dequeued > 0) {
-        uint64_t avg_wait =
-            metrics_.total_wait_time_ms.load(std::memory_order_relaxed) / dequeued;
+        uint64_t avg_wait = metrics_.total_wait_time_ms.load(std::memory_order_relaxed) / dequeued;
         // Add 10% of average wait time, capped at 500ms
         base_ms += std::min<uint32_t>(static_cast<uint32_t>(avg_wait / 10), 500);
     }

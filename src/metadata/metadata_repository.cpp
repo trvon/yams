@@ -448,7 +448,8 @@ Result<std::optional<DocumentInfo>> MetadataRepository::getDocument(int64_t id) 
 }
 
 // Internal helper that uses an existing connection to avoid nested connection acquisition deadlock
-Result<std::optional<DocumentInfo>> MetadataRepository::getDocumentInternal(Database& db, int64_t id) {
+Result<std::optional<DocumentInfo>> MetadataRepository::getDocumentInternal(Database& db,
+                                                                            int64_t id) {
     using yams::metadata::sql::QuerySpec;
     const char* cols = hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
     QuerySpec spec{};

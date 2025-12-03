@@ -215,8 +215,9 @@ size_t ConfigResolver::readVectorMaxElements() {
                 spdlog::info("[ConfigResolver] Using YAMS_VECTOR_MAX_ELEMENTS={}", val);
                 return val;
             }
-            spdlog::warn("[ConfigResolver] YAMS_VECTOR_MAX_ELEMENTS={} out of range [{}, {}], using default",
-                         val, kMinMaxElements, kMaxMaxElements);
+            spdlog::warn(
+                "[ConfigResolver] YAMS_VECTOR_MAX_ELEMENTS={} out of range [{}, {}], using default",
+                val, kMinMaxElements, kMaxMaxElements);
         } catch (...) {
             spdlog::warn("[ConfigResolver] Invalid YAMS_VECTOR_MAX_ELEMENTS value, using default");
         }
@@ -231,10 +232,13 @@ size_t ConfigResolver::readVectorMaxElements() {
             if (it != kv.end() && !it->second.empty()) {
                 size_t val = std::stoull(it->second);
                 if (val >= kMinMaxElements && val <= kMaxMaxElements) {
-                    spdlog::info("[ConfigResolver] Using vector_database.max_elements={} from config", val);
+                    spdlog::info(
+                        "[ConfigResolver] Using vector_database.max_elements={} from config", val);
                     return val;
                 }
-                spdlog::warn("[ConfigResolver] vector_database.max_elements={} out of range, using default", val);
+                spdlog::warn(
+                    "[ConfigResolver] vector_database.max_elements={} out of range, using default",
+                    val);
             }
         } catch (...) {
             // Ignore parse errors

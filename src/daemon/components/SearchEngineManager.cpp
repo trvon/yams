@@ -62,12 +62,12 @@ void SearchEngineManager::refreshSnapshot() {
 }
 
 boost::asio::awaitable<Result<std::shared_ptr<yams::search::SearchEngine>>>
-SearchEngineManager::buildEngine(
-    std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo,
-    std::shared_ptr<yams::vector::VectorDatabase> vectorDatabase,
-    std::shared_ptr<yams::vector::VectorIndexManager> vectorManager,
-    std::shared_ptr<yams::vector::EmbeddingGenerator> embeddingGen,
-    const std::string& reason, int timeoutMs, boost::asio::any_io_executor workerExecutor) {
+SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo,
+                                 std::shared_ptr<yams::vector::VectorDatabase> vectorDatabase,
+                                 std::shared_ptr<yams::vector::VectorIndexManager> vectorManager,
+                                 std::shared_ptr<yams::vector::EmbeddingGenerator> embeddingGen,
+                                 const std::string& reason, int timeoutMs,
+                                 boost::asio::any_io_executor workerExecutor) {
     using namespace boost::asio::experimental::awaitable_operators;
 
     auto ex = co_await boost::asio::this_coro::executor;

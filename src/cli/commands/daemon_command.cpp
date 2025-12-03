@@ -607,8 +607,9 @@ private:
             auto result = daemon::DaemonClient::startDaemon(config);
             if (!result) {
                 spdlog::error("Failed to start daemon: {}", result.error().message);
-                std::cerr << formatErrorWithHint(result.error().code, 
-                    "Failed to start daemon: " + result.error().message) << "\n";
+                std::cerr << formatErrorWithHint(result.error().code, "Failed to start daemon: " +
+                                                                          result.error().message)
+                          << "\n";
                 std::cerr << "  💡 Hint: Check if another daemon is already running\n";
                 std::cerr << "  📋 Try: yams daemon stop && yams daemon start\n";
                 std::exit(1);

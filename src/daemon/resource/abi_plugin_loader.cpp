@@ -59,14 +59,14 @@ static std::vector<std::string> parseInterfacesFromManifest(const std::string& m
             bool hasObjects = inner.find('{') != std::string::npos;
             if (hasObjects) {
                 std::regex idPattern("\\\"id\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
-                for (std::sregex_iterator it(inner.begin(), inner.end(), idPattern), end;
-                     it != end; ++it) {
+                for (std::sregex_iterator it(inner.begin(), inner.end(), idPattern), end; it != end;
+                     ++it) {
                     out.push_back((*it)[1].str());
                 }
             } else {
                 std::regex strItem("\\\"([^\\\"]+)\\\"");
-                for (std::sregex_iterator it(inner.begin(), inner.end(), strItem), end;
-                     it != end; ++it) {
+                for (std::sregex_iterator it(inner.begin(), inner.end(), strItem), end; it != end;
+                     ++it) {
                     out.push_back((*it)[1].str());
                 }
             }

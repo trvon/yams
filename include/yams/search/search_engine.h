@@ -66,11 +66,11 @@ struct SearchEngineConfig {
      * - CUSTOM: User-specified weights (ignores profile)
      */
     enum class CorpusProfile {
-        CODE,   // Primarily source code (.py, .cpp, .rs, .go, etc.)
-        PROSE,  // Primarily text documents (.md, .txt, .pdf)
-        DOCS,   // Technical documentation (mixed code snippets + prose)
-        MIXED,  // Balanced corpus (default)
-        CUSTOM  // User-specified weights
+        CODE,  // Primarily source code (.py, .cpp, .rs, .go, etc.)
+        PROSE, // Primarily text documents (.md, .txt, .pdf)
+        DOCS,  // Technical documentation (mixed code snippets + prose)
+        MIXED, // Balanced corpus (default)
+        CUSTOM // User-specified weights
     } corpusProfile = CorpusProfile::MIXED;
 
     // Component weights (0.0 = disabled, 1.0 = full weight)
@@ -127,44 +127,44 @@ struct SearchEngineConfig {
         config.corpusProfile = profile;
 
         switch (profile) {
-        case CorpusProfile::CODE:
-            // Code-heavy: prioritize symbols, paths, and structured search
-            config.fts5Weight = 0.20f;
-            config.pathTreeWeight = 0.20f;
-            config.symbolWeight = 0.30f;
-            config.kgWeight = 0.10f;
-            config.vectorWeight = 0.10f;
-            config.tagWeight = 0.05f;
-            config.metadataWeight = 0.05f;
-            break;
+            case CorpusProfile::CODE:
+                // Code-heavy: prioritize symbols, paths, and structured search
+                config.fts5Weight = 0.20f;
+                config.pathTreeWeight = 0.20f;
+                config.symbolWeight = 0.30f;
+                config.kgWeight = 0.10f;
+                config.vectorWeight = 0.10f;
+                config.tagWeight = 0.05f;
+                config.metadataWeight = 0.05f;
+                break;
 
-        case CorpusProfile::PROSE:
-            // Prose-heavy: prioritize FTS5 and semantic vector search
-            config.fts5Weight = 0.40f;
-            config.pathTreeWeight = 0.10f;
-            config.symbolWeight = 0.05f;
-            config.kgWeight = 0.05f;
-            config.vectorWeight = 0.25f;
-            config.tagWeight = 0.10f;
-            config.metadataWeight = 0.05f;
-            break;
+            case CorpusProfile::PROSE:
+                // Prose-heavy: prioritize FTS5 and semantic vector search
+                config.fts5Weight = 0.40f;
+                config.pathTreeWeight = 0.10f;
+                config.symbolWeight = 0.05f;
+                config.kgWeight = 0.05f;
+                config.vectorWeight = 0.25f;
+                config.tagWeight = 0.10f;
+                config.metadataWeight = 0.05f;
+                break;
 
-        case CorpusProfile::DOCS:
-            // Documentation: balanced FTS5/vector with moderate symbol/path
-            config.fts5Weight = 0.30f;
-            config.pathTreeWeight = 0.15f;
-            config.symbolWeight = 0.15f;
-            config.kgWeight = 0.10f;
-            config.vectorWeight = 0.20f;
-            config.tagWeight = 0.05f;
-            config.metadataWeight = 0.05f;
-            break;
+            case CorpusProfile::DOCS:
+                // Documentation: balanced FTS5/vector with moderate symbol/path
+                config.fts5Weight = 0.30f;
+                config.pathTreeWeight = 0.15f;
+                config.symbolWeight = 0.15f;
+                config.kgWeight = 0.10f;
+                config.vectorWeight = 0.20f;
+                config.tagWeight = 0.05f;
+                config.metadataWeight = 0.05f;
+                break;
 
-        case CorpusProfile::MIXED:
-        case CorpusProfile::CUSTOM:
-        default:
-            // Keep default balanced weights
-            break;
+            case CorpusProfile::MIXED:
+            case CorpusProfile::CUSTOM:
+            default:
+                // Keep default balanced weights
+                break;
         }
 
         return config;
@@ -183,22 +183,22 @@ struct SearchEngineConfig {
      * @param extensionCounts Map of extension -> count from getDocumentCountsByExtension()
      * @return Detected CorpusProfile
      */
-    static CorpusProfile detectProfile(
-        const std::unordered_map<std::string, int64_t>& extensionCounts) {
+    static CorpusProfile
+    detectProfile(const std::unordered_map<std::string, int64_t>& extensionCounts) {
         if (extensionCounts.empty()) {
             return CorpusProfile::MIXED;
         }
 
         // Code file extensions
         static const std::unordered_set<std::string> codeExtensions = {
-            ".py",   ".cpp", ".c",   ".h",     ".hpp",  ".cc",  ".cxx", ".rs", ".go",
-            ".js",   ".ts",  ".jsx", ".tsx",   ".java", ".kt",  ".rb",  ".cs", ".swift",
-            ".m",    ".mm",  ".php", ".scala", ".lua",  ".pl",  ".sh",  ".bash"};
+            ".py", ".cpp", ".c",   ".h",     ".hpp",  ".cc", ".cxx", ".rs",  ".go",
+            ".js", ".ts",  ".jsx", ".tsx",   ".java", ".kt", ".rb",  ".cs",  ".swift",
+            ".m",  ".mm",  ".php", ".scala", ".lua",  ".pl", ".sh",  ".bash"};
 
         // Prose/document extensions
         static const std::unordered_set<std::string> proseExtensions = {
-            ".md",  ".txt",  ".pdf",  ".docx", ".doc", ".rtf",
-            ".tex", ".html", ".htm",  ".xml",  ".rst", ".adoc"};
+            ".md",  ".txt",  ".pdf", ".docx", ".doc", ".rtf",
+            ".tex", ".html", ".htm", ".xml",  ".rst", ".adoc"};
 
         int64_t totalDocs = 0;
         int64_t codeDocs = 0;
@@ -265,7 +265,9 @@ struct SearchResponse {
     bool isDegraded = false;
 
     [[nodiscard]] bool hasResults() const { return !results.empty(); }
-    [[nodiscard]] bool isComplete() const { return timedOutComponents.empty() && failedComponents.empty(); }
+    [[nodiscard]] bool isComplete() const {
+        return timedOutComponents.empty() && failedComponents.empty();
+    }
 };
 
 /**
@@ -430,7 +432,7 @@ public:
         std::atomic<uint64_t> totalQueries{0};
         std::atomic<uint64_t> successfulQueries{0};
         std::atomic<uint64_t> failedQueries{0};
-        std::atomic<uint64_t> timedOutQueries{0};  // Parallel component timeouts
+        std::atomic<uint64_t> timedOutQueries{0}; // Parallel component timeouts
 
         // Component metrics
         std::atomic<uint64_t> fts5Queries{0};

@@ -1,5 +1,5 @@
-#include <spdlog/spdlog.h>
 #include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -439,7 +439,8 @@ public:
 
                 bool jsonMode = jsonOutput_ || (cli_ && cli_->getJsonOutput());
 
-                auto render = [&, jsonMode](const yams::daemon::GrepResponse& resp) -> Result<void> {
+                auto render = [&,
+                               jsonMode](const yams::daemon::GrepResponse& resp) -> Result<void> {
                     // JSON output mode
                     if (jsonMode) {
                         nlohmann::json j;

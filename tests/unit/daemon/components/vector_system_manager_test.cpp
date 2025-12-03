@@ -6,8 +6,8 @@
 #include <filesystem>
 #include <gtest/gtest.h>
 
-#include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/daemon.h>
 
 #ifdef _WIN32

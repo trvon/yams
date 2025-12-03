@@ -70,9 +70,7 @@ public:
     /**
      * Get the vector database instance
      */
-    std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const {
-        return vectorDatabase_;
-    }
+    std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const { return vectorDatabase_; }
 
     /**
      * Get the embedding generator instance

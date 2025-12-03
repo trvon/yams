@@ -842,7 +842,8 @@ std::string CompletionCommand::generatePowerShellCompletion() const {
     oss << "    # Complete commands at position 1\n";
     oss << "    if ($elements.Count -eq 1 -or ($elements.Count -eq 2 -and $wordToComplete -ne "
            "'')) {\n";
-    oss << "        $commands | Where-Object { $_.Name -like \"$wordToComplete*\" } | ForEach-Object "
+    oss << "        $commands | Where-Object { $_.Name -like \"$wordToComplete*\" } | "
+           "ForEach-Object "
            "{\n";
     oss << "            [System.Management.Automation.CompletionResult]::new(\n";
     oss << "                $_.Name, $_.Name, 'ParameterValue', $_.Description\n";

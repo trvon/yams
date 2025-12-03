@@ -1,5 +1,5 @@
-#include <spdlog/spdlog.h>
 #include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
 #include <algorithm>
 #include <future>
 #include <iomanip>
@@ -161,7 +161,7 @@ public:
                 if constexpr (std::is_same_v<std::decay_t<decltype(response)>,
                                              yams::daemon::DeleteResponse>) {
                     const auto& resp = response;
-                    
+
                     if (jsonMode) {
                         nlohmann::json j;
                         j["dry_run"] = resp.dryRun;
@@ -181,7 +181,7 @@ public:
                         std::cout << j.dump(2) << std::endl;
                         return Result<void>();
                     }
-                    
+
                     if (resp.dryRun) {
                         std::cout << "[DRY RUN] Documents that would be deleted:\n";
                         for (const auto& result : resp.results) {

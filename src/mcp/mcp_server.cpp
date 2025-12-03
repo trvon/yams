@@ -1270,8 +1270,8 @@ MessageResult MCPServer::handleRequest(const json& request) {
 }
 
 json MCPServer::initialize(const json& params) {
-    static const std::vector<std::string> kSupported = {
-        "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05", "2024-10-07"};
+    static const std::vector<std::string> kSupported = {"2025-11-25", "2025-06-18", "2025-03-26",
+                                                        "2024-11-05", "2024-10-07"};
     const std::string latest = "2025-11-25";
 
     // Extract requested version (optional)

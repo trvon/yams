@@ -46,8 +46,7 @@ struct ExternalPluginHost::Impl {
     std::set<std::filesystem::path> trusted;
     ExternalPluginHost::StateCallback state_callback;
 
-    Impl(ServiceManager* sm, const std::filesystem::path& trustFile,
-         ExternalPluginHostConfig cfg)
+    Impl(ServiceManager* sm, const std::filesystem::path& trustFile, ExternalPluginHostConfig cfg)
         : service_manager(sm), trust_file(trustFile), config(std::move(cfg)) {
         loadTrust();
     }
@@ -117,8 +116,7 @@ struct ExternalPluginHost::Impl {
         return desc;
     }
 
-    auto scanDirectory(const std::filesystem::path& dir)
-        -> Result<std::vector<PluginDescriptor>> {
+    auto scanDirectory(const std::filesystem::path& dir) -> Result<std::vector<PluginDescriptor>> {
         std::vector<PluginDescriptor> results;
 
         if (!fs::exists(dir) || !fs::is_directory(dir)) {
@@ -145,8 +143,8 @@ struct ExternalPluginHost::Impl {
         return results;
     }
 
-    auto load(const std::filesystem::path& file,
-              const std::string& configJson) -> Result<PluginDescriptor> {
+    auto load(const std::filesystem::path& file, const std::string& configJson)
+        -> Result<PluginDescriptor> {
         // Check if file exists
         if (!fs::exists(file)) {
             return Error{ErrorCode::FileNotFound, "Plugin file not found: " + file.string()};
@@ -154,8 +152,7 @@ struct ExternalPluginHost::Impl {
 
         // Check trust policy
         if (!trust_file.empty() && !isTrusted(file)) {
-            return Error{ErrorCode::Unauthorized,
-                         "Plugin is not in trust list: " + file.string()};
+            return Error{ErrorCode::Unauthorized, "Plugin is not in trust list: " + file.string()};
         }
 
         // Scan to get descriptor
@@ -171,8 +168,7 @@ struct ExternalPluginHost::Impl {
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (loaded.find(name) != loaded.end()) {
-                return Error{ErrorCode::InvalidState,
-                             "Plugin already loaded: " + name};
+                return Error{ErrorCode::InvalidState, "Plugin already loaded: " + name};
             }
         }
 
@@ -180,8 +176,7 @@ struct ExternalPluginHost::Impl {
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (loaded.size() >= config.maxPlugins) {
-                return Error{ErrorCode::ResourceExhausted,
-                             "Maximum number of plugins loaded"};
+                return Error{ErrorCode::ResourceExhausted, "Maximum number of plugins loaded"};
             }
         }
 
@@ -368,9 +363,8 @@ struct ExternalPluginHost::Impl {
     // ExternalPluginHost-specific methods
     //--------------------------------------------------------------------------
 
-    auto callRpc(const std::string& pluginName, const std::string& method,
-                 const json& params, std::chrono::milliseconds /*timeout*/)
-        -> Result<json> {
+    auto callRpc(const std::string& pluginName, const std::string& method, const json& params,
+                 std::chrono::milliseconds /*timeout*/) -> Result<json> {
         std::lock_guard<std::mutex> lock(mutex);
 
         auto it = loaded.find(pluginName);
@@ -425,9 +419,7 @@ struct ExternalPluginHost::Impl {
         return false;
     }
 
-    static auto supportedExtensions() -> std::vector<std::string> {
-        return {".py", ".js"};
-    }
+    static auto supportedExtensions() -> std::vector<std::string> { return {".py", ".js"}; }
 
     auto getStats(const std::string& name) const -> json {
         std::lock_guard<std::mutex> lock(mutex);
@@ -463,9 +455,7 @@ struct ExternalPluginHost::Impl {
         return stats;
     }
 
-    void setStateCallback(ExternalPluginHost::StateCallback cb) {
-        state_callback = std::move(cb);
-    }
+    void setStateCallback(ExternalPluginHost::StateCallback cb) { state_callback = std::move(cb); }
 
 private:
     extraction::PluginProcessConfig buildProcessConfig(const std::filesystem::path& file) const {
@@ -482,9 +472,8 @@ private:
             proc_config.args = {"-u", file.string()}; // -u for unbuffered
         } else if (ext == ".js") {
             // Node.js plugin
-            proc_config.executable = config.nodeExecutable.empty()
-                                         ? std::string("node")
-                                         : config.nodeExecutable.string();
+            proc_config.executable = config.nodeExecutable.empty() ? std::string("node")
+                                                                   : config.nodeExecutable.string();
             proc_config.args = {file.string()};
         } else {
             // Direct executable
@@ -547,15 +536,13 @@ private:
 // ExternalPluginHost implementation (delegates to Impl)
 //==============================================================================
 
-ExternalPluginHost::ExternalPluginHost(ServiceManager* sm,
-                                       const std::filesystem::path& trustFile,
+ExternalPluginHost::ExternalPluginHost(ServiceManager* sm, const std::filesystem::path& trustFile,
                                        ExternalPluginHostConfig config)
     : pImpl(std::make_unique<Impl>(sm, trustFile, std::move(config))) {}
 
 ExternalPluginHost::~ExternalPluginHost() = default;
 
-auto ExternalPluginHost::scanTarget(const std::filesystem::path& file)
-    -> Result<PluginDescriptor> {
+auto ExternalPluginHost::scanTarget(const std::filesystem::path& file) -> Result<PluginDescriptor> {
     return pImpl->scanTarget(file);
 }
 
@@ -564,8 +551,8 @@ auto ExternalPluginHost::scanDirectory(const std::filesystem::path& dir)
     return pImpl->scanDirectory(dir);
 }
 
-auto ExternalPluginHost::load(const std::filesystem::path& file,
-                              const std::string& configJson) -> Result<PluginDescriptor> {
+auto ExternalPluginHost::load(const std::filesystem::path& file, const std::string& configJson)
+    -> Result<PluginDescriptor> {
     return pImpl->load(file, configJson);
 }
 

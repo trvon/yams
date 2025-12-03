@@ -23,7 +23,9 @@ namespace yams::daemon {
 
 DatabaseManager::DatabaseManager(Dependencies deps) : deps_(std::move(deps)) {}
 
-DatabaseManager::~DatabaseManager() { shutdown(); }
+DatabaseManager::~DatabaseManager() {
+    shutdown();
+}
 
 Result<void> DatabaseManager::initialize() {
     // Actual initialization is deferred to open() which takes path and executor
@@ -47,8 +49,8 @@ void DatabaseManager::shutdown() {
 }
 
 boost::asio::awaitable<bool> DatabaseManager::open(const std::filesystem::path& dbPath,
-                                                    int timeoutMs,
-                                                    boost::asio::any_io_executor executor) {
+                                                   int timeoutMs,
+                                                   boost::asio::any_io_executor executor) {
     dbPath_ = dbPath;
 
     // Create database instance
@@ -129,7 +131,7 @@ boost::asio::awaitable<bool> DatabaseManager::open(const std::filesystem::path& 
 }
 
 boost::asio::awaitable<bool> DatabaseManager::migrate(int timeoutMs,
-                                                       boost::asio::any_io_executor executor) {
+                                                      boost::asio::any_io_executor executor) {
     if (!database_) {
         spdlog::warn("[DatabaseManager] Cannot migrate: database not open");
         co_return false;

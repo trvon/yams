@@ -339,8 +339,7 @@ public:
                                               const SearchParams& params = {});
 
 private:
-    Result<SearchResponse> searchInternal(const std::string& query,
-                                          const SearchParams& params);
+    Result<SearchResponse> searchInternal(const std::string& query, const SearchParams& params);
 
     // Component query methods
     Result<std::vector<ComponentResult>> queryFTS5(const std::string& query);
@@ -425,27 +424,23 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         std::future<Result<std::vector<ComponentResult>>> metaFuture;
 
         if (config_.fts5Weight > 0.0f) {
-            fts5Future = std::async(std::launch::async, [this, &query]() {
-                return queryFTS5(query);
-            });
+            fts5Future =
+                std::async(std::launch::async, [this, &query]() { return queryFTS5(query); });
         }
 
         if (config_.kgWeight > 0.0f && kgStore_) {
-            kgFuture = std::async(std::launch::async, [this, &query]() {
-                return queryKnowledgeGraph(query);
-            });
+            kgFuture = std::async(std::launch::async,
+                                  [this, &query]() { return queryKnowledgeGraph(query); });
         }
 
         if (config_.pathTreeWeight > 0.0f) {
-            pathFuture = std::async(std::launch::async, [this, &query]() {
-                return queryPathTree(query);
-            });
+            pathFuture =
+                std::async(std::launch::async, [this, &query]() { return queryPathTree(query); });
         }
 
         if (config_.symbolWeight > 0.0f) {
-            symbolFuture = std::async(std::launch::async, [this, &query]() {
-                return querySymbols(query);
-            });
+            symbolFuture =
+                std::async(std::launch::async, [this, &query]() { return querySymbols(query); });
         }
 
         if (config_.vectorWeight > 0.0f && queryEmbedding.has_value() && vectorIndex_) {
@@ -461,17 +456,16 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
 
         if (config_.metadataWeight > 0.0f) {
-            metaFuture = std::async(std::launch::async, [this, &params]() {
-                return queryMetadata(params);
-            });
+            metaFuture =
+                std::async(std::launch::async, [this, &params]() { return queryMetadata(params); });
         }
 
         enum class ComponentStatus { Success, Failed, TimedOut };
 
-        auto collectResults = [&](auto& future, const char* name,
-                                  std::atomic<uint64_t>& queryCount,
+        auto collectResults = [&](auto& future, const char* name, std::atomic<uint64_t>& queryCount,
                                   std::atomic<uint64_t>& avgTime) -> ComponentStatus {
-            if (!future.valid()) return ComponentStatus::Success;
+            if (!future.valid())
+                return ComponentStatus::Success;
 
             auto waitStart = std::chrono::steady_clock::now();
             auto status = future.wait_for(config_.componentTimeout);
@@ -480,8 +474,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 try {
                     auto results = future.get();
                     auto waitEnd = std::chrono::steady_clock::now();
-                    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
-                        waitEnd - waitStart).count();
+                    auto duration =
+                        std::chrono::duration_cast<std::chrono::microseconds>(waitEnd - waitStart)
+                            .count();
 
                     if (results) {
                         if (!results.value().empty()) {
@@ -494,7 +489,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                         avgTime.store(duration, std::memory_order_relaxed);
                         return ComponentStatus::Success;
                     } else {
-                        spdlog::debug("Parallel {} query returned error: {}", name, results.error().message);
+                        spdlog::debug("Parallel {} query returned error: {}", name,
+                                      results.error().message);
                         return ComponentStatus::Failed;
                     }
                 } catch (const std::exception& e) {
@@ -517,19 +513,32 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             }
         };
 
-        handleStatus(collectResults(fts5Future, "fts5", stats_.fts5Queries, stats_.avgFts5TimeMicros), "fts5");
-        handleStatus(collectResults(kgFuture, "kg", stats_.kgQueries, stats_.avgKgTimeMicros), "kg");
-        handleStatus(collectResults(pathFuture, "path", stats_.pathTreeQueries, stats_.avgPathTreeTimeMicros), "path");
-        handleStatus(collectResults(symbolFuture, "symbol", stats_.symbolQueries, stats_.avgSymbolTimeMicros), "symbol");
-        handleStatus(collectResults(vectorFuture, "vector", stats_.vectorQueries, stats_.avgVectorTimeMicros), "vector");
-        handleStatus(collectResults(tagFuture, "tag", stats_.tagQueries, stats_.avgTagTimeMicros), "tag");
-        handleStatus(collectResults(metaFuture, "metadata", stats_.metadataQueries, stats_.avgMetadataTimeMicros), "metadata");
+        handleStatus(
+            collectResults(fts5Future, "fts5", stats_.fts5Queries, stats_.avgFts5TimeMicros),
+            "fts5");
+        handleStatus(collectResults(kgFuture, "kg", stats_.kgQueries, stats_.avgKgTimeMicros),
+                     "kg");
+        handleStatus(collectResults(pathFuture, "path", stats_.pathTreeQueries,
+                                    stats_.avgPathTreeTimeMicros),
+                     "path");
+        handleStatus(collectResults(symbolFuture, "symbol", stats_.symbolQueries,
+                                    stats_.avgSymbolTimeMicros),
+                     "symbol");
+        handleStatus(collectResults(vectorFuture, "vector", stats_.vectorQueries,
+                                    stats_.avgVectorTimeMicros),
+                     "vector");
+        handleStatus(collectResults(tagFuture, "tag", stats_.tagQueries, stats_.avgTagTimeMicros),
+                     "tag");
+        handleStatus(collectResults(metaFuture, "metadata", stats_.metadataQueries,
+                                    stats_.avgMetadataTimeMicros),
+                     "metadata");
 
     } else {
         auto runSequential = [&](auto queryFn, const char* name, float weight,
                                  std::atomic<uint64_t>& queryCount,
                                  std::atomic<uint64_t>& avgTime) {
-            if (weight <= 0.0f) return;
+            if (weight <= 0.0f)
+                return;
 
             auto start = std::chrono::steady_clock::now();
             auto results = queryFn();
@@ -537,13 +546,13 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
             if (results) {
                 if (!results.value().empty()) {
-                    allComponentResults.insert(allComponentResults.end(),
-                                               results.value().begin(),
+                    allComponentResults.insert(allComponentResults.end(), results.value().begin(),
                                                results.value().end());
                     contributing.push_back(name);
                 }
                 queryCount.fetch_add(1, std::memory_order_relaxed);
-                auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+                auto duration =
+                    std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
                 avgTime.store(duration, std::memory_order_relaxed);
             } else {
                 failed.push_back(name);
@@ -587,13 +596,16 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     response.timedOutComponents = std::move(timedOut);
     response.failedComponents = std::move(failed);
     response.contributingComponents = std::move(contributing);
-    response.isDegraded = !response.timedOutComponents.empty() || !response.failedComponents.empty();
+    response.isDegraded =
+        !response.timedOutComponents.empty() || !response.failedComponents.empty();
 
     auto endTime = std::chrono::steady_clock::now();
-    response.executionTimeMs = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
+    response.executionTimeMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
 
     stats_.successfulQueries.fetch_add(1, std::memory_order_relaxed);
-    auto durationMicros = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime).count();
+    auto durationMicros =
+        std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime).count();
     stats_.totalQueryTimeMicros.fetch_add(durationMicros, std::memory_order_relaxed);
 
     uint64_t totalQueries = stats_.totalQueries.load(std::memory_order_relaxed);
@@ -605,8 +617,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     if (response.isDegraded && response.hasResults()) {
         spdlog::info("Search returned {} results (degraded: {} timed out, {} failed)",
-                     response.results.size(),
-                     response.timedOutComponents.size(),
+                     response.results.size(), response.timedOutComponents.size(),
                      response.failedComponents.size());
     }
 
@@ -764,8 +775,9 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::querySymbols(const std:
             ComponentResult result;
             result.documentHash = searchResult.document.sha256Hash;
             result.filePath = filePath;
-            result.score = std::max(0.0f, scoreMultiplier /
-                                              (1.0f + static_cast<float>(std::abs(searchResult.score)) / 10.0f));
+            result.score = std::max(
+                0.0f, scoreMultiplier /
+                          (1.0f + static_cast<float>(std::abs(searchResult.score)) / 10.0f));
             result.source = "symbol";
             result.rank = results.size();
             result.snippet = searchResult.snippet.empty()

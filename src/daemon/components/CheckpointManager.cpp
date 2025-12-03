@@ -87,7 +87,6 @@ void CheckpointManager::launchCheckpointLoop() {
 
             while (!stopFlag->load(std::memory_order_acquire) &&
                    self->running_.load(std::memory_order_acquire)) {
-
                 bool needsCheckpoint = false;
                 size_t currentInserts = 0;
 
@@ -99,10 +98,12 @@ void CheckpointManager::launchCheckpointLoop() {
                             self->stats_.last_vector_insert_count.load(std::memory_order_relaxed);
 
                         if (currentInserts > lastInserts &&
-                            (currentInserts - lastInserts) >= self->config_.vector_index_insert_threshold) {
+                            (currentInserts - lastInserts) >=
+                                self->config_.vector_index_insert_threshold) {
                             needsCheckpoint = true;
-                            spdlog::debug("[CheckpointManager] Insert threshold reached ({} new inserts)",
-                                          currentInserts - lastInserts);
+                            spdlog::debug(
+                                "[CheckpointManager] Insert threshold reached ({} new inserts)",
+                                currentInserts - lastInserts);
                         }
                     }
                 }

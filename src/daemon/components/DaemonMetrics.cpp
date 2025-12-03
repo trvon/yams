@@ -7,6 +7,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/compression/compression_monitor.h>
+#include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/InternalEventBus.h>
@@ -18,7 +19,6 @@
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
-#include <yams/daemon/components/CheckpointManager.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
 #include <yams/version.hpp>
@@ -812,8 +812,8 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                     auto epochToIso = [](uint64_t epochMs) -> std::string {
                         if (epochMs == 0)
                             return "";
-                        auto tp =
-                            std::chrono::system_clock::time_point(std::chrono::milliseconds(epochMs));
+                        auto tp = std::chrono::system_clock::time_point(
+                            std::chrono::milliseconds(epochMs));
                         std::time_t tt = std::chrono::system_clock::to_time_t(tp);
                         std::tm tm;
 #ifdef _WIN32

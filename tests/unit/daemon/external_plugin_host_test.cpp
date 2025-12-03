@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 Trevon Sides
 
+#include <nlohmann/json.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
-#include <nlohmann/json.hpp>
 #include <yams/daemon/resource/external_plugin_host.h>
 
 #include <chrono>
@@ -65,14 +65,16 @@ TEST_CASE("ExternalPluginHost - Static File Detection", "[external-plugin][host]
 TEST_CASE("ExternalPluginHost - Supported Extensions", "[external-plugin][host]") {
     auto exts = ExternalPluginHost::supportedExtensions();
     REQUIRE(exts.size() >= 2);
-    
+
     bool hasPython = false;
     bool hasJs = false;
     for (const auto& ext : exts) {
-        if (ext == ".py") hasPython = true;
-        if (ext == ".js") hasJs = true;
+        if (ext == ".py")
+            hasPython = true;
+        if (ext == ".js")
+            hasJs = true;
     }
-    
+
     CHECK(hasPython);
     CHECK(hasJs);
 }
@@ -83,7 +85,7 @@ TEST_CASE("ExternalPluginHost - Construction and Destruction", "[external-plugin
     SECTION("Default construction") {
         ExternalPluginHostConfig config;
         ExternalPluginHost host(nullptr, fixture.trustFile_, config);
-        
+
         // Host should be constructible with nullptr ServiceManager
         auto loaded = host.listLoaded();
         CHECK(loaded.empty());
@@ -94,7 +96,7 @@ TEST_CASE("ExternalPluginHost - Construction and Destruction", "[external-plugin
         config.maxPlugins = 5;
         config.defaultRpcTimeout = std::chrono::milliseconds{5000};
         config.pythonExecutable = "python";
-        
+
         ExternalPluginHost host(nullptr, fixture.trustFile_, config);
         CHECK(host.listLoaded().empty());
     }
@@ -112,14 +114,14 @@ TEST_CASE("ExternalPluginHost - Trust Management", "[external-plugin][host][trus
 
     SECTION("Add and remove from trust list") {
         auto pluginPath = fixture.makeFile("trusted_plugin.py", "# trusted");
-        
+
         // Add to trust
         auto addResult = host.trustAdd(pluginPath);
         REQUIRE(addResult.has_value());
-        
+
         auto trustList = host.trustList();
         REQUIRE(trustList.size() == 1);
-        
+
         // Verify canonical path is stored
         auto canonical = fs::weakly_canonical(pluginPath);
         bool found = std::find(trustList.begin(), trustList.end(), canonical) != trustList.end();
@@ -133,15 +135,15 @@ TEST_CASE("ExternalPluginHost - Trust Management", "[external-plugin][host][trus
 
     SECTION("Trust list persists") {
         auto pluginPath = fixture.makeFile("persistent_plugin.py", "# persist");
-        
+
         {
             ExternalPluginHost host1(nullptr, fixture.trustFile_, config);
             host1.trustAdd(pluginPath);
         }
-        
+
         // Check file was written
         REQUIRE(fs::exists(fixture.trustFile_));
-        
+
         {
             ExternalPluginHost host2(nullptr, fixture.trustFile_, config);
             auto trustList = host2.trustList();
@@ -189,7 +191,8 @@ TEST_CASE("ExternalPluginHost - Unload Non-Existent Plugin", "[external-plugin][
     CHECK(result.error().code == ErrorCode::NotFound);
 }
 
-TEST_CASE("ExternalPluginHost - Health Check Non-Existent Plugin", "[external-plugin][host][health]") {
+TEST_CASE("ExternalPluginHost - Health Check Non-Existent Plugin",
+          "[external-plugin][host][health]") {
     ExternalPluginHostFixture fixture;
     ExternalPluginHostConfig config;
     ExternalPluginHost host(nullptr, fixture.trustFile_, config);

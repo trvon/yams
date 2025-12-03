@@ -6,6 +6,7 @@
 #include <string>
 #include <thread>
 #include <boost/asio/executor_work_guard.hpp>
+#include <yams/daemon/client/asio_connection.h>
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/global_io_context.h>
 
@@ -174,12 +175,16 @@ GlobalIOContext::GlobalIOContext() {
 }
 
 GlobalIOContext::~GlobalIOContext() {
+    ConnectionRegistry::instance().closeAll();
+    AsioConnectionPool::shutdown_all(std::chrono::milliseconds(1000));
+
     if (this->work_guard_) {
         this->work_guard_->reset();
         this->work_guard_.reset();
     }
 
     io_context_->stop();
+
     for (auto& t : this->io_threads_) {
         if (t.joinable()) {
             t.join();

@@ -91,9 +91,9 @@ bool HotzoneManager::save(const std::filesystem::path& path) const {
 
     nlohmann::json entries = nlohmann::json::array();
     for (const auto& [key, node] : map_) {
-        auto epoch = std::chrono::duration_cast<std::chrono::milliseconds>(
-                         node.updated.time_since_epoch())
-                         .count();
+        auto epoch =
+            std::chrono::duration_cast<std::chrono::milliseconds>(node.updated.time_since_epoch())
+                .count();
         entries.push_back({{"key", key}, {"score", node.score}, {"updated_ms", epoch}});
     }
     j["entries"] = entries;

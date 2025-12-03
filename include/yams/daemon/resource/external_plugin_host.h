@@ -103,8 +103,7 @@ public:
      * @param trustFile Path to trust list file (empty for default)
      * @param config Configuration options
      */
-    explicit ExternalPluginHost(ServiceManager* sm,
-                                const std::filesystem::path& trustFile = {},
+    explicit ExternalPluginHost(ServiceManager* sm, const std::filesystem::path& trustFile = {},
                                 ExternalPluginHostConfig config = {});
 
     /**
@@ -138,8 +137,7 @@ public:
      * @param dir Directory to scan
      * @return Vector of plugin descriptors found
      */
-    Result<std::vector<PluginDescriptor>>
-    scanDirectory(const std::filesystem::path& dir) override;
+    Result<std::vector<PluginDescriptor>> scanDirectory(const std::filesystem::path& dir) override;
 
     /**
      * @brief Load an external plugin

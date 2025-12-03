@@ -23,6 +23,17 @@
 
 namespace yams::daemon {
 
+class ConnectionRegistry {
+public:
+    static ConnectionRegistry& instance();
+    void add(std::weak_ptr<struct AsioConnection> conn);
+    void closeAll();
+
+private:
+    std::mutex mutex_;
+    std::vector<std::weak_ptr<struct AsioConnection>> connections_;
+};
+
 struct AsioConnection {
     using socket_t = boost::asio::local::stream_protocol::socket;
     // Use std::promise/std::future for thread-safe one-shot response delivery
@@ -35,12 +46,16 @@ struct AsioConnection {
           strand(o.executor ? *o.executor
                             : GlobalIOContext::instance().get_io_context().get_executor()) {}
 
-    ~AsioConnection() {
+    ~AsioConnection() { alive.store(false, std::memory_order_release); }
+
+    void close() {
         alive.store(false, std::memory_order_release);
-        if (socket && socket->is_open()) {
-            boost::system::error_code ec;
-            socket->cancel(ec);
-            socket->close(ec);
+        if (socket) {
+            if (socket->is_open()) {
+                boost::system::error_code ec;
+                socket->close(ec);
+            }
+            socket.release();
         }
     }
 

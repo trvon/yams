@@ -1,10 +1,10 @@
 // Copyright 2025 The YAMS Authors
 // SPDX-License-Identifier: Apache-2.0
 
-#include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/ServiceManagerFsm.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/vector/vector_database.h>
 #include <yams/vector/vector_index_manager.h>
@@ -31,7 +31,9 @@ namespace yams::daemon {
 
 VectorSystemManager::VectorSystemManager(Dependencies deps) : deps_(std::move(deps)) {}
 
-VectorSystemManager::~VectorSystemManager() { shutdown(); }
+VectorSystemManager::~VectorSystemManager() {
+    shutdown();
+}
 
 Result<void> VectorSystemManager::initialize() {
     // Initialization is deferred to initializeOnce() which takes dataDir
@@ -194,7 +196,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
 #else
         lock_fd = ::open(lockPath.c_str(), O_CREAT | O_RDWR, 0644);
         if (lock_fd >= 0) {
-            struct flock fl {};
+            struct flock fl{};
             fl.l_type = F_WRLCK;
             fl.l_whence = SEEK_SET;
             if (fcntl(lock_fd, F_SETLK, &fl) == -1) {
@@ -234,7 +236,8 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                 if (deps_.state) {
                     try {
                         deps_.state->readiness.vectorDbReady = true;
-                        deps_.state->readiness.vectorDbDim = static_cast<uint32_t>(cfg.embedding_dim);
+                        deps_.state->readiness.vectorDbDim =
+                            static_cast<uint32_t>(cfg.embedding_dim);
                     } catch (...) {
                     }
                 }
@@ -279,7 +282,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
     }
 #else
     if (lock_fd >= 0) {
-        struct flock fl {};
+        struct flock fl{};
         fl.l_type = F_UNLCK;
         fl.l_whence = SEEK_SET;
         (void)fcntl(lock_fd, F_SETLK, &fl);
@@ -297,7 +300,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
 }
 
 bool VectorSystemManager::initializeIndexManager(const std::filesystem::path& dataDir,
-                                                  size_t dimension) {
+                                                 size_t dimension) {
     if (dimension == 0) {
         // Try to get from database config
         if (vectorDatabase_) {
@@ -327,8 +330,9 @@ bool VectorSystemManager::initializeIndexManager(const std::filesystem::path& da
             return false;
         }
 
-        spdlog::info("[VectorSystemManager] VectorIndexManager initialized with dim={}, max_elements={}",
-                     dimension, indexConfig.max_elements);
+        spdlog::info(
+            "[VectorSystemManager] VectorIndexManager initialized with dim={}, max_elements={}",
+            dimension, indexConfig.max_elements);
         return true;
     } catch (const std::exception& e) {
         spdlog::error("[VectorSystemManager] Exception initializing index manager: {}", e.what());

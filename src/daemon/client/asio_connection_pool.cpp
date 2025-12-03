@@ -36,6 +36,27 @@
 
 namespace yams::daemon {
 
+ConnectionRegistry& ConnectionRegistry::instance() {
+    static auto* reg = new ConnectionRegistry();
+    return *reg;
+}
+
+void ConnectionRegistry::add(std::weak_ptr<AsioConnection> conn) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    connections_.push_back(std::move(conn));
+}
+
+void ConnectionRegistry::closeAll() {
+    std::lock_guard<std::mutex> lk(mutex_);
+    for (auto& weak : connections_) {
+        if (auto conn = weak.lock()) {
+            conn->alive.store(false, std::memory_order_release);
+            conn->socket.release();
+        }
+    }
+    connections_.clear();
+}
+
 using boost::asio::awaitable;
 using boost::asio::use_awaitable;
 namespace this_coro = boost::asio::this_coro;
@@ -205,11 +226,7 @@ void AsioConnectionPool::shutdown(std::chrono::milliseconds timeout) {
 
     for (auto& weak : connection_pool_) {
         if (auto conn = weak.lock()) {
-            conn->alive = false;
-            if (conn->socket && conn->socket->is_open()) {
-                boost::system::error_code ec;
-                conn->socket->close(ec);
-            }
+            conn->close();
 
             if (conn->read_loop_future.valid()) {
                 auto status = conn->read_loop_future.wait_for(timeout);
@@ -230,7 +247,6 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
     if (!socket_res) {
         co_return nullptr;
     }
-    // Adopt connected socket first
     conn->socket = std::move(socket_res.value());
     conn->alive = true;
     try {
@@ -242,6 +258,14 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
         }
     } catch (...) {
     }
+
+    {
+        std::lock_guard<std::mutex> lk(mutex_);
+        cleanup_stale_connections();
+        connection_pool_.push_back(conn);
+    }
+
+    ConnectionRegistry::instance().add(conn);
 
     co_return conn;
 }

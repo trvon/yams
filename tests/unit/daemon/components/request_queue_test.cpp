@@ -24,8 +24,9 @@ class RequestQueueTest : public ::testing::Test {
 protected:
     void SetUp() override {
         io_ = std::make_shared<boost::asio::io_context>();
-        work_guard_ = std::make_unique<boost::asio::executor_work_guard<
-            boost::asio::io_context::executor_type>>(io_->get_executor());
+        work_guard_ = std::make_unique<
+            boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>(
+            io_->get_executor());
 
         // Run io_context in background thread
         io_thread_ = std::thread([this]() { io_->run(); });
@@ -50,8 +51,8 @@ protected:
     }
 
     std::shared_ptr<boost::asio::io_context> io_;
-    std::unique_ptr<boost::asio::executor_work_guard<
-        boost::asio::io_context::executor_type>> work_guard_;
+    std::unique_ptr<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>
+        work_guard_;
     std::thread io_thread_;
 };
 
@@ -107,19 +108,19 @@ TEST_F(RequestQueueTest, PriorityOrdering) {
     // Should dequeue in priority order (High first)
     auto r1 = queue.try_dequeue();
     ASSERT_TRUE(r1.has_value());
-    EXPECT_EQ(r1->request_id, 4);  // High priority
+    EXPECT_EQ(r1->request_id, 4); // High priority
 
     auto r2 = queue.try_dequeue();
     ASSERT_TRUE(r2.has_value());
-    EXPECT_EQ(r2->request_id, 3);  // Normal priority
+    EXPECT_EQ(r2->request_id, 3); // Normal priority
 
     auto r3 = queue.try_dequeue();
     ASSERT_TRUE(r3.has_value());
-    EXPECT_EQ(r3->request_id, 2);  // Low priority
+    EXPECT_EQ(r3->request_id, 2); // Low priority
 
     auto r4 = queue.try_dequeue();
     ASSERT_TRUE(r4.has_value());
-    EXPECT_EQ(r4->request_id, 1);  // Background priority
+    EXPECT_EQ(r4->request_id, 1); // Background priority
 
     queue.stop();
 }
@@ -146,8 +147,8 @@ TEST_F(RequestQueueTest, FIFOWithinPriority) {
 TEST_F(RequestQueueTest, BackpressureWatermarks) {
     RequestQueue::Config cfg;
     cfg.max_queue_size = 10;
-    cfg.high_watermark_percent = 80;  // 8 items
-    cfg.low_watermark_percent = 20;   // 2 items
+    cfg.high_watermark_percent = 80; // 8 items
+    cfg.low_watermark_percent = 20;  // 2 items
     RequestQueue queue(cfg, io_->get_executor());
 
     std::atomic<bool> backpressure_active{false};
@@ -240,7 +241,7 @@ TEST_F(RequestQueueTest, StopClearsQueue) {
     for (int i = 0; i < 5; ++i) {
         auto req = makeRequest(i);
         req.completion_callback = [&](auto result) {
-            EXPECT_FALSE(result.has_value());  // Should be error
+            EXPECT_FALSE(result.has_value()); // Should be error
             callbacks_called.fetch_add(1);
         };
         queue.try_enqueue(std::move(req));
@@ -258,8 +259,8 @@ TEST_F(RequestQueueTest, StopClearsQueue) {
 TEST_F(RequestQueueTest, TimeoutEviction) {
     RequestQueue::Config cfg;
     cfg.max_queue_size = 100;
-    cfg.request_timeout = 50ms;      // Very short for testing
-    cfg.eviction_interval = 20ms;    // Check frequently
+    cfg.request_timeout = 50ms;   // Very short for testing
+    cfg.eviction_interval = 20ms; // Check frequently
     RequestQueue queue(cfg, io_->get_executor());
 
     std::atomic<int> timeout_callbacks{0};
