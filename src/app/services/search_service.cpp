@@ -1219,17 +1219,16 @@ private:
         constexpr int kMaxSearchResults = 10000;
         params.limit = std::min(params.limit, kMaxSearchResults);
 
-        auto searchRes = ctx_.searchEngine->search(req.query, params);
+        auto searchRes = ctx_.searchEngine->searchWithResponse(req.query, params);
         if (!searchRes) {
-            // Graceful degradation: if search fails, fall back to keyword-only search
             spdlog::warn("Search failed ({}), falling back to keyword-only search",
                          searchRes.error().message);
             return metadataSearch(req, telemetry);
         }
 
-        const auto& vec = searchRes.value();
+        const auto& engineResponse = searchRes.value();
+        const auto& vec = engineResponse.results;
 
-        // Safety check: if result set is unexpectedly large, truncate with warning
         if (vec.size() > static_cast<size_t>(kMaxSearchResults)) {
             spdlog::warn("Search returned {} results, truncating to {} to prevent crash",
                          vec.size(), kMaxSearchResults);
@@ -1238,6 +1237,18 @@ private:
         SearchResponse resp;
         resp.type = "hybrid";
         resp.usedHybrid = true;
+        resp.executionTimeMs = engineResponse.executionTimeMs;
+        resp.isDegraded = engineResponse.isDegraded;
+        resp.timedOutComponents = engineResponse.timedOutComponents;
+        resp.failedComponents = engineResponse.failedComponents;
+        resp.contributingComponents = engineResponse.contributingComponents;
+
+        if (resp.isDegraded) {
+            spdlog::info("Search completed in degraded mode: {} timed out, {} failed, {} contributing",
+                         resp.timedOutComponents.size(),
+                         resp.failedComponents.size(),
+                         resp.contributingComponents.size());
+        }
 
         if (req.pathsOnly) {
             for (const auto& r : vec) {

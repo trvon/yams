@@ -86,8 +86,8 @@ struct SearchEngineConfig {
     size_t maxResults = 100;                     // Maximum results to return
     float similarityThreshold = 0.65f;           // Minimum similarity threshold
     bool enableParallelExecution = true;         // Parallel component queries
-    std::chrono::milliseconds componentTimeout = // Timeout per component
-        std::chrono::milliseconds(5000);
+    std::chrono::milliseconds componentTimeout = // Timeout per component (10s for cold-start)
+        std::chrono::milliseconds(10000);
 
     // Result fusion strategy
     enum class FusionStrategy {
@@ -256,6 +256,18 @@ struct ComponentResult {
     std::map<std::string, std::string> debugInfo; // Component-specific debug data
 };
 
+struct SearchResponse {
+    std::vector<SearchResult> results;
+    std::vector<std::string> timedOutComponents;
+    std::vector<std::string> failedComponents;
+    std::vector<std::string> contributingComponents;
+    int64_t executionTimeMs = 0;
+    bool isDegraded = false;
+
+    [[nodiscard]] bool hasResults() const { return !results.empty(); }
+    [[nodiscard]] bool isComplete() const { return timedOutComponents.empty() && failedComponents.empty(); }
+};
+
 /**
  * @brief Parallel component query executor
  *
@@ -379,6 +391,20 @@ public:
      */
     Result<std::vector<SearchResult>> search(const std::string& query,
                                              const SearchParams& params = {});
+
+    /**
+     * @brief Execute a search query with full response metadata
+     *
+     * Like search() but returns additional metadata about which components
+     * contributed, timed out, or failed. Use this when you need to know
+     * if the search was degraded due to component timeouts.
+     *
+     * @param query Search query string
+     * @param params Additional search parameters (filters, limits, etc.)
+     * @return SearchResponse with results and metadata
+     */
+    Result<SearchResponse> searchWithResponse(const std::string& query,
+                                              const SearchParams& params = {});
 
     /**
      * @brief Update configuration at runtime

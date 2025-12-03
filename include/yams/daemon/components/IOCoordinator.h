@@ -96,7 +96,12 @@ public:
      *
      * @param config Configuration options
      */
-    explicit IOCoordinator(Config config = {});
+    explicit IOCoordinator(Config config);
+
+    /**
+     * @brief Construct IOCoordinator with default configuration.
+     */
+    IOCoordinator();
 
     /**
      * @brief Destructor ensures clean shutdown.

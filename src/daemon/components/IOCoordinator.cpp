@@ -11,6 +11,8 @@
 
 namespace yams::daemon {
 
+IOCoordinator::IOCoordinator() : IOCoordinator(Config{}) {}
+
 IOCoordinator::IOCoordinator(Config config)
     : config_(std::move(config)),
       io_context_(std::make_shared<boost::asio::io_context>(BOOST_ASIO_CONCURRENCY_HINT_SAFE)) {

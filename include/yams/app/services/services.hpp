@@ -275,6 +275,12 @@ struct SearchResponse {
     // Performance and debugging
     std::string queryInfo; // description of how query was processed
     std::unordered_map<std::string, std::string> searchStats; // detailed stats for debugging
+
+    // Degraded mode indicators
+    bool isDegraded{false};
+    std::vector<std::string> timedOutComponents;
+    std::vector<std::string> failedComponents;
+    std::vector<std::string> contributingComponents;
 };
 
 class ISearchService {
