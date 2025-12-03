@@ -123,7 +123,8 @@ public:
                         return formatSize(static_cast<uint64_t>(val));
                     };
 
-                    uint64_t docs = static_cast<uint64_t>(std::max<int64_t>(0, safeGet("storage_documents")));
+                    uint64_t docs =
+                        static_cast<uint64_t>(std::max<int64_t>(0, safeGet("storage_documents")));
                     std::cout << "STOR : ok, docs=" << docs
                               << ", logical=" << fmt("storage_logical_bytes")
                               << ", physical=" << fmt("storage_physical_bytes");
