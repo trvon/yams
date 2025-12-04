@@ -1403,7 +1403,7 @@ public:
             spdlog::debug("Search query contained invalid UTF-8; sanitized for IPC transmission");
         }
         dreq.limit = static_cast<size_t>(limit_);
-        dreq.fuzzy = true;
+        dreq.fuzzy = fuzzySearch_;
         dreq.literalText = literalText_;
         dreq.similarity = (minSimilarity_ > 0.0f) ? static_cast<double>(minSimilarity_) : 0.7;
         dreq.pathsOnly = pathsOnly_;
