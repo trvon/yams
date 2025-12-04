@@ -1537,69 +1537,45 @@ public:
                 std::make_shared<std::promise<Result<yams::daemon::SearchResponse>>>();
             auto fut = prom->get_future();
 
-            // Shared timer that can be cancelled when streaming wins
             auto timer = std::make_shared<boost::asio::steady_timer>(getExecutor());
             timer->expires_after(std::chrono::seconds(2));
 
-            // Track completion of both coroutines to ensure clean shutdown
-            auto completionCount = std::make_shared<std::atomic_int>(0);
-            auto allDone = std::make_shared<std::promise<void>>();
-            auto allDoneFut = allDone->get_future();
-            auto signalDone = [completionCount, allDone]() {
-                if (completionCount->fetch_add(1) == 1) {
-                    allDone->set_value();
-                }
-            };
-
-            // Launch streaming
             boost::asio::co_spawn(
                 getExecutor(),
-                [&, decided, prom, leaseHandle, timer,
-                 signalDone]() -> boost::asio::awaitable<void> {
+                [&, decided, prom, leaseHandle, timer]() -> boost::asio::awaitable<void> {
                     auto& cliRef = **leaseHandle;
                     auto sr = co_await cliRef.streamingSearch(dreq);
                     if (!decided->exchange(true)) {
                         prom->set_value(std::move(sr));
-                        // Cancel the fallback timer since streaming won
                         timer->cancel();
                     }
-                    signalDone();
                     co_return;
                 },
                 boost::asio::detached);
 
-            // Launch delayed unary fallback (2 seconds after start)
             boost::asio::co_spawn(
                 getExecutor(),
-                [&, decided, prom, leaseHandle, timer,
-                 signalDone]() -> boost::asio::awaitable<void> {
+                [&, decided, prom, leaseHandle, timer]() -> boost::asio::awaitable<void> {
                     boost::system::error_code ec;
                     co_await timer->async_wait(
                         boost::asio::redirect_error(boost::asio::use_awaitable, ec));
-                    // Only proceed if timer wasn't cancelled and no result yet
                     if (!ec && !decided->load()) {
                         auto& cliRef = **leaseHandle;
                         auto ur = co_await cliRef.call(dreq);
                         if (!decided->exchange(true))
                             prom->set_value(std::move(ur));
                     }
-                    signalDone();
                     co_return;
                 },
                 boost::asio::detached);
 
-            // Wait up to body timeout for one of the paths to complete
             auto wait_ms = static_cast<int>(bodyTimeoutMs_ > 0 ? bodyTimeoutMs_ : 60000);
             if (fut.wait_for(std::chrono::milliseconds(wait_ms)) == std::future_status::ready) {
                 result_stream_or_unary = fut.get();
             } else {
                 result_stream_or_unary = Error{ErrorCode::Timeout, "Search timed out"};
             }
-
-            // Wait for both coroutines to complete before returning to avoid use-after-free
-            // when io_context is destroyed. Give them a reasonable grace period.
-            timer->cancel(); // Ensure timer is cancelled if we got here via timeout
-            allDoneFut.wait_for(std::chrono::seconds(5));
+            timer->cancel();
         } else {
             // Non-streaming path (cold): unary only
             result_stream_or_unary = co_await client.call(dreq);

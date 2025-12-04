@@ -4,7 +4,9 @@ name: Release
 'on':
   push:
     tags:
-      - "v*"  # Stable releases triggered by version tags
+      - "v*"
+  schedule:
+    - cron: '0 6 * * *'
   workflow_dispatch:
     inputs:
       channel:
@@ -23,22 +25,15 @@ name: Release
         description: "Limit matrix to macOS variants only (skip linux-hosted)"
         required: false
         default: "false"
-  workflow_run:
-    workflows:
-      - Tests
-    branches:
-      - main
-    types:
-      - completed
 
 permissions:
   contents: write
 
 jobs:
   check-commits:
-    name: Check for new commits (nightly/workflow_run only)
+    name: Check for new commits (nightly only)
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
+    if: github.event_name == 'schedule'
     outputs:
       has_new_commits: ${{ steps.check.outputs.has_new_commits }}
       last_release_sha: ${{ steps.check.outputs.last_release_sha }}
@@ -303,13 +298,6 @@ jobs:
               *) channel="nightly" ;;
             esac
           elif [ "$EVENT" = "schedule" ]; then
-            if [ "$SCHEDULE_CRON" = "0 3 * * 1" ]; then
-              channel="weekly"
-            else
-              channel="nightly"
-            fi
-          elif [ "$EVENT" = "workflow_run" ]; then
-            # workflow_run triggers from main branch after Tests complete
             channel="nightly"
           else
             channel="stable"
@@ -976,13 +964,6 @@ jobs:
               *) channel="nightly" ;;
             esac
           elif [ "$EVENT" = "schedule" ]; then
-            if [ "$SCHEDULE_CRON" = "0 3 * * 1" ]; then
-              channel="weekly"
-            else
-              channel="nightly"
-            fi
-          elif [ "$EVENT" = "workflow_run" ]; then
-            # workflow_run triggers from main branch after Tests complete
             channel="nightly"
           else
             channel="stable"
