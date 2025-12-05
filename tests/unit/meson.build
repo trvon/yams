@@ -231,6 +231,8 @@ unit_search = files(
 )
 
 unit_plugins = files(
+  'plugins/plugin_installer_test.cpp',
+  'plugins/plugin_repo_client_test.cpp',
   'plugins/symbol_extractor_query_test.cpp',
 )
 

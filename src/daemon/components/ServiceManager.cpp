@@ -13,8 +13,11 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <sstream>
 #include <system_error>
 #include <thread>
+#include <yams/config/config_helpers.h>
+#include <yams/config/config_migration.h>
 
 #ifdef _WIN32
 #include <io.h>
@@ -70,6 +73,7 @@
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
+#include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/extraction/extraction_util.h>
@@ -82,32 +86,7 @@
 #include <yams/vector/vector_database.h>
 
 namespace {
-// Convenience aliases for ConfigResolver methods (reduces verbosity in this file)
-inline bool env_truthy(const char* value) {
-    return yams::daemon::ConfigResolver::envTruthy(value);
-}
-
-inline std::filesystem::path resolveDefaultConfigPath() {
-    return yams::daemon::ConfigResolver::resolveDefaultConfigPath();
-}
-
-inline std::map<std::string, std::string> parseSimpleTomlFlat(const std::filesystem::path& path) {
-    return yams::daemon::ConfigResolver::parseSimpleTomlFlat(path);
-}
-
-inline std::optional<size_t> read_db_embedding_dim(const std::filesystem::path& dbPath) {
-    return yams::daemon::ConfigResolver::readDbEmbeddingDim(dbPath);
-}
-
-inline std::optional<size_t> read_vector_sentinel_dim(const std::filesystem::path& dataDir) {
-    return yams::daemon::ConfigResolver::readVectorSentinelDim(dataDir);
-}
-
-inline void write_vector_sentinel(const std::filesystem::path& dataDir, size_t dim,
-                                  const std::string& tableName, int schemaVersion) {
-    yams::daemon::ConfigResolver::writeVectorSentinel(dataDir, dim, tableName, schemaVersion);
-}
-
+// Convenience alias for ConfigResolver timeouts
 inline int read_timeout_ms(const char* envName, int defaultMs, int minMs) {
     return yams::daemon::ConfigResolver::readTimeoutMs(envName, defaultMs, minMs);
 }
@@ -183,7 +162,8 @@ ServiceManager::PluginStatusSnapshot ServiceManager::getPluginStatusSnapshot() c
 void ServiceManager::refreshPluginStatusSnapshot() {
     PluginStatusSnapshot snapshot;
     try {
-        snapshot.host = pluginHostFsm_.snapshot();
+        // PBI-088: Use delegated FSM snapshot (PluginManager owns the FSM)
+        snapshot.host = getPluginHostFsmSnapshot();
         bool providerDegraded = false;
         try {
             auto es = embeddingFsm_.snapshot();
@@ -312,142 +292,64 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
         } catch (...) {
             spdlog::warn("ServiceManager: unknown error initializing AbiPluginHost");
         }
+
+        // NOTE: ExternalPluginHost should be initialized in PluginManager, not ServiceManager.
+        // See PBI-093 / RFC-EPH for future integration.
+
         // Defer vector DB initialization to async phase to avoid blocking daemon startup (PBI-057).
         spdlog::debug("[Startup] deferring vector DB init to async phase");
-        // Auto-trust plugin directory from env if provided.
-        try {
+
+        // PBI-088: Delegate trust setup to PluginManager which owns the FSM
+        // Auto-trust plugin directories (env, config, system) via PluginManager
+        if (pluginManager_) {
+            // Trust from env
             if (const char* env = std::getenv("YAMS_PLUGIN_DIR")) {
                 std::filesystem::path penv(env);
                 if (!penv.empty()) {
-                    if (abiHost_) {
-                        if (auto tr1 = abiHost_->trustAdd(penv); !tr1) {
-                            spdlog::warn("Failed to auto-trust YAMS_PLUGIN_DIR {}: {}",
-                                         penv.string(), tr1.error().message);
-                            try {
-                                pluginHostFsm_.dispatch(PluginLoadFailedEvent{tr1.error().message});
-                            } catch (const std::exception& e) {
-                                spdlog::debug("FSM dispatch failed for PluginLoadFailedEvent: {}",
-                                              e.what());
-                            } catch (...) {
-                                spdlog::debug(
-                                    "FSM dispatch failed for PluginLoadFailedEvent: unknown error");
-                            }
-                        }
-                    }
-                    if (abiPluginLoader_) {
-                        if (auto tr2 = abiPluginLoader_->trustAdd(penv); !tr2) {
-                            spdlog::warn("Failed to auto-trust YAMS_PLUGIN_DIR for loader {}: {}",
-                                         penv.string(), tr2.error().message);
-                            try {
-                                pluginHostFsm_.dispatch(PluginLoadFailedEvent{tr2.error().message});
-                            } catch (const std::exception& e) {
-                                spdlog::debug("FSM dispatch failed for PluginLoadFailedEvent: {}",
-                                              e.what());
-                            } catch (...) {
-                                spdlog::debug(
-                                    "FSM dispatch failed for PluginLoadFailedEvent: unknown error");
-                            }
-                        }
+                    if (auto tr = pluginManager_->trustAdd(penv); !tr) {
+                        spdlog::warn("Failed to auto-trust YAMS_PLUGIN_DIR {}: {}", penv.string(),
+                                     tr.error().message);
                     }
                 }
             }
-        } catch (const std::exception& e) {
-            spdlog::warn("Exception during auto-trust setup: {}", e.what());
-        }
 
-        // Auto-trust configured plugin directory (config_.pluginDir) so that specifying
-        // pluginDir in DaemonConfig is sufficient without relying on YAMS_PLUGIN_DIR env.
-        try {
+            // Trust from config
             if (!config_.pluginDir.empty()) {
                 std::filesystem::path pconf = config_.pluginDir;
-                if (abiHost_) {
-                    if (auto trc = abiHost_->trustAdd(pconf); !trc) {
-                        spdlog::warn("Failed to trust configured pluginDir {}: {}", pconf.string(),
-                                     trc.error().message);
-                        try {
-                            pluginHostFsm_.dispatch(PluginLoadFailedEvent{trc.error().message});
-                        } catch (const std::exception& e) {
-                            spdlog::debug("FSM dispatch failed for PluginLoadFailedEvent: {}",
-                                          e.what());
-                        } catch (...) {
-                            spdlog::debug(
-                                "FSM dispatch failed for PluginLoadFailedEvent: unknown error");
-                        }
-                    } else {
-                        spdlog::debug("Trusted configured pluginDir {} for ABI host",
-                                      pconf.string());
-                        try {
-                            pluginHostFsm_.dispatch(PluginTrustVerifiedEvent{});
-                        } catch (const std::exception& e) {
-                            spdlog::debug("FSM dispatch failed for PluginTrustVerifiedEvent: {}",
-                                          e.what());
-                        } catch (...) {
-                            spdlog::debug(
-                                "FSM dispatch failed for PluginTrustVerifiedEvent: unknown error");
-                        }
-                    }
-                }
-                if (abiPluginLoader_) {
-                    if (auto trc2 = abiPluginLoader_->trustAdd(pconf); !trc2) {
-                        spdlog::warn(
-                            "Failed to trust configured pluginDir for legacy loader {}: {}",
-                            pconf.string(), trc2.error().message);
-                        try {
-                            pluginHostFsm_.dispatch(PluginLoadFailedEvent{trc2.error().message});
-                        } catch (const std::exception& e) {
-                            spdlog::debug("FSM dispatch failed for PluginLoadFailedEvent: {}",
-                                          e.what());
-                        } catch (...) {
-                            spdlog::debug(
-                                "FSM dispatch failed for PluginLoadFailedEvent: unknown error");
-                        }
-                    } else {
-                        spdlog::debug("Trusted configured pluginDir {} for legacy plugin loader",
-                                      pconf.string());
-                    }
+                if (auto tr = pluginManager_->trustAdd(pconf); !tr) {
+                    spdlog::warn("Failed to trust configured pluginDir {}: {}", pconf.string(),
+                                 tr.error().message);
+                } else {
+                    spdlog::debug("Trusted configured pluginDir {}", pconf.string());
                 }
             }
-        } catch (const std::exception& e) {
-            spdlog::warn("Exception trusting configured pluginDir: {}", e.what());
-        }
 
-        // Auto-trust system install location for plugins
+            // Trust explicit entries from config ([plugins].trusted_paths or daemon.trusted_paths)
+            for (const auto& p : config_.trustedPluginPaths) {
+                if (auto tr = pluginManager_->trustAdd(p); !tr) {
+                    spdlog::warn("Failed to trust configured plugin path {}: {}", p.string(),
+                                 tr.error().message);
+                } else {
+                    spdlog::debug("Trusted configured plugin path {}", p.string());
+                }
+            }
+
+            // Trust system install location
 #ifdef YAMS_INSTALL_PREFIX
-        try {
             namespace fs = std::filesystem;
             fs::path system_plugins = fs::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins";
             if (fs::exists(system_plugins) && fs::is_directory(system_plugins)) {
-                spdlog::debug("Found system plugin directory: {}", system_plugins.string());
-                if (abiHost_) {
-                    if (auto trc = abiHost_->trustAdd(system_plugins)) {
-                        spdlog::info("Auto-trusted system plugin directory: {}",
-                                     system_plugins.string());
-                        try {
-                            pluginHostFsm_.dispatch(PluginTrustVerifiedEvent{});
-                        } catch (...) {
-                        }
-                    } else {
-                        spdlog::warn("Failed to auto-trust system plugins: {}",
-                                     trc.error().message);
-                    }
+                if (auto tr = pluginManager_->trustAdd(system_plugins)) {
+                    spdlog::info("Auto-trusted system plugin directory: {}",
+                                 system_plugins.string());
+                } else {
+                    spdlog::warn("Failed to auto-trust system plugins: {}", tr.error().message);
                 }
-                if (abiPluginLoader_) {
-                    if (auto trc2 = abiPluginLoader_->trustAdd(system_plugins)) {
-                        spdlog::debug("Auto-trusted system plugins for legacy loader");
-                    } else {
-                        spdlog::warn("Failed to auto-trust system plugins for legacy loader: {}",
-                                     trc2.error().message);
-                    }
-                }
-            } else {
-                spdlog::debug("System plugin directory not found: {}", system_plugins.string());
             }
-        } catch (const std::exception& e) {
-            spdlog::warn("Exception auto-trusting system plugins: {}", e.what());
-        }
-#else
-        spdlog::debug("YAMS_INSTALL_PREFIX not defined; skipping system plugin auto-trust");
 #endif
+        } else {
+            spdlog::debug("[ServiceManager] PluginManager not available for trust setup");
+        }
 
         try {
             if (!ingestService_) {
@@ -1680,20 +1582,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             }
 
             // Respect config flag plugins.symbol_extraction.enable (default: true)
-            bool enableSymbols = true;
-            try {
-                auto cfgPath = resolveDefaultConfigPath();
-                if (!cfgPath.empty()) {
-                    auto flat = parseSimpleTomlFlat(cfgPath);
-                    auto it = flat.find("plugins.symbol_extraction.enable");
-                    if (it != flat.end()) {
-                        std::string v = it->second;
-                        std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                        enableSymbols = !(v == "0" || v == "false" || v == "off" || v == "no");
-                    }
-                }
-            } catch (...) {
-            }
+            bool enableSymbols = ConfigResolver::isSymbolExtractionEnabled(config_);
             if (enableSymbols) {
                 auto symRes = init::step<size_t>(
                     "adopt_symbol_extractors", [&]() { return adoptSymbolExtractorsFromHosts(); });
@@ -2148,183 +2037,33 @@ bool ServiceManager::resizeWorkerPool(std::size_t target) {
 }
 
 boost::asio::awaitable<Result<size_t>> ServiceManager::autoloadPluginsNow() {
-    auto self = shared_from_this(); // Capture shared_from_this for coroutine safety
-    auto plugin_load_executor = getWorkerExecutor(); // Use the new io_context executor
-    std::vector<boost::asio::awaitable<Result<PluginDescriptor>>> load_tasks;
-    size_t loaded_count = 0; // Initialize loaded_count here
-    try {
-        // FSM guard: avoid concurrent autoload scans
-        try {
-            auto ps = pluginHostFsm_.snapshot().state;
-            spdlog::info("Plugin autoload(now): FSM state check - current state: {}",
-                         static_cast<int>(ps));
-            if (ps == PluginHostState::ScanningDirectories ||
-                ps == PluginHostState::LoadingPlugins) {
-                spdlog::warn("Plugin autoload skipped: scan already in progress (state={})",
-                             static_cast<int>(ps));
-                co_return Result<size_t>(0);
-            }
-            // VerifyingTrust and NotInitialized are OK - proceed with scan
-        } catch (...) {
-        }
-        refreshPluginStatusSnapshot();
-        if (config_.useMockModelProvider || env_truthy(std::getenv("YAMS_USE_MOCK_PROVIDER"))) {
-            spdlog::info("Plugin autoload skipped (mock provider in use)");
-            co_return Result<size_t>(0);
-        }
-        if (const char* d = std::getenv("YAMS_DISABLE_ABI_PLUGINS"); d && *d) {
-            spdlog::info("Plugin autoload disabled by YAMS_DISABLE_ABI_PLUGINS");
-            co_return Result<size_t>(0);
-        }
-        std::vector<std::filesystem::path> roots;
-        if (abiHost_) {
-            for (const auto& p : abiHost_->trustList())
-                roots.push_back(p);
-        }
-        try {
-            namespace fs = std::filesystem;
-#ifdef _WIN32
-            // Windows: use platform-specific data directory for user plugins
-            roots.push_back(yams::config::get_data_dir() / "plugins");
-#else
-            if (const char* home = std::getenv("HOME")) {
-                roots.push_back(fs::path(home) / ".local" / "lib" / "yams" / "plugins");
-            }
-            roots.push_back(std::filesystem::path("/usr/local/lib/yams/plugins"));
-            roots.push_back(std::filesystem::path("/usr/lib/yams/plugins"));
-#endif
-#ifdef YAMS_INSTALL_PREFIX
-            roots.push_back(std::filesystem::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" /
-                            "plugins");
-#endif
-        } catch (...) {
-        }
-
-        std::sort(roots.begin(), roots.end());
-        roots.erase(std::unique(roots.begin(), roots.end()), roots.end());
-
-        spdlog::info("Plugin autoload(now): {} roots to scan", roots.size());
-        try {
-            pluginHostFsm_.dispatch(PluginScanStartedEvent{roots.size()});
-        } catch (...) {
-        }
-        for (const auto& r : roots) {
-            spdlog::info("Plugin autoload(now): scanning root {}", r.string());
-        }
-        for (const auto& r : roots) {
-            try {
-                if (self->abiHost_) {                                 // Use self->abiHost_
-                    if (auto sr = self->abiHost_->scanDirectory(r)) { // Use self->abiHost_
-                        if (sr.value().empty()) {
-                            spdlog::info("Plugin autoload(now): no candidates in {}", r.string());
-                        } else {
-                            spdlog::info("Plugin autoload(now): found {} candidate(s) in {}",
-                                         sr.value().size(), r.string());
-                        }
-                        for (const auto& d : sr.value()) {
-                            spdlog::info(
-                                "Plugin autoload(now): candidate '{}' path='{}' ifaces=[{}]",
-                                d.name, d.path.string(), [&]() {
-                                    std::string s;
-                                    for (size_t i = 0; i < d.interfaces.size(); i++) {
-                                        if (i)
-                                            s += ",";
-                                        s += d.interfaces[i];
-                                    }
-                                    return s;
-                                }());
-                            // Create an awaitable for each plugin load
-                            load_tasks.push_back(boost::asio::co_spawn(
-                                plugin_load_executor,
-                                [self, d]() -> boost::asio::awaitable<Result<PluginDescriptor>> {
-                                    co_return self->abiHost_->load(d.path, "");
-                                },
-                                boost::asio::use_awaitable));
-                        }
-                    } else {
-                        // Scan failure (e.g., invalid directory): mark degraded
-                        try {
-                            self->pluginHostFsm_.dispatch(
-                                PluginLoadFailedEvent{sr.error().message});
-                        } catch (...) {
-                        }
-                        self->refreshPluginStatusSnapshot();
-                    }
-                }
-            } catch (const std::exception& e) {
-                spdlog::warn("Plugin autoload(now): scan/load error at {}: {}", r.string(),
-                             e.what());
-                try {
-                    self->pluginHostFsm_.dispatch(PluginLoadFailedEvent{e.what()});
-                } catch (...) {
-                }
-                self->refreshPluginStatusSnapshot();
-            } catch (...) {
-                spdlog::warn("Plugin autoload(now): unknown error at {}", r.string());
-                try {
-                    self->pluginHostFsm_.dispatch(PluginLoadFailedEvent{"unknown error"});
-                } catch (...) {
-                    // Ignore FSM dispatch errors
-                }
-                self->refreshPluginStatusSnapshot();
-            }
-        }
-        // Await all plugin load tasks (sequentially for simplicity with Result<T>)
-        if (!load_tasks.empty()) {
-            for (auto& task : load_tasks) {
-                try {
-                    auto res = co_await std::move(task);
-                    if (res) {
-                        ++loaded_count;
-                        spdlog::info("Plugin autoload(now): loaded '{}' (ifaces=[{}])",
-                                     res.value().name, [&]() {
-                                         std::string s;
-                                         for (size_t i = 0; i < res.value().interfaces.size();
-                                              ++i) {
-                                             if (i)
-                                                 s += ",";
-                                             s += res.value().interfaces[i];
-                                         }
-                                         return s;
-                                     }());
-                        try {
-                            self->pluginHostFsm_.dispatch(PluginLoadedEvent{res.value().name});
-                        } catch (...) {
-                        }
-                        self->refreshPluginStatusSnapshot();
-                    } else {
-                        spdlog::warn("Plugin autoload(now): load failed: {}", res.error().message);
-                        try {
-                            self->pluginHostFsm_.dispatch(
-                                PluginLoadFailedEvent{res.error().message});
-                        } catch (...) {
-                        }
-                        self->refreshPluginStatusSnapshot();
-                    }
-                } catch (const std::exception& e) {
-                    spdlog::warn("Plugin autoload(now): exception awaiting task: {}", e.what());
-                }
-            }
-        }
-        spdlog::info("Plugin autoload(now): loaded {} plugin(s)", loaded_count);
-        try {
-            self->pluginHostFsm_.dispatch(AllPluginsLoadedEvent{loaded_count});
-        } catch (...) {
-        }
-        self->refreshPluginStatusSnapshot();
-        auto adopted = self->adoptModelProviderFromHosts();
-        if (adopted && adopted.value()) {
-            spdlog::info("Plugin autoload(now): model provider adopted");
-        } else {
-            spdlog::info("Plugin autoload(now): no model provider adopted");
-        }
-        (void)self->adoptContentExtractorsFromHosts();
-        spdlog::info("Model preload deferred until after initialization completes");
-        writeBootstrapStatusFile(self->config_, self->state_);
-        co_return Result<size_t>(loaded_count);
-    } catch (const std::exception& e) {
-        co_return Error{ErrorCode::InternalError, e.what()};
+    // PBI-088: Delegate to PluginManager which owns the plugin host lifecycle and FSM
+    if (!pluginManager_) {
+        spdlog::error("[ServiceManager] autoloadPluginsNow: PluginManager not initialized");
+        co_return Error{ErrorCode::InvalidState, "PluginManager not initialized"};
     }
+
+    auto executor = getWorkerExecutor();
+    auto result = co_await pluginManager_->autoloadPlugins(executor);
+
+    if (result) {
+        spdlog::info("ServiceManager: Autoloaded {} plugins via PluginManager", result.value());
+
+        // Adopt model provider from PluginManager's hosts
+        auto adopted = adoptModelProviderFromHosts();
+        if (adopted && adopted.value()) {
+            spdlog::info("[ServiceManager] Model provider adopted after autoload");
+        }
+
+        // Adopt extractors
+        (void)adoptContentExtractorsFromHosts();
+        (void)adoptSymbolExtractorsFromHosts();
+
+        refreshPluginStatusSnapshot();
+        writeBootstrapStatusFile(config_, state_);
+    }
+
+    co_return result;
 }
 
 boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
@@ -2595,134 +2334,7 @@ size_t ServiceManager::getEmbeddingDimension() const {
 }
 
 std::string ServiceManager::resolvePreferredModel() const {
-    std::string preferred;
-
-    // 1. Check environment variable first (highest priority)
-    if (const char* envp = std::getenv("YAMS_PREFERRED_MODEL")) {
-        preferred = envp;
-        if (!preferred.empty()) {
-            spdlog::debug("Preferred model from environment: {}", preferred);
-            return preferred;
-        }
-    }
-
-    // 2. Check config file
-    try {
-        namespace fs = std::filesystem;
-        fs::path cfgHome;
-        if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
-            cfgHome = fs::path(xdg);
-        } else if (const char* home = std::getenv("HOME")) {
-            cfgHome = fs::path(home) / ".config";
-        }
-
-        fs::path cfgPath = cfgHome / "yams" / "config.toml";
-        if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            // Fast path: flat TOML for explicit key
-            try {
-                auto kv = parseSimpleTomlFlat(cfgPath);
-                auto it = kv.find("embeddings.preferred_model");
-                if (it != kv.end() && !it->second.empty()) {
-                    preferred = it->second;
-                    spdlog::debug("Preferred model from config: {}", preferred);
-                    return preferred;
-                }
-            } catch (...) {
-            }
-            std::ifstream in(cfgPath);
-            std::string line;
-            auto trim = [&](std::string& t) {
-                if (t.empty())
-                    return;
-                t.erase(0, t.find_first_not_of(" \t"));
-                auto p = t.find_last_not_of(" \t");
-                if (p != std::string::npos)
-                    t.erase(p + 1);
-            };
-
-            while (std::getline(in, line)) {
-                std::string l = line;
-                trim(l);
-                if (l.empty() || l[0] == '#')
-                    continue;
-
-                if (l.find("embeddings.preferred_model") != std::string::npos) {
-                    auto eq = l.find('=');
-                    if (eq != std::string::npos) {
-                        std::string v = l.substr(eq + 1);
-                        trim(v);
-                        if (!v.empty() && v.front() == '"' && v.back() == '"')
-                            v = v.substr(1, v.size() - 2);
-                        preferred = v;
-                    }
-                    if (!preferred.empty()) {
-                        spdlog::debug("Preferred model from config: {}", preferred);
-                        return preferred;
-                    }
-                }
-                // daemon.models.preload_models -> take the first
-                if (l.find("daemon.models.preload_models") != std::string::npos) {
-                    auto eq = l.find('=');
-                    if (eq != std::string::npos) {
-                        std::string v = l.substr(eq + 1);
-                        trim(v);
-                        // crude parse: if contains MiniLM or mpnet, prefer ordering
-                        if (v.find("all-MiniLM-L6-v2") != std::string::npos) {
-                            preferred = "all-MiniLM-L6-v2";
-                        } else if (v.find("all-mpnet-base-v2") != std::string::npos) {
-                            preferred = "all-mpnet-base-v2";
-                        }
-                    }
-                    if (!preferred.empty()) {
-                        spdlog::debug("Preferred model from config preload list: {}", preferred);
-                        return preferred;
-                    }
-                }
-            }
-        }
-    } catch (const std::exception& e) {
-        spdlog::debug("Error reading config for preferred model: {}", e.what());
-    }
-
-    // 3. Auto-detect from available models (prefer models matching existing DB dim)
-    try {
-        if (!resolvedDataDir_.empty()) {
-            namespace fs = std::filesystem;
-            fs::path models = resolvedDataDir_ / "models";
-            std::error_code ec;
-            if (fs::exists(models, ec) && fs::is_directory(models, ec)) {
-                [[maybe_unused]] size_t dbDim = 0;
-                try {
-                    // Prefer sentinel dim when available
-                    if (auto s = read_vector_sentinel_dim(getResolvedDataDir()))
-                        dbDim = *s;
-                } catch (...) {
-                }
-                std::vector<std::string> preferences;
-
-                for (const auto& pref : preferences) {
-                    fs::path modelPath = models / pref;
-                    if (fs::exists(modelPath / "model.onnx", ec)) {
-                        spdlog::debug("Auto-detected preferred model: {}", pref);
-                        return pref;
-                    }
-                }
-
-                // If no preferred model found, use the first available
-                for (const auto& e : fs::directory_iterator(models, ec)) {
-                    if (e.is_directory() && fs::exists(e.path() / "model.onnx", ec)) {
-                        preferred = e.path().filename().string();
-                        spdlog::debug("Using first available model: {}", preferred);
-                        return preferred;
-                    }
-                }
-            }
-        }
-    } catch (const std::exception& e) {
-        spdlog::debug("Error auto-detecting models: {}", e.what());
-    }
-
-    return preferred;
+    return ConfigResolver::resolvePreferredModel(config_, resolvedDataDir_);
 }
 
 // Async phase helpers implementation

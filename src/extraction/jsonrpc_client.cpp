@@ -24,11 +24,12 @@ std::optional<json> JsonRpcClient::call(std::string_view method, json params,
     std::string request_str = request.dump() + "\n";
 
     // Send request
-    spdlog::debug("JsonRpcClient: Sending request: {}", request_str);
+    spdlog::info("JsonRpcClient: Sending request to method '{}': {}", method, request_str);
     std::span<const std::byte> request_bytes{reinterpret_cast<const std::byte*>(request_str.data()),
                                              request_str.size()};
 
     size_t written = process_.write_stdin(request_bytes);
+    spdlog::info("JsonRpcClient: Wrote {} of {} bytes to stdin", written, request_str.size());
     if (written != request_str.size()) {
         spdlog::error("JsonRpcClient: Failed to write full request ({}/{} bytes)", written,
                       request_str.size());
@@ -36,14 +37,18 @@ std::optional<json> JsonRpcClient::call(std::string_view method, json params,
     }
 
     // Give plugin a moment to process
-    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    spdlog::info("JsonRpcClient: Waiting 100ms for plugin to process request");
+    std::this_thread::sleep_for(std::chrono::milliseconds{100});
 
     // Read response
+    spdlog::info("JsonRpcClient: Reading response with timeout {}ms", timeout.count());
     auto response = read_response(timeout);
     if (!response) {
         spdlog::warn("JsonRpcClient: Timeout waiting for response to '{}'", method);
         return std::nullopt;
     }
+
+    spdlog::info("JsonRpcClient: Received response: {}", response->dump());
 
     // Validate response
     if (!response->contains("jsonrpc") || (*response)["jsonrpc"] != "2.0") {
@@ -92,15 +97,23 @@ void JsonRpcClient::notify(std::string_view method, json params) {
 
 std::optional<json> JsonRpcClient::read_response(std::chrono::milliseconds timeout) {
     auto start = std::chrono::steady_clock::now();
+    int poll_count = 0;
 
     while (std::chrono::steady_clock::now() - start < timeout) {
         std::lock_guard lock{mutex_};
         auto data = process_.read_stdout();
 
+        if (poll_count % 100 == 0) { // Log every ~1 second
+            spdlog::info("JsonRpcClient: poll #{}, buffer_size={}, read_pos={}", poll_count,
+                         data.size(), read_pos_);
+        }
+        poll_count++;
+
         if (data.size() > read_pos_) {
             // We have new data
             std::string_view remaining{reinterpret_cast<const char*>(data.data() + read_pos_),
                                        data.size() - read_pos_};
+            spdlog::info("JsonRpcClient: Got {} new bytes", remaining.size());
 
             // Look for newline (NDJSON framing)
             size_t newline_pos = remaining.find('\n');
@@ -125,8 +138,15 @@ std::optional<json> JsonRpcClient::read_response(std::chrono::milliseconds timeo
     // Timeout
     std::lock_guard lock{mutex_};
     auto data = process_.read_stdout();
-    spdlog::debug("JsonRpcClient: read_response timeout after {}ms. Buffer size: {}, read_pos: {}",
-                  timeout.count(), data.size(), read_pos_);
+    spdlog::warn("JsonRpcClient: read_response timeout after {}ms. Buffer size: {}, read_pos: {}",
+                 timeout.count(), data.size(), read_pos_);
+
+    // Dump whatever we have in the buffer for debugging
+    if (data.size() > 0) {
+        std::string_view content{reinterpret_cast<const char*>(data.data()),
+                                 std::min<size_t>(data.size(), 500)};
+        spdlog::warn("JsonRpcClient: Buffer content (first 500 bytes): '{}'", content);
+    }
 
     return std::nullopt;
 }

@@ -76,6 +76,7 @@ class VectorDatabase;
 namespace yams::daemon {
 
 class AbiPluginLoader;
+class ExternalPluginHost;
 class IModelProvider;
 class RetrievalSessionManager;
 class WorkerPool;
@@ -332,6 +333,10 @@ public:
     AbiPluginLoader* getAbiPluginLoader() const { return abiPluginLoader_.get(); }
     // Plugin host (C‑ABI)
     AbiPluginHost* getAbiPluginHost() const { return abiHost_.get(); }
+    // Plugin host (external Python/JS plugins) - delegates to PluginManager
+    ExternalPluginHost* getExternalPluginHost() const {
+        return pluginManager_ ? pluginManager_->getExternalPluginHost() : nullptr;
+    }
 
     // PBI-088: New component accessors
     PluginManager* getPluginManager() const { return pluginManager_.get(); }
@@ -370,7 +375,14 @@ public:
         }
         return embeddingFsm_.snapshot();
     }
-    PluginHostSnapshot getPluginHostFsmSnapshot() const { return pluginHostFsm_.snapshot(); }
+    // PBI-088: Delegate to PluginManager FSM (it owns the plugin host lifecycle)
+    PluginHostSnapshot getPluginHostFsmSnapshot() const {
+        if (pluginManager_) {
+            return pluginManager_->getPluginHostFsmSnapshot();
+        }
+        // Fallback: return NotInitialized state if PluginManager not available
+        return PluginHostSnapshot{};
+    }
 
     // PBI-008-11: FSM hook scaffolds for session preparation lifecycle (no-op for now)
     void onPrepareSessionRequested() {};
@@ -380,6 +392,9 @@ public:
     const DaemonConfig& getConfig() const { return config_; }
     // Resolved data directory used for storage (may derive from env/config)
     const std::filesystem::path& getResolvedDataDir() const { return resolvedDataDir_; }
+
+    // Persist trusted plugin path updates back to config.toml when available.
+    void persistTrustedPluginPath(const std::filesystem::path& path, bool remove) const;
 
     // Try to adopt a model provider from loaded plugin hosts at runtime.
     // If preferredName is non-empty, attempts that plugin first.
@@ -449,16 +464,15 @@ public:
     AbiPluginLoader* __test_getAbiPluginLoader() const { return abiPluginLoader_.get(); }
 #endif
     // Test helpers for plugin host FSM transitions (status recovery tests)
+    // PBI-088: Delegate to PluginManager which owns the FSM
     void __test_pluginLoadFailed(const std::string& error) {
-        try {
-            pluginHostFsm_.dispatch(PluginLoadFailedEvent{error});
-        } catch (...) {
+        if (pluginManager_) {
+            pluginManager_->dispatchPluginLoadFailed(error);
         }
     }
     void __test_pluginScanComplete(std::size_t count) {
-        try {
-            pluginHostFsm_.dispatch(AllPluginsLoadedEvent{count});
-        } catch (...) {
+        if (pluginManager_) {
+            pluginManager_->dispatchAllPluginsLoaded(count);
         }
     }
     // Force a vector DB initialization attempt and return whether work was performed
@@ -503,6 +517,7 @@ private:
 
     const DaemonConfig& config_;
     StateComponent& state_;
+    mutable std::mutex configPersistMutex_{};
 
     // All the services managed by this component
     std::shared_ptr<api::IContentStore> contentStore_;
@@ -530,6 +545,7 @@ private:
 
     std::unique_ptr<AbiPluginLoader> abiPluginLoader_;
     std::unique_ptr<AbiPluginHost> abiHost_;
+    // NOTE: ExternalPluginHost moved to PluginManager (PBI-093)
     std::unique_ptr<RetrievalSessionManager> retrievalSessions_;
     std::unique_ptr<CheckpointManager> checkpointManager_;
 
@@ -608,9 +624,9 @@ private:
     DaemonLifecycleFsm& lifecycleFsm_;
 
     // FSMs introduced by PBI-046 (initially advisory; will replace atomic flags incrementally)
+    // NOTE: pluginHostFsm_ removed - delegated to PluginManager (PBI-088)
     ServiceManagerFsm serviceFsm_{};
     EmbeddingProviderFsm embeddingFsm_{};
-    PluginHostFsm pluginHostFsm_{};
 
     // jthreads: deprecated – replaced by std::thread workers using ioContext_
     // They are kept for compatibility but not used in the new shutdown flow.

@@ -135,6 +135,7 @@ test_deps = [
   dependency('yams_detection'),
   dependency('yams_content'),
   dependency('yams_downloader'),
+  dependency('yams_plugins_mgmt'),
   dependency('yams_indexing'),
   dependency('yams_vector'),
   dependency('yams_search'),
@@ -853,6 +854,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  plugin_process_launcher_exe = executable('plugin_process_launcher',
+    files('unit/extraction/plugin_process_launcher_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + plugin_process_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   jsonrpc_client_exe = executable('jsonrpc_client',
     files('unit/extraction/jsonrpc_client_test.cpp'),
     include_directories: incs,
@@ -1038,6 +1048,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'extraction', 'plugin', 'debug'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 30
+  )
+
+  test('plugin_process_launcher', plugin_process_launcher_exe,
+    suite: ['catch2', 'unit', 'extraction', 'plugin', 'launcher'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path, 'YAMS_SOURCE_DIR': meson.project_source_root() },
+    timeout: 120
   )
 
   test('jsonrpc_client', jsonrpc_client_exe,

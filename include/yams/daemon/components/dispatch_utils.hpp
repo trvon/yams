@@ -17,6 +17,7 @@
 #include <yams/daemon/components/PluginHostFsm.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/search/search_engine.h>
@@ -25,8 +26,9 @@
 
 namespace yams::daemon::dispatch {
 
-// Forward declaration
+// Forward declarations
 const std::vector<std::filesystem::path>& defaultAbiPluginDirs() noexcept;
+const std::vector<std::filesystem::path>& defaultExternalPluginDirs() noexcept;
 
 template <typename Fn>
 inline boost::asio::awaitable<std::remove_cvref_t<std::invoke_result_t<Fn&>>>
@@ -216,14 +218,15 @@ inline std::pair<std::string, size_t> build_plugins_json(ServiceManager* sm) {
     try {
         if (!sm)
             return {arr.dump(), 0};
-        auto* abi = sm->getAbiPluginHost();
-        if (abi) {
-            auto descs = abi->listLoaded();
+
+        // Helper to add plugin descriptors to result
+        auto addPlugins = [&](const std::vector<PluginDescriptor>& descs, const std::string& type) {
             count += descs.size();
             for (const auto& d : descs) {
                 nlohmann::json rec;
                 rec["name"] = d.name;
                 rec["path"] = d.path.string();
+                rec["type"] = type;
                 if (!d.interfaces.empty())
                     rec["interfaces"] = d.interfaces;
                 try {
@@ -250,8 +253,18 @@ inline std::pair<std::string, size_t> build_plugins_json(ServiceManager* sm) {
                 }
                 arr.push_back(std::move(rec));
             }
-        } else {
-            // Legacy loader removed; no fallback list available
+        };
+
+        // ABI (native) plugins
+        auto* abi = sm->getAbiPluginHost();
+        if (abi) {
+            addPlugins(abi->listLoaded(), "native");
+        }
+
+        // External (Python/JS) plugins
+        auto* external = sm->getExternalPluginHost();
+        if (external) {
+            addPlugins(external->listLoaded(), "external");
         }
     } catch (...) {
     }

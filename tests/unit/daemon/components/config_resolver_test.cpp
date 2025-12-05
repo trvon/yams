@@ -3,8 +3,11 @@
 //
 // Unit tests for ConfigResolver component
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <optional>
+#include <string>
 #include <gtest/gtest.h>
 
 #include <yams/daemon/components/ConfigResolver.h>
@@ -19,6 +22,39 @@ namespace fs = std::filesystem;
 using namespace yams::daemon;
 
 namespace yams::daemon::test {
+
+namespace {
+struct EnvGuard {
+    std::string key;
+    std::optional<std::string> previous;
+
+    EnvGuard(std::string k, std::optional<std::string> value) : key(std::move(k)) {
+        if (const char* cur = std::getenv(key.c_str())) {
+            previous = std::string(cur);
+        }
+        set(value);
+    }
+
+    ~EnvGuard() { set(previous); }
+
+private:
+    void set(const std::optional<std::string>& value) {
+#ifdef _WIN32
+        if (value) {
+            _putenv_s(key.c_str(), value->c_str());
+        } else {
+            _putenv_s(key.c_str(), "");
+        }
+#else
+        if (value) {
+            ::setenv(key.c_str(), value->c_str(), 1);
+        } else {
+            ::unsetenv(key.c_str());
+        }
+#endif
+    }
+};
+} // namespace
 
 class ConfigResolverTest : public ::testing::Test {
 protected:
@@ -163,5 +199,75 @@ TEST_F(ConfigResolverTest, EnvTruthy_ArbitraryValueIsTrue) {
     EXPECT_TRUE(ConfigResolver::envTruthy("anything"));
     EXPECT_TRUE(ConfigResolver::envTruthy("enabled"));
 }
+
+TEST_F(ConfigResolverTest, ResolvePreferredModel_PrefersEnvOverConfig) {
+    writeConfig("embeddings.preferred_model = \"config-model\"\n");
+    DaemonConfig cfg;
+    cfg.configFilePath = configPath_;
+
+    EnvGuard env("YAMS_PREFERRED_MODEL", std::string("env-model"));
+
+    auto result = ConfigResolver::resolvePreferredModel(cfg, testDir_);
+    EXPECT_EQ(result, "env-model");
+}
+
+TEST_F(ConfigResolverTest, ResolvePreferredModel_FromConfigWhenNoEnv) {
+    writeConfig("embeddings.preferred_model = \"config-model\"\n");
+    DaemonConfig cfg;
+    cfg.configFilePath = configPath_;
+
+    EnvGuard env("YAMS_PREFERRED_MODEL", std::nullopt);
+
+    auto result = ConfigResolver::resolvePreferredModel(cfg, testDir_);
+    EXPECT_EQ(result, "config-model");
+}
+
+TEST_F(ConfigResolverTest, ResolvePreferredModel_FallsBackToModelsDirectory) {
+    DaemonConfig cfg;
+    cfg.configFilePath = testDir_ / "missing.toml"; // ensure no config file is read
+    EnvGuard env("YAMS_PREFERRED_MODEL", std::nullopt);
+
+    auto models = testDir_ / "models" / "fallback-model";
+    std::filesystem::create_directories(models);
+    std::ofstream(models / "model.onnx").put('\0');
+
+    auto result = ConfigResolver::resolvePreferredModel(cfg, testDir_);
+    EXPECT_EQ(result, "fallback-model");
+}
+
+TEST_F(ConfigResolverTest, IsSymbolExtractionEnabled_DefaultsTrue) {
+    DaemonConfig cfg;
+    cfg.configFilePath = testDir_ / "missing.toml"; // no file
+
+    auto enabled = ConfigResolver::isSymbolExtractionEnabled(cfg);
+    EXPECT_TRUE(enabled);
+}
+
+TEST_F(ConfigResolverTest, IsSymbolExtractionEnabled_ReadsConfigFalse) {
+    writeConfig("[plugins]\nsymbol_extraction.enable = false\n");
+    DaemonConfig cfg;
+    cfg.configFilePath = configPath_;
+
+    auto enabled = ConfigResolver::isSymbolExtractionEnabled(cfg);
+    EXPECT_FALSE(enabled);
+}
+
+#ifdef _WIN32
+TEST_F(ConfigResolverTest, ResolveDefaultConfigPath_WindowsAppData) {
+    auto appdataRoot = testDir_ / "appdata";
+    std::filesystem::create_directories(appdataRoot / "yams");
+    auto cfgPath = appdataRoot / "yams" / "config.toml";
+    std::ofstream(cfgPath) << "# dummy\n";
+
+    EnvGuard envAppdata("APPDATA", appdataRoot.string());
+    EnvGuard envHome("HOME", std::nullopt); // ensure HOME doesn't interfere
+    EnvGuard envXdg("XDG_CONFIG_HOME", std::nullopt);
+    EnvGuard envExplicit("YAMS_CONFIG_PATH", std::nullopt);
+
+    auto resolved = ConfigResolver::resolveDefaultConfigPath();
+    EXPECT_EQ(std::filesystem::weakly_canonical(resolved),
+              std::filesystem::weakly_canonical(cfgPath));
+}
+#endif
 
 } // namespace yams::daemon::test

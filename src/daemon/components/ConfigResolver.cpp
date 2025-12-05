@@ -13,6 +13,8 @@
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
+#include <system_error>
+#include <vector>
 
 namespace yams::daemon {
 
@@ -31,6 +33,14 @@ std::filesystem::path ConfigResolver::resolveDefaultConfigPath() {
         if (std::filesystem::exists(p))
             return p;
     }
+#ifdef _WIN32
+    // Windows: prefer roaming APPDATA for config (matches get_config_dir())
+    if (const char* appdata = std::getenv("APPDATA")) {
+        std::filesystem::path p = std::filesystem::path(appdata) / "yams" / "config.toml";
+        if (std::filesystem::exists(p))
+            return p;
+    }
+#endif
     if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
         std::filesystem::path p = std::filesystem::path(xdg) / "yams" / "config.toml";
         if (std::filesystem::exists(p))
@@ -189,6 +199,170 @@ bool ConfigResolver::detectEmbeddingPreloadFlag(const DaemonConfig& config) {
     }
 
     return flag;
+}
+
+std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,
+                                                  const std::filesystem::path& resolvedDataDir) {
+    std::string preferred;
+
+    if (const char* envp = std::getenv("YAMS_PREFERRED_MODEL")) {
+        preferred = envp;
+        if (!preferred.empty()) {
+            spdlog::debug("Preferred model from environment: {}", preferred);
+            return preferred;
+        }
+    }
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath = !config.configFilePath.empty() ? config.configFilePath
+                                                          : resolveDefaultConfigPath();
+        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            // Flat parse for explicit keys
+            auto kv = parseSimpleTomlFlat(cfgPath);
+            auto it = kv.find("embeddings.preferred_model");
+            if (it != kv.end() && !it->second.empty()) {
+                preferred = it->second;
+                spdlog::debug("Preferred model from config: {}", preferred);
+                return preferred;
+            }
+
+            // daemon.models.preload_models -> take the first known value
+            auto preload = kv.find("daemon.models.preload_models");
+            if (preload != kv.end()) {
+                const auto& v = preload->second;
+                if (v.find("all-MiniLM-L6-v2") != std::string::npos) {
+                    preferred = "all-MiniLM-L6-v2";
+                } else if (v.find("all-mpnet-base-v2") != std::string::npos) {
+                    preferred = "all-mpnet-base-v2";
+                }
+                if (!preferred.empty()) {
+                    spdlog::debug("Preferred model from config preload list: {}", preferred);
+                    return preferred;
+                }
+            }
+
+            // Fallback: scan lines to catch cases the flat parser misses
+            std::ifstream in(cfgPath);
+            std::string line;
+            auto trim = [](std::string& t) {
+                if (t.empty())
+                    return;
+                t.erase(0, t.find_first_not_of(" \t"));
+                auto p = t.find_last_not_of(" \t");
+                if (p != std::string::npos)
+                    t.erase(p + 1);
+            };
+
+            while (std::getline(in, line)) {
+                std::string l = line;
+                trim(l);
+                if (l.empty() || l[0] == '#')
+                    continue;
+
+                if (l.find("embeddings.preferred_model") != std::string::npos) {
+                    auto eq = l.find('=');
+                    if (eq != std::string::npos) {
+                        std::string v = l.substr(eq + 1);
+                        trim(v);
+                        if (!v.empty() && v.front() == '"' && v.back() == '"')
+                            v = v.substr(1, v.size() - 2);
+                        preferred = v;
+                    }
+                    if (!preferred.empty()) {
+                        spdlog::debug("Preferred model from config: {}", preferred);
+                        return preferred;
+                    }
+                }
+                // daemon.models.preload_models -> take the first
+                if (l.find("daemon.models.preload_models") != std::string::npos) {
+                    auto eq = l.find('=');
+                    if (eq != std::string::npos) {
+                        std::string v = l.substr(eq + 1);
+                        trim(v);
+                        if (v.find("all-MiniLM-L6-v2") != std::string::npos) {
+                            preferred = "all-MiniLM-L6-v2";
+                        } else if (v.find("all-mpnet-base-v2") != std::string::npos) {
+                            preferred = "all-mpnet-base-v2";
+                        }
+                    }
+                    if (!preferred.empty()) {
+                        spdlog::debug("Preferred model from config preload list: {}", preferred);
+                        return preferred;
+                    }
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for preferred model: {}", e.what());
+    }
+
+    try {
+        if (!resolvedDataDir.empty()) {
+            namespace fs = std::filesystem;
+            fs::path models = resolvedDataDir / "models";
+            std::error_code ec;
+            if (fs::exists(models, ec) && fs::is_directory(models, ec)) {
+                [[maybe_unused]] size_t dbDim = 0;
+                try {
+                    // Prefer sentinel dim when available
+                    if (auto s = readVectorSentinelDim(resolvedDataDir))
+                        dbDim = *s;
+                } catch (...) {
+                }
+                std::vector<std::string> preferences;
+                (void)dbDim;
+
+                for (const auto& pref : preferences) {
+                    fs::path modelPath = models / pref;
+                    if (fs::exists(modelPath / "model.onnx", ec)) {
+                        spdlog::debug("Auto-detected preferred model: {}", pref);
+                        return pref;
+                    }
+                }
+
+                // If no preferred model found, use the first available
+                for (const auto& e : fs::directory_iterator(models, ec)) {
+                    if (e.is_directory() && fs::exists(e.path() / "model.onnx", ec)) {
+                        preferred = e.path().filename().string();
+                        spdlog::debug("Using first available model: {}", preferred);
+                        return preferred;
+                    }
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Error auto-detecting models: {}", e.what());
+    }
+
+    return preferred;
+}
+
+bool ConfigResolver::isSymbolExtractionEnabled(const DaemonConfig& config) {
+    bool enableSymbols = true;
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath = !config.configFilePath.empty() ? config.configFilePath
+                                                          : resolveDefaultConfigPath();
+        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            auto flat = parseSimpleTomlFlat(cfgPath);
+            auto it = flat.find("plugins.symbol_extraction.enable");
+            if (it != flat.end()) {
+                std::string v = it->second;
+                std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
+                    return static_cast<char>(std::tolower(c));
+                });
+                enableSymbols = !(v == "0" || v == "false" || v == "off" || v == "no");
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("[ConfigResolver] Failed to read symbol extraction flag: {}", e.what());
+    } catch (...) {
+        spdlog::debug("[ConfigResolver] Failed to read symbol extraction flag: unknown error");
+    }
+
+    return enableSymbols;
 }
 
 int ConfigResolver::readTimeoutMs(const char* envName, int defaultMs, int minMs) {

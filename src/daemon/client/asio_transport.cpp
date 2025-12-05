@@ -166,6 +166,20 @@ AsioTransportAdapter::async_write_all(boost::asio::local::stream_protocol::socke
     co_return Result<void>{};
 }
 
+namespace {
+// Shared request-id generator for all client request paths (unary + streaming)
+std::atomic<uint64_t>& request_id_counter() {
+    static std::atomic<uint64_t> counter{
+        static_cast<uint64_t>(
+            std::chrono::steady_clock::now().time_since_epoch().count())};
+    return counter;
+}
+
+uint64_t next_request_id() {
+    return request_id_counter().fetch_add(1, std::memory_order_relaxed);
+}
+} // namespace
+
 boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(const Request& req) {
     Request copy = req;
     co_return co_await send_request(std::move(copy));
@@ -177,14 +191,11 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
         co_return Error{ErrorCode::NetworkError, "Failed to establish connection"};
     }
 
-    static std::atomic<uint64_t> g_req_id{
-        static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count())};
-
     const auto req_type = getMessageType(req);
 
     Message msg;
     msg.version = PROTOCOL_VERSION;
-    msg.requestId = g_req_id.fetch_add(1, std::memory_order_relaxed);
+    msg.requestId = next_request_id();
     msg.timestamp = std::chrono::steady_clock::now();
     msg.payload = std::move(req);
     msg.clientVersion = "yams-client-0.3.4";
@@ -276,12 +287,9 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
             co_return Error{ErrorCode::NetworkError, "Failed to establish connection"};
         }
 
-        static std::atomic<uint64_t> g_req_id{
-            static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count())};
-
         Message msg;
         msg.version = PROTOCOL_VERSION;
-        msg.requestId = g_req_id.fetch_add(1, std::memory_order_relaxed);
+        msg.requestId = next_request_id();
         msg.timestamp = std::chrono::steady_clock::now();
         msg.payload = req;
         msg.clientVersion = "yams-client-0.3.4";

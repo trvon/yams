@@ -2440,11 +2440,16 @@ struct PluginTrustRemoveRequest {
 
 // Graph query requests (PBI-009)
 struct GraphQueryRequest {
-    // Origin selection (exactly one should be set)
+    // Origin selection (exactly one should be set, unless listByType mode)
     std::string documentHash;
     std::string documentName;
     std::string snapshotId;
     int64_t nodeId{-1}; // -1 means not set
+
+    // List-by-type mode (PBI-093): when true, ignore origin and list nodes by type
+    bool listByType{false};
+    std::string nodeType; // Node type to filter (e.g., "binary.function", "binary.import")
+    std::string nodeKey;  // Direct node key lookup (e.g., "fn:abc123:0x1000")
 
     // Traversal options
     std::vector<std::string> relationFilters; // Empty = all relations
@@ -2467,9 +2472,10 @@ struct GraphQueryRequest {
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
-        ser << documentHash << documentName << snapshotId << nodeId << relationFilters << maxDepth
-            << maxResults << maxResultsPerDepth << scopeToSnapshot << offset << limit
-            << includeEdgeProperties << includeNodeProperties << hydrateFully;
+        ser << documentHash << documentName << snapshotId << nodeId << listByType << nodeType
+            << nodeKey << relationFilters << maxDepth << maxResults << maxResultsPerDepth
+            << scopeToSnapshot << offset << limit << includeEdgeProperties << includeNodeProperties
+            << hydrateFully;
     }
 
     template <typename Deserializer>
@@ -2494,6 +2500,22 @@ struct GraphQueryRequest {
 
         if (auto r = deser.template read<int64_t>(); r)
             req.nodeId = r.value();
+        else
+            return r.error();
+
+        // PBI-093: New fields for listByType mode
+        if (auto r = deser.template read<bool>(); r)
+            req.listByType = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            req.nodeType = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            req.nodeKey = std::move(r.value());
         else
             return r.error();
 
@@ -2622,6 +2644,229 @@ struct GraphValidateRequest {
     }
 };
 
+// ============================================================================
+// KG Ingest Request/Response (PBI-093 Phase 2)
+// ============================================================================
+
+/**
+ * Node for bulk KG ingestion. Matches KGNode structure but uses IPC serialization.
+ */
+struct KgIngestNode {
+    std::string nodeKey;    // Unique logical key (required)
+    std::string label;      // Human-readable name
+    std::string type;       // Node type (e.g., "binary.function")
+    std::string properties; // JSON properties blob
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << nodeKey << label << type << properties;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<KgIngestNode> deserialize(Deserializer& deser) {
+        KgIngestNode node;
+        if (auto r = deser.readString(); r)
+            node.nodeKey = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            node.label = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            node.type = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            node.properties = std::move(r.value());
+        else
+            return r.error();
+        return node;
+    }
+};
+
+/**
+ * Edge for bulk KG ingestion. Uses node keys for referencing (resolved by daemon).
+ */
+struct KgIngestEdge {
+    std::string srcNodeKey; // Source node key (resolved to ID by daemon)
+    std::string dstNodeKey; // Destination node key (resolved to ID by daemon)
+    std::string relation;   // Relation/predicate (e.g., "CALLS", "CONTAINS")
+    float weight{1.0f};     // Optional weight
+    std::string properties; // JSON properties blob
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << srcNodeKey << dstNodeKey << relation << weight << properties;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<KgIngestEdge> deserialize(Deserializer& deser) {
+        KgIngestEdge edge;
+        if (auto r = deser.readString(); r)
+            edge.srcNodeKey = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            edge.dstNodeKey = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            edge.relation = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.template read<float>(); r)
+            edge.weight = r.value();
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            edge.properties = std::move(r.value());
+        else
+            return r.error();
+        return edge;
+    }
+};
+
+/**
+ * Alias for bulk KG ingestion.
+ */
+struct KgIngestAlias {
+    std::string nodeKey;    // Node key to associate alias with
+    std::string alias;      // Surface form
+    std::string source;     // Origin/system of alias
+    float confidence{1.0f}; // [0,1]
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << nodeKey << alias << source << confidence;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<KgIngestAlias> deserialize(Deserializer& deser) {
+        KgIngestAlias a;
+        if (auto r = deser.readString(); r)
+            a.nodeKey = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            a.alias = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            a.source = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.template read<float>(); r)
+            a.confidence = r.value();
+        else
+            return r.error();
+        return a;
+    }
+};
+
+/**
+ * Bulk KG ingest request for ingesting nodes, edges, and aliases from external sources
+ * (e.g., Ghidra plugin binary analysis results).
+ */
+struct KgIngestRequest {
+    std::vector<KgIngestNode> nodes;
+    std::vector<KgIngestEdge> edges;
+    std::vector<KgIngestAlias> aliases;
+
+    // Optional: associate all entities with a document
+    std::string documentHash; // If set, links entities to this document
+
+    // Options
+    bool skipExistingNodes{true}; // Skip nodes that already exist (by nodeKey)
+    bool skipExistingEdges{true}; // Skip edges that already exist (by src/dst/relation)
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        // Nodes
+        ser << static_cast<uint32_t>(nodes.size());
+        for (const auto& node : nodes) {
+            node.serialize(ser);
+        }
+        // Edges
+        ser << static_cast<uint32_t>(edges.size());
+        for (const auto& edge : edges) {
+            edge.serialize(ser);
+        }
+        // Aliases
+        ser << static_cast<uint32_t>(aliases.size());
+        for (const auto& alias : aliases) {
+            alias.serialize(ser);
+        }
+        ser << documentHash << skipExistingNodes << skipExistingEdges;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<KgIngestRequest> deserialize(Deserializer& deser) {
+        KgIngestRequest req;
+
+        // Nodes
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            req.nodes.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto node = KgIngestNode::deserialize(deser);
+                if (!node)
+                    return node.error();
+                req.nodes.push_back(std::move(node.value()));
+            }
+        } else
+            return cnt.error();
+
+        // Edges
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            req.edges.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto edge = KgIngestEdge::deserialize(deser);
+                if (!edge)
+                    return edge.error();
+                req.edges.push_back(std::move(edge.value()));
+            }
+        } else
+            return cnt.error();
+
+        // Aliases
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            req.aliases.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto alias = KgIngestAlias::deserialize(deser);
+                if (!alias)
+                    return alias.error();
+                req.aliases.push_back(std::move(alias.value()));
+            }
+        } else
+            return cnt.error();
+
+        if (auto r = deser.readString(); r)
+            req.documentHash = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.template read<bool>(); r)
+            req.skipExistingNodes = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<bool>(); r)
+            req.skipExistingEdges = r.value();
+        else
+            return r.error();
+
+        return req;
+    }
+};
+
 // Forward declarations for late-defined request types used in the Request variant
 struct CatRequest;
 struct ListSessionsRequest;
@@ -2641,7 +2886,8 @@ using Request = std::variant<
     CancelRequest, CatRequest, ListSessionsRequest, UseSessionRequest, AddPathSelectorRequest,
     RemovePathSelectorRequest, ListTreeDiffRequest, FileHistoryRequest, PruneRequest,
     ListCollectionsRequest, ListSnapshotsRequest, RestoreCollectionRequest, RestoreSnapshotRequest,
-    GraphQueryRequest, GraphPathHistoryRequest, GraphRepairRequest, GraphValidateRequest>;
+    GraphQueryRequest, GraphPathHistoryRequest, GraphRepairRequest, GraphValidateRequest,
+    KgIngestRequest>;
 
 // ============================================================================
 // Response Types
@@ -5150,12 +5396,13 @@ struct GraphNode {
     std::string documentPath;
     std::string snapshotId;
     int32_t distance{0};
+    std::string properties; // JSON string for node properties (optional)
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
         ser << nodeId << nodeKey << label << type << documentHash << documentPath << snapshotId
-            << distance;
+            << distance << properties;
     }
 
     template <typename Deserializer>
@@ -5200,6 +5447,11 @@ struct GraphNode {
 
         if (auto r = deser.template read<int32_t>(); r)
             node.distance = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            node.properties = std::move(r.value());
         else
             return r.error();
 
@@ -5497,6 +5749,86 @@ struct GraphValidateResponse {
             }
         } else
             return cnt.error();
+
+        return res;
+    }
+};
+
+/**
+ * Response for KG ingest request (PBI-093 Phase 2).
+ */
+struct KgIngestResponse {
+    uint64_t nodesInserted{0};
+    uint64_t nodesSkipped{0};
+    uint64_t edgesInserted{0};
+    uint64_t edgesSkipped{0};
+    uint64_t aliasesInserted{0};
+    uint64_t aliasesSkipped{0};
+    std::vector<std::string> errors; // Non-fatal errors/warnings
+    bool success{true};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << nodesInserted << nodesSkipped << edgesInserted << edgesSkipped << aliasesInserted
+            << aliasesSkipped;
+        ser << static_cast<uint32_t>(errors.size());
+        for (const auto& err : errors) {
+            ser << err;
+        }
+        ser << success;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<KgIngestResponse> deserialize(Deserializer& deser) {
+        KgIngestResponse res;
+
+        if (auto r = deser.template read<uint64_t>(); r)
+            res.nodesInserted = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<uint64_t>(); r)
+            res.nodesSkipped = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<uint64_t>(); r)
+            res.edgesInserted = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<uint64_t>(); r)
+            res.edgesSkipped = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<uint64_t>(); r)
+            res.aliasesInserted = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<uint64_t>(); r)
+            res.aliasesSkipped = r.value();
+        else
+            return r.error();
+
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            res.errors.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto err = deser.readString();
+                if (!err)
+                    return err.error();
+                res.errors.push_back(std::move(err.value()));
+            }
+        } else
+            return cnt.error();
+
+        if (auto r = deser.template read<bool>(); r)
+            res.success = r.value();
+        else
+            return r.error();
 
         return res;
     }
@@ -6056,7 +6388,7 @@ using Response =
                  ListSessionsResponse, ListTreeDiffResponse, FileHistoryResponse, PruneResponse,
                  ListCollectionsResponse, ListSnapshotsResponse, RestoreCollectionResponse,
                  RestoreSnapshotResponse, GraphQueryResponse, GraphPathHistoryResponse,
-                 GraphRepairResponse, GraphValidateResponse,
+                 GraphRepairResponse, GraphValidateResponse, KgIngestResponse,
                  // Streaming events (progress/heartbeats)
                  EmbeddingEvent, ModelLoadEvent>;
 
@@ -6192,6 +6524,9 @@ enum class MessageType : uint8_t {
     // Graph maintenance responses (PBI-009 Phase 4.3)
     GraphRepairResponse = 166,
     GraphValidateResponse = 167,
+    // KG ingest (PBI-093 Phase 2)
+    KgIngestRequest = 70,
+    KgIngestResponse = 168,
     // Events
     EmbeddingEvent = 149,
     ModelLoadEvent = 150,

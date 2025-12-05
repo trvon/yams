@@ -11,6 +11,7 @@
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
+#include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/plugins/content_extractor_v1.h>
@@ -94,7 +95,21 @@ Result<void> PluginManager::initialize() {
     } else {
         std::filesystem::path trustFile = deps_.dataDir / "plugins.trust";
         pluginHost_ = std::make_unique<AbiPluginHost>(nullptr, trustFile);
-        spdlog::info("[PluginManager] Initialized with trust file: {}", trustFile.string());
+        spdlog::info("[PluginManager] AbiPluginHost initialized with trust file: {}",
+                     trustFile.string());
+    }
+
+    // Initialize ExternalPluginHost for Python/JS plugins
+    try {
+        std::filesystem::path externalTrustFile = deps_.dataDir / "external_plugins.trust";
+        ExternalPluginHostConfig externalConfig;
+        externalHost_ =
+            std::make_unique<ExternalPluginHost>(nullptr, externalTrustFile, externalConfig);
+        spdlog::info("[PluginManager] ExternalPluginHost initialized with trust file: {}",
+                     externalTrustFile.string());
+    } catch (const std::exception& e) {
+        spdlog::warn("[PluginManager] Failed to initialize ExternalPluginHost: {}", e.what());
+        // Not fatal - external plugins just won't be available
     }
 
     // Configure name policy
@@ -116,6 +131,9 @@ Result<void> PluginManager::initialize() {
 void PluginManager::shutdown() {
     spdlog::debug("[PluginManager] Shutting down");
 
+    // Shutdown external plugin host first (terminates child processes)
+    externalHost_.reset();
+
     // Clear adopted interfaces
     modelProvider_.reset();
     contentExtractors_.clear();
@@ -136,21 +154,72 @@ void PluginManager::shutdown() {
 }
 
 std::vector<std::filesystem::path> PluginManager::trustList() const {
-    if (!getActivePluginHost())
-        return {};
-    return getActivePluginHost()->trustList();
+    std::vector<std::filesystem::path> paths;
+    if (getActivePluginHost()) {
+        auto abi = getActivePluginHost()->trustList();
+        paths.insert(paths.end(), abi.begin(), abi.end());
+    }
+    if (externalHost_) {
+        auto ext = externalHost_->trustList();
+        paths.insert(paths.end(), ext.begin(), ext.end());
+    }
+    std::sort(paths.begin(), paths.end());
+    paths.erase(std::unique(paths.begin(), paths.end()), paths.end());
+    return paths;
 }
 
 Result<void> PluginManager::trustAdd(const std::filesystem::path& path) {
-    if (!getActivePluginHost())
-        return Error{ErrorCode::InvalidState, "Plugin host not initialized"};
-    return getActivePluginHost()->trustAdd(path);
+    Result<void> lastErr{Error{ErrorCode::InvalidState, "Plugin host not initialized"}};
+    bool any = false;
+
+    if (getActivePluginHost()) {
+        auto r = getActivePluginHost()->trustAdd(path);
+        if (r) {
+            any = true;
+        } else {
+            lastErr = r;
+        }
+    }
+
+    if (externalHost_) {
+        auto r = externalHost_->trustAdd(path);
+        if (r) {
+            any = true;
+        } else {
+            lastErr = r;
+        }
+    }
+
+    if (any)
+        return Result<void>();
+    return lastErr;
 }
 
 Result<void> PluginManager::trustRemove(const std::filesystem::path& path) {
-    if (!getActivePluginHost())
-        return Error{ErrorCode::InvalidState, "Plugin host not initialized"};
-    return getActivePluginHost()->trustRemove(path);
+    Result<void> lastErr{Error{ErrorCode::InvalidState, "Plugin host not initialized"}};
+    bool any = false;
+
+    if (getActivePluginHost()) {
+        auto r = getActivePluginHost()->trustRemove(path);
+        if (r) {
+            any = true;
+        } else {
+            lastErr = r;
+        }
+    }
+
+    if (externalHost_) {
+        auto r = externalHost_->trustRemove(path);
+        if (r) {
+            any = true;
+        } else {
+            lastErr = r;
+        }
+    }
+
+    if (any)
+        return Result<void>();
+    return lastErr;
 }
 
 boost::asio::awaitable<Result<size_t>>
@@ -240,7 +309,12 @@ PluginManager::autoloadPlugins(boost::asio::any_io_executor executor) {
                              }());
 
                 // Create awaitable load task
-                auto host = pluginHost_.get();
+                // Use getActivePluginHost() to get the correct host (shared or owned)
+                auto host = getActivePluginHost();
+                if (!host) {
+                    spdlog::warn("[PluginManager] no active plugin host for loading");
+                    continue;
+                }
                 auto path = desc.path;
                 loadTasks.push_back(boost::asio::co_spawn(
                     executor,
@@ -265,6 +339,72 @@ PluginManager::autoloadPlugins(boost::asio::any_io_executor executor) {
                 }
             } catch (const std::exception& e) {
                 spdlog::warn("[PluginManager] load exception: {}", e.what());
+            }
+        }
+
+        // External plugins autoload: scan external plugin directories
+        if (externalHost_) {
+            std::vector<std::filesystem::path> externalRoots;
+
+            // Add external trust list paths
+            for (const auto& p : externalHost_->trustList()) {
+                externalRoots.push_back(p);
+            }
+
+            // Add platform-specific default external plugin directories
+#ifdef _WIN32
+            externalRoots.push_back(yams::config::get_data_dir() / "external-plugins");
+#else
+            if (const char* home = std::getenv("HOME")) {
+                externalRoots.push_back(fs::path(home) / ".local" / "lib" / "yams" /
+                                        "external-plugins");
+            }
+            externalRoots.push_back(fs::path("/usr/local/lib/yams/external-plugins"));
+            externalRoots.push_back(fs::path("/usr/lib/yams/external-plugins"));
+#endif
+
+            // Deduplicate
+            std::sort(externalRoots.begin(), externalRoots.end());
+            externalRoots.erase(std::unique(externalRoots.begin(), externalRoots.end()),
+                                externalRoots.end());
+
+            for (const auto& root : externalRoots) {
+                if (!std::filesystem::exists(root))
+                    continue;
+
+                try {
+                    spdlog::info("[PluginManager] scanning external root: {}", root.string());
+                    auto scanResult = externalHost_->scanDirectory(root);
+                    if (scanResult) {
+                        for (const auto& desc : scanResult.value()) {
+                            spdlog::info("[PluginManager] loading external plugin '{}' from {}",
+                                         desc.name, desc.path.string());
+                            auto loadResult = externalHost_->load(desc.path, "");
+                            if (loadResult) {
+                                ++loadedCount;
+                                spdlog::info("[PluginManager] loaded external: '{}' (ifaces=[{}])",
+                                             loadResult.value().name, [&]() {
+                                                 std::string s;
+                                                 for (size_t i = 0;
+                                                      i < loadResult.value().interfaces.size();
+                                                      ++i) {
+                                                     if (i)
+                                                         s += ",";
+                                                     s += loadResult.value().interfaces[i];
+                                                 }
+                                                 return s;
+                                             }());
+                                pluginHostFsm_.dispatch(PluginLoadedEvent{loadResult.value().name});
+                            } else {
+                                spdlog::warn("[PluginManager] external plugin load failed: {}",
+                                             loadResult.error().message);
+                            }
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::warn("[PluginManager] external scan error at {}: {}", root.string(),
+                                 e.what());
+                }
             }
         }
 

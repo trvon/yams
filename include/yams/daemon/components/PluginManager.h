@@ -30,9 +30,11 @@ class AbiPluginLoader;
 class AbiPluginHost;
 class AbiSymbolExtractorAdapter;
 class DaemonLifecycleFsm;
+class ExternalPluginHost;
 class IModelProvider;
 class StateComponent;
 struct DaemonConfig;
+struct ExternalPluginHostConfig;
 
 /**
  * @brief Manages plugin lifecycle, loading, and interface adoption.
@@ -108,9 +110,14 @@ public:
     // --- Plugin Host Operations ---
 
     /**
-     * @brief Get the underlying plugin host for low-level operations.
+     * @brief Get the ABI plugin host for native C++ plugins.
      */
     AbiPluginHost* getPluginHost() const { return pluginHost_.get(); }
+
+    /**
+     * @brief Get the external plugin host for Python/JS plugins.
+     */
+    ExternalPluginHost* getExternalPluginHost() const { return externalHost_.get(); }
 
     /**
      * @brief Get the plugin loader.
@@ -238,6 +245,28 @@ public:
     ProviderSnapshot getEmbeddingProviderFsmSnapshot() const { return embeddingFsm_.snapshot(); }
 
     /**
+     * @brief Dispatch plugin load failed event to FSM.
+     * Used by ServiceManager test helpers.
+     */
+    void dispatchPluginLoadFailed(const std::string& error) {
+        try {
+            pluginHostFsm_.dispatch(PluginLoadFailedEvent{error});
+        } catch (...) {
+        }
+    }
+
+    /**
+     * @brief Dispatch all plugins loaded event to FSM.
+     * Used by ServiceManager test helpers.
+     */
+    void dispatchAllPluginsLoaded(std::size_t count) {
+        try {
+            pluginHostFsm_.dispatch(AllPluginsLoadedEvent{count});
+        } catch (...) {
+        }
+    }
+
+    /**
      * @brief Set cached model count (for status snapshot).
      */
     void setCachedModelCount(std::uint32_t count) {
@@ -263,6 +292,7 @@ private:
     // Plugin infrastructure
     std::unique_ptr<AbiPluginLoader> pluginLoader_;
     std::unique_ptr<AbiPluginHost> pluginHost_; // Owned when created internally
+    std::unique_ptr<ExternalPluginHost> externalHost_; // For Python/JS plugins
     AbiPluginHost* sharedPluginHost_{nullptr};  // Non-owning when shared from ServiceManager
 
     // FSMs for state tracking

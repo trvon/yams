@@ -1,5 +1,6 @@
 #include <fstream>
 #include <map>
+#include <sstream>
 #include <yams/config/config_helpers.h>
 
 #ifdef _WIN32
@@ -263,6 +264,34 @@ std::filesystem::path resolve_data_dir_from_config() {
 
     // 3) Use platform-specific data directory
     return get_data_dir();
+}
+
+std::vector<std::filesystem::path> parse_path_list(const std::string& raw) {
+    std::vector<std::filesystem::path> out;
+    if (raw.empty())
+        return out;
+
+    std::string s = raw;
+    trim(s);
+    if (s.empty())
+        return out;
+
+    // Strip surrounding brackets for TOML arrays
+    if (s.front() == '[' && s.back() == ']') {
+        s = s.substr(1, s.size() - 2);
+    }
+
+    std::stringstream ss(s);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        trim(item);
+        item = unquote(item);
+        if (item.empty())
+            continue;
+        out.emplace_back(expand_tilde(item));
+    }
+
+    return out;
 }
 
 } // namespace yams::config
