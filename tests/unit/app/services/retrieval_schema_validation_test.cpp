@@ -310,12 +310,10 @@ TEST_CASE("FTS5 table schema supports grep operations", "[retrieval][schema][gre
         // FTS5 tables have specific columns
         bool hasContent = std::find(columns.begin(), columns.end(), "content") != columns.end();
         bool hasTitle = std::find(columns.begin(), columns.end(), "title") != columns.end();
-        bool hasContentType =
-            std::find(columns.begin(), columns.end(), "content_type") != columns.end();
 
         REQUIRE(hasContent);
         REQUIRE(hasTitle);
-        REQUIRE(hasContentType);
+        // content_type was removed in migration v18; mime filters are handled via documents join
     }
 }
 

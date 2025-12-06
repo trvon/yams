@@ -72,14 +72,16 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
 
     auto ex = co_await boost::asio::this_coro::executor;
 
-    // Enable vector search if vectorManager is provided
-    // ServiceManager already validated that vectorDatabase has data before passing vectorManager
-    bool vectorEnabled = (vectorManager != nullptr);
+    // Enable vector search only when a manager is provided; otherwise build a text-only engine
+    // that can be upgraded later when vectors become available.
+    bool vectorEnabled = (vectorManager != nullptr && vectorDatabase != nullptr);
 
     if (vectorEnabled) {
         spdlog::info("[SearchEngineManager] Vector search enabled: vectorManager provided");
     } else {
-        spdlog::info("[SearchEngineManager] Vector search disabled: no vectorManager");
+        spdlog::info(
+            "[SearchEngineManager] Vector search disabled: building text-only engine (will "
+            "rebuild when vectors become available)");
     }
 
     // Dispatch FSM event: build started
@@ -97,14 +99,18 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
     // Create builder and configure
     auto builder = std::make_shared<yams::search::SearchEngineBuilder>();
     builder->withMetadataRepo(metadataRepo);
-    if (vectorDatabase)
+    if (vectorEnabled && vectorDatabase)
         builder->withVectorDatabase(vectorDatabase);
-    if (vectorManager)
+    if (vectorEnabled && vectorManager)
         builder->withVectorIndex(vectorManager);
-    if (embeddingGen)
+    if (vectorEnabled && embeddingGen)
         builder->withEmbeddingGenerator(embeddingGen);
 
     auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
+    if (!vectorEnabled) {
+        opts.config.vectorWeight = 0.0f;
+        opts.config.vectorMaxResults = 0;
+    }
 
     using RetT = Result<std::shared_ptr<yams::search::SearchEngine>>;
     boost::asio::experimental::concurrent_channel<

@@ -558,6 +558,9 @@ Result<void> YamsDaemon::stop() {
         spdlog::debug("Stopping metrics polling...");
         metrics_->stopPolling();
         spdlog::debug("Metrics polling stopped");
+        // Destroy metrics (and its strand) while WorkCoordinator is still alive
+        spdlog::debug("Resetting metrics before WorkCoordinator shutdown...");
+        metrics_.reset();
     }
 
     // Stop socket server before ServiceManager tears down the WorkCoordinator

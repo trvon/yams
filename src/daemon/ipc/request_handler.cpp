@@ -16,10 +16,12 @@
 #include <array>
 #include <chrono>
 #include <span>
+#include <tuple>
 #include <utility>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/experimental/as_tuple.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
 #include <boost/asio/read.hpp>
@@ -338,14 +340,20 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
             timer.expires_after(config_.read_timeout);
 
             // Race the read against the timer
-            auto read_or_timeout =
-                co_await (boost::asio::async_read(*sock, boost::asio::buffer(buf),
-                                                  boost::asio::transfer_at_least(1),
-                                                  boost::asio::use_awaitable) ||
-                          timer.async_wait(boost::asio::use_awaitable));
+            auto read_or_timeout = co_await (
+                boost::asio::async_read(*sock, boost::asio::buffer(buf),
+                                        boost::asio::transfer_at_least(1),
+                                        boost::asio::experimental::as_tuple(
+                                            boost::asio::use_awaitable)) ||
+                timer.async_wait(boost::asio::experimental::as_tuple(
+                    boost::asio::use_awaitable)));
 
             size_t bytes_read = 0;
             if (read_or_timeout.index() == 1) {
+                const auto [timer_ec] = std::get<1>(read_or_timeout);
+                if (timer_ec && timer_ec != boost::asio::error::operation_aborted) {
+                    spdlog::debug("Read timer cancelled with error: {}", timer_ec.message());
+                }
                 // Idle persistent connection; keep connection open and continue.
                 // IMPORTANT: Do not signal FSM on idle timeouts. The FSM's on_timeout()
                 // is reserved for operation deadlines (header/payload/write). Calling it
@@ -384,7 +392,15 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                 continue;
             } else {
                 // Header/payload bytes became available
-                bytes_read = std::get<0>(read_or_timeout);
+                const auto [read_ec, read_bytes] = std::get<0>(read_or_timeout);
+                if (read_ec) {
+                    spdlog::debug("Closing connection: read error {} ({})", read_ec.message(),
+                                  read_ec.value());
+                    boost::system::error_code ignore_ec;
+                    sock->close(ignore_ec);
+                    break;
+                }
+                bytes_read = read_bytes;
                 spdlog::debug("socket.async_read returned {} bytes", bytes_read);
                 consecutive_idle_timeouts = 0; // traffic observed, reset idle counter
                 if (bytes_read == 0) {
@@ -536,27 +552,50 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                             [self = shared_from_this(), sock, req = std::move(routed_request),
                              req_id = request_id,
                              expects = expects_streaming]() -> boost::asio::awaitable<void> {
-                                spdlog::info(
-                                    "handle_streaming_request spawn req_id={} type={} expects={}",
-                                    req_id, static_cast<int>(getMessageType(req)), expects);
-                                auto r = co_await self->handle_streaming_request(*sock, req, req_id,
-                                                                                 nullptr, expects);
-                                if (!r) {
-                                    spdlog::debug("Multiplexed request failed (requestId={}): {}",
-                                                  req_id, r.error().message);
-                                }
-                                self->inflight_.fetch_sub(1, std::memory_order_relaxed);
-                                MuxMetricsRegistry::instance().incrementActiveHandlers(-1);
-                                {
-                                    std::lock_guard<std::mutex> lk(self->ctx_mtx_);
-                                    auto it = self->contexts_.find(req_id);
-                                    if (it != self->contexts_.end()) {
-                                        it->second->completed.store(true,
-                                                                    std::memory_order_relaxed);
-                                        self->contexts_.erase(it);
+                                struct Cleanup {
+                                    std::shared_ptr<RequestHandler> self;
+                                    uint64_t req_id;
+                                    ~Cleanup() {
+                                        if (!self) {
+                                            return;
+                                        }
+                                        self->inflight_.fetch_sub(1, std::memory_order_relaxed);
+                                        MuxMetricsRegistry::instance().incrementActiveHandlers(-1);
+                                        {
+                                            std::lock_guard<std::mutex> lk(self->ctx_mtx_);
+                                            auto it = self->contexts_.find(req_id);
+                                            if (it != self->contexts_.end()) {
+                                                it->second->completed.store(
+                                                    true, std::memory_order_relaxed);
+                                                self->contexts_.erase(it);
+                                            }
+                                        }
+                                        RequestContextRegistry::instance().deregister_context(
+                                            req_id);
                                     }
+                                } cleanup{self, req_id};
+
+                                try {
+                                    spdlog::info("handle_streaming_request spawn req_id={} type={} "
+                                                 "expects={}",
+                                                 req_id, static_cast<int>(getMessageType(req)),
+                                                 expects);
+                                    auto r = co_await self->handle_streaming_request(
+                                        *sock, req, req_id, nullptr, expects);
+                                    if (!r) {
+                                        spdlog::debug(
+                                            "Multiplexed request failed (requestId={}): {}",
+                                            req_id, r.error().message);
+                                    }
+                                } catch (const std::exception& e) {
+                                    spdlog::error(
+                                        "Multiplexed request threw exception (requestId={}): {}",
+                                        req_id, e.what());
+                                } catch (...) {
+                                    spdlog::error(
+                                        "Multiplexed request threw unknown exception (requestId={})",
+                                        req_id);
                                 }
-                                RequestContextRegistry::instance().deregister_context(req_id);
                                 co_return;
                             },
                             boost::asio::detached);
@@ -1105,7 +1144,7 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
             Response header_response;
             try {
                 header_response = response;
-            } catch (const std::exception& e) {
+            } catch (const std::exception&) {
                 // If copy fails (e.g. variant holds non-copyable), create from scratch
                 if (std::holds_alternative<GetResponse>(response)) {
                     header_response = GetResponse{};

@@ -5,7 +5,12 @@
 #include <memory>
 #include <string>
 #include <thread>
+
+#include <boost/asio.hpp>
 #include <boost/asio/executor_work_guard.hpp>
+
+#include <spdlog/spdlog.h>
+
 #include <yams/daemon/client/asio_connection.h>
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/global_io_context.h>
@@ -99,7 +104,15 @@ void GlobalIOContext::restart() {
 
     try {
         for (unsigned int i = 0; i < thread_count; ++i) {
-            new_threads.emplace_back([this]() { io_context_->run(); });
+            new_threads.emplace_back([this]() {
+                try {
+                    io_context_->run();
+                } catch (const std::exception& e) {
+                    spdlog::error("GlobalIOContext worker exited with exception: {}", e.what());
+                } catch (...) {
+                    spdlog::error("GlobalIOContext worker exited with unknown exception");
+                }
+            });
         }
         // All threads created successfully - move them to member variable
         this->io_threads_ = std::move(new_threads);
@@ -144,7 +157,15 @@ void GlobalIOContext::ensure_initialized() {
         io_threads_.reserve(thread_count);
         try {
             for (unsigned int i = 0; i < thread_count; ++i) {
-                io_threads_.emplace_back([this]() { io_context_->run(); });
+                io_threads_.emplace_back([this]() {
+                    try {
+                        io_context_->run();
+                    } catch (const std::exception& e) {
+                        spdlog::error("GlobalIOContext worker exited with exception: {}", e.what());
+                    } catch (...) {
+                        spdlog::error("GlobalIOContext worker exited with unknown exception");
+                    }
+                });
             }
         } catch (...) {
             // Stop io_context first to wake any waiting threads

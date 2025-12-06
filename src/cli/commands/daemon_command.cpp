@@ -1131,13 +1131,11 @@ private:
         }
 
         if (detailed_) {
-            std::cout << "Socket: " << socketPath_ << "\n";
             if (pidFile_.empty()) {
                 pidFile_ =
                     daemon::YamsDaemon::resolveSystemPath(daemon::YamsDaemon::PathType::PidFile)
                         .string();
             }
-            std::cout << "PID file: " << pidFile_ << "\n";
             // Enable client debug logging for ping/connect path
             setenv("YAMS_CLIENT_DEBUG", "1", 1);
         }

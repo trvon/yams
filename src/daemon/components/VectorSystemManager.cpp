@@ -69,7 +69,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
     // Honor global disable flags
     if (ConfigResolver::envTruthy(std::getenv("YAMS_DISABLE_VECTORS")) ||
         ConfigResolver::envTruthy(std::getenv("YAMS_DISABLE_VECTOR_DB"))) {
-        spdlog::warn("[VectorInit] disabled via env flag");
+        spdlog::info("[VectorInit] disabled via env flag");
         return Result<bool>(false);
     }
 

@@ -9,6 +9,7 @@
 #include <boost/asio/detached.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <boost/asio/use_future.hpp>
 
 #include <spdlog/spdlog.h>
 
@@ -40,16 +41,18 @@ void RequestQueue::start() {
     spdlog::info("[RequestQueue] Starting background tasks");
     stop_flag_->store(false, std::memory_order_release);
 
-    // Launch eviction coroutine
-    boost::asio::co_spawn(
+    eviction_timer_ = std::make_unique<boost::asio::steady_timer>(executor_);
+    eviction_future_ = boost::asio::co_spawn(
         executor_, [this]() -> boost::asio::awaitable<void> { co_await eviction_loop(); },
-        boost::asio::detached);
+        boost::asio::use_future);
 
+    // Launch eviction coroutine
     // Launch aging coroutine (promotes stale low-priority requests)
     if (config_.enable_priority_queuing) {
-        boost::asio::co_spawn(
+        aging_timer_ = std::make_unique<boost::asio::steady_timer>(executor_);
+        aging_future_ = boost::asio::co_spawn(
             executor_, [this]() -> boost::asio::awaitable<void> { co_await aging_loop(); },
-            boost::asio::detached);
+            boost::asio::use_future);
     }
 }
 
@@ -62,6 +65,15 @@ void RequestQueue::stop() {
 
     spdlog::info("[RequestQueue] Stopping and clearing queue");
     stop_flag_->store(true, std::memory_order_release);
+
+    if (eviction_timer_) {
+        boost::system::error_code ec;
+        eviction_timer_->cancel(ec);
+    }
+    if (aging_timer_) {
+        boost::system::error_code ec;
+        aging_timer_->cancel(ec);
+    }
 
     // Drain all queues and invoke callbacks with cancellation error
     std::lock_guard<std::mutex> lock(mutex_);
@@ -81,6 +93,24 @@ void RequestQueue::stop() {
         }
     }
     metrics_.current_depth.store(0, std::memory_order_relaxed);
+
+    auto await_future = [](std::future<void>& fut) {
+        if (!fut.valid()) {
+            return;
+        }
+        try {
+            fut.get();
+        } catch (const std::exception& e) {
+            spdlog::warn("[RequestQueue] Background task exited with exception: {}", e.what());
+        }
+        fut = std::future<void>();
+    };
+
+    await_future(eviction_future_);
+    await_future(aging_future_);
+
+    eviction_timer_.reset();
+    aging_timer_.reset();
 }
 
 bool RequestQueue::try_enqueue(QueuedRequest request) {
@@ -290,13 +320,18 @@ boost::asio::awaitable<void> RequestQueue::eviction_loop() {
     using namespace std::chrono_literals;
     spdlog::debug("[RequestQueue] Eviction loop started");
 
-    auto executor = co_await boost::asio::this_coro::executor;
-    boost::asio::steady_timer timer(executor);
+    if (!eviction_timer_) {
+        co_return;
+    }
+    auto& timer = *eviction_timer_;
 
     while (!stop_flag_->load(std::memory_order_acquire)) {
         timer.expires_after(config_.eviction_interval);
         auto [ec] = co_await timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable));
-        (void)ec; // Ignore timer errors
+        if (ec == boost::asio::error::operation_aborted &&
+            stop_flag_->load(std::memory_order_acquire)) {
+            break;
+        }
 
         if (stop_flag_->load(std::memory_order_acquire)) {
             break;
@@ -352,13 +387,18 @@ boost::asio::awaitable<void> RequestQueue::aging_loop() {
     using namespace std::chrono_literals;
     spdlog::debug("[RequestQueue] Aging loop started");
 
-    auto executor = co_await boost::asio::this_coro::executor;
-    boost::asio::steady_timer timer(executor);
+    if (!aging_timer_) {
+        co_return;
+    }
+    auto& timer = *aging_timer_;
 
     while (!stop_flag_->load(std::memory_order_acquire)) {
         timer.expires_after(config_.aging_interval);
         auto [ec] = co_await timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable));
-        (void)ec; // Ignore timer errors
+        if (ec == boost::asio::error::operation_aborted &&
+            stop_flag_->load(std::memory_order_acquire)) {
+            break;
+        }
 
         if (stop_flag_->load(std::memory_order_acquire)) {
             break;

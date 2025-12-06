@@ -58,6 +58,13 @@ if tests_has_cli
     'cli/update_command_test.cpp',
     'cli/add_command_stdin_test.cpp',
     'cli/grep_command_path_tree_test.cpp',
+    # Error hints and prompt utilities
+    'cli/error_hints_test.cpp',
+    'cli/prompt_util_test.cpp',
+    # CLI11 option isolation (descriptions not leaking into values)
+    'cli/cli_option_isolation_test.cpp',
+    # Data dir resolution precedence (config > env > CLI)
+    'cli/data_dir_resolution_test.cpp',
   )
 endif
 

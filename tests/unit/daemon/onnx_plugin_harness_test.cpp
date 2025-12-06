@@ -109,11 +109,13 @@ TEST_CASE("Plugin: ONNX plugin loading with isolation", "[daemon][plugin][onnx]"
 
     auto pluginPath = getOnnxPluginPath();
     if (!pluginPath) {
-        SKIP("ONNX plugin not available (set TEST_ONNX_PLUGIN_FILE or build plugins/onnx)");
+        SUCCEED("ONNX plugin not available (set TEST_ONNX_PLUGIN_FILE or build plugins/onnx)");
+        return;
     }
 
     if (!fs::exists(*pluginPath)) {
-        SKIP("ONNX plugin file does not exist: " + pluginPath->string());
+        SUCCEED("ONNX plugin file does not exist: " + pluginPath->string());
+        return;
     }
 
     SECTION("Load ONNX plugin successfully") {

@@ -19,11 +19,12 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
     spdlog::info("Building embedded SearchEngine");
 
     // Validate required dependencies
-    if (!vectorIndex_) {
+    const bool vectorRequested = options.config.vectorWeight > 0.0f;
+    if (vectorRequested && !vectorIndex_) {
         return Error{ErrorCode::InvalidArgument,
                      "SearchEngineBuilder: VectorIndexManager not provided"};
     }
-    if (!vectorDatabase_) {
+    if (vectorRequested && !vectorDatabase_) {
         return Error{ErrorCode::InvalidArgument,
                      "SearchEngineBuilder: VectorDatabase not provided"};
     }

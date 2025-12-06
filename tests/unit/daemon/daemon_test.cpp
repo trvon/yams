@@ -68,6 +68,8 @@ protected:
         ::setenv("YAMS_SEARCH_BUILD_TIMEOUT_MS", "1500", 1);
         // Avoid vector DB dependency in unit tests
         ::setenv("YAMS_DISABLE_VECTORS", "1", 1);
+        // Session watcher is unnecessary in unit tests and can interfere with teardown timing
+        ::setenv("YAMS_DISABLE_SESSION_WATCHER", "1", 1);
 
         std::error_code se;
         fs::create_directories(config_.dataDir, se);
@@ -797,6 +799,12 @@ TEST_F(DaemonTest, DISABLED_RapidStartStopCycles) {
 // The fix uses a promise/future barrier (asyncInitStartedPromise_/asyncInitStartedFuture_)
 // to synchronize between the main thread and the async init coroutine.
 TEST_F(DaemonTest, AsyncInitBarrierPreventsRaceCondition) {
+    if (const char* disable_vectors = std::getenv("YAMS_DISABLE_VECTORS")) {
+        if (std::string_view(disable_vectors) == "1") {
+            GTEST_SKIP() << "Skipping: vector DB disabled via YAMS_DISABLE_VECTORS=1";
+        }
+    }
+
     daemon_ = std::make_unique<YamsDaemon>(config_);
 
     // Start daemon - this sets up the barrier mechanism

@@ -1295,17 +1295,30 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
     // Executors and sessions
     // Lightweight session directory watcher (polling), reacts to SessionService config.
-    try {
-        auto exec = getWorkerExecutor();
-        sessionWatchStopSource_ = yams::compat::stop_source{};
-        auto token = sessionWatchStopSource_.get_token();
-        sessionWatcherFuture_ = boost::asio::co_spawn(
-            exec,
-            [this, token]() -> boost::asio::awaitable<void> {
-                co_await co_runSessionWatcher(token);
-            },
-            boost::asio::use_future);
-    } catch (...) {
+    auto isTruthy = [](const char* s) {
+        if (!s)
+            return false;
+        std::string v(s);
+        std::transform(v.begin(), v.end(), v.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return v == "1" || v == "true" || v == "yes" || v == "on";
+    };
+    const bool disableSessionWatcher = isTruthy(std::getenv("YAMS_DISABLE_SESSION_WATCHER"));
+    if (disableSessionWatcher) {
+        spdlog::info("[ServiceManager] Session watcher disabled via YAMS_DISABLE_SESSION_WATCHER");
+    } else {
+        try {
+            auto exec = getWorkerExecutor();
+            sessionWatchStopSource_ = yams::compat::stop_source{};
+            auto token = sessionWatchStopSource_.get_token();
+            sessionWatcherFuture_ = boost::asio::co_spawn(
+                exec,
+                [this, token]() -> boost::asio::awaitable<void> {
+                    co_await co_runSessionWatcher(token);
+                },
+                boost::asio::use_future);
+        } catch (...) {
+        }
     }
 
     if (database_ && metadataRepo_)
@@ -1667,9 +1680,13 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         }
         int build_timeout = read_timeout_ms("YAMS_SEARCH_BUILD_TIMEOUT_MS", 5000, 250);
 
-        // Determine vector_enabled: check if vector DB has usable data
+        // Determine vector readiness: honor env disables and presence of vector infra
+        const bool vectorsDisabled = ConfigResolver::envTruthy(std::getenv("YAMS_DISABLE_VECTORS")) ||
+                                     ConfigResolver::envTruthy(std::getenv("YAMS_DISABLE_VECTOR_DB"));
         bool vectorEnabled = false;
-        if (vectorDatabase_) {
+        if (vectorsDisabled) {
+            spdlog::info("[SearchBuild] Vector search disabled via env flag; building text-only engine");
+        } else if (vectorDatabase_ && vectorIndexManager_) {
             try {
                 // Use VectorDatabase directly - it knows the actual DB size
                 auto vectorCount = vectorDatabase_->getVectorCount();
@@ -1679,6 +1696,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             } catch (const std::exception& e) {
                 spdlog::warn("[SearchBuild] Could not check vector count: {}", e.what());
             }
+        } else {
+            spdlog::info("[SearchBuild] Vector components not available; building text-only engine");
         }
 
         spdlog::info("[SearchBuild] scheduling initial build (vector_enabled hint={})",
@@ -1713,7 +1732,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             // Update readiness indicators after successful rebuild
             state_.readiness.searchEngineReady = true;
             state_.readiness.searchProgress = 100;
-            state_.readiness.vectorIndexReady = true;
+            state_.readiness.vectorIndexReady = (vectorIndexManager_ != nullptr &&
+                                                 vectorDatabase_ != nullptr);
             writeBootstrapStatusFile(config_, state_);
 
             spdlog::info("SearchEngine initialized and published to AppContext");
@@ -2110,7 +2130,8 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
 
             // Update readiness indicators
             state_.readiness.searchEngineReady = true;
-            state_.readiness.vectorIndexReady = true;
+            state_.readiness.vectorIndexReady =
+                (vectorIndexManager_ != nullptr && vectorDatabase_ != nullptr);
 
             spdlog::info("[ServiceManager] co_enableEmbeddingsAndRebuild: success");
         } else {
@@ -2175,7 +2196,8 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
                 // Update readiness indicators after successful rebuild
                 state_.readiness.searchEngineReady = true;
                 state_.readiness.searchProgress = 100;
-                state_.readiness.vectorIndexReady = true;
+                state_.readiness.vectorIndexReady =
+                    (vectorIndexManager_ != nullptr && vectorDatabase_ != nullptr);
                 writeBootstrapStatusFile(config_, state_);
 
                 spdlog::info("[Rebuild] done ok: vector scoring enabled");

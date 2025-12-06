@@ -286,6 +286,12 @@ Result<void> SocketServer::stop() {
             acceptLoopFuture_ = {};
         }
 
+        // Destroy acceptor while WorkCoordinator is still alive to avoid dangling
+        // references during later shutdown (e.g., when destructor runs after
+        // WorkCoordinator teardown).
+        acceptor_.reset();
+        connectionSlots_.reset();
+
         // WorkCoordinator manages thread lifecycle - just signal completion
         spdlog::info("SocketServer: accept loop stopped, WorkCoordinator continues running");
 

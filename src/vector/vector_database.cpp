@@ -54,6 +54,21 @@ public:
                 // best-effort: continue
             }
 
+            auto envTruthy = [](const char* env) {
+                if (!env || !*env)
+                    return false;
+                std::string v(env);
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                return v == "1" || v == "true" || v == "yes" || v == "on";
+            };
+
+            if (envTruthy(std::getenv("YAMS_DISABLE_VECTORS")) ||
+                envTruthy(std::getenv("YAMS_DISABLE_VECTOR_DB"))) {
+                spdlog::debug("[VectorDB] initialization skipped: disabled via environment");
+                initialized_ = true;
+                return true;
+            }
+
             // Allow test/CI override to force in-memory vector DB
             std::string db_path = config_.database_path;
             bool force_in_memory = config_.use_in_memory;
@@ -79,20 +94,23 @@ public:
             // virtual tables (avoids 'no such module: vec0'). Allow test harnesses to override so
             // unit tests can exercise vector flows even with YAMS_DISABLE_VECTORS.
             bool vec_bypass = false;
+            bool vec_bypass_protected = false; // do not auto-enable during tests if set via env
             try {
                 if (const char* env = std::getenv("YAMS_DISABLE_VECTORS")) {
                     std::string v(env);
                     std::transform(v.begin(), v.end(), v.begin(), ::tolower);
                     vec_bypass = (v == "1" || v == "true" || v == "yes" || v == "on");
+                    vec_bypass_protected = vec_bypass_protected || vec_bypass;
                 }
                 if (!vec_bypass) {
                     if (const char* env = std::getenv("YAMS_SQLITE_VEC_SKIP_INIT")) {
                         std::string v(env);
                         std::transform(v.begin(), v.end(), v.begin(), ::tolower);
                         vec_bypass = (v == "1" || v == "true" || v == "yes" || v == "on");
+                        vec_bypass_protected = vec_bypass_protected || vec_bypass;
                     }
                 }
-                if (vec_bypass) {
+                if (vec_bypass && !vec_bypass_protected) {
                     if (const char* testEnv = std::getenv("YAMS_TESTING")) {
                         std::string v(testEnv);
                         std::transform(v.begin(), v.end(), v.begin(), ::tolower);

@@ -147,6 +147,48 @@ test_deps = [
   dependency('yams_mcp'),
 ]
 
+onnxruntime_dep_opt = dependency('onnxruntime', required: false)
+if onnxruntime_dep_opt.found()
+  test_deps += onnxruntime_dep_opt
+endif
+
+# Windows: stage runtime DLLs next to every test executable (mirrors Windows install).
+# Placing DLLs alongside the test binaries prevents the loader from falling back to
+# older System32 copies (e.g., onnxruntime.dll API 17) and keeps tests aligned with
+# the Conan-shipped runtime used for installation.
+if host_machine.system() == 'windows' and windows_runtime_dlls.length() > 0
+  py_mod = import('python')
+  python = py_mod.find_installation('python3')
+
+  # All test binary directories (relative to builddir/tests)
+  test_runtime_dirs = [
+    '.',
+    'integration',
+    'integration/smoke',
+    'integration/daemon',
+    'integration/cli',
+    'integration/search',
+  ]
+
+  foreach dll_info : windows_runtime_dlls
+    dll_name = dll_info[0]
+    dll_src = dll_info[1]
+
+    foreach dest_rel : test_runtime_dirs
+      dest_path = join_paths(meson.current_build_dir(), dest_rel, dll_name)
+      stamp = 'dllcopy_@0@_@1@.stamp'.format(dll_name, dest_rel.replace('/', '_'))
+      custom_target(stamp,
+        input: dll_src,
+        output: stamp,
+        command: [python, '-c',
+          'import pathlib, shutil, sys; src=sys.argv[1]; dest=pathlib.Path(sys.argv[2]); stamp=pathlib.Path(sys.argv[3]); dest.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src, dest); stamp.parent.mkdir(parents=True, exist_ok=True); stamp.write_text("ok")',
+          dll_src, dest_path, '@OUTPUT@'],
+        build_by_default: true,
+      )
+    endforeach
+  endforeach
+endif
+
 tests_has_cli = false
 tests_has_cli11 = cli11_dep.found()
 
@@ -1053,7 +1095,7 @@ if catch2_dep.found()
   test('plugin_process_launcher', plugin_process_launcher_exe,
     suite: ['catch2', 'unit', 'extraction', 'plugin', 'launcher'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path, 'YAMS_SOURCE_DIR': meson.project_source_root() },
-    timeout: 120
+    timeout: host_machine.system() == 'windows' ? 180 : 120
   )
 
   test('jsonrpc_client', jsonrpc_client_exe,

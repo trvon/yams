@@ -24,6 +24,8 @@
 #include <string>
 #include <vector>
 
+#include "tests/support/temp_dir_scope.hpp"
+
 namespace yams::plugins::test {
 
 namespace fs = std::filesystem;
@@ -50,31 +52,24 @@ public:
 class PluginInstallerTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // Create temporary test directories
-        testDir_ = fs::temp_directory_path() / "yams-installer-test";
+        // Create an isolated temp root per test to avoid shard races
+        tempScope_.emplace(yams::test_support::TempDirScope::unique_under("yams-installer-test"));
+        testDir_ = tempScope_->path();
         installDir_ = testDir_ / "plugins";
         trustFile_ = testDir_ / "config" / "plugins_trust.txt";
-        
-        // Clean up any previous test artifacts
-        std::error_code ec;
-        fs::remove_all(testDir_, ec);
-        
+
         // Create test directories
         fs::create_directories(installDir_);
         fs::create_directories(trustFile_.parent_path());
-        
+
         // Create mock repo client
         mockClient_ = std::make_shared<MockPluginRepoClient>();
     }
-    
-    void TearDown() override {
-        std::error_code ec;
-        fs::remove_all(testDir_, ec);
-    }
-    
+
     fs::path testDir_;
     fs::path installDir_;
     fs::path trustFile_;
+    std::optional<yams::test_support::TempDirScope> tempScope_;
     std::shared_ptr<MockPluginRepoClient> mockClient_;
 };
 

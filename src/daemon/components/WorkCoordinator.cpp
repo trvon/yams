@@ -61,7 +61,25 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
         for (std::size_t i = 0; i < workerCount; ++i) {
             workers_.emplace_back([this, i]() {
                 spdlog::trace("[WorkCoordinator] Worker {} starting io_context.run()", i);
-                ioContext_->run();
+                for (;;) {
+                    try {
+                        ioContext_->run();
+                        break; // Normal exit (stopped or no work)
+                    } catch (const std::exception& e) {
+                        spdlog::error("[WorkCoordinator] Worker {} caught exception: {}", i,
+                                       e.what());
+                    } catch (...) {
+                        spdlog::error("[WorkCoordinator] Worker {} caught unknown exception", i);
+                    }
+
+                    if (ioContext_->stopped()) {
+                        break;
+                    }
+
+                    spdlog::debug(
+                        "[WorkCoordinator] Worker {} restarting io_context.run() after exception",
+                        i);
+                }
                 spdlog::trace("[WorkCoordinator] Worker {} exited io_context.run()", i);
             });
         }
