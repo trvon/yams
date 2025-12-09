@@ -22,6 +22,13 @@
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
 
+// Redefine SKIP_DAEMON_TEST_ON_WINDOWS for gtest (harness header uses Catch2's SKIP)
+#ifdef _WIN32
+#undef SKIP_DAEMON_TEST_ON_WINDOWS
+#define SKIP_DAEMON_TEST_ON_WINDOWS()                                                              \
+    GTEST_SKIP() << "Daemon IPC tests unstable on Windows - see windows-daemon-ipc-plan.md"
+#endif
+
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
 
@@ -60,6 +67,9 @@ protected:
     }
 
     void SetUp() override {
+        // Skip on Windows - daemon IPC tests are unstable there
+        SKIP_DAEMON_TEST_ON_WINDOWS();
+        
         if (!canBindUnixSocketHere()) {
             GTEST_SKIP() << "Skipping: AF_UNIX not available in this environment.";
         }

@@ -168,6 +168,7 @@ if host_machine.system() == 'windows' and windows_runtime_dlls.length() > 0
     'integration/daemon',
     'integration/cli',
     'integration/search',
+    'integration/services',
   ]
 
   foreach dll_info : windows_runtime_dlls
@@ -295,7 +296,36 @@ unit_exclude = '*-' + ':'.join(heavy_tests)
 
 
 # Compute build_rpath for external deps (so tests run without env vars)
-onnx_dep = dependency('onnxruntime', required: false, method: 'pkg-config')
+onnx_cmake_paths = []
+onnx_candidate_dirs = [base_build, join_paths(base_build, 'conan'), join_paths(base_build, 'conan', 'generators'), join_paths(base_build, 'generators')]
+
+foreach variant : ['build-debug', 'build-release', 'debug', 'release']
+  variant_path = join_paths(base_build, variant)
+  if fs.exists(variant_path)
+    onnx_candidate_dirs += [variant_path]
+    onnx_candidate_dirs += [join_paths(variant_path, 'conan')]
+    onnx_candidate_dirs += [join_paths(variant_path, 'conan', 'generators')]
+    onnx_candidate_dirs += [join_paths(variant_path, 'generators')]
+  endif
+endforeach
+
+foreach cand : onnx_candidate_dirs
+  if fs.exists(cand)
+    onnx_cmake_paths += cand
+    foreach sub : ['onnxruntime', 'onnxruntime/Release', 'onnxruntime/Debug']
+      subdir = join_paths(cand, sub)
+      if fs.exists(subdir)
+        onnx_cmake_paths += subdir
+      endif
+    endforeach
+  endif
+endforeach
+
+# Prefer Conan CMake config before falling back to system discovery
+onnx_dep = dependency('onnxruntime', method: 'cmake', cmake_module_path: onnx_cmake_paths, required: false)
+if not onnx_dep.found()
+  onnx_dep = dependency('onnxruntime', required: false, method: 'pkg-config')
+endif
 if not onnx_dep.found()
   onnx_dep = dependency('onnxruntime', required: false)
 endif

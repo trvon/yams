@@ -46,12 +46,14 @@ onnx_cmake_paths = []
 foreach base : conan_candidate_dirs
   if fs.exists(base)
     onnx_cmake_paths += base
+
     foreach sub : ['onnxruntime', 'onnxruntime/Release', 'onnxruntime/Debug']
       cand = join_paths(base, sub)
       if fs.exists(cand)
         onnx_cmake_paths += cand
       endif
     endforeach
+
   endif
 endforeach
 
@@ -61,10 +63,10 @@ if onnx_opt_path != ''
   onnx_cmake_paths += onnx_opt_path
 endif
 
-# Prefer pkg-config (Conan ships onnxruntime.pc); fall back to CMake if available
-onnx_dep = dependency('onnxruntime', required: false)
-if (not onnx_dep.found()) and (onnx_cmake_paths.length() > 0)
-  onnx_dep = dependency('onnxruntime', method: 'cmake', cmake_module_path: onnx_cmake_paths, required: false)
+# Prefer Conan CMake config (generator dirs) before falling back to system discovery
+onnx_dep = dependency('onnxruntime', method: 'cmake', cmake_module_path: onnx_cmake_paths, required: false)
+if not onnx_dep.found()
+  onnx_dep = dependency('onnxruntime', required: false)
 endif
 
 onnx_feature_requested = not onnx_opt.disabled()

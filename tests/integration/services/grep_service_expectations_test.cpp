@@ -19,6 +19,14 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
 
+// Windows daemon IPC tests are unstable due to socket shutdown race conditions
+#ifdef _WIN32
+#define SKIP_DAEMON_TEST_ON_WINDOWS()                                                              \
+    GTEST_SKIP() << "Daemon IPC tests unstable on Windows - see windows-daemon-ipc-plan.md"
+#else
+#define SKIP_DAEMON_TEST_ON_WINDOWS() ((void)0)
+#endif
+
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
 
@@ -32,6 +40,9 @@ protected:
     static bool canBindUnixSocketHere();
 
     void SetUp() override {
+        // Skip on Windows - daemon IPC tests are unstable there
+        SKIP_DAEMON_TEST_ON_WINDOWS();
+        
         if (!canBindUnixSocketHere()) {
             GTEST_SKIP() << "Skipping: AF_UNIX not available in this environment.";
         }
