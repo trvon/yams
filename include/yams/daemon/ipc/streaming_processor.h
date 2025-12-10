@@ -89,6 +89,9 @@ private:
     std::optional<GrepState> grep_;
     // Cached total for embedding requests to avoid any ABI/ODR surprises when copying variants
     std::size_t pending_total_{0};
+
+    // Clear all per-request state so each streaming request starts from a known baseline.
+    void reset_state();
 };
 
 } // namespace yams::daemon

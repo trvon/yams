@@ -131,17 +131,9 @@ void TuningManager::tick_once() {
     } catch (...) {
     }
 
-    const bool noConns = (activeConns == 0);
-    const bool noWorkerQ = (workerQueued == 0);
-    const bool muxLow =
-        muxQueuedBytes < std::max<std::uint64_t>(TuneAdvisor::maxMuxBytes() / 64ull,
-                                                 1ull * 1024ull * 1024ull); // ~1/64 of cap or 1MiB
-
-    bool fully_ready = state_ ? state_->readiness.searchEngineReady.load() : false;
-
-    if (fully_ready && noConns && noWorkerQ && muxLow) {
-    } else {
-    }
+    (void)activeConns;
+    (void)workerQueued;
+    (void)muxQueuedBytes;
 
     // Search concurrency governance (no dedicated pool)
     try {

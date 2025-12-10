@@ -661,7 +661,7 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
         handlerConfig.graceful_half_close = true;
         auto connectionTimeout = config_.connectionTimeout;
         if (connectionTimeout.count() == 0) {
-            connectionTimeout = std::chrono::milliseconds(2000);
+            connectionTimeout = std::chrono::milliseconds(TuneAdvisor::ipcTimeoutMs());
         }
         auto timeoutSeconds = std::chrono::duration_cast<std::chrono::seconds>(connectionTimeout);
         if (timeoutSeconds.count() == 0 && connectionTimeout.count() > 0) {

@@ -200,6 +200,9 @@ private:
 
     // Version 18: Remove content_type from FTS5 index (never queried via MATCH)
     static Migration removeFTS5ContentType();
+
+    // Version 19: Rename doc_entities to kg_doc_entities (repair for existing databases)
+    static Migration renameDocEntitiesToKgDocEntities();
 };
 
 /**

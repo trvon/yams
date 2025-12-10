@@ -363,20 +363,26 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                         .count());
                 // Bound idle lifetime to avoid FD/backlog exhaustion if clients vanish silently
                 if (++consecutive_idle_timeouts >= kMaxIdleTimeouts) {
-                    // Close connection even if there are in-flight requests, because if the client
-                    // stopped reading, those requests are stuck anyway and keeping the connection
-                    // open indefinitely just wastes resources.
                     const auto inflight = inflight_.load(std::memory_order_acquire);
-                    if (config_.enable_multiplexing && inflight > 0) {
-                        spdlog::warn("Closing idle connection with {} in-flight requests after {} "
-                                     "timeouts (fd={}) - "
-                                     "client likely stopped reading",
-                                     inflight, consecutive_idle_timeouts, sock_fd);
-                    } else {
-                        spdlog::info(
-                            "Closing idle connection after {} consecutive read timeouts (fd={})",
-                            consecutive_idle_timeouts, sock_fd);
+                    bool has_active = inflight > 0;
+                    if (!has_active) {
+                        std::lock_guard<std::mutex> lk(ctx_mtx_);
+                        has_active = !contexts_.empty();
                     }
+
+                    // Avoid closing a connection that still has active work (streaming or inflight);
+                    // reset the idle counter so long-running responses can complete.
+                    if (has_active) {
+                        spdlog::info(
+                            "Idle timeout hit with active work (inflight={} ctxs={}) after {} timeouts (fd={}); keeping connection open",
+                            inflight, contexts_.size(), consecutive_idle_timeouts, sock_fd);
+                        consecutive_idle_timeouts = 0;
+                        continue;
+                    }
+
+                    spdlog::info(
+                        "Closing idle connection after {} consecutive read timeouts (fd={})",
+                        consecutive_idle_timeouts, sock_fd);
                     boost::system::error_code ignore_ec;
                     sock->close(ignore_ec);
                     break;
