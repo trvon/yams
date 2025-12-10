@@ -473,8 +473,7 @@ public:
 // PBI-074: Symbol Ranking Tests
 // ============================================================================
 
-TEST_CASE("Symbol matches boost search ranking",
-          "[integration][search][symbols][ranking]") {
+TEST_CASE("Symbol matches boost search ranking", "[integration][search][symbols][ranking]") {
     SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     SymbolSearchFixture fixture;
 

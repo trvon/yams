@@ -96,7 +96,7 @@ void RequestQueue::stop() {
                             Error{ErrorCode::OperationCancelled, "Request queue shutting down"});
                     } catch (const std::exception& e) {
                         spdlog::warn("[RequestQueue] Exception in completion callback: {}",
-                                      e.what());
+                                     e.what());
                     }
                 }
             }

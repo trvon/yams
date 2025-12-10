@@ -57,7 +57,8 @@ protected:
         info.fileSize = 1234;
         info.sha256Hash = hash;
         info.mimeType = "text/plain";
-        info.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+        info.createdTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
         info.modifiedTime = info.createdTime;
         info.indexedTime = info.createdTime;
         auto derived = computePathDerivedValues(path);
@@ -80,7 +81,8 @@ protected:
         int64_t docId = result.value();
 
         if (!sessionId.empty()) {
-            auto metaResult = repository_->setMetadata(docId, "session_id", MetadataValue(sessionId));
+            auto metaResult =
+                repository_->setMetadata(docId, "session_id", MetadataValue(sessionId));
             EXPECT_TRUE(metaResult.has_value()) << "Failed to set session_id metadata";
         }
         return docId;
@@ -93,10 +95,14 @@ protected:
 
 TEST_F(SessionIsolationTest, FindDocumentsBySessionId) {
     // Add documents with different sessions
-    addDocumentWithSession("/work/session1/file1.txt", "hash1111111111111111111111111111", "session-a");
-    addDocumentWithSession("/work/session1/file2.txt", "hash2222222222222222222222222222", "session-a");
-    addDocumentWithSession("/work/session2/file3.txt", "hash3333333333333333333333333333", "session-b");
-    addDocumentWithSession("/work/global/file4.txt", "hash4444444444444444444444444444", "");  // No session
+    addDocumentWithSession("/work/session1/file1.txt", "hash1111111111111111111111111111",
+                           "session-a");
+    addDocumentWithSession("/work/session1/file2.txt", "hash2222222222222222222222222222",
+                           "session-a");
+    addDocumentWithSession("/work/session2/file3.txt", "hash3333333333333333333333333333",
+                           "session-b");
+    addDocumentWithSession("/work/global/file4.txt", "hash4444444444444444444444444444",
+                           ""); // No session
 
     // Find documents in session-a
     auto resultA = repository_->findDocumentsBySessionId("session-a");
@@ -159,8 +165,10 @@ TEST_F(SessionIsolationTest, RemoveSessionIdFromDocuments_Merge) {
 }
 
 TEST_F(SessionIsolationTest, DeleteDocumentsBySessionId_Discard) {
-    auto id1 = addDocumentWithSession("/discard/f1.txt", "hashdiscard1111111111111111111", "discard-session");
-    auto id2 = addDocumentWithSession("/discard/f2.txt", "hashdiscard2222222222222222222", "discard-session");
+    auto id1 = addDocumentWithSession("/discard/f1.txt", "hashdiscard1111111111111111111",
+                                      "discard-session");
+    auto id2 = addDocumentWithSession("/discard/f2.txt", "hashdiscard2222222222222222222",
+                                      "discard-session");
     addDocumentWithSession("/keep/f1.txt", "hashsafe11111111111111111111111", "safe-session");
 
     // Verify documents exist
@@ -192,7 +200,8 @@ TEST_F(SessionIsolationTest, DeleteDocumentsBySessionId_Discard) {
 TEST_F(SessionIsolationTest, SessionDocumentsVisibleOnlyToSession) {
     // Add session documents and global documents
     addDocumentWithSession("/session/code.cpp", "hashsession11111111111111111111", "dev-session");
-    addDocumentWithSession("/global/readme.md", "hashglobal111111111111111111111", "");  // No session
+    addDocumentWithSession("/global/readme.md", "hashglobal111111111111111111111",
+                           ""); // No session
 
     // Session query should only find session document
     auto sessionDocs = repository_->findDocumentsBySessionId("dev-session");
@@ -207,7 +216,8 @@ TEST_F(SessionIsolationTest, SessionDocumentsVisibleOnlyToSession) {
 }
 
 TEST_F(SessionIsolationTest, MultipleSessionsAreIsolated) {
-    addDocumentWithSession("/alice/notes.txt", "hashalice1111111111111111111111", "alice-workspace");
+    addDocumentWithSession("/alice/notes.txt", "hashalice1111111111111111111111",
+                           "alice-workspace");
     addDocumentWithSession("/alice/todo.txt", "hashalice2222222222222222222222", "alice-workspace");
     addDocumentWithSession("/bob/code.py", "hashbob111111111111111111111111", "bob-workspace");
     addDocumentWithSession("/shared/doc.md", "hashshared11111111111111111111", "");

@@ -350,12 +350,13 @@ public:
     }
 
     // Session-related operations (unused in these tests)
-    Result<std::vector<DocumentInfo>>
-    findDocumentsBySessionId(const std::string&) override {
+    Result<std::vector<DocumentInfo>> findDocumentsBySessionId(const std::string&) override {
         return std::vector<DocumentInfo>{};
     }
     Result<int64_t> countDocumentsBySessionId(const std::string&) override { return 0; }
-    Result<void> removeSessionIdFromDocuments(const std::string&) override { return Result<void>(); }
+    Result<void> removeSessionIdFromDocuments(const std::string&) override {
+        return Result<void>();
+    }
     Result<int64_t> deleteDocumentsBySessionId(const std::string&) override { return 0; }
 };
 

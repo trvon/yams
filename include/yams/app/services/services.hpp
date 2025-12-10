@@ -177,9 +177,9 @@ struct SearchRequest {
     std::string format{"table"}; // "table" | "json" | "minimal" | "paths"
 
     // Session-isolated memory (PBI-082)
-    bool useSession{true};       // scope to active session when true (default)
-    std::string sessionName;     // explicit session to search (empty = current)
-    bool globalSearch{false};    // bypass session isolation, search global docs only
+    bool useSession{true};    // scope to active session when true (default)
+    std::string sessionName;  // explicit session to search (empty = current)
+    bool globalSearch{false}; // bypass session isolation, search global docs only
 
     // Line-level context (like grep)
     bool showLineNumbers{false};    // show line numbers with matches
@@ -337,9 +337,9 @@ struct GrepRequest {
     bool matchAllTags{false};      // require all specified tags
 
     // Session-isolated memory (PBI-082)
-    bool useSession{true};       // scope to active session when true (default)
-    std::string sessionName;     // explicit session to search (empty = current)
-    bool globalSearch{false};    // bypass session isolation, search global docs only
+    bool useSession{true};    // scope to active session when true (default)
+    std::string sessionName;  // explicit session to search (empty = current)
+    bool globalSearch{false}; // bypass session isolation, search global docs only
 
     // Limits
     int maxCount{0}; // stop after N matches per file (0 => unlimited)
@@ -429,8 +429,8 @@ struct StoreDocumentRequest {
     std::string snapshotLabel; // user-friendly snapshot label
 
     // Session-isolated memory (PBI-082)
-    std::string sessionId;      // session to associate document with
-    bool bypassSession{false};  // skip session tagging even if session is active
+    std::string sessionId;     // session to associate document with
+    bool bypassSession{false}; // skip session tagging even if session is active
 
     // Embedding control
     bool noEmbeddings{false}; // disable embedding generation

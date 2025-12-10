@@ -12,11 +12,7 @@ namespace yams::app::services {
 
 struct AppContext; // forward decl
 
-enum class SessionState {
-    NotExists,
-    Closed,
-    Active
-};
+enum class SessionState { NotExists, Closed, Active };
 
 struct SessionInfo {
     std::string name;

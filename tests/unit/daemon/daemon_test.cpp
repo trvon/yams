@@ -40,7 +40,7 @@ protected:
     void SetUp() override {
         // Skip on Windows - daemon IPC tests are unstable there
         SKIP_DAEMON_TEST_ON_WINDOWS();
-        
+
         cleanupDaemonFiles();
 
 #ifdef _WIN32

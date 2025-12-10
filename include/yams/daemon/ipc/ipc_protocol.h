@@ -82,7 +82,7 @@ struct SearchRequest {
     // Session scoping (controls hot/cold path behavior)
     bool useSession = false;
     std::string sessionName;
-    bool globalSearch = false;  // Session-isolated memory (PBI-082): bypass session isolation
+    bool globalSearch = false; // Session-isolated memory (PBI-082): bypass session isolation
 
     template <typename Serializer>
     requires IsSerializer<Serializer>

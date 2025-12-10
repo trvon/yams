@@ -359,7 +359,8 @@ public:
     Result<std::vector<std::string>> getSnapshotLabels() override;
 
     // Session operations (PBI-082)
-    Result<std::vector<DocumentInfo>> findDocumentsBySessionId(const std::string& sessionId) override;
+    Result<std::vector<DocumentInfo>>
+    findDocumentsBySessionId(const std::string& sessionId) override;
     Result<int64_t> countDocumentsBySessionId(const std::string& sessionId) override;
     Result<void> removeSessionIdFromDocuments(const std::string& sessionId) override;
     Result<int64_t> deleteDocumentsBySessionId(const std::string& sessionId) override;

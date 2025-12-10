@@ -92,7 +92,7 @@ private:
 #ifdef _WIN32
     // Windows-specific handles
     HANDLE process_handle_{INVALID_HANDLE_VALUE};
-    HANDLE job_handle_{INVALID_HANDLE_VALUE};  // Job Object for child process cleanup
+    HANDLE job_handle_{INVALID_HANDLE_VALUE}; // Job Object for child process cleanup
     HANDLE stdin_write_{INVALID_HANDLE_VALUE};
     HANDLE stdout_read_{INVALID_HANDLE_VALUE};
     HANDLE stderr_read_{INVALID_HANDLE_VALUE};
@@ -286,7 +286,7 @@ void PluginProcess::Impl::terminate(std::chrono::milliseconds timeout) {
     // Forceful kill (SIGKILL)
     spdlog::warn("PluginProcess: Forcefully killing process {}", process_id_);
     kill(process_id_, SIGKILL);
-    (void)wait_for_exit(std::chrono::seconds{1});  // Best-effort wait after SIGKILL
+    (void)wait_for_exit(std::chrono::seconds{1}); // Best-effort wait after SIGKILL
     state_.store(ProcessState::Terminated, std::memory_order_release);
 }
 
@@ -573,7 +573,8 @@ void PluginProcess::Impl::terminate(std::chrono::milliseconds timeout) {
             spdlog::warn("PluginProcess: TerminateJobObject failed with error {}", GetLastError());
             // Fall back to TerminateProcess
             if (!TerminateProcess(process_handle_, 0)) {
-                spdlog::warn("PluginProcess: TerminateProcess failed with error {}", GetLastError());
+                spdlog::warn("PluginProcess: TerminateProcess failed with error {}",
+                             GetLastError());
             }
         } else {
             spdlog::debug("PluginProcess: Terminated Job Object (all child processes killed)");

@@ -26,7 +26,7 @@ class RequestQueueTest : public ::testing::Test {
 protected:
     void SetUp() override {
         SKIP_REQUEST_QUEUE_TEST_ON_WINDOWS();
-        
+
         io_ = std::make_shared<boost::asio::io_context>();
         work_guard_ = std::make_unique<
             boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>(

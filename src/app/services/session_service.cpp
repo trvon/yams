@@ -445,10 +445,9 @@ public:
             auto oldJson = load_json(oldPath);
             if (oldJson.contains("state") && oldJson["state"] == "active") {
                 oldJson["state"] = "closed";
-                oldJson["lastClosedTime"] =
-                    std::chrono::duration_cast<std::chrono::seconds>(
-                        std::chrono::system_clock::now().time_since_epoch())
-                        .count();
+                oldJson["lastClosedTime"] = std::chrono::duration_cast<std::chrono::seconds>(
+                                                std::chrono::system_clock::now().time_since_epoch())
+                                                .count();
                 save_json(oldPath, oldJson);
             }
         }
@@ -499,8 +498,8 @@ public:
         SessionInfo info;
         info.name = name;
         info.description = j.value("description", j.value("desc", ""));
-        info.state =
-            (j.contains("state") && j["state"] == "active") ? SessionState::Active : SessionState::Closed;
+        info.state = (j.contains("state") && j["state"] == "active") ? SessionState::Active
+                                                                     : SessionState::Closed;
         info.createdTime = j.value("createdTime", std::int64_t{0});
         info.lastOpenedTime = j.value("lastOpenedTime", std::int64_t{0});
         info.lastClosedTime = j.value("lastClosedTime", std::int64_t{0});
@@ -573,7 +572,8 @@ public:
             throw std::runtime_error("Session does not exist: " + name);
 
         if (!confirm)
-            throw std::runtime_error("Discard requires confirmation. Pass confirm=true or use --confirm flag.");
+            throw std::runtime_error(
+                "Discard requires confirmation. Pass confirm=true or use --confirm flag.");
 
         if (!ctx_ || !ctx_->metadataRepo)
             return 0;

@@ -261,16 +261,16 @@ TEST(CLIOptionIsolationTest, DescriptionStringsAreNotValidPaths) {
         // - Contains special characters like '[' or '('
         // - Contains multiple spaces (which is unusual for paths)
         // - Is a descriptive sentence (contains spaces and common description words)
-        bool hasSpecialChars = desc.find('[') != std::string::npos ||
-                               desc.find('(') != std::string::npos;
+        bool hasSpecialChars =
+            desc.find('[') != std::string::npos || desc.find('(') != std::string::npos;
         bool isLongDescription = desc.length() > 60;
         bool containsMultipleSpaces = std::count(desc.begin(), desc.end(), ' ') >= 2;
         bool hasDescriptionWords = desc.find("directory") != std::string::npos ||
                                    desc.find("file") != std::string::npos ||
                                    desc.find("path") != std::string::npos;
 
-        EXPECT_TRUE(hasSpecialChars || isLongDescription ||
-                    containsMultipleSpaces || hasDescriptionWords)
+        EXPECT_TRUE(hasSpecialChars || isLongDescription || containsMultipleSpaces ||
+                    hasDescriptionWords)
             << "Description '" << desc << "' looks too path-like, may indicate a bug";
     }
 }
