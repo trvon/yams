@@ -545,6 +545,19 @@ private:
         req.snapshotId = snapshotId_;
         req.snapshotLabel = snapshotLabel_;
 
+        // Session-isolated memory (PBI-082): tag document with active session
+        if (auto appContext2 = cli_->getAppContext()) {
+            auto sessionSvc = app::services::makeSessionService(appContext2.get());
+            if (sessionSvc) {
+                if (auto currentSession = sessionSvc->current()) {
+                    auto state = sessionSvc->getState(*currentSession);
+                    if (state == app::services::SessionState::Active) {
+                        req.sessionId = *currentSession;
+                    }
+                }
+            }
+        }
+
         // Parse metadata key=value pairs
         for (const auto& kv : metadata_) {
             auto pos = kv.find('=');
@@ -592,6 +605,19 @@ private:
         req.collection = collection_;
         req.snapshotId = snapshotId_;
         req.snapshotLabel = snapshotLabel_;
+
+        // Session-isolated memory (PBI-082): tag document with active session
+        if (auto appContext2 = cli_->getAppContext()) {
+            auto sessionSvc = app::services::makeSessionService(appContext2.get());
+            if (sessionSvc) {
+                if (auto currentSession = sessionSvc->current()) {
+                    auto state = sessionSvc->getState(*currentSession);
+                    if (state == app::services::SessionState::Active) {
+                        req.sessionId = *currentSession;
+                    }
+                }
+            }
+        }
 
         // Parse metadata key=value pairs
         for (const auto& kv : metadata_) {
@@ -645,6 +671,19 @@ private:
         req.excludePatterns = excludePatterns_;
         req.recursive = recursive_;
         req.verify = verify_;
+
+        // Session-isolated memory (PBI-082): tag documents with active session
+        if (auto appContext2 = cli_->getAppContext()) {
+            auto sessionSvc = app::services::makeSessionService(appContext2.get());
+            if (sessionSvc) {
+                if (auto currentSession = sessionSvc->current()) {
+                    auto state = sessionSvc->getState(*currentSession);
+                    if (state == app::services::SessionState::Active) {
+                        req.sessionId = *currentSession;
+                    }
+                }
+            }
+        }
 
         // Parse metadata key=value pairs
         for (const auto& kv : metadata_) {
