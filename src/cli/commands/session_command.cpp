@@ -245,6 +245,35 @@ Env:
                       << " ms, session='" << sess << "'\n";
         });
 
+        // Session-isolated memory (PBI-082)
+        auto* createCmd = cmd->add_subcommand("create", "Create a new session (closed state)");
+        createCmd->add_option("name", sessionName_, "Session name")->required();
+        createCmd->add_option("--desc", sessionDesc_, "Session description");
+        createCmd->callback([this]() { this->mode_ = Mode::Create; });
+
+        auto* openCmd = cmd->add_subcommand("open", "Open/activate a session");
+        openCmd->add_option("name", sessionName_, "Session name")->required();
+        openCmd->callback([this]() { this->mode_ = Mode::Open; });
+
+        auto* closeCmd = cmd->add_subcommand("close", "Close current session (preserve data)");
+        closeCmd->callback([this]() { this->mode_ = Mode::Close; });
+
+        auto* statusCmd = cmd->add_subcommand("status", "Show session status and document count");
+        statusCmd->add_option("name", sessionName_, "Session name (optional, defaults to current)");
+        statusCmd->add_flag("--json", jsonOutput_, "JSON output");
+        statusCmd->callback([this]() { this->mode_ = Mode::Status; });
+
+        auto* mergeCmd = cmd->add_subcommand("merge", "Merge session documents into global index");
+        mergeCmd->add_option("name", sessionName_, "Session name")->required();
+        mergeCmd->add_option("--exclude", mergeExcludePatterns_, "Exclude patterns")->take_all();
+        mergeCmd->add_flag("--dry-run", mergeDryRun_, "Preview without executing");
+        mergeCmd->callback([this]() { this->mode_ = Mode::Merge; });
+
+        auto* discardCmd = cmd->add_subcommand("discard", "Discard all session documents");
+        discardCmd->add_option("name", sessionName_, "Session name")->required();
+        discardCmd->add_flag("--confirm", discardConfirm_, "Confirm deletion");
+        discardCmd->callback([this]() { this->mode_ = Mode::Discard; });
+
         // Diff: expose tree diff for latest snapshots of a pinned directory
         auto* diffCmd =
             cmd->add_subcommand("diff", "Show tree diff for session (latest snapshots)");
@@ -428,6 +457,18 @@ Env:
                 return doTags();
             case Mode::Annotate:
                 return doAnnotate();
+            case Mode::Create:
+                return doCreate();
+            case Mode::Open:
+                return doOpen();
+            case Mode::Close:
+                return doClose();
+            case Mode::Status:
+                return doStatus();
+            case Mode::Merge:
+                return doMerge();
+            case Mode::Discard:
+                return doDiscard();
             default:
                 return Result<void>(Error{ErrorCode::InvalidArgument, "No session subcommand"});
         }
@@ -450,7 +491,13 @@ private:
         Load,
         Emit,
         Tags,
-        Annotate
+        Annotate,
+        Create,
+        Open,
+        Close,
+        Status,
+        Merge,
+        Discard
     };
 
     std::shared_ptr<app::services::ISessionService> sessionSvc() const {
@@ -937,6 +984,140 @@ private:
         return {};
     }
 
+    // Session-isolated memory (PBI-082)
+    Result<void> doCreate() {
+        if (sessionName_.empty())
+            return Error{ErrorCode::InvalidArgument, "Session name required"};
+        auto svc = sessionSvc();
+        if (!svc)
+            return Error{ErrorCode::NotInitialized, "Session service not available"};
+        try {
+            svc->create(sessionName_, sessionDesc_);
+            std::cout << "Created session: " << sessionName_ << " (closed)\n";
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::InvalidArgument, e.what()};
+        }
+        return {};
+    }
+
+    Result<void> doOpen() {
+        if (sessionName_.empty())
+            return Error{ErrorCode::InvalidArgument, "Session name required"};
+        auto svc = sessionSvc();
+        if (!svc)
+            return Error{ErrorCode::NotInitialized, "Session service not available"};
+        try {
+            svc->open(sessionName_);
+            std::cout << "Opened session: " << sessionName_ << " (active)\n";
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::InvalidArgument, e.what()};
+        }
+        return {};
+    }
+
+    Result<void> doClose() {
+        auto svc = sessionSvc();
+        if (!svc)
+            return Error{ErrorCode::NotInitialized, "Session service not available"};
+        auto cur = svc->current();
+        if (!cur)
+            return Error{ErrorCode::InvalidArgument, "No current session to close"};
+        svc->close();
+        std::cout << "Closed session: " << *cur << "\n";
+        return {};
+    }
+
+    Result<void> doStatus() {
+        auto svc = sessionSvc();
+        if (!svc)
+            return Error{ErrorCode::NotInitialized, "Session service not available"};
+
+        std::string name = sessionName_.empty() ? svc->current().value_or("") : sessionName_;
+        if (name.empty()) {
+            if (jsonOutput_) {
+                json j;
+                j["active"] = false;
+                j["message"] = "No active session";
+                std::cout << j.dump(2) << std::endl;
+            } else {
+                std::cout << "No active session\n";
+            }
+            return {};
+        }
+
+        auto info = svc->getSessionInfo(name);
+        if (!info) {
+            return Error{ErrorCode::NotFound, "Session not found: " + name};
+        }
+
+        if (jsonOutput_) {
+            json j;
+            j["name"] = info->name;
+            j["description"] = info->description;
+            j["state"] = info->state == app::services::SessionState::Active ? "active" : "closed";
+            j["documentCount"] = info->documentCount;
+            j["createdTime"] = info->createdTime;
+            j["lastOpenedTime"] = info->lastOpenedTime;
+            j["lastClosedTime"] = info->lastClosedTime;
+            std::cout << j.dump(2) << std::endl;
+        } else {
+            std::string stateStr =
+                info->state == app::services::SessionState::Active ? "active" : "closed";
+            std::cout << "Session: " << info->name << "\n";
+            std::cout << "  State: " << stateStr << "\n";
+            if (!info->description.empty())
+                std::cout << "  Description: " << info->description << "\n";
+            std::cout << "  Documents: " << info->documentCount << "\n";
+        }
+        return {};
+    }
+
+    Result<void> doMerge() {
+        if (sessionName_.empty())
+            return Error{ErrorCode::InvalidArgument, "Session name required"};
+        auto svc = sessionSvc();
+        if (!svc)
+            return Error{ErrorCode::NotInitialized, "Session service not available"};
+
+        app::services::MergeOptions opts;
+        opts.excludePatterns = mergeExcludePatterns_;
+        opts.dryRun = mergeDryRun_;
+
+        try {
+            auto result = svc->merge(sessionName_, opts);
+            if (mergeDryRun_) {
+                std::cout << "Dry run: would merge " << result.documentsMerged << " documents\n";
+                if (result.documentsExcluded > 0)
+                    std::cout << "  Would exclude: " << result.documentsExcluded << " documents\n";
+            } else {
+                std::cout << "Merged " << result.documentsMerged << " documents into global index\n";
+                if (result.documentsExcluded > 0)
+                    std::cout << "  Excluded: " << result.documentsExcluded << " documents\n";
+                std::cout << "Session '" << sessionName_ << "' deleted\n";
+            }
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::InvalidArgument, e.what()};
+        }
+        return {};
+    }
+
+    Result<void> doDiscard() {
+        if (sessionName_.empty())
+            return Error{ErrorCode::InvalidArgument, "Session name required"};
+        auto svc = sessionSvc();
+        if (!svc)
+            return Error{ErrorCode::NotInitialized, "Session service not available"};
+
+        try {
+            auto count = svc->discard(sessionName_, discardConfirm_);
+            std::cout << "Discarded " << count << " documents from session '" << sessionName_ << "'\n";
+            std::cout << "Session '" << sessionName_ << "' deleted\n";
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::InvalidArgument, e.what()};
+        }
+        return {};
+    }
+
     YamsCLI* cli_ = nullptr;
     Mode mode_{Mode::None};
     // lifecycle fields
@@ -961,6 +1142,10 @@ private:
     // emit options
     bool emitMaterialized_{false};
     std::string emitKind_{"names"};
+    // merge/discard options (PBI-082)
+    std::vector<std::string> mergeExcludePatterns_;
+    bool mergeDryRun_{false};
+    bool discardConfirm_{false};
 };
 } // namespace
 

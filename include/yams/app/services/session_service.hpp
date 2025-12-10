@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -10,6 +11,34 @@
 namespace yams::app::services {
 
 struct AppContext; // forward decl
+
+enum class SessionState {
+    NotExists,
+    Closed,
+    Active
+};
+
+struct SessionInfo {
+    std::string name;
+    std::string description;
+    SessionState state{SessionState::Closed};
+    std::size_t documentCount{0};
+    std::int64_t createdTime{0};
+    std::int64_t lastOpenedTime{0};
+    std::int64_t lastClosedTime{0};
+};
+
+struct MergeOptions {
+    std::vector<std::string> excludePatterns;
+    std::vector<std::string> addTags;
+    bool dryRun{false};
+};
+
+struct MergeResult {
+    std::size_t documentsMerged{0};
+    std::size_t documentsExcluded{0};
+    std::vector<std::string> mergedPaths;
+};
 
 struct PrepareBudget {
     int maxCores{-1};
@@ -37,13 +66,24 @@ class ISessionService {
 public:
     virtual ~ISessionService() = default;
 
-    // Lifecycle
+    // Lifecycle (legacy)
     virtual std::optional<std::string> current() const = 0;
     virtual std::vector<std::string> listSessions() const = 0;
     virtual bool exists(const std::string& name) const = 0;
     virtual void init(const std::string& name, const std::string& desc) = 0;
     virtual void use(const std::string& name) = 0;
     virtual void remove(const std::string& name) = 0;
+
+    // Session-isolated memory (PBI-082)
+    virtual void create(const std::string& name, const std::string& desc) = 0;
+    virtual void open(const std::string& name) = 0;
+    virtual void close() = 0;
+    virtual SessionState getState(const std::string& name) const = 0;
+    virtual std::optional<SessionInfo> getSessionInfo(const std::string& name) const = 0;
+    virtual std::vector<SessionInfo> listAllSessions() const = 0;
+    virtual MergeResult merge(const std::string& name, const MergeOptions& opts = {}) = 0;
+    virtual std::size_t discard(const std::string& name, bool confirm = false) = 0;
+    virtual std::size_t getDocumentCount(const std::string& name) const = 0;
 
     // Selectors (Phase 1: path-only)
     virtual std::vector<std::string> listPathSelectors(const std::string& name) const = 0;

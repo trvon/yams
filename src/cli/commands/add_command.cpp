@@ -21,6 +21,7 @@
 #include <yams/vector/embedding_service.h>
 // App services for service-based architecture
 #include <yams/app/services/services.hpp>
+#include <yams/app/services/session_service.hpp>
 // Service façade for daemon-first document ingestion
 #include <yams/app/services/document_ingestion_service.h>
 // Daemon client API for daemon-first add
@@ -210,6 +211,17 @@ public:
                     }
                 }
 
+                // Get active session for session-isolated memory (PBI-082)
+                std::string activeSessionId;
+                if (auto appContext = cli_->getAppContext()) {
+                    auto sessionSvc = app::services::makeSessionService(appContext.get());
+                    if (sessionSvc) {
+                        if (auto currentSession = sessionSvc->current()) {
+                            activeSessionId = *currentSession;
+                        }
+                    }
+                }
+
                 // Ensure daemon is running; auto-start if necessary
                 std::filesystem::path effectiveSocket =
                     yams::daemon::DaemonClient::resolveSocketPathConfigFirst();
@@ -364,6 +376,7 @@ public:
                     aopts.collection = sanitizedCollection;
                     aopts.snapshotId = sanitizedSnapshotId;
                     aopts.snapshotLabel = sanitizedSnapshotLabel;
+                    aopts.sessionId = activeSessionId;
                     if (!sanitizedMimeType.empty()) {
                         aopts.mimeType = sanitizedMimeType;
                     }

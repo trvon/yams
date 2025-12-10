@@ -4355,6 +4355,132 @@ Result<std::vector<std::string>> MetadataRepository::getSnapshotLabels() {
 }
 
 Result<std::vector<DocumentInfo>>
+MetadataRepository::findDocumentsBySessionId(const std::string& sessionId) {
+    return executeQuery<std::vector<DocumentInfo>>(
+        [&](Database& db) -> Result<std::vector<DocumentInfo>> {
+            auto stmtResult = db.prepare(R"(
+            SELECT DISTINCT d.id, d.file_path, d.file_name, d.file_extension, d.file_size,
+                   d.sha256_hash, d.mime_type, d.created_time, d.modified_time,
+                   d.indexed_time, d.content_extracted, d.extraction_status,
+                   d.extraction_error
+            FROM documents d
+            JOIN metadata m ON d.id = m.document_id
+            WHERE m.key = 'session_id' AND m.value = ?
+            ORDER BY d.indexed_time DESC
+        )");
+
+            if (!stmtResult)
+                return stmtResult.error();
+
+            Statement stmt = std::move(stmtResult).value();
+            auto bindResult = stmt.bind(1, sessionId);
+            if (!bindResult)
+                return bindResult.error();
+
+            std::vector<DocumentInfo> documents;
+            while (true) {
+                auto stepResult = stmt.step();
+                if (!stepResult)
+                    return stepResult.error();
+                if (!stepResult.value())
+                    break;
+
+                documents.push_back(mapDocumentRow(stmt));
+            }
+
+            return documents;
+        });
+}
+
+Result<int64_t> MetadataRepository::countDocumentsBySessionId(const std::string& sessionId) {
+    return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
+        auto stmtResult = db.prepare(R"(
+            SELECT COUNT(DISTINCT document_id)
+            FROM metadata
+            WHERE key = 'session_id' AND value = ?
+        )");
+
+        if (!stmtResult)
+            return stmtResult.error();
+
+        Statement stmt = std::move(stmtResult).value();
+        auto bindResult = stmt.bind(1, sessionId);
+        if (!bindResult)
+            return bindResult.error();
+
+        auto stepResult = stmt.step();
+        if (!stepResult)
+            return stepResult.error();
+
+        return stmt.getInt64(0);
+    });
+}
+
+Result<void> MetadataRepository::removeSessionIdFromDocuments(const std::string& sessionId) {
+    return executeQuery<void>([&](Database& db) -> Result<void> {
+        auto stmtResult = db.prepare(R"(
+            DELETE FROM metadata
+            WHERE key = 'session_id' AND value = ?
+        )");
+
+        if (!stmtResult)
+            return stmtResult.error();
+
+        Statement stmt = std::move(stmtResult).value();
+        auto bindResult = stmt.bind(1, sessionId);
+        if (!bindResult)
+            return bindResult.error();
+
+        return stmt.execute();
+    });
+}
+
+Result<int64_t> MetadataRepository::deleteDocumentsBySessionId(const std::string& sessionId) {
+    return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
+        auto countResult = db.prepare(R"(
+            SELECT COUNT(DISTINCT document_id)
+            FROM metadata
+            WHERE key = 'session_id' AND value = ?
+        )");
+        if (!countResult)
+            return countResult.error();
+
+        Statement countStmt = std::move(countResult).value();
+        auto bindCount = countStmt.bind(1, sessionId);
+        if (!bindCount)
+            return bindCount.error();
+
+        auto stepCount = countStmt.step();
+        if (!stepCount)
+            return stepCount.error();
+
+        int64_t count = countStmt.getInt64(0);
+
+        auto deleteResult = db.prepare(R"(
+            DELETE FROM documents
+            WHERE id IN (
+                SELECT DISTINCT document_id
+                FROM metadata
+                WHERE key = 'session_id' AND value = ?
+            )
+        )");
+        if (!deleteResult)
+            return deleteResult.error();
+
+        Statement deleteStmt = std::move(deleteResult).value();
+        auto bindDelete = deleteStmt.bind(1, sessionId);
+        if (!bindDelete)
+            return bindDelete.error();
+
+        auto execResult = deleteStmt.execute();
+        if (!execResult)
+            return execResult.error();
+
+        return count;
+    });
+}
+
+Result<std::vector<DocumentInfo>>
 MetadataRepository::findDocumentsByTags(const std::vector<std::string>& tags, bool matchAll) {
     if (tags.empty()) {
         return std::vector<DocumentInfo>();

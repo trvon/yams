@@ -348,6 +348,15 @@ public:
     Result<void> finalizeTreeDiff(int64_t, std::size_t, std::string_view) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
+
+    // Session-related operations (unused in these tests)
+    Result<std::vector<DocumentInfo>>
+    findDocumentsBySessionId(const std::string&) override {
+        return std::vector<DocumentInfo>{};
+    }
+    Result<int64_t> countDocumentsBySessionId(const std::string&) override { return 0; }
+    Result<void> removeSessionIdFromDocuments(const std::string&) override { return Result<void>(); }
+    Result<int64_t> deleteDocumentsBySessionId(const std::string&) override { return 0; }
 };
 
 TEST(ResolverFilesystemBackend, ResolveNameToAbsoluteFilePath) {

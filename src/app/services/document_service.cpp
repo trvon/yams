@@ -279,6 +279,9 @@ public:
         if (req.noEmbeddings) {
             md.tags["no_embeddings"] = "true";
         }
+        if (!req.sessionId.empty() && !req.bypassSession) {
+            md.tags["session_id"] = req.sessionId;
+        }
 
         std::string usePath;
         std::optional<std::filesystem::path> tmpToRemove;

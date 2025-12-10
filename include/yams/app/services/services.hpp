@@ -176,9 +176,10 @@ struct SearchRequest {
     bool jsonOutput{false};      // structured JSON output for LLM parsing
     std::string format{"table"}; // "table" | "json" | "minimal" | "paths"
 
-    // Session context for gating hot-path behaviors
-    bool useSession{false};
-    std::string sessionName;
+    // Session-isolated memory (PBI-082)
+    bool useSession{true};       // scope to active session when true (default)
+    std::string sessionName;     // explicit session to search (empty = current)
+    bool globalSearch{false};    // bypass session isolation, search global docs only
 
     // Line-level context (like grep)
     bool showLineNumbers{false};    // show line numbers with matches
@@ -335,9 +336,10 @@ struct GrepRequest {
     std::vector<std::string> tags; // filter by tags
     bool matchAllTags{false};      // require all specified tags
 
-    // Session scoping (controls hot/cold path behavior)
-    bool useSession{false};  // if true, allow hot path optimization for session-warmed docs
-    std::string sessionName; // optional explicit session name
+    // Session-isolated memory (PBI-082)
+    bool useSession{true};       // scope to active session when true (default)
+    std::string sessionName;     // explicit session to search (empty = current)
+    bool globalSearch{false};    // bypass session isolation, search global docs only
 
     // Limits
     int maxCount{0}; // stop after N matches per file (0 => unlimited)
@@ -425,6 +427,10 @@ struct StoreDocumentRequest {
     std::string collection;    // collection name for organizing documents
     std::string snapshotId;    // unique snapshot identifier
     std::string snapshotLabel; // user-friendly snapshot label
+
+    // Session-isolated memory (PBI-082)
+    std::string sessionId;      // session to associate document with
+    bool bypassSession{false};  // skip session tagging even if session is active
 
     // Embedding control
     bool noEmbeddings{false}; // disable embedding generation
@@ -876,6 +882,10 @@ struct AddDirectoryRequest {
     // Optional: verify indexes (FTS/vector) presence when enabled
     bool verifyIndexes{false};
     std::string snapshotLabel; // Optional human-friendly label for automatic snapshot
+
+    // Session-isolated memory (PBI-082)
+    std::string sessionId;     // session to associate documents with
+    bool bypassSession{false}; // skip session tagging even if session is active
 };
 
 struct IndexedFileResult {

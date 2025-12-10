@@ -203,6 +203,13 @@ public:
     virtual Result<std::vector<std::string>> getSnapshots() = 0;
     virtual Result<std::vector<std::string>> getSnapshotLabels() = 0;
 
+    // Session operations (PBI-082)
+    virtual Result<std::vector<DocumentInfo>>
+    findDocumentsBySessionId(const std::string& sessionId) = 0;
+    virtual Result<int64_t> countDocumentsBySessionId(const std::string& sessionId) = 0;
+    virtual Result<void> removeSessionIdFromDocuments(const std::string& sessionId) = 0;
+    virtual Result<int64_t> deleteDocumentsBySessionId(const std::string& sessionId) = 0;
+
     // Tag operations
     virtual Result<std::vector<DocumentInfo>>
     findDocumentsByTags(const std::vector<std::string>& tags, bool matchAll = false) = 0;
@@ -350,6 +357,12 @@ public:
     Result<std::vector<std::string>> getCollections() override;
     Result<std::vector<std::string>> getSnapshots() override;
     Result<std::vector<std::string>> getSnapshotLabels() override;
+
+    // Session operations (PBI-082)
+    Result<std::vector<DocumentInfo>> findDocumentsBySessionId(const std::string& sessionId) override;
+    Result<int64_t> countDocumentsBySessionId(const std::string& sessionId) override;
+    Result<void> removeSessionIdFromDocuments(const std::string& sessionId) override;
+    Result<int64_t> deleteDocumentsBySessionId(const std::string& sessionId) override;
 
     Result<std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>>>
     getMetadataForDocuments(std::span<const int64_t> documentIds) override;

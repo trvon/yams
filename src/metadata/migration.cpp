@@ -324,7 +324,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             createTreeSnapshotsSchema(),  createTreeDiffsSchema(),
             addPathIndexingSchema(),      chunkedPathIndexingBackfill(),
             createPathTreeSchema(),       createSymbolMetadataSchema(),
-            addFTS5PorterStemmer(),       removeFTS5ContentType()};
+            addFTS5PorterStemmer(),       removeFTS5ContentType(),
+            createSessionIndexes()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -1978,6 +1979,24 @@ Migration YamsMetadataMigrations::removeFTS5ContentType() {
         )");
         return rc;
     };
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::createSessionIndexes() {
+    Migration m;
+    m.version = 19;
+    m.name = "Add session_id index for session-isolated memory";
+    m.created = std::chrono::system_clock::now();
+
+    m.upSQL = R"(
+        CREATE INDEX IF NOT EXISTS idx_metadata_session_id
+            ON metadata(key, value) WHERE key = 'session_id';
+    )";
+
+    m.downSQL = R"(
+        DROP INDEX IF EXISTS idx_metadata_session_id;
+    )";
 
     return m;
 }

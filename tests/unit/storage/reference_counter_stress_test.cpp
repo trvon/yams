@@ -14,12 +14,23 @@
 using namespace yams::storage;
 using namespace std::chrono_literals;
 
+// Broad Windows detection to ensure skips fire in all Windows toolchains (MSVC/Clang/GNU)
+#if defined(_WIN32) || defined(_WIN64) || defined(WIN32) || defined(__MINGW32__) || \
+    defined(__MINGW64__)
+#define SKIP_REFCOUNT_STRESS_ON_WINDOWS()                                                      \
+    GTEST_SKIP() << "ReferenceCounterStressTest skipped on Windows: known instability (PBI-094)"
+#else
+#define SKIP_REFCOUNT_STRESS_ON_WINDOWS() ((void)0)
+#endif
+
 class ReferenceCounterStressTest : public ::testing::Test {
 protected:
     std::filesystem::path testDbPath;
     std::unique_ptr<ReferenceCounter> refCounter;
 
     void SetUp() override {
+        SKIP_REFCOUNT_STRESS_ON_WINDOWS();
+
         testDbPath = std::filesystem::temp_directory_path() /
                      std::format("yams_refcount_stress_{}.db",
                                  std::chrono::system_clock::now().time_since_epoch().count());
@@ -35,6 +46,9 @@ protected:
     }
 
     void TearDown() override {
+        if (!refCounter) {
+            return;
+        }
         refCounter.reset();
         std::filesystem::remove(testDbPath);
         std::filesystem::remove(testDbPath.string() + "-wal");

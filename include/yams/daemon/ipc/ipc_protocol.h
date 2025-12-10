@@ -1573,6 +1573,7 @@ struct AddDocumentRequest {
     std::string collection;    // Collection name for organizing documents
     std::string snapshotId;    // Unique snapshot identifier
     std::string snapshotLabel; // User-friendly snapshot label
+    std::string sessionId;     // Session-isolated memory (PBI-082)
 
     // Content handling options
     std::string mimeType;         // MIME type of the document
@@ -1584,7 +1585,7 @@ struct AddDocumentRequest {
     void serialize(Serializer& ser) const {
         ser << path << content << name << tags << metadata << recursive << includeHidden
             << includePatterns << excludePatterns << collection << snapshotId << snapshotLabel
-            << mimeType << disableAutoMime << noEmbeddings;
+            << sessionId << mimeType << disableAutoMime << noEmbeddings;
     }
 
     template <typename Deserializer>
@@ -1645,6 +1646,11 @@ struct AddDocumentRequest {
         if (!snapLbl)
             return snapLbl.error();
         req.snapshotLabel = std::move(snapLbl.value());
+
+        auto sessId = deser.readString();
+        if (!sessId)
+            return sessId.error();
+        req.sessionId = std::move(sessId.value());
 
         auto mime = deser.readString();
         if (!mime)

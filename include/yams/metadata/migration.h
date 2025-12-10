@@ -200,6 +200,8 @@ private:
 
     // Version 18: Remove content_type from FTS5 index (never queried via MATCH)
     static Migration removeFTS5ContentType();
+
+    static Migration createSessionIndexes();
 };
 
 /**
