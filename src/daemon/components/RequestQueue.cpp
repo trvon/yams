@@ -5,6 +5,8 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 
 #include <boost/asio/as_tuple.hpp>
+#include <boost/asio/bind_cancellation_slot.hpp>
+#include <boost/asio/cancellation_type.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -39,6 +41,7 @@ void RequestQueue::start() {
     }
 
     spdlog::info("[RequestQueue] Starting background tasks");
+    cancel_signal_ = std::make_shared<boost::asio::cancellation_signal>();
     stop_flag_->store(false, std::memory_order_release);
 
     eviction_timer_ = std::make_unique<boost::asio::steady_timer>(executor_);
@@ -66,6 +69,10 @@ void RequestQueue::stop() {
     spdlog::info("[RequestQueue] Stopping and clearing queue");
     stop_flag_->store(true, std::memory_order_release);
 
+    if (cancel_signal_) {
+        cancel_signal_->emit(boost::asio::cancellation_type::all);
+    }
+
     if (eviction_timer_) {
         boost::system::error_code ec;
         eviction_timer_->cancel(ec);
@@ -76,23 +83,26 @@ void RequestQueue::stop() {
     }
 
     // Drain all queues and invoke callbacks with cancellation error
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (auto& queue : queues_) {
-        while (!queue.empty()) {
-            auto req = std::move(queue.front());
-            queue.pop_front();
-            metrics_.evicted_shutdown.fetch_add(1, std::memory_order_relaxed);
-            if (req.completion_callback) {
-                try {
-                    req.completion_callback(
-                        Error{ErrorCode::OperationCancelled, "Request queue shutting down"});
-                } catch (const std::exception& e) {
-                    spdlog::warn("[RequestQueue] Exception in completion callback: {}", e.what());
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto& queue : queues_) {
+            while (!queue.empty()) {
+                auto req = std::move(queue.front());
+                queue.pop_front();
+                metrics_.evicted_shutdown.fetch_add(1, std::memory_order_relaxed);
+                if (req.completion_callback) {
+                    try {
+                        req.completion_callback(
+                            Error{ErrorCode::OperationCancelled, "Request queue shutting down"});
+                    } catch (const std::exception& e) {
+                        spdlog::warn("[RequestQueue] Exception in completion callback: {}",
+                                      e.what());
+                    }
                 }
             }
         }
+        metrics_.current_depth.store(0, std::memory_order_relaxed);
     }
-    metrics_.current_depth.store(0, std::memory_order_relaxed);
 
     auto await_future = [](std::future<void>& fut) {
         if (!fut.valid()) {
@@ -327,7 +337,8 @@ boost::asio::awaitable<void> RequestQueue::eviction_loop() {
 
     while (!stop_flag_->load(std::memory_order_acquire)) {
         timer.expires_after(config_.eviction_interval);
-        auto [ec] = co_await timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable));
+        auto [ec] = co_await timer.async_wait(boost::asio::bind_cancellation_slot(
+            cancel_signal_->slot(), boost::asio::as_tuple(boost::asio::use_awaitable)));
         if (ec == boost::asio::error::operation_aborted &&
             stop_flag_->load(std::memory_order_acquire)) {
             break;
@@ -394,7 +405,8 @@ boost::asio::awaitable<void> RequestQueue::aging_loop() {
 
     while (!stop_flag_->load(std::memory_order_acquire)) {
         timer.expires_after(config_.aging_interval);
-        auto [ec] = co_await timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable));
+        auto [ec] = co_await timer.async_wait(boost::asio::bind_cancellation_slot(
+            cancel_signal_->slot(), boost::asio::as_tuple(boost::asio::use_awaitable)));
         if (ec == boost::asio::error::operation_aborted &&
             stop_flag_->load(std::memory_order_acquire)) {
             break;

@@ -40,7 +40,8 @@ private:
         auto now = std::chrono::steady_clock::now().time_since_epoch().count();
         auto tid = std::hash<std::thread::id>{}(std::this_thread::get_id());
         auto counter = counter_.fetch_add(1, std::memory_order_relaxed);
-        return base_name + "-" + std::to_string(now) + "-" + std::to_string(tid) + "-" + std::to_string(counter);
+        return base_name + "-" + std::to_string(now) + "-" + std::to_string(tid) + "-" +
+               std::to_string(counter);
     }
 
     std::filesystem::path root_;

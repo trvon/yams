@@ -6,6 +6,7 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/app/services/enhanced_search_executor.h>
 #include <yams/app/services/services.hpp>
+#include <yams/app/services/session_service.hpp>
 #include <yams/detection/file_type_detector.h>
 #include <yams/metadata/query_helpers.h>
 #ifdef YAMS_ENABLE_DAEMON_FEATURES
@@ -1366,6 +1367,42 @@ private:
                 spdlog::debug("[SearchService] After intersection: {} documents remain",
                               intersected.size());
                 docIds = std::move(intersected);
+            }
+        }
+
+        // Session-isolated memory filtering (PBI-082)
+        if (!req.globalSearch && req.useSession) {
+            std::string sessionId = req.sessionName;
+            if (sessionId.empty()) {
+                auto sessionSvc = makeSessionService(&ctx_);
+                if (sessionSvc) {
+                    if (auto curr = sessionSvc->current()) {
+                        sessionId = *curr;
+                    }
+                }
+            }
+            if (!sessionId.empty()) {
+                auto sessionDocsRes = ctx_.metadataRepo->findDocumentsBySessionId(sessionId);
+                if (sessionDocsRes) {
+                    std::unordered_set<int64_t> sessionDocIds;
+                    for (const auto& doc : sessionDocsRes.value()) {
+                        sessionDocIds.insert(doc.id);
+                    }
+                    if (!docIds.has_value()) {
+                        std::vector<int64_t> ids(sessionDocIds.begin(), sessionDocIds.end());
+                        docIds = std::move(ids);
+                    } else {
+                        std::vector<int64_t> intersected;
+                        for (int64_t id : docIds.value()) {
+                            if (sessionDocIds.count(id) > 0) {
+                                intersected.push_back(id);
+                            }
+                        }
+                        docIds = std::move(intersected);
+                    }
+                    spdlog::debug("[SearchService] Session filter: {} docs in session '{}'",
+                                  docIds->size(), sessionId);
+                }
             }
         }
 

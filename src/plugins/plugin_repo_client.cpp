@@ -9,9 +9,9 @@
 #include <iomanip>
 #include <sstream>
 
-#include <curl/curl.h>
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <curl/curl.h>
 
 namespace yams::plugins {
 
@@ -44,8 +44,7 @@ private:
 
 class PluginRepoClientImpl : public IPluginRepoClient {
 public:
-    explicit PluginRepoClientImpl(PluginRepoConfig config)
-        : config_(std::move(config)) {
+    explicit PluginRepoClientImpl(PluginRepoConfig config) : config_(std::move(config)) {
         // Allow environment variable override
         if (const char* envUrl = std::getenv("YAMS_PLUGIN_REPO_URL")) {
             config_.repoUrl = envUrl;
@@ -90,16 +89,17 @@ public:
             }
             return results;
         } catch (const std::exception& e) {
-            return Error{ErrorCode::InvalidData, std::string("Failed to parse plugin list: ") + e.what()};
+            return Error{ErrorCode::InvalidData,
+                         std::string("Failed to parse plugin list: ") + e.what()};
         }
     }
 
-    Result<RemotePluginInfo> get(
-        const std::string& name,
-        const std::optional<std::string>& version) override {
+    Result<RemotePluginInfo> get(const std::string& name,
+                                 const std::optional<std::string>& version) override {
         std::string url;
         if (version) {
-            url = config_.repoUrl + "/api/v1/plugins/" + urlEncode(name) + "/" + urlEncode(*version);
+            url =
+                config_.repoUrl + "/api/v1/plugins/" + urlEncode(name) + "/" + urlEncode(*version);
         } else {
             url = config_.repoUrl + "/api/v1/plugins/" + urlEncode(name) + "/latest";
         }
@@ -113,7 +113,8 @@ public:
             auto json = nlohmann::json::parse(resp.value());
             return parsePluginInfo(json, name);
         } catch (const std::exception& e) {
-            return Error{ErrorCode::InvalidData, std::string("Failed to parse plugin info: ") + e.what()};
+            return Error{ErrorCode::InvalidData,
+                         std::string("Failed to parse plugin info: ") + e.what()};
         }
     }
 
@@ -137,7 +138,8 @@ public:
             }
             return results;
         } catch (const std::exception& e) {
-            return Error{ErrorCode::InvalidData, std::string("Failed to parse versions: ") + e.what()};
+            return Error{ErrorCode::InvalidData,
+                         std::string("Failed to parse versions: ") + e.what()};
         }
     }
 
@@ -206,7 +208,8 @@ private:
                 if (json.contains("error")) {
                     msg << ": " << json["error"].get<std::string>();
                 }
-            } catch (...) {}
+            } catch (...) {
+            }
             return Error{ErrorCode::NetworkError, msg.str()};
         }
 
@@ -233,8 +236,8 @@ private:
 
         // If download_url is not provided, construct it
         if (info.downloadUrl.empty() && !info.name.empty() && !info.version.empty()) {
-            info.downloadUrl = config_.repoUrl + "/plugins/" + info.name + "/" +
-                               info.version + "/" + info.name + "-" + info.version + ".tar.gz";
+            info.downloadUrl = config_.repoUrl + "/plugins/" + info.name + "/" + info.version +
+                               "/" + info.name + "-" + info.version + ".tar.gz";
         }
 
         if (json.contains("interfaces") && json["interfaces"].is_array()) {
@@ -254,8 +257,8 @@ private:
         escaped << std::hex;
 
         for (char c : value) {
-            if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' ||
-                c == '.' || c == '~') {
+            if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.' ||
+                c == '~') {
                 escaped << c;
             } else {
                 escaped << std::uppercase;

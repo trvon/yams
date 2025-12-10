@@ -170,8 +170,7 @@ namespace {
 // Shared request-id generator for all client request paths (unary + streaming)
 std::atomic<uint64_t>& request_id_counter() {
     static std::atomic<uint64_t> counter{
-        static_cast<uint64_t>(
-            std::chrono::steady_clock::now().time_since_epoch().count())};
+        static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count())};
     return counter;
 }
 

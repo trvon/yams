@@ -316,15 +316,25 @@ Result<void> MigrationManager::createMigrationTables() {
 
 // YamsMetadataMigrations implementation
 std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
-    return {createInitialSchema(),        createFTS5Tables(),
-            createMetadataIndexes(),      createRelationshipTables(),
-            createSearchTables(),         createCollectionIndexes(),
-            createKnowledgeGraphSchema(), createBinarySignatureSchema(),
-            createVectorSearchSchema(),   upgradeFTS5Tokenization(),
-            createTreeSnapshotsSchema(),  createTreeDiffsSchema(),
-            addPathIndexingSchema(),      chunkedPathIndexingBackfill(),
-            createPathTreeSchema(),       createSymbolMetadataSchema(),
-            addFTS5PorterStemmer(),       removeFTS5ContentType(),
+    return {createInitialSchema(),
+            createFTS5Tables(),
+            createMetadataIndexes(),
+            createRelationshipTables(),
+            createSearchTables(),
+            createCollectionIndexes(),
+            createKnowledgeGraphSchema(),
+            createBinarySignatureSchema(),
+            createVectorSearchSchema(),
+            upgradeFTS5Tokenization(),
+            createTreeSnapshotsSchema(),
+            createTreeDiffsSchema(),
+            addPathIndexingSchema(),
+            chunkedPathIndexingBackfill(),
+            createPathTreeSchema(),
+            createSymbolMetadataSchema(),
+            addFTS5PorterStemmer(),
+            removeFTS5ContentType(),
+            renameDocEntitiesToKgDocEntities(),
             createSessionIndexes()};
 }
 
@@ -1983,9 +1993,92 @@ Migration YamsMetadataMigrations::removeFTS5ContentType() {
     return m;
 }
 
-Migration YamsMetadataMigrations::createSessionIndexes() {
+Migration YamsMetadataMigrations::renameDocEntitiesToKgDocEntities() {
     Migration m;
     m.version = 19;
+    m.name = "Rename doc_entities to kg_doc_entities";
+    m.created = std::chrono::system_clock::now();
+
+    m.upFunc = [](Database& db) -> Result<void> {
+        // Check if old table exists
+        auto oldExists = db.tableExists("doc_entities");
+        if (!oldExists)
+            return oldExists.error();
+
+        // Check if new table exists
+        auto newExists = db.tableExists("kg_doc_entities");
+        if (!newExists)
+            return newExists.error();
+
+        if (oldExists.value() && !newExists.value()) {
+            // Rename old table to new name
+            auto rc = db.execute("ALTER TABLE doc_entities RENAME TO kg_doc_entities;");
+            if (!rc)
+                return rc;
+
+            // Rename indexes
+            (void)db.execute("DROP INDEX IF EXISTS idx_doc_entities_document;");
+            (void)db.execute("DROP INDEX IF EXISTS idx_doc_entities_node;");
+            auto idx1 = db.execute("CREATE INDEX IF NOT EXISTS idx_kg_doc_entities_document ON "
+                                   "kg_doc_entities(document_id);");
+            if (!idx1)
+                return idx1;
+            auto idx2 = db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_kg_doc_entities_node ON kg_doc_entities(node_id);");
+            if (!idx2)
+                return idx2;
+
+            spdlog::info("Renamed doc_entities to kg_doc_entities");
+        } else if (!oldExists.value() && !newExists.value()) {
+            // Neither exists - create the new table (shouldn't happen if v7 ran, but be safe)
+            auto rc = db.execute(R"(
+                CREATE TABLE IF NOT EXISTS kg_doc_entities (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    document_id INTEGER NOT NULL,
+                    entity_text TEXT NOT NULL,
+                    node_id INTEGER,
+                    start_offset INTEGER,
+                    end_offset INTEGER,
+                    confidence REAL,
+                    extractor TEXT,
+                    FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
+                    FOREIGN KEY (node_id) REFERENCES kg_nodes(id) ON DELETE SET NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_kg_doc_entities_document ON kg_doc_entities(document_id);
+                CREATE INDEX IF NOT EXISTS idx_kg_doc_entities_node ON kg_doc_entities(node_id);
+            )");
+            if (!rc)
+                return rc;
+            spdlog::info("Created kg_doc_entities table");
+        }
+        // If kg_doc_entities already exists, nothing to do
+
+        return Result<void>();
+    };
+
+    m.downFunc = [](Database& db) -> Result<void> {
+        // Reverse: rename kg_doc_entities back to doc_entities
+        auto newExists = db.tableExists("kg_doc_entities");
+        if (newExists && newExists.value()) {
+            (void)db.execute("DROP INDEX IF EXISTS idx_kg_doc_entities_document;");
+            (void)db.execute("DROP INDEX IF EXISTS idx_kg_doc_entities_node;");
+            auto rc = db.execute("ALTER TABLE kg_doc_entities RENAME TO doc_entities;");
+            if (!rc)
+                return rc;
+            (void)db.execute("CREATE INDEX IF NOT EXISTS idx_doc_entities_document ON "
+                             "doc_entities(document_id);");
+            (void)db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_doc_entities_node ON doc_entities(node_id);");
+        }
+        return Result<void>();
+    };
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::createSessionIndexes() {
+    Migration m;
+    m.version = 20;
     m.name = "Add session_id index for session-isolated memory";
     m.created = std::chrono::system_clock::now();
 

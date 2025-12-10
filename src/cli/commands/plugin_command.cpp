@@ -15,7 +15,6 @@
 #include <yams/plugins/plugin_installer.hpp>
 #include <yams/plugins/plugin_repo_client.hpp>
 
-
 namespace yams::cli {
 
 namespace {

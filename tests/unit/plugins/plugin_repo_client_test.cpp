@@ -10,8 +10,8 @@
  * - URL encoding and special characters
  */
 
-#include <gtest/gtest.h>
 #include <gmock/gmock.h>
+#include <gtest/gtest.h>
 
 #include <yams/plugins/plugin_repo_client.hpp>
 
@@ -134,20 +134,20 @@ TEST_F(PluginRepoClientTest, UserAgentCanBeConfigured) {
  */
 TEST_F(PluginRepoClientTest, ChecksumFormatValidation) {
     // Valid SHA-256 checksum format
-    const std::string validChecksum = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-    
+    const std::string validChecksum =
+        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
     // Verify format starts with sha256:
     EXPECT_EQ(validChecksum.substr(0, 7), "sha256:");
-    
+
     // Verify hex portion is 64 characters
     const std::string hexPortion = validChecksum.substr(7);
     EXPECT_EQ(hexPortion.length(), 64u);
-    
+
     // Verify all characters are valid hex
     for (char c : hexPortion) {
-        bool isValidHex = (c >= '0' && c <= '9') || 
-                          (c >= 'a' && c <= 'f') || 
-                          (c >= 'A' && c <= 'F');
+        bool isValidHex =
+            (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
         EXPECT_TRUE(isValidHex) << "Invalid hex character: " << c;
     }
 }
@@ -160,9 +160,10 @@ TEST_F(PluginRepoClientTest, SecurityFieldsArePreserved) {
     info.name = "test-plugin";
     info.version = "1.2.3";
     info.checksum = "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abcd";
-    info.downloadUrl = "https://secure-cdn.example.com/plugins/test-plugin/1.2.3/test-plugin.tar.gz";
+    info.downloadUrl =
+        "https://secure-cdn.example.com/plugins/test-plugin/1.2.3/test-plugin.tar.gz";
     info.abiVersion = 2;
-    
+
     EXPECT_EQ(info.checksum.substr(0, 7), "sha256:");
     EXPECT_TRUE(info.downloadUrl.find("https://") == 0);
     EXPECT_EQ(info.abiVersion, 2);
@@ -175,21 +176,14 @@ TEST_F(PluginRepoClientTest, SecurityFieldsArePreserved) {
  */
 TEST_F(PluginRepoClientTest, PluginNameValidation) {
     // Safe plugin names
-    std::vector<std::string> safeNames = {
-        "my-plugin",
-        "my_plugin",
-        "myplugin",
-        "plugin123",
-        "my-cool-plugin-v2"
-    };
-    
+    std::vector<std::string> safeNames = {"my-plugin", "my_plugin", "myplugin", "plugin123",
+                                          "my-cool-plugin-v2"};
+
     for (const auto& name : safeNames) {
         // Verify name only contains safe characters
         bool isSafe = true;
         for (char c : name) {
-            if (!((c >= 'a' && c <= 'z') || 
-                  (c >= 'A' && c <= 'Z') || 
-                  (c >= '0' && c <= '9') || 
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
                   c == '-' || c == '_')) {
                 isSafe = false;
                 break;
@@ -205,7 +199,7 @@ TEST_F(PluginRepoClientTest, PluginNameValidation) {
 TEST_F(PluginRepoClientTest, MinVersionCompatibility) {
     RemotePluginInfo info;
     info.minYamsVersion = "2.0.0";
-    
+
     // This is a placeholder - actual version comparison would be done elsewhere
     EXPECT_FALSE(info.minYamsVersion.empty());
 }
@@ -227,7 +221,7 @@ TEST_F(PluginRepoClientTest, MinVersionCompatibility) {
 TEST_F(PluginRepoClientTest, DISABLED_ListPluginsReturnsValidResults) {
     auto client = makePluginRepoClient(config_);
     auto result = client->list();
-    
+
     // This test is disabled because it requires network access
     // or a mock HTTP client implementation
     EXPECT_TRUE(result.has_value());
@@ -239,7 +233,7 @@ TEST_F(PluginRepoClientTest, DISABLED_ListPluginsReturnsValidResults) {
 TEST_F(PluginRepoClientTest, DISABLED_GetPluginReturnsMetadata) {
     auto client = makePluginRepoClient(config_);
     auto result = client->get("test-plugin");
-    
+
     EXPECT_TRUE(result.has_value());
 }
 
@@ -249,7 +243,7 @@ TEST_F(PluginRepoClientTest, DISABLED_GetPluginReturnsMetadata) {
 TEST_F(PluginRepoClientTest, DISABLED_ListVersionsReturnsVersions) {
     auto client = makePluginRepoClient(config_);
     auto result = client->versions("test-plugin");
-    
+
     EXPECT_TRUE(result.has_value());
 }
 
@@ -259,7 +253,7 @@ TEST_F(PluginRepoClientTest, DISABLED_ListVersionsReturnsVersions) {
 TEST_F(PluginRepoClientTest, DISABLED_ExistsCheckWorks) {
     auto client = makePluginRepoClient(config_);
     auto result = client->exists("test-plugin");
-    
+
     EXPECT_TRUE(result.has_value());
 }
 

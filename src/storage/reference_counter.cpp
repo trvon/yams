@@ -499,8 +499,8 @@ Result<void> ReferenceCounter::decrement(std::string_view blockHash) {
 // Get reference count
 Result<uint64_t> ReferenceCounter::getRefCount(std::string_view blockHash) const {
     try {
-        // With FULLMUTEX mode, SQLite handles thread safety
-        std::shared_lock lock(pImpl->dbMutex);
+        // Serialize access to the SQLite handle; shared access can race on Windows builds
+        std::unique_lock lock(pImpl->dbMutex);
 
         auto stmt = pImpl->stmtCache->get(Impl::GET_REF_COUNT_STMT, "");
         stmt.bind(1, blockHash);
@@ -528,9 +528,8 @@ Result<bool> ReferenceCounter::hasReferences(std::string_view blockHash) const {
 // Get statistics
 Result<RefCountStats> ReferenceCounter::getStats() const {
     try {
-        // With FULLMUTEX mode, SQLite handles thread safety internally
-        // We still use shared_lock for read operations to coordinate with schema changes
-        std::shared_lock lock(pImpl->dbMutex);
+        // Serialize reads with writes to avoid SQLite handle reuse races on Windows
+        std::unique_lock lock(pImpl->dbMutex);
 
         RefCountStats stats{};
 
@@ -604,8 +603,8 @@ Result<RefCountStats> ReferenceCounter::getStats() const {
 Result<std::vector<std::string>>
 ReferenceCounter::getUnreferencedBlocks(size_t limit, std::chrono::seconds minAge) const {
     try {
-        // Shared lock for read operation
-        std::shared_lock lock(pImpl->dbMutex);
+        // Serialize access to the single SQLite handle
+        std::unique_lock lock(pImpl->dbMutex);
 
         std::vector<std::string> blocks;
         blocks.reserve(limit);

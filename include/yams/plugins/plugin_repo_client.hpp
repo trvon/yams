@@ -39,13 +39,13 @@ struct RemotePluginInfo {
     std::string minYamsVersion;
 
     // Download info
-    std::string downloadUrl;  // Full URL to .tar.gz bundle
-    std::string checksum;     // sha256:<hex>
+    std::string downloadUrl; // Full URL to .tar.gz bundle
+    std::string checksum;    // sha256:<hex>
     uint64_t sizeBytes{0};
 
     // Platform compatibility
-    std::string platform;     // linux-x86_64, darwin-arm64, windows-x86_64, etc.
-    std::string arch;         // x86_64, arm64, etc.
+    std::string platform; // linux-x86_64, darwin-arm64, windows-x86_64, etc.
+    std::string arch;     // x86_64, arm64, etc.
     int abiVersion{1};
 
     // Timestamps
@@ -90,8 +90,7 @@ public:
      * @param filter Optional search filter (name, interface, etc.)
      * @return Vector of plugin summaries
      */
-    virtual Result<std::vector<RemotePluginSummary>> list(
-        const std::string& filter = "") = 0;
+    virtual Result<std::vector<RemotePluginSummary>> list(const std::string& filter = "") = 0;
 
     /**
      * Get detailed metadata for a specific plugin.
@@ -99,9 +98,8 @@ public:
      * @param version Optional version (default: latest)
      * @return Plugin metadata including download URL
      */
-    virtual Result<RemotePluginInfo> get(
-        const std::string& name,
-        const std::optional<std::string>& version = std::nullopt) = 0;
+    virtual Result<RemotePluginInfo>
+    get(const std::string& name, const std::optional<std::string>& version = std::nullopt) = 0;
 
     /**
      * List all versions of a plugin.

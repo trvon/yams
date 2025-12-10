@@ -7,6 +7,7 @@
 
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/steady_timer.hpp>
 
 #include <array>
@@ -15,11 +16,11 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
-#include <future>
 #include <vector>
 
 namespace yams::daemon {
@@ -238,6 +239,7 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> backpressured_{false};
     std::shared_ptr<std::atomic<bool>> stop_flag_;
+    std::shared_ptr<boost::asio::cancellation_signal> cancel_signal_;
 
     // Background task lifecycle
     std::future<void> eviction_future_;

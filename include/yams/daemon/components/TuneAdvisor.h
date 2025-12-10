@@ -551,6 +551,29 @@ public:
     static void setPostIngestQueueMax(uint32_t v) {
         postIngestQueueMaxOverride_.store(v, std::memory_order_relaxed);
     }
+
+    // Override store for IPC timeout (ms)
+    static inline std::atomic<uint32_t> ipcTimeoutMsOverride_{0};
+
+    // IPC timeouts (ms) for read/write operations. Default 5000ms; env: YAMS_IPC_TIMEOUT_MS.
+    static uint32_t ipcTimeoutMs() {
+        uint32_t ov = ipcTimeoutMsOverride_.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+        uint32_t def = 5000;
+        if (const char* s = std::getenv("YAMS_IPC_TIMEOUT_MS")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 500 && v <= 60000)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return def;
+    }
+    static void setIpcTimeoutMs(uint32_t ms) {
+        ipcTimeoutMsOverride_.store(ms, std::memory_order_relaxed);
+    }
     static uint32_t mcpWorkerThreads() { return mcpWorkerThreads_.load(std::memory_order_relaxed); }
     static void setMcpWorkerThreads(uint32_t n) {
         mcpWorkerThreads_.store(n, std::memory_order_relaxed);

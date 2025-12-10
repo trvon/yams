@@ -347,8 +347,8 @@ public:
                       "Emit grouped JSON (preserves flat JSON unless this is set)");
 
         // Session scoping controls
-        cmd->add_option("--session", sessionOverride_, "Use this session for scoping");
-        cmd->add_flag("--no-session", noSession_, "Bypass session scoping");
+        cmd->add_option("--session", sessionOverride_, "Search within specific session");
+        cmd->add_flag("--global,--no-session", noSession_, "Search global memory (bypass session)");
 
         // CWD scoping
         cmd->add_flag("--cwd,--here", scopeToCwd_,
@@ -665,10 +665,9 @@ public:
             dreq.indexedAfter = indexedAfter_;
             dreq.indexedBefore = indexedBefore_;
 
-            // Session scoping: enable hot path optimization only when session is active
-            bool hasActiveSession = !noSession_ && !includeGlobsExpanded.empty();
-            dreq.useSession = hasActiveSession;
-            if (hasActiveSession && sessionOverride_) {
+            dreq.globalSearch = noSession_;
+            dreq.useSession = !noSession_;
+            if (!noSession_ && sessionOverride_) {
                 dreq.sessionName = *sessionOverride_;
             }
 

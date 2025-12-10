@@ -13,8 +13,8 @@
  * contained "[Deprecated] Single path to file/directory...").
  */
 
-#include <gtest/gtest.h>
 #include <CLI/CLI.hpp>
+#include <gtest/gtest.h>
 
 #include <filesystem>
 #include <string>
@@ -124,8 +124,7 @@ TEST(CLIOptionIsolationTest, NamedOptionWithoutArgumentUsesDefault) {
     CLI::App app("Test");
 
     std::string name;
-    app.add_option("-n,--name", name,
-                   "Name for the document (especially useful for stdin)")
+    app.add_option("-n,--name", name, "Name for the document (especially useful for stdin)")
         ->default_val("");
 
     // Simulate: yams add (no --name argument)
@@ -145,8 +144,7 @@ TEST(CLIOptionIsolationTest, SubcommandOptionDescriptionsRemainIsolated) {
     CLI::App app("Test");
 
     std::string dataDir;
-    app.add_option("--data-dir", dataDir, "Data directory for storage")
-        ->default_val("/default");
+    app.add_option("--data-dir", dataDir, "Data directory for storage")->default_val("/default");
 
     auto* addCmd = app.add_subcommand("add", "Add document(s) to the store");
 
@@ -155,8 +153,7 @@ TEST(CLIOptionIsolationTest, SubcommandOptionDescriptionsRemainIsolated) {
                        "[Deprecated] Single path to file/directory (use '-' for stdin)");
 
     std::string docName;
-    addCmd->add_option("-n,--name", docName,
-                       "Name for the document (especially useful for stdin)");
+    addCmd->add_option("-n,--name", docName, "Name for the document (especially useful for stdin)");
 
     // Use Windows-compatible paths that don't look like switches
 #ifdef _WIN32
@@ -251,9 +248,7 @@ TEST(CLIOptionIsolationTest, DescriptionStringsAreNotValidPaths) {
     std::vector<std::string> descriptions = {
         "[Deprecated] Single path to file/directory (use '-' for stdin)",
         "File or directory paths to add (use '-' for stdin). Accepts multiple.",
-        "Name for the document (especially useful for stdin)",
-        "Data directory for storage"
-    };
+        "Name for the document (especially useful for stdin)", "Data directory for storage"};
 
     for (const auto& desc : descriptions) {
         // On Windows, paths with brackets are technically valid but highly unusual
@@ -273,8 +268,8 @@ TEST(CLIOptionIsolationTest, DescriptionStringsAreNotValidPaths) {
         bool hasDescriptionWords = desc.find("directory") != std::string::npos ||
                                    desc.find("file") != std::string::npos ||
                                    desc.find("path") != std::string::npos;
-        
-        EXPECT_TRUE(hasSpecialChars || isLongDescription || 
+
+        EXPECT_TRUE(hasSpecialChars || isLongDescription ||
                     containsMultipleSpaces || hasDescriptionWords)
             << "Description '" << desc << "' looks too path-like, may indicate a bug";
     }
@@ -309,12 +304,9 @@ TEST(CLIOptionIsolationTest, MultipleOptionsWithSimilarDescriptions) {
     std::string namePath;
     std::string deletePath;
 
-    app.add_option("--query", queryPath,
-                   "Read query from file path (use '-' to read from STDIN)");
-    app.add_option("--name", namePath,
-                   "Name of the document to retrieve (explicit flag form)");
-    app.add_option("--delete", deletePath,
-                   "Delete multiple documents by names (comma-separated)");
+    app.add_option("--query", queryPath, "Read query from file path (use '-' to read from STDIN)");
+    app.add_option("--name", namePath, "Name of the document to retrieve (explicit flag form)");
+    app.add_option("--delete", deletePath, "Delete multiple documents by names (comma-separated)");
 
     // Parse with one option specified
     std::vector<const char*> args = {"test", "--query", "search.txt"};

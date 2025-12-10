@@ -200,9 +200,10 @@ TEST(PromptUtilTest, InputValidatorRejectsInvalidReturnsDefault) {
     MockStdin input("invalid\n");
     SuppressCout suppress;
     auto validator = [](const std::string& s) { return s == "valid"; };
-    EXPECT_EQ(prompt_input("Enter value:",
-                           {.defaultValue = "fallback", .retryOnInvalid = false, .validator = validator}),
-              "fallback");
+    EXPECT_EQ(
+        prompt_input("Enter value:",
+                     {.defaultValue = "fallback", .retryOnInvalid = false, .validator = validator}),
+        "fallback");
 }
 
 TEST(PromptUtilTest, InputTrimsTabsAndNewlines) {
@@ -241,8 +242,7 @@ TEST(PromptUtilTest, ChoiceFirstItemSelected) {
 TEST(PromptUtilTest, ChoiceLastItemSelected) {
     MockStdin input("3\n");
     SuppressCout suppress;
-    std::vector<ChoiceItem> items = {
-        {"a", "A", ""}, {"b", "B", ""}, {"c", "C", ""}};
+    std::vector<ChoiceItem> items = {{"a", "A", ""}, {"b", "B", ""}, {"c", "C", ""}};
     EXPECT_EQ(prompt_choice("Select:", items), 2);
 }
 
@@ -318,7 +318,8 @@ TEST(PromptUtilTest, InputOnlyWhitespaceReturnsDefaultWhenTrimmed) {
     MockStdin input("   \t  \n");
     SuppressCout suppress;
     // After trimming, this becomes empty
-    EXPECT_EQ(prompt_input("Value:", {.defaultValue = "default", .trimWhitespace = true}), "default");
+    EXPECT_EQ(prompt_input("Value:", {.defaultValue = "default", .trimWhitespace = true}),
+              "default");
 }
 
 TEST(PromptUtilTest, MultiplePromptsInSequence) {

@@ -31,19 +31,19 @@ namespace yams::plugins {
  */
 struct InstallProgress {
     enum class Stage {
-        Querying,      // Fetching metadata from repository
-        Downloading,   // Downloading plugin bundle
-        Verifying,     // Verifying checksum
-        Extracting,    // Extracting archive
-        Installing,    // Moving to plugin directory
-        Trusting,      // Adding to trust list
-        Loading,       // Loading plugin
-        Complete       // Installation complete
+        Querying,    // Fetching metadata from repository
+        Downloading, // Downloading plugin bundle
+        Verifying,   // Verifying checksum
+        Extracting,  // Extracting archive
+        Installing,  // Moving to plugin directory
+        Trusting,    // Adding to trust list
+        Loading,     // Loading plugin
+        Complete     // Installation complete
     };
 
     Stage stage{Stage::Querying};
     std::string message;
-    float progress{0.0f};       // 0.0 - 1.0
+    float progress{0.0f}; // 0.0 - 1.0
     uint64_t bytesDownloaded{0};
     uint64_t totalBytes{0};
 };
@@ -54,14 +54,14 @@ using InstallProgressCallback = std::function<void(const InstallProgress&)>;
  * Installation options.
  */
 struct InstallOptions {
-    std::optional<std::string> version;           // Specific version (default: latest)
-    std::filesystem::path installDir;             // Target directory (default: ~/.local/lib/yams/plugins)
-    bool autoTrust{true};                         // Add to trust list after install
-    bool autoLoad{true};                          // Load plugin after install (requires daemon)
-    bool force{false};                            // Overwrite if already installed
-    bool dryRun{false};                           // Preview only, don't install
-    std::optional<std::string> checksum;          // Override checksum verification
-    InstallProgressCallback onProgress{nullptr};  // Progress callback
+    std::optional<std::string> version;  // Specific version (default: latest)
+    std::filesystem::path installDir;    // Target directory (default: ~/.local/lib/yams/plugins)
+    bool autoTrust{true};                // Add to trust list after install
+    bool autoLoad{true};                 // Load plugin after install (requires daemon)
+    bool force{false};                   // Overwrite if already installed
+    bool dryRun{false};                  // Preview only, don't install
+    std::optional<std::string> checksum; // Override checksum verification
+    InstallProgressCallback onProgress{nullptr}; // Progress callback
 };
 
 /**
@@ -73,7 +73,7 @@ struct InstallResult {
     std::filesystem::path installedPath;
     std::string checksum;
     uint64_t sizeBytes{0};
-    bool wasUpgrade{false};     // true if replaced existing version
+    bool wasUpgrade{false}; // true if replaced existing version
     std::string previousVersion;
     std::chrono::milliseconds elapsed{0};
 };
@@ -91,9 +91,8 @@ public:
      * @param options Installation options
      * @return Installation result
      */
-    virtual Result<InstallResult> install(
-        const std::string& nameOrUrl,
-        const InstallOptions& options = {}) = 0;
+    virtual Result<InstallResult> install(const std::string& nameOrUrl,
+                                          const InstallOptions& options = {}) = 0;
 
     /**
      * Uninstall a plugin.
@@ -101,9 +100,7 @@ public:
      * @param removeFromTrust Also remove from trust list
      * @return Success or error
      */
-    virtual Result<void> uninstall(
-        const std::string& name,
-        bool removeFromTrust = true) = 0;
+    virtual Result<void> uninstall(const std::string& name, bool removeFromTrust = true) = 0;
 
     /**
      * List installed plugins.
@@ -116,16 +113,15 @@ public:
      * @param name Plugin name
      * @return Installed version or nullopt
      */
-    virtual Result<std::optional<std::string>> installedVersion(
-        const std::string& name) = 0;
+    virtual Result<std::optional<std::string>> installedVersion(const std::string& name) = 0;
 
     /**
      * Check for available updates.
      * @param name Plugin name (empty = check all)
      * @return Map of plugin name -> available version
      */
-    virtual Result<std::map<std::string, std::string>> checkUpdates(
-        const std::string& name = "") = 0;
+    virtual Result<std::map<std::string, std::string>>
+    checkUpdates(const std::string& name = "") = 0;
 };
 
 /**
@@ -134,10 +130,9 @@ public:
  * @param installDir Default installation directory
  * @param trustFile Trust file path
  */
-std::unique_ptr<IPluginInstaller> makePluginInstaller(
-    std::shared_ptr<IPluginRepoClient> repoClient,
-    const std::filesystem::path& installDir = {},
-    const std::filesystem::path& trustFile = {});
+std::unique_ptr<IPluginInstaller> makePluginInstaller(std::shared_ptr<IPluginRepoClient> repoClient,
+                                                      const std::filesystem::path& installDir = {},
+                                                      const std::filesystem::path& trustFile = {});
 
 /**
  * Get the default plugin installation directory.

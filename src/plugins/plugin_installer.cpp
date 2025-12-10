@@ -9,9 +9,9 @@
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
+#include <regex>
 #include <set>
 #include <sstream>
-#include <regex>
 
 #ifdef _WIN32
 #include <ShlObj.h>
@@ -22,12 +22,12 @@
 #endif
 
 // Archive extraction (minitar or platform-specific)
+#include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
 #include <archive.h>
 #include <archive_entry.h>
 #include <curl/curl.h>
-#include <nlohmann/json.hpp>
 #include <openssl/evp.h>
-#include <spdlog/spdlog.h>
 
 namespace yams::plugins {
 
@@ -118,8 +118,8 @@ Result<void> extractArchive(const fs::path& archivePath, const fs::path& destDir
     archive_read_support_format_tar(a);
     archive_read_support_filter_gzip(a);
 
-    archive_write_disk_set_options(ext,
-        ARCHIVE_EXTRACT_TIME | ARCHIVE_EXTRACT_PERM | ARCHIVE_EXTRACT_ACL | ARCHIVE_EXTRACT_FFLAGS);
+    archive_write_disk_set_options(ext, ARCHIVE_EXTRACT_TIME | ARCHIVE_EXTRACT_PERM |
+                                            ARCHIVE_EXTRACT_ACL | ARCHIVE_EXTRACT_FFLAGS);
 
     r = archive_read_open_filename(a, archivePath.string().c_str(), 10240);
     if (r != ARCHIVE_OK) {
@@ -168,12 +168,10 @@ Result<void> extractArchive(const fs::path& archivePath, const fs::path& destDir
 
 class PluginInstallerImpl : public IPluginInstaller {
 public:
-    PluginInstallerImpl(std::shared_ptr<IPluginRepoClient> repoClient,
-                        fs::path installDir,
+    PluginInstallerImpl(std::shared_ptr<IPluginRepoClient> repoClient, fs::path installDir,
                         fs::path trustFile)
-        : repoClient_(std::move(repoClient))
-        , installDir_(std::move(installDir))
-        , trustFile_(std::move(trustFile)) {
+        : repoClient_(std::move(repoClient)), installDir_(std::move(installDir)),
+          trustFile_(std::move(trustFile)) {
         if (installDir_.empty()) {
             installDir_ = getDefaultPluginInstallDir();
         }
@@ -187,7 +185,8 @@ public:
         auto startTime = std::chrono::steady_clock::now();
         InstallResult result;
 
-        auto notifyProgress = [&](InstallProgress::Stage stage, const std::string& msg, float pct = 0.0f) {
+        auto notifyProgress = [&](InstallProgress::Stage stage, const std::string& msg,
+                                  float pct = 0.0f) {
             if (options.onProgress) {
                 InstallProgress progress;
                 progress.stage = stage;
@@ -219,7 +218,8 @@ public:
             info.name = fs::path(nameOrUrl).stem().string();
             info.downloadUrl = nameOrUrl;
             info.version = version.value_or("unknown");
-            // Try to extract name from URL pattern: /plugins/<name>/<version>/<name>-<version>.tar.gz
+            // Try to extract name from URL pattern:
+            // /plugins/<name>/<version>/<name>-<version>.tar.gz
             std::regex urlPattern(R"(/plugins/([^/]+)/([^/]+)/[^/]+\.tar\.gz$)");
             std::smatch match;
             if (std::regex_search(nameOrUrl, match, urlPattern)) {
@@ -248,7 +248,8 @@ public:
             result.previousVersion = *installedVer.value();
             if (!options.force && result.previousVersion == info.version) {
                 return Error{ErrorCode::InvalidOperation,
-                             "Plugin " + info.name + "@" + info.version + " is already installed. Use --force to reinstall."};
+                             "Plugin " + info.name + "@" + info.version +
+                                 " is already installed. Use --force to reinstall."};
             }
         }
 
@@ -256,12 +257,14 @@ public:
             result.installedPath = pluginDir;
             result.checksum = info.checksum;
             result.sizeBytes = info.sizeBytes;
-            spdlog::info("[dry-run] Would install {} {} to {}", info.name, info.version, pluginDir.string());
+            spdlog::info("[dry-run] Would install {} {} to {}", info.name, info.version,
+                         pluginDir.string());
             return result;
         }
 
         // Create temp directory for download
-        fs::path tempDir = fs::temp_directory_path() / ("yams-plugin-" + info.name + "-" + info.version);
+        fs::path tempDir =
+            fs::temp_directory_path() / ("yams-plugin-" + info.name + "-" + info.version);
         std::error_code ec;
         fs::create_directories(tempDir, ec);
         fs::path archivePath = tempDir / (info.name + "-" + info.version + ".tar.gz");
@@ -281,8 +284,9 @@ public:
             std::string actualChecksum = computeSha256(archivePath);
             if (actualChecksum != expectedChecksum) {
                 fs::remove_all(tempDir, ec);
-                return Error{ErrorCode::HashMismatch,
-                             "Checksum mismatch: expected " + expectedChecksum + ", got " + actualChecksum};
+                return Error{ErrorCode::HashMismatch, "Checksum mismatch: expected " +
+                                                          expectedChecksum + ", got " +
+                                                          actualChecksum};
             }
             result.checksum = actualChecksum;
         } else {
@@ -413,7 +417,8 @@ public:
                     nlohmann::json manifest;
                     file >> manifest;
                     return std::optional<std::string>(manifest.value("version", "unknown"));
-                } catch (...) {}
+                } catch (...) {
+                }
             }
         }
 
@@ -440,7 +445,7 @@ public:
 
             auto remoteInfo = repoClient_->get(pluginName);
             if (!remoteInfo) {
-                continue;  // Plugin not in repository
+                continue; // Plugin not in repository
             }
 
             if (remoteInfo.value().version != *currentVer.value()) {
@@ -556,12 +561,10 @@ private:
     fs::path trustFile_;
 };
 
-std::unique_ptr<IPluginInstaller> makePluginInstaller(
-    std::shared_ptr<IPluginRepoClient> repoClient,
-    const fs::path& installDir,
-    const fs::path& trustFile) {
-    return std::make_unique<PluginInstallerImpl>(
-        std::move(repoClient), installDir, trustFile);
+std::unique_ptr<IPluginInstaller> makePluginInstaller(std::shared_ptr<IPluginRepoClient> repoClient,
+                                                      const fs::path& installDir,
+                                                      const fs::path& trustFile) {
+    return std::make_unique<PluginInstallerImpl>(std::move(repoClient), installDir, trustFile);
 }
 
 fs::path getDefaultPluginInstallDir() {

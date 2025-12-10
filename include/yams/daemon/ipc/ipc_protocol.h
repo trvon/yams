@@ -82,6 +82,7 @@ struct SearchRequest {
     // Session scoping (controls hot/cold path behavior)
     bool useSession = false;
     std::string sessionName;
+    bool globalSearch = false;  // Session-isolated memory (PBI-082): bypass session isolation
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -95,7 +96,8 @@ struct SearchRequest {
             << modifiedBefore << indexedAfter << indexedBefore
             << static_cast<int32_t>(vectorStageTimeoutMs)
             << static_cast<int32_t>(keywordStageTimeoutMs)
-            << static_cast<int32_t>(snippetHydrationTimeoutMs) << useSession << sessionName;
+            << static_cast<int32_t>(snippetHydrationTimeoutMs) << useSession << sessionName
+            << globalSearch;
     }
 
     template <typename Deserializer>
@@ -283,6 +285,10 @@ struct SearchRequest {
         }
         if (auto sn = deser.readString(); sn) {
             req.sessionName = std::move(sn.value());
+        }
+        // Session-isolated memory (PBI-082)
+        if (auto gs = deser.template read<bool>(); gs) {
+            req.globalSearch = gs.value();
         }
 
         return req;

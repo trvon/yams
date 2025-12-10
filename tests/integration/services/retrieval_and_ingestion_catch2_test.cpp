@@ -21,9 +21,9 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 
+#include "../daemon/test_daemon_harness.h"
 #include "common/capability.h"
 #include "common/fixture_manager.h"
-#include "../daemon/test_daemon_harness.h"
 
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/app/services/retrieval_service.h>
@@ -160,8 +160,8 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "AddViaDaemonAndListGetGrep"
     using yams::app::services::RetrievalService;
 
     // 1) Create a small file to add
-    auto doc =
-        fixtures_->createTextFixture("hello/hello.txt", "hello yams services", {"services", "smoke"});
+    auto doc = fixtures_->createTextFixture("hello/hello.txt", "hello yams services",
+                                            {"services", "smoke"});
     fs::path filePath = doc.path;
 
     // 2) Add via DocumentIngestionService (daemon-first)
@@ -313,9 +313,9 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "AddDirectoryWithPatternsAnd
 
     // Create fixtures
     auto keepCpp = fixtures_->createTextFixture("ingest/dirA/dirB/keep.cpp",
-                                                 "int main() { return 0; }\n", {"code", "cpp"});
+                                                "int main() { return 0; }\n", {"code", "cpp"});
     auto keepMd = fixtures_->createTextFixture("ingest/dirA/dirB/keep.md",
-                                                "# Title\nhello pattern tags\n", {"docs", "md"});
+                                               "# Title\nhello pattern tags\n", {"docs", "md"});
     std::vector<std::byte> skipData = {std::byte{0x00}, std::byte{0x01}, std::byte{0x02}};
     auto skipBin = fixtures_->createBinaryFixture("ingest/dirA/dirB/skip.bin", skipData, {"bin"});
     (void)keepCpp;

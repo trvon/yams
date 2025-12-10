@@ -50,6 +50,17 @@ inline std::pair<std::size_t, std::size_t> page_bounds(std::size_t pos, std::siz
 
 namespace yams::daemon {
 
+void StreamingRequestProcessor::reset_state() {
+    pending_request_.reset();
+    pending_final_.reset();
+    search_.reset();
+    list_.reset();
+    grep_.reset();
+    mode_ = Mode::None;
+    heartbeat_sent_ = false;
+    pending_total_ = 0;
+}
+
 std::size_t
 StreamingRequestProcessor::compute_item_chunk_count(std::size_t approx_bytes_per_item) const {
 #if defined(TRACY_ENABLE)
@@ -109,6 +120,8 @@ boost::asio::awaitable<Response> StreamingRequestProcessor::process(const Reques
 // -------------------- process_streaming (decide whether to defer) ----------
 boost::asio::awaitable<std::optional<Response>>
 StreamingRequestProcessor::process_streaming_impl(Request request) {
+    // Ensure previous stream state does not leak into this request.
+    reset_state();
     Request& req_copy = request; // owned request in coroutine frame
     try {
 // Unconditional debug: trace message type at entry
@@ -376,8 +389,7 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                     // Emit precomputed final to avoid copying cross-TU Request
                     if (pending_final_.has_value()) {
                         auto final = std::move(pending_final_.value());
-                        pending_final_.reset();
-                        pending_request_.reset();
+                        reset_state();
                         // Log counters for visibility
                         if (std::holds_alternative<BatchEmbeddingResponse>(final)) {
                             [[maybe_unused]] const auto& r =
@@ -402,7 +414,7 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                 // For GenerateEmbedding/LoadModel, call delegate once and finish.
                 {
                     auto final = co_await delegate_->process(**pending_request_);
-                    pending_request_.reset();
+                    reset_state();
                     co_return ResponseChunk{.data = std::move(final), .is_last_chunk = true};
                 }
             }
@@ -418,7 +430,7 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                     spdlog::info("[SRP] AddDocument delegate processing done");
                 } catch (...) {
                 }
-                pending_request_.reset();
+                reset_state();
                 co_return ResponseChunk{.data = std::move(final), .is_last_chunk = true};
             }
 
@@ -432,7 +444,7 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                     search_->elapsed = s->elapsed;
                     search_->pos = 0;
                 } else {
-                    pending_request_.reset();
+                    reset_state();
                     co_return ResponseChunk{.data = std::move(r), .is_last_chunk = true};
                 }
             } else if (mode_ == Mode::List && !list_.has_value()) {
@@ -443,7 +455,7 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                     list_->totalCount = l->totalCount;
                     list_->pos = 0;
                 } else {
-                    pending_request_.reset();
+                    reset_state();
                     co_return ResponseChunk{.data = std::move(r), .is_last_chunk = true};
                 }
             } else if (mode_ == Mode::Grep && !grep_.has_value()) {
@@ -455,7 +467,7 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                     grep_->filesSearched = g->filesSearched;
                     grep_->pos = 0;
                 } else {
-                    pending_request_.reset();
+                    reset_state();
                     co_return ResponseChunk{.data = std::move(r), .is_last_chunk = true};
                 }
             }
@@ -487,8 +499,7 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
             st.pos = end;
             bool last = (end >= total);
             if (last) {
-                // clear pending only once we have emitted all pages
-                pending_request_.reset();
+                reset_state();
             }
             co_return ResponseChunk{.data = Response{std::move(chunk)}, .is_last_chunk = last};
         }
@@ -515,7 +526,7 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
             st.pos = end;
             bool last = (end >= total);
             if (last)
-                pending_request_.reset();
+                reset_state();
             co_return ResponseChunk{.data = Response{std::move(chunk)}, .is_last_chunk = last};
         }
 
@@ -543,13 +554,14 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
             st.pos = end;
             bool last = (end >= total);
             if (last)
-                pending_request_.reset();
+                reset_state();
             co_return ResponseChunk{.data = Response{std::move(chunk)}, .is_last_chunk = last};
         }
 
         // 6) Fallback: provide a graceful end-of-stream to avoid calling into
         // delegate_->next_chunk() (which is not used by the dispatcher adapter).
         SuccessResponse ok{"End of stream"};
+        reset_state();
         co_return ResponseChunk{.data = Response{std::move(ok)}, .is_last_chunk = true};
     } catch (const std::exception& e) {
         spdlog::error("StreamingRequestProcessor::next_chunk() exception: {}", e.what());

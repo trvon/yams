@@ -81,11 +81,11 @@ public:
     explicit TempConfig(const std::string& content) {
         tempDir_ = fs::temp_directory_path() / ("yams_test_" + std::to_string(
 #ifdef _WIN32
-            _getpid()
+                                                                   _getpid()
 #else
-            getpid()
+                                                                   getpid()
 #endif
-        ));
+                                                                       ));
         fs::create_directories(tempDir_);
         configPath_ = tempDir_ / "config.toml";
         std::ofstream f(configPath_);
@@ -315,14 +315,9 @@ TEST(DataDirResolutionTest, ExpandTildeLeaveRelativePathsUnchanged) {
 
 TEST(DataDirResolutionTest, ResolvedPathDoesNotContainDescriptions) {
     // These are description patterns that should NEVER appear in paths
-    std::vector<std::string> badPatterns = {
-        "[Deprecated]",
-        "Single path to file",
-        "use '-' for stdin",
-        "Data directory for storage",
-        "especially useful for",
-        "File or directory paths"
-    };
+    std::vector<std::string> badPatterns = {"[Deprecated]",          "Single path to file",
+                                            "use '-' for stdin",     "Data directory for storage",
+                                            "especially useful for", "File or directory paths"};
 
     auto dataDir = yams::config::get_data_dir();
     auto configDir = yams::config::get_config_dir();

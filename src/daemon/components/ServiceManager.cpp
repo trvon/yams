@@ -12,8 +12,8 @@
 #include <map>
 #include <mutex>
 #include <optional>
-#include <string>
 #include <sstream>
+#include <string>
 #include <system_error>
 #include <thread>
 #include <yams/config/config_helpers.h>
@@ -1681,11 +1681,13 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         int build_timeout = read_timeout_ms("YAMS_SEARCH_BUILD_TIMEOUT_MS", 5000, 250);
 
         // Determine vector readiness: honor env disables and presence of vector infra
-        const bool vectorsDisabled = ConfigResolver::envTruthy(std::getenv("YAMS_DISABLE_VECTORS")) ||
-                                     ConfigResolver::envTruthy(std::getenv("YAMS_DISABLE_VECTOR_DB"));
+        const bool vectorsDisabled =
+            ConfigResolver::envTruthy(std::getenv("YAMS_DISABLE_VECTORS")) ||
+            ConfigResolver::envTruthy(std::getenv("YAMS_DISABLE_VECTOR_DB"));
         bool vectorEnabled = false;
         if (vectorsDisabled) {
-            spdlog::info("[SearchBuild] Vector search disabled via env flag; building text-only engine");
+            spdlog::info(
+                "[SearchBuild] Vector search disabled via env flag; building text-only engine");
         } else if (vectorDatabase_ && vectorIndexManager_) {
             try {
                 // Use VectorDatabase directly - it knows the actual DB size
@@ -1697,7 +1699,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                 spdlog::warn("[SearchBuild] Could not check vector count: {}", e.what());
             }
         } else {
-            spdlog::info("[SearchBuild] Vector components not available; building text-only engine");
+            spdlog::info(
+                "[SearchBuild] Vector components not available; building text-only engine");
         }
 
         spdlog::info("[SearchBuild] scheduling initial build (vector_enabled hint={})",
@@ -1732,8 +1735,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             // Update readiness indicators after successful rebuild
             state_.readiness.searchEngineReady = true;
             state_.readiness.searchProgress = 100;
-            state_.readiness.vectorIndexReady = (vectorIndexManager_ != nullptr &&
-                                                 vectorDatabase_ != nullptr);
+            state_.readiness.vectorIndexReady =
+                (vectorIndexManager_ != nullptr && vectorDatabase_ != nullptr);
             writeBootstrapStatusFile(config_, state_);
 
             spdlog::info("SearchEngine initialized and published to AppContext");

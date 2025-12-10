@@ -57,12 +57,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `MIXED`: Default balanced weights for heterogeneous corpora
   - `SearchEngineConfig::detectProfile()`: Auto-detects from file extension distribution
   - `SearchEngineConfig::forProfile()`: Returns preset weights for a profile
+- **Session-isolated memory**: Documents can now be isolated to working sessions
+  - New CLI commands: `yams session create`, `open`, `close`, `status`, `merge`, `discard`
+  - Documents added during an active session are tagged with `session_id` metadata
+  - Session documents are invisible to global searches (use `--global` to bypass)
+  - `merge`: Removes session tag to promote documents to global index
+  - `discard`: Permanently deletes all session documents
+  - Supports multiple concurrent sessions with automatic isolation
+  - Database migration adds session tracking to metadata repository
+- **Windows Job Object for plugin processes**: External plugin child process cleanup
+  - Plugin processes are now assigned to Windows Job Objects
+  - All child processes are automatically terminated when plugin unloads
+  - Prevents orphaned processes from holding file locks (e.g., PID files)
+  - Uses `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` for reliable cleanup
+  - Location: `src/extraction/plugin_process.cpp`
 
 ### Changed
 - **Embedding model list**: Both recommended models now have 384 dimensions
   - `all-MiniLM-L6-v2`: Lightweight general-purpose semantic search (default)
   - `multi-qa-MiniLM-L6-cos-v1`: Optimized for question-answer semantic search
-- **ServiceManager Decomposition (PBI-088)**: Extracted focused components from monolithic ServiceManager
+- **ServiceManager Decomposition**: Extracted focused components from monolithic ServiceManager
   - New `ConfigResolver`: Static config/env resolution utilities (248 lines)
   - New `VectorSystemManager`: Vector DB and index lifecycle (397 lines)
   - New `DatabaseManager`: Metadata DB, connection pool, KG store lifecycle (254 lines)

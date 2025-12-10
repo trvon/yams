@@ -14,14 +14,8 @@
 using namespace yams::storage;
 using namespace std::chrono_literals;
 
-// Broad Windows detection to ensure skips fire in all Windows toolchains (MSVC/Clang/GNU)
-#if defined(_WIN32) || defined(_WIN64) || defined(WIN32) || defined(__MINGW32__) || \
-    defined(__MINGW64__)
-#define SKIP_REFCOUNT_STRESS_ON_WINDOWS()                                                      \
-    GTEST_SKIP() << "ReferenceCounterStressTest skipped on Windows: known instability (PBI-094)"
-#else
+// Re-enabled on Windows after stabilizing SQLite access
 #define SKIP_REFCOUNT_STRESS_ON_WINDOWS() ((void)0)
-#endif
 
 class ReferenceCounterStressTest : public ::testing::Test {
 protected:
