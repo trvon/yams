@@ -420,7 +420,9 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
             std::is_same<Req, ListCollectionsRequest>, std::is_same<Req, ListSnapshotsRequest>,
             std::is_same<Req, RestoreCollectionRequest>, std::is_same<Req, RestoreSnapshotRequest>,
             // Graph maintenance operations (PBI-009)
-            std::is_same<Req, GraphRepairRequest>, std::is_same<Req, GraphValidateRequest>>,
+            std::is_same<Req, GraphRepairRequest>, std::is_same<Req, GraphValidateRequest>,
+            // Graph query operations
+            std::is_same<Req, GraphQueryRequest>>,
         "Req must be a valid daemon Request alternative");
 
     // Force streaming for streaming-capable requests

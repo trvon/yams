@@ -9,6 +9,7 @@
 #include <spdlog/spdlog.h>
 #include <fmt/format.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -163,9 +164,24 @@ public:
             }
 
             // 6) Vector Database Setup
-            bool enableVectorDB = autoInit_; // Auto mode enables vector DB by default
+            auto envTruthy = [](const char* env) {
+                if (!env || !*env)
+                    return false;
+                std::string v(env);
+                std::transform(v.begin(), v.end(), v.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                return v == "1" || v == "true" || v == "yes" || v == "on";
+            };
+
+            const bool vectorsDisabledEnv =
+                envTruthy(std::getenv("YAMS_DISABLE_VECTORS")) ||
+                envTruthy(std::getenv("YAMS_DISABLE_VECTOR_DB"));
+
+            bool enableVectorDB = autoInit_ && !vectorsDisabledEnv; // Auto mode enables vector DB by default
             std::string selectedModel;
-            if (autoInit_) {
+            if (vectorsDisabledEnv) {
+                spdlog::info("Vector database disabled via env flag; skipping setup");
+            } else if (autoInit_) {
                 // Use the default model (first in the list) for auto-init
                 selectedModel = EMBEDDING_MODELS[0].name;
                 spdlog::info("Using default embedding model: {}", selectedModel);

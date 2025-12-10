@@ -20,6 +20,7 @@
 #include <yams/cli/recommendation_util.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/metadata/metadata_repository.h>
@@ -614,17 +615,7 @@ private:
 
         // Configuration migration status
         try {
-            const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME");
-            const char* homeEnv = std::getenv("HOME");
-
-            fs::path configPath;
-            if (xdgConfigHome) {
-                configPath = fs::path(xdgConfigHome) / "yams" / "config.toml";
-            } else if (homeEnv) {
-                configPath = fs::path(homeEnv) / ".config" / "yams" / "config.toml";
-            } else {
-                configPath = fs::path("~/.config") / "yams" / "config.toml";
-            }
+            fs::path configPath = yams::config::get_config_path();
 
             info.configPath = configPath.string();
 

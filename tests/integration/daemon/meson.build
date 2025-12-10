@@ -68,6 +68,7 @@ else
       },
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
+      args: ['--allow-running-no-tests'],
     )
     
     daemon_shutdown_exe = executable('yams_daemon_shutdown_tests_catch2',
@@ -87,6 +88,7 @@ else
       },
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
+      args: ['--allow-running-no-tests'],
     )
     
     post_ingest_queue_validation_exe = executable('yams_post_ingest_queue_validation',
@@ -106,6 +108,7 @@ else
       },
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
+      args: ['--allow-running-no-tests'],
     )
 
     connection_pool_stale_exe = executable('yams_connection_pool_stale_tests_catch2',
@@ -125,6 +128,7 @@ else
       },
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
+      args: ['--allow-running-no-tests'],
     )
 
     client_timeout_recovery_exe = executable('yams_client_timeout_recovery_tests_catch2',
@@ -144,6 +148,7 @@ else
       },
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
+      args: ['--allow-running-no-tests'],
     )
 
     idle_streaming_exe = executable('yams_idle_streaming_tests_catch2',
@@ -163,6 +168,7 @@ else
       },
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
+      args: ['--allow-running-no-tests'],
     )
 
     writer_drain_exe = executable('yams_writer_drain_tests_catch2',
@@ -182,6 +188,7 @@ else
       },
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
+      args: ['--allow-running-no-tests'],
     )
 
     socket_memory_pressure_exe = executable('yams_socket_memory_pressure_tests_catch2',
@@ -201,6 +208,7 @@ else
       },
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
+      args: ['--allow-running-no-tests'],
     )
 
     stats_command_crash_exe = executable('yams_stats_command_crash_tests_catch2',

@@ -125,6 +125,16 @@ template <> struct ResponseOf<GraphValidateRequest> {
     using type = GraphValidateResponse;
 };
 
+// Graph query operations
+template <> struct ResponseOf<GraphQueryRequest> {
+    using type = GraphQueryResponse;
+};
+
+// KG ingest operations (PBI-093)
+template <> struct ResponseOf<KgIngestRequest> {
+    using type = KgIngestResponse;
+};
+
 // Helper alias
 template <typename Req> using ResponseOfT = typename ResponseOf<Req>::type;
 

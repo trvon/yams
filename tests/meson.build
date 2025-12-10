@@ -135,6 +135,7 @@ test_deps = [
   dependency('yams_detection'),
   dependency('yams_content'),
   dependency('yams_downloader'),
+  dependency('yams_plugins_mgmt'),
   dependency('yams_indexing'),
   dependency('yams_vector'),
   dependency('yams_search'),
@@ -145,6 +146,49 @@ test_deps = [
   dependency('yams_daemon'),
   dependency('yams_mcp'),
 ]
+
+onnxruntime_dep_opt = dependency('onnxruntime', required: false)
+if onnxruntime_dep_opt.found()
+  test_deps += onnxruntime_dep_opt
+endif
+
+# Windows: stage runtime DLLs next to every test executable (mirrors Windows install).
+# Placing DLLs alongside the test binaries prevents the loader from falling back to
+# older System32 copies (e.g., onnxruntime.dll API 17) and keeps tests aligned with
+# the Conan-shipped runtime used for installation.
+if host_machine.system() == 'windows' and windows_runtime_dlls.length() > 0
+  py_mod = import('python')
+  python = py_mod.find_installation('python3')
+
+  # All test binary directories (relative to builddir/tests)
+  test_runtime_dirs = [
+    '.',
+    'integration',
+    'integration/smoke',
+    'integration/daemon',
+    'integration/cli',
+    'integration/search',
+    'integration/services',
+  ]
+
+  foreach dll_info : windows_runtime_dlls
+    dll_name = dll_info[0]
+    dll_src = dll_info[1]
+
+    foreach dest_rel : test_runtime_dirs
+      dest_path = join_paths(meson.current_build_dir(), dest_rel, dll_name)
+      stamp = 'dllcopy_@0@_@1@.stamp'.format(dll_name, dest_rel.replace('/', '_'))
+      custom_target(stamp,
+        input: dll_src,
+        output: stamp,
+        command: [python, '-c',
+          'import pathlib, shutil, sys; src=sys.argv[1]; dest=pathlib.Path(sys.argv[2]); stamp=pathlib.Path(sys.argv[3]); dest.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src, dest); stamp.parent.mkdir(parents=True, exist_ok=True); stamp.write_text("ok")',
+          dll_src, dest_path, '@OUTPUT@'],
+        build_by_default: true,
+      )
+    endforeach
+  endforeach
+endif
 
 tests_has_cli = false
 tests_has_cli11 = cli11_dep.found()
@@ -252,7 +296,36 @@ unit_exclude = '*-' + ':'.join(heavy_tests)
 
 
 # Compute build_rpath for external deps (so tests run without env vars)
-onnx_dep = dependency('onnxruntime', required: false, method: 'pkg-config')
+onnx_cmake_paths = []
+onnx_candidate_dirs = [base_build, join_paths(base_build, 'conan'), join_paths(base_build, 'conan', 'generators'), join_paths(base_build, 'generators')]
+
+foreach variant : ['build-debug', 'build-release', 'debug', 'release']
+  variant_path = join_paths(base_build, variant)
+  if fs.exists(variant_path)
+    onnx_candidate_dirs += [variant_path]
+    onnx_candidate_dirs += [join_paths(variant_path, 'conan')]
+    onnx_candidate_dirs += [join_paths(variant_path, 'conan', 'generators')]
+    onnx_candidate_dirs += [join_paths(variant_path, 'generators')]
+  endif
+endforeach
+
+foreach cand : onnx_candidate_dirs
+  if fs.exists(cand)
+    onnx_cmake_paths += cand
+    foreach sub : ['onnxruntime', 'onnxruntime/Release', 'onnxruntime/Debug']
+      subdir = join_paths(cand, sub)
+      if fs.exists(subdir)
+        onnx_cmake_paths += subdir
+      endif
+    endforeach
+  endif
+endforeach
+
+# Prefer Conan CMake config before falling back to system discovery
+onnx_dep = dependency('onnxruntime', method: 'cmake', cmake_module_path: onnx_cmake_paths, required: false)
+if not onnx_dep.found()
+  onnx_dep = dependency('onnxruntime', required: false, method: 'pkg-config')
+endif
 if not onnx_dep.found()
   onnx_dep = dependency('onnxruntime', required: false)
 endif
@@ -853,6 +926,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  plugin_process_launcher_exe = executable('plugin_process_launcher',
+    files('unit/extraction/plugin_process_launcher_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + plugin_process_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   jsonrpc_client_exe = executable('jsonrpc_client',
     files('unit/extraction/jsonrpc_client_test.cpp'),
     include_directories: incs,
@@ -1038,6 +1120,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'extraction', 'plugin', 'debug'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 30
+  )
+
+  test('plugin_process_launcher', plugin_process_launcher_exe,
+    suite: ['catch2', 'unit', 'extraction', 'plugin', 'launcher'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path, 'YAMS_SOURCE_DIR': meson.project_source_root() },
+    timeout: host_machine.system() == 'windows' ? 180 : 120
   )
 
   test('jsonrpc_client', jsonrpc_client_exe,

@@ -7,6 +7,7 @@
 #include <boost/asio/detached.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <boost/asio/use_future.hpp>
 #include <yams/daemon/components/PoolManager.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
@@ -33,11 +34,22 @@ TuningManager::~TuningManager() {
 void TuningManager::start() {
     if (running_.exchange(true))
         return;
-    boost::asio::co_spawn(strand_, tuningLoop(), boost::asio::detached);
+    tuningFuture_ = boost::asio::co_spawn(strand_, tuningLoop(), boost::asio::use_future);
 }
 
 void TuningManager::stop() {
-    running_ = false;
+    if (!running_.exchange(false))
+        return;
+
+    try {
+        if (tuningFuture_.valid()) {
+            tuningFuture_.wait();
+            tuningFuture_.get();
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("TuningManager loop stop wait error: {}", e.what());
+    } catch (...) {
+    }
 }
 
 boost::asio::awaitable<void> TuningManager::tuningLoop() {

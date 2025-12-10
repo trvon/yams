@@ -15,6 +15,7 @@ struct StateComponent;
 
 namespace yams::metadata {
 class MetadataRepository;
+class KnowledgeGraphStore;
 }
 
 namespace yams::api {
@@ -130,10 +131,17 @@ private:
     boost::asio::awaitable<Response> handleGraphQueryRequest(const GraphQueryRequest& req);
     boost::asio::awaitable<Response>
     handleGraphPathHistoryRequest(const GraphPathHistoryRequest& req);
+    // PBI-093: Helper for listByType mode
+    boost::asio::awaitable<Response>
+    handleGraphQueryListByType(const GraphQueryRequest& req,
+                               yams::metadata::KnowledgeGraphStore* kgStore);
 
     // Graph maintenance handlers (PBI-009 Phase 4.3)
     boost::asio::awaitable<Response> handleGraphRepairRequest(const GraphRepairRequest& req);
     boost::asio::awaitable<Response> handleGraphValidateRequest(const GraphValidateRequest& req);
+
+    // KG ingest handler (PBI-093 Phase 2)
+    boost::asio::awaitable<Response> handleKgIngestRequest(const KgIngestRequest& req);
 
     // Legacy helper declarations removed after dispatcher split
 

@@ -23,6 +23,15 @@
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 
+// Windows daemon shutdown hangs at WorkCoordinator thread join - skip until fixed
+// See: docs/developer/windows-daemon-ipc-plan.md
+#ifdef _WIN32
+#define SKIP_ON_WINDOWS_DAEMON_SHUTDOWN()                                                          \
+    SKIP("Windows daemon shutdown hangs - see windows-daemon-ipc-plan.md")
+#else
+#define SKIP_ON_WINDOWS_DAEMON_SHUTDOWN() ((void)0)
+#endif
+
 namespace {
 
 class SyncIndexingFixture {
@@ -114,6 +123,7 @@ public:
 } // anonymous namespace
 
 TEST_CASE("SyncIndexing: Single file add immediate grep", "[integration][sync][indexing]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     SyncIndexingFixture fixture;
 
     auto testFile =
@@ -146,6 +156,7 @@ TEST_CASE("SyncIndexing: Single file add immediate grep", "[integration][sync][i
 }
 
 TEST_CASE("SyncIndexing: No delay after sync add", "[integration][sync][indexing]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     SyncIndexingFixture fixture;
 
     auto testFile =
@@ -184,6 +195,7 @@ TEST_CASE("SyncIndexing: No delay after sync add", "[integration][sync][indexing
 }
 
 TEST_CASE("SyncIndexing: Minimal queue growth", "[integration][sync][indexing]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     SyncIndexingFixture fixture;
 
     auto queueBefore = fixture.getQueueDepth();

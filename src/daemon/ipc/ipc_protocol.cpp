@@ -186,6 +186,10 @@ template <> struct MessageTypeTraits<GraphValidateRequest> {
     static constexpr MessageType value = MessageType::GraphValidateRequest;
     static constexpr const char* name = "GraphValidate";
 };
+template <> struct MessageTypeTraits<KgIngestRequest> {
+    static constexpr MessageType value = MessageType::KgIngestRequest;
+    static constexpr const char* name = "KgIngest";
+};
 
 // Response type mappings
 template <> struct MessageTypeTraits<SearchResponse> {
@@ -307,6 +311,9 @@ template <> struct MessageTypeTraits<GraphRepairResponse> {
 };
 template <> struct MessageTypeTraits<GraphValidateResponse> {
     static constexpr MessageType value = MessageType::GraphValidateResponse;
+};
+template <> struct MessageTypeTraits<KgIngestResponse> {
+    static constexpr MessageType value = MessageType::KgIngestResponse;
 };
 
 MessageType getMessageType(const Request& req) {

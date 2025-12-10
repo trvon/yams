@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <memory>
 #include <string>
 #include <boost/asio/awaitable.hpp>
@@ -47,6 +48,7 @@ private:
     WorkCoordinator* coordinator_;
     boost::asio::strand<boost::asio::io_context::executor_type> strand_;
     std::atomic<bool> running_{false};
+    std::future<void> tuningFuture_{};
 
     // Repair tuning helpers (hysteresis + rate limiting)
     std::function<void(uint32_t, uint32_t)> setRepair_{};

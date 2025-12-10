@@ -288,6 +288,13 @@ int main(int argc, char* argv[]) {
                 if (daemonSection.find("plugin_name_policy") != daemonSection.end()) {
                     config.pluginNamePolicy = daemonSection.at("plugin_name_policy");
                 }
+                if (auto it = daemonSection.find("trusted_paths"); it != daemonSection.end()) {
+                    auto paths = yams::config::parse_path_list(it->second);
+                    for (auto& p : paths) {
+                        if (!p.empty())
+                            config.trustedPluginPaths.push_back(std::move(p));
+                    }
+                }
                 if (daemonSection.find("auto_repair_batch_size") != daemonSection.end()) {
                     try {
                         config.autoRepairBatchSize = static_cast<size_t>(
@@ -301,6 +308,18 @@ int main(int argc, char* argv[]) {
                     "Daemon configuration section not found in config file, using defaults");
                 // Enable model provider by default if plugins will be loaded
                 config.enableModelProvider = config.autoLoadPlugins;
+            }
+
+            // [plugins] section: trust list for ABI and external plugins
+            if (tomlConfig.find("plugins") != tomlConfig.end()) {
+                const auto& pluginsSection = tomlConfig.at("plugins");
+                if (auto it = pluginsSection.find("trusted_paths"); it != pluginsSection.end()) {
+                    auto paths = yams::config::parse_path_list(it->second);
+                    for (auto& p : paths) {
+                        if (!p.empty())
+                            config.trustedPluginPaths.push_back(std::move(p));
+                    }
+                }
             }
 
             // Apply [tuning] overrides to TuneAdvisor if present

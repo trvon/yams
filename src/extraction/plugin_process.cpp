@@ -264,7 +264,16 @@ void PluginProcess::Impl::terminate(std::chrono::milliseconds timeout) {
                  process_id_);
     state_.store(ProcessState::ShuttingDown, std::memory_order_release);
 
-    // Try graceful shutdown first (SIGTERM)
+    // Close stdin to signal EOF to the child process first
+    {
+        std::lock_guard lock{stdin_mutex_};
+        if (stdin_fd_ >= 0) {
+            close(stdin_fd_);
+            stdin_fd_ = -1;
+        }
+    }
+
+    // Try graceful shutdown (SIGTERM)
     if (kill(process_id_, SIGTERM) == 0) {
         if (wait_for_exit(timeout)) {
             state_.store(ProcessState::Terminated, std::memory_order_release);
@@ -354,7 +363,7 @@ PluginProcess::Impl::~Impl() {
     }
     stop_io_threads();
 
-    // Close handles
+    // Close remaining handles (stdout/stderr may already be closed by stop_io_threads)
     if (stdin_write_ != INVALID_HANDLE_VALUE)
         CloseHandle(stdin_write_);
     if (stdout_read_ != INVALID_HANDLE_VALUE)
@@ -392,15 +401,57 @@ void PluginProcess::Impl::spawn_process() {
         cmdline += L" \"" + std::wstring(arg.begin(), arg.end()) + L"\"";
     }
 
+    spdlog::info("PluginProcess: Spawning '{}' with {} args", config_.executable.string(),
+                 config_.args.size());
+    for (size_t i = 0; i < config_.args.size(); ++i) {
+        spdlog::info("  arg[{}]: '{}'", i, config_.args[i]);
+    }
+    if (config_.workdir) {
+        spdlog::info("  workdir: '{}'", config_.workdir->string());
+    }
+
     // Build environment block
+    // We need to either pass nullptr to inherit parent environment,
+    // or provide a complete environment block with CREATE_UNICODE_ENVIRONMENT flag.
+    // For simplicity, we'll inherit the parent environment and only set custom vars
+    // by prepending them to the inherited environment.
     std::wstring envblock;
+    bool hasCustomEnv = false;
     for (const auto& [key, value] : config_.env) {
         if (!key.starts_with("__YAMS_")) {
             envblock += std::wstring(key.begin(), key.end()) + L"=" +
                         std::wstring(value.begin(), value.end()) + L'\0';
+            hasCustomEnv = true;
         }
     }
-    envblock += L'\0';
+
+    // If we have custom env vars, we need to also copy parent environment
+    // and add CREATE_UNICODE_ENVIRONMENT flag. Otherwise pass nullptr to inherit.
+    LPVOID envPtr = nullptr;
+    DWORD creationFlags = CREATE_NO_WINDOW;
+
+    if (hasCustomEnv) {
+        // Get parent environment and append to our block
+        LPWCH parentEnv = GetEnvironmentStringsW();
+        if (parentEnv) {
+            // Find the end of parent environment (double null terminated)
+            LPWCH p = parentEnv;
+            while (*p || *(p + 1)) {
+                p++;
+            }
+            p += 2; // Include final double null
+            size_t parentLen = p - parentEnv;
+
+            // Append parent env to our custom vars
+            envblock.append(parentEnv, parentLen);
+            FreeEnvironmentStringsW(parentEnv);
+        } else {
+            // No parent env, just terminate our block
+            envblock += L'\0';
+        }
+        envPtr = envblock.data();
+        creationFlags |= CREATE_UNICODE_ENVIRONMENT;
+    }
 
     STARTUPINFOW si{sizeof(STARTUPINFOW)};
     si.dwFlags = STARTF_USESTDHANDLES;
@@ -410,10 +461,11 @@ void PluginProcess::Impl::spawn_process() {
 
     PROCESS_INFORMATION pi{};
 
-    if (!CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
-                        envblock.empty() ? nullptr : envblock.data(),
+    if (!CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, TRUE, creationFlags, envPtr,
                         config_.workdir ? config_.workdir->wstring().c_str() : nullptr, &si, &pi)) {
-        throw std::runtime_error("CreateProcessW failed");
+        DWORD error = GetLastError();
+        spdlog::error("CreateProcessW failed with error {}", error);
+        throw std::runtime_error("CreateProcessW failed with error " + std::to_string(error));
     }
 
     process_handle_ = pi.hProcess;
@@ -438,16 +490,42 @@ void PluginProcess::Impl::terminate(std::chrono::milliseconds timeout) {
                  process_id_);
     state_.store(ProcessState::ShuttingDown, std::memory_order_release);
 
-    // Try graceful shutdown
-    if (wait_for_exit(timeout)) {
+    // Close stdin to signal EOF to the child process
+    // This is the graceful way to tell a stdin-reading process to exit
+    {
+        std::lock_guard lock{stdin_mutex_};
+        if (stdin_write_ != INVALID_HANDLE_VALUE) {
+            // Flush before closing
+            FlushFileBuffers(stdin_write_);
+            CloseHandle(stdin_write_);
+            stdin_write_ = INVALID_HANDLE_VALUE;
+            spdlog::debug("PluginProcess: Closed stdin pipe to signal EOF");
+        }
+    }
+
+    // On Windows, closing stdin pipe may not immediately signal EOF to child
+    // due to buffering. Give a short grace period then check if process exited.
+    auto grace_period = std::min(timeout, std::chrono::milliseconds{500});
+    if (wait_for_exit(grace_period)) {
+        spdlog::debug("PluginProcess: Process exited gracefully after stdin close");
+        stop_io_threads(); // Stop I/O threads before marking terminated
         state_.store(ProcessState::Terminated, std::memory_order_release);
         return;
     }
 
-    // Forceful termination
-    spdlog::warn("PluginProcess: Forcefully terminating process {}", process_id_);
-    TerminateProcess(process_handle_, 1);
+    // Try to terminate the process tree using Windows Job Objects would be ideal,
+    // but for now just terminate the process directly
+    spdlog::debug("PluginProcess: Process did not exit after stdin close, terminating");
+    if (!TerminateProcess(process_handle_, 0)) {
+        spdlog::warn("PluginProcess: TerminateProcess failed with error {}", GetLastError());
+    }
+
+    // Wait for termination to complete
     wait_for_exit(std::chrono::seconds{1});
+
+    // Stop I/O threads - this closes stdout/stderr handles to unblock ReadFile
+    stop_io_threads();
+
     state_.store(ProcessState::Terminated, std::memory_order_release);
 }
 
@@ -500,9 +578,40 @@ void PluginProcess::Impl::start_io_threads() {
 }
 
 void PluginProcess::Impl::stop_io_threads() {
-    // jthread auto-joins on destruction (C++20 feature)
+    spdlog::debug("PluginProcess: Stopping I/O threads");
+
+    // Request stop first
     stdout_thread_.request_stop();
     stderr_thread_.request_stop();
+
+#ifdef _WIN32
+    // On Windows, ReadFile on a pipe blocks indefinitely. We must close the handles
+    // to unblock the reader threads before joining them.
+    spdlog::debug("PluginProcess: Closing pipe handles to unblock readers");
+    if (stdout_read_ != INVALID_HANDLE_VALUE) {
+        // Cancel any pending I/O on this handle
+        CancelIoEx(stdout_read_, nullptr);
+        CloseHandle(stdout_read_);
+        stdout_read_ = INVALID_HANDLE_VALUE;
+    }
+    if (stderr_read_ != INVALID_HANDLE_VALUE) {
+        CancelIoEx(stderr_read_, nullptr);
+        CloseHandle(stderr_read_);
+        stderr_read_ = INVALID_HANDLE_VALUE;
+    }
+#endif
+
+    // Explicitly join the threads with timeout
+    // jthread will join on destruction, but we do it explicitly here for clarity
+    spdlog::debug("PluginProcess: Joining stdout thread");
+    if (stdout_thread_.joinable()) {
+        stdout_thread_.join();
+    }
+    spdlog::debug("PluginProcess: Joining stderr thread");
+    if (stderr_thread_.joinable()) {
+        stderr_thread_.join();
+    }
+    spdlog::debug("PluginProcess: I/O threads stopped");
 }
 
 void PluginProcess::Impl::read_stdout_loop() {
@@ -510,6 +619,10 @@ void PluginProcess::Impl::read_stdout_loop() {
 
     while (is_alive()) {
 #ifdef _WIN32
+        // Check handle validity before blocking ReadFile call
+        if (stdout_read_ == INVALID_HANDLE_VALUE) {
+            break;
+        }
         DWORD bytes_read;
         if (ReadFile(stdout_read_, buffer.data(), static_cast<DWORD>(buffer.size()), &bytes_read,
                      nullptr) &&
@@ -522,6 +635,13 @@ void PluginProcess::Impl::read_stdout_loop() {
             stdout_buffer_.insert(stdout_buffer_.end(), buffer.begin(),
                                   buffer.begin() + bytes_read);
         } else {
+            // ReadFile failed or returned 0 bytes - could be handle closed or process terminated
+#ifdef _WIN32
+            // If handle was closed to unblock us, exit the loop
+            if (GetLastError() == ERROR_INVALID_HANDLE || stdout_read_ == INVALID_HANDLE_VALUE) {
+                break;
+            }
+#endif
             std::this_thread::sleep_for(std::chrono::milliseconds{10});
         }
     }
@@ -532,6 +652,10 @@ void PluginProcess::Impl::read_stderr_loop() {
 
     while (is_alive()) {
 #ifdef _WIN32
+        // Check handle validity before blocking ReadFile call
+        if (stderr_read_ == INVALID_HANDLE_VALUE) {
+            break;
+        }
         DWORD bytes_read;
         if (ReadFile(stderr_read_, buffer.data(), static_cast<DWORD>(buffer.size()), &bytes_read,
                      nullptr) &&
@@ -549,6 +673,13 @@ void PluginProcess::Impl::read_stderr_loop() {
                 std::span<const std::byte>(buffer.data(), static_cast<size_t>(bytes_read)));
             spdlog::debug("Plugin stderr: {}", msg);
         } else {
+            // ReadFile failed or returned 0 bytes - could be handle closed or process terminated
+#ifdef _WIN32
+            // If handle was closed to unblock us, exit the loop
+            if (GetLastError() == ERROR_INVALID_HANDLE || stderr_read_ == INVALID_HANDLE_VALUE) {
+                break;
+            }
+#endif
             std::this_thread::sleep_for(std::chrono::milliseconds{10});
         }
     }
@@ -560,8 +691,28 @@ ProcessState PluginProcess::Impl::state() const noexcept {
 
 bool PluginProcess::Impl::is_alive() const noexcept {
     auto current_state = state();
-    return current_state == ProcessState::Starting || current_state == ProcessState::Ready ||
-           current_state == ProcessState::Busy;
+    if (current_state != ProcessState::Starting && current_state != ProcessState::Ready &&
+        current_state != ProcessState::Busy) {
+        return false;
+    }
+
+    // On Windows, additionally check if the process is actually still running
+    if (process_handle_ != INVALID_HANDLE_VALUE) {
+        DWORD exit_code;
+        if (GetExitCodeProcess(process_handle_, &exit_code)) {
+            // STILL_ACTIVE means process hasn't exited yet
+            if (exit_code != STILL_ACTIVE) {
+                // Process has exited - update internal state
+                // Note: this is mutable even though we're const, because
+                // we're just caching observed external state
+                const_cast<std::atomic<ProcessState>&>(state_).store(ProcessState::Terminated,
+                                                                     std::memory_order_release);
+                const_cast<std::optional<int>&>(exit_code_) = static_cast<int>(exit_code);
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 std::span<const std::byte> PluginProcess::Impl::read_stdout() {

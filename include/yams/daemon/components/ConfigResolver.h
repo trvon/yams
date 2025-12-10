@@ -101,6 +101,30 @@ public:
                                     const std::string& tableName, int schemaVersion);
 
     /**
+     * @brief Resolve the preferred embedding model name from env/config/data dir.
+     *
+     * Precedence:
+     * 1. Environment variable YAMS_PREFERRED_MODEL (if non-empty)
+     * 2. Config file key embeddings.preferred_model
+     * 3. First entry in daemon.models.preload_models (if present)
+     * 4. First model found under resolvedDataDir/models (if any)
+     *
+     * @param config Daemon configuration (used for config file path)
+     * @param resolvedDataDir Data directory resolved by the daemon (for auto-detect)
+     * @return Preferred model name or empty string if none found
+     */
+    static std::string resolvePreferredModel(const DaemonConfig& config,
+                                             const std::filesystem::path& resolvedDataDir);
+
+    /**
+     * @brief Determine if symbol extraction plugins should be enabled.
+     *
+     * Reads plugins.symbol_extraction.enable from config.toml when present;
+     * defaults to true when unset or on parse errors.
+     */
+    static bool isSymbolExtractionEnabled(const DaemonConfig& config);
+
+    /**
      * @brief Detect if embedding preload on startup is configured.
      *
      * Checks config file (embeddings.preload_on_startup) and

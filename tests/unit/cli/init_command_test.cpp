@@ -7,8 +7,11 @@
 #include <string>
 #include <vector>
 
+#include "../../common/test_helpers.h"
+
 namespace fs = std::filesystem;
 using namespace yams::cli;
+using yams::test::ScopedEnvVar;
 
 // ------------------------------------------------------------------
 // Test the EMBEDDING_MODELS definition used by init command.
@@ -108,6 +111,7 @@ TEST(InitCommandCLI, NonInteractiveFlagWorks) {
     // Non-interactive with a temp directory should not prompt
     auto tempDir = fs::temp_directory_path() / "yams-test-init-ni";
     fs::create_directories(tempDir);
+    ScopedEnvVar configEnv("YAMS_CONFIG", (tempDir / "config.toml").string());
 
     const char* argv[] = {"yams", "--data-dir",        tempDir.string().c_str(),
                           "init", "--non-interactive", "--no-keygen"};
@@ -125,6 +129,7 @@ TEST(InitCommandCLI, AutoFlagAccepted) {
     // Just verify the --auto flag is recognized
     auto tempDir = fs::temp_directory_path() / "yams-test-init-auto";
     fs::create_directories(tempDir);
+    ScopedEnvVar configEnv("YAMS_CONFIG", (tempDir / "config.toml").string());
 
     const char* argv[] = {"yams", "--data-dir", tempDir.string().c_str(),
                           "init", "--auto",     "--no-keygen"};
@@ -141,6 +146,7 @@ TEST(InitCommandCLI, ForceFlagAccepted) {
     YamsCLI cli;
     auto tempDir = fs::temp_directory_path() / "yams-test-init-force";
     fs::create_directories(tempDir);
+    ScopedEnvVar configEnv("YAMS_CONFIG", (tempDir / "config.toml").string());
 
     const char* argv[] = {"yams",       "--data-dir",        tempDir.string().c_str(),
                           "init",       "--non-interactive", "--force",

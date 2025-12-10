@@ -16,6 +16,23 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#if defined(_WIN32) && __has_include(<onnxruntime_c_api.h>)
+#include <onnxruntime_c_api.h>
+#define YAMS_ORT_API_VERSION ORT_API_VERSION
+#else
+#define YAMS_ORT_API_VERSION 0
+#endif
+
+#if defined(_WIN32) && YAMS_ORT_API_VERSION < 23
+
+TEST_CASE("HybridSearch - Windows ONNX Runtime API too old", "[hybrid][windows][skip]") {
+    SUCCEED("Skipping hybrid search tests on Windows: ONNX Runtime API version below 23.");
+}
+
+#else
+
+#define SKIP_HYBRID_ON_WINDOWS() ((void)0)
+
 #include <yams/api/content_store_builder.h>
 #include <yams/core/types.h>
 #include <yams/metadata/connection_pool.h>
@@ -49,15 +66,6 @@
 #include <optional>
 #include <thread>
 #include <vector>
-
-// Windows: ONNX runtime global cleanup causes crashes even when tests pass.
-// Skip all hybrid search tests on Windows until ONNX compatibility is resolved.
-#ifdef _WIN32
-#define SKIP_HYBRID_ON_WINDOWS()                                                                   \
-    SKIP("HybridSearch tests crash on Windows due to ONNX cleanup issues")
-#else
-#define SKIP_HYBRID_ON_WINDOWS() ((void)0)
-#endif
 
 using namespace yams;
 using namespace yams::app::services;
@@ -1893,3 +1901,4 @@ TEST_CASE("Filtering - File type filter (binary only)", "[search][filtering][fil
 //   tests/integration/search/hybrid_search_integration_test.cpp
 // If additional hybrid search functionality testing is needed, new tests should be written
 // using the integration test infrastructure with DaemonHarness.
+#endif // defined(_WIN32) && YAMS_ORT_API_VERSION < 23

@@ -738,6 +738,112 @@ message GraphValidateResponse {
   repeated string issues = 5;
 }
 
+// KG Ingest types (PBI-093)
+message KgIngestNode {
+  string node_key = 1;
+  string label = 2;
+  string type = 3;
+  string properties = 4;  // JSON blob
+}
+
+message KgIngestEdge {
+  string src_node_key = 1;
+  string dst_node_key = 2;
+  string relation = 3;
+  float weight = 4;
+  string properties = 5;  // JSON blob
+}
+
+message KgIngestAlias {
+  string node_key = 1;
+  string alias = 2;
+  string source = 3;
+  float confidence = 4;
+}
+
+message KgIngestRequest {
+  repeated KgIngestNode nodes = 1;
+  repeated KgIngestEdge edges = 2;
+  repeated KgIngestAlias aliases = 3;
+  string document_hash = 4;
+  bool skip_existing_nodes = 5;
+  bool skip_existing_edges = 6;
+}
+
+message KgIngestResponse {
+  uint64 nodes_inserted = 1;
+  uint64 nodes_skipped = 2;
+  uint64 edges_inserted = 3;
+  uint64 edges_skipped = 4;
+  uint64 aliases_inserted = 5;
+  uint64 aliases_skipped = 6;
+  repeated string errors = 7;
+  bool success = 8;
+}
+
+// Graph Query types (PBI-009/093)
+message GraphNode {
+  int64 node_id = 1;
+  string node_key = 2;
+  string label = 3;
+  string type = 4;
+  string document_hash = 5;
+  string document_path = 6;
+  string snapshot_id = 7;
+  int32 distance = 8;
+  string properties = 9;  // JSON blob
+}
+
+message GraphQueryRequest {
+  string document_hash = 1;
+  string document_name = 2;
+  string snapshot_id = 3;
+  int64 node_id = 4;
+  bool list_by_type = 5;
+  string node_type = 6;
+  string node_key = 7;
+  repeated string relation_filters = 8;
+  int32 max_depth = 9;
+  uint32 max_results = 10;
+  uint32 max_results_per_depth = 11;
+  string scope_to_snapshot = 12;
+  uint32 offset = 13;
+  uint32 limit = 14;
+  bool include_edge_properties = 15;
+  bool include_node_properties = 16;
+  bool hydrate_fully = 17;
+}
+
+message GraphQueryResponse {
+  GraphNode origin_node = 1;
+  repeated GraphNode connected_nodes = 2;
+  uint64 total_nodes_found = 3;
+  uint64 total_edges_traversed = 4;
+  bool truncated = 5;
+  int32 max_depth_reached = 6;
+  int64 query_time_ms = 7;
+  bool kg_available = 8;
+  string warning = 9;
+}
+
+message GraphPathHistoryRequest {
+  string path = 1;
+  uint32 limit = 2;
+}
+
+message PathHistoryEntry {
+  string path = 1;
+  string snapshot_id = 2;
+  string blob_hash = 3;
+  string change_type = 4;
+}
+
+message GraphPathHistoryResponse {
+  string query_path = 1;
+  repeated PathHistoryEntry history = 2;
+  bool has_more = 3;
+}
+
 // ENVELOPE
 message Envelope {
   uint32 version = 1;
@@ -796,6 +902,11 @@ message Envelope {
     // Graph maintenance requests (PBI-009)
     GraphRepairRequest graph_repair_request = 52;
     GraphValidateRequest graph_validate_request = 53;
+    // KG Ingest request (PBI-093)
+    KgIngestRequest kg_ingest_request = 54;
+    // Graph query requests
+    GraphQueryRequest graph_query_request = 55;
+    GraphPathHistoryRequest graph_path_history_request = 56;
 
     // Responses
     SuccessResponse success_response = 100;
@@ -843,6 +954,11 @@ message Envelope {
     // Graph maintenance responses (PBI-009)
     GraphRepairResponse graph_repair_response = 137;
     GraphValidateResponse graph_validate_response = 138;
+    // KG Ingest response (PBI-093)
+    KgIngestResponse kg_ingest_response = 139;
+    // Graph query responses
+    GraphQueryResponse graph_query_response = 140;
+    GraphPathHistoryResponse graph_path_history_response = 141;
 
   }
 }

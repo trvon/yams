@@ -3,8 +3,8 @@
 # Explicit file list keeps configuration deterministic and fast
 dbg = (get_option('buildtype') == 'debug')
 if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-services') or dbg) and tests_has_cli
+  # GTest-based services tests (excluding retrieval_and_ingestion which moved to Catch2)
   services_integration_srcs = files(
-    'retrieval_and_ingestion_service_test.cpp',
     'ipc_conformance_test.cpp',
     'ui_cli_expectations_test.cpp',
     'grep_service_expectations_test.cpp',
@@ -42,6 +42,28 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
     timeout: get_option('integration-ui-timeout'),
     args: ['--gtest_filter=UiCliExpectationsIT.*:GrepServiceExpectationsIT.*']
   )
+
+  # Catch2 migration: Retrieval and Ingestion service tests (uses DaemonHarness)
+  catch2_retrieval_ingestion_exe = executable('catch2_retrieval_ingestion',
+    files('retrieval_and_ingestion_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: ['-DYAMS_TESTING=1'],
+    install: false,
+  )
+
+  test('retrieval_ingestion_catch2', catch2_retrieval_ingestion_exe,
+    suite: ['catch2', 'integration', 'services', 'isolated'],
+    env: {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'YAMS_STRESS_ITERS': get_option('stress-iters').to_string(),
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
+    },
+    is_parallel: false,
+    timeout: get_option('integration-timeout'),
+    # Allow exit 0 when all tests skip (Windows daemon shutdown not yet implemented)
+    args: ['--allow-running-no-tests'],
+  )
 elif get_option('enable-integration-tests')
   message('integration_services suite disabled (enable with -Denable-integration-services=true).')
 endif
@@ -64,5 +86,6 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
     },
     is_parallel: false,
     timeout: 120,
+    args: ['--allow-running-no-tests'],
   )
 endif

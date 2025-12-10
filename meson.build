@@ -111,6 +111,32 @@ install_prefix_escaped = install_prefix.replace('\\', '\\\\')
 add_project_arguments('-DYAMS_INSTALL_PREFIX="' + install_prefix_escaped + '"', language: 'cpp')
 message('YAMS install prefix: ' + install_prefix)
 
+base_build = meson.project_build_root()
+onnx_cmake_paths = []
+onnx_candidate_dirs = [base_build, join_paths(base_build, 'conan'), join_paths(base_build, 'conan', 'generators'), join_paths(base_build, 'generators')]
+
+foreach variant : ['build-debug', 'build-release', 'debug', 'release']
+  variant_path = join_paths(base_build, variant)
+  if fs.exists(variant_path)
+    onnx_candidate_dirs += [variant_path]
+    onnx_candidate_dirs += [join_paths(variant_path, 'conan')]
+    onnx_candidate_dirs += [join_paths(variant_path, 'conan', 'generators')]
+    onnx_candidate_dirs += [join_paths(variant_path, 'generators')]
+  endif
+endforeach
+
+foreach cand : onnx_candidate_dirs
+  if fs.exists(cand)
+    onnx_cmake_paths += cand
+    foreach sub : ['onnxruntime', 'onnxruntime/Release', 'onnxruntime/Debug']
+      subdir = join_paths(cand, sub)
+      if fs.exists(subdir)
+        onnx_cmake_paths += subdir
+      endif
+    endforeach
+  endif
+endforeach
+
 # --- Windows DLL deployment ---
 # On Windows, DLLs must be in the same directory as the executable or in PATH.
 # We extract the DLL paths from the dependency's pkg-config `bindir` variable,
@@ -136,22 +162,73 @@ if host_machine.system() == 'windows'
     endif
   endif
 
-  # Get ONNX Runtime dependency and extract bindir
-  onnx_dep_check = dependency('onnxruntime', required: false)
+  # Get ONNX Runtime dependency and extract bindir (prefer Conan CMake config)
+  onnx_dep_check = dependency('onnxruntime', method: 'cmake', cmake_module_path: onnx_cmake_paths, required: false)
+  if not onnx_dep_check.found()
+    onnx_dep_check = dependency('onnxruntime', required: false)
+  endif
+
+  onnx_bindir_candidates = []
   if onnx_dep_check.found()
     onnx_prefix = onnx_dep_check.get_variable(pkgconfig: 'prefix', default_value: '')
     onnx_bindir = onnx_dep_check.get_variable(pkgconfig: 'bindir', default_value: '')
     if onnx_bindir != ''
-      # Resolve ${prefix} placeholder if present
       onnx_bindir = onnx_bindir.replace('${prefix}', onnx_prefix)
-      foreach dll_name : ['onnxruntime.dll', 'onnxruntime_providers_shared.dll']
-        dll_path = onnx_bindir / dll_name
-        if fs.exists(dll_path)
-          windows_runtime_dlls += [[dll_name, dll_path]]
-        endif
-      endforeach
+      onnx_bindir_candidates += [onnx_bindir]
+    endif
+
+    # CMake configs from Conan often expose PACKAGE_PREFIX_DIR; fall back to <prefix>/bin
+    cmake_prefix = onnx_dep_check.get_variable(cmake: 'PACKAGE_PREFIX_DIR', default_value: '')
+    if cmake_prefix != ''
+      onnx_bindir_candidates += [join_paths(cmake_prefix, 'bin')]
+    elif onnx_prefix != ''
+      onnx_bindir_candidates += [join_paths(onnx_prefix, 'bin')]
     endif
   endif
+
+  # As a last resort, probe the Conan cache directly (~/.conan2/p/**/p/bin) via a tiny Python helper
+  py_mod = import('python')
+  python3 = py_mod.find_installation('python3')
+  conan_probe = run_command(python3, ['-c', '''import pathlib, os
+root = pathlib.Path(os.path.expanduser("~/.conan2/p"))
+dirs = []
+if root.exists():
+    for child in root.iterdir():
+        bin_dir = child / "p" / "bin"
+        if bin_dir.exists():
+            dll = bin_dir / "onnxruntime.dll"
+            if dll.exists():
+                dirs.append(str(bin_dir))
+print(";".join(dirs))'''], check: false)
+  if conan_probe.returncode() == 0
+    conan_dirs = conan_probe.stdout().strip().split(';')
+    foreach d : conan_dirs
+      if d != ''
+        onnx_bindir_candidates += [d]
+      endif
+    endforeach
+  endif
+
+  foreach bindir : onnx_bindir_candidates
+    foreach dll_name : ['onnxruntime.dll', 'onnxruntime_providers_shared.dll']
+      dll_path = bindir / dll_name
+      if fs.exists(dll_path)
+        windows_runtime_dlls += [[dll_name, dll_path]]
+      endif
+    endforeach
+  endforeach
+
+  # Deduplicate DLL entries by name to avoid duplicate targets
+  dedup_map = {}
+  deduped = []
+  foreach dll_info : windows_runtime_dlls
+    name = dll_info[0]
+    if not dedup_map.has_key(name)
+      dedup_map += {name: true}
+      deduped += [dll_info]
+    endif
+  endforeach
+  windows_runtime_dlls = deduped
 
   # Log discovered DLLs
   foreach dll_info : windows_runtime_dlls
@@ -277,6 +354,7 @@ subdir('src/extraction')
 subdir('src/detection')
 subdir('src/content')
 subdir('src/downloader')
+subdir('src/plugins')
 subdir('src/indexing')
 subdir('src/genai')
 subdir('src/vector')

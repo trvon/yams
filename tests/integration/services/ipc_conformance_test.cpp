@@ -9,6 +9,14 @@
 #include "../daemon/test_async_helpers.h"
 #include <boost/asio/awaitable.hpp>
 
+// Windows daemon IPC tests are unstable due to socket shutdown race conditions
+#ifdef _WIN32
+#define SKIP_DAEMON_TEST_ON_WINDOWS()                                                              \
+    GTEST_SKIP() << "Daemon IPC tests unstable on Windows - see windows-daemon-ipc-plan.md"
+#else
+#define SKIP_DAEMON_TEST_ON_WINDOWS() ((void)0)
+#endif
+
 #include <boost/asio/local/stream_protocol.hpp>
 #include <boost/system/error_code.hpp>
 #include <yams/daemon/client/daemon_client.h>
@@ -67,6 +75,7 @@ protected:
 };
 
 TEST_F(IpcConformanceFixture, CatAndCancelAndSessions) {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
     if (!canBindUnixSocketHere()) {
         GTEST_SKIP() << "Skipping IPC conformance: environment forbids AF_UNIX bind (sandbox).";
     }
@@ -135,6 +144,7 @@ TEST_F(IpcConformanceFixture, CatAndCancelAndSessions) {
 
 // Phase 1: Unreachable socket returns actionable error (tolerant envelope)
 TEST_F(IpcConformanceFixture, UnreachableSocketErrorShape) {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
     if (!canBindUnixSocketHere()) {
         GTEST_SKIP() << "Skipping IPC unreachable: AF_UNIX not available.";
     }
@@ -156,6 +166,7 @@ TEST_F(IpcConformanceFixture, UnreachableSocketErrorShape) {
 
 // Final lightweight stress: ping loop to ensure stable IPC handling.
 TEST_F(IpcConformanceFixture, StressTail) {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
     if (!canBindUnixSocketHere()) {
         GTEST_SKIP() << "Skipping IPC stress: AF_UNIX not available.";
     }

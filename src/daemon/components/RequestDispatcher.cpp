@@ -115,6 +115,7 @@ DEFINE_REQUEST_HANDLER(GraphQueryRequest, handleGraphQueryRequest);
 DEFINE_REQUEST_HANDLER(GraphPathHistoryRequest, handleGraphPathHistoryRequest);
 DEFINE_REQUEST_HANDLER(GraphRepairRequest, handleGraphRepairRequest);
 DEFINE_REQUEST_HANDLER(GraphValidateRequest, handleGraphValidateRequest);
+DEFINE_REQUEST_HANDLER(KgIngestRequest, handleKgIngestRequest);
 
 #undef DEFINE_REQUEST_HANDLER
 

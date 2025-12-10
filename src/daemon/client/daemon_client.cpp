@@ -10,6 +10,7 @@
 
 #include <yams/config/config_helpers.h>
 
+#include <boost/asio/as_tuple.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
@@ -28,6 +29,7 @@
 #include <future>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <thread>
 
 #ifndef _WIN32
@@ -321,15 +323,24 @@ boost::asio::awaitable<Result<void>> DaemonClient::connect() {
         boost::asio::local::stream_protocol::endpoint ep(socketPath.string());
         steady_timer t(ex);
         t.expires_after(timeout);
-        auto which =
-            co_await (sock.async_connect(ep, use_awaitable) || t.async_wait(use_awaitable));
-        if (which.index() == 1) {
-            co_return Error{ErrorCode::Timeout, "Connection timeout"};
+        try {
+            auto which = co_await (sock.async_connect(ep, boost::asio::as_tuple(use_awaitable)) ||
+                                   t.async_wait(boost::asio::as_tuple(use_awaitable)));
+            if (which.index() == 1) {
+                co_return Error{ErrorCode::Timeout, "Connection timeout"};
+            }
+
+            auto& [ec] = std::get<0>(which);
+            if (ec) {
+                co_return Error{ErrorCode::NetworkError, ec.message()};
+            }
+
+            boost::system::error_code close_ec;
+            sock.close(close_ec);
+            co_return Result<void>();
+        } catch (const std::exception& e) {
+            co_return Error{ErrorCode::NetworkError, e.what()};
         }
-        // Success
-        boost::system::error_code ec;
-        sock.close(ec);
-        co_return Result<void>();
     };
 
     {

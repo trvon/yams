@@ -48,9 +48,9 @@ if onnx_opt_path != ''
   onnx_cmake_paths += onnx_opt_path
 endif
 
-onnx_dep = dependency('onnxruntime', required: false)
-if (not onnx_dep.found()) and (onnx_cmake_paths.length() > 0)
-  onnx_dep = dependency('onnxruntime', method: 'cmake', cmake_module_path: onnx_cmake_paths, required: false)
+onnx_dep = dependency('onnxruntime', method: 'cmake', cmake_module_path: onnx_cmake_paths, required: false)
+if not onnx_dep.found()
+  onnx_dep = dependency('onnxruntime', required: false)
 endif
 spdlog_dep = dependency('spdlog', required: false)
 json_dep = dependency('nlohmann_json', required: false)

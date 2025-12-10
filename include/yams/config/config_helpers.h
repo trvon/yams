@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace yams::config {
 
@@ -74,6 +75,10 @@ inline std::chrono::milliseconds parse_ms(std::string_view s) {
 // Parse a value from TOML config file
 std::string parse_config_value(const std::filesystem::path& config_path, const std::string& section,
                                const std::string& key);
+
+// Parse a comma- or TOML-array-separated list of paths into filesystem paths.
+// Accepts forms like "a,b" or ["a", "b"]. Tilde expansion is applied.
+std::vector<std::filesystem::path> parse_path_list(const std::string& raw);
 
 // Get standard config path
 std::filesystem::path get_config_path(const std::string& override_path = "");

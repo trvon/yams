@@ -12,6 +12,9 @@
 #include <yams/core/types.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/plugins/plugin_installer.hpp>
+#include <yams/plugins/plugin_repo_client.hpp>
+
 
 namespace yams::cli {
 
@@ -34,9 +37,7 @@ void print_plugin_not_ready_hint(const std::optional<yams::daemon::StatusRespons
             std::cout << "  last_error=" << st.lastError << '\n';
         }
     }
-    std::cout << "Inspect 'yams daemon status -d' or '~/.yams/data/status.json' for detailed "
-                 "plugin state."
-              << '\n';
+    std::cout << "Inspect 'yams daemon status -d' for detailed plugin state.\n";
 }
 
 template <typename FetchStatusFn>
@@ -158,12 +159,49 @@ public:
                 ->required();
             trust->get_subcommand("remove")->callback([this]() { trustRemove(untrustPath_); });
 
-            // plugin install (stub)
-            plugin->add_subcommand("install", "Install plugin from URL or path (stub)")
-                ->add_option("src", installSrc_, "URL or local path")
-                ->required();
-            plugin->get_subcommand("install")->callback(
-                [this]() { std::cout << "yams plugin install: TODO src=" << installSrc_ << "\n"; });
+            // plugin install
+            auto* install =
+                plugin->add_subcommand("install", "Install plugin from repository or URL");
+            install->add_option("source", installSrc_, "Plugin name[@version] or URL")->required();
+            install->add_option("--dir", installDir_,
+                                "Installation directory (default: ~/.local/lib/yams/plugins)");
+            install->add_flag("--force,-f", installForce_, "Force reinstall if already installed");
+            install->add_flag("--no-trust", installNoTrust_, "Don't add to trust list");
+            install->add_flag("--no-load", installNoLoad_, "Don't load plugin after install");
+            install->add_flag("--dry-run", installDryRun_, "Preview only, don't install");
+            install->callback([this]() { installPlugin(); });
+
+            // plugin repo (remote repository commands)
+            auto* repo = plugin->add_subcommand("repo", "Query plugin repository");
+            repo->require_subcommand(1);
+
+            // plugin repo list
+            auto* repoList = repo->add_subcommand("list", "List available plugins in repository");
+            repoList->add_option("--filter", repoFilter_, "Filter plugins by name or interface");
+            repoList->callback([this]() { repoListPlugins(); });
+
+            // plugin repo info
+            auto* repoInfo = repo->add_subcommand("info", "Show plugin details from repository");
+            repoInfo->add_option("name", repoPluginName_, "Plugin name")->required();
+            repoInfo->add_option("--version", repoVersion_, "Specific version (default: latest)");
+            repoInfo->callback([this]() { repoShowInfo(); });
+
+            // plugin repo versions
+            auto* repoVersions = repo->add_subcommand("versions", "List available versions");
+            repoVersions->add_option("name", repoPluginName_, "Plugin name")->required();
+            repoVersions->callback([this]() { repoShowVersions(); });
+
+            // plugin uninstall
+            auto* uninstall = plugin->add_subcommand("uninstall", "Uninstall a plugin");
+            uninstall->add_option("name", uninstallName_, "Plugin name")->required();
+            uninstall->add_flag("--keep-trust", uninstallKeepTrust_, "Keep in trust list");
+            uninstall->callback([this]() { uninstallPlugin(); });
+
+            // plugin update
+            auto* update = plugin->add_subcommand("update", "Update plugins to latest version");
+            update->add_option("name", updateName_, "Plugin name (empty = check all)");
+            update->add_flag("--all,-a", updateAll_, "Update all installed plugins");
+            update->callback([this]() { updatePlugins(); });
 
             // plugin enable/disable/verify (stubs)
             plugin->add_subcommand("enable", "Enable a previously loaded plugin (stub)")
@@ -205,6 +243,14 @@ private:
     void trustAdd(const std::string& path);
     void trustRemove(const std::string& path);
 
+    // New install/repo methods
+    void installPlugin();
+    void uninstallPlugin();
+    void updatePlugins();
+    void repoListPlugins();
+    void repoShowInfo();
+    void repoShowVersions();
+
     YamsCLI* cli_{nullptr};
     // Persistent option storage to avoid dangling references in callbacks
     std::string scanDir_;
@@ -219,6 +265,26 @@ private:
     std::string installSrc_;
     std::string nameToggle_;
     bool verboseList_{false};
+
+    // Install options
+    std::string installDir_;
+    bool installForce_{false};
+    bool installNoTrust_{false};
+    bool installNoLoad_{false};
+    bool installDryRun_{false};
+
+    // Repo options
+    std::string repoFilter_;
+    std::string repoPluginName_;
+    std::string repoVersion_;
+
+    // Uninstall options
+    std::string uninstallName_;
+    bool uninstallKeepTrust_{false};
+
+    // Update options
+    std::string updateName_;
+    bool updateAll_{false};
 };
 
 // Factory
@@ -659,6 +725,259 @@ void PluginCommand::trustRemove(const std::string& path) {
             return;
         }
         std::cout << "Untrusted: " << path << "\n";
+    } catch (const std::exception& e) {
+        std::cout << "Error: " << e.what() << "\n";
+    }
+}
+
+void PluginCommand::installPlugin() {
+    using namespace yams::plugins;
+
+    try {
+        // Create repository client and installer
+        auto repoClient = makePluginRepoClient();
+        auto installer = makePluginInstaller(
+            std::shared_ptr<IPluginRepoClient>(repoClient.release()),
+            installDir_.empty() ? std::filesystem::path{} : std::filesystem::path(installDir_));
+
+        InstallOptions options;
+        options.force = installForce_;
+        options.autoTrust = !installNoTrust_;
+        options.autoLoad = !installNoLoad_;
+        options.dryRun = installDryRun_;
+
+        // Progress callback
+        options.onProgress = [](const InstallProgress& progress) {
+            const char* stageNames[] = {"Querying",   "Downloading", "Verifying", "Extracting",
+                                        "Installing", "Trusting",    "Loading",   "Complete"};
+            int stageIdx = static_cast<int>(progress.stage);
+            if (stageIdx >= 0 && stageIdx < 8) {
+                std::cout << "\r[" << stageNames[stageIdx] << "] " << progress.message;
+                if (progress.totalBytes > 0) {
+                    std::cout << " (" << (progress.bytesDownloaded / 1024) << "/"
+                              << (progress.totalBytes / 1024) << " KB)";
+                }
+                std::cout << std::flush;
+                if (progress.stage == InstallProgress::Stage::Complete) {
+                    std::cout << "\n";
+                }
+            }
+        };
+
+        auto result = installer->install(installSrc_, options);
+        if (!result) {
+            std::cout << "\nInstallation failed: " << result.error().message << "\n";
+            return;
+        }
+
+        const auto& r = result.value();
+        std::cout << "\nInstalled: " << r.pluginName << " v" << r.version << "\n";
+        std::cout << "  Path: " << r.installedPath.string() << "\n";
+        std::cout << "  Size: " << (r.sizeBytes / 1024) << " KB\n";
+        std::cout << "  Checksum: " << r.checksum << "\n";
+        if (r.wasUpgrade) {
+            std::cout << "  Upgraded from: v" << r.previousVersion << "\n";
+        }
+        std::cout << "  Elapsed: " << r.elapsed.count() << " ms\n";
+
+        if (!installNoLoad_) {
+            std::cout << "\nTo load the plugin, run: yams plugin load " << r.pluginName << "\n";
+        }
+    } catch (const std::exception& e) {
+        std::cout << "Error: " << e.what() << "\n";
+    }
+}
+
+void PluginCommand::uninstallPlugin() {
+    using namespace yams::plugins;
+
+    try {
+        auto repoClient = makePluginRepoClient();
+        auto installer =
+            makePluginInstaller(std::shared_ptr<IPluginRepoClient>(repoClient.release()));
+
+        auto result = installer->uninstall(uninstallName_, !uninstallKeepTrust_);
+        if (!result) {
+            std::cout << "Uninstall failed: " << result.error().message << "\n";
+            return;
+        }
+
+        std::cout << "Uninstalled: " << uninstallName_ << "\n";
+    } catch (const std::exception& e) {
+        std::cout << "Error: " << e.what() << "\n";
+    }
+}
+
+void PluginCommand::updatePlugins() {
+    using namespace yams::plugins;
+
+    try {
+        auto repoClient = makePluginRepoClient();
+        auto installer =
+            makePluginInstaller(std::shared_ptr<IPluginRepoClient>(repoClient.release()));
+
+        // Check for updates
+        auto updates = installer->checkUpdates(updateAll_ ? "" : updateName_);
+        if (!updates) {
+            std::cout << "Failed to check for updates: " << updates.error().message << "\n";
+            return;
+        }
+
+        if (updates.value().empty()) {
+            std::cout << "All plugins are up to date.\n";
+            return;
+        }
+
+        std::cout << "Available updates:\n";
+        for (const auto& [name, version] : updates.value()) {
+            auto currentVer = installer->installedVersion(name);
+            std::string current =
+                (currentVer && currentVer.value()) ? *currentVer.value() : "unknown";
+            std::cout << "  " << name << ": " << current << " -> " << version << "\n";
+        }
+
+        if (!updateAll_ && updateName_.empty()) {
+            std::cout
+                << "\nRun 'yams plugin update <name>' or 'yams plugin update --all' to update.\n";
+            return;
+        }
+
+        // Perform updates
+        for (const auto& [name, version] : updates.value()) {
+            std::cout << "\nUpdating " << name << " to v" << version << "...\n";
+
+            InstallOptions options;
+            options.force = true;
+            options.version = version;
+
+            auto result = installer->install(name, options);
+            if (!result) {
+                std::cout << "  Failed: " << result.error().message << "\n";
+            } else {
+                std::cout << "  Updated successfully.\n";
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cout << "Error: " << e.what() << "\n";
+    }
+}
+
+void PluginCommand::repoListPlugins() {
+    using namespace yams::plugins;
+
+    try {
+        auto repoClient = makePluginRepoClient();
+        auto result = repoClient->list(repoFilter_);
+        if (!result) {
+            std::cout << "Failed to list plugins: " << result.error().message << "\n";
+            return;
+        }
+
+        const auto& plugins = result.value();
+        if (plugins.empty()) {
+            std::cout << "No plugins found.\n";
+            return;
+        }
+
+        std::cout << "Available plugins (" << plugins.size() << "):\n";
+        for (const auto& p : plugins) {
+            std::cout << "  " << p.name;
+            if (!p.latestVersion.empty()) {
+                std::cout << " v" << p.latestVersion;
+            }
+            if (!p.description.empty()) {
+                std::cout << " - " << p.description;
+            }
+            if (!p.interfaces.empty()) {
+                std::cout << "\n    interfaces: ";
+                for (size_t i = 0; i < p.interfaces.size(); ++i) {
+                    if (i)
+                        std::cout << ", ";
+                    std::cout << p.interfaces[i];
+                }
+            }
+            if (p.downloads > 0) {
+                std::cout << " [" << p.downloads << " downloads]";
+            }
+            std::cout << "\n";
+        }
+    } catch (const std::exception& e) {
+        std::cout << "Error: " << e.what() << "\n";
+    }
+}
+
+void PluginCommand::repoShowInfo() {
+    using namespace yams::plugins;
+
+    try {
+        auto repoClient = makePluginRepoClient();
+        std::optional<std::string> version =
+            repoVersion_.empty() ? std::nullopt : std::make_optional(repoVersion_);
+        auto result = repoClient->get(repoPluginName_, version);
+        if (!result) {
+            std::cout << "Failed to get plugin info: " << result.error().message << "\n";
+            return;
+        }
+
+        const auto& info = result.value();
+        std::cout << "Plugin: " << info.name << "\n";
+        std::cout << "  Version: " << info.version << "\n";
+        if (!info.description.empty())
+            std::cout << "  Description: " << info.description << "\n";
+        if (!info.author.empty())
+            std::cout << "  Author: " << info.author << "\n";
+        if (!info.license.empty())
+            std::cout << "  License: " << info.license << "\n";
+        if (!info.interfaces.empty()) {
+            std::cout << "  Interfaces: ";
+            for (size_t i = 0; i < info.interfaces.size(); ++i) {
+                if (i)
+                    std::cout << ", ";
+                std::cout << info.interfaces[i];
+            }
+            std::cout << "\n";
+        }
+        if (!info.platform.empty())
+            std::cout << "  Platform: " << info.platform << "\n";
+        if (!info.arch.empty())
+            std::cout << "  Architecture: " << info.arch << "\n";
+        std::cout << "  ABI Version: " << info.abiVersion << "\n";
+        if (info.sizeBytes > 0)
+            std::cout << "  Size: " << (info.sizeBytes / 1024) << " KB\n";
+        if (!info.checksum.empty())
+            std::cout << "  Checksum: " << info.checksum << "\n";
+        if (!info.downloadUrl.empty())
+            std::cout << "  Download URL: " << info.downloadUrl << "\n";
+        if (info.downloads > 0)
+            std::cout << "  Downloads: " << info.downloads << "\n";
+        if (!info.publishedAt.empty())
+            std::cout << "  Published: " << info.publishedAt << "\n";
+    } catch (const std::exception& e) {
+        std::cout << "Error: " << e.what() << "\n";
+    }
+}
+
+void PluginCommand::repoShowVersions() {
+    using namespace yams::plugins;
+
+    try {
+        auto repoClient = makePluginRepoClient();
+        auto result = repoClient->versions(repoPluginName_);
+        if (!result) {
+            std::cout << "Failed to get versions: " << result.error().message << "\n";
+            return;
+        }
+
+        const auto& versions = result.value();
+        if (versions.empty()) {
+            std::cout << "No versions found for " << repoPluginName_ << ".\n";
+            return;
+        }
+
+        std::cout << "Available versions for " << repoPluginName_ << ":\n";
+        for (const auto& v : versions) {
+            std::cout << "  " << v << "\n";
+        }
     } catch (const std::exception& e) {
         std::cout << "Error: " << e.what() << "\n";
     }

@@ -722,11 +722,12 @@ private:
             }
         }
 
-        // If still not stopped, try pkill as last resort for orphaned daemons
+        // If still not stopped, try platform-specific last-resort termination for orphaned daemons
         if (!stopped && daemonRunning) {
             spdlog::warn("Daemon not responding to shutdown, attempting to kill orphaned process");
 
-            // Use pkill to find and kill yams-daemon processes with our socket
+#ifndef _WIN32
+            // Unix: use pkill to find and kill yams-daemon processes with our socket
             std::string pkillCmd = "pkill -f 'yams-daemon.*" + effectiveSocket + "'";
             int pkillResult = std::system(pkillCmd.c_str());
 
@@ -745,6 +746,25 @@ private:
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
                 }
             }
+#else
+            // Windows: fall back to taskkill to avoid pkill dependency
+            pid_t pid = readPidFromFile(pidFile_);
+            std::string taskkillCmd;
+            if (pid > 0) {
+                taskkillCmd = "taskkill /PID " + std::to_string(pid) + " /T /F";
+            } else {
+                taskkillCmd = "taskkill /IM yams-daemon.exe /T /F";
+            }
+
+            int tkResult = std::system(taskkillCmd.c_str());
+            if (tkResult == 0) {
+                spdlog::info("Killed daemon process via taskkill");
+                stopped = true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            } else {
+                spdlog::warn("taskkill failed (exit={}): command='{}'", tkResult, taskkillCmd);
+            }
+#endif
         }
 
         // Clean up files if daemon was stopped
@@ -756,7 +776,11 @@ private:
             std::cerr << "[FAIL] Failed to stop YAMS daemon\n";
             std::cerr << "  💡 Hint: The daemon may be unresponsive or owned by another user\n";
             std::cerr << "  📋 Try: yams daemon stop --force\n";
+#ifndef _WIN32
             std::cerr << "  📋 Or manually: pkill yams-daemon\n";
+#else
+            std::cerr << "  📋 Or manually (Windows): taskkill /IM yams-daemon.exe /T /F\n";
+#endif
             std::exit(1);
         }
     }
@@ -1107,13 +1131,11 @@ private:
         }
 
         if (detailed_) {
-            std::cout << "Socket: " << socketPath_ << "\n";
             if (pidFile_.empty()) {
                 pidFile_ =
                     daemon::YamsDaemon::resolveSystemPath(daemon::YamsDaemon::PathType::PidFile)
                         .string();
             }
-            std::cout << "PID file: " << pidFile_ << "\n";
             // Enable client debug logging for ping/connect path
             setenv("YAMS_CLIENT_DEBUG", "1", 1);
         }

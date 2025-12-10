@@ -7,6 +7,7 @@
 
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/steady_timer.hpp>
 
 #include <array>
 #include <atomic>
@@ -18,6 +19,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <future>
 #include <vector>
 
 namespace yams::daemon {
@@ -236,6 +238,12 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> backpressured_{false};
     std::shared_ptr<std::atomic<bool>> stop_flag_;
+
+    // Background task lifecycle
+    std::future<void> eviction_future_;
+    std::future<void> aging_future_;
+    std::unique_ptr<boost::asio::steady_timer> eviction_timer_;
+    std::unique_ptr<boost::asio::steady_timer> aging_timer_;
 
     // Callbacks
     BackpressureCallback backpressure_cb_;
