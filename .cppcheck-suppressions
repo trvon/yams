@@ -19,7 +19,6 @@
 *:*.pb.cc
 
 # SQLite amalgamation file - external code
-*:*/sqlite-vec.c
 *:*/sqlite3.c
 *:*/sqlite3.h
 

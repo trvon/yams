@@ -5,6 +5,7 @@
 
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <cstring>
 #include <mutex>
 #include <optional>
@@ -284,7 +285,7 @@ void PluginProcess::Impl::terminate(std::chrono::milliseconds timeout) {
     // Forceful kill (SIGKILL)
     spdlog::warn("PluginProcess: Forcefully killing process {}", process_id_);
     kill(process_id_, SIGKILL);
-    wait_for_exit(std::chrono::seconds{1});
+    (void)wait_for_exit(std::chrono::seconds{1});  // Best-effort wait after SIGKILL
     state_.store(ProcessState::Terminated, std::memory_order_release);
 }
 
@@ -696,6 +697,7 @@ bool PluginProcess::Impl::is_alive() const noexcept {
         return false;
     }
 
+#ifdef _WIN32
     // On Windows, additionally check if the process is actually still running
     if (process_handle_ != INVALID_HANDLE_VALUE) {
         DWORD exit_code;
@@ -712,6 +714,17 @@ bool PluginProcess::Impl::is_alive() const noexcept {
             }
         }
     }
+#else
+    // On Unix, check if the process is still running using kill with signal 0
+    if (process_id_ > 0) {
+        if (kill(process_id_, 0) == -1 && errno == ESRCH) {
+            // Process doesn't exist anymore
+            const_cast<std::atomic<ProcessState>&>(state_).store(ProcessState::Terminated,
+                                                                 std::memory_order_release);
+            return false;
+        }
+    }
+#endif
     return true;
 }
 

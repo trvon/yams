@@ -9,7 +9,7 @@
 #define SQLITE_VEC_DATE "2024-08-15"
 #define SQLITE_VEC_SOURCE "yams-embedded"
 
-// Provide version triplet macros expected by upstream sqlite-vec.c
+// Provide version triplet macros for sqlite-vec compatibility
 #ifndef SQLITE_VEC_VERSION_MAJOR
 #define SQLITE_VEC_VERSION_MAJOR 0
 #endif

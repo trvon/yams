@@ -9,7 +9,7 @@ RUN set -eux; \
   apt-get update && \
   apt-get install -y --no-install-recommends --fix-missing \
   build-essential git curl pkg-config ca-certificates \
-  libssl-dev libsqlite3-dev protobuf-compiler libprotobuf-dev \
+  libssl-dev libsqlite3-dev libsqlite3-0 protobuf-compiler libprotobuf-dev \
   libcurl4-openssl-dev \
   python3 python3-venv python3-pip \
   gcc g++ ninja-build openssl lld llvm clang \
