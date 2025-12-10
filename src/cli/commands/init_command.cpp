@@ -173,11 +173,11 @@ public:
                 return v == "1" || v == "true" || v == "yes" || v == "on";
             };
 
-            const bool vectorsDisabledEnv =
-                envTruthy(std::getenv("YAMS_DISABLE_VECTORS")) ||
-                envTruthy(std::getenv("YAMS_DISABLE_VECTOR_DB"));
+            const bool vectorsDisabledEnv = envTruthy(std::getenv("YAMS_DISABLE_VECTORS")) ||
+                                            envTruthy(std::getenv("YAMS_DISABLE_VECTOR_DB"));
 
-            bool enableVectorDB = autoInit_ && !vectorsDisabledEnv; // Auto mode enables vector DB by default
+            bool enableVectorDB =
+                autoInit_ && !vectorsDisabledEnv; // Auto mode enables vector DB by default
             std::string selectedModel;
             if (vectorsDisabledEnv) {
                 spdlog::info("Vector database disabled via env flag; skipping setup");

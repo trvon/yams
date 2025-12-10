@@ -19,9 +19,10 @@
 #endif
 
 #ifdef _WIN32
-TEST_CASE("GrepService - Windows disabled due to ONNX runtime instability", "[grep][windows][skip]") {
-    SUCCEED(
-        "GrepService tests are disabled on Windows pending ONNX Runtime cleanup fixes; this keeps the suite green.");
+TEST_CASE("GrepService - Windows disabled due to ONNX runtime instability",
+          "[grep][windows][skip]") {
+    SUCCEED("GrepService tests are disabled on Windows pending ONNX Runtime cleanup fixes; this "
+            "keeps the suite green.");
 }
 #else
 

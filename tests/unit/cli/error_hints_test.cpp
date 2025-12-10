@@ -50,7 +50,8 @@ TEST(ErrorHintsTest, VectorErrorPatternDetected) {
 }
 
 TEST(ErrorHintsTest, DimensionMismatchPatternDetected) {
-    auto hint = getErrorHint(ErrorCode::InvalidArgument, "dimension mismatch: expected 384, got 768");
+    auto hint =
+        getErrorHint(ErrorCode::InvalidArgument, "dimension mismatch: expected 384, got 768");
     EXPECT_EQ(hint.hint, "Embedding model or vector index issue detected");
     EXPECT_EQ(hint.command, "yams doctor --check-embeddings");
 }

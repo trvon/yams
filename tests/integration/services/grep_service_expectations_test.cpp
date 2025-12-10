@@ -42,7 +42,7 @@ protected:
     void SetUp() override {
         // Skip on Windows - daemon IPC tests are unstable there
         SKIP_DAEMON_TEST_ON_WINDOWS();
-        
+
         if (!canBindUnixSocketHere()) {
             GTEST_SKIP() << "Skipping: AF_UNIX not available in this environment.";
         }

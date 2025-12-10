@@ -10,8 +10,8 @@
  * - Trust list management
  */
 
-#include <gtest/gtest.h>
 #include <gmock/gmock.h>
+#include <gtest/gtest.h>
 
 #include <yams/plugins/plugin_installer.hpp>
 #include <yams/plugins/plugin_repo_client.hpp>
@@ -40,8 +40,10 @@ using namespace testing;
  */
 class MockPluginRepoClient : public IPluginRepoClient {
 public:
-    MOCK_METHOD(Result<std::vector<RemotePluginSummary>>, list, (const std::string& filter), (override));
-    MOCK_METHOD(Result<RemotePluginInfo>, get, (const std::string& name, const std::optional<std::string>& version), (override));
+    MOCK_METHOD(Result<std::vector<RemotePluginSummary>>, list, (const std::string& filter),
+                (override));
+    MOCK_METHOD(Result<RemotePluginInfo>, get,
+                (const std::string& name, const std::optional<std::string>& version), (override));
     MOCK_METHOD(Result<std::vector<std::string>>, versions, (const std::string& name), (override));
     MOCK_METHOD(Result<bool>, exists, (const std::string& name), (override));
 };
@@ -91,7 +93,7 @@ TEST_F(PluginInstallerTest, CanCreateInstaller) {
 TEST_F(PluginInstallerTest, ListInstalledReturnsEmptyOnFreshInstall) {
     auto installer = makePluginInstaller(mockClient_, installDir_, trustFile_);
     auto result = installer->listInstalled();
-    
+
     ASSERT_TRUE(result.has_value());
     EXPECT_TRUE(result.value().empty());
 }
@@ -103,13 +105,13 @@ TEST_F(PluginInstallerTest, ListInstalledFindsExistingPlugins) {
     // Create fake plugin directories
     fs::create_directories(installDir_ / "plugin-a");
     fs::create_directories(installDir_ / "plugin-b");
-    
+
     auto installer = makePluginInstaller(mockClient_, installDir_, trustFile_);
     auto result = installer->listInstalled();
-    
+
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result.value().size(), 2u);
-    
+
     auto& plugins = result.value();
     EXPECT_TRUE(std::find(plugins.begin(), plugins.end(), "plugin-a") != plugins.end());
     EXPECT_TRUE(std::find(plugins.begin(), plugins.end(), "plugin-b") != plugins.end());
@@ -121,7 +123,7 @@ TEST_F(PluginInstallerTest, ListInstalledFindsExistingPlugins) {
 TEST_F(PluginInstallerTest, InstalledVersionReturnsNulloptForMissingPlugin) {
     auto installer = makePluginInstaller(mockClient_, installDir_, trustFile_);
     auto result = installer->installedVersion("non-existent");
-    
+
     ASSERT_TRUE(result.has_value());
     EXPECT_FALSE(result.value().has_value());
 }
@@ -135,10 +137,10 @@ TEST_F(PluginInstallerTest, InstalledVersionReadsFromManifest) {
     std::ofstream manifestFile(installDir_ / "test-plugin" / "manifest.json");
     manifestFile << R"({"version": "1.2.3", "name": "test-plugin"})";
     manifestFile.close();
-    
+
     auto installer = makePluginInstaller(mockClient_, installDir_, trustFile_);
     auto result = installer->installedVersion("test-plugin");
-    
+
     ASSERT_TRUE(result.has_value());
     ASSERT_TRUE(result.value().has_value());
     EXPECT_EQ(*result.value(), "1.2.3");
@@ -150,10 +152,10 @@ TEST_F(PluginInstallerTest, InstalledVersionReadsFromManifest) {
 TEST_F(PluginInstallerTest, InstalledVersionReturnsUnknownWithoutManifest) {
     // Create plugin directory without manifest
     fs::create_directories(installDir_ / "test-plugin");
-    
+
     auto installer = makePluginInstaller(mockClient_, installDir_, trustFile_);
     auto result = installer->installedVersion("test-plugin");
-    
+
     ASSERT_TRUE(result.has_value());
     ASSERT_TRUE(result.value().has_value());
     EXPECT_EQ(*result.value(), "unknown");
@@ -170,10 +172,10 @@ TEST_F(PluginInstallerTest, UninstallRemovesPluginDirectory) {
     // Create plugin directory
     fs::create_directories(installDir_ / "test-plugin");
     ASSERT_TRUE(fs::exists(installDir_ / "test-plugin"));
-    
+
     auto installer = makePluginInstaller(mockClient_, installDir_, trustFile_);
     auto result = installer->uninstall("test-plugin");
-    
+
     EXPECT_TRUE(result.has_value());
     EXPECT_FALSE(fs::exists(installDir_ / "test-plugin"));
 }
@@ -184,7 +186,7 @@ TEST_F(PluginInstallerTest, UninstallRemovesPluginDirectory) {
 TEST_F(PluginInstallerTest, UninstallFailsForMissingPlugin) {
     auto installer = makePluginInstaller(mockClient_, installDir_, trustFile_);
     auto result = installer->uninstall("non-existent");
-    
+
     EXPECT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, ErrorCode::NotFound);
 }
@@ -198,22 +200,22 @@ TEST_F(PluginInstallerTest, UninstallFailsForMissingPlugin) {
  */
 TEST_F(PluginInstallerTest, InstallOptionsHaveSecureDefaults) {
     InstallOptions options;
-    
+
     // Auto-trust should be on by default for convenience
     EXPECT_TRUE(options.autoTrust);
-    
+
     // Auto-load should be on by default
     EXPECT_TRUE(options.autoLoad);
-    
+
     // Force should be off by default (don't overwrite existing)
     EXPECT_FALSE(options.force);
-    
+
     // Dry-run should be off by default
     EXPECT_FALSE(options.dryRun);
-    
+
     // No version specified means latest
     EXPECT_FALSE(options.version.has_value());
-    
+
     // No checksum override by default (use server-provided)
     EXPECT_FALSE(options.checksum.has_value());
 }
@@ -226,11 +228,12 @@ TEST_F(PluginInstallerTest, InstallOptionsHaveSecureDefaults) {
  */
 TEST_F(PluginInstallerTest, ChecksumFormatRequirements) {
     // Valid SHA-256 checksum (empty file hash)
-    const std::string emptyFileSha256 = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-    
+    const std::string emptyFileSha256 =
+        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
     // Verify prefix
     EXPECT_TRUE(emptyFileSha256.substr(0, 7) == "sha256:");
-    
+
     // Verify hex portion length (64 chars for SHA-256)
     EXPECT_EQ(emptyFileSha256.length(), 7 + 64);
 }
@@ -246,7 +249,7 @@ TEST_F(PluginInstallerTest, InstallResultContainsSecurityInfo) {
     result.sizeBytes = 1024 * 1024; // 1MB
     result.wasUpgrade = false;
     result.elapsed = std::chrono::milliseconds{500};
-    
+
     EXPECT_FALSE(result.checksum.empty());
     EXPECT_TRUE(result.checksum.substr(0, 7) == "sha256:");
     EXPECT_GT(result.sizeBytes, 0u);
@@ -269,7 +272,7 @@ TEST_F(PluginInstallerTest, InstallProgressStagesAreDefined) {
     auto trusting = InstallProgress::Stage::Trusting;
     auto loading = InstallProgress::Stage::Loading;
     auto complete = InstallProgress::Stage::Complete;
-    
+
     // Just verify they're distinct
     EXPECT_NE(querying, downloading);
     EXPECT_NE(verifying, extracting);
@@ -281,7 +284,7 @@ TEST_F(PluginInstallerTest, InstallProgressStagesAreDefined) {
  */
 TEST_F(PluginInstallerTest, InstallProgressDefaultValues) {
     InstallProgress progress;
-    
+
     EXPECT_EQ(progress.stage, InstallProgress::Stage::Querying);
     EXPECT_TRUE(progress.message.empty());
     EXPECT_FLOAT_EQ(progress.progress, 0.0f);
@@ -302,9 +305,9 @@ TEST_F(PluginInstallerTest, TrustFileLocationIsCorrect) {
     std::ofstream manifestFile(installDir_ / "trusted-plugin" / "manifest.json");
     manifestFile << R"({"version": "1.0.0"})";
     manifestFile.close();
-    
+
     auto installer = makePluginInstaller(mockClient_, installDir_, trustFile_);
-    
+
     // Verify trust file would be at expected location
     EXPECT_EQ(trustFile_.parent_path().filename(), "config");
     EXPECT_EQ(trustFile_.filename(), "plugins_trust.txt");
@@ -320,7 +323,7 @@ TEST_F(PluginInstallerTest, TrustFileLocationIsCorrect) {
 TEST_F(PluginInstallerTest, CheckUpdatesWithNoPluginsReturnsEmpty) {
     auto installer = makePluginInstaller(mockClient_, installDir_, trustFile_);
     auto result = installer->checkUpdates();
-    
+
     ASSERT_TRUE(result.has_value());
     EXPECT_TRUE(result.value().empty());
 }
@@ -334,13 +337,13 @@ TEST_F(PluginInstallerTest, CheckUpdatesWithNoPluginsReturnsEmpty) {
  */
 TEST(PluginInstallerDefaults, DefaultInstallDirIsValid) {
     auto defaultDir = getDefaultPluginInstallDir();
-    
+
     // Should not be empty
     EXPECT_FALSE(defaultDir.empty());
-    
+
     // Should contain "yams" somewhere in the path
     EXPECT_NE(defaultDir.string().find("yams"), std::string::npos);
-    
+
     // Should contain "plugins"
     EXPECT_NE(defaultDir.string().find("plugins"), std::string::npos);
 }
@@ -350,13 +353,13 @@ TEST(PluginInstallerDefaults, DefaultInstallDirIsValid) {
  */
 TEST(PluginInstallerDefaults, DefaultTrustFileIsValid) {
     auto defaultFile = getDefaultPluginTrustFile();
-    
+
     // Should not be empty
     EXPECT_FALSE(defaultFile.empty());
-    
+
     // Should contain "yams" somewhere in the path
     EXPECT_NE(defaultFile.string().find("yams"), std::string::npos);
-    
+
     // Should end with a recognizable filename
     EXPECT_EQ(defaultFile.filename().string(), "plugins_trust.txt");
 }
@@ -377,13 +380,14 @@ TEST(PluginInstallerDefaults, DefaultTrustFileIsValid) {
 TEST(PluginInstallerSecurity, Sha256IsUsedForIntegrity) {
     // SHA-256 produces a 64-character hex string
     const size_t sha256HexLength = 64;
-    
+
     // With prefix "sha256:" the total length is 71
     const size_t expectedTotalLength = 7 + sha256HexLength;
-    
+
     // Sample checksum to verify format
-    const std::string sampleChecksum = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-    
+    const std::string sampleChecksum =
+        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
     EXPECT_EQ(sampleChecksum.length(), expectedTotalLength);
 }
 

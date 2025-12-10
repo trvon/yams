@@ -16,7 +16,7 @@ struct StateComponent;
 namespace yams::metadata {
 class MetadataRepository;
 class KnowledgeGraphStore;
-}
+} // namespace yams::metadata
 
 namespace yams::api {
 class IContentStore;

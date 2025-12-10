@@ -50,7 +50,7 @@ protected:
     void SetUp() override {
         // Skip on Windows - daemon IPC tests are unstable there
         SKIP_DAEMON_TEST_ON_WINDOWS();
-        
+
         // Start daemon
         harness_ = std::make_unique<yams::test::DaemonHarness>();
         ASSERT_TRUE(harness_->start(5s)) << "Failed to start daemon";

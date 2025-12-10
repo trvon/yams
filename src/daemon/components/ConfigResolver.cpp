@@ -215,8 +215,8 @@ std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,
 
     try {
         namespace fs = std::filesystem;
-        fs::path cfgPath = !config.configFilePath.empty() ? config.configFilePath
-                                                          : resolveDefaultConfigPath();
+        fs::path cfgPath =
+            !config.configFilePath.empty() ? config.configFilePath : resolveDefaultConfigPath();
         if (!cfgPath.empty() && fs::exists(cfgPath)) {
             // Flat parse for explicit keys
             auto kv = parseSimpleTomlFlat(cfgPath);
@@ -343,16 +343,15 @@ bool ConfigResolver::isSymbolExtractionEnabled(const DaemonConfig& config) {
 
     try {
         namespace fs = std::filesystem;
-        fs::path cfgPath = !config.configFilePath.empty() ? config.configFilePath
-                                                          : resolveDefaultConfigPath();
+        fs::path cfgPath =
+            !config.configFilePath.empty() ? config.configFilePath : resolveDefaultConfigPath();
         if (!cfgPath.empty() && fs::exists(cfgPath)) {
             auto flat = parseSimpleTomlFlat(cfgPath);
             auto it = flat.find("plugins.symbol_extraction.enable");
             if (it != flat.end()) {
                 std::string v = it->second;
-                std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
-                    return static_cast<char>(std::tolower(c));
-                });
+                std::transform(v.begin(), v.end(), v.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
                 enableSymbols = !(v == "0" || v == "false" || v == "off" || v == "no");
             }
         }

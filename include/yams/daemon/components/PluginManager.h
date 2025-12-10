@@ -291,9 +291,9 @@ private:
 
     // Plugin infrastructure
     std::unique_ptr<AbiPluginLoader> pluginLoader_;
-    std::unique_ptr<AbiPluginHost> pluginHost_; // Owned when created internally
+    std::unique_ptr<AbiPluginHost> pluginHost_;        // Owned when created internally
     std::unique_ptr<ExternalPluginHost> externalHost_; // For Python/JS plugins
-    AbiPluginHost* sharedPluginHost_{nullptr};  // Non-owning when shared from ServiceManager
+    AbiPluginHost* sharedPluginHost_{nullptr};         // Non-owning when shared from ServiceManager
 
     // FSMs for state tracking
     PluginHostFsm pluginHostFsm_;

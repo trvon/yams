@@ -67,7 +67,7 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
                         break; // Normal exit (stopped or no work)
                     } catch (const std::exception& e) {
                         spdlog::error("[WorkCoordinator] Worker {} caught exception: {}", i,
-                                       e.what());
+                                      e.what());
                     } catch (...) {
                         spdlog::error("[WorkCoordinator] Worker {} caught unknown exception", i);
                     }

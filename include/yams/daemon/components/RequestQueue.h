@@ -15,11 +15,11 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
-#include <future>
 #include <vector>
 
 namespace yams::daemon {

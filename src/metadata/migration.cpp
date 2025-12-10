@@ -316,15 +316,24 @@ Result<void> MigrationManager::createMigrationTables() {
 
 // YamsMetadataMigrations implementation
 std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
-    return {createInitialSchema(),        createFTS5Tables(),
-            createMetadataIndexes(),      createRelationshipTables(),
-            createSearchTables(),         createCollectionIndexes(),
-            createKnowledgeGraphSchema(), createBinarySignatureSchema(),
-            createVectorSearchSchema(),   upgradeFTS5Tokenization(),
-            createTreeSnapshotsSchema(),  createTreeDiffsSchema(),
-            addPathIndexingSchema(),      chunkedPathIndexingBackfill(),
-            createPathTreeSchema(),       createSymbolMetadataSchema(),
-            addFTS5PorterStemmer(),       removeFTS5ContentType(),
+    return {createInitialSchema(),
+            createFTS5Tables(),
+            createMetadataIndexes(),
+            createRelationshipTables(),
+            createSearchTables(),
+            createCollectionIndexes(),
+            createKnowledgeGraphSchema(),
+            createBinarySignatureSchema(),
+            createVectorSearchSchema(),
+            upgradeFTS5Tokenization(),
+            createTreeSnapshotsSchema(),
+            createTreeDiffsSchema(),
+            addPathIndexingSchema(),
+            chunkedPathIndexingBackfill(),
+            createPathTreeSchema(),
+            createSymbolMetadataSchema(),
+            addFTS5PorterStemmer(),
+            removeFTS5ContentType(),
             renameDocEntitiesToKgDocEntities()};
 }
 
@@ -2009,8 +2018,8 @@ Migration YamsMetadataMigrations::renameDocEntitiesToKgDocEntities() {
             // Rename indexes
             (void)db.execute("DROP INDEX IF EXISTS idx_doc_entities_document;");
             (void)db.execute("DROP INDEX IF EXISTS idx_doc_entities_node;");
-            auto idx1 = db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_kg_doc_entities_document ON kg_doc_entities(document_id);");
+            auto idx1 = db.execute("CREATE INDEX IF NOT EXISTS idx_kg_doc_entities_document ON "
+                                   "kg_doc_entities(document_id);");
             if (!idx1)
                 return idx1;
             auto idx2 = db.execute(
@@ -2055,8 +2064,8 @@ Migration YamsMetadataMigrations::renameDocEntitiesToKgDocEntities() {
             auto rc = db.execute("ALTER TABLE kg_doc_entities RENAME TO doc_entities;");
             if (!rc)
                 return rc;
-            (void)db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_doc_entities_document ON doc_entities(document_id);");
+            (void)db.execute("CREATE INDEX IF NOT EXISTS idx_doc_entities_document ON "
+                             "doc_entities(document_id);");
             (void)db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_doc_entities_node ON doc_entities(node_id);");
         }
