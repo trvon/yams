@@ -6,7 +6,7 @@ name: Release
     tags:
       - "v*"
   schedule:
-    - cron: '0 6 * * *'
+    - cron: '0 6 * * 0' # 06:00 UTC every Sunday
   workflow_dispatch:
     inputs:
       channel:
