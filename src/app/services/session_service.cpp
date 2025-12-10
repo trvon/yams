@@ -1,6 +1,8 @@
 #include <nlohmann/json.hpp>
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <stdexcept>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
 
@@ -410,6 +412,192 @@ public:
         }
 
         return out;
+    }
+
+    // Session-isolated memory (PBI-082)
+    void create(const std::string& name, const std::string& desc) override {
+        if (exists(name))
+            throw std::runtime_error("Session already exists: " + name);
+
+        auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count();
+
+        json j;
+        j["name"] = name;
+        j["description"] = desc;
+        j["state"] = "closed";
+        j["createdTime"] = now;
+        j["lastOpenedTime"] = 0;
+        j["lastClosedTime"] = 0;
+        j["selectors"] = json::array();
+        j["materialized"] = json::array();
+        save_json(sessions_dir() / (name + ".json"), j);
+    }
+
+    void open(const std::string& name) override {
+        if (!exists(name))
+            throw std::runtime_error("Session does not exist: " + name);
+
+        auto cur = current();
+        if (cur && *cur != name) {
+            auto oldPath = sessions_dir() / (*cur + ".json");
+            auto oldJson = load_json(oldPath);
+            if (oldJson.contains("state") && oldJson["state"] == "active") {
+                oldJson["state"] = "closed";
+                oldJson["lastClosedTime"] =
+                    std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::system_clock::now().time_since_epoch())
+                        .count();
+                save_json(oldPath, oldJson);
+            }
+        }
+
+        auto p = sessions_dir() / (name + ".json");
+        auto j = load_json(p);
+        j["state"] = "active";
+        j["lastOpenedTime"] = std::chrono::duration_cast<std::chrono::seconds>(
+                                  std::chrono::system_clock::now().time_since_epoch())
+                                  .count();
+        save_json(p, j);
+        use(name);
+    }
+
+    void close() override {
+        auto cur = current();
+        if (!cur)
+            return;
+
+        auto p = sessions_dir() / (*cur + ".json");
+        auto j = load_json(p);
+        j["state"] = "closed";
+        j["lastClosedTime"] = std::chrono::duration_cast<std::chrono::seconds>(
+                                  std::chrono::system_clock::now().time_since_epoch())
+                                  .count();
+        save_json(p, j);
+
+        json idx = load_json(index_path());
+        idx.erase("current");
+        save_json(index_path(), idx);
+    }
+
+    SessionState getState(const std::string& name) const override {
+        if (!exists(name))
+            return SessionState::NotExists;
+
+        auto j = load_json(sessions_dir() / (name + ".json"));
+        if (j.contains("state") && j["state"] == "active")
+            return SessionState::Active;
+        return SessionState::Closed;
+    }
+
+    std::optional<SessionInfo> getSessionInfo(const std::string& name) const override {
+        if (!exists(name))
+            return std::nullopt;
+
+        auto j = load_json(sessions_dir() / (name + ".json"));
+        SessionInfo info;
+        info.name = name;
+        info.description = j.value("description", j.value("desc", ""));
+        info.state =
+            (j.contains("state") && j["state"] == "active") ? SessionState::Active : SessionState::Closed;
+        info.createdTime = j.value("createdTime", std::int64_t{0});
+        info.lastOpenedTime = j.value("lastOpenedTime", std::int64_t{0});
+        info.lastClosedTime = j.value("lastClosedTime", std::int64_t{0});
+
+        if (ctx_ && ctx_->metadataRepo) {
+            auto countResult = ctx_->metadataRepo->countDocumentsBySessionId(name);
+            if (countResult)
+                info.documentCount = static_cast<std::size_t>(countResult.value());
+        }
+
+        return info;
+    }
+
+    std::vector<SessionInfo> listAllSessions() const override {
+        std::vector<SessionInfo> out;
+        for (const auto& name : listSessions()) {
+            auto info = getSessionInfo(name);
+            if (info)
+                out.push_back(*info);
+        }
+        return out;
+    }
+
+    MergeResult merge(const std::string& name, const MergeOptions& opts) override {
+        if (!exists(name))
+            throw std::runtime_error("Session does not exist: " + name);
+
+        MergeResult result;
+
+        if (!ctx_ || !ctx_->metadataRepo)
+            return result;
+
+        auto docsResult = ctx_->metadataRepo->findDocumentsBySessionId(name);
+        if (!docsResult)
+            return result;
+
+        for (const auto& doc : docsResult.value()) {
+            bool excluded = false;
+            for (const auto& pattern : opts.excludePatterns) {
+                if (doc.filePath.find(pattern) != std::string::npos) {
+                    excluded = true;
+                    break;
+                }
+            }
+
+            if (excluded) {
+                result.documentsExcluded++;
+            } else {
+                result.mergedPaths.push_back(doc.filePath);
+                result.documentsMerged++;
+            }
+        }
+
+        if (!opts.dryRun) {
+            ctx_->metadataRepo->removeSessionIdFromDocuments(name);
+            remove(name);
+
+            json idx = load_json(index_path());
+            if (idx.contains("current") && idx["current"] == name) {
+                idx.erase("current");
+                save_json(index_path(), idx);
+            }
+        }
+
+        return result;
+    }
+
+    std::size_t discard(const std::string& name, bool confirm) override {
+        if (!exists(name))
+            throw std::runtime_error("Session does not exist: " + name);
+
+        if (!confirm)
+            throw std::runtime_error("Discard requires confirmation. Pass confirm=true or use --confirm flag.");
+
+        if (!ctx_ || !ctx_->metadataRepo)
+            return 0;
+
+        auto countResult = ctx_->metadataRepo->deleteDocumentsBySessionId(name);
+        std::size_t deleted = countResult ? static_cast<std::size_t>(countResult.value()) : 0;
+
+        remove(name);
+
+        json idx = load_json(index_path());
+        if (idx.contains("current") && idx["current"] == name) {
+            idx.erase("current");
+            save_json(index_path(), idx);
+        }
+
+        return deleted;
+    }
+
+    std::size_t getDocumentCount(const std::string& name) const override {
+        if (!ctx_ || !ctx_->metadataRepo)
+            return 0;
+
+        auto countResult = ctx_->metadataRepo->countDocumentsBySessionId(name);
+        return countResult ? static_cast<std::size_t>(countResult.value()) : 0;
     }
 
 private:

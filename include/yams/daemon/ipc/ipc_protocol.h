@@ -82,6 +82,7 @@ struct SearchRequest {
     // Session scoping (controls hot/cold path behavior)
     bool useSession = false;
     std::string sessionName;
+    bool globalSearch = false;  // Session-isolated memory (PBI-082): bypass session isolation
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -95,7 +96,8 @@ struct SearchRequest {
             << modifiedBefore << indexedAfter << indexedBefore
             << static_cast<int32_t>(vectorStageTimeoutMs)
             << static_cast<int32_t>(keywordStageTimeoutMs)
-            << static_cast<int32_t>(snippetHydrationTimeoutMs) << useSession << sessionName;
+            << static_cast<int32_t>(snippetHydrationTimeoutMs) << useSession << sessionName
+            << globalSearch;
     }
 
     template <typename Deserializer>
@@ -283,6 +285,10 @@ struct SearchRequest {
         }
         if (auto sn = deser.readString(); sn) {
             req.sessionName = std::move(sn.value());
+        }
+        // Session-isolated memory (PBI-082)
+        if (auto gs = deser.template read<bool>(); gs) {
+            req.globalSearch = gs.value();
         }
 
         return req;
@@ -1573,6 +1579,7 @@ struct AddDocumentRequest {
     std::string collection;    // Collection name for organizing documents
     std::string snapshotId;    // Unique snapshot identifier
     std::string snapshotLabel; // User-friendly snapshot label
+    std::string sessionId;     // Session-isolated memory (PBI-082)
 
     // Content handling options
     std::string mimeType;         // MIME type of the document
@@ -1584,7 +1591,7 @@ struct AddDocumentRequest {
     void serialize(Serializer& ser) const {
         ser << path << content << name << tags << metadata << recursive << includeHidden
             << includePatterns << excludePatterns << collection << snapshotId << snapshotLabel
-            << mimeType << disableAutoMime << noEmbeddings;
+            << sessionId << mimeType << disableAutoMime << noEmbeddings;
     }
 
     template <typename Deserializer>
@@ -1645,6 +1652,11 @@ struct AddDocumentRequest {
         if (!snapLbl)
             return snapLbl.error();
         req.snapshotLabel = std::move(snapLbl.value());
+
+        auto sessId = deser.readString();
+        if (!sessId)
+            return sessId.error();
+        req.sessionId = std::move(sessId.value());
 
         auto mime = deser.readString();
         if (!mime)

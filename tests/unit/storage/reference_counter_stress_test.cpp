@@ -14,12 +14,17 @@
 using namespace yams::storage;
 using namespace std::chrono_literals;
 
+// Re-enabled on Windows after stabilizing SQLite access
+#define SKIP_REFCOUNT_STRESS_ON_WINDOWS() ((void)0)
+
 class ReferenceCounterStressTest : public ::testing::Test {
 protected:
     std::filesystem::path testDbPath;
     std::unique_ptr<ReferenceCounter> refCounter;
 
     void SetUp() override {
+        SKIP_REFCOUNT_STRESS_ON_WINDOWS();
+
         testDbPath = std::filesystem::temp_directory_path() /
                      std::format("yams_refcount_stress_{}.db",
                                  std::chrono::system_clock::now().time_since_epoch().count());
@@ -35,6 +40,9 @@ protected:
     }
 
     void TearDown() override {
+        if (!refCounter) {
+            return;
+        }
         refCounter.reset();
         std::filesystem::remove(testDbPath);
         std::filesystem::remove(testDbPath.string() + "-wal");

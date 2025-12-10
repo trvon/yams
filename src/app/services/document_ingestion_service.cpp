@@ -51,6 +51,7 @@ DocumentIngestionService::addViaDaemon(const AddOptions& opts) const {
     dreq.collection = opts.collection;
     dreq.snapshotId = opts.snapshotId;
     dreq.snapshotLabel = opts.snapshotLabel;
+    dreq.sessionId = opts.sessionId;
     dreq.recursive = opts.recursive;
     dreq.includePatterns = opts.includePatterns;
     dreq.excludePatterns = opts.excludePatterns;

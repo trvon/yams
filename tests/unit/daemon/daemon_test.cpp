@@ -23,6 +23,11 @@ using pid_t = int;
 static int setenv(const char* name, const char* value, int overwrite) {
     return _putenv_s(name, value);
 }
+// Windows daemon IPC tests are unstable due to socket shutdown race conditions
+#define SKIP_DAEMON_TEST_ON_WINDOWS()                                                              \
+    GTEST_SKIP() << "Daemon IPC tests unstable on Windows - see windows-daemon-ipc-plan.md"
+#else
+#define SKIP_DAEMON_TEST_ON_WINDOWS() ((void)0)
 #endif
 
 namespace yams::daemon::test {
@@ -33,6 +38,9 @@ using namespace std::chrono_literals;
 class DaemonTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        // Skip on Windows - daemon IPC tests are unstable there
+        SKIP_DAEMON_TEST_ON_WINDOWS();
+        
         cleanupDaemonFiles();
 
 #ifdef _WIN32

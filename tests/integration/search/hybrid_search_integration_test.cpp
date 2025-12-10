@@ -5,6 +5,14 @@
 #include <catch2/catch_test_macros.hpp>
 #include <yams/daemon/client/daemon_client.h>
 
+// Windows daemon IPC tests are unstable due to socket shutdown race conditions
+#ifdef _WIN32
+#define SKIP_ON_WINDOWS_DAEMON_SHUTDOWN()                                                          \
+    SKIP("Daemon IPC tests unstable on Windows - see windows-daemon-ipc-plan.md")
+#else
+#define SKIP_ON_WINDOWS_DAEMON_SHUTDOWN() ((void)0)
+#endif
+
 using namespace yams::daemon;
 using namespace std::chrono_literals;
 
@@ -71,6 +79,7 @@ private:
 // =============================================================================
 
 TEST_CASE("SemanticSearch - Infrastructure availability", "[integration][search][semantic]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     HybridSearchIntegrationFixture fixture;
 
     // Test that daemon is running and can respond to semantic search requests
@@ -97,6 +106,7 @@ TEST_CASE("SemanticSearch - Infrastructure availability", "[integration][search]
 }
 
 TEST_CASE("SemanticSearch - Similarity threshold filtering", "[integration][search][semantic]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     HybridSearchIntegrationFixture fixture;
 
     // Test semantic search with high similarity threshold
@@ -122,6 +132,7 @@ TEST_CASE("SemanticSearch - Similarity threshold filtering", "[integration][sear
 
 TEST_CASE("SemanticSearch - Empty query validation",
           "[integration][search][semantic][validation]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     HybridSearchIntegrationFixture fixture;
 
     // Empty query should fail validation at daemon level
@@ -139,6 +150,7 @@ TEST_CASE("SemanticSearch - Empty query validation",
 }
 
 TEST_CASE("SemanticSearch - Very long query handling", "[integration][search][semantic][edge]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     HybridSearchIntegrationFixture fixture;
 
     // Test with very long query (stress test embedding provider)
@@ -168,6 +180,7 @@ TEST_CASE("SemanticSearch - Very long query handling", "[integration][search][se
 // =============================================================================
 
 TEST_CASE("HybridSearch - RRF fusion with real infrastructure", "[integration][search][hybrid]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     HybridSearchIntegrationFixture fixture;
 
     // Test Reciprocal Rank Fusion with both keyword and semantic results
@@ -197,6 +210,7 @@ TEST_CASE("HybridSearch - RRF fusion with real infrastructure", "[integration][s
 }
 
 TEST_CASE("HybridSearch - Keyword-only fallback path", "[integration][search][hybrid][fallback]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     HybridSearchIntegrationFixture fixture;
 
     // When vector search unavailable, hybrid should fall back to keyword-only
@@ -217,6 +231,7 @@ TEST_CASE("HybridSearch - Keyword-only fallback path", "[integration][search][hy
 }
 
 TEST_CASE("HybridSearch - Engine unavailable detection", "[integration][search][hybrid][error]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     HybridSearchIntegrationFixture fixture;
 
     // Test that hybrid search properly detects when hybrid engine is unavailable

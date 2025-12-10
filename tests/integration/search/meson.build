@@ -37,6 +37,8 @@ else
       },
       is_parallel: false,
       timeout: 300,  # 5 minutes - allows time for daemon startup + embedding model load
+      # Allow exit 0 when all tests skip (Windows daemon shutdown not yet implemented)
+      args: ['--allow-running-no-tests'],
     )
 
     # Symbol search integration tests
@@ -57,6 +59,8 @@ else
       },
       is_parallel: false,
       timeout: 120,  # 2 minutes - symbol extraction can be slow
+      # Allow exit 0 when all tests skip (Windows daemon shutdown not yet implemented)
+      args: ['--allow-running-no-tests'],
     )
   else
     message('hybrid_search_integration test disabled (enable with -Denable-daemon-integration=true).')

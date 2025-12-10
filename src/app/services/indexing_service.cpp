@@ -466,6 +466,9 @@ private:
             storeReq.tags = req.tags;
             // Set automatic snapshot ID for versioning
             storeReq.snapshotId = snapshotId;
+            // Session-isolated memory (PBI-082)
+            storeReq.sessionId = req.sessionId;
+            storeReq.bypassSession = req.bypassSession;
             if (!req.collection.empty()) {
                 storeReq.metadata["collection"] = req.collection;
             }

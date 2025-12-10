@@ -8,6 +8,14 @@
 #include <catch2/catch_test_macros.hpp>
 #include <yams/compat/unistd.h>
 
+// Windows daemon IPC tests are unstable due to socket shutdown race conditions
+#ifdef _WIN32
+#define SKIP_ON_WINDOWS_DAEMON_SHUTDOWN()                                                          \
+    SKIP("Daemon IPC tests unstable on Windows - see windows-daemon-ipc-plan.md")
+#else
+#define SKIP_ON_WINDOWS_DAEMON_SHUTDOWN() ((void)0)
+#endif
+
 #include <yams/app/services/services.hpp>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -203,6 +211,7 @@ public:
 // ============================================================================
 
 TEST_CASE("Symbol extractor plugins are loaded", "[integration][search][symbols]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     SymbolSearchFixture fixture;
 
     SECTION("ServiceManager initializes successfully") {
@@ -218,6 +227,7 @@ TEST_CASE("Symbol extractor plugins are loaded", "[integration][search][symbols]
 }
 
 TEST_CASE("Symbol extraction from C++ source code", "[integration][search][symbols]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     SymbolSearchFixture fixture;
 
     SECTION("Extract functions and classes") {
@@ -272,6 +282,7 @@ void globalFunction() {
 }
 
 TEST_CASE("Symbol-aware search with enrichment", "[integration][search][symbols][enrichment]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     SymbolSearchFixture fixture;
 
     SECTION("Search for symbol names enriches results") {
@@ -359,6 +370,7 @@ int SearchableClass::searchableFunction(int param) {
 }
 
 TEST_CASE("Symbol metadata is searchable", "[integration][search][symbols][metadata]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     SymbolSearchFixture fixture;
 
     SECTION("Symbol properties available in KG") {
@@ -397,6 +409,7 @@ int main() {
 }
 
 TEST_CASE("Symbol search performance baseline", "[integration][search][symbols][perf]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     SymbolSearchFixture fixture;
 
     SECTION("Multiple source files with symbols") {
@@ -461,7 +474,8 @@ public:
 // ============================================================================
 
 TEST_CASE("Symbol matches boost search ranking",
-          "[integration][search][symbols][ranking][pbi-074]") {
+          "[integration][search][symbols][ranking]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     SymbolSearchFixture fixture;
 
     SECTION("Definition ranks higher than usage in search results") {

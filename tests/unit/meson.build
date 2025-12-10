@@ -215,6 +215,7 @@ unit_metadata = files(
   'metadata/path_tree_delete_test.cpp',
   'metadata/query_helpers_integration_test.cpp',
   'metadata/query_helpers_test.cpp',
+  'metadata/session_isolation_test.cpp',
   'metadata/sql_build_select_test.cpp',
   'metadata/tags_queryspec_integration_test.cpp',
   'metadata/tree_builder_test.cpp',

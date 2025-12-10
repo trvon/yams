@@ -92,6 +92,7 @@ private:
 #ifdef _WIN32
     // Windows-specific handles
     HANDLE process_handle_{INVALID_HANDLE_VALUE};
+    HANDLE job_handle_{INVALID_HANDLE_VALUE};  // Job Object for child process cleanup
     HANDLE stdin_write_{INVALID_HANDLE_VALUE};
     HANDLE stdout_read_{INVALID_HANDLE_VALUE};
     HANDLE stderr_read_{INVALID_HANDLE_VALUE};
@@ -373,6 +374,12 @@ PluginProcess::Impl::~Impl() {
         CloseHandle(stderr_read_);
     if (process_handle_ != INVALID_HANDLE_VALUE)
         CloseHandle(process_handle_);
+    // Close Job Object - this will terminate any remaining child processes
+    // since we configured JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if (job_handle_ != INVALID_HANDLE_VALUE) {
+        spdlog::debug("PluginProcess: Closing Job Object (will terminate child processes)");
+        CloseHandle(job_handle_);
+    }
 }
 
 void PluginProcess::Impl::setup_pipes() {
@@ -396,6 +403,28 @@ void PluginProcess::Impl::setup_pipes() {
 }
 
 void PluginProcess::Impl::spawn_process() {
+    // Create a Job Object to track this process and all its children
+    // When the Job Object is closed (or parent process exits), all child processes are terminated
+    job_handle_ = CreateJobObjectW(nullptr, nullptr);
+    if (job_handle_ == nullptr) {
+        spdlog::warn("PluginProcess: Failed to create Job Object (error {}), proceeding without",
+                     GetLastError());
+    } else {
+        // Configure the Job Object to terminate all processes when it's closed
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jobInfo{};
+        jobInfo.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+        if (!SetInformationJobObject(job_handle_, JobObjectExtendedLimitInformation, &jobInfo,
+                                     sizeof(jobInfo))) {
+            spdlog::warn("PluginProcess: Failed to configure Job Object (error {})",
+                         GetLastError());
+            CloseHandle(job_handle_);
+            job_handle_ = INVALID_HANDLE_VALUE;
+        } else {
+            spdlog::debug("PluginProcess: Created Job Object for child process cleanup");
+        }
+    }
+
     // Build command line
     std::wstring cmdline = L"\"" + config_.executable.wstring() + L"\"";
     for (const auto& arg : config_.args) {
@@ -454,6 +483,9 @@ void PluginProcess::Impl::spawn_process() {
         creationFlags |= CREATE_UNICODE_ENVIRONMENT;
     }
 
+    // Create process in suspended state so we can add it to Job Object before it starts
+    creationFlags |= CREATE_SUSPENDED;
+
     STARTUPINFOW si{sizeof(STARTUPINFOW)};
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdInput = reinterpret_cast<HANDLE>(std::stoull(config_.env.at("__YAMS_STDIN_RD__")));
@@ -466,11 +498,30 @@ void PluginProcess::Impl::spawn_process() {
                         config_.workdir ? config_.workdir->wstring().c_str() : nullptr, &si, &pi)) {
         DWORD error = GetLastError();
         spdlog::error("CreateProcessW failed with error {}", error);
+        if (job_handle_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(job_handle_);
+            job_handle_ = INVALID_HANDLE_VALUE;
+        }
         throw std::runtime_error("CreateProcessW failed with error " + std::to_string(error));
     }
 
     process_handle_ = pi.hProcess;
     process_id_ = pi.dwProcessId;
+
+    // Assign process to Job Object before resuming it
+    // This ensures all child processes spawned by this process are also in the Job
+    if (job_handle_ != INVALID_HANDLE_VALUE) {
+        if (!AssignProcessToJobObject(job_handle_, process_handle_)) {
+            spdlog::warn("PluginProcess: Failed to assign process to Job Object (error {})",
+                         GetLastError());
+            // Continue anyway - process will still work, just without child cleanup guarantee
+        } else {
+            spdlog::debug("PluginProcess: Assigned process {} to Job Object", process_id_);
+        }
+    }
+
+    // Resume the process now that it's in the Job Object
+    ResumeThread(pi.hThread);
     CloseHandle(pi.hThread);
 
     // Close child ends
@@ -514,11 +565,24 @@ void PluginProcess::Impl::terminate(std::chrono::milliseconds timeout) {
         return;
     }
 
-    // Try to terminate the process tree using Windows Job Objects would be ideal,
-    // but for now just terminate the process directly
+    // Terminate the process tree using Job Object if available
     spdlog::debug("PluginProcess: Process did not exit after stdin close, terminating");
-    if (!TerminateProcess(process_handle_, 0)) {
-        spdlog::warn("PluginProcess: TerminateProcess failed with error {}", GetLastError());
+    if (job_handle_ != INVALID_HANDLE_VALUE) {
+        // Terminate all processes in the Job Object (including any child processes)
+        if (!TerminateJobObject(job_handle_, 0)) {
+            spdlog::warn("PluginProcess: TerminateJobObject failed with error {}", GetLastError());
+            // Fall back to TerminateProcess
+            if (!TerminateProcess(process_handle_, 0)) {
+                spdlog::warn("PluginProcess: TerminateProcess failed with error {}", GetLastError());
+            }
+        } else {
+            spdlog::debug("PluginProcess: Terminated Job Object (all child processes killed)");
+        }
+    } else {
+        // No Job Object, terminate process directly
+        if (!TerminateProcess(process_handle_, 0)) {
+            spdlog::warn("PluginProcess: TerminateProcess failed with error {}", GetLastError());
+        }
     }
 
     // Wait for termination to complete

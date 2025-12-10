@@ -25,6 +25,7 @@ struct AddOptions {
     std::string collection;    // optional collection name
     std::string snapshotId;    // optional snapshot id
     std::string snapshotLabel; // optional snapshot label
+    std::string sessionId;     // session-isolated memory (PBI-082)
     bool recursive{false};     // directory recursion
     std::vector<std::string> includePatterns;
     std::vector<std::string> excludePatterns;

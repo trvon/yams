@@ -20,9 +20,13 @@ using namespace std::chrono_literals;
 
 namespace yams::daemon::test {
 
+#define SKIP_REQUEST_QUEUE_TEST_ON_WINDOWS() ((void)0)
+
 class RequestQueueTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        SKIP_REQUEST_QUEUE_TEST_ON_WINDOWS();
+        
         io_ = std::make_shared<boost::asio::io_context>();
         work_guard_ = std::make_unique<
             boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>(
@@ -33,6 +37,10 @@ protected:
     }
 
     void TearDown() override {
+        // Guard against skipped tests where io_ is never initialized
+        if (!io_) {
+            return;
+        }
         work_guard_.reset();
         io_->stop();
         if (io_thread_.joinable()) {
