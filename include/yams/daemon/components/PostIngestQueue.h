@@ -70,10 +70,15 @@ public:
 
 private:
     boost::asio::awaitable<void> channelPoller();
+    boost::asio::awaitable<void> kgPoller();
     void processTask(const std::string& hash, const std::string& mime);
     void processMetadataStage(const std::string& hash, const std::string& mime);
-    void processKnowledgeGraphStage(const std::string& hash, const std::string& mime);
+    void processKnowledgeGraphStage(const std::string& hash, int64_t docId,
+                                    const std::string& filePath,
+                                    const std::vector<std::string>& tags);
     void processEmbeddingStage(const std::string& hash, const std::string& mime);
+    void dispatchToKgChannel(const std::string& hash, int64_t docId,
+                             const std::string& filePath, std::vector<std::string> tags);
 
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::MetadataRepository> meta_;
@@ -84,11 +89,16 @@ private:
 
     std::atomic<bool> stop_{false};
     std::atomic<bool> started_{false};
+    std::atomic<bool> kgStarted_{false};
     std::atomic<std::size_t> processed_{0};
     std::atomic<std::size_t> failed_{0};
+    std::atomic<std::size_t> inFlight_{0};
+    std::atomic<std::size_t> kgInFlight_{0};
     std::atomic<double> latencyMsEma_{0.0};
     std::atomic<double> ratePerSecEma_{0.0};
     std::size_t capacity_{1000};
+    static constexpr std::size_t kMaxConcurrent_ = 4;
+    static constexpr std::size_t kMaxKgConcurrent_ = 8;
 
     std::chrono::steady_clock::time_point lastCompleteTs_{};
     static constexpr double kAlpha_ = 0.2;

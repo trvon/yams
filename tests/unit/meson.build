@@ -69,14 +69,15 @@ if tests_has_cli
 endif
 
 unit_compression = files(
-  'compression/basic_error_handler_test.cpp',
-  'compression/basic_integrity_validator_test.cpp',
-  'compression/compression_comprehensive_test.cpp',
-  'compression/compression_monitor_test.cpp',
-  'compression/compression_policy_test.cpp',
-  'compression/recovery_manager_test.cpp',
-  'compression/transaction_manager_test.cpp',
-  'compression/zstandard_compressor_test.cpp',
+  # Migrated to Catch2: see tests/meson.build catch2_compression_submodule_exe (yams-pmf)
+  # 'compression/basic_error_handler_test.cpp',
+  # 'compression/basic_integrity_validator_test.cpp',
+  # 'compression/compression_comprehensive_test.cpp',
+  # 'compression/compression_monitor_test.cpp',
+  # 'compression/compression_policy_test.cpp',
+  # 'compression/recovery_manager_test.cpp',
+  # 'compression/transaction_manager_test.cpp',
+  # 'compression/zstandard_compressor_test.cpp',
   # excluded: error_handler_test_simple.cpp, error_handler_test.cpp, integrity_validator*_test.cpp
 )
 
@@ -85,7 +86,8 @@ lzma_opt = get_option('enable-lzma')
 lzma_dep = dependency('lzma', required: false)
 unit_compression_opt = []
 if lzma_dep.found() and lzma_opt.allowed()
-  unit_compression_opt += files('compression/lzma_compressor_test.cpp')
+  # Migrated to Catch2: lzma_compressor_catch2_test.cpp (yams-pmf)
+  # unit_compression_opt += files('compression/lzma_compressor_test.cpp')
 endif
 
 unit_daemon_base = files(

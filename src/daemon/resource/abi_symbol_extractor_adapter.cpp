@@ -1,8 +1,58 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <set>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 
 namespace yams::daemon {
+
+// Default extension-to-language mappings for common languages
+static const std::unordered_map<std::string, std::string> kDefaultExtensionMap = {
+    // C/C++
+    {".c", "c"},
+    {".h", "c"},
+    {".cpp", "cpp"},
+    {".cc", "cpp"},
+    {".cxx", "cpp"},
+    {".hpp", "cpp"},
+    {".hxx", "cpp"},
+    {".c++", "cpp"},
+    {".h++", "cpp"},
+    // Python
+    {".py", "python"},
+    {".pyw", "python"},
+    {".pyi", "python"},
+    // Rust
+    {".rs", "rust"},
+    // Go
+    {".go", "go"},
+    // JavaScript/TypeScript
+    {".js", "javascript"},
+    {".mjs", "javascript"},
+    {".cjs", "javascript"},
+    {".jsx", "javascript"},
+    {".ts", "typescript"},
+    {".tsx", "typescript"},
+    {".mts", "typescript"},
+    // Java
+    {".java", "java"},
+    // C#
+    {".cs", "csharp"},
+    // PHP
+    {".php", "php"},
+    // Kotlin
+    {".kt", "kotlin"},
+    {".kts", "kotlin"},
+    // Perl
+    {".pl", "perl"},
+    {".pm", "perl"},
+    // R
+    {".r", "r"},
+    {".R", "r"},
+    // SQL
+    {".sql", "sql"},
+    // Solidity
+    {".sol", "solidity"},
+};
 
 std::unordered_map<std::string, std::string>
 AbiSymbolExtractorAdapter::getSupportedExtensions() const {
@@ -21,21 +71,68 @@ AbiSymbolExtractorAdapter::getSupportedExtensions() const {
     try {
         auto j = nlohmann::json::parse(json_str);
 
-        // Expected format:
+        // Format 1 (structured):
         // {
         //   "languages": [
         //     {"id": "cpp", "extensions": [".cpp", ".hpp", ".cc", ".h"]},
         //     {"id": "python", "extensions": [".py"]}
         //   ]
         // }
+        //
+        // Format 2 (simple array - used by treesitter plugin):
+        // {
+        //   "languages": ["cpp", "c++", "c", "python", "go", "rust", ...],
+        //   "features": [...],
+        //   "version": "..."
+        // }
         if (j.contains("languages") && j["languages"].is_array()) {
-            for (const auto& lang : j["languages"]) {
-                if (lang.contains("id") && lang.contains("extensions")) {
-                    std::string langId = lang["id"].get<std::string>();
-                    for (const auto& ext : lang["extensions"]) {
-                        std::string extension = ext.get<std::string>();
-                        result[extension] = langId;
+            const auto& langs = j["languages"];
+            if (!langs.empty()) {
+                // Detect format by checking first element
+                if (langs[0].is_object()) {
+                    // Format 1: structured with id and extensions
+                    for (const auto& lang : langs) {
+                        if (lang.contains("id") && lang.contains("extensions")) {
+                            std::string langId = lang["id"].get<std::string>();
+                            for (const auto& ext : lang["extensions"]) {
+                                std::string extension = ext.get<std::string>();
+                                result[extension] = langId;
+                            }
+                        }
                     }
+                } else if (langs[0].is_string()) {
+                    // Format 2: simple array of language names
+                    // Build extension map from supported languages using defaults
+                    std::set<std::string> supportedLangs;
+                    for (const auto& lang : langs) {
+                        supportedLangs.insert(lang.get<std::string>());
+                    }
+
+                    // Map extensions to languages if the language is supported
+                    for (const auto& [ext, lang] : kDefaultExtensionMap) {
+                        // Check if plugin supports this language (including aliases)
+                        bool supported = supportedLangs.count(lang) > 0;
+                        // Also check common aliases
+                        if (!supported && lang == "cpp") {
+                            supported = supportedLangs.count("c++") > 0;
+                        }
+                        if (!supported && lang == "javascript") {
+                            supported = supportedLangs.count("js") > 0;
+                        }
+                        if (!supported && lang == "typescript") {
+                            supported = supportedLangs.count("ts") > 0;
+                        }
+                        if (!supported && lang == "csharp") {
+                            supported = supportedLangs.count("c#") > 0 || supportedLangs.count("cs") > 0;
+                        }
+
+                        if (supported) {
+                            result[ext] = lang;
+                        }
+                    }
+
+                    spdlog::debug("Symbol extractor supports {} languages, mapped {} extensions",
+                                  supportedLangs.size(), result.size());
                 }
             }
         }

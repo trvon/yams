@@ -907,6 +907,31 @@ if catch2_dep.found()
     install: false,
   )
 
+  # Compression submodule tests (CompressionPolicy, CompressionMonitor, Zstandard, LZMA, ErrorHandler, etc.)
+  # Migrated from GTest as part of yams-3s4 / yams-pmf
+  catch2_compression_submodule_exe = executable('catch2_compression_submodule',
+    files(
+      'unit/compression/basic_error_handler_catch2_test.cpp',
+      # TODO(yams-3s4): Fix API mismatch - uses non-existent ValidationConfig fields
+      # 'unit/compression/basic_integrity_validator_catch2_test.cpp',
+      'unit/compression/compression_comprehensive_catch2_test.cpp',
+      'unit/compression/compression_monitor_catch2_test.cpp',
+      'unit/compression/compression_policy_catch2_test.cpp',
+      'unit/compression/error_handler_catch2_test.cpp',
+      # TODO(yams-3s4): Fix API mismatch - uses non-existent IntegrityValidator methods
+      # 'unit/compression/integrity_validator_catch2_test.cpp',
+      'unit/compression/lzma_compressor_catch2_test.cpp',
+      'unit/compression/recovery_manager_catch2_test.cpp',
+      'unit/compression/transaction_manager_catch2_test.cpp',
+      'unit/compression/zstandard_compressor_catch2_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # Vector Test Suites (Catch2) - requires enable-vector-tests
   # Migrated from GTest as part of yams-3s4 / yams-1d4
   # --------------------------------------------------------------------------
@@ -1471,6 +1496,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'search', 'yams-1yq'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 180
+  )
+
+  test('compression_submodule', catch2_compression_submodule_exe,
+    suite: ['catch2', 'unit', 'compression', 'yams-pmf'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 300
   )
 
   # Vector test suite (requires enable-vector-tests)

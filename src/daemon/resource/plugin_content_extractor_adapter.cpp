@@ -140,6 +140,9 @@ PluginContentExtractorAdapter::extractExternal(const std::vector<std::byte>& byt
     if (!ext.host)
         return std::nullopt;
 
+    // Serialize access to the external plugin process (can only handle one request at a time)
+    std::lock_guard<std::mutex> lock(externalMutex_);
+
     try {
         // Encode bytes as base64 for JSON transport
         // Use a simple base64 encoding
@@ -212,6 +215,16 @@ PluginContentExtractorAdapter::extractExternal(const std::vector<std::byte>& byt
         spdlog::warn("PluginContentExtractorAdapter[{}]: extraction failed: {}", name_, e.what());
         return std::nullopt;
     }
+}
+
+bool PluginContentExtractorAdapter::isBusy() const {
+    if (!isExternal())
+        return false;
+    if (externalMutex_.try_lock()) {
+        externalMutex_.unlock();
+        return false;
+    }
+    return true;
 }
 
 } // namespace yams::daemon

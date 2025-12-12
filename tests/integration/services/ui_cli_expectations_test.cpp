@@ -852,8 +852,8 @@ TEST_F(UiCliExpectationsIT, JsonOutputStructurePathsOnly) {
 
     auto result = yams::test_async::res(searchSvc->search(sreq), 2s);
     ASSERT_TRUE(result) << result.error().message;
-    // For now just assert non-empty JSON string when requested
-    EXPECT_FALSE(result.value().jsonOutput.empty());
+    // JSON formatting happens in CLI layer; service returns paths vector
+    EXPECT_FALSE(result.value().paths.empty());
 }
 
 // 12) Search — explicit hash search normalization

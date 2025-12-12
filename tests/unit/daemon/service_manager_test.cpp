@@ -159,15 +159,7 @@ TEST_F(ServiceManagerTest, ResizeWorkerPool) {
     });
 }
 
-// Test 13: Resize post-ingest threads returns result
-TEST_F(ServiceManagerTest, ResizePostIngestThreads) {
-    ServiceManager sm(config_, state_, lifecycleFsm_);
-
-    EXPECT_NO_THROW({
-        bool result = sm.resizePostIngestThreads(2);
-        (void)result;
-    });
-}
+// Test 13: Removed - resizePostIngestThreads API no longer exists
 
 // Test 14: getWorkerQueueDepth doesn't crash
 TEST_F(ServiceManagerTest, GetWorkerQueueDepth) {

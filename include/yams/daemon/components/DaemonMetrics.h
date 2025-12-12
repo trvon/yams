@@ -87,6 +87,11 @@ struct MetricsSnapshot {
     std::size_t postIngestFailed{0};
     double postIngestLatencyMsEma{0.0};
     double postIngestRateSecEma{0.0};
+    // KG pipeline metrics
+    std::size_t kgQueued{0};
+    std::size_t kgDropped{0};
+    std::size_t kgConsumed{0};
+    std::size_t kgInFlight{0};
 
     // Readiness and init progress
     std::map<std::string, bool> readinessStates; // subsystem -> ready

@@ -162,6 +162,12 @@ public:
         std::string hash;
         std::string mime;
     };
+    struct KgJob {
+        std::string hash;
+        int64_t documentId{-1};
+        std::string filePath;
+        std::vector<std::string> tags;
+    };
     struct StoreDocumentTask {
         AddDocumentRequest request;
     };
@@ -200,6 +206,9 @@ private:
     std::atomic<std::uint64_t> postQueued_{0};
     std::atomic<std::uint64_t> postDropped_{0};
     std::atomic<std::uint64_t> postConsumed_{0};
+    std::atomic<std::uint64_t> kgQueued_{0};
+    std::atomic<std::uint64_t> kgDropped_{0};
+    std::atomic<std::uint64_t> kgConsumed_{0};
 
 public:
     // Counter helpers
@@ -233,6 +242,9 @@ public:
     void incPostQueued() { postQueued_.fetch_add(1, std::memory_order_relaxed); }
     void incPostDropped() { postDropped_.fetch_add(1, std::memory_order_relaxed); }
     void incPostConsumed() { postConsumed_.fetch_add(1, std::memory_order_relaxed); }
+    void incKgQueued() { kgQueued_.fetch_add(1, std::memory_order_relaxed); }
+    void incKgDropped() { kgDropped_.fetch_add(1, std::memory_order_relaxed); }
+    void incKgConsumed() { kgConsumed_.fetch_add(1, std::memory_order_relaxed); }
 
     std::uint64_t embedQueued() const { return embedQueued_.load(std::memory_order_relaxed); }
     std::uint64_t embedDropped() const { return embedDropped_.load(std::memory_order_relaxed); }
@@ -258,6 +270,9 @@ public:
     std::uint64_t postQueued() const { return postQueued_.load(std::memory_order_relaxed); }
     std::uint64_t postDropped() const { return postDropped_.load(std::memory_order_relaxed); }
     std::uint64_t postConsumed() const { return postConsumed_.load(std::memory_order_relaxed); }
+    std::uint64_t kgQueued() const { return kgQueued_.load(std::memory_order_relaxed); }
+    std::uint64_t kgDropped() const { return kgDropped_.load(std::memory_order_relaxed); }
+    std::uint64_t kgConsumed() const { return kgConsumed_.load(std::memory_order_relaxed); }
 };
 
 } // namespace yams::daemon
