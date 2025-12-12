@@ -264,9 +264,12 @@ public:
     getContentExtractors() const {
         return contentExtractors_;
     }
-    // Symbol extractors (ABI adapters)
+    // Symbol extractors (ABI adapters) - delegate to PluginManager
     const std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>>& getSymbolExtractors() const {
-        return symbolExtractors_;
+        if (pluginManager_) {
+            return pluginManager_->getSymbolExtractors();
+        }
+        return symbolExtractors_; // Empty fallback
     }
 
     // Knowledge Graph Store (PBI-059)

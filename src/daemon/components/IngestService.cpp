@@ -133,7 +133,12 @@ static void processTask(ServiceManager* sm, const InternalEventBus::StoreDocumen
                          serviceResp.hash, serviceResp.bytesStored, serviceResp.bytesDeduped);
 
             if (sm && sm->getPostIngestQueue() && !serviceResp.hash.empty()) {
+                spdlog::info("[IngestService] Enqueuing post-ingest for hash={}", serviceResp.hash);
                 sm->enqueuePostIngest(serviceResp.hash, req.mimeType);
+            } else {
+                spdlog::warn("[IngestService] Post-ingest skipped: sm={} piq={} hash_empty={}",
+                             sm != nullptr, sm ? (sm->getPostIngestQueue() != nullptr) : false,
+                             serviceResp.hash.empty());
             }
         }
     }

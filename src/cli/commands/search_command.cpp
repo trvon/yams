@@ -571,17 +571,19 @@ public:
         cli_ = cli;
 
         auto* cmd = app.add_subcommand("search", getDescription());
-        // Removed positional query to avoid option-name collision; prefer -q/--query or extras
         // Provide flagged alias to safely pass queries beginning with '-'
         cmd->add_option("-q,--query", query_, "Search query (use when the query starts with '-')");
+        // Define a positional option for the query - this allows options anywhere in command line
+        cmd->add_option("query_positional", extraArgs_, "Search query terms")
+            ->expected(0, -1); // Accept 0 or more positional arguments
         cmd->add_option("--path", pathFilter_, "Filter results by path pattern (optional)");
         // Query input sources
         cmd->add_flag("--stdin", readStdin_, "Read query from STDIN if not provided");
         cmd->add_option("--query-file", queryFile_,
                         "Read query from file path (use '-' to read from STDIN)");
-        cmd->allow_extras();
 
-        cmd->add_option("-l,--limit", limit_, "Maximum number of results")->default_val(20);
+        auto* limitOpt =
+            cmd->add_option("-l,--limit", limit_, "Maximum number of results")->default_val(20);
 
         cmd->add_option("-t,--type", searchType_, "Search type (keyword, semantic, hybrid)")
             ->default_val("hybrid");
@@ -685,9 +687,9 @@ public:
         cmd->add_option("--indexed-before", indexedBefore_,
                         "Indexed before (ISO/relative/natural)");
 
+        // limitOpt is unused but kept for potential future diagnostics
+        (void)limitOpt;
         cmd->callback([this, cmd]() {
-            // Capture extras for folding into the query string
-            this->extraArgs_ = cmd->remaining();
             cli_->setPendingCommand(this);
             // Apply local inversion flags captured above
             // Note: CLI11 stores flag states; re-fetch via app to avoid capture issues
@@ -888,7 +890,8 @@ public:
                 spdlog::debug(
                     "Search query contained invalid UTF-8; sanitized for IPC transmission");
             }
-            dreq.limit = static_cast<size_t>(limit_);
+            // Request one extra result to account for potential deduplication
+            dreq.limit = static_cast<size_t>(limit_) + 1;
             dreq.fuzzy = fuzzySearch_; // honor explicit CLI flag; fallback logic will retry
             dreq.literalText = literalText_;
             dreq.similarity = (minSimilarity_ > 0.0f) ? static_cast<double>(minSimilarity_) : 0.7;
@@ -1293,7 +1296,8 @@ public:
         if (dreq.query != query_) {
             spdlog::debug("Search query contained invalid UTF-8; sanitized for IPC transmission");
         }
-        dreq.limit = static_cast<size_t>(limit_);
+        // Request one extra result to account for potential deduplication
+        dreq.limit = static_cast<size_t>(limit_) + 1;
         dreq.fuzzy = fuzzySearch_;
         dreq.literalText = literalText_;
         dreq.similarity = (minSimilarity_ > 0.0f) ? static_cast<double>(minSimilarity_) : 0.7;

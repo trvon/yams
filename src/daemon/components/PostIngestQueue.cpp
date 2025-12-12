@@ -40,8 +40,11 @@ PostIngestQueue::~PostIngestQueue() {
 }
 
 void PostIngestQueue::start() {
+    spdlog::info("[PostIngestQueue] start() called, stop_={}", stop_.load());
     if (!stop_.load()) {
+        spdlog::info("[PostIngestQueue] Spawning channelPoller coroutine...");
         boost::asio::co_spawn(coordinator_->getExecutor(), channelPoller(), boost::asio::detached);
+        spdlog::info("[PostIngestQueue] Spawning kgPoller coroutine...");
         boost::asio::co_spawn(coordinator_->getExecutor(), kgPoller(), boost::asio::detached);
 
         constexpr int maxWaitMs = 100;
@@ -51,6 +54,8 @@ void PostIngestQueue::start() {
 
         spdlog::info("[PostIngestQueue] Pollers started (extraction={}, kg={})",
                      started_.load(), kgStarted_.load());
+    } else {
+        spdlog::warn("[PostIngestQueue] start() skipped because stop_=true");
     }
 }
 
@@ -60,13 +65,16 @@ void PostIngestQueue::stop() {
 }
 
 boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
+    spdlog::info("[PostIngestQueue] channelPoller coroutine STARTED");
     const std::size_t channelCapacity =
         std::max<std::size_t>(65536, TuneAdvisor::postIngestQueueMax());
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
             "post_ingest", channelCapacity);
+    spdlog::info("[PostIngestQueue] channelPoller got channel (cap={})", channelCapacity);
 
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+    spdlog::info("[PostIngestQueue] channelPoller got timer");
 
     started_.store(true);
 

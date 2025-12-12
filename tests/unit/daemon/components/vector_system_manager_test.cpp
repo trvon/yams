@@ -11,6 +11,7 @@
 #include <yams/daemon/components/StateComponent.h>
 
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 
 using namespace yams::daemon;
@@ -101,6 +102,13 @@ TEST_CASE_METHOD(VectorSystemManagerFixture,
     }
 
     SECTION("second call to initializeOnce skips work") {
+        // Skip this test if vectors are disabled - the semantics change
+        if (std::getenv("YAMS_SQLITE_VEC_SKIP_INIT") ||
+            std::getenv("YAMS_DISABLE_VECTORS") ||
+            std::getenv("YAMS_DISABLE_VECTOR_DB")) {
+            SKIP("Vector initialization disabled - skipping initializeOnce semantics test");
+        }
+
         auto result1 = mgr.initializeOnce(tempDir);
         auto result2 = mgr.initializeOnce(tempDir);
 

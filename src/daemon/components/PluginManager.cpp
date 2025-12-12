@@ -628,10 +628,17 @@ Result<size_t> PluginManager::adoptSymbolExtractors() {
         // Clear existing extractors to avoid duplicates on re-adoption
         symbolExtractors_.clear();
 
+        // Use getActivePluginHost() to get the correct host (shared or owned)
+        auto* host = getActivePluginHost();
+        if (!host) {
+            spdlog::warn("[PluginManager] No active plugin host for symbol extractor adoption");
+            return Result<size_t>(0);
+        }
+
         size_t adopted =
             adoptPluginInterfaceImpl<yams_symbol_extractor_v1, AbiSymbolExtractorAdapter,
                                      AbiSymbolExtractorAdapter>(
-                pluginHost_.get(), "symbol_extractor_v1", YAMS_IFACE_SYMBOL_EXTRACTOR_V1_VERSION,
+                host, "symbol_extractor_v1", YAMS_IFACE_SYMBOL_EXTRACTOR_V1_VERSION,
                 symbolExtractors_, [](const yams_symbol_extractor_v1* table) {
                     return table->abi_version == YAMS_IFACE_SYMBOL_EXTRACTOR_V1_VERSION;
                 });

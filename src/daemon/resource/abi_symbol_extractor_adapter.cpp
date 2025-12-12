@@ -96,6 +96,10 @@ AbiSymbolExtractorAdapter::getSupportedExtensions() const {
                             std::string langId = lang["id"].get<std::string>();
                             for (const auto& ext : lang["extensions"]) {
                                 std::string extension = ext.get<std::string>();
+                                // Strip leading dot for consistency with callers
+                                if (!extension.empty() && extension[0] == '.') {
+                                    extension = extension.substr(1);
+                                }
                                 result[extension] = langId;
                             }
                         }
@@ -127,7 +131,12 @@ AbiSymbolExtractorAdapter::getSupportedExtensions() const {
                         }
 
                         if (supported) {
-                            result[ext] = lang;
+                            // Strip leading dot from extension for consistency with callers
+                            std::string extKey = ext;
+                            if (!extKey.empty() && extKey[0] == '.') {
+                                extKey = extKey.substr(1);
+                            }
+                            result[extKey] = lang;
                         }
                     }
 

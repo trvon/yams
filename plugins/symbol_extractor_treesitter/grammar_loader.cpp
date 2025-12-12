@@ -313,7 +313,12 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
         }
 
         auto have = [](const char* tool) {
-            return std::system((std::string("which ") + tool + " > /dev/null 2>&1").c_str()) == 0;
+#ifdef _WIN32
+            std::string cmd = std::string("where ") + tool + " > NUL 2>&1";
+#else
+            std::string cmd = std::string("which ") + tool + " > /dev/null 2>&1";
+#endif
+            return std::system(cmd.c_str()) == 0;
         };
         std::string cxx =
             have("g++") ? "g++" : (have("c++") ? "c++" : (have("clang++") ? "clang++" : ""));
@@ -424,7 +429,11 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
 bool GrammarDownloader::canAutoDownload() {
     // Check for required tools: git and at least one compiler
     auto have = [](const char* tool) {
+#ifdef _WIN32
+        std::string cmd = std::string("where ") + tool + " > NUL 2>&1";
+#else
         std::string cmd = std::string("which ") + tool + " > /dev/null 2>&1";
+#endif
         return std::system(cmd.c_str()) == 0;
     };
     bool has_git = have("git");

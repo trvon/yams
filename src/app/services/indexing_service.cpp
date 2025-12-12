@@ -9,6 +9,7 @@
 #include <yams/app/services/services.hpp>
 #include <yams/common/pattern_utils.h>
 #include <yams/crypto/hasher.h>
+#include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/metadata/tree_builder.h>
@@ -481,6 +482,27 @@ private:
                 fileResult.sizeBytes = result.value().bytesStored;
                 fileResult.success = true;
                 response.filesIndexed++;
+
+                // Dispatch to PostIngestQueue for entity extraction via InternalEventBus
+                if (!fileResult.hash.empty()) {
+                    try {
+                        auto channel = daemon::InternalEventBus::instance()
+                                           .get_or_create_channel<daemon::InternalEventBus::PostIngestTask>(
+                                               "post_ingest", 65536);
+                        if (channel) {
+                            daemon::InternalEventBus::PostIngestTask task;
+                            task.hash = fileResult.hash;
+                            // mime type not in response - PostIngestQueue will detect from metadata
+                            task.mime = "";
+                            if (!channel->try_push(std::move(task))) {
+                                spdlog::debug("[IndexingService] post_ingest channel full for {}",
+                                              fileResult.hash.substr(0, 12));
+                            }
+                        }
+                    } catch (...) {
+                        // Non-fatal: entity extraction is best-effort
+                    }
+                }
 
                 // Optional post-add verification
                 if (req.verify) {
