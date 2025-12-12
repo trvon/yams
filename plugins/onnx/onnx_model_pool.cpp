@@ -1183,60 +1183,18 @@ Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
     embConfig.enable_gpu = config_.enableGPU;
     embConfig.num_threads = config_.numThreads;
 
-    // Create resource pool for this model
-    spdlog::info("[ONNX Plugin] Creating ResourcePool with lazy loading (preCreate=false)");
     auto t0 = std::chrono::steady_clock::now();
     entry.pool = std::make_shared<ResourcePool<OnnxModelSession>>(
         poolConfig,
-        [modelPath, modelName, embConfig,
-         timeout = config_.modelLoadTimeout](const std::string& id) -> Result<ModelSessionPtr> {
-            spdlog::info("[ONNX Plugin] Pool factory lambda called for: {}", modelName);
-            (void)id;
-            // Bound session creation time to avoid hanging the pool indefinitely
-            // NOTE: On MSVC/Windows, std::async(std::launch::async, ...) can throw
-            // std::system_error("resource deadlock would occur") in some environments.
-            // Use an explicit std::thread + std::promise instead.
-            auto promise = std::make_shared<std::promise<Result<ModelSessionPtr>>>();
-            auto fut = promise->get_future();
-
-            std::thread worker;
+        [modelPath, modelName, embConfig](const std::string&) -> Result<ModelSessionPtr> {
             try {
-                worker = std::thread([modelPath, modelName, embConfig, promise]() {
-                    try {
-                        spdlog::info("[ONNX Plugin] Creating OnnxModelSession for: {}", modelName);
-                        auto session =
-                            std::make_shared<OnnxModelSession>(modelPath, modelName, embConfig);
-                        spdlog::info("[ONNX Plugin] OnnxModelSession created successfully for: {}",
-                                     modelName);
-                        promise->set_value(session);
-                    } catch (const std::exception& e) {
-                        promise->set_value(Error{ErrorCode::InternalError,
-                                     std::string("Failed to create model session: ") + e.what()});
-                    } catch (...) {
-                        promise->set_value(Error{ErrorCode::InternalError, "Unknown error creating ONNX session"});
-                    }
-                });
-            } catch (const std::system_error& e) {
-                spdlog::error("[ONNX Plugin] failed to start session creation thread: {} (category='{}' value={})",
-                              e.what(), e.code().category().name(), e.code().value());
-                return Error{ErrorCode::InternalError,
-                             std::string("session creation thread start failed: ") + e.what()};
+                return std::make_shared<OnnxModelSession>(modelPath, modelName, embConfig);
             } catch (const std::exception& e) {
-                spdlog::error("[ONNX Plugin] failed to start session creation thread: {}", e.what());
                 return Error{ErrorCode::InternalError,
-                             std::string("session creation thread start failed: ") + e.what()};
+                             std::string("Failed to create model session: ") + e.what()};
+            } catch (...) {
+                return Error{ErrorCode::InternalError, "Unknown error creating ONNX session"};
             }
-
-            if (fut.wait_for(timeout) == std::future_status::ready) {
-                if (worker.joinable())
-                    worker.join();
-                return fut.get();
-            }
-            spdlog::warn("[ONNX] Session creation timed out after {}s for model {}",
-                         timeout.count(), modelName);
-            // Match behavior: detach worker thread on timeout
-            worker.detach();
-            return Error{ErrorCode::Timeout, "Model load timed out"};
         },
         [](const OnnxModelSession& session) { return session.isValid(); });
     auto t1 = std::chrono::steady_clock::now();

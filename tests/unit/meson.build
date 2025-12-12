@@ -50,7 +50,7 @@ if tests_has_cli
     'cli/config_command_test.cpp',
     'cli/daemon_command_test.cpp',
     'cli/doctor_command_test.cpp',
-    'cli/init_command_test.cpp',
+    # init_command_test.cpp moved to Catch2 (init_command_catch2_test.cpp)
     'cli/model_command_test.cpp',
     'cli/recommendation_util_test.cpp',
     'cli/session_command_test.cpp',
@@ -250,7 +250,7 @@ unit_storage = files(
   'storage/reference_counter_test.cpp',
   'storage/reference_counter_stress_test.cpp',
   'storage/s3_signer_test.cpp',
-  'storage/test_storage_backend.cpp',
+  # test_storage_backend.cpp migrated to Catch2 - see tests/meson.build (storage_backend_catch2_test.cpp)
 )
 
 unit_vector = []

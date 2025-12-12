@@ -549,6 +549,22 @@ std::shared_ptr<app::services::AppContext> YamsCLI::getAppContext() {
 
 Result<void> YamsCLI::initializeStorage() {
     try {
+        // Validate dataPath_ is a reasonable filesystem path, not a CLI description
+        // This guards against CLI11 option description leaks into the data path
+        auto pathStr = dataPath_.string();
+        bool looksLikeDescription = 
+            pathStr.find('(') != std::string::npos ||  // CLI descriptions often have parens
+            pathStr.find('[') != std::string::npos ||  // [Deprecated] etc.
+            pathStr.length() > 200 ||                  // Paths shouldn't be this long
+            std::count(pathStr.begin(), pathStr.end(), ' ') > 3;  // Too many spaces
+        
+        if (looksLikeDescription) {
+            spdlog::error("Invalid data path (looks like CLI description): {}", pathStr);
+            return Error{ErrorCode::InvalidArgument, 
+                "Data path appears invalid: '" + pathStr.substr(0, 60) + 
+                "...' - please set YAMS_DATA_DIR or use --data-dir"};
+        }
+
         // Create data directory if it doesn't exist
         if (!std::filesystem::exists(dataPath_)) {
             std::filesystem::create_directories(dataPath_);
@@ -1140,17 +1156,27 @@ void YamsCLI::checkConfigMigration() {
         }
 
         if (needsResult.value()) {
-            std::cout << "\nConfiguration Migration Required\n";
-            std::cout << "YAMS needs to update your configuration to version 2.\n";
-            std::cout << "This will add new features and improve performance.\n\n";
-            std::cout << "Proceed with migration? [Y/n]: ";
-            std::cout.flush();
+            // In non-interactive mode (tests, CI), auto-accept migration
+            bool autoMigrate = false;
+            if (const char* env = std::getenv("YAMS_NON_INTERACTIVE"); env && *env) {
+                autoMigrate = true;
+            }
 
-            std::string response;
-            std::getline(std::cin, response);
+            if (!autoMigrate) {
+                std::cout << "\nConfiguration Migration Required\n";
+                std::cout << "YAMS needs to update your configuration to version 2.\n";
+                std::cout << "This will add new features and improve performance.\n\n";
+                std::cout << "Proceed with migration? [Y/n]: ";
+                std::cout.flush();
 
-            // Default to 'yes' if empty or starts with 'y'/'Y'
-            if (response.empty() || response[0] == 'y' || response[0] == 'Y') {
+                std::string response;
+                std::getline(std::cin, response);
+
+                // Default to 'yes' if empty or starts with 'y'/'Y'
+                autoMigrate = response.empty() || response[0] == 'y' || response[0] == 'Y';
+            }
+
+            if (autoMigrate) {
                 auto migrateResult = migrator.migrateToV2(configPath, true);
                 if (migrateResult) {
                     std::cout << "✅ Configuration successfully migrated to v2\n\n";

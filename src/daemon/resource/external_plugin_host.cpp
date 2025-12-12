@@ -131,35 +131,29 @@ struct ExternalPluginHost::Impl {
             return Error{ErrorCode::InvalidPath, "Directory does not exist: " + dir.string()};
         }
 
+        if (isPluginDirectory(dir)) {
+            if (auto r = scanTarget(dir)) {
+                results.push_back(std::move(r.value()));
+            }
+            return results;
+        }
+
         for (const auto& entry : fs::directory_iterator(dir)) {
-            // Check for plugin directories (contain yams-plugin.json)
             if (entry.is_directory()) {
                 if (isPluginDirectory(entry.path())) {
-                    auto scan_result = scanTarget(entry.path());
-                    if (scan_result) {
-                        results.push_back(std::move(scan_result.value()));
-                    } else {
-                        spdlog::debug("Skipping plugin dir {}: {}", entry.path().string(),
-                                      scan_result.error().message);
+                    if (auto r = scanTarget(entry.path())) {
+                        results.push_back(std::move(r.value()));
                     }
                 }
                 continue;
             }
 
-            // Check for standalone plugin files
-            if (!entry.is_regular_file()) {
-                continue;
-            }
-            if (!isExternalPluginFile(entry.path())) {
+            if (!entry.is_regular_file() || !isExternalPluginFile(entry.path())) {
                 continue;
             }
 
-            auto scan_result = scanTarget(entry.path());
-            if (scan_result) {
-                results.push_back(std::move(scan_result.value()));
-            } else {
-                spdlog::debug("Skipping {}: {}", entry.path().string(),
-                              scan_result.error().message);
+            if (auto r = scanTarget(entry.path())) {
+                results.push_back(std::move(r.value()));
             }
         }
 
@@ -784,10 +778,23 @@ private:
             fs::create_directories(parent, ec);
         }
 
+        // Read existing entries from file to merge with our in-memory set
+        // This handles the case where ABI and External hosts share the same trust file
+        std::set<fs::path> merged = trusted;
+        if (fs::exists(trust_file)) {
+            std::ifstream infile(trust_file);
+            std::string line;
+            while (std::getline(infile, line)) {
+                if (!line.empty() && line[0] != '#') {
+                    merged.insert(fs::weakly_canonical(line));
+                }
+            }
+        }
+
         std::ofstream file(trust_file);
-        file << "# YAMS External Plugin Trust List\n";
+        file << "# YAMS Plugin Trust List\n";
         file << "# One plugin path per line\n";
-        for (const auto& path : trusted) {
+        for (const auto& path : merged) {
             file << path.string() << "\n";
         }
     }

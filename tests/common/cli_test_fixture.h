@@ -44,12 +44,15 @@ protected:
         // Isolate config and data directories
         configEnv_.emplace("YAMS_CONFIG", (tempDir_ / "config.toml").string());
         dataEnv_.emplace("YAMS_DATA_DIR", (tempDir_ / "data").string());
+        // Skip interactive prompts (e.g., migration confirmation)
+        nonInteractiveEnv_.emplace("YAMS_NON_INTERACTIVE", "1");
     }
 
     void TearDown() override {
         // Reset environment first (before removing directory)
         configEnv_.reset();
         dataEnv_.reset();
+        nonInteractiveEnv_.reset();
 
         // Clean up temp directory
         std::error_code ec;
@@ -105,6 +108,7 @@ private:
     std::filesystem::path tempDir_;
     std::optional<ScopedEnvVar> configEnv_;
     std::optional<ScopedEnvVar> dataEnv_;
+    std::optional<ScopedEnvVar> nonInteractiveEnv_;
 };
 
 } // namespace yams::test

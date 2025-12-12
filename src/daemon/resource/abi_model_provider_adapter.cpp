@@ -107,8 +107,12 @@ AbiModelProviderAdapter::generateBatchEmbeddingsFor(const std::string& modelName
     auto st = table_->generate_embedding_batch(table_->self, modelName.c_str(), input_ptrs.data(),
                                                input_lens.data(), texts.size(), &vecs, &out_batch,
                                                &out_dim);
-    if (st != YAMS_OK)
+    if (st != YAMS_OK) {
+        spdlog::warn("[ABI Adapter] generate_embedding_batch failed for model '{}' (batch_size={}, "
+                     "status={})",
+                     modelName, texts.size(), static_cast<int>(st));
         return mapStatus(st, "generate_embedding_batch");
+    }
     std::vector<std::vector<float>> result;
     try {
         result.resize(out_batch);

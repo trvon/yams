@@ -37,6 +37,14 @@ std::filesystem::path get_config_dir() {
 }
 
 std::filesystem::path get_data_dir() {
+    // Check YAMS_DATA_DIR environment variable first (used by test fixtures)
+    if (const char* dataDir = std::getenv("YAMS_DATA_DIR"); dataDir && *dataDir) {
+        return std::filesystem::path(dataDir);
+    }
+    // Also check legacy YAMS_STORAGE env var for backwards compatibility
+    if (const char* storage = std::getenv("YAMS_STORAGE"); storage && *storage) {
+        return std::filesystem::path(storage);
+    }
 #ifdef _WIN32
     // Windows: Use LOCALAPPDATA for local data (databases, indices)
     if (const char* localAppData = std::getenv("LOCALAPPDATA")) {
@@ -166,6 +174,10 @@ std::string parse_config_value(const std::filesystem::path& config_path, const s
 std::filesystem::path get_config_path(const std::string& override_path) {
     if (!override_path.empty()) {
         return std::filesystem::path(override_path);
+    }
+    // Check YAMS_CONFIG environment variable first (used by test fixtures)
+    if (const char* configEnv = std::getenv("YAMS_CONFIG"); configEnv && *configEnv) {
+        return std::filesystem::path(configEnv);
     }
     // Use the platform-specific config directory helper
     return get_config_dir() / "config.toml";

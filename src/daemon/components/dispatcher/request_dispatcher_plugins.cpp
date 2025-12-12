@@ -1,7 +1,7 @@
 // Split from RequestDispatcher.cpp: plugin-related handlers
 #include <algorithm>
 #include <filesystem>
-
+#include <set>
 #include <vector>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/PluginHostFsm.h>
@@ -197,6 +197,8 @@ RequestDispatcher::handlePluginLoadRequest(const PluginLoadRequest& req) {
                                 lr = {true, "loaded", toRecord(r.value())};
                                 if (serviceManager_) {
                                     serviceManager_->adoptModelProviderFromHosts(lr.record.name);
+                                    // Refresh status snapshot so new plugin appears in list
+                                    serviceManager_->refreshPluginStatusSnapshot();
                                 }
                                 return true;
                             }
@@ -258,6 +260,10 @@ RequestDispatcher::handlePluginUnloadRequest(const PluginUnloadRequest& req) con
                     if (!ok)
                         co_return ErrorResponse{ErrorCode::NotFound,
                                                 "Plugin not found or unload failed"};
+                    // Refresh status snapshot so unloaded plugin is removed from list
+                    if (serviceManager_) {
+                        serviceManager_->refreshPluginStatusSnapshot();
+                    }
                     co_return SuccessResponse{"unloaded"};
                 });
         });
@@ -314,7 +320,44 @@ RequestDispatcher::handlePluginTrustAddRequest(const PluginTrustAddRequest& req)
                         [abi, external, path,
                          sm = serviceManager_]() -> boost::asio::awaitable<void> {
                             try {
-                                auto loadPlugins = [&](auto host, const auto& dir) {
+                                // Helper to get paths of already-loaded plugins
+                                auto getLoadedPaths = [](auto host) -> std::set<std::filesystem::path> {
+                                    std::set<std::filesystem::path> paths;
+                                    if (host) {
+                                        for (const auto& desc : host->listLoaded()) {
+                                            // Store both the exact path and parent directory
+                                            paths.insert(std::filesystem::weakly_canonical(desc.path));
+                                            if (desc.path.has_parent_path()) {
+                                                paths.insert(std::filesystem::weakly_canonical(
+                                                    desc.path.parent_path()));
+                                            }
+                                        }
+                                    }
+                                    return paths;
+                                };
+
+                                // Get paths of currently loaded plugins to skip scanning them
+                                auto abiLoadedPaths = getLoadedPaths(abi);
+                                auto externalLoadedPaths = getLoadedPaths(external);
+
+                                // Check if the path is already loaded (exact match or parent of loaded)
+                                auto isAlreadyLoaded = [](const std::filesystem::path& p,
+                                                          const std::set<std::filesystem::path>& loaded) {
+                                    auto canonical = std::filesystem::weakly_canonical(p);
+                                    return loaded.count(canonical) > 0;
+                                };
+
+                                // Skip entirely if path is already loaded
+                                bool skipAbi = isAlreadyLoaded(path, abiLoadedPaths);
+                                bool skipExternal = isAlreadyLoaded(path, externalLoadedPaths);
+
+                                if (skipAbi && skipExternal) {
+                                    spdlog::debug("trust add: path {} already loaded, skipping scan",
+                                                  path.string());
+                                    co_return;
+                                }
+
+                                auto loadPlugins = [](auto host, const auto& dir) {
                                     if (host) {
                                         if (auto r = host->scanDirectory(dir)) {
                                             for (const auto& d : r.value()) {
@@ -325,22 +368,27 @@ RequestDispatcher::handlePluginTrustAddRequest(const PluginTrustAddRequest& req)
                                 };
 
                                 if (std::filesystem::is_directory(path)) {
-                                    loadPlugins(abi, path);
-                                    loadPlugins(external, path);
+                                    if (!skipAbi)
+                                        loadPlugins(abi, path);
+                                    if (!skipExternal)
+                                        loadPlugins(external, path);
                                 } else if (std::filesystem::is_regular_file(path)) {
                                     // Route based on file type
                                     auto ext = path.extension().string();
                                     if (ext == ".py" || ext == ".js") {
-                                        if (external)
+                                        if (external && !skipExternal)
                                             (void)external->load(path, "");
                                     } else {
-                                        if (abi)
+                                        if (abi && !skipAbi)
                                             (void)abi->load(path, "");
                                     }
                                 }
 
-                                if (sm)
+                                if (sm) {
                                     (void)sm->adoptModelProviderFromHosts();
+                                    // Refresh status so newly loaded plugins appear in list
+                                    sm->refreshPluginStatusSnapshot();
+                                }
                             } catch (...) {
                                 // Handle exceptions silently
                             }

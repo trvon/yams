@@ -1,27 +1,33 @@
 #include <algorithm>
+#include <iostream>
 #include <sstream>
 #include <gtest/gtest.h>
 #include <yams/cli/yams_cli.h>
 
+#include "../../common/cli_test_fixture.h"
+
 using namespace yams;
 using namespace yams::cli;
+using namespace yams::test;
 
-TEST(DoctorCommandTest, PruneHelpDoesNotRunDoctorDiagnostics) {
+class DoctorCommandTest : public CliTestFixture {};
+
+TEST_F(DoctorCommandTest, PruneHelpDoesNotRunDoctorDiagnostics) {
     // When running `yams doctor prune` without arguments (help mode),
     // it should NOT execute the default doctor diagnostics (runAll)
 
     std::ostringstream output;
     std::streambuf* oldCout = std::cout.rdbuf(output.rdbuf());
 
-    // Create CLI instance
-    YamsCLI cli;
+    // Create CLI instance via fixture
+    auto cli = makeCli();
 
     // Parse args as if user ran: yams doctor prune
     const char* argv[] = {"yams", "doctor", "prune"};
     int argc = 3;
 
     // This should display prune help and NOT run doctor diagnostics
-    cli.run(argc, const_cast<char**>(argv));
+    cli->run(argc, const_cast<char**>(argv));
 
     std::cout.rdbuf(oldCout); // restore
 
@@ -36,11 +42,11 @@ TEST(DoctorCommandTest, PruneHelpDoesNotRunDoctorDiagnostics) {
     EXPECT_EQ(outputStr.find("Daemon Status"), std::string::npos);
 }
 
-TEST(DoctorCommandTest, PruneWithCategoryDoesNotRunDoctorDiagnostics) {
+TEST_F(DoctorCommandTest, PruneWithCategoryDoesNotRunDoctorDiagnostics) {
     std::ostringstream output;
     std::streambuf* oldCout = std::cout.rdbuf(output.rdbuf());
 
-    YamsCLI cli;
+    auto cli = makeCli();
 
     // Parse args: yams doctor prune --category build-artifacts
     const char* argv[] = {"yams", "doctor", "prune", "--category", "build-artifacts"};
@@ -48,7 +54,7 @@ TEST(DoctorCommandTest, PruneWithCategoryDoesNotRunDoctorDiagnostics) {
 
     // Note: This will fail if daemon not running, but that's OK for the test
     // We're just checking it doesn't run doctor diagnostics
-    cli.run(argc, const_cast<char**>(argv));
+    cli->run(argc, const_cast<char**>(argv));
 
     std::cout.rdbuf(oldCout);
 
@@ -62,17 +68,17 @@ TEST(DoctorCommandTest, PruneWithCategoryDoesNotRunDoctorDiagnostics) {
 // which may hang or take a long time. The key fix is ensuring subcommands
 // like "prune" don't trigger diagnostics.
 
-TEST(DoctorCommandTest, PruneHelpDisplaysWithoutErrors) {
+TEST_F(DoctorCommandTest, PruneHelpDisplaysWithoutErrors) {
     // Test that the UI frames are built correctly
     std::ostringstream output;
     std::streambuf* oldCout = std::cout.rdbuf(output.rdbuf());
 
-    YamsCLI cli;
+    auto cli = makeCli();
     const char* argv[] = {"yams", "doctor", "prune"};
     int argc = 3;
 
     // Should not throw
-    EXPECT_NO_THROW(cli.run(argc, const_cast<char**>(argv)));
+    EXPECT_NO_THROW(cli->run(argc, const_cast<char**>(argv)));
 
     std::cout.rdbuf(oldCout);
 

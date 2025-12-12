@@ -450,11 +450,29 @@ void AbiPluginLoader::loadTrust() {
 }
 
 void AbiPluginLoader::saveTrust() const {
+    namespace fs = std::filesystem;
     if (trustFile_.empty())
         return;
-    std::filesystem::create_directories(trustFile_.parent_path());
+    fs::create_directories(trustFile_.parent_path());
+
+    // Read existing entries from file to merge with our in-memory set
+    // This handles the case where ABI and External hosts share the same trust file
+    std::set<fs::path> merged = trusted_;
+    if (fs::exists(trustFile_)) {
+        std::ifstream infile(trustFile_);
+        std::string line;
+        while (std::getline(infile, line)) {
+            if (!line.empty() && line[0] != '#') {
+                std::error_code ec;
+                merged.insert(fs::weakly_canonical(line, ec));
+            }
+        }
+    }
+
     std::ofstream out(trustFile_);
-    for (const auto& p : trusted_)
+    out << "# YAMS Plugin Trust List\n";
+    out << "# One plugin path per line\n";
+    for (const auto& p : merged)
         out << p.string() << "\n";
 }
 

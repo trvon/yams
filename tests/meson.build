@@ -825,6 +825,30 @@ if catch2_dep.found()
     install: false,
   )
 
+  # CLI Test Suites (Catch2)
+  # --------------------------------------------------------------------------
+  
+  catch2_cli_init_command_exe = executable('catch2_cli_init_command',
+    files('unit/cli/init_command_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # Storage Test Suites (Catch2)
+  # --------------------------------------------------------------------------
+  
+  catch2_storage_backend_exe = executable('catch2_storage_backend',
+    files('unit/storage/storage_backend_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # Metadata Test Suites (4 executables)
   # --------------------------------------------------------------------------
   
@@ -1266,5 +1290,17 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'extractor'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
+  )
+
+  test('cli_init_command', catch2_cli_init_command_exe,
+    suite: ['catch2', 'unit', 'cli', 'init'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
+  )
+
+  test('storage_backend', catch2_storage_backend_exe,
+    suite: ['catch2', 'unit', 'storage', 'backend'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
   )
 endif

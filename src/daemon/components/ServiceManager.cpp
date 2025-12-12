@@ -209,8 +209,10 @@ void ServiceManager::refreshPluginStatusSnapshot() {
         }
 
         // PBI-096: External (Python/JS) plugins
+        spdlog::info("[refreshPluginStatusSnapshot] Checking external plugins, pluginManager_={}", (void*)pluginManager_.get());
         if (auto* external = getExternalPluginHost()) {
             auto externalLoaded = external->listLoaded();
+            spdlog::info("[refreshPluginStatusSnapshot] External host returned {} plugins", externalLoaded.size());
             // Reserve additional space for external plugins
             snapshot.records.reserve(snapshot.records.size() + externalLoaded.size());
             addPluginRecords(externalLoaded, "external");

@@ -6,12 +6,20 @@
 #include <yams/storage/storage_backend.h>
 #include <yams/storage/storage_backend_extended.h>
 
+extern "C" {
+#include <yams/plugins/abi.h>
+#include <yams/plugins/object_storage_v1.h>
+}
+
 #include <curl/curl.h>
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <regex>
 #include <sstream>
 #include <string>
@@ -660,6 +668,172 @@ Result<bool> S3Backend::verifyChecksum(std::string_view key, const std::string& 
 } // namespace yams::storage
 
 using namespace yams::storage;
+
+static const char* kManifestJson = R"JSON({
+  "name": "object_storage_s3",
+  "version": "0.1.0",
+  "interfaces": [
+    {"id": "object_storage_v1", "version": 1}
+  ]
+})JSON";
+
+static yams_object_storage_v1 g_storage_v1;
+
+static int s3_create(const char* config_json, void** out_backend) {
+    if (!out_backend)
+        return YAMS_PLUGIN_ERR_INVALID;
+    auto* backend = new S3Backend();
+    BackendConfig cfg;
+    if (config_json) {
+        try {
+            auto j = nlohmann::json::parse(config_json);
+            if (j.contains("url"))
+                cfg.url = j["url"].get<std::string>();
+            if (j.contains("region"))
+                cfg.region = j["region"].get<std::string>();
+            if (j.contains("use_path_style"))
+                cfg.usePathStyle = j["use_path_style"].get<bool>();
+            if (j.contains("request_timeout"))
+                cfg.requestTimeout = j["request_timeout"].get<int>();
+            if (j.contains("storage_class"))
+                cfg.storageClass = j["storage_class"].get<std::string>();
+            if (j.contains("sse_kms_key_id"))
+                cfg.sseKmsKeyId = j["sse_kms_key_id"].get<std::string>();
+            if (j.contains("checksum_algorithm"))
+                cfg.checksumAlgorithm = j["checksum_algorithm"].get<std::string>();
+            if (j.contains("credentials") && j["credentials"].is_object()) {
+                for (auto& [k, v] : j["credentials"].items()) {
+                    if (v.is_string())
+                        cfg.credentials[k] = v.get<std::string>();
+                }
+            }
+        } catch (...) {
+        }
+    }
+    auto r = backend->initialize(cfg);
+    if (!r) {
+        delete backend;
+        return YAMS_PLUGIN_ERR_INIT_FAILED;
+    }
+    *out_backend = backend;
+    return YAMS_PLUGIN_OK;
+}
+
+static void s3_destroy(void* backend) {
+    delete static_cast<S3Backend*>(backend);
+}
+
+static int s3_put(void* backend, const char* key, const void* buf, size_t len, const char*) {
+    if (!backend || !key || !buf)
+        return YAMS_PLUGIN_ERR_INVALID;
+    auto* s3 = static_cast<S3Backend*>(backend);
+    auto r = s3->store(key, std::span<const std::byte>(static_cast<const std::byte*>(buf), len));
+    return r ? YAMS_PLUGIN_OK : YAMS_PLUGIN_ERR_INVALID;
+}
+
+static int s3_get(void* backend, const char* key, void** out_buf, size_t* out_len, const char*) {
+    if (!backend || !key || !out_buf || !out_len)
+        return YAMS_PLUGIN_ERR_INVALID;
+    auto* s3 = static_cast<S3Backend*>(backend);
+    auto r = s3->retrieve(key);
+    if (!r)
+        return YAMS_PLUGIN_ERR_NOT_FOUND;
+    auto& data = r.value();
+    void* buf = std::malloc(data.size());
+    if (!buf)
+        return YAMS_PLUGIN_ERR_INVALID;
+    std::memcpy(buf, data.data(), data.size());
+    *out_buf = buf;
+    *out_len = data.size();
+    return YAMS_PLUGIN_OK;
+}
+
+static int s3_head(void* backend, const char* key, char** out_metadata_json, const char*) {
+    if (!backend || !key || !out_metadata_json)
+        return YAMS_PLUGIN_ERR_INVALID;
+    auto* s3 = static_cast<S3Backend*>(backend);
+    auto r = s3->exists(key);
+    if (!r || !r.value())
+        return YAMS_PLUGIN_ERR_NOT_FOUND;
+    *out_metadata_json = strdup("{}");
+    return YAMS_PLUGIN_OK;
+}
+
+static int s3_del(void* backend, const char* key, const char*) {
+    if (!backend || !key)
+        return YAMS_PLUGIN_ERR_INVALID;
+    auto* s3 = static_cast<S3Backend*>(backend);
+    auto r = s3->remove(key);
+    return r ? YAMS_PLUGIN_OK : YAMS_PLUGIN_ERR_INVALID;
+}
+
+static int s3_list(void* backend, const char* prefix, char** out_list_json, const char*) {
+    if (!backend || !out_list_json)
+        return YAMS_PLUGIN_ERR_INVALID;
+    auto* s3 = static_cast<S3Backend*>(backend);
+    auto r = s3->list(prefix ? prefix : "");
+    if (!r)
+        return YAMS_PLUGIN_ERR_INVALID;
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& k : r.value())
+        arr.push_back(k);
+    std::string json_str = arr.dump();
+    *out_list_json = strdup(json_str.c_str());
+    return YAMS_PLUGIN_OK;
+}
+
+extern "C" {
+
+YAMS_PLUGIN_API int yams_plugin_get_abi_version(void) {
+    return YAMS_PLUGIN_ABI_VERSION;
+}
+
+YAMS_PLUGIN_API const char* yams_plugin_get_name(void) {
+    return "object_storage_s3";
+}
+
+YAMS_PLUGIN_API const char* yams_plugin_get_version(void) {
+    return "0.1.0";
+}
+
+YAMS_PLUGIN_API const char* yams_plugin_get_manifest_json(void) {
+    return kManifestJson;
+}
+
+YAMS_PLUGIN_API int yams_plugin_init(const char*, const void*) {
+    g_storage_v1.size = sizeof(yams_object_storage_v1);
+    g_storage_v1.version = 1;
+    g_storage_v1.create = s3_create;
+    g_storage_v1.destroy = s3_destroy;
+    g_storage_v1.put = s3_put;
+    g_storage_v1.get = s3_get;
+    g_storage_v1.head = s3_head;
+    g_storage_v1.del = s3_del;
+    g_storage_v1.list = s3_list;
+    return YAMS_PLUGIN_OK;
+}
+
+YAMS_PLUGIN_API void yams_plugin_shutdown(void) {}
+
+YAMS_PLUGIN_API int yams_plugin_get_interface(const char* id, uint32_t version, void** out_iface) {
+    if (!id || !out_iface)
+        return YAMS_PLUGIN_ERR_INVALID;
+    *out_iface = nullptr;
+    if (version == 1 && std::strcmp(id, "object_storage_v1") == 0) {
+        *out_iface = &g_storage_v1;
+        return YAMS_PLUGIN_OK;
+    }
+    return YAMS_PLUGIN_ERR_NOT_FOUND;
+}
+
+YAMS_PLUGIN_API int yams_plugin_get_health_json(char** out_json) {
+    if (!out_json)
+        return YAMS_PLUGIN_ERR_INVALID;
+    *out_json = strdup("{\"status\":\"ok\"}");
+    return YAMS_PLUGIN_OK;
+}
+
+}
 
 extern "C" yams::storage::IStorageBackend* yams_plugin_create_object_storage() {
     return new S3Backend();

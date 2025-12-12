@@ -2,18 +2,18 @@
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
 
-using namespace yams::cli;
+#include "../../common/cli_test_fixture.h"
 
-TEST(ModelCommandCLI, ListsAndShowsInfo) {
-    {
-        YamsCLI cli;
-        const char* argv1[] = {"yams", "model", "--list"};
-        (void)cli.run(static_cast<int>(std::size(argv1)), const_cast<char**>(argv1));
-    }
-    {
-        YamsCLI cli;
-        const char* argv2[] = {"yams", "model", "--info", "all-MiniLM-L6-v2"};
-        (void)cli.run(static_cast<int>(std::size(argv2)), const_cast<char**>(argv2));
-    }
+using namespace yams::cli;
+using namespace yams::test;
+
+class ModelCommandCLITest : public CliTestFixture {};
+
+TEST_F(ModelCommandCLITest, ListsAndShowsInfo) {
+    // Test --list flag
+    EXPECT_EQ(runCommand({"yams", "model", "--list"}), 0);
+
+    // Test --info flag (may return non-zero if model not installed, but should not crash)
+    (void)runCommand({"yams", "model", "--info", "all-MiniLM-L6-v2"});
     SUCCEED();
 }

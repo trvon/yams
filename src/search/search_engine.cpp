@@ -341,15 +341,15 @@ public:
 private:
     Result<SearchResponse> searchInternal(const std::string& query, const SearchParams& params);
 
-    // Component query methods
-    Result<std::vector<ComponentResult>> queryFTS5(const std::string& query);
-    Result<std::vector<ComponentResult>> queryPathTree(const std::string& query);
-    Result<std::vector<ComponentResult>> querySymbols(const std::string& query);
-    Result<std::vector<ComponentResult>> queryKnowledgeGraph(const std::string& query);
-    Result<std::vector<ComponentResult>> queryVectorIndex(const std::vector<float>& embedding);
+    Result<std::vector<ComponentResult>> queryFTS5(const std::string& query, size_t limit);
+    Result<std::vector<ComponentResult>> queryPathTree(const std::string& query, size_t limit);
+    Result<std::vector<ComponentResult>> querySymbols(const std::string& query, size_t limit);
+    Result<std::vector<ComponentResult>> queryKnowledgeGraph(const std::string& query, size_t limit);
+    Result<std::vector<ComponentResult>> queryVectorIndex(const std::vector<float>& embedding,
+                                                          size_t limit);
     Result<std::vector<ComponentResult>> queryTags(const std::vector<std::string>& tags,
-                                                   bool matchAll);
-    Result<std::vector<ComponentResult>> queryMetadata(const SearchParams& params);
+                                                   bool matchAll, size_t limit);
+    Result<std::vector<ComponentResult>> queryMetadata(const SearchParams& params, size_t limit);
 
     std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<vector::VectorDatabase> vectorDb_;
@@ -396,22 +396,37 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
     }
 
+    const size_t userLimit = params.limit > 0 ? static_cast<size_t>(params.limit) : config_.maxResults;
+    const size_t componentCap = std::max(userLimit * 3, static_cast<size_t>(50));
+
+    SearchEngineConfig workingConfig = config_;
+    workingConfig.fts5MaxResults = std::min(config_.fts5MaxResults, componentCap);
+    workingConfig.pathTreeMaxResults = std::min(config_.pathTreeMaxResults, componentCap);
+    workingConfig.symbolMaxResults = std::min(config_.symbolMaxResults, componentCap);
+    workingConfig.kgMaxResults = std::min(config_.kgMaxResults, componentCap);
+    workingConfig.vectorMaxResults = std::min(config_.vectorMaxResults, componentCap);
+    workingConfig.tagMaxResults = std::min(config_.tagMaxResults, componentCap);
+    workingConfig.metadataMaxResults = std::min(config_.metadataMaxResults, componentCap);
+    workingConfig.maxResults = userLimit;
+
+    spdlog::debug("Search limit optimization: userLimit={}, componentCap={}", userLimit, componentCap);
+
     std::vector<ComponentResult> allComponentResults;
     size_t estimatedResults = 0;
-    if (config_.fts5Weight > 0.0f)
-        estimatedResults += config_.fts5MaxResults;
-    if (config_.kgWeight > 0.0f)
-        estimatedResults += config_.kgMaxResults;
-    if (config_.pathTreeWeight > 0.0f)
-        estimatedResults += config_.pathTreeMaxResults;
-    if (config_.symbolWeight > 0.0f)
-        estimatedResults += config_.symbolMaxResults;
-    if (config_.vectorWeight > 0.0f)
-        estimatedResults += config_.vectorMaxResults;
-    if (config_.tagWeight > 0.0f)
-        estimatedResults += config_.tagMaxResults;
-    if (config_.metadataWeight > 0.0f)
-        estimatedResults += config_.metadataMaxResults;
+    if (workingConfig.fts5Weight > 0.0f)
+        estimatedResults += workingConfig.fts5MaxResults;
+    if (workingConfig.kgWeight > 0.0f)
+        estimatedResults += workingConfig.kgMaxResults;
+    if (workingConfig.pathTreeWeight > 0.0f)
+        estimatedResults += workingConfig.pathTreeMaxResults;
+    if (workingConfig.symbolWeight > 0.0f)
+        estimatedResults += workingConfig.symbolMaxResults;
+    if (workingConfig.vectorWeight > 0.0f)
+        estimatedResults += workingConfig.vectorMaxResults;
+    if (workingConfig.tagWeight > 0.0f)
+        estimatedResults += workingConfig.tagMaxResults;
+    if (workingConfig.metadataWeight > 0.0f)
+        estimatedResults += workingConfig.metadataMaxResults;
     allComponentResults.reserve(estimatedResults);
 
     if (config_.enableParallelExecution) {
@@ -424,40 +439,45 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         std::future<Result<std::vector<ComponentResult>>> metaFuture;
 
         if (config_.fts5Weight > 0.0f) {
-            fts5Future =
-                std::async(std::launch::async, [this, &query]() { return queryFTS5(query); });
+            fts5Future = std::async(std::launch::async, [this, &query, &workingConfig]() {
+                return queryFTS5(query, workingConfig.fts5MaxResults);
+            });
         }
 
         if (config_.kgWeight > 0.0f && kgStore_) {
-            kgFuture = std::async(std::launch::async,
-                                  [this, &query]() { return queryKnowledgeGraph(query); });
+            kgFuture = std::async(std::launch::async, [this, &query, &workingConfig]() {
+                return queryKnowledgeGraph(query, workingConfig.kgMaxResults);
+            });
         }
 
         if (config_.pathTreeWeight > 0.0f) {
-            pathFuture =
-                std::async(std::launch::async, [this, &query]() { return queryPathTree(query); });
+            pathFuture = std::async(std::launch::async, [this, &query, &workingConfig]() {
+                return queryPathTree(query, workingConfig.pathTreeMaxResults);
+            });
         }
 
         if (config_.symbolWeight > 0.0f) {
-            symbolFuture =
-                std::async(std::launch::async, [this, &query]() { return querySymbols(query); });
+            symbolFuture = std::async(std::launch::async, [this, &query, &workingConfig]() {
+                return querySymbols(query, workingConfig.symbolMaxResults);
+            });
         }
 
         if (config_.vectorWeight > 0.0f && queryEmbedding.has_value() && vectorIndex_) {
-            vectorFuture = std::async(std::launch::async, [this, &queryEmbedding]() {
-                return queryVectorIndex(queryEmbedding.value());
+            vectorFuture = std::async(std::launch::async, [this, &queryEmbedding, &workingConfig]() {
+                return queryVectorIndex(queryEmbedding.value(), workingConfig.vectorMaxResults);
             });
         }
 
         if (config_.tagWeight > 0.0f && !params.tags.empty()) {
-            tagFuture = std::async(std::launch::async, [this, &params]() {
-                return queryTags(params.tags, params.matchAllTags);
+            tagFuture = std::async(std::launch::async, [this, &params, &workingConfig]() {
+                return queryTags(params.tags, params.matchAllTags, workingConfig.tagMaxResults);
             });
         }
 
         if (config_.metadataWeight > 0.0f) {
-            metaFuture =
-                std::async(std::launch::async, [this, &params]() { return queryMetadata(params); });
+            metaFuture = std::async(std::launch::async, [this, &params, &workingConfig]() {
+                return queryMetadata(params, workingConfig.metadataMaxResults);
+            });
         }
 
         enum class ComponentStatus { Success, Failed, TimedOut };
@@ -559,39 +579,40 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             }
         };
 
-        runSequential([&]() { return queryFTS5(query); }, "fts5", config_.fts5Weight,
-                      stats_.fts5Queries, stats_.avgFts5TimeMicros);
+        runSequential([&]() { return queryFTS5(query, workingConfig.fts5MaxResults); }, "fts5",
+                      config_.fts5Weight, stats_.fts5Queries, stats_.avgFts5TimeMicros);
 
         if (kgStore_) {
-            runSequential([&]() { return queryKnowledgeGraph(query); }, "kg", config_.kgWeight,
-                          stats_.kgQueries, stats_.avgKgTimeMicros);
+            runSequential([&]() { return queryKnowledgeGraph(query, workingConfig.kgMaxResults); },
+                          "kg", config_.kgWeight, stats_.kgQueries, stats_.avgKgTimeMicros);
         }
 
-        runSequential([&]() { return queryPathTree(query); }, "path", config_.pathTreeWeight,
-                      stats_.pathTreeQueries, stats_.avgPathTreeTimeMicros);
+        runSequential([&]() { return queryPathTree(query, workingConfig.pathTreeMaxResults); },
+                      "path", config_.pathTreeWeight, stats_.pathTreeQueries,
+                      stats_.avgPathTreeTimeMicros);
 
-        runSequential([&]() { return querySymbols(query); }, "symbol", config_.symbolWeight,
-                      stats_.symbolQueries, stats_.avgSymbolTimeMicros);
+        runSequential([&]() { return querySymbols(query, workingConfig.symbolMaxResults); },
+                      "symbol", config_.symbolWeight, stats_.symbolQueries,
+                      stats_.avgSymbolTimeMicros);
 
         if (queryEmbedding.has_value() && vectorIndex_) {
-            runSequential([&]() { return queryVectorIndex(queryEmbedding.value()); }, "vector",
-                          config_.vectorWeight, stats_.vectorQueries, stats_.avgVectorTimeMicros);
+            runSequential(
+                [&]() { return queryVectorIndex(queryEmbedding.value(), workingConfig.vectorMaxResults); },
+                "vector", config_.vectorWeight, stats_.vectorQueries, stats_.avgVectorTimeMicros);
         }
 
         if (!params.tags.empty()) {
-            runSequential([&]() { return queryTags(params.tags, params.matchAllTags); }, "tag",
-                          config_.tagWeight, stats_.tagQueries, stats_.avgTagTimeMicros);
+            runSequential(
+                [&]() { return queryTags(params.tags, params.matchAllTags, workingConfig.tagMaxResults); },
+                "tag", config_.tagWeight, stats_.tagQueries, stats_.avgTagTimeMicros);
         }
 
-        runSequential([&]() { return queryMetadata(params); }, "metadata", config_.metadataWeight,
-                      stats_.metadataQueries, stats_.avgMetadataTimeMicros);
+        runSequential([&]() { return queryMetadata(params, workingConfig.metadataMaxResults); },
+                      "metadata", config_.metadataWeight, stats_.metadataQueries,
+                      stats_.avgMetadataTimeMicros);
     }
 
-    auto fusionConfig = config_;
-    if (params.limit > 0) {
-        fusionConfig.maxResults = static_cast<size_t>(params.limit);
-    }
-    ResultFusion fusion(fusionConfig);
+    ResultFusion fusion(workingConfig);
     response.results = fusion.fuse(allComponentResults);
     response.timedOutComponents = std::move(timedOut);
     response.failedComponents = std::move(failed);
@@ -624,7 +645,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     return response;
 }
 
-Result<std::vector<ComponentResult>> SearchEngine::Impl::queryFTS5(const std::string& query) {
+Result<std::vector<ComponentResult>> SearchEngine::Impl::queryFTS5(const std::string& query,
+                                                                    size_t limit) {
     std::vector<ComponentResult> results;
 
     if (!metadataRepo_) {
@@ -632,8 +654,7 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryFTS5(const std::st
     }
 
     try {
-        // Use MetadataRepository::search() for FTS5 queries
-        auto searchResults = metadataRepo_->search(query, config_.fts5MaxResults, 0);
+        auto searchResults = metadataRepo_->search(query, limit, 0);
 
         if (!searchResults) {
             spdlog::debug("FTS5 search failed: {}", searchResults.error().message);
@@ -670,7 +691,8 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryFTS5(const std::st
     return results;
 }
 
-Result<std::vector<ComponentResult>> SearchEngine::Impl::queryPathTree(const std::string& query) {
+Result<std::vector<ComponentResult>> SearchEngine::Impl::queryPathTree(const std::string& query,
+                                                                        size_t limit) {
     std::vector<ComponentResult> results;
 
     if (!metadataRepo_) {
@@ -678,13 +700,9 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryPathTree(const std
     }
 
     try {
-        // Strategy: Search for documents whose paths match the query string
-        // Use path prefix matching and path component matching
-
-        // Query for documents with matching path components
         yams::metadata::DocumentQueryOptions options;
-        options.containsFragment = query; // Use query as path fragment
-        options.limit = config_.pathTreeMaxResults;
+        options.containsFragment = query;
+        options.limit = static_cast<int>(limit);
 
         auto docResults = metadataRepo_->queryDocuments(options);
         if (!docResults) {
@@ -736,7 +754,8 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryPathTree(const std
     return results;
 }
 
-Result<std::vector<ComponentResult>> SearchEngine::Impl::querySymbols(const std::string& query) {
+Result<std::vector<ComponentResult>> SearchEngine::Impl::querySymbols(const std::string& query,
+                                                                       size_t limit) {
     std::vector<ComponentResult> results;
 
     if (!metadataRepo_) {
@@ -744,14 +763,14 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::querySymbols(const std:
     }
 
     try {
-        auto fts5Results = metadataRepo_->search(query, config_.symbolMaxResults * 2, 0);
+        auto fts5Results = metadataRepo_->search(query, limit * 2, 0);
         if (!fts5Results) {
             spdlog::debug("Symbol search failed: {}", fts5Results.error().message);
             return results;
         }
 
         for (size_t rank = 0; rank < fts5Results.value().results.size(); ++rank) {
-            if (results.size() >= config_.symbolMaxResults) {
+            if (results.size() >= limit) {
                 break;
             }
 
@@ -798,21 +817,17 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::querySymbols(const std:
 }
 
 Result<std::vector<ComponentResult>>
-SearchEngine::Impl::queryKnowledgeGraph(const std::string& query) {
+SearchEngine::Impl::queryKnowledgeGraph(const std::string& query, size_t limit) {
     std::vector<ComponentResult> results;
 
     if (!kgStore_) {
-        // KG store not available, skip
         return results;
     }
 
     try {
-        // Strategy: Use KnowledgeGraphStore to resolve aliases matching the query
-        // Try fuzzy matching first (includes FTS5)
-        auto aliasResults = kgStore_->resolveAliasFuzzy(query, config_.kgMaxResults);
+        auto aliasResults = kgStore_->resolveAliasFuzzy(query, limit);
         if (!aliasResults || aliasResults.value().empty()) {
-            // Fallback to exact match
-            aliasResults = kgStore_->resolveAliasExact(query, config_.kgMaxResults);
+            aliasResults = kgStore_->resolveAliasExact(query, limit);
             if (!aliasResults) {
                 spdlog::debug("KG alias resolution failed: {}", aliasResults.error().message);
                 return results;
@@ -822,7 +837,7 @@ SearchEngine::Impl::queryKnowledgeGraph(const std::string& query) {
         std::unordered_map<std::string, size_t> docHashToResultIndex;
 
         for (const auto& aliasRes : aliasResults.value()) {
-            if (results.size() >= config_.kgMaxResults) {
+            if (results.size() >= limit) {
                 break;
             }
 
@@ -840,7 +855,7 @@ SearchEngine::Impl::queryKnowledgeGraph(const std::string& query) {
             }
 
             for (const auto& searchResult : docResults.value().results) {
-                if (results.size() >= config_.kgMaxResults) {
+                if (results.size() >= limit) {
                     break;
                 }
 
@@ -883,7 +898,7 @@ SearchEngine::Impl::queryKnowledgeGraph(const std::string& query) {
 }
 
 Result<std::vector<ComponentResult>>
-SearchEngine::Impl::queryVectorIndex(const std::vector<float>& embedding) {
+SearchEngine::Impl::queryVectorIndex(const std::vector<float>& embedding, size_t limit) {
     std::vector<ComponentResult> results;
 
     if (!vectorIndex_) {
@@ -894,7 +909,7 @@ SearchEngine::Impl::queryVectorIndex(const std::vector<float>& embedding) {
         vector::SearchFilter filter;
         filter.min_similarity = config_.similarityThreshold;
 
-        auto vectorResults = vectorIndex_->search(embedding, config_.vectorMaxResults, filter);
+        auto vectorResults = vectorIndex_->search(embedding, limit, filter);
 
         if (!vectorResults) {
             spdlog::debug("Vector search failed: {}", vectorResults.error().message);
@@ -930,7 +945,7 @@ SearchEngine::Impl::queryVectorIndex(const std::vector<float>& embedding) {
 }
 
 Result<std::vector<ComponentResult>>
-SearchEngine::Impl::queryTags(const std::vector<std::string>& tags, bool matchAll) {
+SearchEngine::Impl::queryTags(const std::vector<std::string>& tags, bool matchAll, size_t limit) {
     std::vector<ComponentResult> results;
 
     if (!metadataRepo_ || tags.empty()) {
@@ -944,8 +959,7 @@ SearchEngine::Impl::queryTags(const std::vector<std::string>& tags, bool matchAl
             return results;
         }
 
-        for (size_t rank = 0; rank < tagResults.value().size() && rank < config_.tagMaxResults;
-             ++rank) {
+        for (size_t rank = 0; rank < tagResults.value().size() && rank < limit; ++rank) {
             const auto& doc = tagResults.value()[rank];
 
             ComponentResult result;
@@ -992,14 +1006,14 @@ SearchEngine::Impl::queryTags(const std::vector<std::string>& tags, bool matchAl
     return results;
 }
 
-Result<std::vector<ComponentResult>> SearchEngine::Impl::queryMetadata(const SearchParams& params) {
+Result<std::vector<ComponentResult>> SearchEngine::Impl::queryMetadata(const SearchParams& params,
+                                                                        size_t limit) {
     std::vector<ComponentResult> results;
 
     if (!metadataRepo_) {
         return results;
     }
 
-    // Only run if we have metadata filters
     bool hasFilters = params.mimeType.has_value() || params.extension.has_value() ||
                       params.modifiedAfter.has_value() || params.modifiedBefore.has_value();
 
@@ -1013,7 +1027,7 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryMetadata(const Sea
         options.extension = params.extension;
         options.modifiedAfter = params.modifiedAfter;
         options.modifiedBefore = params.modifiedBefore;
-        options.limit = static_cast<int>(config_.metadataMaxResults);
+        options.limit = static_cast<int>(limit);
 
         auto docResults = metadataRepo_->queryDocuments(options);
         if (!docResults) {

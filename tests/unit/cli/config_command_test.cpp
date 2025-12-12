@@ -34,12 +34,23 @@ protected:
         testConfigHome_ = testHome_ / "config";
         fs::create_directories(testConfigHome_);
 
+        // Use YAMS_CONFIG and YAMS_DATA_DIR for cross-platform isolation
+        // These are checked first by get_config_path() and get_data_dir()
+        setenv("YAMS_CONFIG", (testConfigHome_ / "config.toml").string().c_str(), 1);
+        setenv("YAMS_DATA_DIR", testDataHome_.string().c_str(), 1);
+        // Skip interactive prompts (e.g., migration confirmation)
+        setenv("YAMS_NON_INTERACTIVE", "1", 1);
+
+        // Also set XDG vars for Unix compatibility
         setenv("XDG_DATA_HOME", testDataHome_.string().c_str(), 1);
         setenv("XDG_CONFIG_HOME", testConfigHome_.string().c_str(), 1);
     }
 
     void TearDown() override {
         fs::remove_all(testHome_);
+        unsetenv("YAMS_CONFIG");
+        unsetenv("YAMS_DATA_DIR");
+        unsetenv("YAMS_NON_INTERACTIVE");
         unsetenv("XDG_DATA_HOME");
         unsetenv("XDG_CONFIG_HOME");
     }

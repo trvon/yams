@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <random>
 #include <thread>
 #include <catch2/catch_test_macros.hpp>
 #include <yams/compat/unistd.h>
@@ -16,14 +17,112 @@
 namespace yams::daemon {
 namespace fs = std::filesystem;
 
+/**
+ * RAII helper to set and restore environment variables.
+ * Defined locally to avoid dependency on GTest-based test_helpers.h
+ */
+class ScopedEnv {
+public:
+    ScopedEnv(const char* name, const char* value) : name_(name) {
+        if (const char* old = std::getenv(name)) {
+            hadValue_ = true;
+            oldValue_ = old;
+        }
+        set(value);
+    }
+
+    ~ScopedEnv() {
+        if (hadValue_) {
+            set(oldValue_.c_str());
+        } else {
+            unset();
+        }
+    }
+
+    ScopedEnv(const ScopedEnv&) = delete;
+    ScopedEnv& operator=(const ScopedEnv&) = delete;
+    
+    // Move support for reassignment
+    ScopedEnv(ScopedEnv&& other) noexcept
+        : name_(std::move(other.name_)),
+          oldValue_(std::move(other.oldValue_)),
+          hadValue_(other.hadValue_),
+          active_(other.active_) {
+        other.active_ = false;
+    }
+
+    ScopedEnv& operator=(ScopedEnv&& other) noexcept {
+        if (this != &other) {
+            if (active_) {
+                if (hadValue_) {
+                    set(oldValue_.c_str());
+                } else {
+                    unset();
+                }
+            }
+            name_ = std::move(other.name_);
+            oldValue_ = std::move(other.oldValue_);
+            hadValue_ = other.hadValue_;
+            active_ = other.active_;
+            other.active_ = false;
+        }
+        return *this;
+    }
+
+private:
+    void set(const char* value) {
+#ifdef _WIN32
+        _putenv_s(name_.c_str(), value);
+#else
+        setenv(name_.c_str(), value, 1);
+#endif
+    }
+
+    void unset() {
+#ifdef _WIN32
+        _putenv_s(name_.c_str(), "");
+#else
+        unsetenv(name_.c_str());
+#endif
+    }
+
+    std::string name_;
+    std::string oldValue_;
+    bool hadValue_{false};
+    bool active_{true};
+};
+
+// Generate a unique suffix for test directories to avoid collisions
+inline std::string uniqueSuffix() {
+    static std::atomic<int> counter{0};
+    auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    return std::to_string(::getpid()) + "_" + std::to_string(now) + "_" + std::to_string(counter++);
+}
+
 struct PluginHostFixture {
-    PluginHostFixture() {
-        tempDir_ = fs::temp_directory_path() / ("yams_ph_" + std::to_string(::getpid()));
+    // RAII env var management - declared first so they're destroyed last
+    ScopedEnv xdgConfigEnv_;
+    ScopedEnv testingEnv_;
+    ScopedEnv pluginPolicyEnv_;
+    ScopedEnv configEnv_;
+    ScopedEnv dataEnv_;
+    
+    fs::path tempDir_;
+    fs::path trustFile_;
+
+    PluginHostFixture()
+        : xdgConfigEnv_("XDG_CONFIG_HOME", ""),  // placeholder, updated below
+          testingEnv_("YAMS_TESTING", "1"),
+          pluginPolicyEnv_("YAMS_PLUGIN_NAME_POLICY", "spec"),
+          configEnv_("YAMS_CONFIG", ""),
+          dataEnv_("YAMS_DATA_DIR", ""),
+          tempDir_(fs::temp_directory_path() / ("yams_ph_" + uniqueSuffix())),
+          trustFile_(tempDir_ / "plugins_trust.txt") {
         fs::create_directories(tempDir_);
-        trustFile_ = tempDir_ / "plugins_trust.txt";
-        ::setenv("XDG_CONFIG_HOME", tempDir_.string().c_str(), 1);
-        ::setenv("YAMS_TESTING", "1", 1);
-        ::setenv("YAMS_PLUGIN_NAME_POLICY", "spec", 1);
+        // Update env vars with actual temp dir paths
+        xdgConfigEnv_ = ScopedEnv("XDG_CONFIG_HOME", tempDir_.string().c_str());
+        configEnv_ = ScopedEnv("YAMS_CONFIG", (tempDir_ / "config.toml").string().c_str());
+        dataEnv_ = ScopedEnv("YAMS_DATA_DIR", tempDir_.string().c_str());
     }
 
     ~PluginHostFixture() {
@@ -33,18 +132,38 @@ struct PluginHostFixture {
 
     fs::path makeFile(std::string_view name, std::string_view content = "") {
         auto p = tempDir_ / name;
+        fs::create_directories(p.parent_path());
         std::ofstream{p, std::ios::binary} << content;
         return p;
     }
-
-    fs::path tempDir_;
-    fs::path trustFile_;
 };
 
 struct RequestDispatcherFixture {
-    RequestDispatcherFixture() {
-        tempDir_ = fs::temp_directory_path() / ("yams_rdph_" + std::to_string(::getpid()));
+    // RAII env var management - declared first so they're destroyed last
+    // (after resources that may depend on them during shutdown)
+    ScopedEnv xdgConfigEnv_;
+    ScopedEnv testingEnv_;
+    ScopedEnv configEnv_;
+    ScopedEnv dataEnv_;
+    
+    fs::path tempDir_;
+    std::unique_ptr<StateComponent> state_;
+    std::unique_ptr<DaemonLifecycleFsm> lifecycleFsm_;
+    std::unique_ptr<ServiceManager> svc_;
+    std::unique_ptr<RequestDispatcher> dispatcher_;
+
+    RequestDispatcherFixture()
+        : xdgConfigEnv_("XDG_CONFIG_HOME", ""),  // placeholder, set after tempDir_ known
+          testingEnv_("YAMS_TESTING", "1"),
+          configEnv_("YAMS_CONFIG", ""),
+          dataEnv_("YAMS_DATA_DIR", ""),
+          tempDir_(fs::temp_directory_path() / ("yams_rdph_" + uniqueSuffix())) {
+        // Now update env vars with actual temp dir path
         fs::create_directories(tempDir_);
+        xdgConfigEnv_ = ScopedEnv("XDG_CONFIG_HOME", tempDir_.string().c_str());
+        configEnv_ = ScopedEnv("YAMS_CONFIG", (tempDir_ / "config.toml").string().c_str());
+        dataEnv_ = ScopedEnv("YAMS_DATA_DIR", tempDir_.string().c_str());
+        
         state_ = std::make_unique<StateComponent>();
         lifecycleFsm_ = std::make_unique<DaemonLifecycleFsm>();
 
@@ -58,19 +177,15 @@ struct RequestDispatcherFixture {
     }
 
     ~RequestDispatcherFixture() {
-        std::error_code ec;
-        fs::remove_all(tempDir_, ec);
+        // Reset in reverse dependency order before env vars are restored
         dispatcher_.reset();
         svc_.reset();
         lifecycleFsm_.reset();
         state_.reset();
+        
+        std::error_code ec;
+        fs::remove_all(tempDir_, ec);
     }
-
-    fs::path tempDir_;
-    std::unique_ptr<StateComponent> state_;
-    std::unique_ptr<DaemonLifecycleFsm> lifecycleFsm_;
-    std::unique_ptr<ServiceManager> svc_;
-    std::unique_ptr<RequestDispatcher> dispatcher_;
 };
 
 TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {

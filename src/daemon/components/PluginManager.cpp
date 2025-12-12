@@ -102,11 +102,11 @@ Result<void> PluginManager::initialize() {
 
     // Initialize ExternalPluginHost for Python/JS plugins
     try {
-        std::filesystem::path externalTrustFile = deps_.dataDir / "external_plugins.trust";
+        std::filesystem::path externalTrustFile = deps_.dataDir / "plugins.trust";
         ExternalPluginHostConfig externalConfig;
         externalHost_ =
             std::make_unique<ExternalPluginHost>(nullptr, externalTrustFile, externalConfig);
-        spdlog::info("[PluginManager] ExternalPluginHost initialized with trust file: {}",
+        spdlog::info("[PluginManager] ExternalPluginHost initialized (unified trust file: {})",
                      externalTrustFile.string());
     } catch (const std::exception& e) {
         spdlog::warn("[PluginManager] Failed to initialize ExternalPluginHost: {}", e.what());

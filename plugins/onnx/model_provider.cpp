@@ -429,18 +429,32 @@ struct ProviderSingleton {
             if (!self || !model_id || !input || !out_vec || !out_dim)
                 return YAMS_ERR_INVALID_ARG;
             auto* c = static_cast<ProviderCtx*>(self);
-            if (c->disabled)
+            if (c->disabled) {
+                spdlog::warn("[ONNX Plugin] generate_embedding: plugin disabled");
                 return YAMS_ERR_UNSUPPORTED;
-            if (!c->ready || !c->pool)
+            }
+            if (!c->ready) {
+                spdlog::warn("[ONNX Plugin] generate_embedding: plugin not ready");
                 return YAMS_ERR_INTERNAL;
+            }
+            if (!c->pool) {
+                spdlog::warn("[ONNX Plugin] generate_embedding: pool is null");
+                return YAMS_ERR_INTERNAL;
+            }
             std::string text(reinterpret_cast<const char*>(input), input_len);
             auto h = c->pool->acquireModel(model_id, std::chrono::seconds(30));
-            if (!h)
+            if (!h) {
+                spdlog::warn("[ONNX Plugin] acquireModel failed for {}: {}", model_id,
+                             h.error().message);
                 return YAMS_ERR_INTERNAL;
+            }
             auto& session = *h.value();
             auto r = const_cast<yams::daemon::OnnxModelSession&>(session).generateEmbedding(text);
-            if (!r)
+            if (!r) {
+                spdlog::warn("[ONNX Plugin] generateEmbedding failed for {}: {}", model_id,
+                             r.error().message);
                 return YAMS_ERR_INTERNAL;
+            }
             auto& vec = r.value();
             const size_t n = vec.size();
             float* buf = static_cast<float*>(std::malloc(sizeof(float) * n));
@@ -464,9 +478,19 @@ struct ProviderSingleton {
             if (!self || !model_id || !inputs || !input_lens || !out_vecs || !out_batch || !out_dim)
                 return YAMS_ERR_INVALID_ARG;
             auto* c = static_cast<ProviderCtx*>(self);
-            if (c->disabled)
+            if (c->disabled) {
+                spdlog::warn("[ONNX Plugin] generate_embedding_batch: plugin disabled");
                 return YAMS_ERR_UNSUPPORTED;
-            if (!c->ready || !c->pool) {
+            }
+            if (!c->ready) {
+                spdlog::warn("[ONNX Plugin] generate_embedding_batch: plugin not ready");
+                *out_vecs = nullptr;
+                *out_batch = 0;
+                *out_dim = 0;
+                return YAMS_ERR_INTERNAL;
+            }
+            if (!c->pool) {
+                spdlog::warn("[ONNX Plugin] generate_embedding_batch: pool is null");
                 *out_vecs = nullptr;
                 *out_batch = 0;
                 *out_dim = 0;
@@ -477,16 +501,22 @@ struct ProviderSingleton {
             for (size_t i = 0; i < batch_size; ++i) {
                 texts.emplace_back(reinterpret_cast<const char*>(inputs[i]), input_lens[i]);
             }
+            spdlog::debug("[ONNX Plugin] generate_embedding_batch: model={} batch_size={}",
+                          model_id, batch_size);
             auto h = c->pool->acquireModel(model_id, std::chrono::seconds(30));
             if (!h) {
-                spdlog::warn("[ONNX Plugin] acquireModel failed for {} (batch)", model_id);
+                spdlog::warn("[ONNX Plugin] acquireModel failed for '{}' (batch): {}", model_id,
+                             h.error().message);
                 return YAMS_ERR_INTERNAL;
             }
             auto& session = *h.value();
             auto r =
                 const_cast<yams::daemon::OnnxModelSession&>(session).generateBatchEmbeddings(texts);
-            if (!r)
+            if (!r) {
+                spdlog::warn("[ONNX Plugin] generateBatchEmbeddings failed for {}: {}", model_id,
+                             r.error().message);
                 return YAMS_ERR_INTERNAL;
+            }
             auto& mat = r.value();
             if (mat.empty()) {
                 *out_vecs = nullptr;

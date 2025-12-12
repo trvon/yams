@@ -150,6 +150,113 @@ TEST_CASE("ExternalPluginHost - Trust Management", "[external-plugin][host][trus
             CHECK(trustList.size() == 1);
         }
     }
+
+    SECTION("Adding already-trusted path is idempotent") {
+        auto pluginPath = fixture.makeFile("idempotent_plugin.py", "# test");
+
+        // Add first time
+        auto addResult1 = host.trustAdd(pluginPath);
+        REQUIRE(addResult1.has_value());
+        CHECK(host.trustList().size() == 1);
+
+        // Add second time - should succeed without error and not duplicate
+        auto addResult2 = host.trustAdd(pluginPath);
+        REQUIRE(addResult2.has_value());
+        CHECK(host.trustList().size() == 1);
+    }
+
+    SECTION("Trust paths with varying depth levels") {
+        // Create 10 paths with varying depths
+        std::vector<fs::path> paths;
+
+        // Depth 0 - root level file
+        paths.push_back(fixture.makeFile("plugin_root.py", "# root"));
+
+        // Depth 1
+        fs::create_directories(fixture.tempDir_ / "level1");
+        paths.push_back(fixture.tempDir_ / "level1" / "plugin_d1.py");
+        std::ofstream{paths.back()} << "# depth 1";
+
+        // Depth 2
+        fs::create_directories(fixture.tempDir_ / "level1" / "level2");
+        paths.push_back(fixture.tempDir_ / "level1" / "level2" / "plugin_d2.py");
+        std::ofstream{paths.back()} << "# depth 2";
+
+        // Depth 3
+        fs::create_directories(fixture.tempDir_ / "a" / "b" / "c");
+        paths.push_back(fixture.tempDir_ / "a" / "b" / "c" / "plugin_d3.py");
+        std::ofstream{paths.back()} << "# depth 3";
+
+        // Depth 4
+        fs::create_directories(fixture.tempDir_ / "deep" / "nested" / "path" / "here");
+        paths.push_back(fixture.tempDir_ / "deep" / "nested" / "path" / "here" / "plugin_d4.py");
+        std::ofstream{paths.back()} << "# depth 4";
+
+        // Depth 5
+        fs::create_directories(fixture.tempDir_ / "x" / "y" / "z" / "w" / "v");
+        paths.push_back(fixture.tempDir_ / "x" / "y" / "z" / "w" / "v" / "plugin_d5.py");
+        std::ofstream{paths.back()} << "# depth 5";
+
+        // More depth 1 variations
+        fs::create_directories(fixture.tempDir_ / "plugins");
+        paths.push_back(fixture.tempDir_ / "plugins" / "my_plugin.py");
+        std::ofstream{paths.back()} << "# plugins dir";
+
+        // Path with special characters (spaces, dashes)
+        fs::create_directories(fixture.tempDir_ / "my-plugins" / "sub dir");
+        paths.push_back(fixture.tempDir_ / "my-plugins" / "sub dir" / "special_plugin.py");
+        std::ofstream{paths.back()} << "# special chars";
+
+        // Directory trust (not file)
+        fs::create_directories(fixture.tempDir_ / "trusted_dir");
+        paths.push_back(fixture.tempDir_ / "trusted_dir");
+
+        // Another deep path
+        fs::create_directories(fixture.tempDir_ / "org" / "company" / "project" / "plugins");
+        paths.push_back(fixture.tempDir_ / "org" / "company" / "project" / "plugins" / "plugin.py");
+        std::ofstream{paths.back()} << "# org path";
+
+        REQUIRE(paths.size() == 10);
+
+        // Add all paths to trust
+        for (size_t i = 0; i < paths.size(); ++i) {
+            INFO("Adding trust for path " << i << ": " << paths[i].string());
+            auto result = host.trustAdd(paths[i]);
+            REQUIRE(result.has_value());
+        }
+
+        // Verify all paths are trusted
+        auto trustList = host.trustList();
+        CHECK(trustList.size() == 10);
+
+        // Re-add all paths (idempotency check)
+        for (size_t i = 0; i < paths.size(); ++i) {
+            INFO("Re-adding trust for path " << i << ": " << paths[i].string());
+            auto result = host.trustAdd(paths[i]);
+            REQUIRE(result.has_value());
+        }
+
+        // Count should still be 10 (no duplicates)
+        trustList = host.trustList();
+        CHECK(trustList.size() == 10);
+
+        // Verify each canonical path is in the list
+        for (const auto& path : paths) {
+            auto canonical = fs::weakly_canonical(path);
+            bool found = std::find(trustList.begin(), trustList.end(), canonical) != trustList.end();
+            INFO("Checking path: " << canonical.string());
+            CHECK(found);
+        }
+
+        // Remove paths one by one and verify count decreases
+        for (size_t i = 0; i < paths.size(); ++i) {
+            auto result = host.trustRemove(paths[i]);
+            REQUIRE(result.has_value());
+            CHECK(host.trustList().size() == (10 - i - 1));
+        }
+
+        CHECK(host.trustList().empty());
+    }
 }
 
 TEST_CASE("ExternalPluginHost - Scan Invalid Files", "[external-plugin][host][scan]") {
