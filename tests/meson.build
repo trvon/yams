@@ -904,6 +904,61 @@ if catch2_dep.found()
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
+
+  detection_exe = executable('detection',
+    files(
+      'unit/detection/command_integration_test.cpp',
+      'unit/detection/detection_test_helpers.h',
+      'unit/detection/file_type_detector_test.cpp',
+      'unit/detection/file_type_graceful_fallback_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # Plugins tests (Catch2 - migrated from GTest)
+  plugins_catch2_exe = executable('plugins_catch2',
+    files(
+      'unit/plugins/plugin_installer_test.cpp',
+      'unit/plugins/plugin_repo_client_test.cpp',
+      'unit/plugins/onnx_request_test.cpp',
+      'unit/plugins/symbol_extractor_query_test.cpp',
+      'unit/plugins/symbol_extractor_validation_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  
+  # Integrity tests (Catch2 - migrated from GTest)
+  integrity_test_deps = [
+    dependency('spdlog'),
+    dependency('yams_core'),
+    dependency('yams_crypto'),
+    dependency('yams_integrity'),
+    dependency('yams_storage_engine'),
+    dependency('yams_reference_counter'),
+  ]
+  
+  integrity_catch2_exe = executable('integrity_catch2',
+    files(
+      'unit/integrity/chunk_validator_test.cpp',
+      'unit/integrity/integrity_verifier_simple_test.cpp',
+      'unit/integrity/repair_manager_test.cpp',
+      'unit/integrity/verification_monitor_test.cpp',
+      'unit/integrity/verification_scheduler_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + integrity_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
   
   # Content tests (depends on content, extraction, detection modules)
   content_test_deps = [
@@ -1128,6 +1183,24 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'core', 'magic'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
+  )
+
+  test('detection', detection_exe,
+    suite: ['catch2', 'unit', 'detection'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+  
+  test('plugins_catch2', plugins_catch2_exe,
+    suite: ['catch2', 'unit', 'plugins'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+  
+  test('integrity_catch2', integrity_catch2_exe,
+    suite: ['catch2', 'unit', 'integrity'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
   )
   
   # Content tests

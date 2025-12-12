@@ -1,190 +1,147 @@
 #include <atomic>
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <span>
 #include <thread>
 #include <vector>
-#include <gtest/gtest.h>
+#include <catch2/catch_test_macros.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/detection/file_type_detector.h>
 
-namespace yams::detection {
+#include "detection_test_helpers.h"
+
+using namespace yams::detection;
+using yams::detection::test_utils::ScopedCurrentPath;
+using yams::detection::test_utils::TestDirectory;
 namespace fs = std::filesystem;
 
-class FileTypeGracefulFallbackTest : public ::testing::Test {
-protected:
-    void SetUp() override {
-        testDataDir = fs::current_path() / "test_data";
+namespace {
+struct GracefulFallbackFixture {
+    GracefulFallbackFixture()
+        : corruptedJsonPath(
+              dir.writeTextFile("corrupted.json", "{ invalid json content without closing brace")),
+          emptyJsonPath(dir.writeTextFile("empty.json", "")),
+          restrictedPath(dir.writeTextFile("restricted.json", "{}")),
+          nonExistentPath(dir.testDataDir() / "does_not_exist.json"), cwdGuard(dir.root()) {}
 
-        // Create corrupted JSON file
-        corruptedJsonPath = testDataDir / "corrupted.json";
-        std::ofstream corrupted(corruptedJsonPath);
-        corrupted << "{ invalid json content without closing brace";
-        corrupted.close();
-
-        // Create empty file
-        emptyJsonPath = testDataDir / "empty.json";
-        std::ofstream empty(emptyJsonPath);
-        empty.close();
-
-        // Create file with wrong permissions (if possible)
-        restrictedPath = testDataDir / "restricted.json";
-        std::ofstream restricted(restrictedPath);
-        restricted << "{}";
-        restricted.close();
-
-        nonExistentPath = testDataDir / "does_not_exist.json";
-    }
-
-    void TearDown() override {
-        // Clean up test files
-        for (const auto& path : {corruptedJsonPath, emptyJsonPath, restrictedPath}) {
-            if (fs::exists(path)) {
-                fs::remove(path);
-            }
-        }
-        // Clear detector state
-        FileTypeDetector::instance().clearCache();
-    }
-
-    fs::path testDataDir;
+    TestDirectory dir{};
     fs::path corruptedJsonPath;
     fs::path emptyJsonPath;
     fs::path restrictedPath;
     fs::path nonExistentPath;
+    ScopedCurrentPath cwdGuard;
 };
+} // namespace
 
-TEST_F(FileTypeGracefulFallbackTest, InitializeWithMissingFile) {
-    FileTypeDetectorConfig config;
+TEST_CASE_METHOD(GracefulFallbackFixture, "Initialization tolerates missing file",
+                 "[detection][fallback]") {
+    FileTypeDetectorConfig config{};
     config.patternsFile = nonExistentPath;
     config.useCustomPatterns = true;
     config.useBuiltinPatterns = true;
 
-    // Should succeed with built-in patterns
     auto result = FileTypeDetector::instance().initialize(config);
-    EXPECT_TRUE(result.has_value()) << "Should succeed when patterns file is missing";
+    REQUIRE(result);
 
-    // Should still be able to detect using built-in patterns
-    std::vector<std::byte> jpegData = {std::byte(0xFF), std::byte(0xD8), std::byte(0xFF)};
-
-    auto detectResult = FileTypeDetector::instance().detectFromBuffer(jpegData);
-    // May or may not succeed depending on built-in patterns, but shouldn't crash
-    EXPECT_NO_THROW(FileTypeDetector::instance().detectFromBuffer(jpegData));
+    std::array<std::byte, 3> jpegData{std::byte{0xFF}, std::byte{0xD8}, std::byte{0xFF}};
+    CHECK_NOTHROW(FileTypeDetector::instance().detectFromBuffer(jpegData));
 }
 
-TEST_F(FileTypeGracefulFallbackTest, InitializeWithCorruptedJSON) {
-    FileTypeDetectorConfig config;
+TEST_CASE_METHOD(GracefulFallbackFixture, "Corrupted JSON falls back to built-ins",
+                 "[detection][fallback]") {
+    FileTypeDetectorConfig config{};
     config.patternsFile = corruptedJsonPath;
     config.useCustomPatterns = true;
     config.useBuiltinPatterns = true;
 
-    // Should succeed with built-in patterns despite corrupted JSON
     auto result = FileTypeDetector::instance().initialize(config);
-    EXPECT_TRUE(result.has_value())
-        << "Should succeed with built-in patterns when JSON is corrupted";
+    REQUIRE(result);
 
-    // Classification methods should still work with built-in knowledge
-    EXPECT_NO_THROW({
-        FileTypeDetector::instance().isTextMimeType("text/plain");
-        FileTypeDetector::instance().isBinaryMimeType("image/jpeg");
-        FileTypeDetector::instance().getFileTypeCategory("image/png");
-    });
+    CHECK_NOTHROW(FileTypeDetector::instance().isTextMimeType("text/plain"));
+    CHECK_NOTHROW(FileTypeDetector::instance().isBinaryMimeType("image/jpeg"));
+    CHECK_NOTHROW(FileTypeDetector::instance().getFileTypeCategory("image/png"));
 }
 
-TEST_F(FileTypeGracefulFallbackTest, InitializeWithEmptyFile) {
-    FileTypeDetectorConfig config;
+TEST_CASE_METHOD(GracefulFallbackFixture, "Empty pattern file still initializes",
+                 "[detection][fallback]") {
+    FileTypeDetectorConfig config{};
     config.patternsFile = emptyJsonPath;
     config.useCustomPatterns = true;
     config.useBuiltinPatterns = true;
 
     auto result = FileTypeDetector::instance().initialize(config);
-    EXPECT_TRUE(result.has_value()) << "Should succeed when patterns file is empty";
+    REQUIRE(result);
 }
 
-TEST_F(FileTypeGracefulFallbackTest, LoadPatternsFromMissingFile) {
+TEST_CASE_METHOD(GracefulFallbackFixture, "Loading missing pattern file fails cleanly",
+                 "[detection][patterns]") {
     auto result = FileTypeDetector::instance().loadPatternsFromFile(nonExistentPath);
-    EXPECT_FALSE(result.has_value()) << "Should fail when file doesn't exist";
-
-    // But detector should still work with existing patterns
-    EXPECT_NO_THROW({ FileTypeDetector::instance().isTextMimeType("text/plain"); });
+    CHECK_FALSE(result);
+    CHECK_NOTHROW(FileTypeDetector::instance().isTextMimeType("text/plain"));
 }
 
-TEST_F(FileTypeGracefulFallbackTest, LoadPatternsFromCorruptedFile) {
+TEST_CASE_METHOD(GracefulFallbackFixture, "Loading corrupted patterns fails cleanly",
+                 "[detection][patterns]") {
     auto result = FileTypeDetector::instance().loadPatternsFromFile(corruptedJsonPath);
-    EXPECT_FALSE(result.has_value()) << "Should fail when JSON is corrupted";
-
-    // But detector should still work with existing patterns
-    EXPECT_NO_THROW({ FileTypeDetector::instance().getFileTypeCategory("image/jpeg"); });
+    CHECK_FALSE(result);
+    CHECK_NOTHROW(FileTypeDetector::instance().getFileTypeCategory("image/jpeg"));
 }
 
-TEST_F(FileTypeGracefulFallbackTest, FallbackToExtensionDetection) {
-    // Initialize with no custom patterns
-    FileTypeDetectorConfig config;
+TEST_CASE_METHOD(GracefulFallbackFixture, "Extension fallback still works",
+                 "[detection][fallback]") {
+    FileTypeDetectorConfig config{};
     config.useCustomPatterns = false;
     config.useBuiltinPatterns = true;
     FileTypeDetector::instance().initialize(config);
 
-    // Should fall back to extension-based MIME detection
-    EXPECT_EQ(FileTypeDetector::getMimeTypeFromExtension(".jpg"), "image/jpeg");
-    EXPECT_EQ(FileTypeDetector::getMimeTypeFromExtension(".txt"), "text/plain");
-    EXPECT_EQ(FileTypeDetector::getMimeTypeFromExtension(".unknown"), "application/octet-stream");
+    CHECK(FileTypeDetector::getMimeTypeFromExtension(".jpg") == "image/jpeg");
+    CHECK(FileTypeDetector::getMimeTypeFromExtension(".txt") == "text/plain");
+    CHECK(FileTypeDetector::getMimeTypeFromExtension(".unknown") == "application/octet-stream");
 }
 
-TEST_F(FileTypeGracefulFallbackTest, ClassificationMethodsWithoutPatterns) {
-    // Initialize with minimal configuration
-    FileTypeDetectorConfig config;
+TEST_CASE_METHOD(GracefulFallbackFixture, "Classification works without patterns",
+                 "[detection][fallback]") {
+    FileTypeDetectorConfig config{};
     config.useCustomPatterns = false;
-    config.useBuiltinPatterns = false; // Very minimal setup
+    config.useBuiltinPatterns = false;
     FileTypeDetector::instance().initialize(config);
 
-    // Classification methods should still work reasonably
-    EXPECT_NO_THROW({
-        bool isText = FileTypeDetector::instance().isTextMimeType("text/plain");
-        bool isBinary = FileTypeDetector::instance().isBinaryMimeType("image/jpeg");
-        std::string category = FileTypeDetector::instance().getFileTypeCategory("application/pdf");
+    bool isText = FileTypeDetector::instance().isTextMimeType("text/plain");
+    bool isBinary = FileTypeDetector::instance().isBinaryMimeType("image/jpeg");
+    auto category = FileTypeDetector::instance().getFileTypeCategory("application/pdf");
 
-        // Should give reasonable results even without patterns
-        EXPECT_TRUE(isText || !isText); // Just ensure no exception
-        EXPECT_TRUE(isBinary || !isBinary);
-        EXPECT_FALSE(category.empty());
-    });
+    CHECK((isText || !isText));
+    CHECK((isBinary || !isBinary));
+    CHECK_FALSE(category.empty());
 }
 
-TEST_F(FileTypeGracefulFallbackTest, DetectionWithoutInitialization) {
-    // Don't initialize the detector explicitly
-    std::vector<std::byte> someData = {std::byte(0x01), std::byte(0x02)};
-
-    // Should not crash even without explicit initialization
-    EXPECT_NO_THROW({
-        auto result = FileTypeDetector::instance().detectFromBuffer(someData);
-        // Result may fail, but shouldn't crash
-    });
+TEST_CASE_METHOD(GracefulFallbackFixture, "Detection works without explicit init",
+                 "[detection][fallback]") {
+    std::array<std::byte, 2> someData{std::byte{0x01}, std::byte{0x02}};
+    CHECK_NOTHROW(FileTypeDetector::instance().detectFromBuffer(someData));
 }
 
-TEST_F(FileTypeGracefulFallbackTest, FindMagicNumbersFile_NoFileFound) {
-    // Test the YamsCLI::findMagicNumbersFile function
-    // This will likely not find the file in test environment
-    auto path = cli::YamsCLI::findMagicNumbersFile();
+TEST_CASE_METHOD(GracefulFallbackFixture, "findMagicNumbersFile empty path still usable",
+                 "[detection][fallback]") {
+    auto path = yams::cli::YamsCLI::findMagicNumbersFile();
+    REQUIRE_NOTHROW(std::string(path.string()));
 
-    // Should return empty path gracefully (not crash)
-    EXPECT_NO_THROW({ std::string pathStr = path.string(); });
-
-    // If path is empty, detector should still work with built-in patterns
     if (path.empty()) {
-        FileTypeDetectorConfig config;
-        config.patternsFile = path; // Empty path
-        config.useCustomPatterns = !path.empty();
+        FileTypeDetectorConfig config{};
+        config.patternsFile = path;
+        config.useCustomPatterns = false;
         config.useBuiltinPatterns = true;
 
         auto result = FileTypeDetector::instance().initialize(config);
-        EXPECT_TRUE(result.has_value())
-            << "Should work even when findMagicNumbersFile returns empty";
+        CHECK(result);
     }
 }
 
-TEST_F(FileTypeGracefulFallbackTest, RobustConfigurationHandling) {
-    // Test with various configuration combinations
+TEST_CASE_METHOD(GracefulFallbackFixture, "Various configs handled gracefully",
+                 "[detection][fallback]") {
     std::vector<FileTypeDetectorConfig> configs = {
-        {}, // Default config
+        {},
         {.useLibMagic = false, .useBuiltinPatterns = true, .useCustomPatterns = false},
         {.useLibMagic = true, .useBuiltinPatterns = false, .useCustomPatterns = false},
         {.useLibMagic = false,
@@ -193,36 +150,26 @@ TEST_F(FileTypeGracefulFallbackTest, RobustConfigurationHandling) {
          .patternsFile = nonExistentPath}};
 
     for (const auto& config : configs) {
-        EXPECT_NO_THROW({
-            auto result = FileTypeDetector::instance().initialize(config);
-            // Should succeed or fail gracefully, never crash
-            EXPECT_TRUE(result.has_value() || !result.has_value());
-        }) << "Should handle configuration gracefully";
+        CHECK_NOTHROW(FileTypeDetector::instance().initialize(config));
     }
 }
 
-TEST_F(FileTypeGracefulFallbackTest, LargeBufferHandling) {
-    FileTypeDetectorConfig config;
-    config.maxBytesToRead = 10; // Very small limit
+TEST_CASE_METHOD(GracefulFallbackFixture, "Large buffers handled gracefully",
+                 "[detection][performance]") {
+    FileTypeDetectorConfig config{};
+    config.maxBytesToRead = 10;
     FileTypeDetector::instance().initialize(config);
 
-    // Create large buffer
-    std::vector<std::byte> largeBuffer(1000, std::byte(0x41)); // 1KB of 'A'
-
-    EXPECT_NO_THROW({
-        auto result = FileTypeDetector::instance().detectFromBuffer(largeBuffer);
-        // Should handle large buffers gracefully
-    });
+    std::vector<std::byte> largeBuffer(1000, std::byte{0x41});
+    CHECK_NOTHROW(FileTypeDetector::instance().detectFromBuffer(largeBuffer));
 }
 
-TEST_F(FileTypeGracefulFallbackTest, ConcurrentAccess) {
-    // Basic thread safety check - initialize detector
-    FileTypeDetectorConfig config;
+TEST_CASE_METHOD(GracefulFallbackFixture, "Concurrent access avoids exceptions",
+                 "[detection][concurrency]") {
+    FileTypeDetectorConfig config{};
     FileTypeDetector::instance().initialize(config);
 
-    std::vector<std::byte> testData = {std::byte(0xFF), std::byte(0xD8)};
-
-    // Multiple threads accessing classification methods
+    std::vector<std::byte> testData = {std::byte{0xFF}, std::byte{0xD8}};
     std::vector<std::thread> threads;
     std::atomic<int> exceptions{0};
 
@@ -245,7 +192,5 @@ TEST_F(FileTypeGracefulFallbackTest, ConcurrentAccess) {
         t.join();
     }
 
-    EXPECT_EQ(exceptions.load(), 0) << "Should handle concurrent access without exceptions";
+    CHECK(exceptions.load() == 0);
 }
-
-} // namespace yams::detection

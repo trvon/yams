@@ -316,14 +316,14 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
         // Defer vector DB initialization to async phase to avoid blocking daemon startup (PBI-057).
         spdlog::debug("[Startup] deferring vector DB init to async phase");
 
-        // PBI-088: Delegate trust setup to PluginManager which owns the FSM
-        // Auto-trust plugin directories (env, config, system) via PluginManager
-        if (pluginManager_) {
+        // Auto-trust plugin directories (env, config, system) via AbiPluginHost
+        // Note: Use abiHost_ directly since PluginManager is created later
+        if (abiHost_) {
             // Trust from env
             if (const char* env = std::getenv("YAMS_PLUGIN_DIR")) {
                 std::filesystem::path penv(env);
                 if (!penv.empty()) {
-                    if (auto tr = pluginManager_->trustAdd(penv); !tr) {
+                    if (auto tr = abiHost_->trustAdd(penv); !tr) {
                         spdlog::warn("Failed to auto-trust YAMS_PLUGIN_DIR {}: {}", penv.string(),
                                      tr.error().message);
                     }
@@ -333,7 +333,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             // Trust from config
             if (!config_.pluginDir.empty()) {
                 std::filesystem::path pconf = config_.pluginDir;
-                if (auto tr = pluginManager_->trustAdd(pconf); !tr) {
+                if (auto tr = abiHost_->trustAdd(pconf); !tr) {
                     spdlog::warn("Failed to trust configured pluginDir {}: {}", pconf.string(),
                                  tr.error().message);
                 } else {
@@ -343,7 +343,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
 
             // Trust explicit entries from config ([plugins].trusted_paths or daemon.trusted_paths)
             for (const auto& p : config_.trustedPluginPaths) {
-                if (auto tr = pluginManager_->trustAdd(p); !tr) {
+                if (auto tr = abiHost_->trustAdd(p); !tr) {
                     spdlog::warn("Failed to trust configured plugin path {}: {}", p.string(),
                                  tr.error().message);
                 } else {
@@ -356,7 +356,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             namespace fs = std::filesystem;
             fs::path system_plugins = fs::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins";
             if (fs::exists(system_plugins) && fs::is_directory(system_plugins)) {
-                if (auto tr = pluginManager_->trustAdd(system_plugins)) {
+                if (auto tr = abiHost_->trustAdd(system_plugins)) {
                     spdlog::info("Auto-trusted system plugin directory: {}",
                                  system_plugins.string());
                 } else {
@@ -365,7 +365,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             }
 #endif
         } else {
-            spdlog::debug("[ServiceManager] PluginManager not available for trust setup");
+            spdlog::debug("[ServiceManager] AbiPluginHost not available for trust setup");
         }
 
         try {

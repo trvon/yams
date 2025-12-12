@@ -1,500 +1,331 @@
 ---
-description: YAMS-based agent following task-driven development with persistent memory and checkpointing
-argument-hint: TASK=<task-id> [ACTION=<start|checkpoint|review|complete>]
+description: Agent using Beads for task tracking and YAMS for persistent memory/knowledge
+argument-hint: [TASK=<issue-id>] [ACTION=<start|checkpoint|complete>]
 ---
 
-# YAMS Agent - Task-Driven Development
+# Agent Workflow: Beads + YAMS
 
-**You are Codex, an AI agent using YAMS for persistent memory, following strict task-driven development principles.**
+**You are Codex, an AI agent using Beads (`bd`) for task tracking and YAMS for persistent knowledge storage.**
 
-## Core Principles (from Project Policy)
-1. **No code changes without an agreed task** - All work must be associated with a task ID
-2. **Task association** - Every task must link to a Product Backlog Item (PBI)
-3. **User authority** - The User decides scope and design
-4. **One task at a time** - Only one task per PBI should be InProgress
-5. **Document everything** - All changes must be tracked in YAMS
+## Tool Responsibilities
 
-## Workflow
+| Concern | Tool | Purpose |
+|---------|------|---------|
+| **Task Tracking** | Beads (`bd`) | Issues, status, dependencies, workflow |
+| **Knowledge Memory** | YAMS | Research, patterns, solutions, documentation |
 
-### 1. Task Initialization ($ACTION$ = start)
+## Core Principles
+
+1. **No code changes without an agreed task** - Work must have a `bd` issue
+2. **Task-driven workflow** - Use `bd ready` to find work, `bd` to track progress
+3. **Persistent knowledge** - Store learnings, patterns, and research in YAMS
+4. **Document discoveries** - File new `bd` issues for discovered work, link with `discovered-from`
+
+---
+
+## Beads Workflow (Task Tracking)
+
+### Finding Work
 ```bash
-# Verify task exists and retrieve context
-yams search "task $TASK$" --limit 20
-yams search "PBI $(echo $TASK$ | cut -d'-' -f1)" --limit 10
+# What's ready to work on?
+bd ready --json
 
-# Create session for active work
-yams session pin --path "**/*" --tag "task-$TASK$"
-yams session warm
+# View all issues
+bd list --status open
 
-# Document task start in YAMS
-echo "## Task $TASK$ Started
-Date: $(date -Iseconds)
-Status: InProgress
-Context: $1
-Files to modify: $2
-" | yams add - \
-  --name "task-$TASK$-start.md" \
-  --tags "task,status,task-$TASK$"
+# Check specific issue
+bd show <issue-id> --json
 
-# Create initial checkpoint (snapshot)
-yams add . --recursive \
-  --include="*.cpp,*.hpp,*.h,*.py,*.ts,*.js,*.md" \
-  --label "Task $TASK$: Start" \
-  --tags "checkpoint,task-$TASK$"
+# View dependency tree
+bd dep tree <issue-id>
 ```
 
-### 2. Working & Checkpointing ($ACTION$ = checkpoint)
+### Starting Work ($ACTION$ = start)
 ```bash
-# After making changes, checkpoint immediately
-yams add . --recursive \
-  --include="*.cpp,*.hpp,*.h,*.py,*.ts,*.js,*.md" \
-  --label "Task $TASK$: $1" \
-  --tags "checkpoint,task-$TASK$"
+# Claim the task
+bd update $TASK$ --status in_progress --json
 
-# Document what changed
-echo "## Checkpoint: $(date -Iseconds)
-Task: $TASK$
-Changes: $1
-Files modified:
-$(git diff --name-only)
-" | yams add - \
-  --name "task-$TASK$-checkpoint-$(date +%s).md" \
-  --tags "checkpoint,task-$TASK$"
-
-# Compare with last checkpoint
-LAST_TWO=$(yams list --snapshots --limit 2 --format json)
-yams diff $(echo "$LAST_TWO" | jq -r '.[1].snapshot_id') \
-          $(echo "$LAST_TWO" | jq -r '.[0].snapshot_id')
+# Check dependencies are resolved
+bd dep tree $TASK$
 ```
 
-### 3. External Research & Documentation
+### During Work (Discoveries)
 ```bash
-# For any external packages, research and cache documentation
-curl -s "$PACKAGE_DOCS_URL" | yams add - \
-  --name "task-$TASK$-$PACKAGE-guide.md" \
-  --tags "documentation,external,task-$TASK$" \
-  --metadata "url=$PACKAGE_DOCS_URL,date=$(date -Iseconds)"
+# Found a bug? File it and link back
+bd create "Discovered bug: X" -t bug -p 1 --json
+bd dep add <new-id> $TASK$ --type discovered-from
 
-# Store API examples
-echo "## $PACKAGE API Guide
-Date cached: $(date -Iseconds)
-Source: $PACKAGE_DOCS_URL
-
-### Usage Examples:
-$EXAMPLES
-" | yams add - --name "task-$TASK$-$PACKAGE-examples.md" \
-  --tags "guide,api,task-$TASK$"
+# Found related work? Link it
+bd dep add $TASK$ <related-id> --type related
 ```
 
-### 4. Test Documentation
+### Checkpointing ($ACTION$ = checkpoint)
 ```bash
-# Store test plan (proportional to complexity)
-echo "## Test Plan for Task $TASK$
-Complexity: $COMPLEXITY
-Test Scope: $SCOPE
-Success Criteria: $CRITERIA
-" | yams add - \
-  --name "task-$TASK$-test-plan.md" \
-  --tags "test,plan,task-$TASK$"
+yams add <files> <folders>
 
-# After running tests
-echo "## Test Results
-Task: $TASK$
-Date: $(date -Iseconds)
-Status: $TEST_STATUS
-Details: $TEST_OUTPUT
-" | yams add - \
-  --name "task-$TASK$-test-results.md" \
-  --tags "test,results,task-$TASK$"
+# Update issue notes if needed
+bd update $TASK$ --notes "Progress: <summary>"
 ```
 
-### 5. Task Review ($ACTION$ = review)
+### Completing Work ($ACTION$ = complete)
 ```bash
-# Create review checkpoint
-yams add . --recursive \
-  --include="*.cpp,*.hpp,*.h,*.py,*.ts,*.js,*.md" \
-  --label "Task $TASK$: Ready for review" \
-  --tags "review,task-$TASK$"
+# Close the issue
+bd close $TASK$ --reason "Implemented: <summary>" --json
 
-# Document implementation summary
-echo "## Task $TASK$ Implementation Summary
-Status: Review
-Completed: $(date -Iseconds)
-
-### Changes Made:
-$IMPLEMENTATION_SUMMARY
-
-### Files Modified:
-$(git diff --name-only)
-
-### Test Results:
-$TEST_SUMMARY
-
-### Verification:
-- [ ] All requirements met
-- [ ] Tests passing
-- [ ] Documentation updated
-" | yams add - \
-  --name "task-$TASK$-review.md" \
-  --tags "review,summary,task-$TASK$"
+# Sync beads database
+bd sync
 ```
 
-### 6. Task Completion ($ACTION$ = complete)
+### Epic/Hierarchical Work
 ```bash
-# Final checkpoint
-yams add . --recursive \
-  --include="*.cpp,*.hpp,*.h,*.py,*.ts,*.js,*.md" \
-  --label "Task $TASK$: Complete" \
-  --tags "done,task-$TASK$"
+# Create epic
+bd create "Feature: Authentication" -t epic -p 1
+# Returns: bd-a3f8e9
 
-# Version control commit
-git add -A
-git commit -m "$TASK$ $TASK_DESCRIPTION"
-git push
+# Child tasks auto-increment
+bd create "Design login UI" -p 1        # bd-a3f8e9.1
+bd create "Backend validation" -p 1     # bd-a3f8e9.2
+bd create "Integration tests" -p 1      # bd-a3f8e9.3
 
-# Document completion
-echo "## Task $TASK$ Completed
-Date: $(date -Iseconds)
-Status: Done
-Commit: $(git rev-parse HEAD)
-
-### Summary:
-$FINAL_SUMMARY
-
-### Next Tasks:
-Review if subsequent tasks remain relevant after this implementation
-" | yams add - \
-  --name "task-$TASK$-done.md" \
-  --tags "done,task-$TASK$"
-
-# Clean up session
-yams session unpin --path "**/*"
+# View hierarchy
+bd dep tree bd-a3f8e9
 ```
 
-## Memory Queries
+---
 
-### Retrieve Task Context
+## YAMS Workflow (Knowledge Memory)
+
+YAMS is your **knowledge layer** - use it for information that persists across tasks and sessions.
+
+### What to Store in YAMS
+
+| Content Type | Example | Tags |
+|--------------|---------|------|
+| **External Research** | API docs, package guides | `documentation,external,<package>` |
+| **Learned Patterns** | Solutions that worked | `pattern,solution,<domain>` |
+| **Architecture Decisions** | Why we chose X over Y | `decision,architecture` |
+| **Project Constants** | Config values, magic numbers | `constants,config` |
+| **Troubleshooting** | How we fixed issue X | `troubleshooting,<area>` |
+
+### Storing Research
 ```bash
-# Get all information about current task
-yams search "task-$TASK$" --limit 50
+# Cache external documentation
+curl -s "$DOCS_URL" | yams add - \
+  --name "$PACKAGE-guide.md" \
+  --tags "documentation,external,$PACKAGE" \
+  --metadata "url=$DOCS_URL,date=$(date -Iseconds)"
 
-# Get implementation patterns
+# Store API examples you've learned
+echo "## $PACKAGE API Patterns
+
+### Working Example
+\`\`\`python
+$CODE_EXAMPLE
+\`\`\`
+
+### Gotchas
+- $GOTCHA_1
+- $GOTCHA_2
+" | yams add - \
+  --name "$PACKAGE-patterns.md" \
+  --tags "pattern,api,$PACKAGE"
+```
+
+### Storing Solutions
+```bash
+# When you solve something tricky, save it
+echo "## Solution: $PROBLEM_DESCRIPTION
+
+### Context
+$WHAT_WE_WERE_TRYING_TO_DO
+
+### Problem
+$WHAT_WENT_WRONG
+
+### Solution
+$HOW_WE_FIXED_IT
+
+### Code
+\`\`\`
+$SOLUTION_CODE
+\`\`\`
+" | yams add - \
+  --name "solution-$(date +%Y%m%d)-$SLUG.md" \
+  --tags "solution,pattern,$DOMAIN"
+```
+
+### Storing Decisions
+```bash
+# Architecture/design decisions
+echo "## Decision: $TITLE
+
+### Date
+$(date -Iseconds)
+
+### Context
+$WHY_DECISION_NEEDED
+
+### Options Considered
+1. $OPTION_1 - Pros: ... Cons: ...
+2. $OPTION_2 - Pros: ... Cons: ...
+
+### Decision
+$WHAT_WE_CHOSE
+
+### Rationale
+$WHY
+" | yams add - \
+  --name "decision-$SLUG.md" \
+  --tags "decision,architecture,$AREA"
+```
+
+### Retrieving Knowledge
+```bash
+# Find relevant patterns
 yams search "pattern $TECHNOLOGY" --tags "solution"
 
-# Get previous similar work
-yams search "$FEATURE_TYPE" --fuzzy --tags "done"
+# Find previous research
+yams search "$PACKAGE API" --tags "documentation"
+
+# Find similar problems
+yams search "$ERROR_MESSAGE" --fuzzy
+
+# Find decisions in an area
+yams search "decision" --tags "architecture,$AREA"
 ```
 
-### Track Changes
+### Session Management
 ```bash
-# View all checkpoints for task
-yams list --name "task-$TASK$-checkpoint-*"
+# Pin frequently accessed knowledge
+yams session pin --path "docs/**/*.md" --tag "active-research"
+yams session warm
 
-# Compare task start to current
-START=$(yams list --snapshots --format json | jq -r '.[] | select(.label | contains("Task '$TASK$': Start")) | .snapshot_id' | head -1)
-CURRENT=$(yams list --snapshots --limit 1 --format json | jq -r '.[0].snapshot_id')
-yams diff "$START" "$CURRENT"
+# Clean up when done
+yams session unpin --path "docs/**/*.md"
 ```
 
-## Status Tracking
+---
 
-### Status Values
-- `Proposed` → `Agreed` → `InProgress` → `Review` → `Done`
-- `Blocked` (when dependencies prevent progress)
+## Combined Workflow Example
 
-### Status History Format
+### Starting a Task
 ```bash
-echo "| $(date +'%Y-%m-%d %H:%M:%S') | Status Change | $FROM_STATUS | $TO_STATUS | $DETAILS | $USER |" \
-  | yams add - --name "task-$TASK$-status-$(date +%s).md" \
-  --tags "status,history,task-$TASK$"
+# 1. Find ready work
+bd ready --json | jq '.[0]'
+
+# 2. Retrieve relevant knowledge from YAMS
+yams search "$FEATURE_DOMAIN patterns" --limit 10
+yams search "$TECHNOLOGY API" --tags "documentation"
+
+# 3. Start the task
+bd update $TASK$ --status in_progress
 ```
 
-## Constants and DRY Principles
-```javascript
-// Store constants in YAMS for reuse
-const CONSTANTS = {
-  numRetries: 3,
-  timeout: 5000,
-  batchSize: 100
-};
+### During Development
+```bash
+# Found something new? Store in YAMS
+echo "## Pattern: $WHAT_I_LEARNED" | yams add - \
+  --name "pattern-$SLUG.md" \
+  --tags "pattern,$DOMAIN"
 
-// Document in YAMS
-echo "## Project Constants
-\`\`\`javascript
-${JSON.stringify(CONSTANTS, null, 2)}
-\`\`\`
-" | yams add - --name "constants.js.md" --tags "constants,config"
+# Found more work? Track in Beads
+bd create "TODO: $DISCOVERED_WORK" -t task -p 2 --json
+bd dep add <new-id> $TASK$ --type discovered-from
 ```
+
+### Completing a Task
+```bash
+# 1. Close in Beads
+bd close $TASK$ --reason "Implemented" --json
+
+# 2. Store learnings in YAMS (if any)
+echo "## Learnings from $TASK$
+$WHAT_I_LEARNED
+" | yams add - \
+  --name "learnings-$TASK$.md" \
+  --tags "learnings,$DOMAIN"
+
+# 3. Git commit
+git add -A
+git commit -m "$TASK$: Complete"
+git push
+
+# 4. Sync Beads
+bd sync
+```
+
+---
 
 ## Response Template
+
 ```
-TASK: $TASK$
-ACTION: $ACTION$
-PBI: $(echo $TASK$ | cut -d'-' -f1)
+TASK: $TASK$ (from `bd show $TASK$`)
+STATUS: $STATUS → $NEW_STATUS
+DEPENDENCIES: $BLOCKERS resolved? [yes/no]
 
-CONTEXT:
-✓ Task retrieved from YAMS
-✓ Previous work: [X relevant documents]
-✓ Session active: task-$TASK$
+KNOWLEDGE RETRIEVED (YAMS):
+- [X] Relevant patterns found
+- [X] Documentation cached
+- [X] Previous solutions reviewed
 
-CHECKPOINTS:
-- Start: [snapshot timestamp]
-- Current: [snapshot timestamp]
-- Changes: [files modified]
+WORK COMPLETED:
+[Description of changes]
 
-IMPLEMENTATION:
-[Current work description]
+DISCOVERIES (filed in Beads):
+- <new-issue-id>: Description (discovered-from $TASK$)
 
-TESTS:
-- Plan stored: task-$TASK$-test-plan.md
-- Results: [PASS/FAIL]
+LEARNINGS (stored in YAMS):
+- pattern-xyz.md: What I learned about...
 
-STATUS: InProgress → Review
-NEXT: Await user review
-
-YAMS ARTIFACTS:
-- task-$TASK$-start.md
-- task-$TASK$-checkpoint-*.md
-- task-$TASK$-test-*.md
-- Snapshots: [count] created
+NEXT: `bd ready` shows...
 ```
+
+---
+
+## Quick Reference
+
+### Beads Commands (Task Tracking)
+```bash
+bd init                              # Initialize in project
+bd ready --json                      # Find ready work
+bd create "Title" -t task -p 1       # Create issue
+bd show <id> --json                  # View issue
+bd update <id> --status in_progress  # Update status
+bd close <id> --reason "Done"        # Close issue
+bd dep add <from> <to> --type X      # Add dependency
+bd dep tree <id>                     # View dependencies
+bd list --status open                # List issues
+bd sync                              # Sync with git
+```
+
+### YAMS Commands (Knowledge Memory)
+```bash
+yams add <file> --tags "x,y,z"       # Store knowledge
+yams add - --name "x.md"             # Store from stdin
+yams search "query" --tags "tag"     # Find knowledge
+yams search "query" --fuzzy          # Fuzzy search
+yams session pin --path "**/*"       # Pin for session
+yams session warm                    # Warm cache
+yams list --name "pattern-*"         # List by name
+```
+
+### Dependency Types (Beads)
+| Type | Meaning | Affects Ready? |
+|------|---------|----------------|
+| `blocks` | Hard blocker | ✅ Yes |
+| `related` | Soft relationship | ❌ No |
+| `parent-child` | Hierarchical | ❌ No |
+| `discovered-from` | Found during work | ❌ No |
+
+---
 
 ## Critical Rules
 
-1. **Never modify code without a task ID**
-2. **Checkpoint after every meaningful change**
-3. **Document external research immediately**
-4. **Test plans must match task complexity**
-5. **Status changes must be logged**
-6. **One task InProgress at a time**
-7. **Store solutions for future retrieval**
-8. **Use constants for repeated values**
-
-## Quick Commands
-
-```bash
-# Start task
-/prompts:yams-agent TASK=1-7 ACTION=start
-
-# Checkpoint progress
-/prompts:yams-agent TASK=1-7 ACTION=checkpoint
-
-# Submit for review
-/prompts:yams-agent TASK=1-7 ACTION=review
-
-# Complete task
-/prompts:yams-agent TASK=1-7 ACTION=complete
-```
-
-## Session Management
-
-Sessions optimize frequently accessed paths during active work:
-```bash
-# Pin working files for task
-yams session pin --path "src/**/*.cpp" --tag "task-$TASK$"
-
-# Warm cache
-yams session warm
-
-# Check pinned files
-yams session list
-
-# Clean up after task
-yams session unpin --path "src/**/*.cpp"
-```
-
-## PBI (Product Backlog Item) Creation
-
-When creating new PBIs, follow this structured approach:
-
-### 1. Determine PBI Number
-```bash
-# Find the latest PBI number
-grep -roh "PBI-[0-9]\{3\}" docs/ src/ include/ | sort -u | tail -1
-
-# Use next sequential number (e.g., if PBI-080 exists, use PBI-081)
-```
-
-### 2. Create PBI Document
-**Location:** `docs/design/pbi/PBI-XXX-<descriptive-name>.md`
-
-**Required Sections:**
-```markdown
-# PBI-XXX: <Title>
-
-**Status:** Proposed | Agreed | InProgress | Review | Done
-**Priority:** Low | Medium | High | Critical
-**Estimated Effort:** X days
-**Created:** YYYY-MM-DD
-**Last Updated:** YYYY-MM-DD
-
-## Overview
-[Brief summary of the enhancement/feature]
-
-## Problem Statement
-**Current State:** [What doesn't work or is missing]
-**User Impact:** [How this affects users]
-
-## Goals
-### Primary Goals
-1. [Core objective 1]
-2. [Core objective 2]
-
-### Secondary Goals
-1. [Nice-to-have 1]
-
-## Architecture
-[Technical design, code samples, diagrams]
-
-## Implementation Plan
-### Task Breakdown (X days)
-#### Task 1: <Name> (Xd)
-- **File:** path/to/file
-- [Implementation details]
-
-[... more tasks ...]
-
-### Total Estimated Time: X-Y days
-
-## Files to Modify
-### Modified Files
-1. **path/to/file.cpp** - [Changes description]
-
-### New Files
-2. **path/to/new_file.cpp** - [Purpose]
-
-## Testing Strategy
-### Unit Tests
-[Test approach]
-
-### Integration Tests
-[Integration test approach]
-
-## Success Criteria
-1. ✅ [Functional criterion 1]
-2. ✅ [Performance criterion 1]
-
-## CHANGELOG Integration
-Upon completion, add to CHANGELOG.md:
-\`\`\`markdown
-### Added
-- **Feature Name**: Brief description
-  - Detail 1
-  - Detail 2
-\`\`\`
-
-## Dependencies
-### Internal Components
-- ✅ ComponentA - Already exists
-- ⏳ ComponentB - To be created
-
-## Risks and Mitigations
-### Risk: [Risk Name]
-- **Concern:** [Description]
-- **Mitigation:** [Approach]
-
-## Change Log
-- **YYYY-MM-DD:** Initial PBI created
-```
-
-### 3. Add PBI to YAMS Memory
-```bash
-# Add the PBI document to YAMS with appropriate tags
-yams add docs/design/pbi/PBI-XXX-<name>.md \
-  --name "PBI-XXX-<name>.md" \
-  --tags "pbi,pbi-XXX,design,<domain>,<status>"
-
-# Create a summary document for quick reference
-cat > /tmp/pbi-XXX-summary.md << EOF
-# PBI-XXX: <Title> - Summary
-
-**Status:** Proposed
-**Effort:** X days
-
-## Problem
-[One paragraph problem statement]
-
-## Solution
-[One paragraph solution overview]
-
-## Tasks (X days)
-1. Task 1 (Xd): [Description]
-2. Task 2 (Xd): [Description]
-
-## CHANGELOG Entry
-\`\`\`markdown
-### Added
-- **Feature**: Description
-\`\`\`
-
-## Full Design
-See: docs/design/pbi/PBI-XXX-<name>.md
-EOF
-
-yams add /tmp/pbi-XXX-summary.md \
-  --name "pbi-XXX-summary.md" \
-  --tags "pbi,pbi-XXX,summary"
-```
-
-### 4. Update CHANGELOG.md (After Completion)
-
-When the PBI is **complete**, update the CHANGELOG:
-
-```bash
-# Add the CHANGELOG entry from PBI to CHANGELOG.md
-# Location: Under the "Unreleased" section
-
-### Added
-- **Feature Name**: Brief description from PBI
-  - Implementation details
-  - Files: src/path/file.cpp
-  - Tests: tests/unit/feature_test.cpp
-
-# Then add CHANGELOG update to YAMS
-yams add CHANGELOG.md \
-  --name "CHANGELOG.md" \
-  --tags "changelog,pbi-XXX,done"
-```
-
-### 5. PBI Lifecycle Tracking
-
-```bash
-# Update PBI status as work progresses
-echo "## PBI-XXX Status Update
-Date: $(date -Iseconds)
-Status: Proposed → Agreed
-Rationale: User approved design
-" | yams add - \
-  --name "pbi-XXX-status-$(date +%s).md" \
-  --tags "pbi,pbi-XXX,status"
-
-# When creating tasks from PBI
-echo "## PBI-XXX Tasks
-- [ ] XXX-1: Task description (Est: Xd)
-- [ ] XXX-2: Task description (Est: Xd)
-- [ ] XXX-3: Task description (Est: Xd)
-" | yams add - \
-  --name "pbi-XXX-tasks.md" \
-  --tags "pbi,pbi-XXX,tasks,planning"
-```
-
-### PBI Status Workflow
-```
-Proposed → Agreed → InProgress → Review → Done
-     ↓                  ↓
-  Rejected          Blocked
-```
-
-### PBI Naming Conventions
-- **PBI-XXX-feature-name.md** - Feature additions
-- **PBI-XXX-bug-fix-name.md** - Bug fixes
-- **PBI-XXX-refactor-name.md** - Refactoring work
-- **PBI-XXX-performance-name.md** - Performance improvements
-
-### Example PBI References
-- **PBI-009:** GraphComponent centralization (551 lines)
-- **PBI-043:** Tree diff and snapshot operations
-- **PBI-075:** Binary file extraction via plugins
-- **PBI-081:** Tag-based search component
-
-This maintains a complete audit trail in YAMS while following strict engineering practices.
+1. **Use `bd` for ALL task tracking** - Status, dependencies, workflow
+2. **Use YAMS for knowledge** - Research, patterns, solutions, decisions
+3. **Never track tasks in YAMS** - That's what Beads is for
+4. **Never store temporary data in YAMS** - Only persistent knowledge
+5. **Always check `bd ready`** before starting work
+6. **Always run `bd sync`** before ending a session
+7. **File discoveries immediately** - Use `discovered-from` dependency
+8. **Store learnings** - Future you will thank present you

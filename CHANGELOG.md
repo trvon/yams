@@ -72,6 +72,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Prevents orphaned processes from holding file locks (e.g., PID files)
   - Uses `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` for reliable cleanup
   - Location: `src/extraction/plugin_process.cpp`
+- **Plugin health command**: New `yams plugin health [name]` subcommand for plugin diagnostics
+  - Shows plugin status, interfaces, models loaded, and error state
+  - Displays model provider FSM state (Idle, Loading, Ready, Degraded, Failed)
+  - Lists all loaded models when provider is ready
+  - JSON output support with `--json` flag
+  - Location: `src/cli/commands/plugin_command.cpp`
+- **Plugin info improvements**: Enhanced `yams plugin info` output
+  - Now uses `StatusResponse.providers` for accurate plugin status
+  - Shows plugin type (native/external), interfaces, and path
+  - Properly handles both ABI and external plugin hosts
 
 ### Changed
 - **Embedding model list**: Both recommended models now have 384 dimensions
@@ -194,6 +204,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - External plugin extractors (e.g., Ghidra binary analyzer) are now properly synced to PostIngestQueue
   - Added `setExtractors()` method to update extractors after plugins load
   - ServiceManager now syncs extractors from PluginManager after adoption
+
+- **Trust file persistence**: Fixed plugin trust file being deleted on daemon restart
+  - `setTrustFile()` was calling `std::filesystem::remove()` clearing all trusted paths
+  - Changed to load existing trust entries instead of resetting
+  - Location: `include/yams/daemon/resource/abi_plugin_loader.h`
+
+- **Trust file comment parsing**: Fixed daemon crash when loading trust file with comments
+  - `loadTrust()` was treating comment lines (`# YAMS Plugin Trust List`) as plugin paths
+  - Added check to skip lines starting with `#`
+  - Location: `src/daemon/resource/abi_plugin_loader.cpp`
+
+- **Plugin trust initialization order**: Fixed plugins not loading despite being trusted
+  - Trust setup code was using `pluginManager_` which was null at that point
+  - Changed to use `abiHost_` directly for early-stage trust configuration
+  - Location: `src/daemon/components/ServiceManager.cpp`
 
 - **Post-ingestion pipeline reliability**: Improved async processing consistency
   - Unified post-ingest triggering for both directory and single-file ingestion

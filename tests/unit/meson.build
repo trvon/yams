@@ -155,14 +155,16 @@ unit_downloader = files(
   'downloader/test_downloader_basic.cpp',
 )
 
-unit_integrity = files(
-  'integrity/chunk_validator_test.cpp',
-  'integrity/integrity_verifier_simple_test.cpp',
-  'integrity/repair_manager_test.cpp',
-  'integrity/verification_monitor_test.cpp',
-  'integrity/verification_scheduler_test.cpp',
-  # excluded: integrity_verifier_test.cpp
-)
+# Migrated to Catch2 - see tests/meson.build integrity_catch2_exe
+# unit_integrity = files(
+#   'integrity/chunk_validator_test.cpp',
+#   'integrity/integrity_verifier_simple_test.cpp',
+#   'integrity/repair_manager_test.cpp',
+#   'integrity/verification_monitor_test.cpp',
+#   'integrity/verification_scheduler_test.cpp',
+#   # excluded: integrity_verifier_test.cpp
+# )
+unit_integrity = []
 
 unit_repair_base = []
 
@@ -238,10 +240,11 @@ unit_search = files(
   'search/search_smoke_test.cpp',
 )
 
+# Plugin tests migrated to Catch2 - see tests/meson.build (plugins_catch2)
 unit_plugins = files(
-  'plugins/plugin_installer_test.cpp',
-  'plugins/plugin_repo_client_test.cpp',
-  'plugins/symbol_extractor_query_test.cpp',
+  # 'plugins/plugin_installer_test.cpp',        # Migrated to Catch2
+  # 'plugins/plugin_repo_client_test.cpp',      # Migrated to Catch2
+  # 'plugins/symbol_extractor_query_test.cpp',  # Migrated to Catch2
 )
 
 unit_storage = files(

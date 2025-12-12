@@ -2,6 +2,7 @@
 #include <spdlog/spdlog.h>
 #include <future>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -126,6 +127,11 @@ public:
             info->add_option("name", infoName_, "Plugin name")->required();
             info->callback([this]() { showPluginInfo(infoName_); });
 
+            // plugin health [NAME]
+            auto* health = plugin->add_subcommand("health", "Show health status of loaded plugins");
+            health->add_option("name", healthName_, "Plugin name (optional, shows all if omitted)");
+            health->callback([this]() { showPluginHealth(healthName_); });
+
             // plugin load PATH|NAME [--config FILE] [--dry-run]
             auto* load = plugin->add_subcommand("load", "Load a plugin by path or name");
             load->add_option("path_or_name", loadArg_, "Plugin path or registered name")
@@ -235,6 +241,7 @@ public:
 private:
     void listPlugins();
     void showPluginInfo(const std::string& name);
+    void showPluginHealth(const std::string& name);
     void scanPlugins(const std::string& dir, const std::string& target);
     void loadPlugin(const std::string& arg, const std::string& cfg, bool dryRun);
     void unloadPlugin(const std::string& name);
@@ -255,6 +262,7 @@ private:
     std::string scanDir_;
     std::string scanTarget_;
     std::string infoName_;
+    std::string healthName_;
     std::string loadArg_;
     std::string configFile_;
     bool dryRun_{false};
@@ -470,32 +478,221 @@ void PluginCommand::showPluginInfo(const std::string& name) {
         }
         auto leaseHandle = std::move(leaseRes.value());
         auto& client = **leaseHandle;
-        GetStatsRequest req;
-        req.detailed = true; // ensure plugin details are included
-        auto res = yams::cli::run_result<yams::daemon::GetStatsResponse>(
-            client.call(req), std::chrono::milliseconds(10000));
-        if (!res) {
-            std::cout << "Failed to query daemon stats for plugins\n";
-            return;
-        }
-        const auto& resp = res.value();
-        auto it = resp.additionalStats.find("plugins_json");
-        if (it == resp.additionalStats.end()) {
-            std::cout << "No plugin information available.\n";
-            return;
-        }
-        nlohmann::json pj = nlohmann::json::parse(it->second, nullptr, false);
-        if (pj.is_discarded()) {
-            std::cout << "Invalid plugin JSON.\n";
-            return;
-        }
-        for (const auto& rec : pj) {
-            if (rec.value("name", std::string()) == name) {
-                std::cout << rec.dump(2) << "\n";
-                return;
+
+        // First try StatusResponse which has typed provider info
+        StatusRequest sreq;
+        sreq.detailed = true;
+        auto sres = yams::cli::run_result<StatusResponse>(client.call(sreq),
+                                                          std::chrono::milliseconds(10000));
+
+        // Also get stats for extended plugin info (interfaces, path, etc.)
+        GetStatsRequest greq;
+        greq.detailed = true;
+        auto gres = yams::cli::run_result<GetStatsResponse>(client.call(greq),
+                                                            std::chrono::milliseconds(10000));
+
+        // Build combined info from both sources
+        nlohmann::json pluginInfo;
+        bool found = false;
+
+        // Check StatusResponse.providers first (authoritative for loaded plugins)
+        if (sres && !sres.value().providers.empty()) {
+            for (const auto& p : sres.value().providers) {
+                if (p.name == name) {
+                    found = true;
+                    pluginInfo["name"] = p.name;
+                    pluginInfo["ready"] = p.ready;
+                    pluginInfo["degraded"] = p.degraded;
+                    if (!p.error.empty())
+                        pluginInfo["error"] = p.error;
+                    if (p.isProvider) {
+                        pluginInfo["provider"] = true;
+                        pluginInfo["models_loaded"] = p.modelsLoaded;
+                    }
+                    break;
+                }
             }
         }
-        std::cout << "Plugin not found: " << name << "\n";
+
+        // Enrich with plugins_json data (has path, interfaces, type)
+        if (gres) {
+            auto it = gres.value().additionalStats.find("plugins_json");
+            if (it != gres.value().additionalStats.end()) {
+                nlohmann::json pj = nlohmann::json::parse(it->second, nullptr, false);
+                if (!pj.is_discarded()) {
+                    for (const auto& rec : pj) {
+                        if (rec.value("name", std::string()) == name) {
+                            if (!found) {
+                                // Use plugins_json as primary source if not in providers
+                                pluginInfo = rec;
+                                found = true;
+                            } else {
+                                // Merge additional fields from plugins_json
+                                if (rec.contains("path"))
+                                    pluginInfo["path"] = rec["path"];
+                                if (rec.contains("type"))
+                                    pluginInfo["type"] = rec["type"];
+                                if (rec.contains("interfaces"))
+                                    pluginInfo["interfaces"] = rec["interfaces"];
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (found) {
+            std::cout << pluginInfo.dump(2) << "\n";
+        } else {
+            std::cout << "Plugin not found: " << name << "\n";
+            // Show available plugins as hint
+            if (sres && !sres.value().providers.empty()) {
+                std::cout << "Loaded plugins: ";
+                bool first = true;
+                for (const auto& p : sres.value().providers) {
+                    if (!first)
+                        std::cout << ", ";
+                    std::cout << p.name;
+                    first = false;
+                }
+                std::cout << "\n";
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cout << "Error: " << e.what() << "\n";
+    }
+}
+
+void PluginCommand::showPluginHealth(const std::string& name) {
+    using namespace yams::daemon;
+    try {
+        ClientConfig cfg;
+        if (cli_->hasExplicitDataDir()) {
+            cfg.dataDir = cli_->getDataPath();
+        }
+        cfg.enableChunkedResponses = false;
+        cfg.requestTimeout = std::chrono::milliseconds(10000);
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        if (!leaseRes) {
+            std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
+            return;
+        }
+        auto leaseHandle = std::move(leaseRes.value());
+        auto& client = **leaseHandle;
+
+        // Get StatusResponse which has typed provider info
+        StatusRequest sreq;
+        sreq.detailed = true;
+        auto sres = yams::cli::run_result<StatusResponse>(client.call(sreq),
+                                                          std::chrono::milliseconds(10000));
+        if (!sres) {
+            std::cout << "Failed to query daemon status\n";
+            return;
+        }
+
+        const auto& status = sres.value();
+        if (status.providers.empty()) {
+            std::cout << "No plugins loaded.\n";
+            return;
+        }
+
+        // Also get stats for extended plugin info (interfaces, type)
+        GetStatsRequest greq;
+        greq.detailed = true;
+        auto gres = yams::cli::run_result<GetStatsResponse>(client.call(greq),
+                                                            std::chrono::milliseconds(10000));
+
+        // Build interface map from plugins_json
+        std::map<std::string, std::vector<std::string>> ifaceMap;
+        std::map<std::string, std::string> typeMap;
+        if (gres) {
+            auto it = gres.value().additionalStats.find("plugins_json");
+            if (it != gres.value().additionalStats.end()) {
+                nlohmann::json pj = nlohmann::json::parse(it->second, nullptr, false);
+                if (!pj.is_discarded()) {
+                    for (const auto& rec : pj) {
+                        auto pname = rec.value("name", std::string{});
+                        if (!pname.empty()) {
+                            if (rec.contains("interfaces")) {
+                                std::vector<std::string> v;
+                                for (const auto& s : rec["interfaces"]) {
+                                    if (s.is_string())
+                                        v.push_back(s.get<std::string>());
+                                }
+                                if (!v.empty())
+                                    ifaceMap[pname] = std::move(v);
+                            }
+                            if (rec.contains("type"))
+                                typeMap[pname] = rec["type"].get<std::string>();
+                        }
+                    }
+                }
+            }
+        }
+
+        bool found = false;
+        for (const auto& p : status.providers) {
+            // Filter by name if provided
+            if (!name.empty() && p.name != name)
+                continue;
+
+            found = true;
+            std::cout << "Plugin: " << p.name << "\n";
+
+            // Status indicator
+            if (p.ready && !p.degraded) {
+                std::cout << "  Status: OK\n";
+            } else if (p.degraded) {
+                std::cout << "  Status: DEGRADED\n";
+            } else {
+                std::cout << "  Status: NOT READY\n";
+            }
+
+            // Plugin type
+            auto tit = typeMap.find(p.name);
+            if (tit != typeMap.end()) {
+                std::cout << "  Type: " << tit->second << "\n";
+            }
+
+            // Role
+            if (p.isProvider) {
+                std::cout << "  Role: model_provider\n";
+                std::cout << "  Models loaded: " << p.modelsLoaded << "\n";
+            }
+
+            // Interfaces
+            auto iit = ifaceMap.find(p.name);
+            if (iit != ifaceMap.end() && !iit->second.empty()) {
+                std::cout << "  Interfaces: ";
+                for (size_t i = 0; i < iit->second.size(); ++i) {
+                    if (i)
+                        std::cout << ", ";
+                    std::cout << iit->second[i];
+                }
+                std::cout << "\n";
+            }
+
+            // Error
+            if (!p.error.empty()) {
+                std::cout << "  Error: " << p.error << "\n";
+            }
+
+            std::cout << "\n";
+        }
+
+        if (!found && !name.empty()) {
+            std::cout << "Plugin not found: " << name << "\n";
+            std::cout << "Loaded plugins: ";
+            bool first = true;
+            for (const auto& p : status.providers) {
+                if (!first)
+                    std::cout << ", ";
+                std::cout << p.name;
+                first = false;
+            }
+            std::cout << "\n";
+        }
     } catch (const std::exception& e) {
         std::cout << "Error: " << e.what() << "\n";
     }

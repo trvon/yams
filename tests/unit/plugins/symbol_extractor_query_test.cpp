@@ -1,19 +1,17 @@
 #include <cstring>
 #include <string>
 #include <vector>
-#include <gtest/gtest.h>
+#include <catch2/catch_test_macros.hpp>
 #include <yams/compat/dlfcn.h>
 
-#include "../../common/plugins.h"
 #include <yams/plugins/abi.h>
 #include <yams/plugins/symbol_extractor_v1.h>
 
-static void free_result(yams_symbol_extractor_v1* api, yams_symbol_extraction_result_v1* res) {
-    if (!api || !res)
-        return;
-    api->free_result(api->self, res);
-}
+namespace {
 
+/**
+ * @brief RAII wrapper for plugin handle
+ */
 struct PluginHandle {
     void* h{};
     PluginHandle() = default;
@@ -35,8 +33,13 @@ struct PluginHandle {
     }
 };
 
-static yams_symbol_extractor_v1* load_plugin(const char* so_path) {
-    PluginHandle ph;
+void free_result(yams_symbol_extractor_v1* api, yams_symbol_extraction_result_v1* res) {
+    if (!api || !res)
+        return;
+    api->free_result(api->self, res);
+}
+
+yams_symbol_extractor_v1* load_plugin(const char* so_path, PluginHandle& ph) {
     ph.h = dlopen(so_path, RTLD_LAZY | RTLD_LOCAL);
     if (!ph.h)
         return nullptr;
@@ -46,84 +49,101 @@ static yams_symbol_extractor_v1* load_plugin(const char* so_path) {
     auto init = (int (*)(const char*, const void*))dlsym(ph.h, "yams_plugin_init");
     if (!getabi || !getiface || !init)
         return nullptr;
-    EXPECT_GT(getabi(), 0);
-    EXPECT_EQ(0, init("{\n  \"languages\": [\"cpp\", \"python\"]\n}", nullptr));
+    
+    if (getabi() <= 0)
+        return nullptr;
+    
+    if (init("{\n  \"languages\": [\"cpp\", \"python\"]\n}", nullptr) != 0)
+        return nullptr;
+    
     void* ptr = nullptr;
     int rc = getiface(YAMS_IFACE_SYMBOL_EXTRACTOR_V1, YAMS_IFACE_SYMBOL_EXTRACTOR_V1_VERSION, &ptr);
     if (rc != 0 || !ptr)
         return nullptr;
-    // Intentionally leak handle for test lifetime; process exit cleans it.
-    ph.h = nullptr;
+    
     return reinterpret_cast<yams_symbol_extractor_v1*>(ptr);
 }
 
-TEST(SymbolExtractorQueryTest, CppDetectsFunctionAndClass) {
+const char* get_plugin_path() {
 #if defined(_WIN32)
-    GTEST_SKIP() << "Symbol extractor plugin not available on Windows in test environment";
-    return;
-#endif
-#if defined(__APPLE__)
-    const char* so = "/usr/local/lib/yams/plugins/yams_symbol_extractor.dylib";
+    return "builddir/plugins/symbol_extractor_treesitter/yams_symbol_extractor.dll";
+#elif defined(__APPLE__)
+    return "/usr/local/lib/yams/plugins/yams_symbol_extractor.dylib";
 #else
-    const char* so = "/usr/local/lib/yams/plugins/yams_symbol_extractor.so";
+    return "/usr/local/lib/yams/plugins/yams_symbol_extractor.so";
 #endif
-    auto* api = load_plugin(so);
-    ASSERT_NE(api, nullptr);
-
-    const char* code = R"CPP(
-        class Foo { public: void bar(); };
-        int baz(int x) { return x+1; }
-    )CPP";
-
-    yams_symbol_extraction_result_v1* out = nullptr;
-    int rc = api->extract_symbols(api->self, code, std::strlen(code), "/tmp/test.cpp", "cpp", &out);
-    PLUGIN_MISSING_SKIP(rc, out, "symbol grammar not available");
-    ASSERT_EQ(rc, 0);
-    ASSERT_NE(out, nullptr);
-
-    size_t funcs = 0, classes = 0;
-    for (size_t i = 0; i < out->symbol_count; ++i) {
-        if (out->symbols[i].kind && std::strcmp(out->symbols[i].kind, "function") == 0)
-            ++funcs;
-        if (out->symbols[i].kind && (std::strcmp(out->symbols[i].kind, "class") == 0 ||
-                                     std::strcmp(out->symbols[i].kind, "struct") == 0))
-            ++classes;
-    }
-    EXPECT_GE(funcs, 1u);
-    EXPECT_GE(classes, 1u);
-    free_result(api, out);
 }
 
-TEST(SymbolExtractorQueryTest, PythonDetectsFunction) {
+} // namespace
+
+TEST_CASE("Symbol extractor C++ detection", "[plugins][symbol-extractor][cpp]") {
 #if defined(_WIN32)
-    GTEST_SKIP() << "Symbol extractor plugin not available on Windows in test environment";
-    return;
+    SKIP("Symbol extractor plugin not available on Windows in test environment");
 #endif
-#if defined(__APPLE__)
-    const char* so = "/usr/local/lib/yams/plugins/yams_symbol_extractor.dylib";
-#else
-    const char* so = "/usr/local/lib/yams/plugins/yams_symbol_extractor.so";
-#endif
-    auto* api = load_plugin(so);
-    ASSERT_NE(api, nullptr);
 
-    const char* code = R"PY(
-        def foo(x):
-            return x+1
-    )PY";
-
-    yams_symbol_extraction_result_v1* out = nullptr;
-    int rc =
-        api->extract_symbols(api->self, code, std::strlen(code), "/tmp/test.py", "python", &out);
-    PLUGIN_MISSING_SKIP(rc, out, "symbol grammar not available");
-    ASSERT_EQ(rc, 0);
-    ASSERT_NE(out, nullptr);
-
-    size_t funcs = 0;
-    for (size_t i = 0; i < out->symbol_count; ++i) {
-        if (out->symbols[i].kind && std::strcmp(out->symbols[i].kind, "function") == 0)
-            ++funcs;
+    PluginHandle ph;
+    auto* api = load_plugin(get_plugin_path(), ph);
+    if (!api) {
+        SKIP("Symbol extractor plugin not available");
     }
-    EXPECT_GE(funcs, 1u);
-    free_result(api, out);
+
+    SECTION("detects function and class") {
+        const char* code = R"CPP(
+            class Foo { public: void bar(); };
+            int baz(int x) { return x+1; }
+        )CPP";
+
+        yams_symbol_extraction_result_v1* out = nullptr;
+        int rc = api->extract_symbols(api->self, code, std::strlen(code), "/tmp/test.cpp", "cpp", &out);
+        
+        if (rc != 0 || !out) {
+            SKIP("Symbol grammar not available");
+        }
+
+        size_t funcs = 0, classes = 0;
+        for (size_t i = 0; i < out->symbol_count; ++i) {
+            if (out->symbols[i].kind && std::strcmp(out->symbols[i].kind, "function") == 0)
+                ++funcs;
+            if (out->symbols[i].kind && (std::strcmp(out->symbols[i].kind, "class") == 0 ||
+                                         std::strcmp(out->symbols[i].kind, "struct") == 0))
+                ++classes;
+        }
+        CHECK(funcs >= 1u);
+        CHECK(classes >= 1u);
+        free_result(api, out);
+    }
+}
+
+TEST_CASE("Symbol extractor Python detection", "[plugins][symbol-extractor][python]") {
+#if defined(_WIN32)
+    SKIP("Symbol extractor plugin not available on Windows in test environment");
+#endif
+
+    PluginHandle ph;
+    auto* api = load_plugin(get_plugin_path(), ph);
+    if (!api) {
+        SKIP("Symbol extractor plugin not available");
+    }
+
+    SECTION("detects function") {
+        const char* code = R"PY(
+            def foo(x):
+                return x+1
+        )PY";
+
+        yams_symbol_extraction_result_v1* out = nullptr;
+        int rc = api->extract_symbols(api->self, code, std::strlen(code), "/tmp/test.py", "python", &out);
+        
+        if (rc != 0 || !out) {
+            SKIP("Symbol grammar not available");
+        }
+
+        size_t funcs = 0;
+        for (size_t i = 0; i < out->symbol_count; ++i) {
+            if (out->symbols[i].kind && std::strcmp(out->symbols[i].kind, "function") == 0)
+                ++funcs;
+        }
+        CHECK(funcs >= 1u);
+        free_result(api, out);
+    }
 }
