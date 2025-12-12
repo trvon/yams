@@ -1,10 +1,8 @@
 #include <spdlog/spdlog.h>
-#include <regex>
 #include <thread>
+#include <boost/asio.hpp>
 #include <boost/asio/co_spawn.hpp>
-#include <boost/asio/deferred.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/experimental/parallel_group.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/api/content_store.h>
@@ -33,8 +31,8 @@ PostIngestQueue::PostIngestQueue(
     std::size_t capacity)
     : store_(std::move(store)), meta_(std::move(meta)), extractors_(std::move(extractors)),
       kg_(std::move(kg)), graphComponent_(std::move(graphComponent)), coordinator_(coordinator),
-      strand_(coordinator_->makeStrand()), capacity_(capacity ? capacity : 1000) {
-    spdlog::info("[PostIngestQueue] Created with strand from WorkCoordinator");
+      capacity_(capacity ? capacity : 1000) {
+    spdlog::info("[PostIngestQueue] Created (parallel processing via WorkCoordinator)");
 }
 
 PostIngestQueue::~PostIngestQueue() {
@@ -43,7 +41,7 @@ PostIngestQueue::~PostIngestQueue() {
 
 void PostIngestQueue::start() {
     if (!stop_.load()) {
-        boost::asio::co_spawn(strand_, channelPoller(), boost::asio::detached);
+        boost::asio::co_spawn(coordinator_->getExecutor(), channelPoller(), boost::asio::detached);
 
         constexpr int maxWaitMs = 100;
         for (int i = 0; i < maxWaitMs && !started_.load(); ++i) {
@@ -71,27 +69,12 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
     while (!stop_.load()) {
         InternalEventBus::PostIngestTask task;
         if (channel->try_pop(task)) {
-            try {
-                co_await processMetadataStage(task.hash, task.mime);
-
-                using namespace boost::asio::experimental;
-                auto ex = co_await boost::asio::this_coro::executor;
-
-                auto result = co_await make_parallel_group(
-                                  co_spawn(ex, processKnowledgeGraphStage(task.hash, task.mime),
-                                           boost::asio::deferred),
-                                  co_spawn(ex, processEmbeddingStage(task.hash, task.mime),
-                                           boost::asio::deferred))
-                                  .async_wait(wait_for_all(), boost::asio::use_awaitable);
-
-                processed_++;
-                InternalEventBus::instance().incPostConsumed();
-            } catch (const std::exception& e) {
-                spdlog::error("[PostIngestQueue] Failed to process {}: {}", task.hash, e.what());
-                failed_++;
-            }
+            boost::asio::post(coordinator_->getExecutor(),
+                              [this, hash = std::move(task.hash), mime = std::move(task.mime)]() {
+                                  processTask(hash, mime);
+                              });
         } else {
-            timer.expires_after(std::chrono::milliseconds(100));
+            timer.expires_after(std::chrono::milliseconds(50));
             co_await timer.async_wait(boost::asio::use_awaitable);
         }
     }
@@ -139,15 +122,26 @@ bool PostIngestQueue::tryEnqueue(Task&& t) {
 }
 
 std::size_t PostIngestQueue::size() const {
-    // Channel size not available, return 0
     return 0;
 }
 
-boost::asio::awaitable<void> PostIngestQueue::processMetadataStage(const std::string& hash,
-                                                                   const std::string& mime) {
+void PostIngestQueue::processTask(const std::string& hash, const std::string& mime) {
+    try {
+        processMetadataStage(hash, mime);
+        processKnowledgeGraphStage(hash, mime);
+        processEmbeddingStage(hash, mime);
+        processed_++;
+        InternalEventBus::instance().incPostConsumed();
+    } catch (const std::exception& e) {
+        spdlog::error("[PostIngestQueue] Failed to process {}: {}", hash, e.what());
+        failed_++;
+    }
+}
+
+void PostIngestQueue::processMetadataStage(const std::string& hash, const std::string& mime) {
     if (!store_ || !meta_) {
         spdlog::warn("[PostIngestQueue] store or metadata unavailable; dropping task {}", hash);
-        co_return;
+        return;
     }
 
     try {
@@ -171,7 +165,7 @@ boost::asio::awaitable<void> PostIngestQueue::processMetadataStage(const std::st
         } else {
             spdlog::warn("[PostIngestQueue] Metadata not found for hash {}; content may be orphaned",
                          hash);
-            co_return;
+            return;
         }
 
         auto txt = extractDocumentText(store_, hash, mimeType, extension, extractors_);
@@ -203,10 +197,11 @@ boost::asio::awaitable<void> PostIngestQueue::processMetadataStage(const std::st
         spdlog::error("[PostIngestQueue] Metadata stage failed for {}: {}", hash, e.what());
     }
 }
-boost::asio::awaitable<void>
-PostIngestQueue::processKnowledgeGraphStage(const std::string& hash, const std::string& /*mime*/) {
+
+void PostIngestQueue::processKnowledgeGraphStage(const std::string& hash,
+                                                  const std::string& /*mime*/) {
     if (!graphComponent_ || !meta_) {
-        co_return;
+        return;
     }
 
     try {
@@ -214,7 +209,7 @@ PostIngestQueue::processKnowledgeGraphStage(const std::string& hash, const std::
 
         auto infoRes = meta_->getDocumentByHash(hash);
         if (!infoRes || !infoRes.value().has_value()) {
-            co_return;
+            return;
         }
 
         const auto& doc = *infoRes.value();
@@ -243,8 +238,7 @@ PostIngestQueue::processKnowledgeGraphStage(const std::string& hash, const std::
     }
 }
 
-boost::asio::awaitable<void> PostIngestQueue::processEmbeddingStage(const std::string& hash,
-                                                                    const std::string& mime) {
+void PostIngestQueue::processEmbeddingStage(const std::string& hash, const std::string& /*mime*/) {
     try {
         auto embedChannel =
             InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
@@ -252,7 +246,7 @@ boost::asio::awaitable<void> PostIngestQueue::processEmbeddingStage(const std::s
 
         if (!embedChannel) {
             spdlog::warn("[PostIngestQueue] Embed channel unavailable for {}", hash);
-            co_return;
+            return;
         }
 
         InternalEventBus::EmbedJob job;
@@ -271,7 +265,6 @@ boost::asio::awaitable<void> PostIngestQueue::processEmbeddingStage(const std::s
     } catch (const std::exception& e) {
         spdlog::error("[PostIngestQueue] Embedding dispatch failed for {}: {}", hash, e.what());
     }
-    co_return;
 }
 
 } // namespace yams::daemon

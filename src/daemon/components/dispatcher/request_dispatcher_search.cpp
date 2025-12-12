@@ -74,7 +74,13 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
         SearchResponse response;
         response.totalCount = serviceResp.total;
         response.elapsed = std::chrono::milliseconds(serviceResp.executionTimeMs);
+
+        // Enforce limit on results (defense-in-depth)
+        const size_t limit = req.limit > 0 ? req.limit : serviceResp.results.size();
+        size_t count = 0;
+
         for (const auto& item : serviceResp.results) {
+            if (count >= limit) break;
             SearchResult resultItem;
             resultItem.id = std::to_string(item.id);
             resultItem.title = item.title;
@@ -91,6 +97,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
                 resultItem.metadata["title"] = item.title;
             }
             response.results.push_back(std::move(resultItem));
+            ++count;
         }
         std::stable_sort(
             response.results.begin(), response.results.end(),

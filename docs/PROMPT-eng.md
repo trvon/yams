@@ -1,24 +1,24 @@
 ---
-description: Agent using Beads for task tracking and YAMS for persistent memory/knowledge
+description: Agent using Beads for task tracking and YAMS for persistent memory/knowledge/code
 argument-hint: [TASK=<issue-id>] [ACTION=<start|checkpoint|complete>]
 ---
 
 # Agent Workflow: Beads + YAMS
 
-**You are Codex, an AI agent using Beads (`bd`) for task tracking and YAMS for persistent knowledge storage.**
+**You are Codex, an AI agent using Beads (`bd`) for task tracking and YAMS for persistent memory, knowledge, and code indexing.**
 
 ## Tool Responsibilities
 
 | Concern | Tool | Purpose |
 |---------|------|---------|
 | **Task Tracking** | Beads (`bd`) | Issues, status, dependencies, workflow |
-| **Knowledge Memory** | YAMS | Research, patterns, solutions, documentation |
+| **Memory & Code** | YAMS | Code index, research, patterns, solutions, graph connections |
 
 ## Core Principles
 
 1. **No code changes without an agreed task** - Work must have a `bd` issue
 2. **Task-driven workflow** - Use `bd ready` to find work, `bd` to track progress
-3. **Persistent knowledge** - Store learnings, patterns, and research in YAMS
+3. **Index all code changes** - YAMS provides superior search and code/idea graph connections
 4. **Document discoveries** - File new `bd` issues for discovered work, link with `discovered-from`
 
 ---
@@ -59,14 +59,6 @@ bd dep add <new-id> $TASK$ --type discovered-from
 bd dep add $TASK$ <related-id> --type related
 ```
 
-### Checkpointing ($ACTION$ = checkpoint)
-```bash
-yams add <files> <folders>
-
-# Update issue notes if needed
-bd update $TASK$ --notes "Progress: <summary>"
-```
-
 ### Completing Work ($ACTION$ = complete)
 ```bash
 # Close the issue
@@ -93,19 +85,82 @@ bd dep tree bd-a3f8e9
 
 ---
 
-## YAMS Workflow (Knowledge Memory)
+## YAMS Workflow (Memory, Knowledge & Code)
 
-YAMS is your **knowledge layer** - use it for information that persists across tasks and sessions.
+YAMS is your **memory layer** - use it for code indexing, knowledge, and graph connections between ideas.
 
 ### What to Store in YAMS
 
 | Content Type | Example | Tags |
 |--------------|---------|------|
+| **Code Changes** | Modified/created files | `code,task-$TASK$,<component>` |
 | **External Research** | API docs, package guides | `documentation,external,<package>` |
 | **Learned Patterns** | Solutions that worked | `pattern,solution,<domain>` |
 | **Architecture Decisions** | Why we chose X over Y | `decision,architecture` |
-| **Project Constants** | Config values, magic numbers | `constants,config` |
 | **Troubleshooting** | How we fixed issue X | `troubleshooting,<area>` |
+
+---
+
+## Code Indexing (Critical)
+
+**All code changes must be indexed into YAMS** for searchability and graph connections.
+
+### Checkpointing Code ($ACTION$ = checkpoint)
+```bash
+# Index changed files into YAMS
+yams add src/auth/*.py \
+  --tags "code,task-$TASK$,auth,python" \
+  --label "Task $TASK$: Auth implementation"
+
+# Index entire directories for major changes
+yams add src/components/ --recursive \
+  --include "*.tsx,*.ts" \
+  --tags "code,task-$TASK$,frontend" \
+  --label "Task $TASK$: Component updates"
+
+# Update issue notes
+bd update $TASK$ --notes "Progress: <summary>"
+```
+
+### After Any Code Change
+```bash
+# Always index modified files
+yams add <changed-files> \
+  --tags "code,task-$TASK$,<component>" \
+  --label "$TASK$: <brief-description>"
+```
+
+### Code Search (Why YAMS > CLI tools)
+```bash
+# Find how we implemented something before
+yams search "authentication middleware" --tags "code"
+
+# Find all code related to a feature
+yams search "task-bd-a3f8e9" --tags "code"
+
+# Find code patterns across the project
+yams search "error handling retry" --tags "code,pattern"
+
+# Graph connections: find related code and ideas
+yams graph "auth" --depth 2
+
+# Find code that relates to a concept
+yams search "rate limiting" --fuzzy
+```
+
+### Linking Code to Ideas
+```bash
+# When code implements a pattern, link them
+yams add src/utils/retry.py \
+  --tags "code,pattern,retry,error-handling" \
+  --metadata "implements=exponential-backoff,related=rate-limiting"
+
+# This creates graph edges between code and concepts
+```
+
+---
+
+## Knowledge Storage
 
 ### Storing Research
 ```bash
@@ -115,7 +170,7 @@ curl -s "$DOCS_URL" | yams add - \
   --tags "documentation,external,$PACKAGE" \
   --metadata "url=$DOCS_URL,date=$(date -Iseconds)"
 
-# Store API examples you've learned
+# Store API examples
 echo "## $PACKAGE API Patterns
 
 ### Working Example
@@ -156,7 +211,6 @@ $SOLUTION_CODE
 
 ### Storing Decisions
 ```bash
-# Architecture/design decisions
 echo "## Decision: $TITLE
 
 ### Date
@@ -179,31 +233,6 @@ $WHY
   --tags "decision,architecture,$AREA"
 ```
 
-### Retrieving Knowledge
-```bash
-# Find relevant patterns
-yams search "pattern $TECHNOLOGY" --tags "solution"
-
-# Find previous research
-yams search "$PACKAGE API" --tags "documentation"
-
-# Find similar problems
-yams search "$ERROR_MESSAGE" --fuzzy
-
-# Find decisions in an area
-yams search "decision" --tags "architecture,$AREA"
-```
-
-### Session Management
-```bash
-# Pin frequently accessed knowledge
-yams session pin --path "docs/**/*.md" --tag "active-research"
-yams session warm
-
-# Clean up when done
-yams session unpin --path "docs/**/*.md"
-```
-
 ---
 
 ## Combined Workflow Example
@@ -213,9 +242,9 @@ yams session unpin --path "docs/**/*.md"
 # 1. Find ready work
 bd ready --json | jq '.[0]'
 
-# 2. Retrieve relevant knowledge from YAMS
-yams search "$FEATURE_DOMAIN patterns" --limit 10
-yams search "$TECHNOLOGY API" --tags "documentation"
+# 2. Search for related code and knowledge
+yams search "$FEATURE_DOMAIN" --tags "code" --limit 10
+yams search "$TECHNOLOGY patterns" --tags "pattern,solution"
 
 # 3. Start the task
 bd update $TASK$ --status in_progress
@@ -223,7 +252,12 @@ bd update $TASK$ --status in_progress
 
 ### During Development
 ```bash
-# Found something new? Store in YAMS
+# After making changes, index the code
+yams add src/feature/*.py \
+  --tags "code,task-$TASK$,$COMPONENT" \
+  --label "$TASK$: $DESCRIPTION"
+
+# Store any patterns learned
 echo "## Pattern: $WHAT_I_LEARNED" | yams add - \
   --name "pattern-$SLUG.md" \
   --tags "pattern,$DOMAIN"
@@ -235,22 +269,25 @@ bd dep add <new-id> $TASK$ --type discovered-from
 
 ### Completing a Task
 ```bash
-# 1. Close in Beads
+# 1. Final code index
+yams add <all-changed-files> \
+  --tags "code,task-$TASK$,complete" \
+  --label "$TASK$: Final implementation"
+
+# 2. Close in Beads
 bd close $TASK$ --reason "Implemented" --json
 
-# 2. Store learnings in YAMS (if any)
+# 3. Store learnings
 echo "## Learnings from $TASK$
 $WHAT_I_LEARNED
 " | yams add - \
   --name "learnings-$TASK$.md" \
-  --tags "learnings,$DOMAIN"
+  --tags "learnings,$DOMAIN,task-$TASK$"
 
-# 3. Git commit
+# 4. Git commit & sync
 git add -A
 git commit -m "$TASK$: Complete"
 git push
-
-# 4. Sync Beads
 bd sync
 ```
 
@@ -263,8 +300,12 @@ TASK: $TASK$ (from `bd show $TASK$`)
 STATUS: $STATUS → $NEW_STATUS
 DEPENDENCIES: $BLOCKERS resolved? [yes/no]
 
+CODE INDEXED (YAMS):
+- src/auth/*.py → tags: code,task-$TASK$,auth
+- src/utils/helper.py → tags: code,task-$TASK$,utils
+
 KNOWLEDGE RETRIEVED (YAMS):
-- [X] Relevant patterns found
+- [X] Related code patterns found
 - [X] Documentation cached
 - [X] Previous solutions reviewed
 
@@ -298,15 +339,24 @@ bd list --status open                # List issues
 bd sync                              # Sync with git
 ```
 
-### YAMS Commands (Knowledge Memory)
+### YAMS Commands (Memory, Knowledge & Code)
 ```bash
-yams add <file> --tags "x,y,z"       # Store knowledge
-yams add - --name "x.md"             # Store from stdin
-yams search "query" --tags "tag"     # Find knowledge
-yams search "query" --fuzzy          # Fuzzy search
-yams session pin --path "**/*"       # Pin for session
-yams session warm                    # Warm cache
-yams list --name "pattern-*"         # List by name
+# Code indexing
+yams add <files> --tags "code,task-X,component"
+yams add <dir> --recursive --include "*.py"
+yams search "query" --tags "code"
+yams graph "concept" --depth 2
+
+# Knowledge storage
+yams add <file> --tags "x,y,z"
+yams add - --name "x.md"             # From stdin
+yams search "query" --tags "tag"
+yams search "query" --fuzzy
+
+# Session management
+yams session pin --path "**/*"
+yams session warm
+yams list --name "pattern-*"
 ```
 
 ### Dependency Types (Beads)
@@ -322,10 +372,11 @@ yams list --name "pattern-*"         # List by name
 ## Critical Rules
 
 1. **Use `bd` for ALL task tracking** - Status, dependencies, workflow
-2. **Use YAMS for knowledge** - Research, patterns, solutions, decisions
-3. **Never track tasks in YAMS** - That's what Beads is for
-4. **Never store temporary data in YAMS** - Only persistent knowledge
-5. **Always check `bd ready`** before starting work
-6. **Always run `bd sync`** before ending a session
-7. **File discoveries immediately** - Use `discovered-from` dependency
-8. **Store learnings** - Future you will thank present you
+2. **Index ALL code changes in YAMS** - Superior search and graph connections
+3. **Tag code with task ID** - `code,task-$TASK$,<component>`
+4. **Search YAMS before implementing** - Find related code and patterns first
+5. **Never track tasks in YAMS** - That's what Beads is for
+6. **Always check `bd ready`** before starting work
+7. **Always run `bd sync`** before ending a session
+8. **File discoveries immediately** - Use `discovered-from` dependency
+9. **Store learnings** - Future you will thank present you

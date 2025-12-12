@@ -70,12 +70,10 @@ public:
 
 private:
     boost::asio::awaitable<void> channelPoller();
-    boost::asio::awaitable<void> processMetadataStage(const std::string& hash,
-                                                      const std::string& mime);
-    boost::asio::awaitable<void> processKnowledgeGraphStage(const std::string& hash,
-                                                            const std::string& mime);
-    boost::asio::awaitable<void> processEmbeddingStage(const std::string& hash,
-                                                       const std::string& mime);
+    void processTask(const std::string& hash, const std::string& mime);
+    void processMetadataStage(const std::string& hash, const std::string& mime);
+    void processKnowledgeGraphStage(const std::string& hash, const std::string& mime);
+    void processEmbeddingStage(const std::string& hash, const std::string& mime);
 
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::MetadataRepository> meta_;
@@ -83,7 +81,6 @@ private:
     std::shared_ptr<metadata::KnowledgeGraphStore> kg_;
     std::shared_ptr<GraphComponent> graphComponent_;
     WorkCoordinator* coordinator_;
-    boost::asio::strand<boost::asio::io_context::executor_type> strand_;
 
     std::atomic<bool> stop_{false};
     std::atomic<bool> started_{false};
@@ -94,7 +91,7 @@ private:
     std::size_t capacity_{1000};
 
     std::chrono::steady_clock::time_point lastCompleteTs_{};
-    static constexpr double kAlpha_ = 0.2; // EMA smoothing
+    static constexpr double kAlpha_ = 0.2;
 };
 
 } // namespace yams::daemon

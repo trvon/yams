@@ -550,26 +550,8 @@ yams::Result<void> ServiceManager::initialize() {
         ioCfg.low_watermark = TuneAdvisor::poolLowWatermarkPercent();
         ioCfg.high_watermark = TuneAdvisor::poolHighWatermarkPercent();
         PoolManager::instance().configure("ipc_io", ioCfg);
-        // Post-ingest pool (background CPU) — derive bounds from TuningConfig
-        PoolManager::Config piCfg{};
-        try {
-            const auto& cfg = tuningConfig_;
-            piCfg.min_size =
-                static_cast<uint32_t>(std::max<std::size_t>(1, cfg.postIngestThreadsMin));
-            piCfg.max_size =
-                static_cast<uint32_t>(std::max(cfg.postIngestThreadsMin, cfg.postIngestThreadsMax));
-        } catch (...) {
-            piCfg.min_size = 1;
-            piCfg.max_size = 8;
-        }
-        piCfg.cooldown_ms = TuneAdvisor::poolCooldownMs();
-        piCfg.low_watermark = TuneAdvisor::poolLowWatermarkPercent();
-        piCfg.high_watermark = TuneAdvisor::poolHighWatermarkPercent();
-        PoolManager::instance().configure("post_ingest", piCfg);
-        spdlog::info("PoolManager defaults configured: ipc[min={},max={}] io[min={},max={}] "
-                     "post_ingest[min={},max={}]",
-                     ipcCfg.min_size, ipcCfg.max_size, ioCfg.min_size, ioCfg.max_size,
-                     piCfg.min_size, piCfg.max_size);
+        spdlog::info("PoolManager defaults configured: ipc[min={},max={}] io[min={},max={}]",
+                     ipcCfg.min_size, ipcCfg.max_size, ioCfg.min_size, ioCfg.max_size);
     } catch (const std::exception& e) {
         spdlog::debug("PoolManager configure error: {}", e.what());
     }
@@ -2612,11 +2594,6 @@ ServiceManager::co_initPluginSystem(boost::asio::any_io_executor exec,
 
 namespace yams::daemon {
 
-bool ServiceManager::resizePostIngestThreads(std::size_t target) {
-    // PostIngestQueue now uses strand, no dynamic thread pool resizing
-    (void)target;
-    return false;
-}
 
 // Start background task coroutines (EmbedJob/Fts5Job consumers, OrphanScan)
 // Must be called after shared_ptr construction so shared_from_this() works.

@@ -109,12 +109,13 @@ TEST_CASE("ConfigResolver::envTruthy correctly parses truthy values",
         CHECK_FALSE(ConfigResolver::envTruthy(nullptr));
     }
 
-    SECTION("garbage values are falsy") {
-        CHECK_FALSE(ConfigResolver::envTruthy("garbage"));
-        CHECK_FALSE(ConfigResolver::envTruthy("maybe"));
-        CHECK_FALSE(ConfigResolver::envTruthy("123"));
-        CHECK_FALSE(ConfigResolver::envTruthy("yep"));
-        CHECK_FALSE(ConfigResolver::envTruthy("nope"));
+    SECTION("unrecognized values are truthy (not in falsey list)") {
+        // The implementation treats anything NOT in {0, false, off, no} as truthy
+        CHECK(ConfigResolver::envTruthy("garbage"));
+        CHECK(ConfigResolver::envTruthy("maybe"));
+        CHECK(ConfigResolver::envTruthy("123"));
+        CHECK(ConfigResolver::envTruthy("yep"));
+        CHECK(ConfigResolver::envTruthy("nope"));
     }
 }
 

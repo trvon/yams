@@ -781,6 +781,24 @@ if catch2_dep.found()
     install: false,
   )
 
+  # Daemon component submodule tests (CheckpointManager, ConfigResolver, etc.)
+  # Migrated from GTest as part of yams-3s4 / yams-zns
+  catch2_daemon_component_submodule_exe = executable('catch2_daemon_component_submodule',
+    files(
+      'unit/daemon/components/checkpoint_manager_test.cpp',
+      'unit/daemon/components/config_resolver_test.cpp',
+      'unit/daemon/components/database_manager_test.cpp',
+      'unit/daemon/components/plugin_manager_test.cpp',
+      'unit/daemon/components/request_queue_test.cpp',
+      'unit/daemon/components/vector_system_manager_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # Add plugin path for plugin harness tests
   plugin_test_cpp_args = test_cpp_noerror_args + ['-DYAMS_TESTING=1']
   if get_option('plugin-onnx')
@@ -848,6 +866,66 @@ if catch2_dep.found()
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
+
+  # Storage submodule tests (StorageEngine, CompressedStorageEngine, ReferenceCounter, etc.)
+  # Migrated from GTest as part of yams-3s4 / yams-8b9
+  catch2_storage_submodule_exe = executable('catch2_storage_submodule',
+    files(
+      'unit/storage/compressed_storage_engine_catch2_test.cpp',
+      'unit/storage/compressed_storage_stats_catch2_test.cpp',
+      'unit/storage/object_storage_adapter_catch2_test.cpp',
+      'unit/storage/reference_counter_catch2_test.cpp',
+      'unit/storage/reference_counter_stress_catch2_test.cpp',
+      'unit/storage/s3_signer_catch2_test.cpp',
+      'unit/storage/storage_engine_catch2_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # Search submodule tests (BKTree, TrigramIndex, HybridFuzzySearch, QueryParser, SearchExecutor, etc.)
+  # Migrated from GTest as part of yams-3s4 / yams-1yq
+  catch2_search_submodule_exe = executable('catch2_search_submodule',
+    files(
+      'unit/search/bk_tree_smoke_catch2_test.cpp',
+      'unit/search/bk_tree_catch2_test.cpp',
+      'unit/search/chunk_coverage_catch2_test.cpp',
+      'unit/search/entity_linker_catch2_test.cpp',
+      'unit/search/kg_scorer_simple_catch2_test.cpp',
+      'unit/search/query_parser_catch2_test.cpp',
+      'unit/search/query_qualifiers_catch2_test.cpp',
+      'unit/search/search_executor_catch2_test.cpp',
+      'unit/search/search_smoke_catch2_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # Vector Test Suites (Catch2) - requires enable-vector-tests
+  # Migrated from GTest as part of yams-3s4 / yams-1d4
+  # --------------------------------------------------------------------------
+  if get_option('enable-vector-tests')
+    catch2_vector_submodule_exe = executable('catch2_vector_submodule',
+      files(
+        'unit/vector/document_chunker_catch2_test.cpp',
+        'unit/vector/embedding_genai_selection_catch2_test.cpp',
+        'unit/vector/sqlite_vec_c_api_smoke_catch2_test.cpp',
+        'unit/vector/vector_dimension_validation_catch2_test.cpp',
+        'unit/vector/vector_smoke_catch2_test.cpp',
+      ),
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+      cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+      build_rpath: ':'.join(_test_rpaths),
+      install: false,
+    )
+  endif
 
   # Metadata Test Suites (4 executables)
   # --------------------------------------------------------------------------
@@ -1341,6 +1419,12 @@ if catch2_dep.found()
     timeout: 60
   )
 
+  test('daemon_component_submodule', catch2_daemon_component_submodule_exe,
+    suite: ['catch2', 'unit', 'daemon', 'components', 'yams-zns'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
   test('daemon_plugin_harness', catch2_daemon_plugin_exe,
     suite: ['catch2', 'unit', 'daemon', 'plugin'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -1376,4 +1460,26 @@ if catch2_dep.found()
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
   )
+
+  test('storage_submodule', catch2_storage_submodule_exe,
+    suite: ['catch2', 'unit', 'storage', 'yams-8b9'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 300
+  )
+
+  test('search_submodule', catch2_search_submodule_exe,
+    suite: ['catch2', 'unit', 'search', 'yams-1yq'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 180
+  )
+
+  # Vector test suite (requires enable-vector-tests)
+  # Migrated from GTest as part of yams-3s4 / yams-1d4
+  if get_option('enable-vector-tests')
+    test('vector_submodule', catch2_vector_submodule_exe,
+      suite: ['catch2', 'unit', 'vector', 'yams-1d4'],
+      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+      timeout: 180
+    )
+  endif
 endif

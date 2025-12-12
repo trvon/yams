@@ -88,12 +88,48 @@ public:
             }
             return fallback;
         };
-        int intra = config.num_threads > 0 ? config.num_threads : 4;
+        auto detect_bool = [](const char* name, bool fallback) {
+            if (const char* s = std::getenv(name)) {
+                std::string val(s);
+                std::transform(val.begin(), val.end(), val.begin(), ::tolower);
+                if (val == "0" || val == "false" || val == "no")
+                    return false;
+                if (val == "1" || val == "true" || val == "yes")
+                    return true;
+            }
+            return fallback;
+        };
+
+#ifdef _WIN32
+        // Windows-specific defaults to avoid thread pool exhaustion and deadlocks
+        // when multiple embedding requests run concurrently. The Windows thread
+        // scheduler behaves differently than Linux, and high intra-op thread counts
+        // can cause "resource deadlock would occur" errors under load.
+        int intra_default = 2;
+        int inter_default = 1;
+        bool allow_spinning_default = false; // Reduce CPU contention on Windows
+#else
+        int intra_default = 4;
+        int inter_default = 1;
+        bool allow_spinning_default = true;
+#endif
+
+        int intra = config.num_threads > 0 ? config.num_threads : intra_default;
         intra = detect_threads("YAMS_ONNX_INTRA_OP_THREADS", intra);
-        int inter = detect_threads("YAMS_ONNX_INTER_OP_THREADS", 1);
+        int inter = detect_threads("YAMS_ONNX_INTER_OP_THREADS", inter_default);
         sessionOptions_->SetIntraOpNumThreads(intra);
         sessionOptions_->SetInterOpNumThreads(inter);
-        spdlog::info("[ONNX] SessionOptions threads: intra-op={} inter-op={}", intra, inter);
+
+        // Thread spinning control - spinning threads consume CPU cycles waiting for work
+        // which can cause contention issues on Windows with concurrent embedding requests
+        bool allow_spinning = detect_bool("YAMS_ONNX_ALLOW_SPINNING", allow_spinning_default);
+        sessionOptions_->AddConfigEntry("session.intra_op.allow_spinning",
+                                        allow_spinning ? "1" : "0");
+        sessionOptions_->AddConfigEntry("session.inter_op.allow_spinning",
+                                        allow_spinning ? "1" : "0");
+
+        spdlog::info("[ONNX] SessionOptions threads: intra-op={} inter-op={} spinning={}",
+                     intra, inter, allow_spinning);
 
         // Graph optimization level: BASIC for fast startup, ALL for production
         // ORT_ENABLE_ALL performs expensive graph transformations (minutes for large models)

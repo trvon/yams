@@ -2176,6 +2176,177 @@ template <> struct ProtoBinding<GraphValidateResponse> {
     }
 };
 
+// --------------------------- Graph Query Bindings (PBI-009/093) ---------------------------
+template <> struct ProtoBinding<GraphQueryRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kGraphQueryRequest;
+    static void set(Envelope& env, const GraphQueryRequest& r) {
+        auto* o = env.mutable_graph_query_request();
+        o->set_document_hash(r.documentHash);
+        o->set_document_name(r.documentName);
+        o->set_snapshot_id(r.snapshotId);
+        o->set_node_id(r.nodeId);
+        o->set_list_by_type(r.listByType);
+        o->set_node_type(r.nodeType);
+        o->set_node_key(r.nodeKey);
+        set_string_list(r.relationFilters, o->mutable_relation_filters());
+        o->set_max_depth(r.maxDepth);
+        o->set_max_results(r.maxResults);
+        o->set_max_results_per_depth(r.maxResultsPerDepth);
+        o->set_scope_to_snapshot(r.scopeToSnapshot);
+        o->set_offset(r.offset);
+        o->set_limit(r.limit);
+        o->set_include_edge_properties(r.includeEdgeProperties);
+        o->set_include_node_properties(r.includeNodeProperties);
+        o->set_hydrate_fully(r.hydrateFully);
+    }
+    static GraphQueryRequest get(const Envelope& env) {
+        const auto& i = env.graph_query_request();
+        GraphQueryRequest r{};
+        r.documentHash = i.document_hash();
+        r.documentName = i.document_name();
+        r.snapshotId = i.snapshot_id();
+        r.nodeId = i.node_id();
+        r.listByType = i.list_by_type();
+        r.nodeType = i.node_type();
+        r.nodeKey = i.node_key();
+        r.relationFilters = get_string_list(i.relation_filters());
+        r.maxDepth = i.max_depth();
+        r.maxResults = i.max_results();
+        r.maxResultsPerDepth = i.max_results_per_depth();
+        r.scopeToSnapshot = i.scope_to_snapshot();
+        r.offset = i.offset();
+        r.limit = i.limit();
+        r.includeEdgeProperties = i.include_edge_properties();
+        r.includeNodeProperties = i.include_node_properties();
+        r.hydrateFully = i.hydrate_fully();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<GraphQueryResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kGraphQueryResponse;
+    static void set(Envelope& env, const GraphQueryResponse& r) {
+        auto* o = env.mutable_graph_query_response();
+        // Set origin node
+        auto* origin = o->mutable_origin_node();
+        origin->set_node_id(r.originNode.nodeId);
+        origin->set_node_key(r.originNode.nodeKey);
+        origin->set_label(r.originNode.label);
+        origin->set_type(r.originNode.type);
+        origin->set_document_hash(r.originNode.documentHash);
+        origin->set_document_path(r.originNode.documentPath);
+        origin->set_snapshot_id(r.originNode.snapshotId);
+        origin->set_distance(r.originNode.distance);
+        origin->set_properties(r.originNode.properties);
+        // Set connected nodes
+        for (const auto& node : r.connectedNodes) {
+            auto* n = o->add_connected_nodes();
+            n->set_node_id(node.nodeId);
+            n->set_node_key(node.nodeKey);
+            n->set_label(node.label);
+            n->set_type(node.type);
+            n->set_document_hash(node.documentHash);
+            n->set_document_path(node.documentPath);
+            n->set_snapshot_id(node.snapshotId);
+            n->set_distance(node.distance);
+            n->set_properties(node.properties);
+        }
+        o->set_total_nodes_found(r.totalNodesFound);
+        o->set_total_edges_traversed(r.totalEdgesTraversed);
+        o->set_truncated(r.truncated);
+        o->set_max_depth_reached(r.maxDepthReached);
+        o->set_query_time_ms(r.queryTimeMs);
+        o->set_kg_available(r.kgAvailable);
+        o->set_warning(r.warning);
+    }
+    static GraphQueryResponse get(const Envelope& env) {
+        const auto& i = env.graph_query_response();
+        GraphQueryResponse r{};
+        // Get origin node
+        const auto& origin = i.origin_node();
+        r.originNode.nodeId = origin.node_id();
+        r.originNode.nodeKey = origin.node_key();
+        r.originNode.label = origin.label();
+        r.originNode.type = origin.type();
+        r.originNode.documentHash = origin.document_hash();
+        r.originNode.documentPath = origin.document_path();
+        r.originNode.snapshotId = origin.snapshot_id();
+        r.originNode.distance = origin.distance();
+        r.originNode.properties = origin.properties();
+        // Get connected nodes
+        r.connectedNodes.reserve(i.connected_nodes_size());
+        for (const auto& node : i.connected_nodes()) {
+            GraphNode n{};
+            n.nodeId = node.node_id();
+            n.nodeKey = node.node_key();
+            n.label = node.label();
+            n.type = node.type();
+            n.documentHash = node.document_hash();
+            n.documentPath = node.document_path();
+            n.snapshotId = node.snapshot_id();
+            n.distance = node.distance();
+            n.properties = node.properties();
+            r.connectedNodes.push_back(std::move(n));
+        }
+        r.totalNodesFound = i.total_nodes_found();
+        r.totalEdgesTraversed = i.total_edges_traversed();
+        r.truncated = i.truncated();
+        r.maxDepthReached = i.max_depth_reached();
+        r.queryTimeMs = i.query_time_ms();
+        r.kgAvailable = i.kg_available();
+        r.warning = i.warning();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<GraphPathHistoryRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kGraphPathHistoryRequest;
+    static void set(Envelope& env, const GraphPathHistoryRequest& r) {
+        auto* o = env.mutable_graph_path_history_request();
+        o->set_path(r.path);
+        o->set_limit(r.limit);
+    }
+    static GraphPathHistoryRequest get(const Envelope& env) {
+        const auto& i = env.graph_path_history_request();
+        GraphPathHistoryRequest r{};
+        r.path = i.path();
+        r.limit = i.limit();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<GraphPathHistoryResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kGraphPathHistoryResponse;
+    static void set(Envelope& env, const GraphPathHistoryResponse& r) {
+        auto* o = env.mutable_graph_path_history_response();
+        o->set_query_path(r.queryPath);
+        for (const auto& entry : r.history) {
+            auto* e = o->add_history();
+            e->set_path(entry.path);
+            e->set_snapshot_id(entry.snapshotId);
+            e->set_blob_hash(entry.blobHash);
+            e->set_change_type(entry.changeType);
+        }
+        o->set_has_more(r.hasMore);
+    }
+    static GraphPathHistoryResponse get(const Envelope& env) {
+        const auto& i = env.graph_path_history_response();
+        GraphPathHistoryResponse r{};
+        r.queryPath = i.query_path();
+        r.history.reserve(i.history_size());
+        for (const auto& entry : i.history()) {
+            PathHistoryEntry e{};
+            e.path = entry.path();
+            e.snapshotId = entry.snapshot_id();
+            e.blobHash = entry.blob_hash();
+            e.changeType = entry.change_type();
+            r.history.push_back(std::move(e));
+        }
+        r.hasMore = i.has_more();
+        return r;
+    }
+};
+
 // Helper to encode Request/Response variants using bindings
 template <typename Variant>
 static Result<void> encode_variant_into(Envelope& env, const Variant& v) {
@@ -2485,6 +2656,16 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
             m.payload = Request{std::move(v)};
             break;
         }
+        case Envelope::kGraphQueryRequest: {
+            auto v = ProtoBinding<GraphQueryRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
+        case Envelope::kGraphPathHistoryRequest: {
+            auto v = ProtoBinding<GraphPathHistoryRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
 
         // Additional responses
         case Envelope::kSuccessResponse: {
@@ -2630,6 +2811,16 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
         case Envelope::kGraphValidateResponse: {
             auto v = ProtoBinding<GraphValidateResponse>::get(env);
             m.payload = Response{std::in_place_type<GraphValidateResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kGraphQueryResponse: {
+            auto v = ProtoBinding<GraphQueryResponse>::get(env);
+            m.payload = Response{std::in_place_type<GraphQueryResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kGraphPathHistoryResponse: {
+            auto v = ProtoBinding<GraphPathHistoryResponse>::get(env);
+            m.payload = Response{std::in_place_type<GraphPathHistoryResponse>, std::move(v)};
             break;
         }
         case Envelope::kEmbedEvent: {

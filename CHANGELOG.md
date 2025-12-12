@@ -125,106 +125,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Manages vector index and hotzone checkpoint scheduling
   - Configurable interval, threshold-based vector index saves, optional hotzone persistence
   - Async timer-based loop with graceful shutdown support
-  - Location: `include/yams/daemon/components/CheckpointManager.h`, `src/daemon/components/CheckpointManager.cpp`
+- **Post-ingest pipeline parallelization**: PostIngestQueue and EntityGraphService now use WorkCoordinator
+  - Removed serial strand-based processing bottleneck in PostIngestQueue
+  - EntityGraphService now posts extraction jobs to shared WorkCoordinator thread pool
+  - Removed unused PoolManager "post_ingest" pool and associated TuningManager tuning logic
+  - Documents process in parallel across all worker threads with work stealing
 
 ### Fixed
-- **Plugin interface parsing**: Fixed `parseInterfacesFromManifest` to handle object-format interfaces
-  - Plugins using `[{"id": "model_provider_v1", "version": 2}]` format now parse correctly
-  - Previously only simple string arrays `["interface_name"]` were supported
-  - Affects ONNX plugin and other plugins with versioned interface declarations
-  - Location: `src/daemon/resource/abi_plugin_loader.cpp`
-
-- **Plugin host sharing**: Fixed model provider adoption failure after PBI-088 component extraction
-  - `ServiceManager::autoloadPluginsNow()` loaded plugins into `abiHost_`
-  - `PluginManager::adoptModelProvider()` was querying its own empty `pluginHost_`
-  - Added `sharedPluginHost` option to `PluginManager::Dependencies` for host sharing
-  - `PluginManager` now uses shared host from ServiceManager when provided
-  - Location: `include/yams/daemon/components/PluginManager.h`, `src/daemon/components/PluginManager.cpp`
-
-- **VectorIndexManager initialization**: Fixed search engine build failure "VectorIndexManager not provided"
-  - `VectorSystemManager::initializeOnce()` only initialized vector database, not index manager
-  - Added call to `initializeIndexManager()` after successful database init
-  - Added call to `loadPersistedIndex()` to restore saved index on startup
-  - Location: `src/daemon/components/ServiceManager.cpp`
-
+- **Plugin interface parsing**: Fixed object-format interfaces not parsing correctly
+- **Plugin host sharing**: Fixed model provider adoption failure after component extraction
+- **VectorIndexManager initialization**: Fixed "VectorIndexManager not provided" search engine build failure
 - **Model download mapping**: Added `multi-qa-MiniLM-L6-cos-v1` to HuggingFace repo mapping
-  - Ensures model download works for new model option
-- **Version display**: Fixed `yams --version` showing fallback values instead of actual version
-  - Added generated include directory to CLI build to resolve `version_generated.h`
-  - Version now correctly shows git tag and commit hash
-- **Socket crash on shutdown**: Fixed `EXC_BAD_ACCESS` in `kqueue_reactor::deregister_descriptor` during program exit
-  - Added `ConnectionRegistry` to track all daemon client connections globally
-  - Sockets are now released before `io_context` shutdown to prevent reactor access after destruction
-  - Fixes race condition where coroutine frames holding socket references were destroyed during scheduler shutdown
-  - Related: [boost/asio#1347](https://github.com/chriskohlhoff/asio/issues/1347)
-- **Windows daemon status metrics**: CPU and memory now use native Win32 APIs (GetSystemTimes/GetProcessTimes/GetProcessMemoryInfo)
-  - `yams daemon status -d` reports accurate CPU% and working set on Windows instead of zero values
+- **Version display**: Fixed `yams --version` showing fallback values
+- **Socket crash on shutdown**: Fixed `EXC_BAD_ACCESS` in kqueue_reactor during program exit
+- **Windows daemon status metrics**: CPU and memory now report accurate values
+- **`--name` flag for `yams add`**: Fixed custom document naming for single-file adds
+- **External plugin extractors**: Fixed content extractors from external plugins not being used
+- **Trust file persistence**: Fixed plugin trust file being deleted on daemon restart
+- **Trust file comment parsing**: Fixed daemon crash when loading trust file with comments
+- **Plugin trust initialization order**: Fixed plugins not loading despite being trusted
+- **Post-ingestion pipeline reliability**: Improved async processing consistency
+- **Graph IPC serialization**: Added missing ProtoBinding specializations for GraphQueryRequest/Response
 
 ### CLI Improvements
 - **PowerShell completion**: Added `yams completion powershell` for PowerShell auto-complete
-  - Uses `Register-ArgumentCompleter` with dynamic subcommand and option completion
-  - Supports bash, zsh, fish, and PowerShell shells
 - **Consistent `--json` output**: Extended JSON output support across commands
-  - `yams doctor --json`: Machine-readable health check results
-  - `yams delete --json`: Deletion results as JSON array
-  - `yams grep --json`: Match results with file, line, matchType, confidence
-- **Actionable error hints**: Centralized error hint system (`error_hints.h`)
-  - Pattern-based hints for FTS5, embedding, daemon, database errors
-  - Error code fallback hints for generic error types
-  - Format: `💡 Hint:` with suggested `📋 Try:` command
-- **Daemon error messages**: Enhanced daemon start/stop failure messages
-  - Clear hints for common issues (daemon already running, permission denied)
-  - Suggested recovery commands (`yams daemon stop --force`, `pkill yams-daemon`)
-
-### Fixed
-- **Plugin interface parsing**: Fixed `parseInterfacesFromManifest` to handle object-format interfaces
-  - Plugins using `[{"id": "model_provider_v1", "version": 2}]` format now parse correctly
-  - Previously only simple string arrays `["interface_name"]` were supported
-  - Affects ONNX plugin and other plugins with versioned interface declarations
-  - Location: `src/daemon/resource/abi_plugin_loader.cpp`
-
-- **Plugin host sharing**: Fixed model provider adoption failure 
-  - `ServiceManager::autoloadPluginsNow()` loaded plugins into `abiHost_`
-  - `PluginManager::adoptModelProvider()` was querying its own empty `pluginHost_`
-  - Added `sharedPluginHost` option to `PluginManager::Dependencies` for host sharing
-  - `PluginManager` now uses shared host from ServiceManager when provided
-  - Location: `include/yams/daemon/components/PluginManager.h`, `src/daemon/components/PluginManager.cpp`
-
-- **VectorIndexManager initialization**: Fixed search engine build failure "VectorIndexManager not provided"
-  - `VectorSystemManager::initializeOnce()` only initialized vector database, not index manager
-  - Added call to `initializeIndexManager()` after successful database init
-  - Added call to `loadPersistedIndex()` to restore saved index on startup
-
-- **`--name` flag for `yams add`**: Fixed custom document naming when adding files
-  - The `--name` flag now correctly sets the document name for single-file adds
-  - Previously, files were always stored with their original filename regardless of `--name`
-  - Single files are now processed separately from directories to preserve naming behavior
-
-- **External plugin extractors in post-ingestion**: Fixed content extractors from external plugins not being used
-  - External plugin extractors (e.g., Ghidra binary analyzer) are now properly synced to PostIngestQueue
-  - Added `setExtractors()` method to update extractors after plugins load
-  - ServiceManager now syncs extractors from PluginManager after adoption
-
-- **Trust file persistence**: Fixed plugin trust file being deleted on daemon restart
-  - `setTrustFile()` was calling `std::filesystem::remove()` clearing all trusted paths
-  - Changed to load existing trust entries instead of resetting
-  - Location: `include/yams/daemon/resource/abi_plugin_loader.h`
-
-- **Trust file comment parsing**: Fixed daemon crash when loading trust file with comments
-  - `loadTrust()` was treating comment lines (`# YAMS Plugin Trust List`) as plugin paths
-  - Added check to skip lines starting with `#`
-  - Location: `src/daemon/resource/abi_plugin_loader.cpp`
-
-- **Plugin trust initialization order**: Fixed plugins not loading despite being trusted
-  - Trust setup code was using `pluginManager_` which was null at that point
-  - Changed to use `abiHost_` directly for early-stage trust configuration
-  - Location: `src/daemon/components/ServiceManager.cpp`
-
-- **Post-ingestion pipeline reliability**: Improved async processing consistency
-  - Unified post-ingest triggering for both directory and single-file ingestion
-  - Added retry logic with exponential backoff for internal event bus
-  - PostIngestQueue now blocks until worker is ready during initialization
-  - Extraction failures now report "Failed" status instead of "Skipped"
+- **Actionable error hints**: Centralized error hint system with pattern-based hints
+- **Daemon error messages**: Enhanced daemon start/stop failure messages with recovery hints
 
 ### Removed
 - **HybridSearchEngine**: Legacy search engine removed in favor of unified SearchEngine

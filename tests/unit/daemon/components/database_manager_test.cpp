@@ -8,7 +8,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/daemon/components/DatabaseManager.h>
-#include <yams/daemon/StateComponent.h>
+#include <yams/daemon/components/StateComponent.h>
 
 #include <chrono>
 #include <filesystem>

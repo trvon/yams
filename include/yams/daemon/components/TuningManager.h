@@ -40,8 +40,6 @@ public:
 private:
     boost::asio::awaitable<void> tuningLoop();
     void tick_once();
-    void apply_post_ingest_control(std::size_t queued, std::size_t inflight, std::size_t capacity,
-                                   std::uint64_t activeConns);
 
     ServiceManager* sm_;
     StateComponent* state_;
@@ -50,7 +48,6 @@ private:
     std::atomic<bool> running_{false};
     std::future<void> tuningFuture_{};
 
-    // Repair tuning helpers (hysteresis + rate limiting)
     std::function<void(uint32_t, uint32_t)> setRepair_{};
     std::chrono::steady_clock::time_point repairBusySince_{};
     std::chrono::steady_clock::time_point repairReadySince_{};
@@ -58,10 +55,6 @@ private:
     uint64_t repairBatchesAtWindowStart_{0};
 
     std::function<void(std::size_t)> setWriterBudget_{};
-
-    // PI controller state for post-ingest threads
-    std::chrono::steady_clock::time_point lastPiAdjust_{};
-    double integratorQueueErr_{0.0};
 };
 
 } // namespace yams::daemon

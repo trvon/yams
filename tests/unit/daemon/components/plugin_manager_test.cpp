@@ -9,8 +9,8 @@
 
 #include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
-#include <yams/daemon/StateComponent.h>
-#include <yams/daemon/DaemonConfig.h>
+#include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/daemon.h>
 
 #include <chrono>
 #include <filesystem>
