@@ -167,6 +167,16 @@ public:
     [[nodiscard]] std::span<const std::byte> read_stdout();
 
     /**
+     * @brief Consume (remove) bytes from the front of stdout buffer
+     *
+     * Call this after processing data returned by read_stdout() to prevent
+     * unbounded buffer growth and ensure stale data doesn't accumulate.
+     *
+     * @param bytes Number of bytes to consume from the front of the buffer
+     */
+    void consume_stdout(size_t bytes);
+
+    /**
      * @brief Read available data from stderr (non-blocking)
      *
      * Returns a non-owning view of buffered stderr data. Data remains valid

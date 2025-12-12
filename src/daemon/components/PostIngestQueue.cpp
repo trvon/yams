@@ -1,5 +1,6 @@
 #include <spdlog/spdlog.h>
 #include <regex>
+#include <thread>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/deferred.hpp>
 #include <boost/asio/detached.hpp>
@@ -43,7 +44,13 @@ PostIngestQueue::~PostIngestQueue() {
 void PostIngestQueue::start() {
     if (!stop_.load()) {
         boost::asio::co_spawn(strand_, channelPoller(), boost::asio::detached);
-        spdlog::info("[PostIngestQueue] Channel poller started");
+
+        constexpr int maxWaitMs = 100;
+        for (int i = 0; i < maxWaitMs && !started_.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        spdlog::info("[PostIngestQueue] Channel poller started (ready={})", started_.load());
     }
 }
 
@@ -58,6 +65,8 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
             "post_ingest", 4096);
 
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+
+    started_.store(true);
 
     while (!stop_.load()) {
         InternalEventBus::PostIngestTask task;
@@ -99,9 +108,18 @@ void PostIngestQueue::enqueue(Task t) {
     task.hash = std::move(t.hash);
     task.mime = std::move(t.mime);
 
-    if (!channel->try_push(task)) {
-        spdlog::warn("[PostIngestQueue] Channel full, dropping task");
+    constexpr int maxRetries = 3;
+    constexpr auto baseBackoff = std::chrono::milliseconds(10);
+
+    for (int i = 0; i < maxRetries; ++i) {
+        if (channel->try_push(task)) {
+            return;
+        }
+        std::this_thread::sleep_for(baseBackoff * (1 << i));
     }
+
+    spdlog::error("[PostIngestQueue] Channel full after {} retries, dropping task for hash: {}",
+                  maxRetries, task.hash);
 }
 
 bool PostIngestQueue::tryEnqueue(const Task& t) {
@@ -150,6 +168,10 @@ boost::asio::awaitable<void> PostIngestQueue::processMetadataStage(const std::st
                 mimeType = info.mimeType;
             if (!info.fileExtension.empty())
                 extension = info.fileExtension;
+        } else {
+            spdlog::warn("[PostIngestQueue] Metadata not found for hash {}; content may be orphaned",
+                         hash);
+            co_return;
         }
 
         auto txt = extractDocumentText(store_, hash, mimeType, extension, extractors_);
@@ -160,7 +182,7 @@ boost::asio::awaitable<void> PostIngestQueue::processMetadataStage(const std::st
                 if (d && d.value().has_value()) {
                     auto updated = d.value().value();
                     updated.contentExtracted = false;
-                    updated.extractionStatus = metadata::ExtractionStatus::Skipped;
+                    updated.extractionStatus = metadata::ExtractionStatus::Failed;
                     (void)meta_->updateDocument(updated);
                 }
             }

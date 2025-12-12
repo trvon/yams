@@ -121,6 +121,25 @@ sanitizeMetadata(const std::vector<std::string>& metadataRaw) {
     return out;
 }
 
+// Helper to get active session ID (returns empty string if no active session or bypassed)
+std::string getActiveSessionId(YamsCLI* cli, bool bypass) {
+    if (bypass)
+        return {};
+    auto appContext = cli->getAppContext();
+    if (!appContext)
+        return {};
+    auto sessionSvc = app::services::makeSessionService(appContext.get());
+    if (!sessionSvc)
+        return {};
+    auto currentSession = sessionSvc->current();
+    if (!currentSession)
+        return {};
+    auto state = sessionSvc->getState(*currentSession);
+    if (state != app::services::SessionState::Active)
+        return {};
+    return *currentSession;
+}
+
 } // namespace
 
 class AddCommand : public ICommand {
@@ -183,6 +202,10 @@ public:
         cmd->add_flag("--verify", verify_,
                       "Verify stored content (hash + existence) after add; slower but safer");
 
+        // Session isolation options (PBI-082)
+        cmd->add_flag("--global,--no-session", bypassSession_,
+                      "Add to global memory (bypass active session)");
+
         cmd->callback([this]() { cli_->setPendingCommand(this); });
     }
 
@@ -212,15 +235,7 @@ public:
                 }
 
                 // Get active session for session-isolated memory (PBI-082)
-                std::string activeSessionId;
-                if (auto appContext = cli_->getAppContext()) {
-                    auto sessionSvc = app::services::makeSessionService(appContext.get());
-                    if (sessionSvc) {
-                        if (auto currentSession = sessionSvc->current()) {
-                            activeSessionId = *currentSession;
-                        }
-                    }
-                }
+                std::string activeSessionId = getActiveSessionId(cli_, bypassSession_);
 
                 // Ensure daemon is running; auto-start if necessary
                 std::filesystem::path effectiveSocket =
@@ -296,6 +311,10 @@ public:
                     return Error{ErrorCode::InvalidArgument, "MIME type exceeds maximum length"};
                 }
 
+                // Separate single files from directories for proper handling
+                // Single files should be added directly (to respect --name),
+                // directories use include patterns
+                std::vector<std::filesystem::path> singleFiles;
                 std::map<std::filesystem::path, std::vector<std::string>> groupedPaths;
                 for (const auto& p : paths) {
                     if (p.string() == "-") {
@@ -303,11 +322,8 @@ public:
                     } else if (std::filesystem::is_directory(p)) {
                         groupedPaths[p];
                     } else {
-                        auto parent = p.parent_path();
-                        if (parent.empty() && p.is_relative()) {
-                            parent = ".";
-                        }
-                        groupedPaths[parent].push_back(p.filename().string());
+                        // Single file - add directly to preserve --name behavior
+                        singleFiles.push_back(p);
                     }
                 }
 
@@ -337,8 +353,12 @@ public:
                             std::cout << "  Hash: " << resp.hash << std::endl;
                         }
                     } else {
+                        // Document already exists (skipped) - still show the hash if available
                         std::cout << "No new or updated documents from " << path.string()
                                   << std::endl;
+                        if (!resp.hash.empty()) {
+                            std::cout << "  Hash: " << resp.hash << std::endl;
+                        }
                     }
 
                     if (resp.documentsAdded > 0) {
@@ -351,6 +371,56 @@ public:
                     }
                 };
 
+                // Process single files first (these respect --name directly)
+                for (const auto& filePath : singleFiles) {
+                    yams::app::services::AddOptions aopts;
+                    aopts.path = filePath.string();
+                    aopts.recursive = false; // Single file, not recursive
+                    aopts.name = trimCopy(documentName_);
+                    if (aopts.name.size() > kMaxNameLength) {
+                        return Error{ErrorCode::InvalidArgument,
+                                     "Document name exceeds maximum length"};
+                    }
+                    if (hasUnsupportedControlChars(aopts.name)) {
+                        return Error{ErrorCode::InvalidArgument,
+                                     "Document name contains unsupported control characters"};
+                    }
+                    aopts.tags = sanitizedTags;
+                    aopts.metadata = sanitizedMetadata;
+                    aopts.excludePatterns = sanitizedExclude;
+                    aopts.collection = sanitizedCollection;
+                    aopts.snapshotId = sanitizedSnapshotId;
+                    aopts.snapshotLabel = sanitizedSnapshotLabel;
+                    aopts.sessionId = activeSessionId;
+                    if (!sanitizedMimeType.empty()) {
+                        aopts.mimeType = sanitizedMimeType;
+                    }
+                    aopts.disableAutoMime = disableAutoMime_;
+                    aopts.noEmbeddings = noEmbeddings_;
+                    if (cli_->hasExplicitDataDir()) {
+                        aopts.explicitDataDir = cli_->getDataPath();
+                    }
+                    aopts.timeoutMs = daemonTimeoutMs_;
+                    aopts.retries = daemonRetries_;
+                    aopts.backoffMs = daemonBackoffMs_;
+                    aopts.verify = verify_;
+
+                    yams::app::services::DocumentIngestionService ing;
+                    auto result = ing.addViaDaemon(aopts);
+                    if (result) {
+                        totalAdded += result.value().documentsAdded;
+                        totalUpdated += result.value().documentsUpdated;
+                        totalSkipped += result.value().documentsSkipped;
+                        render(result.value(), filePath);
+                        ok++;
+                    } else {
+                        spdlog::warn("Daemon add failed for file '{}': {}",
+                                     filePath.string(), result.error().message);
+                        failed++;
+                    }
+                }
+
+                // Process directories
                 for (const auto& [dir, files] : groupedPaths) {
                     if (dir.string() == "-") {
                         hasStdin = true;
@@ -431,7 +501,7 @@ public:
                     if (hasStdin)
                         targetPaths_.push_back(std::filesystem::path("-"));
                 } else {
-                    // Nothing left to do if we processed only non-stdin paths successfully
+                    // Nothing left to do if we processed files/directories successfully
                     if (ok > 0 && failed == 0) {
                         return Result<void>();
                     }
@@ -544,19 +614,7 @@ private:
         req.collection = collection_;
         req.snapshotId = snapshotId_;
         req.snapshotLabel = snapshotLabel_;
-
-        // Session-isolated memory (PBI-082): tag document with active session
-        if (auto appContext2 = cli_->getAppContext()) {
-            auto sessionSvc = app::services::makeSessionService(appContext2.get());
-            if (sessionSvc) {
-                if (auto currentSession = sessionSvc->current()) {
-                    auto state = sessionSvc->getState(*currentSession);
-                    if (state == app::services::SessionState::Active) {
-                        req.sessionId = *currentSession;
-                    }
-                }
-            }
-        }
+        req.sessionId = getActiveSessionId(cli_, bypassSession_);
 
         // Parse metadata key=value pairs
         for (const auto& kv : metadata_) {
@@ -605,19 +663,7 @@ private:
         req.collection = collection_;
         req.snapshotId = snapshotId_;
         req.snapshotLabel = snapshotLabel_;
-
-        // Session-isolated memory (PBI-082): tag document with active session
-        if (auto appContext2 = cli_->getAppContext()) {
-            auto sessionSvc = app::services::makeSessionService(appContext2.get());
-            if (sessionSvc) {
-                if (auto currentSession = sessionSvc->current()) {
-                    auto state = sessionSvc->getState(*currentSession);
-                    if (state == app::services::SessionState::Active) {
-                        req.sessionId = *currentSession;
-                    }
-                }
-            }
-        }
+        req.sessionId = getActiveSessionId(cli_, bypassSession_);
 
         // Parse metadata key=value pairs
         for (const auto& kv : metadata_) {
@@ -673,17 +719,7 @@ private:
         req.verify = verify_;
 
         // Session-isolated memory (PBI-082): tag documents with active session
-        if (auto appContext2 = cli_->getAppContext()) {
-            auto sessionSvc = app::services::makeSessionService(appContext2.get());
-            if (sessionSvc) {
-                if (auto currentSession = sessionSvc->current()) {
-                    auto state = sessionSvc->getState(*currentSession);
-                    if (state == app::services::SessionState::Active) {
-                        req.sessionId = *currentSession;
-                    }
-                }
-            }
-        }
+        req.sessionId = getActiveSessionId(cli_, bypassSession_);
 
         // Parse metadata key=value pairs
         for (const auto& kv : metadata_) {
@@ -800,6 +836,9 @@ private:
     std::vector<std::string> includePatterns_;
     std::vector<std::string> excludePatterns_;
     bool verify_ = false;
+
+    // Session isolation options (PBI-082)
+    bool bypassSession_ = false;
 
     // Daemon interaction controls
     int daemonTimeoutMs_ = 30000;

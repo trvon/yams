@@ -18,6 +18,7 @@
 #include <vector>
 
 #include <yams/compression/compressor_interface.h>
+#include <yams/core/atomic_utils.h>
 
 namespace {
 
@@ -911,11 +912,8 @@ WALManager::Stats WALManager::getStats() const {
 }
 
 void WALManager::notifyTransactionClosed() {
-    // Decrement active transactions, avoid underflow
-    auto current = pImpl->activeTransactions.load();
-    if (current > 0) {
-        pImpl->activeTransactions.fetch_sub(1);
-    }
+    // Decrement active transactions atomically, avoiding underflow
+    core::decrement_if_positive(pImpl->activeTransactions);
 }
 
 } // namespace yams::wal

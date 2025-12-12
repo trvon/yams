@@ -102,7 +102,15 @@ public:
 
 private:
     /**
-     * @brief Read a JSON-RPC response from stdout
+     * @brief Read the next complete JSON response from stdout buffer
+     *
+     * Non-blocking. Consumes the response from the buffer if found.
+     * @return Parsed JSON response, or std::nullopt if no complete response available
+     */
+    [[nodiscard]] std::optional<json> read_next_response();
+
+    /**
+     * @brief Read a JSON-RPC response from stdout (legacy, with timeout)
      * @param timeout Maximum time to wait
      * @return Parsed JSON response, or std::nullopt on timeout
      */

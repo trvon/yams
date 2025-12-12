@@ -2122,7 +2122,22 @@ EmbeddingGenerator::generateEmbeddingAsync(const std::string& text) {
 
 std::future<std::vector<std::vector<float>>>
 EmbeddingGenerator::generateEmbeddingsAsync(const std::vector<std::string>& texts) {
-    return std::async(std::launch::async, [this, texts]() { return generateEmbeddings(texts); });
+    auto promise = std::make_shared<std::promise<std::vector<std::vector<float>>>>();
+    std::future<std::vector<std::vector<float>>> future = promise->get_future();
+
+    std::thread([this, texts, promise]() {
+        try {
+            promise->set_value(generateEmbeddings(texts));
+        } catch (...) {
+            try {
+                promise->set_exception(std::current_exception());
+            } catch (...) {
+                // Ignore errors setting exception
+            }
+        }
+    }).detach();
+
+    return future;
 }
 
 bool EmbeddingGenerator::loadModel([[maybe_unused]] const std::string& model_path) {

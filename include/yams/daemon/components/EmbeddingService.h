@@ -1,7 +1,9 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
+#include <string>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/strand.hpp>
@@ -45,8 +47,13 @@ public:
     void start();
 
 private:
+    // Result struct for processEmbedJobWithStatus
+    struct EmbedJobResult {
+        bool deadlockDetected = false;
+    };
+
     boost::asio::awaitable<void> channelPoller();
-    boost::asio::awaitable<void> processEmbedJob(const InternalEventBus::EmbedJob& job);
+    boost::asio::awaitable<EmbedJobResult> processEmbedJobWithStatus(const InternalEventBus::EmbedJob& job);
 
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::MetadataRepository> meta_;

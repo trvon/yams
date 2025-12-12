@@ -106,7 +106,9 @@ TEST_CASE("Executable format detection", "[core][magic][executable]") {
     }
 
     SECTION("Java class file detection") {
-        auto class_data = hex_to_vector("CAFEBABE");
+        // Java class file: magic (CAFEBABE) + minor version (0000) + major version (0034 = Java 8)
+        // The version bytes distinguish it from Mach-O fat binary which also uses CAFEBABE
+        auto class_data = hex_to_vector("CAFEBABE00000034");
         REQUIRE(detect_mime_type(std::span(class_data)) == "application/java-archive");
     }
 }
@@ -193,7 +195,7 @@ TEST_CASE("Pattern database is valid", "[core][magic]") {
         const auto& patterns = get_magic_patterns();
 #if YAMS_HAS_CONSTEXPR_CONTAINERS
         REQUIRE(patterns.size() > 0);
-        REQUIRE(patterns.size() == 86); // High-confidence patterns only
+        REQUIRE(patterns.size() == 97); // High-confidence patterns only
 #endif
     }
 

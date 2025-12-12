@@ -234,7 +234,15 @@ StdioTransport::StdioTransport() {
     // Ensure predictable stdio behavior. In tests, avoid changing global iostream
     // configuration so that rdbuf redirection in unit tests works as expected.
 #ifndef YAMS_TESTING
+#ifdef _WIN32
+    // On Windows, keep sync_with_stdio(true) to ensure std::cin/cout stay synchronized
+    // with the underlying C stdio buffers and Windows handles. Disabling sync causes
+    // std::getline to block even when PeekNamedPipe shows data available, because
+    // the C++ stream buffer becomes disconnected from the Windows pipe state.
+    std::ios::sync_with_stdio(true);
+#else
     std::ios::sync_with_stdio(false);
+#endif
     std::cin.tie(nullptr);
 #endif
 
@@ -242,15 +250,18 @@ StdioTransport::StdioTransport() {
 #ifdef _WIN32
     _setmode(_fileno(stdin), _O_BINARY);
     _setmode(_fileno(stdout), _O_BINARY);
+    // Disable C-level buffering on stdout for Windows pipes - critical for MCP reliability.
+    // Without this, responses may be delayed in the CRT buffer causing client timeouts.
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    // Also disable input buffering to ensure PeekNamedPipe state matches std::cin state
+    setvbuf(stdin, nullptr, _IONBF, 0);
 #endif
 
-    // POSIX Issue 8: configure stdout buffering based on interactivity and keep stderr unbuffered.
-    const bool stdoutInteractive = isInteractiveStream(stdout);
-    if (stdoutInteractive) {
-        std::cout << std::unitbuf;
-    } else {
-        std::cout << std::nounitbuf;
-    }
+    // MCP stdio transport: always use unbuffered output for immediate response delivery.
+    // On Windows pipes, buffered output can cause MCP client timeouts because responses
+    // may sit in the buffer even with explicit flush() calls. Always enable unitbuf for
+    // reliable real-time communication. stderr is also unbuffered for log visibility.
+    std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
 
     // Configure receive timeout from environment, enforce a sane minimum

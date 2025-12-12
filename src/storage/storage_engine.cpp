@@ -1,4 +1,5 @@
 #include <spdlog/spdlog.h>
+#include <yams/core/atomic_utils.h>
 #include <yams/storage/storage_engine.h>
 #if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
 #include <format>
@@ -325,9 +326,9 @@ Result<void> StorageEngine::remove(std::string_view hash) {
         return Result<void>(ErrorCode::PermissionDenied);
     }
 
-    // Update statistics
-    pImpl->stats.totalObjects.fetch_sub(1);
-    pImpl->stats.totalBytes.fetch_sub(fileSize);
+    // Update statistics using saturating subtraction to prevent underflow
+    core::saturating_sub(pImpl->stats.totalObjects, uint64_t{1});
+    core::saturating_sub(pImpl->stats.totalBytes, static_cast<uint64_t>(fileSize));
     pImpl->stats.deleteOperations.fetch_add(1);
 
     spdlog::debug("Removed object {} ({} bytes)", hash, fileSize);

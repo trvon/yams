@@ -132,7 +132,7 @@ static void processTask(ServiceManager* sm, const InternalEventBus::StoreDocumen
                          "(bytesStored={}, bytesDeduped={})",
                          serviceResp.hash, serviceResp.bytesStored, serviceResp.bytesDeduped);
 
-            if (sm && serviceResp.bytesStored > 0) {
+            if (sm && sm->getPostIngestQueue() && !serviceResp.hash.empty()) {
                 sm->enqueuePostIngest(serviceResp.hash, req.mimeType);
             }
         }

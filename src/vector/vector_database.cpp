@@ -1,6 +1,7 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <fstream>
+#include <yams/core/atomic_utils.h>
 #include <yams/profiling.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_backend.h>
@@ -441,10 +442,8 @@ public:
                 return false;
             }
 
-            // Update component-owned metrics (assume 1 deleted if successful)
-            if (cachedVectorCount_.load(std::memory_order_relaxed) > 0) {
-                cachedVectorCount_.fetch_sub(1, std::memory_order_relaxed);
-            }
+            // Update component-owned metrics atomically (avoid underflow)
+            core::decrement_if_positive(cachedVectorCount_);
 
             has_error_ = false;
             return true;
@@ -476,14 +475,9 @@ public:
                 return false;
             }
 
-            // Update component-owned metrics
+            // Update component-owned metrics atomically (avoid underflow)
             if (countToDelete > 0) {
-                size_t current = cachedVectorCount_.load(std::memory_order_relaxed);
-                if (current >= countToDelete) {
-                    cachedVectorCount_.fetch_sub(countToDelete, std::memory_order_relaxed);
-                } else {
-                    cachedVectorCount_.store(0, std::memory_order_relaxed);
-                }
+                core::saturating_sub(cachedVectorCount_, static_cast<size_t>(countToDelete));
             }
 
             has_error_ = false;

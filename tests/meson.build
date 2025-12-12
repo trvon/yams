@@ -816,6 +816,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_extractor_adapter_exe = executable('catch2_extractor_adapter',
+    files('unit/daemon/plugin_content_extractor_adapter_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # Metadata Test Suites (4 executables)
   # --------------------------------------------------------------------------
   
@@ -1249,6 +1258,12 @@ if catch2_dep.found()
 
   test('external_plugin_host', catch2_external_plugin_host_exe,
     suite: ['catch2', 'unit', 'daemon', 'plugin', 'external'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('extractor_adapter', catch2_extractor_adapter_exe,
+    suite: ['catch2', 'unit', 'daemon', 'extractor'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )

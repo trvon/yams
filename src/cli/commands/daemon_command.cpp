@@ -20,6 +20,7 @@
 #include <cctype>
 #include <cerrno>
 #include <chrono>
+#include <deque>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
@@ -150,6 +151,14 @@ public:
         auto* doctor =
             daemon->add_subcommand("doctor", "Diagnose daemon IPC and environment issues");
         doctor->callback([this]() { doctorDaemon(); });
+
+        // Log subcommand
+        auto* log = daemon->add_subcommand("log", "View daemon logs");
+        log->add_option("-n,--lines", logLines_, "Number of lines to show (default: 50)")
+            ->default_val(50);
+        log->add_flag("-f,--follow", logFollow_, "Follow log output (like tail -f)");
+        log->add_option("--level", logFilterLevel_, "Filter by log level (trace, debug, info, warn, error)");
+        log->callback([this]() { showLog(); });
     }
 
     Result<void> execute() override {
@@ -2135,6 +2144,165 @@ private:
         spdlog::info("YAMS daemon restarted successfully");
     }
 
+    void showLog() {
+        namespace fs = std::filesystem;
+
+        // Determine log file path - mirrors YamsDaemon::resolvePath(PathType::LogFile)
+        fs::path logPath;
+        std::vector<fs::path> candidates;
+
+#ifdef _WIN32
+        const char* localAppData = std::getenv("LOCALAPPDATA");
+        if (localAppData) {
+            candidates.push_back(fs::path(localAppData) / "yams" / "daemon.log");
+        }
+        candidates.push_back(fs::temp_directory_path() / "yams-daemon.log");
+#else
+        // Root user: /var/log
+        if (getuid() == 0) {
+            candidates.push_back(fs::path("/var/log/yams-daemon.log"));
+        }
+        // XDG_STATE_HOME or ~/.local/state
+        const char* xdgState = std::getenv("XDG_STATE_HOME");
+        if (xdgState) {
+            candidates.push_back(fs::path(xdgState) / "yams" / "daemon.log");
+        } else {
+            const char* home = std::getenv("HOME");
+            if (home) {
+                candidates.push_back(fs::path(home) / ".local" / "state" / "yams" / "daemon.log");
+            }
+        }
+        // Fallback to /tmp
+        candidates.push_back(fs::path("/tmp") / ("yams-daemon-" + std::to_string(getuid()) + ".log"));
+#endif
+
+        // Find the first candidate that exists
+        for (const auto& candidate : candidates) {
+            if (fs::exists(candidate)) {
+                logPath = candidate;
+                break;
+            }
+        }
+
+        if (logPath.empty()) {
+            std::cerr << "Daemon log file not found. Checked:" << std::endl;
+            for (const auto& c : candidates) {
+                std::cerr << "  - " << c.string() << std::endl;
+            }
+            return;
+        }
+
+        // Convert level filter to lowercase for comparison
+        std::string levelFilter;
+        if (!logFilterLevel_.empty()) {
+            levelFilter = logFilterLevel_;
+            std::transform(levelFilter.begin(), levelFilter.end(), levelFilter.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+        }
+
+        auto matchesLevel = [&](const std::string& line) -> bool {
+            if (levelFilter.empty()) return true;
+            // spdlog format: [YYYY-MM-DD HH:MM:SS.mmm] [level] message
+            // Look for level in brackets
+            auto pos = line.find("] [");
+            if (pos == std::string::npos) return true;  // Can't parse, show anyway
+            auto endPos = line.find(']', pos + 3);
+            if (endPos == std::string::npos) return true;
+            std::string lineLevel = line.substr(pos + 3, endPos - pos - 3);
+            std::transform(lineLevel.begin(), lineLevel.end(), lineLevel.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+
+            // Level hierarchy: trace < debug < info < warn < error
+            static const std::vector<std::string> levels = {"trace", "debug", "info", "warn", "error"};
+            auto filterIt = std::find(levels.begin(), levels.end(), levelFilter);
+            auto lineIt = std::find(levels.begin(), levels.end(), lineLevel);
+            if (filterIt == levels.end() || lineIt == levels.end()) return true;
+            return lineIt >= filterIt;
+        };
+
+        if (logFollow_) {
+            // Follow mode: tail -f style
+            std::cout << "Following " << logPath.string() << " (Ctrl+C to stop)..." << std::endl;
+            std::ifstream file(logPath, std::ios::ate);
+            if (!file) {
+                std::cerr << "Failed to open log file" << std::endl;
+                return;
+            }
+
+            // Show last N lines first
+            file.seekg(0, std::ios::end);
+            std::streampos fileSize = file.tellg();
+            std::vector<std::string> lastLines;
+
+            // Read backwards to find last N lines
+            std::string line;
+            std::streamoff fileSizeOff = static_cast<std::streamoff>(fileSize);
+            std::streamoff pos = fileSizeOff;
+            int linesFound = 0;
+            while (pos > 0 && linesFound < logLines_) {
+                pos--;
+                file.seekg(pos);
+                char c;
+                file.get(c);
+                if (c == '\n' && pos < fileSizeOff - 1) {
+                    std::getline(file, line);
+                    if (matchesLevel(line)) {
+                        lastLines.push_back(line);
+                        linesFound++;
+                    }
+                    file.seekg(pos);
+                }
+            }
+            if (pos == 0) {
+                file.seekg(0);
+                std::getline(file, line);
+                if (!line.empty() && matchesLevel(line)) {
+                    lastLines.push_back(line);
+                }
+            }
+
+            // Print in correct order
+            for (auto it = lastLines.rbegin(); it != lastLines.rend(); ++it) {
+                std::cout << *it << std::endl;
+            }
+
+            // Now follow
+            file.seekg(0, std::ios::end);
+            while (true) {
+                while (std::getline(file, line)) {
+                    if (matchesLevel(line)) {
+                        std::cout << line << std::endl;
+                    }
+                }
+                file.clear();
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        } else {
+            // Show last N lines
+            std::ifstream file(logPath);
+            if (!file) {
+                std::cerr << "Failed to open log file: " << logPath.string() << std::endl;
+                return;
+            }
+
+            // Read all matching lines into a deque, keeping last N
+            std::deque<std::string> lines;
+            std::string line;
+            while (std::getline(file, line)) {
+                if (matchesLevel(line)) {
+                    lines.push_back(line);
+                    if (static_cast<int>(lines.size()) > logLines_) {
+                        lines.pop_front();
+                    }
+                }
+            }
+
+            for (const auto& l : lines) {
+                std::cout << l << std::endl;
+            }
+        }
+    }
+
     // Options (empty = auto-resolve based on environment)
     std::string socketPath_;
     std::string pidFile_;
@@ -2149,6 +2317,10 @@ private:
     std::string startLogLevel_;
     std::string startConfigPath_;
     std::string startDaemonBinary_;
+    // Log subcommand options
+    int logLines_ = 50;
+    bool logFollow_ = false;
+    std::string logFilterLevel_;
     YamsCLI* cli_ = nullptr;
 };
 

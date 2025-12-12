@@ -16,9 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
-## [v0.8.0] - Unreleased
+## [v0.7.10] - Unreleased
 
 ### Added
+- **Daemon log command**: Added `yams daemon log`
 - **ExternalPluginHost**: New plugin host for Python/process-based plugins (RFC-EPH-001)
   - Implements `IPluginHost` interface for external plugins running as separate processes
   - JSON-RPC 2.0 communication over stdio using existing `PluginProcess` and `JsonRpcClient`
@@ -91,8 +92,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Content type filtering uses JOIN on `documents.mime_type` instead
   - Reduces FTS5 index size and improves indexing performance
   - Automatic migration rebuilds index on first database open
+- **Daemon socket logging noise reduction**: Request/mux/enqueue/drain logs now emit at debug level
+  - Default info-level daemon logs no longer show per-request socket traffic
+  - Enable debug logging to inspect connection-level request handling details
+- **SearchEngine Consolidation**: Unified search architecture by removing legacy HybridSearchEngine
+  - **SearchEngine** is now the sole search engine, consolidating multi-component search (FTS5, PathTree, Symbol, KG, Vector, Tag, Metadata)
+  - Removed ~2000 lines of legacy code: `hybrid_search_engine.cpp`, `hybrid_search_factory.cpp`, and associated headers
+  - **Parallel Execution**: SearchEngine now uses `std::async` to execute all 7 component queries simultaneously
+    - Configurable via `SearchEngineConfig::enableParallelExecution` (default: true)
+    - Per-component timeout via `SearchEngineConfig::componentTimeout` (default: 100ms)
+    - Graceful degradation: timed-out components are skipped, others continue
+  - **Updated Interfaces**: `AppContext.searchEngine` replaces `AppContext.hybridEngine` across CLI, daemon, and services
+  - **SearchEngineBuilder**: Simplified to create `SearchEngine` directly (removed `MetadataKeywordAdapter` and KG scorer wiring)
+  - Removed unused benchmark executables: `engine_comparison_bench`, `hybrid_search_bench`
+  - Location: `src/search/`, `include/yams/search/`, `src/app/services/`, `src/cli/`
+- **HotzoneManager Persistence**: Added save/load functionality for hotzone state
+  - `HotzoneManager::save(path)`: Serializes hotzone entries to JSON with atomic write (temp + rename)
+  - `HotzoneManager::load(path)`: Restores persisted hotzone state on startup
+  - Stores version, half-life config, and timestamped entry scores
+  - Location: `src/search/hotzone_manager.cpp`, `include/yams/search/hotzone_manager.h`
+- **CheckpointManager Component**: New daemon component for periodic state persistence
+  - Manages vector index and hotzone checkpoint scheduling
+  - Configurable interval, threshold-based vector index saves, optional hotzone persistence
+  - Async timer-based loop with graceful shutdown support
+  - Location: `include/yams/daemon/components/CheckpointManager.h`, `src/daemon/components/CheckpointManager.cpp`
 
 ### Fixed
+- **Plugin interface parsing**: Fixed `parseInterfacesFromManifest` to handle object-format interfaces
+  - Plugins using `[{"id": "model_provider_v1", "version": 2}]` format now parse correctly
+  - Previously only simple string arrays `["interface_name"]` were supported
+  - Affects ONNX plugin and other plugins with versioned interface declarations
+  - Location: `src/daemon/resource/abi_plugin_loader.cpp`
+
+- **Plugin host sharing**: Fixed model provider adoption failure after PBI-088 component extraction
+  - `ServiceManager::autoloadPluginsNow()` loaded plugins into `abiHost_`
+  - `PluginManager::adoptModelProvider()` was querying its own empty `pluginHost_`
+  - Added `sharedPluginHost` option to `PluginManager::Dependencies` for host sharing
+  - `PluginManager` now uses shared host from ServiceManager when provided
+  - Location: `include/yams/daemon/components/PluginManager.h`, `src/daemon/components/PluginManager.cpp`
+
+- **VectorIndexManager initialization**: Fixed search engine build failure "VectorIndexManager not provided"
+  - `VectorSystemManager::initializeOnce()` only initialized vector database, not index manager
+  - Added call to `initializeIndexManager()` after successful database init
+  - Added call to `loadPersistedIndex()` to restore saved index on startup
+  - Location: `src/daemon/components/ServiceManager.cpp`
+
 - **Model download mapping**: Added `multi-qa-MiniLM-L6-cos-v1` to HuggingFace repo mapping
   - Ensures model download works for new model option
 - **Version display**: Fixed `yams --version` showing fallback values instead of actual version
@@ -103,6 +147,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Sockets are now released before `io_context` shutdown to prevent reactor access after destruction
   - Fixes race condition where coroutine frames holding socket references were destroyed during scheduler shutdown
   - Related: [boost/asio#1347](https://github.com/chriskohlhoff/asio/issues/1347)
+- **Windows daemon status metrics**: CPU and memory now use native Win32 APIs (GetSystemTimes/GetProcessTimes/GetProcessMemoryInfo)
+  - `yams daemon status -d` reports accurate CPU% and working set on Windows instead of zero values
 
 ### CLI Improvements
 - **PowerShell completion**: Added `yams completion powershell` for PowerShell auto-complete
@@ -138,4 +184,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `VectorSystemManager::initializeOnce()` only initialized vector database, not index manager
   - Added call to `initializeIndexManager()` after successful database init
   - Added call to `loadPersistedIndex()` to restore saved index on startup
-  - Location: `src/daemon/components/ServiceManager.cpp`
+
+- **`--name` flag for `yams add`**: Fixed custom document naming when adding files
+  - The `--name` flag now correctly sets the document name for single-file adds
+  - Previously, files were always stored with their original filename regardless of `--name`
+  - Single files are now processed separately from directories to preserve naming behavior
+
+- **External plugin extractors in post-ingestion**: Fixed content extractors from external plugins not being used
+  - External plugin extractors (e.g., Ghidra binary analyzer) are now properly synced to PostIngestQueue
+  - Added `setExtractors()` method to update extractors after plugins load
+  - ServiceManager now syncs extractors from PluginManager after adoption
+
+- **Post-ingestion pipeline reliability**: Improved async processing consistency
+  - Unified post-ingest triggering for both directory and single-file ingestion
+  - Added retry logic with exponential backoff for internal event bus
+  - PostIngestQueue now blocks until worker is ready during initialization
+  - Extraction failures now report "Failed" status instead of "Skipped"
+
+### Removed
+- **HybridSearchEngine**: Legacy search engine removed in favor of unified SearchEngine
+  - Deleted: `src/search/hybrid_search_engine.cpp` (~1844 lines)
+  - Deleted: `src/search/hybrid_search_factory.cpp` (~168 lines)
+  - Deleted: `include/yams/search/hybrid_search_engine.h`
+  - Deleted: `include/yams/search/hybrid_search_factory.h`
+- **HybridSearchEngine Tests**: Removed obsolete test files
+  - `tests/unit/search/hybrid_search_engine_test.cpp`
+  - `tests/unit/search/hybrid_grouping_smoke_test.cpp`
+  - `tests/unit/search/learned_fusion_smoke_test.cpp`
+  - `tests/unit/search/hierarchical_search_test.cpp`
+  - `tests/unit/metadata/search_metadata_interface_test.cpp`
+- **Legacy Adapters**: Removed `MetadataKeywordAdapter` (was bridge for HybridSearchEngine)
+- **CLI Adapter Rename**: `HybridSearchResultAdapter` → `SearchResultItemAdapter` in result_renderer.h

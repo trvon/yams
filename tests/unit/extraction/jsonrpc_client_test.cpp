@@ -114,8 +114,37 @@ TEST_CASE("JsonRpcClient typed calls", "[extraction][jsonrpc]") {
     }
 
     SECTION("Notification (no response expected)") {
-        // Notifications don't expect a response
         client.notify("plugin.log", {{"level", "info"}, {"message", "test"}});
-        // Should not crash or hang
+    }
+}
+
+TEST_CASE("JsonRpcClient stale response handling", "[extraction][jsonrpc]") {
+    std::string python = getPythonExecutable();
+    std::filesystem::path mock_plugin =
+        std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() / "fixtures" /
+        "mock_plugin_stale.py";
+
+    INFO("Mock plugin path: " << mock_plugin.string());
+
+    if (!std::filesystem::exists(mock_plugin)) {
+        SKIP("mock_plugin_stale.py not found");
+    }
+
+    PluginProcessConfig config{.executable = python, .args = {mock_plugin.string()}};
+    PluginProcess process{std::move(config)};
+    REQUIRE(process.is_alive());
+
+    JsonRpcClient client{process};
+
+    SECTION("Skips stale responses to find matching ID") {
+        auto result = client.call("test.with_stale", json::object());
+        REQUIRE(result.has_value());
+        REQUIRE((*result)["status"] == "ok");
+    }
+
+    SECTION("Handles multiple stale responses") {
+        auto result = client.call("test.with_multiple_stale", json::object());
+        REQUIRE(result.has_value());
+        REQUIRE((*result)["count"] == 3);
     }
 }

@@ -97,17 +97,24 @@ struct ExternalPluginHost::Impl {
         desc.path = file;
         desc.manifestJson = manifest.dump();
 
-        // Parse interfaces
-        if (manifest.contains("capabilities")) {
+        // Parse interfaces - prefer explicit interfaces array from plugin manifest
+        if (manifest.contains("interfaces") && manifest["interfaces"].is_array()) {
+            for (const auto& iface : manifest["interfaces"]) {
+                if (iface.is_string()) {
+                    desc.interfaces.push_back(iface.get<std::string>());
+                }
+            }
+        } else if (manifest.contains("capabilities")) {
+            // Fallback: infer interfaces from capabilities (legacy support)
             auto caps = manifest["capabilities"];
             if (caps.contains("content_extraction")) {
-                desc.interfaces.push_back("content_extraction");
+                desc.interfaces.push_back("content_extractor_v1");
             }
             if (caps.contains("symbol_extraction")) {
-                desc.interfaces.push_back("symbol_extraction");
+                desc.interfaces.push_back("symbol_extractor_v1");
             }
             if (caps.contains("graph_store")) {
-                desc.interfaces.push_back("graph_store");
+                desc.interfaces.push_back("graph_store_v1");
             }
         }
 
@@ -161,29 +168,37 @@ struct ExternalPluginHost::Impl {
 
     auto load(const std::filesystem::path& file, const std::string& configJson)
         -> Result<PluginDescriptor> {
+        spdlog::info("ExternalPluginHost::load() called for: {}", file.string());
+
         // Check if file exists
         if (!fs::exists(file)) {
+            spdlog::warn("ExternalPluginHost::load() file not found: {}", file.string());
             return Error{ErrorCode::FileNotFound, "Plugin file not found: " + file.string()};
         }
 
         // Check trust policy
         if (!trust_file.empty() && !isTrusted(file)) {
+            spdlog::warn("ExternalPluginHost::load() not trusted: {}", file.string());
             return Error{ErrorCode::Unauthorized, "Plugin is not in trust list: " + file.string()};
         }
 
         // Scan to get descriptor
+        spdlog::info("ExternalPluginHost::load() scanning...");
         auto scan_result = scanTarget(file);
         if (!scan_result) {
+            spdlog::warn("ExternalPluginHost::load() scan failed: {}", scan_result.error().message);
             return scan_result;
         }
 
         auto descriptor = std::move(scan_result.value());
         const auto& name = descriptor.name;
+        spdlog::info("ExternalPluginHost::load() scan succeeded, name={}", name);
 
         // Check if already loaded
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (loaded.find(name) != loaded.end()) {
+                spdlog::warn("ExternalPluginHost::load() already loaded: {}", name);
                 return Error{ErrorCode::InvalidState, "Plugin already loaded: " + name};
             }
         }
@@ -192,20 +207,25 @@ struct ExternalPluginHost::Impl {
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (loaded.size() >= config.maxPlugins) {
+                spdlog::warn("ExternalPluginHost::load() max plugins reached");
                 return Error{ErrorCode::ResourceExhausted, "Maximum number of plugins loaded"};
             }
         }
 
         // Launch the plugin process
+        spdlog::info("ExternalPluginHost::load() launching process for real load...");
         auto proc_config = buildProcessConfig(file);
         auto process = std::make_unique<extraction::PluginProcess>(std::move(proc_config));
         auto rpc_client = std::make_unique<extraction::JsonRpcClient>(*process);
 
         // Handshake again (real load)
+        spdlog::info("ExternalPluginHost::load() calling handshake.manifest...");
         auto handshake_result = rpc_client->call("handshake.manifest");
         if (!handshake_result) {
+            spdlog::warn("ExternalPluginHost::load() handshake failed");
             return Error{ErrorCode::IOError, "Handshake failed during load"};
         }
+        spdlog::info("ExternalPluginHost::load() handshake succeeded");
 
         // Initialize plugin with config
         json init_params;
@@ -217,10 +237,13 @@ struct ExternalPluginHost::Impl {
             }
         }
 
+        spdlog::info("ExternalPluginHost::load() calling plugin.init...");
         auto init_result = rpc_client->call("plugin.init", init_params);
         if (!init_result) {
+            spdlog::warn("ExternalPluginHost::load() init failed");
             return Error{ErrorCode::IOError, "Plugin init failed"};
         }
+        spdlog::info("ExternalPluginHost::load() init succeeded");
 
         // Store instance
         {
@@ -380,7 +403,7 @@ struct ExternalPluginHost::Impl {
     //--------------------------------------------------------------------------
 
     auto callRpc(const std::string& pluginName, const std::string& method, const json& params,
-                 std::chrono::milliseconds /*timeout*/) -> Result<json> {
+                 std::chrono::milliseconds timeout) -> Result<json> {
         std::lock_guard<std::mutex> lock(mutex);
 
         auto it = loaded.find(pluginName);
@@ -393,7 +416,7 @@ struct ExternalPluginHost::Impl {
             return Error{ErrorCode::IOError, "Plugin process not running"};
         }
 
-        auto result = instance->rpc_client->call(method, params);
+        auto result = instance->rpc_client->call(method, params, timeout);
         if (!result) {
             return Error{ErrorCode::IOError, "RPC call failed"};
         }
@@ -783,8 +806,20 @@ private:
 
             auto baseStr = base.string();
             auto candStr = candidate.string();
-            if (!baseStr.empty() && candStr.rfind(baseStr, 0) == 0) {
-                return true;
+            
+            // Check if candidate is inside base directory securely
+            if (baseStr.empty()) continue;
+            
+            // Exact match is always trusted
+            if (candStr == baseStr) return true;
+            
+            // Prefix match must be followed by separator to avoid /trusted-evil bypass
+            if (candStr.size() > baseStr.size() && 
+                candStr.compare(0, baseStr.size(), baseStr) == 0) {
+                char nextChar = candStr[baseStr.size()];
+                if (nextChar == '/' || nextChar == '\\') {
+                    return true;
+                }
             }
         }
         return false;

@@ -72,6 +72,7 @@ void BackgroundTaskManager::start() {
         launchOrphanScanTask();
         launchPathTreeRepairTask();
         launchCheckpointTask();
+        launchStorageGcTask();
         spdlog::info("[BackgroundTaskManager] Background tasks launched successfully");
     } catch (const std::exception& e) {
         spdlog::error("[BackgroundTaskManager] Failed to launch background tasks: {}", e.what());
@@ -538,6 +539,70 @@ void BackgroundTaskManager::launchCheckpointTask() {
 
     checkpointMgr->start();
     spdlog::debug("[BackgroundTaskManager] CheckpointManager started");
+}
+
+void BackgroundTaskManager::launchStorageGcTask() {
+    auto self = deps_.serviceManager.lock();
+    if (!self) {
+        throw std::runtime_error(
+            "BackgroundTaskManager: ServiceManager weak_ptr expired in launchStorageGcTask");
+    }
+
+    auto exec = deps_.executor;
+    auto stopFlag = stopRequested_;
+
+    spdlog::debug("[BackgroundTaskManager] Launching StorageGC task");
+    boost::asio::co_spawn(
+        exec,
+        [self, stopFlag]() -> boost::asio::awaitable<void> {
+            using namespace std::chrono_literals;
+
+            // Create local timer (not a member, no shared state)
+            auto executor = co_await boost::asio::this_coro::executor;
+            boost::asio::steady_timer timer(executor);
+
+            // Initial delay: 10 minutes after daemon startup
+            timer.expires_after(10min);
+            try {
+                co_await timer.async_wait(boost::asio::use_awaitable);
+            } catch (const boost::system::system_error& e) {
+                if (e.code() == boost::asio::error::operation_aborted) {
+                    co_return; // Exit if cancelled during initial delay
+                }
+                throw;
+            }
+
+            while (!stopFlag->load(std::memory_order_acquire)) {
+                if (auto store = self->getContentStore(); store) {
+                    spdlog::debug("[StorageGC] Starting garbage collection");
+
+                    try {
+                        auto result = store->garbageCollect(nullptr);
+                        if (!result) {
+                            spdlog::warn("[StorageGC] Failed: {}", result.error().message);
+                        } else {
+                            spdlog::debug("[StorageGC] Collection completed successfully");
+                        }
+                    } catch (const std::exception& e) {
+                        spdlog::warn("[StorageGC] Exception: {}", e.what());
+                    }
+                }
+
+                // Run hourly
+                timer.expires_after(1h);
+                try {
+                    co_await timer.async_wait(boost::asio::use_awaitable);
+                } catch (const boost::system::system_error& e) {
+                    if (e.code() == boost::asio::error::operation_aborted) {
+                        break; // Exit if cancelled
+                    }
+                    throw;
+                }
+            }
+            spdlog::debug("[StorageGC] Task stopped");
+            co_return;
+        },
+        boost::asio::detached);
 }
 
 } // namespace yams::daemon

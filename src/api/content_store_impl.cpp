@@ -381,6 +381,37 @@ public:
 
     // Memory-based retrieve operation
     Result<std::vector<std::byte>> retrieveBytes(const std::string& hash) override {
+        // First try to retrieve manifest (chunked content)
+        auto manifestHash = hash + ".manifest";
+        auto manifestResult = storage_->retrieve(manifestHash);
+
+        if (manifestResult) {
+            // Content is chunked - reconstruct from manifest
+            auto manifest =
+                manifestManager_->deserialize(std::span<const std::byte>(manifestResult.value()));
+            if (!manifest) {
+                return manifest.error();
+            }
+
+            // Reconstruct content in memory
+            std::vector<std::byte> reconstructed;
+            reconstructed.reserve(manifest.value().fileSize);
+
+            for (const auto& chunk : manifest.value().chunks) {
+                auto chunkData = storage_->retrieve(chunk.hash);
+                if (!chunkData) {
+                    spdlog::warn("Failed to retrieve chunk {} for hash {}", chunk.hash, hash);
+                    return chunkData.error();
+                }
+                reconstructed.insert(reconstructed.end(), chunkData.value().begin(),
+                                     chunkData.value().end());
+            }
+
+            updateStats(0, 0, reconstructed.size(), 0, 0, 1, 0);
+            return reconstructed;
+        }
+
+        // Fallback: try direct retrieval (small unchunked content)
         auto dataResult = storage_->retrieve(hash);
         if (!dataResult) {
             return dataResult.error();
@@ -618,10 +649,49 @@ public:
     Result<void> garbageCollect([[maybe_unused]] ProgressCallback progress) override {
         spdlog::info("Starting garbage collection");
 
-        // TODO: Implement garbage collection
-        // This would involve:
-        // 1. Finding unreferenced chunks
-        // 2. Removing them from storage
+        // Cast to concrete types for GarbageCollector access
+        auto* concreteRefCounter = dynamic_cast<storage::ReferenceCounter*>(refCounter_.get());
+        auto* concreteStorage = dynamic_cast<storage::StorageEngine*>(storage_.get());
+
+        if (!concreteRefCounter || !concreteStorage) {
+            spdlog::warn("Garbage collection not supported: requires concrete ReferenceCounter and "
+                         "StorageEngine implementations");
+            return Result<void>();
+        }
+
+        // Create GarbageCollector and run collection
+        storage::GCOptions gcOptions;
+        gcOptions.maxBlocksPerRun = 1000;
+        gcOptions.minAgeSeconds = static_cast<size_t>(config_.gcInterval.count());
+        gcOptions.dryRun = false;
+
+        if (progress) {
+            gcOptions.progressCallback = [&progress](const std::string& /*hash*/, size_t count) {
+                Progress p;
+                p.bytesProcessed = count;
+                p.totalBytes = 0; // Unknown total
+                p.percentage = 0.0;
+                p.currentOperation = "garbage_collection";
+                progress(p);
+            };
+        }
+
+        auto gc = storage::createGarbageCollector(*concreteRefCounter, *concreteStorage);
+        auto result = gc->collect(gcOptions);
+
+        if (!result) {
+            spdlog::error("Garbage collection failed");
+            return Result<void>(result.error());
+        }
+
+        const auto& stats = result.value();
+        spdlog::info("Garbage collection complete: {} blocks scanned, {} deleted, {} bytes reclaimed",
+                     stats.blocksScanned, stats.blocksDeleted, stats.bytesReclaimed);
+
+        // Update our stats
+        if (stats.blocksDeleted > 0) {
+            updateStats(0, 0, 0, 0, 0, 0, stats.blocksDeleted);
+        }
 
         return Result<void>();
     }

@@ -1,4 +1,5 @@
 #include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
@@ -37,13 +38,25 @@ static json load_json(const std::filesystem::path& p) {
         std::ifstream in(p);
         if (in.good())
             in >> j;
+    } catch (const std::exception& e) {
+        spdlog::warn("SessionService: Failed to load JSON from {}: {}", p.string(), e.what());
     } catch (...) {
+        spdlog::warn("SessionService: Failed to load JSON from {}: unknown error", p.string());
     }
     return j;
 }
-static void save_json(const std::filesystem::path& p, const json& j) {
+static bool save_json(const std::filesystem::path& p, const json& j) {
     std::ofstream out(p);
+    if (!out) {
+        spdlog::warn("SessionService: Failed to open {} for writing", p.string());
+        return false;
+    }
     out << j.dump(2) << std::endl;
+    if (!out) {
+        spdlog::warn("SessionService: Failed to write JSON to {}", p.string());
+        return false;
+    }
+    return true;
 }
 } // namespace
 
@@ -226,7 +239,10 @@ public:
 
             j["materialized"] = std::move(materialized);
             save_json(sessions_dir() / (*cur + ".json"), j);
+        } catch (const std::exception& e) {
+            spdlog::warn("SessionService: Error during warm: {}", e.what());
         } catch (...) {
+            spdlog::warn("SessionService: Unknown error during warm");
         }
         return warmed;
     }

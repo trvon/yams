@@ -38,6 +38,36 @@ std::span<const std::byte> string_to_span(std::string_view str) {
     return std::as_bytes(std::span{str.data(), str.size()});
 }
 
+#ifdef _WIN32
+std::wstring escape_arg(const std::string& arg) {
+    std::wstring warg = std::wstring(arg.begin(), arg.end());
+    if (warg.empty()) return L"\"\"";
+    if (warg.find_first_of(L" \t\n\v\"") == std::wstring::npos) return warg;
+
+    std::wstring escaped = L"\"";
+    for (auto it = warg.begin(); it != warg.end(); ++it) {
+        unsigned int backslashes = 0;
+        while (it != warg.end() && *it == L'\\') {
+            ++it;
+            ++backslashes;
+        }
+
+        if (it == warg.end()) {
+            escaped.append(backslashes * 2, L'\\');
+            break;
+        } else if (*it == L'"') {
+            escaped.append(backslashes * 2 + 1, L'\\');
+            escaped.push_back(L'"');
+        } else {
+            escaped.append(backslashes, L'\\');
+            escaped.push_back(*it);
+        }
+    }
+    escaped.push_back(L'"');
+    return escaped;
+}
+#endif
+
 } // anonymous namespace
 
 /**
@@ -58,6 +88,7 @@ public:
     [[nodiscard]] bool is_alive() const noexcept;
     void terminate(std::chrono::milliseconds timeout);
     [[nodiscard]] std::span<const std::byte> read_stdout();
+    void consume_stdout(size_t bytes);
     [[nodiscard]] std::span<const std::byte> read_stderr();
     size_t write_stdin(std::span<const std::byte> data);
     [[nodiscard]] int64_t pid() const noexcept;
@@ -184,7 +215,7 @@ void PluginProcess::Impl::spawn_process() {
     }
 
     if (pid == 0) {
-        // Child process
+        setpgid(0, 0);
         int child_stdin = std::stoi(config_.env.at("__YAMS_STDIN_FD__"));
         int child_stdout = std::stoi(config_.env.at("__YAMS_STDOUT_FD__"));
         int child_stderr = std::stoi(config_.env.at("__YAMS_STDERR_FD__"));
@@ -275,17 +306,18 @@ void PluginProcess::Impl::terminate(std::chrono::milliseconds timeout) {
         }
     }
 
-    // Try graceful shutdown (SIGTERM)
-    if (kill(process_id_, SIGTERM) == 0) {
+    // Try graceful shutdown (SIGTERM) to the process group
+    // Use negative PID to send signal to the entire process group
+    if (kill(-process_id_, SIGTERM) == 0) {
         if (wait_for_exit(timeout)) {
             state_.store(ProcessState::Terminated, std::memory_order_release);
             return;
         }
     }
 
-    // Forceful kill (SIGKILL)
-    spdlog::warn("PluginProcess: Forcefully killing process {}", process_id_);
-    kill(process_id_, SIGKILL);
+    // Forceful kill (SIGKILL) to the process group
+    spdlog::warn("PluginProcess: Forcefully killing process group {}", process_id_);
+    kill(-process_id_, SIGKILL);
     (void)wait_for_exit(std::chrono::seconds{1}); // Best-effort wait after SIGKILL
     state_.store(ProcessState::Terminated, std::memory_order_release);
 }
@@ -426,9 +458,10 @@ void PluginProcess::Impl::spawn_process() {
     }
 
     // Build command line
+    // Build command line with proper escaping
     std::wstring cmdline = L"\"" + config_.executable.wstring() + L"\"";
     for (const auto& arg : config_.args) {
-        cmdline += L" \"" + std::wstring(arg.begin(), arg.end()) + L"\"";
+        cmdline += L" " + escape_arg(arg);
     }
 
     spdlog::info("PluginProcess: Spawning '{}' with {} args", config_.executable.string(),
@@ -798,6 +831,13 @@ std::span<const std::byte> PluginProcess::Impl::read_stdout() {
     return {stdout_buffer_.data(), stdout_buffer_.size()};
 }
 
+void PluginProcess::Impl::consume_stdout(size_t bytes) {
+    std::lock_guard lock{stdout_mutex_};
+    if (bytes > 0 && bytes <= stdout_buffer_.size()) {
+        stdout_buffer_.erase(stdout_buffer_.begin(), stdout_buffer_.begin() + static_cast<ptrdiff_t>(bytes));
+    }
+}
+
 std::span<const std::byte> PluginProcess::Impl::read_stderr() {
     std::lock_guard lock{stderr_mutex_};
     return {stderr_buffer_.data(), stderr_buffer_.size()};
@@ -842,6 +882,10 @@ void PluginProcess::terminate(std::chrono::milliseconds timeout) {
 
 std::span<const std::byte> PluginProcess::read_stdout() {
     return impl_->read_stdout();
+}
+
+void PluginProcess::consume_stdout(size_t bytes) {
+    impl_->consume_stdout(bytes);
 }
 
 std::span<const std::byte> PluginProcess::read_stderr() {

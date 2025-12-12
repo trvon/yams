@@ -14,6 +14,8 @@ JsonRpcClient::JsonRpcClient(PluginProcess& process)
 
 std::optional<json> JsonRpcClient::call(std::string_view method, json params,
                                         std::chrono::milliseconds timeout) {
+    std::lock_guard lock{mutex_};
+
     if (!process_.is_alive()) {
         spdlog::warn("JsonRpcClient: Process not alive, cannot call method '{}'", method);
         return std::nullopt;
@@ -24,59 +26,68 @@ std::optional<json> JsonRpcClient::call(std::string_view method, json params,
     std::string request_str = request.dump() + "\n";
 
     // Send request
-    spdlog::info("JsonRpcClient: Sending request to method '{}': {}", method, request_str);
+    spdlog::debug("JsonRpcClient: Sending request id={} method='{}'", id, method);
     std::span<const std::byte> request_bytes{reinterpret_cast<const std::byte*>(request_str.data()),
                                              request_str.size()};
 
     size_t written = process_.write_stdin(request_bytes);
-    spdlog::info("JsonRpcClient: Wrote {} of {} bytes to stdin", written, request_str.size());
     if (written != request_str.size()) {
         spdlog::error("JsonRpcClient: Failed to write full request ({}/{} bytes)", written,
                       request_str.size());
         return std::nullopt;
     }
 
-    // Give plugin a moment to process
-    spdlog::info("JsonRpcClient: Waiting 100ms for plugin to process request");
-    std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    // Wait for and read responses until we find the one with our ID
+    // This handles the case where responses arrive out of order
+    auto start = std::chrono::steady_clock::now();
 
-    // Read response
-    spdlog::info("JsonRpcClient: Reading response with timeout {}ms", timeout.count());
-    auto response = read_response(timeout);
-    if (!response) {
-        spdlog::warn("JsonRpcClient: Timeout waiting for response to '{}'", method);
-        return std::nullopt;
+    while (std::chrono::steady_clock::now() - start < timeout) {
+        auto response = read_next_response();
+
+        if (!response) {
+            // No complete response yet, wait a bit
+            std::this_thread::sleep_for(std::chrono::milliseconds{10});
+            continue;
+        }
+
+        // Validate JSON-RPC version
+        if (!response->contains("jsonrpc") || (*response)["jsonrpc"] != "2.0") {
+            spdlog::error("JsonRpcClient: Invalid JSON-RPC version in response");
+            return std::nullopt;
+        }
+
+        // Check if this is our response
+        int responseId = response->value("id", -1);
+        if (responseId == id) {
+            spdlog::debug("JsonRpcClient: Got response for id={} method='{}'", id, method);
+
+            // Check for error response
+            if (response->contains("error")) {
+                auto& error = (*response)["error"];
+                spdlog::error("JsonRpcClient: RPC error for '{}': code={}, message={}",
+                              method, error.value("code", -1), error.value("message", "unknown"));
+                return std::nullopt;
+            }
+
+            // Extract result
+            if (!response->contains("result")) {
+                spdlog::error("JsonRpcClient: Response missing 'result' field");
+                return std::nullopt;
+            }
+
+            return (*response)["result"];
+        }
+
+        // This response is for a different request ID - log and continue waiting
+        // This can happen if a previous request timed out but the response arrived late
+        spdlog::debug("JsonRpcClient: Discarding response for old id={} (expected {})",
+                      responseId, id);
     }
 
-    spdlog::info("JsonRpcClient: Received response: {}", response->dump());
-
-    // Validate response
-    if (!response->contains("jsonrpc") || (*response)["jsonrpc"] != "2.0") {
-        spdlog::error("JsonRpcClient: Invalid JSON-RPC version in response");
-        return std::nullopt;
-    }
-
-    if (!response->contains("id") || (*response)["id"] != id) {
-        spdlog::error("JsonRpcClient: Response ID mismatch (expected {}, got {})", id,
-                      response->value("id", -1));
-        return std::nullopt;
-    }
-
-    // Check for error response
-    if (response->contains("error")) {
-        auto& error = (*response)["error"];
-        spdlog::error("JsonRpcClient: RPC error: code={}, message={}", error.value("code", -1),
-                      error.value("message", "unknown"));
-        return std::nullopt;
-    }
-
-    // Extract result
-    if (!response->contains("result")) {
-        spdlog::error("JsonRpcClient: Response missing 'result' field");
-        return std::nullopt;
-    }
-
-    return (*response)["result"];
+    // Timeout
+    spdlog::warn("JsonRpcClient: Timeout after {}ms waiting for response to '{}' (id={})",
+                 timeout.count(), method, id);
+    return std::nullopt;
 }
 
 void JsonRpcClient::notify(std::string_view method, json params) {
@@ -95,57 +106,48 @@ void JsonRpcClient::notify(std::string_view method, json params) {
     process_.write_stdin(notification_bytes);
 }
 
-std::optional<json> JsonRpcClient::read_response(std::chrono::milliseconds timeout) {
-    auto start = std::chrono::steady_clock::now();
-    int poll_count = 0;
+std::optional<json> JsonRpcClient::read_next_response() {
+    auto data = process_.read_stdout();
 
-    while (std::chrono::steady_clock::now() - start < timeout) {
-        std::lock_guard lock{mutex_};
-        auto data = process_.read_stdout();
-
-        if (poll_count % 100 == 0) { // Log every ~1 second
-            spdlog::info("JsonRpcClient: poll #{}, buffer_size={}, read_pos={}", poll_count,
-                         data.size(), read_pos_);
-        }
-        poll_count++;
-
-        if (data.size() > read_pos_) {
-            // We have new data
-            std::string_view remaining{reinterpret_cast<const char*>(data.data() + read_pos_),
-                                       data.size() - read_pos_};
-            spdlog::info("JsonRpcClient: Got {} new bytes", remaining.size());
-
-            // Look for newline (NDJSON framing)
-            size_t newline_pos = remaining.find('\n');
-            if (newline_pos != std::string::npos) {
-                std::string line{remaining.substr(0, newline_pos)};
-                read_pos_ += newline_pos + 1;
-
-                if (!line.empty()) {
-                    try {
-                        return json::parse(line);
-                    } catch (const json::exception& e) {
-                        spdlog::error("JsonRpcClient: JSON parse error: {}", e.what());
-                        return std::nullopt;
-                    }
-                }
-            }
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    if (data.empty()) {
+        return std::nullopt;
     }
 
-    // Timeout
-    std::lock_guard lock{mutex_};
-    auto data = process_.read_stdout();
-    spdlog::warn("JsonRpcClient: read_response timeout after {}ms. Buffer size: {}, read_pos: {}",
-                 timeout.count(), data.size(), read_pos_);
+    // Look for a complete JSON line (terminated by newline)
+    std::string_view buffer{reinterpret_cast<const char*>(data.data()), data.size()};
+    size_t newline_pos = buffer.find('\n');
 
-    // Dump whatever we have in the buffer for debugging
-    if (data.size() > 0) {
-        std::string_view content{reinterpret_cast<const char*>(data.data()),
-                                 std::min<size_t>(data.size(), 500)};
-        spdlog::warn("JsonRpcClient: Buffer content (first 500 bytes): '{}'", content);
+    if (newline_pos == std::string::npos) {
+        // No complete line yet
+        return std::nullopt;
+    }
+
+    // Extract the line and consume it from the buffer
+    std::string line{buffer.substr(0, newline_pos)};
+    process_.consume_stdout(newline_pos + 1);  // +1 to include the newline
+
+    if (line.empty()) {
+        return std::nullopt;
+    }
+
+    try {
+        return json::parse(line);
+    } catch (const json::exception& e) {
+        spdlog::error("JsonRpcClient: JSON parse error: {}", e.what());
+        return std::nullopt;
+    }
+}
+
+std::optional<json> JsonRpcClient::read_response(std::chrono::milliseconds timeout) {
+    // Legacy method - now just wraps read_next_response with timeout
+    auto start = std::chrono::steady_clock::now();
+
+    while (std::chrono::steady_clock::now() - start < timeout) {
+        auto response = read_next_response();
+        if (response) {
+            return response;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
     }
 
     return std::nullopt;

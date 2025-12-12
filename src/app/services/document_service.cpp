@@ -18,6 +18,7 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
 #include <yams/metadata/query_helpers.h>
+#include <yams/core/cpp23_features.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -31,6 +32,7 @@
 #include <span>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -42,23 +44,22 @@ namespace {
 
 constexpr std::size_t kCentroidPreviewLimit = 16;
 
-inline bool startsWith(const std::string& s, const std::string& prefix) {
-    return s.rfind(prefix, 0) == 0;
-}
+// Use project compatibility helpers from cpp23_features.hpp
+using yams::features::string_starts_with;
 
 inline std::string normalizeExtension(const std::string& ext) {
     if (ext.empty())
-        return ext;
+        return {};
     if (ext[0] == '.')
         return ext;
     return "." + ext;
 }
 
 inline bool isTextMime(const std::string& mime) {
-    return !mime.empty() && startsWith(mime, "text/");
+    return !mime.empty() && string_starts_with(mime, "text/");
 }
 
-inline std::string toFileType(const std::string& mime) {
+inline const char* toFileType(const std::string& mime) {
     return isTextMime(mime) ? "text" : "binary";
 }
 
@@ -119,6 +120,39 @@ inline void addMetadataToMap(const std::unordered_map<std::string, std::string>&
     }
 }
 
+// Generate a content snippet by truncating and cleaning whitespace
+inline std::string generateSnippet(const std::string& contentText, int snippetLength) {
+    if (contentText.empty() || contentText.length() <= 3) {
+        return {};
+    }
+    std::string snippet = contentText;
+    if (snippet.length() > static_cast<size_t>(snippetLength)) {
+        snippet = snippet.substr(0, static_cast<size_t>(snippetLength - 3));
+        size_t lastSpace = snippet.find_last_of(' ');
+        if (lastSpace != std::string::npos &&
+            lastSpace > static_cast<size_t>(snippetLength / 2)) {
+            snippet = snippet.substr(0, lastSpace);
+        }
+        snippet += "...";
+    }
+    // Collapse whitespace
+    std::string cleaned;
+    cleaned.reserve(snippet.size());
+    bool lastWasSpace = false;
+    for (char c : snippet) {
+        if (std::isspace(static_cast<unsigned char>(c))) {
+            if (!lastWasSpace) {
+                cleaned += ' ';
+                lastWasSpace = true;
+            }
+        } else {
+            cleaned += c;
+            lastWasSpace = false;
+        }
+    }
+    return cleaned;
+}
+
 // Returns true if s consists only of hex digits
 inline bool isHex(const std::string& s) {
     return std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isxdigit(c) != 0; });
@@ -130,6 +164,261 @@ inline bool looksLikePartialHash(const std::string& s) {
         return false;
     return isHex(s);
 }
+
+// ============================================================================
+// DocumentResolver: Unified document resolution with strategy chain
+// ============================================================================
+// Resolution strategies are tried in priority order:
+//   1. FileName - Exact match on file_name column (for --name added documents)
+//   2. TreeLookup - Path tree index lookup (PBI-053)
+//   3. ExactPath - Exact match on file_path column
+//   4. PathSuffix - Pattern matching for relative paths
+//   5. HashPrefix - Partial hash matching (only for explicit hash queries)
+//
+// This class provides two main methods:
+//   - resolveToHash(): Returns single hash (errors on ambiguous results)
+//   - resolveAll(): Returns all matching documents (for batch operations)
+// ============================================================================
+
+template <typename Repo>
+class DocumentResolver {
+public:
+    struct ResolveOptions {
+        bool oldest = false;           // Return oldest match instead of newest
+        bool tryHashPrefix = false;    // Whether to attempt hash prefix resolution
+    };
+
+    explicit DocumentResolver(Repo& repo) : repo_(repo) {}
+
+    // Single document resolution - returns first/best match or error
+    Result<std::string> resolveToHash(const std::string& query,
+                                      const ResolveOptions& opts = {}) {
+        spdlog::info("[RESOLVE] Starting resolution for: '{}'", query);
+
+        // Strategy 1: FileName exact match (highest priority for --name documents)
+        if (auto hash = tryFileName(query)) {
+            spdlog::info("[RESOLVE] ✓ Resolved via fileName exact match");
+            return *hash;
+        }
+
+        // Strategy 2: Tree-based lookup (PBI-053)
+        if (auto hash = tryTreeLookup(query)) {
+            spdlog::info("[RESOLVE] ✓ Resolved via path tree");
+            return *hash;
+        }
+
+        // Strategy 3: Exact path match
+        if (auto hash = tryExactPath(query)) {
+            spdlog::info("[RESOLVE] ✓ Resolved via exact path");
+            return *hash;
+        }
+
+        // Strategy 4: Path pattern matching (suffix/relative)
+        auto patternMatches = tryPathPatterns(query);
+        if (!patternMatches.empty()) {
+            if (patternMatches.size() == 1) {
+                spdlog::info("[RESOLVE] ✓ Resolved via path pattern (single match)");
+                return patternMatches[0].sha256Hash;
+            }
+            // Multiple matches - sort and return based on opts
+            return selectFromMultiple(patternMatches, opts);
+        }
+
+        // Strategy 5: Hash prefix (only if explicitly requested)
+        if (opts.tryHashPrefix && looksLikePartialHash(query)) {
+            auto hashMatches = tryHashPrefix(query);
+            if (!hashMatches.empty()) {
+                if (hashMatches.size() == 1) {
+                    spdlog::info("[RESOLVE] ✓ Resolved via hash prefix (single match)");
+                    return hashMatches[0].sha256Hash;
+                }
+                return Error{ErrorCode::InvalidOperation,
+                             "Ambiguous hash prefix: " + std::to_string(hashMatches.size()) +
+                                 " matches for '" + query + "'"};
+            }
+        }
+
+        spdlog::warn("[RESOLVE] ❌ No matches found for: '{}'", query);
+        return Error{ErrorCode::NotFound, "Document not found: " + query};
+    }
+
+    // Multi-document resolution - returns all matches (for delete, batch ops)
+    Result<std::vector<metadata::DocumentInfo>> resolveAll(
+        const std::string& query, const ResolveOptions& opts = {}) {
+
+        std::vector<metadata::DocumentInfo> results;
+        std::unordered_set<std::string> seenHashes;
+
+        auto addUnique = [&](const std::vector<metadata::DocumentInfo>& docs) {
+            for (const auto& doc : docs) {
+                if (seenHashes.insert(doc.sha256Hash).second) {
+                    results.push_back(doc);
+                }
+            }
+        };
+
+        // Try fileName match
+        if (auto docs = tryFileNameAll(query); !docs.empty()) {
+            addUnique(docs);
+        }
+
+        // Try exact path
+        auto exactRes = repo_.findDocumentByExactPath(query);
+        if (exactRes && exactRes.value().has_value()) {
+            std::vector<metadata::DocumentInfo> v = {exactRes.value().value()};
+            addUnique(v);
+        }
+
+        // Try path patterns
+        addUnique(tryPathPatterns(query));
+
+        // Try hash prefix if requested
+        if (opts.tryHashPrefix && looksLikePartialHash(query)) {
+            addUnique(tryHashPrefix(query));
+        }
+
+        if (results.empty()) {
+            return Error{ErrorCode::NotFound, "No documents found matching: " + query};
+        }
+
+        return results;
+    }
+
+private:
+    // Strategy implementations
+
+    std::optional<std::string> tryFileName(const std::string& name) {
+        metadata::DocumentQueryOptions opts;
+        opts.fileName = name;
+        opts.limit = 1;
+        auto res = repo_.queryDocuments(opts);
+        if (res && !res.value().empty()) {
+            return res.value()[0].sha256Hash;
+        }
+        return std::nullopt;
+    }
+
+    std::vector<metadata::DocumentInfo> tryFileNameAll(const std::string& name) {
+        metadata::DocumentQueryOptions opts;
+        opts.fileName = name;
+        auto res = repo_.queryDocuments(opts);
+        if (res) {
+            return res.value();
+        }
+        return {};
+    }
+
+    std::optional<std::string> tryTreeLookup(const std::string& path) {
+        std::string normalized = path;
+        std::replace(normalized.begin(), normalized.end(), '\\', '/');
+
+        auto treeNodeRes = repo_.findPathTreeNodeByFullPath(normalized);
+        if (!treeNodeRes || !treeNodeRes.value().has_value()) {
+            return std::nullopt;
+        }
+
+        const auto& node = treeNodeRes.value().value();
+        auto docRes = repo_.findDocumentByExactPath(node.fullPath);
+        if (docRes && docRes.value().has_value()) {
+            return docRes.value().value().sha256Hash;
+        }
+        return std::nullopt;
+    }
+
+    std::optional<std::string> tryExactPath(const std::string& path) {
+        auto res = repo_.findDocumentByExactPath(path);
+        if (res && res.value().has_value()) {
+            return res.value().value().sha256Hash;
+        }
+        return std::nullopt;
+    }
+
+    std::vector<metadata::DocumentInfo> tryPathPatterns(const std::string& name) {
+        std::vector<std::string> patterns;
+        std::filesystem::path inputPath(name);
+        std::string basename = inputPath.filename().string();
+
+        // Basename with path prefix (for filename-only queries)
+        if (!basename.empty() && name.find('/') == std::string::npos &&
+            name.find('\\') == std::string::npos) {
+            patterns.push_back("%/" + basename);
+        }
+
+        // Just basename if different from input
+        if (!basename.empty() && basename != name) {
+            patterns.push_back(basename);
+        }
+
+        // Full path as suffix
+        if (name.find('/') != std::string::npos || name.find('\\') != std::string::npos) {
+            patterns.push_back("%" + name);
+        }
+
+        // For absolute paths, try progressive suffix patterns
+        if (!name.empty() && (name[0] == '/' || name.find(":\\") != std::string::npos)) {
+            try {
+                std::string pathStr = name;
+                std::replace(pathStr.begin(), pathStr.end(), '\\', '/');
+                size_t pos = 0;
+                while ((pos = pathStr.find('/', pos + 1)) != std::string::npos) {
+                    std::string suffix = pathStr.substr(pos + 1);
+                    if (!suffix.empty() && suffix != basename) {
+                        patterns.push_back("%" + suffix);
+                    }
+                }
+            } catch (...) {
+                // Ignore path manipulation errors
+            }
+        }
+
+        // Execute patterns and collect results
+        std::vector<metadata::DocumentInfo> allMatches;
+        std::unordered_set<std::string> seenHashes;
+
+        for (const auto& pattern : patterns) {
+            auto res = metadata::queryDocumentsByPattern(repo_, pattern);
+            if (res) {
+                for (auto& doc : res.value()) {
+                    if (seenHashes.insert(doc.sha256Hash).second) {
+                        allMatches.push_back(std::move(doc));
+                    }
+                }
+            }
+        }
+
+        return allMatches;
+    }
+
+    std::vector<metadata::DocumentInfo> tryHashPrefix(const std::string& prefix) {
+        // Use efficient hash prefix search instead of loading all documents
+        auto matchResult = repo_.findDocumentsByHashPrefix(prefix, 100);
+        if (matchResult) {
+            return matchResult.value();
+        }
+        return {};
+    }
+
+    Result<std::string> selectFromMultiple(std::vector<metadata::DocumentInfo>& matches,
+                                           const ResolveOptions& opts) {
+        const char* strategy = opts.oldest ? "oldest" : "most recent";
+        spdlog::warn("[RESOLVE] ⚠️ Ambiguous: {} matches - returning {}",
+                     matches.size(), strategy);
+
+        std::sort(matches.begin(), matches.end(),
+                  [&opts](const metadata::DocumentInfo& a, const metadata::DocumentInfo& b) {
+                      return opts.oldest ? (a.indexedTime < b.indexedTime)
+                                         : (a.indexedTime > b.indexedTime);
+                  });
+
+        spdlog::info("[RESOLVE] ✓ Selected {}: {} (indexed: {})", strategy,
+                     matches[0].fileName,
+                     matches[0].indexedTime.time_since_epoch().count());
+
+        return matches[0].sha256Hash;
+    }
+
+    Repo& repo_;
+};
 
 struct CompressedPayload {
     std::string blob;
@@ -227,14 +516,12 @@ inline std::string makeTempFilePathFor(const std::string& name) {
     return tmp.string();
 }
 
-// Removed unused function trimLeadingDot
-
 // Basic "tags" extraction heuristic from metadata rows
 inline std::vector<std::string>
 extractTags(const std::unordered_map<std::string, yams::metadata::MetadataValue>& all) {
     std::vector<std::string> tags;
     for (const auto& [key, value] : all) {
-        if (key == "tag" || startsWith(key, "tag:")) {
+        if (key == "tag" || string_starts_with(key, "tag:")) {
             const auto s = value.asString();
             if (!s.empty())
                 tags.push_back(s);
@@ -351,8 +638,15 @@ public:
             // tree indexing and session diffs work for raw-text documents too.
             if (!req.path.empty()) {
                 info.filePath = p.string();
-                info.fileName = p.filename().string();
-                info.fileExtension = p.extension().string();
+                // Use explicit name if provided, otherwise derive from path
+                if (!req.name.empty()) {
+                    info.fileName = req.name;
+                    std::filesystem::path np = req.name;
+                    info.fileExtension = np.extension().string();
+                } else {
+                    info.fileName = p.filename().string();
+                    info.fileExtension = p.extension().string();
+                }
             } else {
                 // Prefer the provided document name as both filePath and fileName
                 info.filePath = req.name;
@@ -403,57 +697,6 @@ public:
                 int64_t docId = ins.value();
                 for (const auto& [k, v] : md.tags) {
                     (void)ctx_.metadataRepo->setMetadata(docId, k, metadata::MetadataValue(v));
-                }
-                // Best-effort: index content into FTS5 using robust extraction (plugins +
-                // built-ins)
-                try {
-                    auto extractedOpt = yams::extraction::util::extractDocumentText(
-                        ctx_.store, out.hash, info.mimeType, info.fileExtension,
-                        ctx_.contentExtractors);
-                    if (extractedOpt && !extractedOpt->empty()) {
-                        const std::string& extracted = *extractedOpt;
-
-                        if (docId > 0) {
-                            metadata::DocumentContent contentRow;
-                            contentRow.documentId = docId;
-                            contentRow.contentText = extracted;
-                            contentRow.contentLength =
-                                static_cast<int64_t>(contentRow.contentText.size());
-                            contentRow.extractionMethod = "inline";
-                            double langConfidence = 0.0;
-                            contentRow.language =
-                                yams::extraction::LanguageDetector::detectLanguage(
-                                    contentRow.contentText, &langConfidence);
-                            auto contentUpsert = ctx_.metadataRepo->insertContent(contentRow);
-                            if (!contentUpsert) {
-                                spdlog::warn("Failed to upsert extracted content for {}: {}",
-                                             out.hash, contentUpsert.error().message);
-                            }
-                        }
-
-                        (void)ctx_.metadataRepo->indexDocumentContent(docId, info.fileName,
-                                                                      extracted, info.mimeType);
-                        (void)ctx_.metadataRepo->updateFuzzyIndex(docId);
-                        // Try to update extraction flags on the document row
-                        auto d = ctx_.metadataRepo->getDocument(docId);
-                        if (d && d.value().has_value()) {
-                            auto updated = d.value().value();
-                            updated.contentExtracted = true;
-                            updated.extractionStatus = metadata::ExtractionStatus::Success;
-                            (void)ctx_.metadataRepo->updateDocument(updated);
-                        }
-                    } else {
-                        // Mark as attempted but possibly skipped/failed for non-text types
-                        auto d = ctx_.metadataRepo->getDocument(docId);
-                        if (d && d.value().has_value()) {
-                            auto updated = d.value().value();
-                            updated.contentExtracted = false;
-                            updated.extractionStatus = metadata::ExtractionStatus::Skipped;
-                            (void)ctx_.metadataRepo->updateDocument(updated);
-                        }
-                    }
-                } catch (...) {
-                    // Non-fatal: indexing is opportunistic here
                 }
 
                 // Update path tree for this document (best-effort)
@@ -765,24 +1008,24 @@ public:
             if (resp.related.empty() && ctx_.metadataRepo) {
                 std::filesystem::path baseDir =
                     std::filesystem::path(foundDoc->filePath).parent_path();
-                auto docsRes = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%");
+                // Query only documents in the same directory using path prefix
+                std::string dirPattern = baseDir.string() + "/%";
+                auto docsRes = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, dirPattern, 21);
                 if (docsRes) {
                     int count = 0;
                     for (const auto& other : docsRes.value()) {
                         if (other.sha256Hash == foundDoc->sha256Hash)
                             continue;
-                        if (std::filesystem::path(other.filePath).parent_path() == baseDir) {
-                            if (seenHashes.count(other.sha256Hash) == 0 && count < 20) {
-                                RelatedDocument rd;
-                                rd.hash = other.sha256Hash;
-                                rd.path = other.filePath;
-                                rd.name = other.fileName;
-                                rd.relationship = "same_directory";
-                                rd.distance = 1;
-                                resp.related.push_back(std::move(rd));
-                                seenHashes.insert(other.sha256Hash);
-                                count++;
-                            }
+                        if (seenHashes.count(other.sha256Hash) == 0 && count < 20) {
+                            RelatedDocument rd;
+                            rd.hash = other.sha256Hash;
+                            rd.path = other.filePath;
+                            rd.name = other.fileName;
+                            rd.relationship = "same_directory";
+                            rd.distance = 1;
+                            resp.related.push_back(std::move(rd));
+                            seenHashes.insert(other.sha256Hash);
+                            count++;
                         }
                     }
                 }
@@ -1269,37 +1512,9 @@ public:
                     if (contentResult) {
                         const auto& optionalContent = contentResult.value();
                         if (optionalContent.has_value()) {
-                            const auto& content = optionalContent.value();
-                            if (!content.contentText.empty() && content.contentText.length() > 3) {
-                                std::string snippet = content.contentText;
-                                if (snippet.length() > static_cast<size_t>(req.snippetLength)) {
-                                    snippet = snippet.substr(
-                                        0, static_cast<size_t>(req.snippetLength - 3));
-                                    size_t lastSpace = snippet.find_last_of(' ');
-                                    if (lastSpace != std::string::npos &&
-                                        lastSpace > static_cast<size_t>(req.snippetLength / 2)) {
-                                        snippet = snippet.substr(0, lastSpace);
-                                    }
-                                    snippet += "...";
-                                }
-                                std::string cleaned;
-                                cleaned.reserve(snippet.size());
-                                bool lastWasSpace = false;
-                                for (char c : snippet) {
-                                    if (std::isspace(static_cast<unsigned char>(c))) {
-                                        if (!lastWasSpace) {
-                                            cleaned += ' ';
-                                            lastWasSpace = true;
-                                        }
-                                    } else {
-                                        cleaned += c;
-                                        lastWasSpace = false;
-                                    }
-                                }
-                                e.snippet = std::move(cleaned);
-                            } else {
-                                e.snippet = "[No text content]";
-                            }
+                            auto snippet = generateSnippet(optionalContent.value().contentText,
+                                                           req.snippetLength);
+                            e.snippet = snippet.empty() ? "[No text content]" : std::move(snippet);
                         } else {
                             e.snippet = "[Content not available]";
                         }
@@ -1362,37 +1577,9 @@ public:
                     if (contentResult) {
                         const auto& optionalContent = contentResult.value();
                         if (optionalContent.has_value()) {
-                            const auto& content = optionalContent.value();
-                            if (!content.contentText.empty() && content.contentText.length() > 3) {
-                                std::string snippet = content.contentText;
-                                if (snippet.length() > static_cast<size_t>(req.snippetLength)) {
-                                    snippet = snippet.substr(
-                                        0, static_cast<size_t>(req.snippetLength - 3));
-                                    size_t lastSpace = snippet.find_last_of(' ');
-                                    if (lastSpace != std::string::npos &&
-                                        lastSpace > static_cast<size_t>(req.snippetLength / 2)) {
-                                        snippet = snippet.substr(0, lastSpace);
-                                    }
-                                    snippet += "...";
-                                }
-                                std::string cleaned;
-                                cleaned.reserve(snippet.size());
-                                bool lastWasSpace = false;
-                                for (char c : snippet) {
-                                    if (std::isspace(static_cast<unsigned char>(c))) {
-                                        if (!lastWasSpace) {
-                                            cleaned += ' ';
-                                            lastWasSpace = true;
-                                        }
-                                    } else {
-                                        cleaned += c;
-                                        lastWasSpace = false;
-                                    }
-                                }
-                                e.snippet = std::move(cleaned);
-                            } else {
-                                e.snippet = "[No text content]";
-                            }
+                            auto snippet = generateSnippet(optionalContent.value().contentText,
+                                                           req.snippetLength);
+                            e.snippet = snippet.empty() ? "[No text content]" : std::move(snippet);
                         } else {
                             e.snippet = "[Content not available]";
                         }
@@ -1437,27 +1624,20 @@ public:
             return Error{ErrorCode::InvalidArgument, "Provide 'hash' or 'name' to update metadata"};
         }
 
-        // Find target document by hash
-        auto docsRes = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%");
-        if (!docsRes) {
+        // Find target document by hash - use direct lookup instead of scanning all
+        auto docRes = ctx_.metadataRepo->getDocumentByHash(hash);
+        if (!docRes) {
             return Error{ErrorCode::InternalError,
-                         "Failed to enumerate documents: " + docsRes.error().message};
+                         "Failed to lookup document: " + docRes.error().message};
         }
-
-        std::optional<metadata::DocumentInfo> target;
-        for (const auto& d : docsRes.value()) {
-            if (d.sha256Hash == hash) {
-                target = d;
-                break;
-            }
-        }
-        if (!target) {
+        if (!docRes.value().has_value()) {
             return Error{ErrorCode::NotFound, "Document not found"};
         }
+        auto target = docRes.value().value();
 
         UpdateMetadataResponse resp;
         resp.hash = hash;
-        resp.documentId = target->id;
+        resp.documentId = target.id;
 
         // Create backup if requested
         if (req.createBackup && ctx_.store) {
@@ -1470,9 +1650,9 @@ public:
 
                 api::ContentMetadata backupMeta;
                 backupMeta.name =
-                    target->fileName + ".backup_" +
+                    target.fileName + ".backup_" +
                     std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
-                backupMeta.mimeType = target->mimeType;
+                backupMeta.mimeType = target.mimeType;
 
                 auto stored = ctx_.store->storeStream(backupStream, backupMeta);
                 if (stored) {
@@ -1486,8 +1666,8 @@ public:
             std::istringstream contentStream(req.newContent);
 
             api::ContentMetadata contentMeta;
-            contentMeta.name = target->fileName;
-            contentMeta.mimeType = target->mimeType;
+            contentMeta.name = target.fileName;
+            contentMeta.mimeType = target.mimeType;
 
             auto stored = ctx_.store->storeStream(contentStream, contentMeta);
             if (!stored) {
@@ -1498,7 +1678,7 @@ public:
             } else {
                 // Update the document's hash in metadata
                 auto updateHash = ctx_.metadataRepo->setMetadata(
-                    target->id, "content_hash",
+                    target.id, "content_hash",
                     metadata::MetadataValue(stored.value().contentHash));
                 if (updateHash) {
                     resp.contentUpdated = true;
@@ -1512,7 +1692,7 @@ public:
 
         // Apply metadata updates
         for (const auto& [k, v] : req.keyValues) {
-            auto u = ctx_.metadataRepo->setMetadata(target->id, k, metadata::MetadataValue(v));
+            auto u = ctx_.metadataRepo->setMetadata(target.id, k, metadata::MetadataValue(v));
             if (!u) {
                 errors.push_back("Failed to update metadata: " + k);
                 if (req.atomic) {
@@ -1530,7 +1710,7 @@ public:
                 continue;
             std::string k = p.substr(0, pos);
             std::string v = p.substr(pos + 1);
-            auto u = ctx_.metadataRepo->setMetadata(target->id, k, metadata::MetadataValue(v));
+            auto u = ctx_.metadataRepo->setMetadata(target.id, k, metadata::MetadataValue(v));
             if (!u) {
                 errors.push_back("Failed to update metadata: " + k);
                 if (req.atomic) {
@@ -1543,7 +1723,7 @@ public:
 
         // Handle tag additions (tags are stored as metadata with "tag:" prefix)
         for (const auto& tag : req.addTags) {
-            auto u = ctx_.metadataRepo->setMetadata(target->id, "tag:" + tag,
+            auto u = ctx_.metadataRepo->setMetadata(target.id, "tag:" + tag,
                                                     metadata::MetadataValue("true"));
             if (!u) {
                 errors.push_back("Failed to add tag: " + tag);
@@ -1558,7 +1738,7 @@ public:
         // Handle tag removals (remove metadata entries with "tag:" prefix)
         for (const auto& tag : req.removeTags) {
             // Get current tags to verify it exists
-            auto currentTags = ctx_.metadataRepo->getDocumentTags(target->id);
+            auto currentTags = ctx_.metadataRepo->getDocumentTags(target.id);
             bool tagExists = false;
             if (currentTags) {
                 for (const auto& existingTag : currentTags.value()) {
@@ -1571,7 +1751,7 @@ public:
 
             if (tagExists) {
                 // Remove by setting to empty/null value (this typically removes the metadata entry)
-                auto u = ctx_.metadataRepo->setMetadata(target->id, "tag:" + tag,
+                auto u = ctx_.metadataRepo->setMetadata(target.id, "tag:" + tag,
                                                         metadata::MetadataValue(""));
                 if (!u) {
                     errors.push_back("Failed to remove tag: " + tag);
@@ -1585,166 +1765,29 @@ public:
         }
 
         // Update fuzzy index
-        ctx_.metadataRepo->updateFuzzyIndex(target->id);
+        ctx_.metadataRepo->updateFuzzyIndex(target.id);
 
         resp.success = (errors.empty() || !req.atomic);
         resp.updatesApplied = count;
         return resp;
     }
 
-    // Tree-aware path resolution using PathTreeNode infrastructure (PBI-053)
-    std::optional<std::string> resolvePathViaTree(const std::string& path) {
-        if (!ctx_.metadataRepo) {
-            return std::nullopt;
-        }
-
-        // Normalize path separators
-        std::string normalizedPath = path;
-        std::replace(normalizedPath.begin(), normalizedPath.end(), '\\', '/');
-
-        // Try exact path lookup in tree
-        auto treeNodeRes = ctx_.metadataRepo->findPathTreeNodeByFullPath(normalizedPath);
-        if (!treeNodeRes) {
-            spdlog::debug("[RESOLVE-TRACE] Tree lookup failed: {}", treeNodeRes.error().message);
-            return std::nullopt;
-        }
-
-        if (!treeNodeRes.value().has_value()) {
-            spdlog::debug("[RESOLVE-TRACE] Path not found in tree: '{}'", normalizedPath);
-            return std::nullopt;
-        }
-
-        const auto& node = treeNodeRes.value().value();
-        spdlog::info("[RESOLVE-TRACE] ✓ Found in tree: node_id={}, fullPath='{}'", node.id,
-                     node.fullPath);
-
-        // Get the document associated with this path node
-        auto docRes = ctx_.metadataRepo->findDocumentByExactPath(node.fullPath);
-        if (!docRes || !docRes.value().has_value()) {
-            spdlog::warn("[RESOLVE-TRACE] Tree node exists but no document found for path: '{}'",
-                         node.fullPath);
-            return std::nullopt;
-        }
-
-        return docRes.value().value().sha256Hash;
-    }
-
-    // Resolve name to hash (disambiguate or error)
+    // Resolve name to hash using unified DocumentResolver
     Result<std::string> resolveNameToHash(const std::string& name, bool oldest = false) override {
-        spdlog::info("[RESOLVE-TRACE] === Starting resolveNameToHash for: '{}' (oldest={})", name,
-                     oldest);
-
         if (!ctx_.metadataRepo) {
             return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
         }
 
-        // Strategy 1: Tree-based lookup (highest priority, PBI-053)
-        auto treeResult = resolvePathViaTree(name);
-        if (treeResult.has_value()) {
-            spdlog::info("[RESOLVE-TRACE] ✓ Resolved via tree");
-            return treeResult.value();
-        }
+        DocumentResolver<metadata::IMetadataRepository> resolver(*ctx_.metadataRepo);
+        typename DocumentResolver<metadata::IMetadataRepository>::ResolveOptions opts;
+        opts.oldest = oldest;
+        opts.tryHashPrefix = false; // Name resolution shouldn't try hash prefix
 
-        // Strategy 2: Exact path match
-        auto exactRes = ctx_.metadataRepo->findDocumentByExactPath(name);
-        if (exactRes && exactRes.value().has_value()) {
-            spdlog::info("[RESOLVE-TRACE] ✓ Resolved via exact path");
-            return exactRes.value().value().sha256Hash;
-        }
-
-        // Strategy 3: Path suffix or filename match
-        std::vector<std::string> candidatePatterns;
-
-        // Always try basename (filename only) match
-        std::filesystem::path inputPath(name);
-        std::string basename = inputPath.filename().string();
-
-        // If input is just a basename (no path separators), try suffix match
-        if (!basename.empty() && name.find('/') == std::string::npos &&
-            name.find('\\') == std::string::npos) {
-            candidatePatterns.push_back("%/" + basename);
-        }
-
-        // If input is a path, add basename separately
-        if (!basename.empty() && basename != name) {
-            candidatePatterns.push_back(basename);
-        }
-
-        // Try full path suffix match
-        if (name.find('/') != std::string::npos || name.find('\\') != std::string::npos) {
-            candidatePatterns.push_back("%" + name);
-        }
-
-        // Strategy 4: For absolute paths, try without the directory component mismatch
-        // e.g., if indexed from /path/a/file.txt but queried from /path/b/file.txt
-        if (!name.empty() && (name[0] == '/' || name.find(":\\") != std::string::npos)) {
-            try {
-                std::filesystem::path absPath(name);
-                // Try suffix patterns of increasing specificity
-                // E.g., for /home/user/Downloads/docs/file.txt try:
-                //   - docs/file.txt
-                //   - Downloads/docs/file.txt
-                std::string pathStr = absPath.string();
-                size_t pos = 0;
-                while ((pos = pathStr.find('/', pos + 1)) != std::string::npos) {
-                    std::string suffix = pathStr.substr(pos + 1);
-                    if (!suffix.empty() && suffix != basename) {
-                        candidatePatterns.push_back("%" + suffix);
-                    }
-                }
-            } catch (...) {
-                // Ignore path manipulation errors
-            }
-        }
-
-        // Try suffix/relative patterns
-        std::vector<metadata::DocumentInfo> allMatches;
-        for (const auto& pattern : candidatePatterns) {
-            auto res = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, pattern);
-            if (res && !res.value().empty()) {
-                allMatches.insert(allMatches.end(), res.value().begin(), res.value().end());
-            }
-        }
-
-        // Deduplicate by hash
-        std::unordered_set<std::string> seenHashes;
-        std::vector<metadata::DocumentInfo> uniqueMatches;
-        for (const auto& doc : allMatches) {
-            if (seenHashes.insert(doc.sha256Hash).second) {
-                uniqueMatches.push_back(doc);
-            }
-        }
-
-        if (uniqueMatches.empty()) {
-            spdlog::warn("[RESOLVE-TRACE] ❌ No matches found for: '{}'", name);
-            return Error{ErrorCode::NotFound, "Document not found: " + name};
-        }
-        if (uniqueMatches.size() > 1) {
-            const char* strategy = oldest ? "oldest" : "most recent";
-            spdlog::warn("[RESOLVE-TRACE] ⚠️ Ambiguous: {} matches - returning {}",
-                         uniqueMatches.size(), strategy);
-
-            // Sort by indexedTime (descending for latest, ascending for oldest)
-            std::sort(uniqueMatches.begin(), uniqueMatches.end(),
-                      [oldest](const metadata::DocumentInfo& a, const metadata::DocumentInfo& b) {
-                          return oldest ? (a.indexedTime < b.indexedTime)
-                                        : (a.indexedTime > b.indexedTime);
-                      });
-
-            // Log the selection for transparency
-            spdlog::info("[RESOLVE-TRACE] ✓ Selected {}: {} (indexed: {})", strategy,
-                         uniqueMatches[0].fileName,
-                         uniqueMatches[0].indexedTime.time_since_epoch().count());
-
-            // Return the selected match
-            return uniqueMatches[0].sha256Hash;
-        }
-
-        spdlog::info("[RESOLVE-TRACE] ✓ Resolved via pattern matching");
-        return uniqueMatches[0].sha256Hash;
+        return resolver.resolveToHash(name, opts);
     }
 
     // Delete by name(s) or pattern (dry-run supported)
+    // Uses DocumentResolver for unified resolution strategy
     Result<DeleteByNameResponse> deleteByName(const DeleteByNameRequest& req) override {
         if (!ctx_.store) {
             return Error{ErrorCode::NotInitialized, "Content store not available"};
@@ -1756,115 +1799,102 @@ public:
         DeleteByNameResponse resp;
         resp.dryRun = req.dryRun;
 
-        std::vector<std::pair<std::string, std::string>> targets; // (name, hash)
+        // Use DocumentResolver for all resolution
+        DocumentResolver<metadata::IMetadataRepository> resolver(*ctx_.metadataRepo);
+        typename DocumentResolver<metadata::IMetadataRepository>::ResolveOptions resolveOpts;
+        resolveOpts.tryHashPrefix = true; // Allow hash prefix for delete operations
 
-        auto addDocVec = [&](const std::vector<metadata::DocumentInfo>& v) {
-            for (const auto& d : v) {
-                targets.emplace_back(d.fileName, d.sha256Hash);
+        std::vector<metadata::DocumentInfo> allTargets;
+        std::unordered_set<std::string> seenHashes;
+
+        auto addUnique = [&](const std::vector<metadata::DocumentInfo>& docs) {
+            for (const auto& doc : docs) {
+                if (seenHashes.insert(doc.sha256Hash).second) {
+                    allTargets.push_back(doc);
+                }
             }
         };
 
-        // If a hash is provided (full or prefix), resolve it first
+        // Resolve hash (full or prefix) using efficient findDocumentsByHashPrefix
         if (!req.hash.empty()) {
-            auto all = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%");
-            if (!all) {
-                return Error{ErrorCode::InternalError,
-                             "Failed to enumerate documents: " + all.error().message};
-            }
-            const bool isPrefix = req.hash.size() < 64; // treat shorter as prefix
-            std::vector<metadata::DocumentInfo> matched;
-            for (const auto& d : all.value()) {
-                if ((isPrefix && d.sha256Hash.rfind(req.hash, 0) == 0) ||
-                    (!isPrefix && d.sha256Hash == req.hash)) {
-                    matched.push_back(d);
+            if (req.hash.size() == 64) {
+                // Full hash - direct lookup
+                auto docRes = ctx_.metadataRepo->getDocumentByHash(req.hash);
+                if (docRes && docRes.value().has_value()) {
+                    addUnique({docRes.value().value()});
                 }
-            }
-            if (!matched.empty()) {
-                addDocVec(matched);
+            } else {
+                // Partial hash - use efficient prefix search
+                auto matchResult = ctx_.metadataRepo->findDocumentsByHashPrefix(req.hash, 100);
+                if (matchResult) {
+                    addUnique(matchResult.value());
+                }
             }
         }
 
+        // Resolve pattern using glob-to-SQL conversion
         if (!req.pattern.empty()) {
             auto pat = globToSqlLike(req.pattern);
             auto res = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, pat);
             if (res && !res.value().empty()) {
-                addDocVec(res.value());
+                addUnique(res.value());
             }
         }
+
+        // Resolve each name using DocumentResolver
         for (const auto& n : req.names) {
-            auto res = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%/" + n);
-            if (!res || res.value().empty()) {
-                // Try direct path match
-                auto res2 = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, n);
-                if (res2 && !res2.value().empty())
-                    addDocVec(res2.value());
-                continue;
+            auto resolved = resolver.resolveAll(n, resolveOpts);
+            if (resolved) {
+                addUnique(resolved.value());
             }
-            addDocVec(res.value());
         }
+
+        // Resolve single name if provided
         if (!req.name.empty()) {
-            auto res = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%/" + req.name);
-            if (!res || res.value().empty()) {
-                auto res2 = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, req.name);
-                if (res2 && !res2.value().empty())
-                    addDocVec(res2.value());
-            } else {
-                addDocVec(res.value());
+            auto resolved = resolver.resolveAll(req.name, resolveOpts);
+            if (resolved) {
+                addUnique(resolved.value());
             }
         }
 
-        // De-duplicate targets by hash
-        std::sort(targets.begin(), targets.end(),
-                  [](const auto& a, const auto& b) { return a.second < b.second; });
-        targets.erase(
-            std::unique(targets.begin(), targets.end(),
-                        [](const auto& a, const auto& b) { return a.second == b.second; }),
-            targets.end());
-
-        for (const auto& [name, hash] : targets) {
+        // Execute deletions
+        for (const auto& doc : allTargets) {
             DeleteByNameResult r;
-            r.name = name;
-            r.hash = hash;
+            r.name = doc.fileName;
+            r.hash = doc.sha256Hash;
+
             if (!req.dryRun) {
-                bool storeDeleted = false;
-                if (auto del = ctx_.store->remove(hash)) {
-                    storeDeleted = del.value();
-                    if (!storeDeleted) {
-                        r.error = "Document not found";
-                        resp.errors.push_back(r);
-                        continue;
-                    }
-                } else {
+                // Delete from content store
+                auto storeResult = ctx_.store->remove(doc.sha256Hash);
+                if (!storeResult) {
                     r.deleted = false;
-                    r.error = del.error().message;
+                    r.error = storeResult.error().message;
+                    resp.errors.push_back(r);
+                    continue;
+                }
+                if (!storeResult.value()) {
+                    r.error = "Document not found in store";
                     resp.errors.push_back(r);
                     continue;
                 }
 
-                bool metadataOk = true;
-                if (ctx_.metadataRepo) {
-                    auto docInfo = ctx_.metadataRepo->getDocumentByHash(hash);
-                    if (docInfo && docInfo.value().has_value()) {
-                        auto deleteResult = ctx_.metadataRepo->deleteDocument(docInfo.value()->id);
-                        if (!deleteResult) {
-                            metadataOk = false;
-                            r.error = "Failed to delete metadata: " + deleteResult.error().message;
-                            resp.errors.push_back(r);
-                        }
-                    }
+                // Delete from metadata repository
+                auto metaResult = ctx_.metadataRepo->deleteDocument(doc.id);
+                if (!metaResult) {
+                    r.error = "Failed to delete metadata: " + metaResult.error().message;
+                    resp.errors.push_back(r);
+                    continue;
                 }
 
-                if (metadataOk) {
-                    r.deleted = storeDeleted;
-                    resp.deleted.push_back(r);
-                }
+                r.deleted = true;
+                resp.deleted.push_back(r);
             } else {
                 r.deleted = false;
                 resp.deleted.push_back(r);
             }
         }
 
-        resp.count = req.dryRun ? targets.size() : resp.deleted.size();
+        resp.count = req.dryRun ? allTargets.size() : resp.deleted.size();
         return resp;
     }
 

@@ -527,6 +527,15 @@ private:
                 outFile << path << "\n";
             }
         }
+
+        // Enforce strict permissions (Owner R/W only)
+        if (fs::exists(trustFile_)) {
+            fs::permissions(trustFile_, fs::perms::owner_read | fs::perms::owner_write,
+                            fs::perm_options::replace, ec);
+            if (ec) {
+                spdlog::warn("Failed to set strict permissions on trust file: {}", ec.message());
+            }
+        }
     }
 
     void removeFromTrustList(const fs::path& pluginPath) {

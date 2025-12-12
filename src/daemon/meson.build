@@ -131,6 +131,7 @@ yams_daemon_lib = static_library('yams_daemon',
     'resource/plugin_host.cpp',
     'resource/plugin_host_services_shim.cpp',
     'resource/external_plugin_host.cpp',
+    'resource/plugin_content_extractor_adapter.cpp',
     # IPC objects are now part of the library
     'ipc/request_handler.cpp',
     'ipc/streaming_processor.cpp',

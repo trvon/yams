@@ -15,6 +15,7 @@
 #include <unordered_set>
 #include <vector>
 #include <yams/common/utf8_utils.h>
+#include <yams/core/atomic_utils.h>
 #include <yams/daemon/components/GraphComponent.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/knowledge_graph_store.h>
@@ -617,14 +618,14 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
         if (!execResult)
             return execResult.error();
 
-        // Update component-owned metrics
+        // Update component-owned metrics (using saturating subtraction to prevent underflow)
         if (db.changes() > 0) {
-            cachedDocumentCount_.fetch_sub(1, std::memory_order_relaxed);
+            core::saturating_sub(cachedDocumentCount_, uint64_t{1});
             if (wasExtracted) {
-                cachedExtractedCount_.fetch_sub(1, std::memory_order_relaxed);
+                core::saturating_sub(cachedExtractedCount_, uint64_t{1});
             }
             if (wasIndexed) {
-                cachedIndexedCount_.fetch_sub(1, std::memory_order_relaxed);
+                core::saturating_sub(cachedIndexedCount_, uint64_t{1});
             }
         }
 
@@ -1825,6 +1826,11 @@ MetadataRepository::queryDocuments(const DocumentQueryOptions& options) {
                 addText(*options.likePattern);
             }
 
+            if (options.fileName && !options.fileName->empty()) {
+                conditions.emplace_back("file_name = ?");
+                addText(*options.fileName);
+            }
+
             if (options.extension && !options.extension->empty()) {
                 conditions.emplace_back("file_extension = ?");
                 addText(*options.extension);
@@ -2413,11 +2419,11 @@ Result<void> MetadataRepository::updateDocumentEmbeddingStatus(int64_t documentI
         if (!execResult)
             return execResult.error();
 
-        // Update component-owned metrics
+        // Update component-owned metrics (using saturating subtraction to prevent underflow)
         if (!hadEmbedding && hasEmbedding) {
             cachedIndexedCount_.fetch_add(1, std::memory_order_relaxed);
         } else if (hadEmbedding && !hasEmbedding) {
-            cachedIndexedCount_.fetch_sub(1, std::memory_order_relaxed);
+            core::saturating_sub(cachedIndexedCount_, uint64_t{1});
         }
 
         return Result<void>();

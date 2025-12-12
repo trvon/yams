@@ -7,7 +7,7 @@
 #include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/daemon.h>
-#include <yams/daemon/resource/abi_content_extractor_adapter.h>
+#include <yams/daemon/resource/plugin_content_extractor_adapter.h>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
@@ -22,6 +22,7 @@
 #include <boost/asio/detached.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
+#include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -552,13 +553,70 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
 
 Result<size_t> PluginManager::adoptContentExtractors() {
     try {
-        size_t adopted =
-            adoptPluginInterfaceImpl<yams_content_extractor_v1, AbiContentExtractorAdapter,
+        size_t adopted = 0;
+
+        // Clear existing extractors to avoid duplicates on re-adoption
+        contentExtractors_.clear();
+
+        // Adopt from ABI (native) plugins
+        adopted +=
+            adoptPluginInterfaceImpl<yams_content_extractor_v1, PluginContentExtractorAdapter,
                                      extraction::IContentExtractor>(
                 pluginHost_.get(), "content_extractor_v1", YAMS_IFACE_CONTENT_EXTRACTOR_V1_VERSION,
                 contentExtractors_, [](const yams_content_extractor_v1* table) {
                     return table->abi_version == YAMS_IFACE_CONTENT_EXTRACTOR_V1_VERSION;
                 });
+
+        // PBI-096: Adopt from external (Python/JS) plugins
+        if (externalHost_) {
+            for (const auto& desc : externalHost_->listLoaded()) {
+                // Check if plugin implements content_extractor_v1
+                bool hasInterface =
+                    std::find(desc.interfaces.begin(), desc.interfaces.end(),
+                              "content_extractor_v1") != desc.interfaces.end();
+                if (!hasInterface)
+                    continue;
+
+                // Parse capabilities from manifest to get supported formats
+                std::vector<std::string> mimes;
+                std::vector<std::string> extensions;
+                try {
+                    if (!desc.manifestJson.empty()) {
+                        auto manifest = nlohmann::json::parse(desc.manifestJson);
+                        if (manifest.contains("capabilities") &&
+                            manifest["capabilities"].contains("content_extraction")) {
+                            auto& ce = manifest["capabilities"]["content_extraction"];
+                            if (ce.contains("formats") && ce["formats"].is_array()) {
+                                for (const auto& f : ce["formats"]) {
+                                    if (f.is_string())
+                                        mimes.push_back(f.get<std::string>());
+                                }
+                            }
+                            if (ce.contains("extensions") && ce["extensions"].is_array()) {
+                                for (const auto& e : ce["extensions"]) {
+                                    if (e.is_string())
+                                        extensions.push_back(e.get<std::string>());
+                                }
+                            }
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::debug("Failed to parse manifest for {}: {}", desc.name, e.what());
+                }
+
+                try {
+                    auto adapter = std::make_shared<PluginContentExtractorAdapter>(
+                        externalHost_.get(), desc.name, std::move(mimes), std::move(extensions));
+                    contentExtractors_.push_back(std::move(adapter));
+                    ++adopted;
+                    spdlog::info("Adopted content_extractor_v1 from external plugin: {}", desc.name);
+                } catch (const std::exception& e) {
+                    spdlog::warn("Failed to create adapter for external plugin {}: {}", desc.name,
+                                 e.what());
+                }
+            }
+        }
+
         return Result<size_t>(adopted);
     } catch (const std::exception& e) {
         return Error{ErrorCode::Unknown, e.what()};
@@ -567,6 +625,9 @@ Result<size_t> PluginManager::adoptContentExtractors() {
 
 Result<size_t> PluginManager::adoptSymbolExtractors() {
     try {
+        // Clear existing extractors to avoid duplicates on re-adoption
+        symbolExtractors_.clear();
+
         size_t adopted =
             adoptPluginInterfaceImpl<yams_symbol_extractor_v1, AbiSymbolExtractorAdapter,
                                      AbiSymbolExtractorAdapter>(
@@ -636,18 +697,30 @@ void PluginManager::refreshStatusSnapshot() {
     } catch (...) {
     }
 
-    // Build plugin records
+    // Helper lambda to add plugin records
+    auto addPluginRecord = [&](const PluginDescriptor& d) {
+        PluginStatusRecord rec;
+        rec.name = d.name;
+        rec.isProvider = (d.name == adoptedProviderPluginName_);
+        rec.ready = rec.isProvider && modelProvider_ && modelProvider_->isAvailable();
+        rec.degraded = rec.isProvider && isModelProviderDegraded();
+        if (rec.isProvider) {
+            rec.modelsLoaded = cachedModelCount_.load(std::memory_order_relaxed);
+        }
+        snap.plugins.push_back(std::move(rec));
+    };
+
+    // Build plugin records from ABI (native) plugins
     if (getActivePluginHost()) {
         for (const auto& d : getActivePluginHost()->listLoaded()) {
-            PluginStatusRecord rec;
-            rec.name = d.name;
-            rec.isProvider = (d.name == adoptedProviderPluginName_);
-            rec.ready = rec.isProvider && modelProvider_ && modelProvider_->isAvailable();
-            rec.degraded = rec.isProvider && isModelProviderDegraded();
-            if (rec.isProvider) {
-                rec.modelsLoaded = cachedModelCount_.load(std::memory_order_relaxed);
-            }
-            snap.plugins.push_back(std::move(rec));
+            addPluginRecord(d);
+        }
+    }
+
+    // PBI-096: Include external (Python/JS) plugins
+    if (externalHost_) {
+        for (const auto& d : externalHost_->listLoaded()) {
+            addPluginRecord(d);
         }
     }
 

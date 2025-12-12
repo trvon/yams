@@ -203,11 +203,14 @@ constexpr auto make_magic_patterns() {
     patterns.push_back(
         MAGIC_PATTERN("5C626567696E", 0, "document", "text/x-tex", "LaTeX with begin", 0.7f));
 
-    // Executable Formats (7 patterns)
+    // Executable Formats (12 patterns)
+    // Windows PE/COFF formats
     patterns.push_back(MAGIC_PATTERN("4D5A", 0, "executable", "application/x-msdownload",
-                                     "DOS MZ executable (EXE, DLL)", 1.0f));
+                                     "DOS MZ executable (EXE, DLL, SYS)", 1.0f));
+    // ELF formats (Linux, BSD, embedded)
     patterns.push_back(MAGIC_PATTERN("7F454C46", 0, "executable", "application/x-executable",
-                                     "ELF executable", 1.0f));
+                                     "ELF executable/shared object", 1.0f));
+    // Mach-O formats (macOS, iOS)
     patterns.push_back(MAGIC_PATTERN("FEEDFACE", 0, "executable", "application/x-mach-binary",
                                      "Mach-O binary (32-bit)", 1.0f));
     patterns.push_back(MAGIC_PATTERN("FEEDFACF", 0, "executable", "application/x-mach-binary",
@@ -216,8 +219,39 @@ constexpr auto make_magic_patterns() {
                                      "Mach-O binary (reverse 32-bit)", 1.0f));
     patterns.push_back(MAGIC_PATTERN("CFFAEDFE", 0, "executable", "application/x-mach-binary",
                                      "Mach-O binary (reverse 64-bit)", 1.0f));
+    // Java class files - more specific patterns must come BEFORE shorter Mach-O pattern
+    // Java class file format: magic (CAFEBABE) + minor version (2 bytes) + major version (2 bytes)
+    // Major versions: 34=Java 8, 37=Java 11, 3D=Java 17, 41=Java 21
+    // Pattern: CAFEBABE + 0000 (minor) + 00XX (major high byte always 00 for versions < 256)
+    patterns.push_back(MAGIC_PATTERN("CAFEBABE00000034", 0, "executable", "application/java-archive",
+                                     "Java class file (Java 8)", 1.0f));
+    patterns.push_back(MAGIC_PATTERN("CAFEBABE00000035", 0, "executable", "application/java-archive",
+                                     "Java class file (Java 9)", 1.0f));
+    patterns.push_back(MAGIC_PATTERN("CAFEBABE00000036", 0, "executable", "application/java-archive",
+                                     "Java class file (Java 10)", 1.0f));
+    patterns.push_back(MAGIC_PATTERN("CAFEBABE00000037", 0, "executable", "application/java-archive",
+                                     "Java class file (Java 11)", 1.0f));
+    patterns.push_back(MAGIC_PATTERN("CAFEBABE0000003D", 0, "executable", "application/java-archive",
+                                     "Java class file (Java 17)", 1.0f));
+    patterns.push_back(MAGIC_PATTERN("CAFEBABE00000041", 0, "executable", "application/java-archive",
+                                     "Java class file (Java 21)", 1.0f));
+    // Mach-O fat/universal binary - shorter pattern after more specific Java patterns
+    patterns.push_back(MAGIC_PATTERN("CAFEBABE", 0, "executable", "application/x-mach-binary",
+                                     "Mach-O fat binary (universal)", 0.9f));
+    patterns.push_back(MAGIC_PATTERN("BEBAFECA", 0, "executable", "application/x-mach-binary",
+                                     "Mach-O fat binary (reverse)", 0.9f));
+    // Fallback for older Java versions or unknown minor versions (lower priority than Mach-O)
     patterns.push_back(MAGIC_PATTERN("CAFEBABE", 0, "executable", "application/java-archive",
-                                     "Java class file", 1.0f));
+                                     "Java class file", 0.85f));
+    // WebAssembly
+    patterns.push_back(MAGIC_PATTERN("0061736D", 0, "executable", "application/wasm",
+                                     "WebAssembly binary", 1.0f));
+    // LLVM bitcode
+    patterns.push_back(MAGIC_PATTERN("4243C0DE", 0, "executable", "application/x-llvm-bc",
+                                     "LLVM bitcode", 1.0f));
+    // DEX (Android Dalvik)
+    patterns.push_back(MAGIC_PATTERN("6465780A", 0, "executable", "application/vnd.android.dex",
+                                     "Android DEX bytecode", 1.0f));
 
     // Multimedia Formats (2 patterns)
     patterns.push_back(MAGIC_PATTERN("52494646", 0, "multimedia", "various",

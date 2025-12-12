@@ -151,6 +151,18 @@ private:
 
     void launchCheckpointTask();
 
+    /**
+     * @brief Launches the Storage GC periodic task.
+     *
+     * Runs periodic garbage collection to remove unreferenced storage chunks
+     * (blocks with ref_count=0 that are not referenced by any manifest).
+     *
+     * This is critical for reclaiming disk space after document deletions.
+     *
+     * Initial delay: 10 minutes; runs hourly thereafter.
+     */
+    void launchStorageGcTask();
+
     Dependencies deps_;                ///< Dependency injection container
     std::atomic<bool> running_{false}; ///< Tracks whether tasks are active
 

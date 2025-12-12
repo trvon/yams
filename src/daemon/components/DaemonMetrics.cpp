@@ -25,6 +25,17 @@
 #ifdef __unix__
 #include <sys/stat.h>
 #endif
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN 1
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX 1
+#endif
+#include <Psapi.h>
+#include <Windows.h>
+
+#endif
 #if defined(TRACY_ENABLE)
 #include <tracy/Tracy.hpp>
 #endif
@@ -39,7 +50,10 @@ namespace yams::daemon {
 namespace {
 // Read Proportional Set Size (PSS) in kB from smaps_rollup when available (Linux), else 0.
 static std::uint64_t readPssKb() {
-#ifdef __APPLE__
+#if defined(_WIN32)
+    // Windows does not expose PSS cheaply; fall back to RSS/working set
+    return 0;
+#elif defined(__APPLE__)
     return 0;
 #else
     std::ifstream in("/proc/self/smaps_rollup");
@@ -59,9 +73,16 @@ static std::uint64_t readPssKb() {
 #endif
 }
 
-// Read Resident Set Size (VmRSS) in kB (Linux), else 0 on unsupported platforms
+// Read Resident Set Size (VmRSS/working set) in kB
 static std::uint64_t readRssKb() {
-#ifdef __APPLE__
+#if defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS_EX pmc{};
+    if (GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc),
+                             sizeof(pmc))) {
+        return static_cast<std::uint64_t>(pmc.WorkingSetSize / 1024ULL);
+    }
+    return 0;
+#elif defined(__APPLE__)
     task_vm_info_data_t info;
     mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
     if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) == KERN_SUCCESS) {
@@ -109,7 +130,47 @@ static std::uint64_t readRssKb() {
 // Percent is relative to total system capacity (all CPUs). A single fully utilized
 // core on a 4-core system will be ~25%.
 double readCpuUsagePercent(std::uint64_t& lastProcJiffies, std::uint64_t& lastTotalJiffies) {
-#ifdef __APPLE__
+#if defined(_WIN32)
+    FILETIME idleFT{}, kernelFT{}, userFT{};
+    if (!GetSystemTimes(&idleFT, &kernelFT, &userFT)) {
+        return 0.0;
+    }
+    FILETIME createFT{}, exitFT{}, procKernelFT{}, procUserFT{};
+    if (!GetProcessTimes(GetCurrentProcess(), &createFT, &exitFT, &procKernelFT, &procUserFT)) {
+        return 0.0;
+    }
+    auto to64 = [](const FILETIME& ft) {
+        ULARGE_INTEGER li{};
+        li.LowPart = ft.dwLowDateTime;
+        li.HighPart = ft.dwHighDateTime;
+        return li.QuadPart;
+    };
+
+    const std::uint64_t procJiffies = to64(procKernelFT) + to64(procUserFT);
+    const std::uint64_t totalJiffies = to64(kernelFT) + to64(userFT);
+
+    if (lastProcJiffies == 0 || lastTotalJiffies == 0 || procJiffies < lastProcJiffies ||
+        totalJiffies < lastTotalJiffies) {
+        lastProcJiffies = procJiffies;
+        lastTotalJiffies = totalJiffies;
+        return 0.0;
+    }
+
+    const std::uint64_t dProc = procJiffies - lastProcJiffies;
+    const std::uint64_t dTotal = totalJiffies - lastTotalJiffies;
+    lastProcJiffies = procJiffies;
+    lastTotalJiffies = totalJiffies;
+    if (dTotal == 0)
+        return 0.0;
+
+    SYSTEM_INFO sysInfo{};
+    GetSystemInfo(&sysInfo);
+    const double maxPct =
+        100.0 *
+        static_cast<double>(sysInfo.dwNumberOfProcessors ? sysInfo.dwNumberOfProcessors : 1);
+    double pct = (static_cast<double>(dProc) / static_cast<double>(dTotal)) * 100.0;
+    return std::clamp(pct, 0.0, maxPct);
+#elif defined(__APPLE__)
     // Process CPU time
     task_thread_times_info_data_t thread_info;
     mach_msg_type_number_t count = TASK_THREAD_TIMES_INFO_COUNT;
@@ -846,9 +907,33 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                     auto ss = cs->getStats();
                     // Lightweight fields
                     out.storeObjects = ss.totalObjects;
-                    out.logicalBytes = ss.totalBytes;              // logical (ingested) bytes
-                    out.casUniqueRawBytes = ss.totalBytes;         // unique raw bytes seen by CAS
-                    out.casDedupSavedBytes = ss.deduplicatedBytes; // bytes avoided via dedup
+
+                    // For logical bytes, we need uncompressed sizes.
+                    // ss.totalBytes may be either compressed or uncompressed depending on
+                    // how the content store was initialized. We use compression stats when
+                    // available to get the true logical (uncompressed) size.
+                    uint64_t logicalFromCompression = 0;
+                    uint64_t compressSaved = 0;
+                    try {
+                        auto& g = yams::compression::CompressionMonitor::getGlobalStats();
+                        logicalFromCompression = g.totalUncompressedBytes.load();
+                        compressSaved = g.totalSpaceSaved.load();
+                    } catch (...) {
+                    }
+
+                    // Use compression-based logical bytes if available and non-zero,
+                    // otherwise fall back to ss.totalBytes (which is correct for
+                    // uncompressed storage or fresh daemon starts)
+                    out.logicalBytes =
+                        (logicalFromCompression > 0) ? logicalFromCompression : ss.totalBytes;
+
+                    // casUniqueRawBytes represents the unique bytes in CAS (on-disk)
+                    // which is ss.totalBytes minus dedup savings. When compression is
+                    // active, this is the compressed size.
+                    out.casUniqueRawBytes = ss.totalBytes;
+                    out.casDedupSavedBytes = ss.deduplicatedBytes;
+                    out.casCompressSavedBytes = compressSaved;
+
                     if (detailed && !disableStoreStats) {
                         out.uniqueBlocks = ss.uniqueBlocks;
                         out.deduplicatedBytes = ss.deduplicatedBytes;
@@ -859,13 +944,6 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             }
             if (detailed) {
                 try {
-                    // Populate compression savings (process-wide monitor)
-                    try {
-                        auto& g = yams::compression::CompressionMonitor::getGlobalStats();
-                        // Access atomics via load to avoid data races
-                        out.casCompressSavedBytes = g.totalSpaceSaved.load();
-                    } catch (...) {
-                    }
                     std::shared_lock lk(cacheMutex_);
                     out.physicalBytes = lastPhysicalBytes_;
                     out.casPhysicalBytes = cached_.casPhysicalBytes;

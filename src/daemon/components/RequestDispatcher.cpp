@@ -10,6 +10,17 @@
 #include <sstream>
 #include <thread>
 #include <tuple>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN 1
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX 1
+#endif
+#include <Windows.h>
+#include <Psapi.h>
+
+#endif
 #ifdef __APPLE__
 #include <mach/mach.h>
 #include <mach/task.h>
@@ -121,12 +132,20 @@ DEFINE_REQUEST_HANDLER(KgIngestRequest, handleKgIngestRequest);
 
 // Helper functions for system metrics (moved from daemon.cpp)
 double getMemoryUsage() {
-#ifdef __APPLE__
+#if defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS_EX pmc{};
+    if (GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc),
+                             sizeof(pmc))) {
+        return static_cast<double>(pmc.WorkingSetSize) / (1024.0 * 1024.0);
+    }
+    return 0.0;
+#elif defined(__APPLE__)
     task_vm_info_data_t info;
     mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
     if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) == KERN_SUCCESS) {
         return static_cast<double>(info.resident_size) / (1024.0 * 1024.0); // MB
     }
+    return 0.0;
 #else
     // Linux implementation using /proc/self/status
     std::ifstream status("/proc/self/status");
@@ -142,14 +161,49 @@ double getMemoryUsage() {
             }
         }
     }
-#endif
     return 0.0;
+#endif
 }
 
 double getCpuUsage() {
     // Simple CPU usage approximation - in a real implementation,
     // you'd track CPU time over intervals
-#ifdef __APPLE__
+#if defined(_WIN32)
+    FILETIME idleFT{}, kernelFT{}, userFT{};
+    FILETIME createFT{}, exitFT{}, procKernelFT{}, procUserFT{};
+    if (!GetSystemTimes(&idleFT, &kernelFT, &userFT) ||
+        !GetProcessTimes(GetCurrentProcess(), &createFT, &exitFT, &procKernelFT, &procUserFT)) {
+        return 0.0;
+    }
+    auto to64 = [](const FILETIME& ft) {
+        ULARGE_INTEGER li{};
+        li.LowPart = ft.dwLowDateTime;
+        li.HighPart = ft.dwHighDateTime;
+        return li.QuadPart;
+    };
+    const std::uint64_t proc = to64(procKernelFT) + to64(procUserFT);
+    const std::uint64_t total = to64(kernelFT) + to64(userFT);
+    static std::uint64_t lastProc = 0;
+    static std::uint64_t lastTotal = 0;
+    if (lastProc == 0 || lastTotal == 0 || proc < lastProc || total < lastTotal) {
+        lastProc = proc;
+        lastTotal = total;
+        return 0.0;
+    }
+    const std::uint64_t dProc = proc - lastProc;
+    const std::uint64_t dTotal = total - lastTotal;
+    lastProc = proc;
+    lastTotal = total;
+    if (dTotal == 0)
+        return 0.0;
+    SYSTEM_INFO sysInfo{};
+    GetSystemInfo(&sysInfo);
+    const double maxPct =
+        100.0 *
+        static_cast<double>(sysInfo.dwNumberOfProcessors ? sysInfo.dwNumberOfProcessors : 1);
+    double pct = (static_cast<double>(dProc) / static_cast<double>(dTotal)) * 100.0;
+    return std::clamp(pct, 0.0, maxPct);
+#elif defined(__APPLE__)
     task_info_data_t tinfo __attribute__((unused));
     unsigned thread_count;
     thread_act_array_t thread_list;
@@ -158,6 +212,7 @@ double getCpuUsage() {
         vm_deallocate(mach_task_self(), (vm_offset_t)thread_list, thread_count * sizeof(thread_t));
         return static_cast<double>(thread_count) * 0.1; // Rough approximation
     }
+    return 0.0;
 #else
     // Linux implementation - read thread count from /proc/self/status (robust to spaces)
     std::ifstream status("/proc/self/status");
@@ -178,8 +233,8 @@ double getCpuUsage() {
             }
         }
     }
-#endif
     return 0.0;
+#endif
 }
 
 RequestDispatcher::RequestDispatcher(YamsDaemon* daemon, ServiceManager* serviceManager,

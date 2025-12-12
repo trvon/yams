@@ -186,8 +186,39 @@ struct ProviderCtx {
         // Initialize pool asynchronously (non-blocking)
         // Note: With lazyLoading=true, initialize() just sets a flag and returns immediately.
         // Actual model loading happens on-demand via loadModel() when first requested.
-        auto fut = std::async(std::launch::async, [this]() { return pool->initialize(); });
+        // NOTE: On MSVC/Windows, std::async(std::launch::async, ...) can throw
+        // std::system_error("resource deadlock would occur") in some environments.
+        // Use an explicit std::thread + std::promise instead.
+        auto promise = std::make_shared<std::promise<yams::Result<void>>>();
+        auto fut = promise->get_future();
+
+        std::thread worker;
+        try {
+            worker = std::thread([this, promise]() {
+                try {
+                    promise->set_value(pool->initialize());
+                } catch (const std::exception& e) {
+                    promise->set_value(yams::Error{yams::ErrorCode::InternalError, e.what()});
+                } catch (...) {
+                    promise->set_value(yams::Error{yams::ErrorCode::InternalError, "unknown exception"});
+                }
+            });
+        } catch (const std::system_error& e) {
+            spdlog::error("[ONNX-Plugin] failed to start init thread: {} (category='{}' value={})",
+                          e.what(), e.code().category().name(), e.code().value());
+            ready = false;
+            last_error = std::string("init thread start failed: ") + e.what();
+            return;
+        } catch (const std::exception& e) {
+            spdlog::error("[ONNX-Plugin] failed to start init thread: {}", e.what());
+            ready = false;
+            last_error = std::string("init thread start failed: ") + e.what();
+            return;
+        }
+
         if (fut.wait_for(std::chrono::seconds(10)) == std::future_status::ready) {
+            if (worker.joinable())
+                worker.join();
             auto res = fut.get();
             if (res) {
                 ready = true;
@@ -203,6 +234,7 @@ struct ProviderCtx {
             // Mark as ready anyway - models can still be loaded on-demand
             spdlog::warn("[ONNX-Plugin] Pool initialize timed out after 10s, marking ready anyway "
                          "(lazy loading enabled)");
+            worker.detach();
             ready = true;
             last_error.clear();
         }
@@ -577,6 +609,9 @@ struct ProviderSingleton {
                 dim = 3072;
             else if (lm.find("text-embedding-3-small") != std::string::npos)
                 dim = 1536;
+            else if (lm.find("test-model") != std::string::npos &&
+                     (std::getenv("YAMS_TEST_MODE") || std::getenv("YAMS_USE_MOCK_PROVIDER")))
+                dim = 384;
 
             if (dim > 0) {
                 *out_dim = dim;

@@ -178,9 +178,9 @@ void ServiceManager::refreshPluginStatusSnapshot() {
         const auto providerError =
             lifecycleFsm_.degradationReason("embeddings"); // Use lifecycleFsm instead
         const auto modelsLoaded = cachedModelProviderModelCount_.load(std::memory_order_relaxed);
-        if (abiHost_) {
-            auto loaded = abiHost_->listLoaded();
-            snapshot.records.reserve(loaded.size());
+        // Helper lambda to add plugin records
+        auto addPluginRecords = [&](const std::vector<PluginDescriptor>& loaded,
+                                    const std::string& pluginType) {
             for (const auto& d : loaded) {
                 PluginStatusRecord rec;
                 rec.name = d.name;
@@ -199,6 +199,21 @@ void ServiceManager::refreshPluginStatusSnapshot() {
                 }
                 snapshot.records.push_back(std::move(rec));
             }
+        };
+
+        // ABI (native) plugins
+        if (abiHost_) {
+            auto loaded = abiHost_->listLoaded();
+            snapshot.records.reserve(loaded.size());
+            addPluginRecords(loaded, "native");
+        }
+
+        // PBI-096: External (Python/JS) plugins
+        if (auto* external = getExternalPluginHost()) {
+            auto externalLoaded = external->listLoaded();
+            // Reserve additional space for external plugins
+            snapshot.records.reserve(snapshot.records.size() + externalLoaded.size());
+            addPluginRecords(externalLoaded, "external");
         }
     } catch (...) {
         // leave snapshot empty on failure
@@ -2023,7 +2038,21 @@ Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& pref
 // NOTE: Implementation delegated to PluginManager (PBI-088 decomposition)
 Result<size_t> ServiceManager::adoptContentExtractorsFromHosts() {
     if (pluginManager_) {
-        return pluginManager_->adoptContentExtractors();
+        auto result = pluginManager_->adoptContentExtractors();
+        if (result) {
+            // Sync local copy for PostIngestQueue and AppContext
+            contentExtractors_ = pluginManager_->getContentExtractors();
+            spdlog::info("[ServiceManager] Synced {} content extractors from PluginManager",
+                         contentExtractors_.size());
+
+            // Update PostIngestQueue with the newly adopted extractors
+            if (postIngest_) {
+                postIngest_->setExtractors(contentExtractors_);
+                spdlog::info("[ServiceManager] Updated PostIngestQueue with {} extractors",
+                             contentExtractors_.size());
+            }
+        }
+        return result;
     }
     spdlog::warn("[Plugin] PluginManager not initialized");
     return Result<size_t>(0);

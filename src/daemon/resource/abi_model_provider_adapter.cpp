@@ -141,7 +141,10 @@ Result<void> AbiModelProviderAdapter::loadModel(const std::string& modelName) {
         reinterpret_cast<const void*>(table_->load_model), static_cast<const void*>(table_->self));
     spdlog::info("[ABI Adapter] Calling table_->load_model({})...", modelName);
 
-    // Run plugin load_model() asynchronously with timeout using std::async
+    // Run plugin load_model() asynchronously with a timeout.
+    // NOTE: On MSVC/Windows, std::async(std::launch::async, ...) can throw
+    // std::system_error("resource deadlock would occur") in some environments.
+    // Use an explicit std::thread + std::promise instead.
     auto read_timeout_ms = [](const char* env, int def_ms) {
         int ms = def_ms;
         if (const char* s = std::getenv(env)) {
@@ -156,24 +159,59 @@ Result<void> AbiModelProviderAdapter::loadModel(const std::string& modelName) {
     };
     const int timeout_ms = read_timeout_ms("YAMS_ABI_LOAD_MODEL_TIMEOUT_MS", 90000); // 90s default
 
-    auto fut = std::async(std::launch::async, [this, modelName]() -> yams_status_t {
-        return table_->load_model(table_->self, modelName.c_str(), nullptr, nullptr);
-    });
+    auto promise = std::make_shared<std::promise<yams_status_t>>();
+    auto fut = promise->get_future();
+
+    std::thread worker;
+    try {
+        worker = std::thread([this, modelName, promise]() {
+            try {
+                const auto st =
+                    table_->load_model(table_->self, modelName.c_str(), nullptr, nullptr);
+                promise->set_value(st);
+            } catch (...) {
+                try {
+                    promise->set_exception(std::current_exception());
+                } catch (...) {
+                }
+            }
+        });
+    } catch (const std::system_error& e) {
+        spdlog::error(
+            "[ABI Adapter] failed to start model load thread: {} (category='{}' value={})",
+            e.what(), e.code().category().name(), e.code().value());
+        return Error{ErrorCode::InternalError,
+                     std::string("load_model thread start failed: ") + e.what()};
+    } catch (const std::exception& e) {
+        spdlog::error("[ABI Adapter] failed to start model load thread: {}", e.what());
+        return Error{ErrorCode::InternalError,
+                     std::string("load_model thread start failed: ") + e.what()};
+    }
 
     if (fut.wait_for(std::chrono::milliseconds(timeout_ms)) != std::future_status::ready) {
         spdlog::warn("[ABI Adapter] load_model timeout after {} ms for: {}", timeout_ms, modelName);
+        // Match prior behavior: return timeout and let the background thread continue.
+        worker.detach();
         return Error{ErrorCode::Timeout, "Model load timed out"};
     }
+
     yams_status_t st = YAMS_ERR_INTERNAL;
     try {
         st = fut.get();
     } catch (const std::exception& e) {
         spdlog::error("[ABI Adapter] load_model async exception: {}", e.what());
+        if (worker.joinable())
+            worker.join();
         return Error{ErrorCode::InternalError, std::string("load_model exception: ") + e.what()};
     } catch (...) {
         spdlog::error("[ABI Adapter] load_model async unknown exception");
+        if (worker.joinable())
+            worker.join();
         return Error{ErrorCode::InternalError, "load_model unknown exception"};
     }
+
+    if (worker.joinable())
+        worker.join();
     spdlog::info("[ABI Adapter] table_->load_model() returned status: {}", static_cast<int>(st));
 
     if (st != YAMS_OK)

@@ -422,12 +422,12 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
             // AddDocumentRequest: single final response after heartbeat.
             if (mt == MessageType::AddDocumentRequest) {
                 try {
-                    spdlog::info("[SRP] AddDocument delegate processing start");
+                    spdlog::debug("[SRP] AddDocument delegate processing start");
                 } catch (...) {
                 }
                 auto final = co_await delegate_->process(**pending_request_);
                 try {
-                    spdlog::info("[SRP] AddDocument delegate processing done");
+                    spdlog::debug("[SRP] AddDocument delegate processing done");
                 } catch (...) {
                 }
                 reset_state();

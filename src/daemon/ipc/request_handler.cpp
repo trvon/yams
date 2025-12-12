@@ -525,13 +525,13 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
 
                 // Handle the request with correlation id
                 // Route through streaming-aware path so FSM transitions are captured
-                spdlog::info("RequestHandler::handle_connection: Routing request_id={} with "
-                             "expectsStreamingResponse={}",
-                             message.requestId, message.expectsStreamingResponse);
+                spdlog::debug("RequestHandler::handle_connection: Routing request_id={} with "
+                              "expectsStreamingResponse={}",
+                              message.requestId, message.expectsStreamingResponse);
                 if (config_.enable_multiplexing) {
                     auto cur = inflight_.load(std::memory_order_relaxed);
-                    spdlog::info("[MUX] req_id={} inflight={}/{}", message.requestId, cur,
-                                 config_.max_inflight_per_connection);
+                    spdlog::debug("[MUX] req_id={} inflight={}/{}", message.requestId, cur,
+                                  config_.max_inflight_per_connection);
                     if (cur >= config_.max_inflight_per_connection) {
                         (void)co_await send_error(*sock, ErrorCode::ResourceExhausted,
                                                   "Too many in-flight requests", message.requestId);
@@ -581,10 +581,10 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                                 } cleanup{self, req_id};
 
                                 try {
-                                    spdlog::info("handle_streaming_request spawn req_id={} type={} "
-                                                 "expects={}",
-                                                 req_id, static_cast<int>(getMessageType(req)),
-                                                 expects);
+                                    spdlog::debug(
+                                        "handle_streaming_request spawn req_id={} type={} "
+                                        "expects={}",
+                                        req_id, static_cast<int>(getMessageType(req)), expects);
                                     auto r = co_await self->handle_streaming_request(
                                         *sock, req, req_id, nullptr, expects);
                                     if (!r) {
@@ -1552,9 +1552,9 @@ Result<bool> RequestHandler::enqueue_frame_sync(uint64_t request_id, std::vector
     bool should_start = !writer_running_;
     if (should_start) {
         writer_running_ = true;
-        spdlog::info("[ENQ_SYNC] req_id={} STARTING writer (was=false)", request_id);
+        spdlog::debug("[ENQ_SYNC] req_id={} STARTING writer (was=false)", request_id);
     } else {
-        spdlog::info("[ENQ_SYNC] req_id={} SKIPPING writer (already running)", request_id);
+        spdlog::debug("[ENQ_SYNC] req_id={} SKIPPING writer (already running)", request_id);
     }
     return should_start;
 }
@@ -1722,7 +1722,7 @@ RequestHandler::writer_drain(boost::asio::local::stream_protocol::socket& socket
         } // Release lock
 
         // Write frames outside the lock
-        spdlog::info("[DRAIN] req_id={} writing {} frames", rid, frames_to_write.size());
+        spdlog::debug("[DRAIN] req_id={} writing {} frames", rid, frames_to_write.size());
         for (auto& frame : frames_to_write) {
             if (fsm)
                 fsm->on_write_queued(frame.data.size());
@@ -1741,7 +1741,7 @@ RequestHandler::writer_drain(boost::asio::local::stream_protocol::socket& socket
                 writer_running_ = false;
                 co_return;
             }
-            spdlog::info("[DRAIN] req_id={} wrote {} bytes successfully", rid, frame.data.size());
+            spdlog::debug("[DRAIN] req_id={} wrote {} bytes successfully", rid, frame.data.size());
         }
     }
 

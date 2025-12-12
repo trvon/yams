@@ -63,6 +63,11 @@ public:
 
     void setCapacity(std::size_t cap) { capacity_ = cap > 0 ? cap : capacity_; }
 
+    // Update extractors after plugins are loaded (called by ServiceManager)
+    void setExtractors(std::vector<std::shared_ptr<extraction::IContentExtractor>> extractors) {
+        extractors_ = std::move(extractors);
+    }
+
 private:
     boost::asio::awaitable<void> channelPoller();
     boost::asio::awaitable<void> processMetadataStage(const std::string& hash,
@@ -81,6 +86,7 @@ private:
     boost::asio::strand<boost::asio::io_context::executor_type> strand_;
 
     std::atomic<bool> stop_{false};
+    std::atomic<bool> started_{false};
     std::atomic<std::size_t> processed_{0};
     std::atomic<std::size_t> failed_{0};
     std::atomic<double> latencyMsEma_{0.0};
