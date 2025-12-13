@@ -80,7 +80,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
         size_t count = 0;
 
         for (const auto& item : serviceResp.results) {
-            if (count >= limit) break;
+            if (count >= limit)
+                break;
             SearchResult resultItem;
             resultItem.id = std::to_string(item.id);
             resultItem.title = item.title;

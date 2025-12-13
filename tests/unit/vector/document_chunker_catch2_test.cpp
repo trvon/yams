@@ -530,8 +530,7 @@ TEST_CASE_METHOD(DocumentChunkerFixture, "splitLargeChunks",
     }
 }
 
-TEST_CASE_METHOD(DocumentChunkerFixture, "addOverlap",
-                 "[vector][chunker][operations][catch2]") {
+TEST_CASE_METHOD(DocumentChunkerFixture, "addOverlap", "[vector][chunker][operations][catch2]") {
     ChunkingConfig config = defaultConfig;
     config.overlap_size = 10;
 
@@ -587,8 +586,7 @@ TEST_CASE_METHOD(DocumentChunkerFixture, "ChunkingStats tracking",
 // Error Handling Tests
 // =============================================================================
 
-TEST_CASE_METHOD(DocumentChunkerFixture, "empty document",
-                 "[vector][chunker][error][catch2]") {
+TEST_CASE_METHOD(DocumentChunkerFixture, "empty document", "[vector][chunker][error][catch2]") {
     ChunkingConfig config = defaultConfig;
     FixedSizeChunker chunker(config);
 
@@ -674,8 +672,7 @@ TEST_CASE_METHOD(DocumentChunkerFixture, "findParagraphBoundaries",
 // Async Operations Tests
 // =============================================================================
 
-TEST_CASE_METHOD(DocumentChunkerFixture, "chunkDocumentAsync",
-                 "[vector][chunker][async][catch2]") {
+TEST_CASE_METHOD(DocumentChunkerFixture, "chunkDocumentAsync", "[vector][chunker][async][catch2]") {
     ChunkingConfig config = defaultConfig;
     FixedSizeChunker chunker(config);
 

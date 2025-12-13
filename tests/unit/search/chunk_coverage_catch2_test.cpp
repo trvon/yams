@@ -1,8 +1,8 @@
 // Catch2 tests for chunk coverage
 // Migrated from GTest: chunk_coverage_test.cpp
 
-#include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
+#include <catch2/catch_test_macros.hpp>
 
 #include <yams/search/chunk_coverage.h>
 

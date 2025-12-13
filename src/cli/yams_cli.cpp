@@ -552,17 +552,17 @@ Result<void> YamsCLI::initializeStorage() {
         // Validate dataPath_ is a reasonable filesystem path, not a CLI description
         // This guards against CLI11 option description leaks into the data path
         auto pathStr = dataPath_.string();
-        bool looksLikeDescription = 
-            pathStr.find('(') != std::string::npos ||  // CLI descriptions often have parens
-            pathStr.find('[') != std::string::npos ||  // [Deprecated] etc.
-            pathStr.length() > 200 ||                  // Paths shouldn't be this long
-            std::count(pathStr.begin(), pathStr.end(), ' ') > 3;  // Too many spaces
-        
+        bool looksLikeDescription =
+            pathStr.find('(') != std::string::npos || // CLI descriptions often have parens
+            pathStr.find('[') != std::string::npos || // [Deprecated] etc.
+            pathStr.length() > 200 ||                 // Paths shouldn't be this long
+            std::count(pathStr.begin(), pathStr.end(), ' ') > 3; // Too many spaces
+
         if (looksLikeDescription) {
             spdlog::error("Invalid data path (looks like CLI description): {}", pathStr);
-            return Error{ErrorCode::InvalidArgument, 
-                "Data path appears invalid: '" + pathStr.substr(0, 60) + 
-                "...' - please set YAMS_DATA_DIR or use --data-dir"};
+            return Error{ErrorCode::InvalidArgument,
+                         "Data path appears invalid: '" + pathStr.substr(0, 60) +
+                             "...' - please set YAMS_DATA_DIR or use --data-dir"};
         }
 
         // Create data directory if it doesn't exist

@@ -27,8 +27,7 @@ json buildServerCapabilities() {
 // Simulate the initialize() logic from mcp_server.cpp
 json initialize(const json& params, const std::string& serverName,
                 const std::string& serverVersion) {
-    static const std::vector<std::string> kSupported = {"2024-11-05", "2025-06-18",
-                                                        "2025-03-26"};
+    static const std::vector<std::string> kSupported = {"2024-11-05", "2025-06-18", "2025-03-26"};
     const std::string latest = "2025-06-18";
 
     std::string requested = latest;
@@ -37,8 +36,7 @@ json initialize(const json& params, const std::string& serverName,
     }
 
     std::string negotiated = latest;
-    bool matched =
-        std::find(kSupported.begin(), kSupported.end(), requested) != kSupported.end();
+    bool matched = std::find(kSupported.begin(), kSupported.end(), requested) != kSupported.end();
     if (matched) {
         negotiated = requested;
     }

@@ -159,8 +159,10 @@ private:
         }
 
         std::string getDisplayPath() const {
-            if (!path.empty()) return path;
-            if (!title.empty()) return title;
+            if (!path.empty())
+                return path;
+            if (!title.empty())
+                return title;
             return id;
         }
     };
@@ -225,8 +227,8 @@ private:
                 if (!item.snippet.empty())
                     doc["snippet"] = truncateSnippet(item.snippet, 200);
 
-                if (verbose_ && (item.vectorScore || item.keywordScore ||
-                                 item.kgEntityScore || item.structuralScore)) {
+                if (verbose_ && (item.vectorScore || item.keywordScore || item.kgEntityScore ||
+                                 item.structuralScore)) {
                     nlohmann::json breakdown;
                     if (item.vectorScore)
                         breakdown["vector_score"] = *item.vectorScore;
@@ -271,7 +273,8 @@ private:
             groups.reserve(deduplicated.size());
             for (auto& item : deduplicated) {
                 std::string key = item.getDisplayPath();
-                if (key.empty()) continue;
+                if (key.empty())
+                    continue;
                 groups[key].push_back(std::move(item));
             }
 
@@ -284,8 +287,10 @@ private:
                 nlohmann::json groupsArr = nlohmann::json::array();
                 for (auto& [path, vec] : groups) {
                     std::stable_sort(vec.begin(), vec.end(), [&](const auto& a, const auto& b) {
-                        if (versionsSort_ == "path") return a.path < b.path;
-                        if (versionsSort_ == "title") return a.title < b.title;
+                        if (versionsSort_ == "path")
+                            return a.path < b.path;
+                        if (versionsSort_ == "title")
+                            return a.title < b.title;
                         return a.score > b.score;
                     });
                     const auto& best = vec.front();
@@ -326,8 +331,10 @@ private:
                 // Human-readable grouped output
                 for (auto& [path, vec] : groups) {
                     std::stable_sort(vec.begin(), vec.end(), [&](const auto& a, const auto& b) {
-                        if (versionsSort_ == "path") return a.path < b.path;
-                        if (versionsSort_ == "title") return a.title < b.title;
+                        if (versionsSort_ == "path")
+                            return a.path < b.path;
+                        if (versionsSort_ == "title")
+                            return a.title < b.title;
                         return a.score > b.score;
                     });
                     const auto& best = vec.front();
@@ -344,9 +351,10 @@ private:
                             hash8 = v.hash.substr(0, 8);
 
                         if (vec.size() > 1 || versionsMode_ == "all") {
-                            std::cout << "  - "
-                                      << (hash8.empty() ? std::string("[--------]") : ("[" + hash8 + "]"))
-                                      << "  " << v.score;
+                            std::cout
+                                << "  - "
+                                << (hash8.empty() ? std::string("[--------]") : ("[" + hash8 + "]"))
+                                << "  " << v.score;
                             if (!v.title.empty() && v.title != path)
                                 std::cout << "  " << v.title;
                             std::cout << "\n";
@@ -1055,7 +1063,8 @@ public:
                 if (pathsOnly_) {
                     std::unordered_set<std::string> seen;
                     for (const auto& path : resp.paths) {
-                        if (seen.count(path)) continue;
+                        if (seen.count(path))
+                            continue;
                         seen.insert(path);
                         std::cout << path << std::endl;
                     }
@@ -1567,7 +1576,8 @@ public:
                     for (const auto& p : resp.paths) {
                         if (!includeGlobsExpanded.empty() && !matchAnyGlob(p, includeGlobsExpanded))
                             continue;
-                        if (seen.count(p)) continue;
+                        if (seen.count(p))
+                            continue;
                         seen.insert(p);
                         std::cout << p << std::endl;
                     }
@@ -1578,7 +1588,8 @@ public:
                 std::vector<UnifiedItem> localItems;
                 localItems.reserve(resp.results.size());
                 for (const auto& it : resp.results) {
-                    if (!includeGlobsExpanded.empty() && !matchAnyGlob(it.path, includeGlobsExpanded))
+                    if (!includeGlobsExpanded.empty() &&
+                        !matchAnyGlob(it.path, includeGlobsExpanded))
                         continue;
                     localItems.push_back(UnifiedItem::fromLocal(it));
                 }

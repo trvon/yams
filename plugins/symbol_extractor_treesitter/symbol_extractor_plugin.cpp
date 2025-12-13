@@ -297,7 +297,8 @@ static int extract_symbols_abi(void* /*self*/, const char* content, size_t conte
                 dl_err = dl.error();
             }
         } else if (!should_auto_download) {
-            dl_err = "Grammar not found. Set YAMS_AUTO_DOWNLOAD_GRAMMARS=1 to enable auto-download.";
+            dl_err =
+                "Grammar not found. Set YAMS_AUTO_DOWNLOAD_GRAMMARS=1 to enable auto-download.";
         } else {
             dl_err = "Grammar download already attempted for this language.";
         }

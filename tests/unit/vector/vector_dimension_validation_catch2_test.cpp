@@ -75,8 +75,7 @@ struct VectorDimensionFixture {
 // Single Vector Insert Dimension Validation
 // =============================================================================
 
-TEST_CASE_METHOD(VectorDimensionFixture,
-                 "VectorDimensionValidation insert correct dimensions",
+TEST_CASE_METHOD(VectorDimensionFixture, "VectorDimensionValidation insert correct dimensions",
                  "[vector][dimension][catch2]") {
     skipIfNeeded();
 
@@ -112,8 +111,7 @@ TEST_CASE_METHOD(VectorDimensionFixture,
 // Dimension Mismatch Error Messages
 // =============================================================================
 
-TEST_CASE_METHOD(VectorDimensionFixture,
-                 "VectorDimensionValidation dimension mismatch errors",
+TEST_CASE_METHOD(VectorDimensionFixture, "VectorDimensionValidation dimension mismatch errors",
                  "[vector][dimension][error][catch2]") {
     skipIfNeeded();
 
@@ -158,8 +156,7 @@ TEST_CASE_METHOD(VectorDimensionFixture,
 // Batch Insert Dimension Validation
 // =============================================================================
 
-TEST_CASE_METHOD(VectorDimensionFixture,
-                 "VectorDimensionValidation batch insert",
+TEST_CASE_METHOD(VectorDimensionFixture, "VectorDimensionValidation batch insert",
                  "[vector][dimension][batch][catch2]") {
     skipIfNeeded();
 
@@ -203,8 +200,7 @@ TEST_CASE_METHOD(VectorDimensionFixture,
 // Search Query Dimension Validation
 // =============================================================================
 
-TEST_CASE_METHOD(VectorDimensionFixture,
-                 "VectorDimensionValidation search query dimension",
+TEST_CASE_METHOD(VectorDimensionFixture, "VectorDimensionValidation search query dimension",
                  "[vector][dimension][search][catch2]") {
     skipIfNeeded();
 
@@ -232,8 +228,7 @@ TEST_CASE_METHOD(VectorDimensionFixture,
 // Empty/Edge Case Dimension Validation
 // =============================================================================
 
-TEST_CASE_METHOD(VectorDimensionFixture,
-                 "VectorDimensionValidation edge cases",
+TEST_CASE_METHOD(VectorDimensionFixture, "VectorDimensionValidation edge cases",
                  "[vector][dimension][edge][catch2]") {
     skipIfNeeded();
 
@@ -265,8 +260,7 @@ TEST_CASE_METHOD(VectorDimensionFixture,
 // Common Dimension Combinations (replacing parameterized test)
 // =============================================================================
 
-TEST_CASE_METHOD(VectorDimensionFixture,
-                 "VectorDimensionValidation common dimension combinations",
+TEST_CASE_METHOD(VectorDimensionFixture, "VectorDimensionValidation common dimension combinations",
                  "[vector][dimension][combinations][catch2]") {
     skipIfNeeded();
 
@@ -298,8 +292,7 @@ TEST_CASE_METHOD(VectorDimensionFixture,
             size_t vectorDim;
         };
         std::vector<MismatchTest> tests = {
-            {384, 768},  {768, 384},  {384, 1024},
-            {1024, 384}, {768, 1024}, {1024, 768},
+            {384, 768}, {768, 384}, {384, 1024}, {1024, 384}, {768, 1024}, {1024, 768},
         };
 
         for (const auto& t : tests) {
@@ -343,8 +336,7 @@ TEST_CASE_METHOD(VectorDimensionFixture,
 // Large Batch Dimension Validation
 // =============================================================================
 
-TEST_CASE_METHOD(VectorDimensionFixture,
-                 "VectorDimensionValidation large batch",
+TEST_CASE_METHOD(VectorDimensionFixture, "VectorDimensionValidation large batch",
                  "[vector][dimension][batch][large][catch2]") {
     skipIfNeeded();
 
@@ -379,8 +371,7 @@ TEST_CASE_METHOD(VectorDimensionFixture,
 // Update with Dimension Validation
 // =============================================================================
 
-TEST_CASE_METHOD(VectorDimensionFixture,
-                 "VectorDimensionValidation update operations",
+TEST_CASE_METHOD(VectorDimensionFixture, "VectorDimensionValidation update operations",
                  "[vector][dimension][update][catch2]") {
     skipIfNeeded();
 

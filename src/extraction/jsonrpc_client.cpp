@@ -64,8 +64,8 @@ std::optional<json> JsonRpcClient::call(std::string_view method, json params,
             // Check for error response
             if (response->contains("error")) {
                 auto& error = (*response)["error"];
-                spdlog::error("JsonRpcClient: RPC error for '{}': code={}, message={}",
-                              method, error.value("code", -1), error.value("message", "unknown"));
+                spdlog::error("JsonRpcClient: RPC error for '{}': code={}, message={}", method,
+                              error.value("code", -1), error.value("message", "unknown"));
                 return std::nullopt;
             }
 
@@ -80,8 +80,8 @@ std::optional<json> JsonRpcClient::call(std::string_view method, json params,
 
         // This response is for a different request ID - log and continue waiting
         // This can happen if a previous request timed out but the response arrived late
-        spdlog::debug("JsonRpcClient: Discarding response for old id={} (expected {})",
-                      responseId, id);
+        spdlog::debug("JsonRpcClient: Discarding response for old id={} (expected {})", responseId,
+                      id);
     }
 
     // Timeout
@@ -124,7 +124,7 @@ std::optional<json> JsonRpcClient::read_next_response() {
 
     // Extract the line and consume it from the buffer
     std::string line{buffer.substr(0, newline_pos)};
-    process_.consume_stdout(newline_pos + 1);  // +1 to include the newline
+    process_.consume_stdout(newline_pos + 1); // +1 to include the newline
 
     if (line.empty()) {
         return std::nullopt;

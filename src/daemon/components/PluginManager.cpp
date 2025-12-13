@@ -7,12 +7,12 @@
 #include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/daemon.h>
-#include <yams/daemon/resource/plugin_content_extractor_adapter.h>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
+#include <yams/daemon/resource/plugin_content_extractor_adapter.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/plugins/content_extractor_v1.h>
 #include <yams/plugins/model_provider_v1.h>
@@ -571,9 +571,8 @@ Result<size_t> PluginManager::adoptContentExtractors() {
         if (externalHost_) {
             for (const auto& desc : externalHost_->listLoaded()) {
                 // Check if plugin implements content_extractor_v1
-                bool hasInterface =
-                    std::find(desc.interfaces.begin(), desc.interfaces.end(),
-                              "content_extractor_v1") != desc.interfaces.end();
+                bool hasInterface = std::find(desc.interfaces.begin(), desc.interfaces.end(),
+                                              "content_extractor_v1") != desc.interfaces.end();
                 if (!hasInterface)
                     continue;
 
@@ -609,7 +608,8 @@ Result<size_t> PluginManager::adoptContentExtractors() {
                         externalHost_.get(), desc.name, std::move(mimes), std::move(extensions));
                     contentExtractors_.push_back(std::move(adapter));
                     ++adopted;
-                    spdlog::info("Adopted content_extractor_v1 from external plugin: {}", desc.name);
+                    spdlog::info("Adopted content_extractor_v1 from external plugin: {}",
+                                 desc.name);
                 } catch (const std::exception& e) {
                     spdlog::warn("Failed to create adapter for external plugin {}: {}", desc.name,
                                  e.what());

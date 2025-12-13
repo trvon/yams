@@ -138,14 +138,16 @@ struct ExternalPluginHost::Impl {
         if (isPluginDirectory(file)) {
             if (auto disk_manifest = readManifest(file)) {
                 desc = buildDescriptorFromManifest(*disk_manifest, file);
-                spdlog::info("ExternalPluginHost: Read manifest from disk for {} (no process spawned)",
-                             file.string());
+                spdlog::info(
+                    "ExternalPluginHost: Read manifest from disk for {} (no process spawned)",
+                    file.string());
             }
         }
 
         // Fall back to launching process to get manifest (for standalone scripts)
         if (!desc) {
-            spdlog::debug("ExternalPluginHost: Spawning process to get manifest for {}", file.string());
+            spdlog::debug("ExternalPluginHost: Spawning process to get manifest for {}",
+                          file.string());
             auto proc_config = buildProcessConfig(file);
             auto process = std::make_unique<extraction::PluginProcess>(std::move(proc_config));
             auto rpc_client = std::make_unique<extraction::JsonRpcClient>(*process);
@@ -838,15 +840,17 @@ private:
 
             auto baseStr = base.string();
             auto candStr = candidate.string();
-            
+
             // Check if candidate is inside base directory securely
-            if (baseStr.empty()) continue;
-            
+            if (baseStr.empty())
+                continue;
+
             // Exact match is always trusted
-            if (candStr == baseStr) return true;
-            
+            if (candStr == baseStr)
+                return true;
+
             // Prefix match must be followed by separator to avoid /trusted-evil bypass
-            if (candStr.size() > baseStr.size() && 
+            if (candStr.size() > baseStr.size() &&
                 candStr.compare(0, baseStr.size(), baseStr) == 0) {
                 char nextChar = candStr[baseStr.size()];
                 if (nextChar == '/' || nextChar == '\\') {

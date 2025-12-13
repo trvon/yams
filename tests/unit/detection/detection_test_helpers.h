@@ -63,8 +63,8 @@ public:
     fs::path nonExistentJson() const { return testDataDir_ / "non_existent.json"; }
 
     fs::path repoMagicNumbers() const {
-        auto path = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path() / "data" /
-                    "magic_numbers.json";
+        auto path = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path() /
+                    "data" / "magic_numbers.json";
         if (fs::exists(path)) {
             return path;
         }
@@ -82,7 +82,8 @@ public:
     fs::path createBinaryFile(const std::string& name, std::span<const std::byte> data) const {
         auto path = testDataDir_ / name;
         std::ofstream file(path, std::ios::binary);
-        file.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+        file.write(reinterpret_cast<const char*>(data.data()),
+                   static_cast<std::streamsize>(data.size()));
         return path;
     }
 

@@ -1211,7 +1211,8 @@ private:
         if (req.pathsOnly) {
             const size_t effectiveLimit = req.limit > 0 ? req.limit : vec.size();
             for (const auto& r : vec) {
-                if (resp.paths.size() >= effectiveLimit) break;
+                if (resp.paths.size() >= effectiveLimit)
+                    break;
                 if (!r.document.filePath.empty()) {
                     resp.paths.push_back(r.document.filePath);
                 }
@@ -1399,9 +1400,11 @@ private:
             resp.usedHybrid = false;
 
             if (searchReq.pathsOnly) {
-                const size_t effectiveLimit = searchReq.limit > 0 ? searchReq.limit : res.results.size();
+                const size_t effectiveLimit =
+                    searchReq.limit > 0 ? searchReq.limit : res.results.size();
                 for (const auto& item : res.results) {
-                    if (resp.paths.size() >= effectiveLimit) break;
+                    if (resp.paths.size() >= effectiveLimit)
+                        break;
                     const auto& d = item.document;
                     resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
                 }
@@ -1437,9 +1440,11 @@ private:
             resp.usedHybrid = false;
 
             if (searchReq.pathsOnly) {
-                const size_t effectiveLimit = searchReq.limit > 0 ? searchReq.limit : res.results.size();
+                const size_t effectiveLimit =
+                    searchReq.limit > 0 ? searchReq.limit : res.results.size();
                 for (const auto& item : res.results) {
-                    if (resp.paths.size() >= effectiveLimit) break;
+                    if (resp.paths.size() >= effectiveLimit)
+                        break;
                     const auto& d = item.document;
                     resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
                 }

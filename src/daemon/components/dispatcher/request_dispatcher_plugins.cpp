@@ -321,12 +321,14 @@ RequestDispatcher::handlePluginTrustAddRequest(const PluginTrustAddRequest& req)
                          sm = serviceManager_]() -> boost::asio::awaitable<void> {
                             try {
                                 // Helper to get paths of already-loaded plugins
-                                auto getLoadedPaths = [](auto host) -> std::set<std::filesystem::path> {
+                                auto getLoadedPaths =
+                                    [](auto host) -> std::set<std::filesystem::path> {
                                     std::set<std::filesystem::path> paths;
                                     if (host) {
                                         for (const auto& desc : host->listLoaded()) {
                                             // Store both the exact path and parent directory
-                                            paths.insert(std::filesystem::weakly_canonical(desc.path));
+                                            paths.insert(
+                                                std::filesystem::weakly_canonical(desc.path));
                                             if (desc.path.has_parent_path()) {
                                                 paths.insert(std::filesystem::weakly_canonical(
                                                     desc.path.parent_path()));
@@ -340,20 +342,23 @@ RequestDispatcher::handlePluginTrustAddRequest(const PluginTrustAddRequest& req)
                                 auto abiLoadedPaths = getLoadedPaths(abi);
                                 auto externalLoadedPaths = getLoadedPaths(external);
 
-                                // Check if the path is already loaded (exact match or parent of loaded)
-                                auto isAlreadyLoaded = [](const std::filesystem::path& p,
-                                                          const std::set<std::filesystem::path>& loaded) {
-                                    auto canonical = std::filesystem::weakly_canonical(p);
-                                    return loaded.count(canonical) > 0;
-                                };
+                                // Check if the path is already loaded (exact match or parent of
+                                // loaded)
+                                auto isAlreadyLoaded =
+                                    [](const std::filesystem::path& p,
+                                       const std::set<std::filesystem::path>& loaded) {
+                                        auto canonical = std::filesystem::weakly_canonical(p);
+                                        return loaded.count(canonical) > 0;
+                                    };
 
                                 // Skip entirely if path is already loaded
                                 bool skipAbi = isAlreadyLoaded(path, abiLoadedPaths);
                                 bool skipExternal = isAlreadyLoaded(path, externalLoadedPaths);
 
                                 if (skipAbi && skipExternal) {
-                                    spdlog::debug("trust add: path {} already loaded, skipping scan",
-                                                  path.string());
+                                    spdlog::debug(
+                                        "trust add: path {} already loaded, skipping scan",
+                                        path.string());
                                     co_return;
                                 }
 

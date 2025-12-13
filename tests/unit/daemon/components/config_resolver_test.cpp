@@ -119,8 +119,7 @@ TEST_CASE("ConfigResolver::envTruthy correctly parses truthy values",
     }
 }
 
-TEST_CASE_METHOD(ConfigResolverFixture,
-                 "ConfigResolver parseSimpleTomlFlat parses TOML files",
+TEST_CASE_METHOD(ConfigResolverFixture, "ConfigResolver parseSimpleTomlFlat parses TOML files",
                  "[daemon][components][config][catch2]") {
     SECTION("basic TOML parsing with sections") {
         auto configPath = writeToml("test.toml", R"(

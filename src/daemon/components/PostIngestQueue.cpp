@@ -52,8 +52,8 @@ void PostIngestQueue::start() {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
-        spdlog::info("[PostIngestQueue] Pollers started (extraction={}, kg={})",
-                     started_.load(), kgStarted_.load());
+        spdlog::info("[PostIngestQueue] Pollers started (extraction={}, kg={})", started_.load(),
+                     kgStarted_.load());
     } else {
         spdlog::warn("[PostIngestQueue] start() skipped because stop_=true");
     }
@@ -182,8 +182,8 @@ void PostIngestQueue::processMetadataStage(const std::string& hash, const std::s
             if (!info.fileExtension.empty())
                 extension = info.fileExtension;
         } else {
-            spdlog::warn("[PostIngestQueue] Metadata not found for hash {}; content may be orphaned",
-                         hash);
+            spdlog::warn(
+                "[PostIngestQueue] Metadata not found for hash {}; content may be orphaned", hash);
             return;
         }
 
@@ -227,8 +227,8 @@ void PostIngestQueue::processMetadataStage(const std::string& hash, const std::s
 }
 
 void PostIngestQueue::processKnowledgeGraphStage(const std::string& hash, int64_t docId,
-                                                  const std::string& filePath,
-                                                  const std::vector<std::string>& tags) {
+                                                 const std::string& filePath,
+                                                 const std::vector<std::string>& tags) {
     if (!graphComponent_) {
         return;
     }
@@ -236,10 +236,8 @@ void PostIngestQueue::processKnowledgeGraphStage(const std::string& hash, int64_
     try {
         auto start = std::chrono::steady_clock::now();
 
-        GraphComponent::DocumentGraphContext ctx{.documentHash = hash,
-                                                 .filePath = filePath,
-                                                 .tags = tags,
-                                                 .documentDbId = docId};
+        GraphComponent::DocumentGraphContext ctx{
+            .documentHash = hash, .filePath = filePath, .tags = tags, .documentDbId = docId};
 
         auto result = graphComponent_->onDocumentIngested(ctx);
         if (!result) {
@@ -319,13 +317,12 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
         InternalEventBus::KgJob job;
         if (kgInFlight_.load() < kMaxKgConcurrent_ && channel->try_pop(job)) {
             kgInFlight_.fetch_add(1);
-            boost::asio::post(
-                coordinator_->getExecutor(),
-                [this, hash = std::move(job.hash), docId = job.documentId,
-                 filePath = std::move(job.filePath), tags = std::move(job.tags)]() {
-                    processKnowledgeGraphStage(hash, docId, filePath, tags);
-                    kgInFlight_.fetch_sub(1);
-                });
+            boost::asio::post(coordinator_->getExecutor(),
+                              [this, hash = std::move(job.hash), docId = job.documentId,
+                               filePath = std::move(job.filePath), tags = std::move(job.tags)]() {
+                                  processKnowledgeGraphStage(hash, docId, filePath, tags);
+                                  kgInFlight_.fetch_sub(1);
+                              });
         } else {
             timer.expires_after(std::chrono::milliseconds(25));
             co_await timer.async_wait(boost::asio::use_awaitable);

@@ -1,8 +1,8 @@
 // Catch2 tests for BK-Tree, TrigramIndex, and HybridFuzzySearch
 // Migrated from GTest: bk_tree_test.cpp
 
-#include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
+#include <catch2/catch_test_macros.hpp>
 
 #include <yams/search/bk_tree.h>
 

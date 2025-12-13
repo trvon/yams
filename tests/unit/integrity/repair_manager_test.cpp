@@ -24,9 +24,9 @@ struct TempDir {
     std::filesystem::path path;
 
     TempDir() {
-        path = std::filesystem::temp_directory_path() / 
-               ("yams_test_" + std::to_string(std::hash<std::thread::id>{}(
-                   std::this_thread::get_id())) + "_" +
+        path = std::filesystem::temp_directory_path() /
+               ("yams_test_" +
+                std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id())) + "_" +
                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
         std::filesystem::create_directories(path);
     }
@@ -51,15 +51,16 @@ struct RepairFixture {
         storageConfig.basePath = tempDir.path / "storage";
         std::filesystem::create_directories(storageConfig.basePath);
         storage = std::make_unique<StorageEngine>(storageConfig);
-        
+
         // Set up repair config with dummy fetchers
-        repairConfig.backupFetcher = [](const std::string&) -> yams::Result<std::vector<std::byte>> {
+        repairConfig.backupFetcher =
+            [](const std::string&) -> yams::Result<std::vector<std::byte>> {
             return yams::Result<std::vector<std::byte>>(yams::ErrorCode::NotFound);
         };
         repairConfig.p2pFetcher = [](const std::string&) -> yams::Result<std::vector<std::byte>> {
             return yams::Result<std::vector<std::byte>>(yams::ErrorCode::NotFound);
         };
-        
+
         manager = std::make_unique<RepairManager>(*storage, repairConfig);
     }
 
@@ -93,7 +94,7 @@ TEST_CASE("RepairManager with working backup fetcher", "[integrity][repair]") {
     storageConfig.basePath = tempDir.path / "storage";
     std::filesystem::create_directories(storageConfig.basePath);
     StorageEngine storage(storageConfig);
-    
+
     RepairManagerConfig config;
     config.backupFetcher = [](const std::string& hash) -> yams::Result<std::vector<std::byte>> {
         if (hash == "recoverable-hash") {
@@ -104,9 +105,9 @@ TEST_CASE("RepairManager with working backup fetcher", "[integrity][repair]") {
         }
         return yams::Result<std::vector<std::byte>>(yams::ErrorCode::NotFound);
     };
-    
+
     RepairManager manager(storage, config);
-    
+
     SECTION("attemptRepair succeeds when backup fetcher returns data") {
         // The repair should attempt to use the backup fetcher
         bool repaired = manager.attemptRepair("recoverable-hash");
@@ -121,11 +122,12 @@ TEST_CASE("RepairManager repair strategy order", "[integrity][repair]") {
     storageConfig.basePath = tempDir.path / "storage";
     std::filesystem::create_directories(storageConfig.basePath);
     StorageEngine storage(storageConfig);
-    
+
     std::vector<std::string> callOrder;
-    
+
     RepairManagerConfig config;
-    config.backupFetcher = [&callOrder](const std::string&) -> yams::Result<std::vector<std::byte>> {
+    config.backupFetcher =
+        [&callOrder](const std::string&) -> yams::Result<std::vector<std::byte>> {
         callOrder.push_back("backup");
         return yams::Result<std::vector<std::byte>>(yams::ErrorCode::NotFound);
     };
@@ -134,9 +136,9 @@ TEST_CASE("RepairManager repair strategy order", "[integrity][repair]") {
         return yams::Result<std::vector<std::byte>>(yams::ErrorCode::NotFound);
     };
     config.defaultOrder = {RepairStrategy::FromBackup, RepairStrategy::FromP2P};
-    
+
     RepairManager manager(storage, config);
-    
+
     SECTION("attempts repair strategies in configured order") {
         manager.attemptRepair("some-hash");
         REQUIRE(callOrder.size() >= 1u);

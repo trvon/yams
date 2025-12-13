@@ -7,8 +7,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
+#include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/daemon.h>
 
@@ -57,8 +57,7 @@ struct PluginManagerFixture {
 
 } // namespace
 
-TEST_CASE_METHOD(PluginManagerFixture,
-                 "PluginManager construction",
+TEST_CASE_METHOD(PluginManagerFixture, "PluginManager construction",
                  "[daemon][components][plugin][catch2]") {
     auto deps = makeDeps();
 
@@ -68,8 +67,7 @@ TEST_CASE_METHOD(PluginManagerFixture,
     }
 }
 
-TEST_CASE_METHOD(PluginManagerFixture,
-                 "PluginManager initialize/shutdown lifecycle",
+TEST_CASE_METHOD(PluginManagerFixture, "PluginManager initialize/shutdown lifecycle",
                  "[daemon][components][plugin][catch2]") {
     auto deps = makeDeps();
     PluginManager mgr(deps);
@@ -98,8 +96,7 @@ TEST_CASE_METHOD(PluginManagerFixture,
     }
 }
 
-TEST_CASE_METHOD(PluginManagerFixture,
-                 "PluginManager plugin host accessors",
+TEST_CASE_METHOD(PluginManagerFixture, "PluginManager plugin host accessors",
                  "[daemon][components][plugin][catch2]") {
     auto deps = makeDeps();
     PluginManager mgr(deps);
@@ -122,8 +119,7 @@ TEST_CASE_METHOD(PluginManagerFixture,
     }
 }
 
-TEST_CASE_METHOD(PluginManagerFixture,
-                 "PluginManager trust list operations",
+TEST_CASE_METHOD(PluginManagerFixture, "PluginManager trust list operations",
                  "[daemon][components][plugin][catch2]") {
     auto deps = makeDeps();
     PluginManager mgr(deps);
@@ -146,8 +142,7 @@ TEST_CASE_METHOD(PluginManagerFixture,
     }
 }
 
-TEST_CASE("PluginManager getName returns component name",
-          "[daemon][components][plugin][catch2]") {
+TEST_CASE("PluginManager getName returns component name", "[daemon][components][plugin][catch2]") {
     DaemonLifecycleFsm fsm;
     StateComponent state;
     DaemonConfig config;

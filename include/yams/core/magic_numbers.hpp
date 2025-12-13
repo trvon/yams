@@ -223,18 +223,22 @@ constexpr auto make_magic_patterns() {
     // Java class file format: magic (CAFEBABE) + minor version (2 bytes) + major version (2 bytes)
     // Major versions: 34=Java 8, 37=Java 11, 3D=Java 17, 41=Java 21
     // Pattern: CAFEBABE + 0000 (minor) + 00XX (major high byte always 00 for versions < 256)
-    patterns.push_back(MAGIC_PATTERN("CAFEBABE00000034", 0, "executable", "application/java-archive",
-                                     "Java class file (Java 8)", 1.0f));
-    patterns.push_back(MAGIC_PATTERN("CAFEBABE00000035", 0, "executable", "application/java-archive",
-                                     "Java class file (Java 9)", 1.0f));
-    patterns.push_back(MAGIC_PATTERN("CAFEBABE00000036", 0, "executable", "application/java-archive",
-                                     "Java class file (Java 10)", 1.0f));
-    patterns.push_back(MAGIC_PATTERN("CAFEBABE00000037", 0, "executable", "application/java-archive",
-                                     "Java class file (Java 11)", 1.0f));
-    patterns.push_back(MAGIC_PATTERN("CAFEBABE0000003D", 0, "executable", "application/java-archive",
-                                     "Java class file (Java 17)", 1.0f));
-    patterns.push_back(MAGIC_PATTERN("CAFEBABE00000041", 0, "executable", "application/java-archive",
-                                     "Java class file (Java 21)", 1.0f));
+    patterns.push_back(MAGIC_PATTERN("CAFEBABE00000034", 0, "executable",
+                                     "application/java-archive", "Java class file (Java 8)", 1.0f));
+    patterns.push_back(MAGIC_PATTERN("CAFEBABE00000035", 0, "executable",
+                                     "application/java-archive", "Java class file (Java 9)", 1.0f));
+    patterns.push_back(MAGIC_PATTERN("CAFEBABE00000036", 0, "executable",
+                                     "application/java-archive", "Java class file (Java 10)",
+                                     1.0f));
+    patterns.push_back(MAGIC_PATTERN("CAFEBABE00000037", 0, "executable",
+                                     "application/java-archive", "Java class file (Java 11)",
+                                     1.0f));
+    patterns.push_back(MAGIC_PATTERN("CAFEBABE0000003D", 0, "executable",
+                                     "application/java-archive", "Java class file (Java 17)",
+                                     1.0f));
+    patterns.push_back(MAGIC_PATTERN("CAFEBABE00000041", 0, "executable",
+                                     "application/java-archive", "Java class file (Java 21)",
+                                     1.0f));
     // Mach-O fat/universal binary - shorter pattern after more specific Java patterns
     patterns.push_back(MAGIC_PATTERN("CAFEBABE", 0, "executable", "application/x-mach-binary",
                                      "Mach-O fat binary (universal)", 0.9f));
@@ -244,11 +248,11 @@ constexpr auto make_magic_patterns() {
     patterns.push_back(MAGIC_PATTERN("CAFEBABE", 0, "executable", "application/java-archive",
                                      "Java class file", 0.85f));
     // WebAssembly
-    patterns.push_back(MAGIC_PATTERN("0061736D", 0, "executable", "application/wasm",
-                                     "WebAssembly binary", 1.0f));
+    patterns.push_back(
+        MAGIC_PATTERN("0061736D", 0, "executable", "application/wasm", "WebAssembly binary", 1.0f));
     // LLVM bitcode
-    patterns.push_back(MAGIC_PATTERN("4243C0DE", 0, "executable", "application/x-llvm-bc",
-                                     "LLVM bitcode", 1.0f));
+    patterns.push_back(
+        MAGIC_PATTERN("4243C0DE", 0, "executable", "application/x-llvm-bc", "LLVM bitcode", 1.0f));
     // DEX (Android Dalvik)
     patterns.push_back(MAGIC_PATTERN("6465780A", 0, "executable", "application/vnd.android.dex",
                                      "Android DEX bytecode", 1.0f));

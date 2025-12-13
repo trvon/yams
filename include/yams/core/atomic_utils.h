@@ -36,7 +36,7 @@ namespace yams::core {
  *   saturating_sub(byteCount, 150);  // byteCount is now 0, not UINT64_MAX-50
  */
 template <typename T>
-    requires std::is_unsigned_v<T>
+requires std::is_unsigned_v<T>
 T saturating_sub(std::atomic<T>& counter, T delta) noexcept {
     T current = counter.load(std::memory_order_relaxed);
     while (true) {
@@ -63,7 +63,7 @@ T saturating_sub(std::atomic<T>& counter, T delta) noexcept {
  * Thread-safe: Yes (lock-free CAS loop)
  */
 template <typename T>
-    requires std::is_unsigned_v<T>
+requires std::is_unsigned_v<T>
 T saturating_add(std::atomic<T>& counter, T delta) noexcept {
     constexpr T max_val = std::numeric_limits<T>::max();
     T current = counter.load(std::memory_order_relaxed);
@@ -88,7 +88,7 @@ T saturating_add(std::atomic<T>& counter, T delta) noexcept {
  * @return true if the counter was decremented, false if it was already zero
  */
 template <typename T>
-    requires std::is_unsigned_v<T>
+requires std::is_unsigned_v<T>
 bool decrement_if_positive(std::atomic<T>& counter) noexcept {
     T current = counter.load(std::memory_order_relaxed);
     while (current > T{0}) {
@@ -112,7 +112,7 @@ bool decrement_if_positive(std::atomic<T>& counter) noexcept {
  * @return The previous value of the counter
  */
 template <typename T>
-    requires std::is_arithmetic_v<T>
+requires std::is_arithmetic_v<T>
 T atomic_max(std::atomic<T>& counter, T value) noexcept {
     T current = counter.load(std::memory_order_relaxed);
     while (current < value) {
@@ -135,7 +135,7 @@ T atomic_max(std::atomic<T>& counter, T value) noexcept {
  * @return The previous value of the counter
  */
 template <typename T>
-    requires std::is_arithmetic_v<T>
+requires std::is_arithmetic_v<T>
 T atomic_min(std::atomic<T>& counter, T value) noexcept {
     T current = counter.load(std::memory_order_relaxed);
     while (current > value) {

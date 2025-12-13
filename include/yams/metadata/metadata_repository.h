@@ -88,7 +88,7 @@ struct DocumentQueryOptions {
     std::optional<std::string> exactPath;
     std::optional<std::string> pathPrefix;
     std::optional<std::string> containsFragment;
-    std::optional<std::string> fileName;  // Exact match on file_name column
+    std::optional<std::string> fileName; // Exact match on file_name column
     std::optional<std::string> extension;
     std::optional<std::string> mimeType;
     bool textOnly{false};

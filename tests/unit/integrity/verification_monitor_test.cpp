@@ -34,7 +34,7 @@ TEST_CASE_METHOD(MonitorFixture, "VerificationMonitor metric tracking", "[integr
         monitor.recordVerification(makeResult(true));
         monitor.recordVerification(makeResult(true));
         monitor.recordVerification(makeResult(true));
-        
+
         auto metrics = monitor.getCurrentMetrics();
         CHECK(metrics.totalVerifications == 3u);
         CHECK(metrics.totalErrors == 0u);
@@ -43,7 +43,7 @@ TEST_CASE_METHOD(MonitorFixture, "VerificationMonitor metric tracking", "[integr
     SECTION("records failed verifications") {
         monitor.recordVerification(makeResult(false));
         monitor.recordVerification(makeResult(false));
-        
+
         auto metrics = monitor.getCurrentMetrics();
         CHECK(metrics.totalVerifications == 2u);
         CHECK(metrics.totalErrors == 2u);
@@ -55,7 +55,7 @@ TEST_CASE_METHOD(MonitorFixture, "VerificationMonitor metric tracking", "[integr
         monitor.recordVerification(makeResult(true));
         monitor.recordVerification(makeResult(false));
         monitor.recordVerification(makeResult(true));
-        
+
         auto metrics = monitor.getCurrentMetrics();
         CHECK(metrics.totalVerifications == 5u);
         CHECK(metrics.totalErrors == 2u);
@@ -67,7 +67,7 @@ TEST_CASE_METHOD(MonitorFixture, "VerificationMonitor repair tracking", "[integr
         monitor.recordRepairAttempt("hash_1", true);
         monitor.recordRepairAttempt("hash_2", false);
         monitor.recordRepairAttempt("hash_3", true);
-        
+
         auto metrics = monitor.getCurrentMetrics();
         CHECK(metrics.repairAttempts == 3u);
         CHECK(metrics.successfulRepairs == 2u);
@@ -77,7 +77,7 @@ TEST_CASE_METHOD(MonitorFixture, "VerificationMonitor repair tracking", "[integr
 TEST_CASE_METHOD(MonitorFixture, "VerificationMonitor alert system", "[integrity][monitor]") {
     SECTION("alert threshold can be configured") {
         monitor.setErrorRateThreshold(0.1); // Very low threshold
-        // Add failures 
+        // Add failures
         for (int i = 0; i < 10; ++i) {
             monitor.recordVerification(makeResult(false));
         }

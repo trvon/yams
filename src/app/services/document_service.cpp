@@ -14,11 +14,11 @@
 #include <yams/extraction/format_handlers/text_basic_handler.hpp>
 #include <yams/extraction/text_extractor.h>
 
+#include <yams/core/cpp23_features.hpp>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
 #include <yams/metadata/query_helpers.h>
-#include <yams/core/cpp23_features.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -129,8 +129,7 @@ inline std::string generateSnippet(const std::string& contentText, int snippetLe
     if (snippet.length() > static_cast<size_t>(snippetLength)) {
         snippet = snippet.substr(0, static_cast<size_t>(snippetLength - 3));
         size_t lastSpace = snippet.find_last_of(' ');
-        if (lastSpace != std::string::npos &&
-            lastSpace > static_cast<size_t>(snippetLength / 2)) {
+        if (lastSpace != std::string::npos && lastSpace > static_cast<size_t>(snippetLength / 2)) {
             snippet = snippet.substr(0, lastSpace);
         }
         snippet += "...";
@@ -180,19 +179,17 @@ inline bool looksLikePartialHash(const std::string& s) {
 //   - resolveAll(): Returns all matching documents (for batch operations)
 // ============================================================================
 
-template <typename Repo>
-class DocumentResolver {
+template <typename Repo> class DocumentResolver {
 public:
     struct ResolveOptions {
-        bool oldest = false;           // Return oldest match instead of newest
-        bool tryHashPrefix = false;    // Whether to attempt hash prefix resolution
+        bool oldest = false;        // Return oldest match instead of newest
+        bool tryHashPrefix = false; // Whether to attempt hash prefix resolution
     };
 
     explicit DocumentResolver(Repo& repo) : repo_(repo) {}
 
     // Single document resolution - returns first/best match or error
-    Result<std::string> resolveToHash(const std::string& query,
-                                      const ResolveOptions& opts = {}) {
+    Result<std::string> resolveToHash(const std::string& query, const ResolveOptions& opts = {}) {
         spdlog::info("[RESOLVE] Starting resolution for: '{}'", query);
 
         // Strategy 1: FileName exact match (highest priority for --name documents)
@@ -243,9 +240,8 @@ public:
     }
 
     // Multi-document resolution - returns all matches (for delete, batch ops)
-    Result<std::vector<metadata::DocumentInfo>> resolveAll(
-        const std::string& query, const ResolveOptions& opts = {}) {
-
+    Result<std::vector<metadata::DocumentInfo>> resolveAll(const std::string& query,
+                                                           const ResolveOptions& opts = {}) {
         std::vector<metadata::DocumentInfo> results;
         std::unordered_set<std::string> seenHashes;
 
@@ -401,8 +397,7 @@ private:
     Result<std::string> selectFromMultiple(std::vector<metadata::DocumentInfo>& matches,
                                            const ResolveOptions& opts) {
         const char* strategy = opts.oldest ? "oldest" : "most recent";
-        spdlog::warn("[RESOLVE] ⚠️ Ambiguous: {} matches - returning {}",
-                     matches.size(), strategy);
+        spdlog::warn("[RESOLVE] ⚠️ Ambiguous: {} matches - returning {}", matches.size(), strategy);
 
         std::sort(matches.begin(), matches.end(),
                   [&opts](const metadata::DocumentInfo& a, const metadata::DocumentInfo& b) {
@@ -410,8 +405,7 @@ private:
                                          : (a.indexedTime > b.indexedTime);
                   });
 
-        spdlog::info("[RESOLVE] ✓ Selected {}: {} (indexed: {})", strategy,
-                     matches[0].fileName,
+        spdlog::info("[RESOLVE] ✓ Selected {}: {} (indexed: {})", strategy, matches[0].fileName,
                      matches[0].indexedTime.time_since_epoch().count());
 
         return matches[0].sha256Hash;
@@ -1010,7 +1004,8 @@ public:
                     std::filesystem::path(foundDoc->filePath).parent_path();
                 // Query only documents in the same directory using path prefix
                 std::string dirPattern = baseDir.string() + "/%";
-                auto docsRes = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, dirPattern, 21);
+                auto docsRes =
+                    metadata::queryDocumentsByPattern(*ctx_.metadataRepo, dirPattern, 21);
                 if (docsRes) {
                     int count = 0;
                     for (const auto& other : docsRes.value()) {
@@ -1678,8 +1673,7 @@ public:
             } else {
                 // Update the document's hash in metadata
                 auto updateHash = ctx_.metadataRepo->setMetadata(
-                    target.id, "content_hash",
-                    metadata::MetadataValue(stored.value().contentHash));
+                    target.id, "content_hash", metadata::MetadataValue(stored.value().contentHash));
                 if (updateHash) {
                     resp.contentUpdated = true;
                     resp.hash = stored.value().contentHash; // Update to new hash

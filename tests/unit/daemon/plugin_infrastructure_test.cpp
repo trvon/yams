@@ -41,13 +41,11 @@ public:
 
     ScopedEnv(const ScopedEnv&) = delete;
     ScopedEnv& operator=(const ScopedEnv&) = delete;
-    
+
     // Move support for reassignment
     ScopedEnv(ScopedEnv&& other) noexcept
-        : name_(std::move(other.name_)),
-          oldValue_(std::move(other.oldValue_)),
-          hadValue_(other.hadValue_),
-          active_(other.active_) {
+        : name_(std::move(other.name_)), oldValue_(std::move(other.oldValue_)),
+          hadValue_(other.hadValue_), active_(other.active_) {
         other.active_ = false;
     }
 
@@ -106,16 +104,14 @@ struct PluginHostFixture {
     ScopedEnv pluginPolicyEnv_;
     ScopedEnv configEnv_;
     ScopedEnv dataEnv_;
-    
+
     fs::path tempDir_;
     fs::path trustFile_;
 
     PluginHostFixture()
-        : xdgConfigEnv_("XDG_CONFIG_HOME", ""),  // placeholder, updated below
-          testingEnv_("YAMS_TESTING", "1"),
-          pluginPolicyEnv_("YAMS_PLUGIN_NAME_POLICY", "spec"),
-          configEnv_("YAMS_CONFIG", ""),
-          dataEnv_("YAMS_DATA_DIR", ""),
+        : xdgConfigEnv_("XDG_CONFIG_HOME", ""), // placeholder, updated below
+          testingEnv_("YAMS_TESTING", "1"), pluginPolicyEnv_("YAMS_PLUGIN_NAME_POLICY", "spec"),
+          configEnv_("YAMS_CONFIG", ""), dataEnv_("YAMS_DATA_DIR", ""),
           tempDir_(fs::temp_directory_path() / ("yams_ph_" + uniqueSuffix())),
           trustFile_(tempDir_ / "plugins_trust.txt") {
         fs::create_directories(tempDir_);
@@ -145,7 +141,7 @@ struct RequestDispatcherFixture {
     ScopedEnv testingEnv_;
     ScopedEnv configEnv_;
     ScopedEnv dataEnv_;
-    
+
     fs::path tempDir_;
     std::unique_ptr<StateComponent> state_;
     std::unique_ptr<DaemonLifecycleFsm> lifecycleFsm_;
@@ -153,9 +149,8 @@ struct RequestDispatcherFixture {
     std::unique_ptr<RequestDispatcher> dispatcher_;
 
     RequestDispatcherFixture()
-        : xdgConfigEnv_("XDG_CONFIG_HOME", ""),  // placeholder, set after tempDir_ known
-          testingEnv_("YAMS_TESTING", "1"),
-          configEnv_("YAMS_CONFIG", ""),
+        : xdgConfigEnv_("XDG_CONFIG_HOME", ""), // placeholder, set after tempDir_ known
+          testingEnv_("YAMS_TESTING", "1"), configEnv_("YAMS_CONFIG", ""),
           dataEnv_("YAMS_DATA_DIR", ""),
           tempDir_(fs::temp_directory_path() / ("yams_rdph_" + uniqueSuffix())) {
         // Now update env vars with actual temp dir path
@@ -163,7 +158,7 @@ struct RequestDispatcherFixture {
         xdgConfigEnv_ = ScopedEnv("XDG_CONFIG_HOME", tempDir_.string().c_str());
         configEnv_ = ScopedEnv("YAMS_CONFIG", (tempDir_ / "config.toml").string().c_str());
         dataEnv_ = ScopedEnv("YAMS_DATA_DIR", tempDir_.string().c_str());
-        
+
         state_ = std::make_unique<StateComponent>();
         lifecycleFsm_ = std::make_unique<DaemonLifecycleFsm>();
 
@@ -182,7 +177,7 @@ struct RequestDispatcherFixture {
         svc_.reset();
         lifecycleFsm_.reset();
         state_.reset();
-        
+
         std::error_code ec;
         fs::remove_all(tempDir_, ec);
     }

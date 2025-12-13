@@ -20,9 +20,9 @@ struct TempDir {
     std::filesystem::path path;
 
     TempDir() {
-        path = std::filesystem::temp_directory_path() / 
-               ("yams_verifier_test_" + std::to_string(std::hash<std::thread::id>{}(
-                   std::this_thread::get_id())) + "_" +
+        path = std::filesystem::temp_directory_path() /
+               ("yams_verifier_test_" +
+                std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id())) + "_" +
                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
         std::filesystem::create_directories(path);
     }
@@ -64,14 +64,16 @@ struct IntegrityVerifierFixture {
 
 } // namespace
 
-TEST_CASE_METHOD(IntegrityVerifierFixture, "IntegrityVerifier basic state", "[integrity][verifier]") {
+TEST_CASE_METHOD(IntegrityVerifierFixture, "IntegrityVerifier basic state",
+                 "[integrity][verifier]") {
     SECTION("initial state is not running") {
         CHECK_FALSE(verifier->isRunning());
         CHECK_FALSE(verifier->isPaused());
     }
 }
 
-TEST_CASE_METHOD(IntegrityVerifierFixture, "IntegrityVerifier block verification", "[integrity][verifier]") {
+TEST_CASE_METHOD(IntegrityVerifierFixture, "IntegrityVerifier block verification",
+                 "[integrity][verifier]") {
     SECTION("verifying missing block returns failure status") {
         auto result = verifier->verifyBlock("nonexistent-hash");
         // Block verification fails for non-existent blocks
@@ -79,7 +81,8 @@ TEST_CASE_METHOD(IntegrityVerifierFixture, "IntegrityVerifier block verification
     }
 }
 
-TEST_CASE_METHOD(IntegrityVerifierFixture, "IntegrityVerifier report generation", "[integrity][verifier]") {
+TEST_CASE_METHOD(IntegrityVerifierFixture, "IntegrityVerifier report generation",
+                 "[integrity][verifier]") {
     SECTION("generates empty report when no verifications") {
         auto report = verifier->generateReport();
         CHECK(report.blocksVerified == 0u);
@@ -93,7 +96,8 @@ TEST_CASE_METHOD(IntegrityVerifierFixture, "IntegrityVerifier report generation"
     }
 }
 
-TEST_CASE_METHOD(IntegrityVerifierFixture, "IntegrityVerifier statistics", "[integrity][verifier]") {
+TEST_CASE_METHOD(IntegrityVerifierFixture, "IntegrityVerifier statistics",
+                 "[integrity][verifier]") {
     SECTION("statistics are accessible") {
         const auto& stats = verifier->getStatistics();
         CHECK(stats.blocksVerifiedTotal.load() == 0u);

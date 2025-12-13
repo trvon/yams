@@ -46,8 +46,7 @@ struct DatabaseManagerFixture {
 
 } // namespace
 
-TEST_CASE_METHOD(DatabaseManagerFixture,
-                 "DatabaseManager construction",
+TEST_CASE_METHOD(DatabaseManagerFixture, "DatabaseManager construction",
                  "[daemon][components][database][catch2]") {
     auto deps = makeDeps();
 
@@ -57,8 +56,7 @@ TEST_CASE_METHOD(DatabaseManagerFixture,
     }
 }
 
-TEST_CASE_METHOD(DatabaseManagerFixture,
-                 "DatabaseManager initialize/shutdown lifecycle",
+TEST_CASE_METHOD(DatabaseManagerFixture, "DatabaseManager initialize/shutdown lifecycle",
                  "[daemon][components][database][catch2]") {
     auto deps = makeDeps();
     DatabaseManager mgr(deps);
@@ -87,8 +85,7 @@ TEST_CASE_METHOD(DatabaseManagerFixture,
     }
 }
 
-TEST_CASE_METHOD(DatabaseManagerFixture,
-                 "DatabaseManager accessor before/after init",
+TEST_CASE_METHOD(DatabaseManagerFixture, "DatabaseManager accessor before/after init",
                  "[daemon][components][database][catch2]") {
     auto deps = makeDeps();
     DatabaseManager mgr(deps);

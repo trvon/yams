@@ -1088,9 +1088,9 @@ private:
             downloadGrammars(dataPath, true);
         } else if (!nonInteractive_) {
             // Interactive mode: prompt user
-            bool setupGrammars = prompt_yes_no(
-                "\nDownload tree-sitter grammars for symbol extraction? [Y/n]: ",
-                YesNoOptions{.defaultYes = true});
+            bool setupGrammars =
+                prompt_yes_no("\nDownload tree-sitter grammars for symbol extraction? [Y/n]: ",
+                              YesNoOptions{.defaultYes = true});
             if (setupGrammars) {
                 downloadGrammars(dataPath, false);
             }
@@ -1138,7 +1138,8 @@ private:
             std::cout << "\nDownloading recommended grammars: ";
             for (size_t i = 0; i < selectedLanguages.size(); ++i) {
                 std::cout << selectedLanguages[i];
-                if (i + 1 < selectedLanguages.size()) std::cout << ", ";
+                if (i + 1 < selectedLanguages.size())
+                    std::cout << ", ";
             }
             std::cout << "\n";
         } else {
@@ -1152,7 +1153,8 @@ private:
 
             std::string choice;
             std::getline(std::cin, choice);
-            if (choice.empty()) choice = "1";
+            if (choice.empty())
+                choice = "1";
 
             if (choice == "1") {
                 for (const auto& g : SUPPORTED_GRAMMARS) {
@@ -1169,7 +1171,8 @@ private:
                 std::cout << "Available: ";
                 for (size_t i = 0; i < std::size(SUPPORTED_GRAMMARS); ++i) {
                     std::cout << SUPPORTED_GRAMMARS[i].language;
-                    if (i + 1 < std::size(SUPPORTED_GRAMMARS)) std::cout << ", ";
+                    if (i + 1 < std::size(SUPPORTED_GRAMMARS))
+                        std::cout << ", ";
                 }
                 std::cout << "\nLanguages: ";
                 std::string langs;
@@ -1188,7 +1191,8 @@ private:
                 }
             } else {
                 std::cout << "Skipping grammar download.\n";
-                std::cout << "You can download grammars later with: yams grammar download <language>\n";
+                std::cout
+                    << "You can download grammars later with: yams grammar download <language>\n";
                 return;
             }
         }
@@ -1201,15 +1205,20 @@ private:
         // Check if build tools are available
         bool canBuild = checkBuildToolsAvailable();
         if (!canBuild) {
-            std::cout << "\n" << cli::ui::status_warning("Build tools not found (git + compiler required).") << "\n";
+            std::cout << "\n"
+                      << cli::ui::status_warning("Build tools not found (git + compiler required).")
+                      << "\n";
             std::cout << "Please install:\n";
 #ifdef _WIN32
-            std::cout << "  " << cli::ui::bullet("Git for Windows: https://git-scm.com/download/win") << "\n";
+            std::cout << "  "
+                      << cli::ui::bullet("Git for Windows: https://git-scm.com/download/win")
+                      << "\n";
             std::cout << "  " << cli::ui::bullet("Visual Studio Build Tools or MinGW-w64") << "\n";
 #else
             std::cout << "  " << cli::ui::bullet("git, gcc/g++ or clang") << "\n";
 #endif
-            std::cout << "\nYou can download grammars later with: yams grammar download <language>\n";
+            std::cout
+                << "\nYou can download grammars later with: yams grammar download <language>\n";
             return;
         }
 
@@ -1233,9 +1242,11 @@ private:
         }
 
         std::cout << "\nGrammar setup complete: "
-                  << cli::ui::colorize(std::to_string(succeeded) + " succeeded", cli::ui::Ansi::GREEN);
+                  << cli::ui::colorize(std::to_string(succeeded) + " succeeded",
+                                       cli::ui::Ansi::GREEN);
         if (failed > 0) {
-            std::cout << ", " << cli::ui::colorize(std::to_string(failed) + " failed", cli::ui::Ansi::RED);
+            std::cout << ", "
+                      << cli::ui::colorize(std::to_string(failed) + " failed", cli::ui::Ansi::RED);
         }
         std::cout << "\n";
     }
@@ -1260,7 +1271,7 @@ private:
     }
 
     static Result<void> downloadAndBuildGrammar(const std::string& language,
-                                                 const fs::path& outputDir) {
+                                                const fs::path& outputDir) {
         // Find the grammar repo
         const GrammarInfo* grammarInfo = nullptr;
         for (const auto& g : SUPPORTED_GRAMMARS) {
@@ -1282,7 +1293,8 @@ private:
         auto cleanup = [&tempDir]() {
             try {
                 fs::remove_all(tempDir);
-            } catch (...) {}
+            } catch (...) {
+            }
         };
 
         try {
@@ -1330,7 +1342,7 @@ private:
             // Determine library name and compiler
 #ifdef _WIN32
             std::string libName = "tree-sitter-" + language + ".dll";
-            std::string compiler = "cl";  // Try MSVC first
+            std::string compiler = "cl"; // Try MSVC first
 
             // Check if cl.exe is available, fallback to g++
             if (std::system("where cl > NUL 2>&1") != 0) {

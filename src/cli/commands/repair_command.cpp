@@ -655,23 +655,29 @@ private:
                         if (fs::is_regular_file(fileEntry)) {
                             std::string filename = fileEntry.path().filename().string();
                             // Check if this is a manifest file
-                            if (filename.size() > 9 && filename.substr(filename.size() - 9) == ".manifest") {
+                            if (filename.size() > 9 &&
+                                filename.substr(filename.size() - 9) == ".manifest") {
                                 manifestsScanned++;
                                 // Read and parse manifest to extract chunk hashes
                                 try {
                                     std::ifstream manifestFile(fileEntry.path(), std::ios::binary);
                                     if (manifestFile) {
-                                        std::vector<char> data((std::istreambuf_iterator<char>(manifestFile)),
-                                                               std::istreambuf_iterator<char>());
+                                        std::vector<char> data(
+                                            (std::istreambuf_iterator<char>(manifestFile)),
+                                            std::istreambuf_iterator<char>());
                                         manifestFile.close();
 
-                                        // Parse manifest (supports both protobuf and binary formats)
-                                        // Binary format: 4-byte magic, 4-byte version, 8-byte fileSize,
-                                        //               8-byte chunkSize, 4-byte numChunks, then chunks
-                                        // Each chunk: 4-byte hashLen, hash string, 8-byte offset, 8-byte size
+                                        // Parse manifest (supports both protobuf and binary
+                                        // formats) Binary format: 4-byte magic, 4-byte version,
+                                        // 8-byte fileSize,
+                                        //               8-byte chunkSize, 4-byte numChunks, then
+                                        //               chunks
+                                        // Each chunk: 4-byte hashLen, hash string, 8-byte offset,
+                                        // 8-byte size
                                         if (data.size() >= 28) {
                                             // Check for binary format magic: YMNF
-                                            if (data[0] == 'Y' && data[1] == 'M' && data[2] == 'N' && data[3] == 'F') {
+                                            if (data[0] == 'Y' && data[1] == 'M' &&
+                                                data[2] == 'N' && data[3] == 'F') {
                                                 // Binary format
                                                 size_t pos = 24; // Skip header (4+4+8+8)
                                                 uint32_t numChunks = 0;
@@ -679,12 +685,15 @@ private:
                                                     std::memcpy(&numChunks, data.data() + pos, 4);
                                                     pos += 4;
                                                 }
-                                                for (uint32_t i = 0; i < numChunks && pos + 4 <= data.size(); ++i) {
+                                                for (uint32_t i = 0;
+                                                     i < numChunks && pos + 4 <= data.size(); ++i) {
                                                     uint32_t hashLen = 0;
                                                     std::memcpy(&hashLen, data.data() + pos, 4);
                                                     pos += 4;
-                                                    if (hashLen > 0 && hashLen < 256 && pos + hashLen <= data.size()) {
-                                                        std::string chunkHash(data.data() + pos, hashLen);
+                                                    if (hashLen > 0 && hashLen < 256 &&
+                                                        pos + hashLen <= data.size()) {
+                                                        std::string chunkHash(data.data() + pos,
+                                                                              hashLen);
                                                         referencedHashes.insert(chunkHash);
                                                         chunksFromManifests++;
                                                         pos += hashLen;
@@ -694,8 +703,8 @@ private:
                                                     }
                                                 }
                                             } else {
-                                                // Try protobuf format - look for hash strings in raw data
-                                                // SHA-256 hashes are 64 hex characters
+                                                // Try protobuf format - look for hash strings in
+                                                // raw data SHA-256 hashes are 64 hex characters
                                                 std::string dataStr(data.begin(), data.end());
                                                 for (size_t i = 0; i + 64 <= dataStr.size(); ++i) {
                                                     bool isHex = true;
@@ -706,13 +715,18 @@ private:
                                                                 (c >= 'A' && c <= 'F');
                                                     }
                                                     if (isHex) {
-                                                        std::string potentialHash = dataStr.substr(i, 64);
-                                                        // Verify it looks like a hash (not random hex)
-                                                        // Check if next char is not hex (end of hash)
+                                                        std::string potentialHash =
+                                                            dataStr.substr(i, 64);
+                                                        // Verify it looks like a hash (not random
+                                                        // hex) Check if next char is not hex (end
+                                                        // of hash)
                                                         if (i + 64 >= dataStr.size() ||
-                                                            !((dataStr[i+64] >= '0' && dataStr[i+64] <= '9') ||
-                                                              (dataStr[i+64] >= 'a' && dataStr[i+64] <= 'f') ||
-                                                              (dataStr[i+64] >= 'A' && dataStr[i+64] <= 'F'))) {
+                                                            !((dataStr[i + 64] >= '0' &&
+                                                               dataStr[i + 64] <= '9') ||
+                                                              (dataStr[i + 64] >= 'a' &&
+                                                               dataStr[i + 64] <= 'f') ||
+                                                              (dataStr[i + 64] >= 'A' &&
+                                                               dataStr[i + 64] <= 'F'))) {
                                                             referencedHashes.insert(potentialHash);
                                                             chunksFromManifests++;
                                                             i += 63; // Skip past this hash
@@ -737,8 +751,8 @@ private:
 
         std::cout << "  Scanned " << manifestsScanned << " manifest files, found "
                   << chunksFromManifests << " chunk references\n";
-        std::cout << "  Total referenced chunks (refs.db + manifests): "
-                  << referencedHashes.size() << "\n";
+        std::cout << "  Total referenced chunks (refs.db + manifests): " << referencedHashes.size()
+                  << "\n";
 
         // Now, get all files that exist in storage (excluding manifests)
         std::vector<std::pair<std::string, fs::path>> existingFiles;
@@ -751,7 +765,8 @@ private:
                         if (fs::is_regular_file(fileEntry)) {
                             std::string filename = fileEntry.path().filename().string();
                             // Skip manifest files - they're not chunks
-                            if (filename.size() > 9 && filename.substr(filename.size() - 9) == ".manifest") {
+                            if (filename.size() > 9 &&
+                                filename.substr(filename.size() - 9) == ".manifest") {
                                 continue;
                             }
                             // Reconstruct full hash: directory name + filename
@@ -1104,7 +1119,8 @@ private:
         }
 
         if (availableModels.empty()) {
-            std::cout << "  ⚠ No local embedding models found. Will attempt to use daemon default.\n";
+            std::cout
+                << "  ⚠ No local embedding models found. Will attempt to use daemon default.\n";
             // Do not fail here - let the daemon decide if it can handle the request
         }
 

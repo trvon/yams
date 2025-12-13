@@ -36,11 +36,12 @@ inline std::string uniqueSuffix() {
     auto now = std::chrono::steady_clock::now().time_since_epoch().count();
     return std::to_string(
 #ifdef _WIN32
-        _getpid()
+               _getpid()
 #else
-        getpid()
+               getpid()
 #endif
-    ) + "_" + std::to_string(now) + "_" + std::to_string(counter++);
+                   ) +
+           "_" + std::to_string(now) + "_" + std::to_string(counter++);
 }
 
 /**
@@ -308,9 +309,9 @@ TEST_CASE("FilesystemBackend - List", "[storage][backend][filesystem][list]") {
         REQUIRE(result);
 
         auto& items = result.value();
-        auto prefixACount =
-            std::count_if(items.begin(), items.end(),
-                          [](const std::string& s) { return s.find("prefix_a") == 0; });
+        auto prefixACount = std::count_if(items.begin(), items.end(), [](const std::string& s) {
+            return s.find("prefix_a") == 0;
+        });
         CHECK(prefixACount == 3);
     }
 

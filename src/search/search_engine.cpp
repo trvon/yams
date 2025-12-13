@@ -344,7 +344,8 @@ private:
     Result<std::vector<ComponentResult>> queryFTS5(const std::string& query, size_t limit);
     Result<std::vector<ComponentResult>> queryPathTree(const std::string& query, size_t limit);
     Result<std::vector<ComponentResult>> querySymbols(const std::string& query, size_t limit);
-    Result<std::vector<ComponentResult>> queryKnowledgeGraph(const std::string& query, size_t limit);
+    Result<std::vector<ComponentResult>> queryKnowledgeGraph(const std::string& query,
+                                                             size_t limit);
     Result<std::vector<ComponentResult>> queryVectorIndex(const std::vector<float>& embedding,
                                                           size_t limit);
     Result<std::vector<ComponentResult>> queryTags(const std::vector<std::string>& tags,
@@ -396,7 +397,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
     }
 
-    const size_t userLimit = params.limit > 0 ? static_cast<size_t>(params.limit) : config_.maxResults;
+    const size_t userLimit =
+        params.limit > 0 ? static_cast<size_t>(params.limit) : config_.maxResults;
     const size_t componentCap = std::max(userLimit * 3, static_cast<size_t>(50));
 
     SearchEngineConfig workingConfig = config_;
@@ -409,7 +411,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     workingConfig.metadataMaxResults = std::min(config_.metadataMaxResults, componentCap);
     workingConfig.maxResults = userLimit;
 
-    spdlog::debug("Search limit optimization: userLimit={}, componentCap={}", userLimit, componentCap);
+    spdlog::debug("Search limit optimization: userLimit={}, componentCap={}", userLimit,
+                  componentCap);
 
     std::vector<ComponentResult> allComponentResults;
     size_t estimatedResults = 0;
@@ -463,9 +466,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
 
         if (config_.vectorWeight > 0.0f && queryEmbedding.has_value() && vectorIndex_) {
-            vectorFuture = std::async(std::launch::async, [this, &queryEmbedding, &workingConfig]() {
-                return queryVectorIndex(queryEmbedding.value(), workingConfig.vectorMaxResults);
-            });
+            vectorFuture =
+                std::async(std::launch::async, [this, &queryEmbedding, &workingConfig]() {
+                    return queryVectorIndex(queryEmbedding.value(), workingConfig.vectorMaxResults);
+                });
         }
 
         if (config_.tagWeight > 0.0f && !params.tags.empty()) {
@@ -597,13 +601,17 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
         if (queryEmbedding.has_value() && vectorIndex_) {
             runSequential(
-                [&]() { return queryVectorIndex(queryEmbedding.value(), workingConfig.vectorMaxResults); },
+                [&]() {
+                    return queryVectorIndex(queryEmbedding.value(), workingConfig.vectorMaxResults);
+                },
                 "vector", config_.vectorWeight, stats_.vectorQueries, stats_.avgVectorTimeMicros);
         }
 
         if (!params.tags.empty()) {
             runSequential(
-                [&]() { return queryTags(params.tags, params.matchAllTags, workingConfig.tagMaxResults); },
+                [&]() {
+                    return queryTags(params.tags, params.matchAllTags, workingConfig.tagMaxResults);
+                },
                 "tag", config_.tagWeight, stats_.tagQueries, stats_.avgTagTimeMicros);
         }
 
@@ -646,7 +654,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 }
 
 Result<std::vector<ComponentResult>> SearchEngine::Impl::queryFTS5(const std::string& query,
-                                                                    size_t limit) {
+                                                                   size_t limit) {
     std::vector<ComponentResult> results;
 
     if (!metadataRepo_) {
@@ -692,7 +700,7 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryFTS5(const std::st
 }
 
 Result<std::vector<ComponentResult>> SearchEngine::Impl::queryPathTree(const std::string& query,
-                                                                        size_t limit) {
+                                                                       size_t limit) {
     std::vector<ComponentResult> results;
 
     if (!metadataRepo_) {
@@ -755,7 +763,7 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryPathTree(const std
 }
 
 Result<std::vector<ComponentResult>> SearchEngine::Impl::querySymbols(const std::string& query,
-                                                                       size_t limit) {
+                                                                      size_t limit) {
     std::vector<ComponentResult> results;
 
     if (!metadataRepo_) {
@@ -1007,7 +1015,7 @@ SearchEngine::Impl::queryTags(const std::vector<std::string>& tags, bool matchAl
 }
 
 Result<std::vector<ComponentResult>> SearchEngine::Impl::queryMetadata(const SearchParams& params,
-                                                                        size_t limit) {
+                                                                       size_t limit) {
     std::vector<ComponentResult> results;
 
     if (!metadataRepo_) {

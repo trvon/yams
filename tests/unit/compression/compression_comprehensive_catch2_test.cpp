@@ -272,8 +272,7 @@ TEST_CASE_METHOD(CompressionComprehensiveFixture,
     }
 }
 
-TEST_CASE_METHOD(CompressionComprehensiveFixture,
-                 "CompressionComprehensive - ConcurrentOperations",
+TEST_CASE_METHOD(CompressionComprehensiveFixture, "CompressionComprehensive - ConcurrentOperations",
                  "[compression][comprehensive][concurrent][catch2][.]") {
     const int numThreads = 10;
     const int operationsPerThread = 100;
@@ -333,8 +332,7 @@ TEST_CASE_METHOD(CompressionComprehensiveFixture, "CompressionComprehensive - Er
     }
 }
 
-TEST_CASE_METHOD(CompressionComprehensiveFixture,
-                 "CompressionComprehensive - MemoryUsagePatterns",
+TEST_CASE_METHOD(CompressionComprehensiveFixture, "CompressionComprehensive - MemoryUsagePatterns",
                  "[compression][comprehensive][catch2][.]") {
     // Test that compression doesn't leak memory by compressing many times
     const int iterations = 1000;

@@ -127,7 +127,8 @@ AbiSymbolExtractorAdapter::getSupportedExtensions() const {
                             supported = supportedLangs.count("ts") > 0;
                         }
                         if (!supported && lang == "csharp") {
-                            supported = supportedLangs.count("c#") > 0 || supportedLangs.count("cs") > 0;
+                            supported =
+                                supportedLangs.count("c#") > 0 || supportedLangs.count("cs") > 0;
                         }
 
                         if (supported) {

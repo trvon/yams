@@ -77,8 +77,8 @@ private:
                                     const std::string& filePath,
                                     const std::vector<std::string>& tags);
     void processEmbeddingStage(const std::string& hash, const std::string& mime);
-    void dispatchToKgChannel(const std::string& hash, int64_t docId,
-                             const std::string& filePath, std::vector<std::string> tags);
+    void dispatchToKgChannel(const std::string& hash, int64_t docId, const std::string& filePath,
+                             std::vector<std::string> tags);
 
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::MetadataRepository> meta_;

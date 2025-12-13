@@ -17,7 +17,7 @@ TEST_F(SessionCommandCLITest, DiffSubcommandParses) {
 TEST_F(SessionCommandCLITest, ParsesWarmWithBudgets) {
     // Ensure CLI constructs and registers commands without throwing
     // Return code may be non-zero due to environment (no daemon)
-    (void)runCommand({"yams", "session", "warm", "--limit", "10",
-                      "--cores", "2", "--snippet-len", "80"});
+    (void)runCommand(
+        {"yams", "session", "warm", "--limit", "10", "--cores", "2", "--snippet-len", "80"});
     SUCCEED();
 }

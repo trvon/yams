@@ -69,8 +69,7 @@ struct RequestQueueFixture {
 
 } // namespace
 
-TEST_CASE_METHOD(RequestQueueFixture,
-                 "RequestQueue construction and initial state",
+TEST_CASE_METHOD(RequestQueueFixture, "RequestQueue construction and initial state",
                  "[daemon][components][queue][catch2]") {
     auto cfg = makeConfig();
     RequestQueue queue(cfg, io->get_executor());
@@ -91,8 +90,7 @@ TEST_CASE_METHOD(RequestQueueFixture,
     }
 }
 
-TEST_CASE_METHOD(RequestQueueFixture,
-                 "RequestQueue enqueue operations",
+TEST_CASE_METHOD(RequestQueueFixture, "RequestQueue enqueue operations",
                  "[daemon][components][queue][catch2]") {
     auto cfg = makeConfig(10);
     RequestQueue queue(cfg, io->get_executor());
@@ -128,8 +126,7 @@ TEST_CASE_METHOD(RequestQueueFixture,
     queue.stop();
 }
 
-TEST_CASE_METHOD(RequestQueueFixture,
-                 "RequestQueue dequeue operations",
+TEST_CASE_METHOD(RequestQueueFixture, "RequestQueue dequeue operations",
                  "[daemon][components][queue][catch2]") {
     auto cfg = makeConfig();
     RequestQueue queue(cfg, io->get_executor());
@@ -162,8 +159,7 @@ TEST_CASE_METHOD(RequestQueueFixture,
     queue.stop();
 }
 
-TEST_CASE_METHOD(RequestQueueFixture,
-                 "RequestQueue priority ordering",
+TEST_CASE_METHOD(RequestQueueFixture, "RequestQueue priority ordering",
                  "[daemon][components][queue][catch2]") {
     auto cfg = makeConfig();
     cfg.enable_priority_queuing = true;
@@ -191,12 +187,11 @@ TEST_CASE_METHOD(RequestQueueFixture,
     queue.stop();
 }
 
-TEST_CASE_METHOD(RequestQueueFixture,
-                 "RequestQueue backpressure",
+TEST_CASE_METHOD(RequestQueueFixture, "RequestQueue backpressure",
                  "[daemon][components][queue][catch2]") {
     auto cfg = makeConfig(10);
-    cfg.high_watermark_percent = 50;  // 50% = 5 items
-    cfg.low_watermark_percent = 20;   // 20% = 2 items
+    cfg.high_watermark_percent = 50; // 50% = 5 items
+    cfg.low_watermark_percent = 20;  // 20% = 2 items
     RequestQueue queue(cfg, io->get_executor());
     queue.start();
 
@@ -214,7 +209,8 @@ TEST_CASE_METHOD(RequestQueueFixture,
     SECTION("backpressure callback is invoked") {
         std::atomic<bool> callbackCalled{false};
         queue.set_backpressure_callback([&](bool active, uint32_t) {
-            if (active) callbackCalled = true;
+            if (active)
+                callbackCalled = true;
         });
 
         // Fill past high watermark
@@ -229,8 +225,7 @@ TEST_CASE_METHOD(RequestQueueFixture,
     queue.stop();
 }
 
-TEST_CASE_METHOD(RequestQueueFixture,
-                 "RequestQueue utilization metrics",
+TEST_CASE_METHOD(RequestQueueFixture, "RequestQueue utilization metrics",
                  "[daemon][components][queue][catch2]") {
     auto cfg = makeConfig(100);
     RequestQueue queue(cfg, io->get_executor());
@@ -251,8 +246,7 @@ TEST_CASE_METHOD(RequestQueueFixture,
     queue.stop();
 }
 
-TEST_CASE_METHOD(RequestQueueFixture,
-                 "RequestQueue retry after calculation",
+TEST_CASE_METHOD(RequestQueueFixture, "RequestQueue retry after calculation",
                  "[daemon][components][queue][catch2]") {
     auto cfg = makeConfig(10);
     RequestQueue queue(cfg, io->get_executor());
@@ -272,8 +266,7 @@ TEST_CASE_METHOD(RequestQueueFixture,
     queue.stop();
 }
 
-TEST_CASE_METHOD(RequestQueueFixture,
-                 "RequestQueue concurrent enqueue",
+TEST_CASE_METHOD(RequestQueueFixture, "RequestQueue concurrent enqueue",
                  "[daemon][components][queue][catch2]") {
     auto cfg = makeConfig(1000);
     RequestQueue queue(cfg, io->get_executor());
@@ -287,8 +280,8 @@ TEST_CASE_METHOD(RequestQueueFixture,
         for (int t = 0; t < numThreads; ++t) {
             threads.emplace_back([&queue, t, this]() {
                 for (int i = 0; i < itemsPerThread; ++i) {
-                    auto req = makeRequest(RequestPriority::Normal, 
-                                          "t" + std::to_string(t) + "_" + std::to_string(i));
+                    auto req = makeRequest(RequestPriority::Normal,
+                                           "t" + std::to_string(t) + "_" + std::to_string(i));
                     queue.try_enqueue(std::move(req));
                 }
             });
@@ -305,8 +298,7 @@ TEST_CASE_METHOD(RequestQueueFixture,
     queue.stop();
 }
 
-TEST_CASE_METHOD(RequestQueueFixture,
-                 "RequestQueue start/stop lifecycle",
+TEST_CASE_METHOD(RequestQueueFixture, "RequestQueue start/stop lifecycle",
                  "[daemon][components][queue][catch2]") {
     auto cfg = makeConfig();
     RequestQueue queue(cfg, io->get_executor());

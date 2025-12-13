@@ -41,8 +41,10 @@ std::span<const std::byte> string_to_span(std::string_view str) {
 #ifdef _WIN32
 std::wstring escape_arg(const std::string& arg) {
     std::wstring warg = std::wstring(arg.begin(), arg.end());
-    if (warg.empty()) return L"\"\"";
-    if (warg.find_first_of(L" \t\n\v\"") == std::wstring::npos) return warg;
+    if (warg.empty())
+        return L"\"\"";
+    if (warg.find_first_of(L" \t\n\v\"") == std::wstring::npos)
+        return warg;
 
     std::wstring escaped = L"\"";
     for (auto it = warg.begin(); it != warg.end(); ++it) {
@@ -834,7 +836,8 @@ std::span<const std::byte> PluginProcess::Impl::read_stdout() {
 void PluginProcess::Impl::consume_stdout(size_t bytes) {
     std::lock_guard lock{stdout_mutex_};
     if (bytes > 0 && bytes <= stdout_buffer_.size()) {
-        stdout_buffer_.erase(stdout_buffer_.begin(), stdout_buffer_.begin() + static_cast<ptrdiff_t>(bytes));
+        stdout_buffer_.erase(stdout_buffer_.begin(),
+                             stdout_buffer_.begin() + static_cast<ptrdiff_t>(bytes));
     }
 }
 

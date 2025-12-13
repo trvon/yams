@@ -13,8 +13,7 @@ using namespace yams::search;
 namespace {
 struct QueryParserFixture {
     QueryParserFixture()
-        : parser_(std::make_unique<QueryParser>()),
-          analyzer_(std::make_unique<QueryAnalyzer>()),
+        : parser_(std::make_unique<QueryParser>()), analyzer_(std::make_unique<QueryAnalyzer>()),
           optimizer_(std::make_unique<QueryOptimizer>()) {}
 
     std::unique_ptr<QueryParser> parser_;
@@ -89,7 +88,8 @@ TEST_CASE("QueryTokenizer - Parentheses", "[search][query][tokenizer][catch2]") 
 // QueryParser Tests
 // ============================================================================
 
-TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParseSingleTerm", "[search][query][parser][catch2]") {
+TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParseSingleTerm",
+                 "[search][query][parser][catch2]") {
     auto result = parser_->parse("hello");
     REQUIRE(result.has_value());
 
@@ -101,7 +101,8 @@ TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParseSingleTerm", "[search][
     CHECK(termNode->getTerm() == "hello");
 }
 
-TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParsePhrase", "[search][query][parser][catch2]") {
+TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParsePhrase",
+                 "[search][query][parser][catch2]") {
     auto result = parser_->parse("\"hello world\"");
     REQUIRE(result.has_value());
 
@@ -113,7 +114,8 @@ TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParsePhrase", "[search][quer
     CHECK(phraseNode->getPhrase() == "hello world");
 }
 
-TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParseAndExpression", "[search][query][parser][catch2]") {
+TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParseAndExpression",
+                 "[search][query][parser][catch2]") {
     auto result = parser_->parse("hello AND world");
     REQUIRE(result.has_value());
 
@@ -122,7 +124,8 @@ TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParseAndExpression", "[searc
     CHECK(ast->getType() == QueryNodeType::And);
 }
 
-TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParseOrExpression", "[search][query][parser][catch2]") {
+TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParseOrExpression",
+                 "[search][query][parser][catch2]") {
     auto result = parser_->parse("hello OR world");
     REQUIRE(result.has_value());
 
@@ -131,7 +134,8 @@ TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParseOrExpression", "[search
     CHECK(ast->getType() == QueryNodeType::Or);
 }
 
-TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParseNotExpression", "[search][query][parser][catch2]") {
+TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParseNotExpression",
+                 "[search][query][parser][catch2]") {
     auto result = parser_->parse("NOT hello");
     REQUIRE(result.has_value());
 
@@ -140,7 +144,8 @@ TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParseNotExpression", "[searc
     CHECK(ast->getType() == QueryNodeType::Not);
 }
 
-TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParseComplexExpression", "[search][query][parser][catch2]") {
+TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParseComplexExpression",
+                 "[search][query][parser][catch2]") {
     auto result = parser_->parse("hello AND (world OR universe)");
     REQUIRE(result.has_value());
 
@@ -149,7 +154,8 @@ TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParseComplexExpression", "[s
     CHECK(ast->getType() == QueryNodeType::And);
 }
 
-TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParseFieldQuery", "[search][query][parser][catch2]") {
+TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParseFieldQuery",
+                 "[search][query][parser][catch2]") {
     auto result = parser_->parse("title:hello");
     REQUIRE(result.has_value());
 
@@ -161,7 +167,8 @@ TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParseFieldQuery", "[search][
     CHECK(fieldNode->getField() == "title");
 }
 
-TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParseWildcard", "[search][query][parser][catch2]") {
+TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParseWildcard",
+                 "[search][query][parser][catch2]") {
     auto result = parser_->parse("hel*");
     REQUIRE(result.has_value());
 
@@ -170,7 +177,8 @@ TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParseWildcard", "[search][qu
     CHECK(ast->getType() == QueryNodeType::Wildcard);
 }
 
-TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParseFuzzy", "[search][query][parser][catch2]") {
+TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParseFuzzy",
+                 "[search][query][parser][catch2]") {
     auto result = parser_->parse("hello~2");
     REQUIRE(result.has_value());
 
@@ -183,17 +191,20 @@ TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ParseFuzzy", "[search][query
     CHECK(fuzzyNode->getDistance() == 2);
 }
 
-TEST_CASE_METHOD(QueryParserFixture, "QueryParser - InvalidQuery_UnmatchedParen", "[search][query][parser][catch2]") {
+TEST_CASE_METHOD(QueryParserFixture, "QueryParser - InvalidQuery_UnmatchedParen",
+                 "[search][query][parser][catch2]") {
     auto result = parser_->parse("(hello world");
     REQUIRE_FALSE(result.has_value());
 }
 
-TEST_CASE_METHOD(QueryParserFixture, "QueryParser - InvalidQuery_EmptyString", "[search][query][parser][catch2]") {
+TEST_CASE_METHOD(QueryParserFixture, "QueryParser - InvalidQuery_EmptyString",
+                 "[search][query][parser][catch2]") {
     auto result = parser_->parse("");
     REQUIRE_FALSE(result.has_value());
 }
 
-TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ToFTS5Query", "[search][query][parser][catch2]") {
+TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ToFTS5Query",
+                 "[search][query][parser][catch2]") {
     auto result = parser_->parse("hello AND world OR \"test phrase\"");
     REQUIRE(result.has_value());
 
@@ -203,7 +214,8 @@ TEST_CASE_METHOD(QueryParserFixture, "QueryParser - ToFTS5Query", "[search][quer
     CHECK(fts5Query.find("world") != std::string::npos);
 }
 
-TEST_CASE_METHOD(QueryParserFixture, "QueryParser - Validation", "[search][query][parser][catch2]") {
+TEST_CASE_METHOD(QueryParserFixture, "QueryParser - Validation",
+                 "[search][query][parser][catch2]") {
     SECTION("Valid query") {
         auto validation = parser_->validate("hello AND world");
         CHECK(validation.isValid);
@@ -229,7 +241,8 @@ TEST_CASE_METHOD(QueryParserFixture, "QueryAnalyzer - Basic", "[search][query][a
     CHECK_FALSE(stats.terms.empty());
 }
 
-TEST_CASE_METHOD(QueryParserFixture, "QueryOptimizer - DoubleNegation", "[search][query][optimizer][catch2]") {
+TEST_CASE_METHOD(QueryParserFixture, "QueryOptimizer - DoubleNegation",
+                 "[search][query][optimizer][catch2]") {
     auto result = parser_->parse("NOT NOT hello");
     REQUIRE(result.has_value());
 

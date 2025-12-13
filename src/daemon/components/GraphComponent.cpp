@@ -132,8 +132,8 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
     // Load document content
     auto contentResult = contentStore->retrieveBytes(ctx.documentHash);
     if (!contentResult) {
-        spdlog::warn("[GraphComponent] Failed to load content for {}: {}", ctx.documentHash.substr(0, 12),
-                     contentResult.error().message);
+        spdlog::warn("[GraphComponent] Failed to load content for {}: {}",
+                     ctx.documentHash.substr(0, 12), contentResult.error().message);
         return Result<void>(); // Non-fatal, continue
     }
 
@@ -153,8 +153,8 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
         spdlog::warn("[GraphComponent] Failed to submit extraction for {}: {}",
                      ctx.documentHash.substr(0, 12), submitResult.error().message);
     } else {
-        spdlog::debug("[GraphComponent] Queued symbol extraction for {} ({})",
-                      ctx.filePath, ctx.documentHash.substr(0, 12));
+        spdlog::debug("[GraphComponent] Queued symbol extraction for {} ({})", ctx.filePath,
+                      ctx.documentHash.substr(0, 12));
     }
 
     return Result<void>();

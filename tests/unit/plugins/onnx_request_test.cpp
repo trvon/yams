@@ -1,9 +1,9 @@
+#include <nlohmann/json.hpp>
 #include <array>
 #include <cstddef>
 #include <cstdlib>
 #include <string>
 #include <catch2/catch_test_macros.hpp>
-#include <nlohmann/json.hpp>
 #include <yams/compat/dlfcn.h>
 
 extern "C" {

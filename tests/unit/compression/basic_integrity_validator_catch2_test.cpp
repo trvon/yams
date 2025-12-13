@@ -8,8 +8,7 @@
 using namespace yams;
 using namespace yams::compression;
 
-TEST_CASE("BasicIntegrityValidator - Construction",
-          "[compression][integrity][basic][catch2]") {
+TEST_CASE("BasicIntegrityValidator - Construction", "[compression][integrity][basic][catch2]") {
     ValidationConfig config;
     config.defaultValidationType = ValidationType::Checksum;
     config.enableAsyncValidation = false;

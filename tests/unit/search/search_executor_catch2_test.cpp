@@ -80,34 +80,36 @@ struct SearchExecutorFixture {
 
     bool setupTestData() {
         // Create schema for tests
-        auto createDocumentsRes = database_->execute(
-            "CREATE TABLE IF NOT EXISTS documents (\n"
-            "  id INTEGER PRIMARY KEY,\n"
-            "  file_path TEXT NOT NULL,\n"
-            "  file_name TEXT NOT NULL,\n"
-            "  file_extension TEXT,\n"
-            "  file_size INTEGER NOT NULL,\n"
-            "  sha256_hash TEXT UNIQUE NOT NULL,\n"
-            "  mime_type TEXT,\n"
-            "  created_time INTEGER,\n"
-            "  modified_time INTEGER,\n"
-            "  indexed_time INTEGER,\n"
-            "  content_extracted INTEGER DEFAULT 0,\n"
-            "  extraction_status TEXT DEFAULT 'pending',\n"
-            "  extraction_error TEXT\n"
-            ")");
-        if (!createDocumentsRes.has_value()) return false;
+        auto createDocumentsRes = database_->execute("CREATE TABLE IF NOT EXISTS documents (\n"
+                                                     "  id INTEGER PRIMARY KEY,\n"
+                                                     "  file_path TEXT NOT NULL,\n"
+                                                     "  file_name TEXT NOT NULL,\n"
+                                                     "  file_extension TEXT,\n"
+                                                     "  file_size INTEGER NOT NULL,\n"
+                                                     "  sha256_hash TEXT UNIQUE NOT NULL,\n"
+                                                     "  mime_type TEXT,\n"
+                                                     "  created_time INTEGER,\n"
+                                                     "  modified_time INTEGER,\n"
+                                                     "  indexed_time INTEGER,\n"
+                                                     "  content_extracted INTEGER DEFAULT 0,\n"
+                                                     "  extraction_status TEXT DEFAULT 'pending',\n"
+                                                     "  extraction_error TEXT\n"
+                                                     ")");
+        if (!createDocumentsRes.has_value())
+            return false;
 
-        auto createFtsRes = database_->execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(\n"
-            "  title, content\n"
-            ")");
-        if (!createFtsRes.has_value()) return false;
+        auto createFtsRes =
+            database_->execute("CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(\n"
+                               "  title, content\n"
+                               ")");
+        if (!createFtsRes.has_value())
+            return false;
 
-        auto createVocabRes = database_->execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts_vocab USING "
-            "fts5vocab(documents_fts, 'row')");
-        if (!createVocabRes.has_value()) return false;
+        auto createVocabRes =
+            database_->execute("CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts_vocab USING "
+                               "fts5vocab(documents_fts, 'row')");
+        if (!createVocabRes.has_value())
+            return false;
 
         // Insert test documents
         auto insertDoc = R"(
@@ -116,35 +118,54 @@ struct SearchExecutorFixture {
         )";
 
         auto stmtRes = database_->prepare(insertDoc);
-        if (!stmtRes.has_value()) return false;
+        if (!stmtRes.has_value())
+            return false;
         auto stmt = std::move(stmtRes.value());
 
         // Document 1
-        if (!stmt.bind(1, 1).has_value()) return false;
-        if (!stmt.bind(2, "Machine Learning Basics").has_value()) return false;
+        if (!stmt.bind(1, 1).has_value())
+            return false;
+        if (!stmt.bind(2, "Machine Learning Basics").has_value())
+            return false;
         if (!stmt.bind(3, "Introduction to machine learning algorithms and concepts. This document "
-                          "covers supervised learning, unsupervised learning, and reinforcement learning.")
-                 .has_value()) return false;
-        if (!stmt.step().has_value()) return false;
-        if (!stmt.reset().has_value()) return false;
+                          "covers supervised learning, unsupervised learning, and reinforcement "
+                          "learning.")
+                 .has_value())
+            return false;
+        if (!stmt.step().has_value())
+            return false;
+        if (!stmt.reset().has_value())
+            return false;
 
         // Document 2
-        if (!stmt.bind(1, 2).has_value()) return false;
-        if (!stmt.bind(2, "Deep Learning with Neural Networks").has_value()) return false;
-        if (!stmt.bind(3, "Neural networks are the foundation of deep learning. This guide explains "
-                          "backpropagation, gradient descent, and common architectures.")
-                 .has_value()) return false;
-        if (!stmt.step().has_value()) return false;
-        if (!stmt.reset().has_value()) return false;
+        if (!stmt.bind(1, 2).has_value())
+            return false;
+        if (!stmt.bind(2, "Deep Learning with Neural Networks").has_value())
+            return false;
+        if (!stmt.bind(3,
+                       "Neural networks are the foundation of deep learning. This guide explains "
+                       "backpropagation, gradient descent, and common architectures.")
+                 .has_value())
+            return false;
+        if (!stmt.step().has_value())
+            return false;
+        if (!stmt.reset().has_value())
+            return false;
 
         // Document 3
-        if (!stmt.bind(1, 3).has_value()) return false;
-        if (!stmt.bind(2, "Data Structures and Algorithms").has_value()) return false;
-        if (!stmt.bind(3, "Comprehensive guide to data structures including arrays, lists, trees, and "
-                          "graphs. Also covers sorting and searching algorithms.")
-                 .has_value()) return false;
-        if (!stmt.step().has_value()) return false;
-        if (!stmt.reset().has_value()) return false;
+        if (!stmt.bind(1, 3).has_value())
+            return false;
+        if (!stmt.bind(2, "Data Structures and Algorithms").has_value())
+            return false;
+        if (!stmt.bind(3,
+                       "Comprehensive guide to data structures including arrays, lists, trees, and "
+                       "graphs. Also covers sorting and searching algorithms.")
+                 .has_value())
+            return false;
+        if (!stmt.step().has_value())
+            return false;
+        if (!stmt.reset().has_value())
+            return false;
 
         // Add corresponding entries to documents table
         auto nowSeconds =
@@ -162,55 +183,97 @@ struct SearchExecutorFixture {
         )";
 
         auto metaStmtRes = database_->prepare(insertDocMeta);
-        if (!metaStmtRes.has_value()) return false;
+        if (!metaStmtRes.has_value())
+            return false;
         auto metaStmt = std::move(metaStmtRes.value());
 
         // Doc 1 meta
-        if (!metaStmt.bind(1, 1).has_value()) return false;
-        if (!metaStmt.bind(2, "/docs/ml-basics.txt").has_value()) return false;
-        if (!metaStmt.bind(3, "Machine Learning Basics").has_value()) return false;
-        if (!metaStmt.bind(4, "txt").has_value()) return false;
-        if (!metaStmt.bind(5, 1024).has_value()) return false;
-        if (!metaStmt.bind(6, "hash1").has_value()) return false;
-        if (!metaStmt.bind(7, "text/plain").has_value()) return false;
-        if (!metaStmt.bind(8, nowSeconds).has_value()) return false;
-        if (!metaStmt.bind(9, nowSeconds - 3600).has_value()) return false;
-        if (!metaStmt.bind(10, nowSeconds - 1800).has_value()) return false;
-        if (!metaStmt.bind(11, 1).has_value()) return false;
-        if (!metaStmt.bind(12, "indexed").has_value()) return false;
-        if (!metaStmt.execute().has_value()) return false;
-        if (!metaStmt.reset().has_value()) return false;
+        if (!metaStmt.bind(1, 1).has_value())
+            return false;
+        if (!metaStmt.bind(2, "/docs/ml-basics.txt").has_value())
+            return false;
+        if (!metaStmt.bind(3, "Machine Learning Basics").has_value())
+            return false;
+        if (!metaStmt.bind(4, "txt").has_value())
+            return false;
+        if (!metaStmt.bind(5, 1024).has_value())
+            return false;
+        if (!metaStmt.bind(6, "hash1").has_value())
+            return false;
+        if (!metaStmt.bind(7, "text/plain").has_value())
+            return false;
+        if (!metaStmt.bind(8, nowSeconds).has_value())
+            return false;
+        if (!metaStmt.bind(9, nowSeconds - 3600).has_value())
+            return false;
+        if (!metaStmt.bind(10, nowSeconds - 1800).has_value())
+            return false;
+        if (!metaStmt.bind(11, 1).has_value())
+            return false;
+        if (!metaStmt.bind(12, "indexed").has_value())
+            return false;
+        if (!metaStmt.execute().has_value())
+            return false;
+        if (!metaStmt.reset().has_value())
+            return false;
 
         // Doc 2 meta
-        if (!metaStmt.bind(1, 2).has_value()) return false;
-        if (!metaStmt.bind(2, "/docs/deep-learning.txt").has_value()) return false;
-        if (!metaStmt.bind(3, "Deep Learning with Neural Networks").has_value()) return false;
-        if (!metaStmt.bind(4, "txt").has_value()) return false;
-        if (!metaStmt.bind(5, 2048).has_value()) return false;
-        if (!metaStmt.bind(6, "hash2").has_value()) return false;
-        if (!metaStmt.bind(7, "text/plain").has_value()) return false;
-        if (!metaStmt.bind(8, nowSeconds).has_value()) return false;
-        if (!metaStmt.bind(9, nowSeconds - 7200).has_value()) return false;
-        if (!metaStmt.bind(10, nowSeconds - 3600).has_value()) return false;
-        if (!metaStmt.bind(11, 1).has_value()) return false;
-        if (!metaStmt.bind(12, "indexed").has_value()) return false;
-        if (!metaStmt.execute().has_value()) return false;
-        if (!metaStmt.reset().has_value()) return false;
+        if (!metaStmt.bind(1, 2).has_value())
+            return false;
+        if (!metaStmt.bind(2, "/docs/deep-learning.txt").has_value())
+            return false;
+        if (!metaStmt.bind(3, "Deep Learning with Neural Networks").has_value())
+            return false;
+        if (!metaStmt.bind(4, "txt").has_value())
+            return false;
+        if (!metaStmt.bind(5, 2048).has_value())
+            return false;
+        if (!metaStmt.bind(6, "hash2").has_value())
+            return false;
+        if (!metaStmt.bind(7, "text/plain").has_value())
+            return false;
+        if (!metaStmt.bind(8, nowSeconds).has_value())
+            return false;
+        if (!metaStmt.bind(9, nowSeconds - 7200).has_value())
+            return false;
+        if (!metaStmt.bind(10, nowSeconds - 3600).has_value())
+            return false;
+        if (!metaStmt.bind(11, 1).has_value())
+            return false;
+        if (!metaStmt.bind(12, "indexed").has_value())
+            return false;
+        if (!metaStmt.execute().has_value())
+            return false;
+        if (!metaStmt.reset().has_value())
+            return false;
 
         // Doc 3 meta
-        if (!metaStmt.bind(1, 3).has_value()) return false;
-        if (!metaStmt.bind(2, "/docs/data-structures.pdf").has_value()) return false;
-        if (!metaStmt.bind(3, "Data Structures and Algorithms").has_value()) return false;
-        if (!metaStmt.bind(4, "pdf").has_value()) return false;
-        if (!metaStmt.bind(5, 4096).has_value()) return false;
-        if (!metaStmt.bind(6, "hash3").has_value()) return false;
-        if (!metaStmt.bind(7, "application/pdf").has_value()) return false;
-        if (!metaStmt.bind(8, nowSeconds).has_value()) return false;
-        if (!metaStmt.bind(9, nowSeconds - 10800).has_value()) return false;
-        if (!metaStmt.bind(10, nowSeconds - 5400).has_value()) return false;
-        if (!metaStmt.bind(11, 0).has_value()) return false;
-        if (!metaStmt.bind(12, "pending").has_value()) return false;
-        if (!metaStmt.execute().has_value()) return false;
+        if (!metaStmt.bind(1, 3).has_value())
+            return false;
+        if (!metaStmt.bind(2, "/docs/data-structures.pdf").has_value())
+            return false;
+        if (!metaStmt.bind(3, "Data Structures and Algorithms").has_value())
+            return false;
+        if (!metaStmt.bind(4, "pdf").has_value())
+            return false;
+        if (!metaStmt.bind(5, 4096).has_value())
+            return false;
+        if (!metaStmt.bind(6, "hash3").has_value())
+            return false;
+        if (!metaStmt.bind(7, "application/pdf").has_value())
+            return false;
+        if (!metaStmt.bind(8, nowSeconds).has_value())
+            return false;
+        if (!metaStmt.bind(9, nowSeconds - 10800).has_value())
+            return false;
+        if (!metaStmt.bind(10, nowSeconds - 5400).has_value())
+            return false;
+        if (!metaStmt.bind(11, 0).has_value())
+            return false;
+        if (!metaStmt.bind(12, "pending").has_value())
+            return false;
+        if (!metaStmt.execute().has_value())
+            return false;
 
         return true;
     }
@@ -260,7 +323,8 @@ struct SearchFiltersFixture {
 // SearchExecutor Tests
 // ============================================================================
 
-TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - BasicSearch", "[search][executor][catch2]") {
+TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - BasicSearch",
+                 "[search][executor][catch2]") {
     if (skip_) {
         SKIP(skipReason_);
     }
@@ -272,7 +336,8 @@ TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - BasicSearch", "[search
     CHECK(results.size() > 0u);
 }
 
-TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - SearchWithResults", "[search][executor][catch2]") {
+TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - SearchWithResults",
+                 "[search][executor][catch2]") {
     if (skip_) {
         SKIP(skipReason_);
     }
@@ -294,7 +359,8 @@ TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - SearchWithResults", "[
     }
 }
 
-TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - SearchWithPagination", "[search][executor][catch2]") {
+TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - SearchWithPagination",
+                 "[search][executor][catch2]") {
     if (skip_) {
         SKIP(skipReason_);
     }
@@ -307,7 +373,8 @@ TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - SearchWithPagination",
     CHECK(results.size() <= 1u);
 }
 
-TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - SearchWithFilters", "[search][executor][catch2]") {
+TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - SearchWithFilters",
+                 "[search][executor][catch2]") {
     if (skip_) {
         SKIP(skipReason_);
     }
@@ -331,7 +398,8 @@ TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - SearchWithFilters", "[
     }
 }
 
-TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - SearchWithSorting", "[search][executor][catch2]") {
+TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - SearchWithSorting",
+                 "[search][executor][catch2]") {
     if (skip_) {
         SKIP(skipReason_);
     }
@@ -353,7 +421,8 @@ TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - SearchWithSorting", "[
     }
 }
 
-TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - EmptyQuery", "[search][executor][catch2]") {
+TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - EmptyQuery",
+                 "[search][executor][catch2]") {
     if (skip_) {
         SKIP(skipReason_);
     }
@@ -363,7 +432,8 @@ TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - EmptyQuery", "[search]
     CHECK(result.error().code == yams::ErrorCode::InvalidArgument);
 }
 
-TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - InvalidQuery", "[search][executor][catch2]") {
+TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - InvalidQuery",
+                 "[search][executor][catch2]") {
     if (skip_) {
         SKIP(skipReason_);
     }
@@ -376,7 +446,8 @@ TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - InvalidQuery", "[searc
     }
 }
 
-TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - SearchSuggestions", "[search][executor][catch2]") {
+TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - SearchSuggestions",
+                 "[search][executor][catch2]") {
     if (skip_) {
         SKIP(skipReason_);
     }
@@ -394,7 +465,8 @@ TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - SearchSuggestions", "[
     }
 }
 
-TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - SearchFacets", "[search][executor][catch2]") {
+TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - SearchFacets",
+                 "[search][executor][catch2]") {
     if (skip_) {
         SKIP(skipReason_);
     }
@@ -423,7 +495,8 @@ TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - SearchFacets", "[searc
     CHECK(foundContentTypeFacet);
 }
 
-TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - SearchWithHighlights", "[search][executor][catch2]") {
+TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - SearchWithHighlights",
+                 "[search][executor][catch2]") {
     if (skip_) {
         SKIP(skipReason_);
     }
@@ -446,7 +519,8 @@ TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - SearchWithHighlights",
     }
 }
 
-TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - SearchStatistics", "[search][executor][catch2]") {
+TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - SearchStatistics",
+                 "[search][executor][catch2]") {
     if (skip_) {
         SKIP(skipReason_);
     }
@@ -464,7 +538,8 @@ TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - SearchStatistics", "[s
     CHECK_FALSE(stats.executedQuery.empty());
 }
 
-TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - ExecutorStatistics", "[search][executor][catch2]") {
+TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - ExecutorStatistics",
+                 "[search][executor][catch2]") {
     if (skip_) {
         SKIP(skipReason_);
     }
@@ -481,7 +556,8 @@ TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - ExecutorStatistics", "
     CHECK(stats.maxSearchTime.count() >= 0);
 }
 
-TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - ClearCache", "[search][executor][catch2]") {
+TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - ClearCache",
+                 "[search][executor][catch2]") {
     if (skip_) {
         SKIP(skipReason_);
     }
@@ -504,7 +580,8 @@ TEST_CASE_METHOD(SearchExecutorFixture, "SearchExecutor - ClearCache", "[search]
 // SearchFilters Tests
 // ============================================================================
 
-TEST_CASE_METHOD(SearchFiltersFixture, "SearchFilters - ContentTypeFilter", "[search][filters][catch2]") {
+TEST_CASE_METHOD(SearchFiltersFixture, "SearchFilters - ContentTypeFilter",
+                 "[search][filters][catch2]") {
     SearchFilters filters;
     ContentTypeFilter typeFilter;
     typeFilter.allowedTypes.insert("text/plain");

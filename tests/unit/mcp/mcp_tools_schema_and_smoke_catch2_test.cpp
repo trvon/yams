@@ -267,8 +267,7 @@ TEST_CASE("MCP Schema - GetStats supports file types breakdown", "[mcp][schema][
     CHECK(hasProp(*props, "file_types"));
 }
 
-TEST_CASE("MCP Schema - AddDirectory has expected properties",
-          "[mcp][schema][directory][catch2]") {
+TEST_CASE("MCP Schema - AddDirectory has expected properties", "[mcp][schema][directory][catch2]") {
     auto server = ServerUnderTest::make();
     json tools = server->testListTools();
     auto t = findTool(tools, "add_directory");

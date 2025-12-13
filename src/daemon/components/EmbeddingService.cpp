@@ -20,10 +20,10 @@ namespace yams {
 namespace daemon {
 
 EmbeddingService::EmbeddingService(std::shared_ptr<api::IContentStore> store,
-                                                                     std::shared_ptr<metadata::MetadataRepository> meta,
-                                                                     WorkCoordinator* coordinator)
-        : store_(std::move(store)), meta_(std::move(meta)), coordinator_(coordinator),
-            strand_(coordinator_->makeStrand()) {}
+                                   std::shared_ptr<metadata::MetadataRepository> meta,
+                                   WorkCoordinator* coordinator)
+    : store_(std::move(store)), meta_(std::move(meta)), coordinator_(coordinator),
+      strand_(coordinator_->makeStrand()) {}
 
 EmbeddingService::~EmbeddingService() {
     shutdown();
@@ -91,12 +91,12 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
             // Process job inline (not co_spawn) to ensure true serialization.
             // This avoids executor thread pool concurrency issues.
             auto result = co_await processEmbedJobWithStatus(job);
-            
+
             if (result.deadlockDetected) {
                 consecutiveDeadlocks++;
                 // Exponential backoff: 500ms, 1s, 2s, 4s, max 10s
-                cooldown = std::chrono::milliseconds(
-                    std::min<int64_t>(500 * (1 << std::min<std::size_t>(consecutiveDeadlocks, 4)), 10000));
+                cooldown = std::chrono::milliseconds(std::min<int64_t>(
+                    500 * (1 << std::min<std::size_t>(consecutiveDeadlocks, 4)), 10000));
                 spdlog::warn("EmbeddingService: deadlock detected, will cooldown for {} ms",
                              cooldown.count());
             } else {
@@ -190,11 +190,10 @@ EmbeddingService::processEmbedJobWithStatus(const InternalEventBus::EmbedJob& jo
                 }
 
                 const auto& msg = r.error().message;
-                const bool isDeadlock =
-                    msg.find("deadlock") != std::string::npos ||
-                    msg.find("resource deadlock") != std::string::npos;
-                const bool isBusy =
-                    msg.find("busy") != std::string::npos || msg.find("locked") != std::string::npos;
+                const bool isDeadlock = msg.find("deadlock") != std::string::npos ||
+                                        msg.find("resource deadlock") != std::string::npos;
+                const bool isBusy = msg.find("busy") != std::string::npos ||
+                                    msg.find("locked") != std::string::npos;
 
                 // On Windows, MSVC can surface EDEADLK as "resource deadlock would occur".
                 // That may be wrapped as InternalError by higher layers (e.g., provider failures),
@@ -213,9 +212,8 @@ EmbeddingService::processEmbedJobWithStatus(const InternalEventBus::EmbedJob& jo
                     break;
                 }
 
-                spdlog::warn(
-                    "EmbeddingService: retrying {} after {} ms (attempt {}/{}): {}",
-                    hash, backoff.count(), attempt, maxAttempts, msg);
+                spdlog::warn("EmbeddingService: retrying {} after {} ms (attempt {}/{}): {}", hash,
+                             backoff.count(), attempt, maxAttempts, msg);
                 boost::asio::steady_timer backoffTimer(co_await boost::asio::this_coro::executor);
                 backoffTimer.expires_after(backoff);
                 co_await backoffTimer.async_wait(boost::asio::use_awaitable);
@@ -226,7 +224,8 @@ EmbeddingService::processEmbedJobWithStatus(const InternalEventBus::EmbedJob& jo
             if (std::string(e.what()).find("deadlock") != std::string::npos ||
                 std::string(e.what()).find("resource deadlock") != std::string::npos) {
                 result.deadlockDetected = true;
-                spdlog::warn("EmbeddingService: deadlock exception processing {}: {}", hash, e.what());
+                spdlog::warn("EmbeddingService: deadlock exception processing {}: {}", hash,
+                             e.what());
             } else {
                 spdlog::error("EmbeddingService: exception processing {}: {}", hash, e.what());
             }

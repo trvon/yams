@@ -77,8 +77,7 @@ struct CheckpointManagerFixture {
 
 } // namespace
 
-TEST_CASE_METHOD(CheckpointManagerFixture,
-                 "CheckpointManager construction and state",
+TEST_CASE_METHOD(CheckpointManagerFixture, "CheckpointManager construction and state",
                  "[daemon][components][checkpoint][catch2]") {
     auto cfg = makeConfig();
     auto deps = makeDeps();
@@ -100,8 +99,7 @@ TEST_CASE_METHOD(CheckpointManagerFixture,
     }
 }
 
-TEST_CASE_METHOD(CheckpointManagerFixture,
-                 "CheckpointManager start/stop lifecycle",
+TEST_CASE_METHOD(CheckpointManagerFixture, "CheckpointManager start/stop lifecycle",
                  "[daemon][components][checkpoint][catch2]") {
     auto cfg = makeConfig(60s);
     auto deps = makeDeps();
@@ -142,8 +140,7 @@ TEST_CASE_METHOD(CheckpointManagerFixture,
     }
 }
 
-TEST_CASE_METHOD(CheckpointManagerFixture,
-                 "CheckpointManager manual checkpoint",
+TEST_CASE_METHOD(CheckpointManagerFixture, "CheckpointManager manual checkpoint",
                  "[daemon][components][checkpoint][catch2]") {
     SECTION("checkpoint with no dependencies succeeds") {
         auto cfg = makeConfig();

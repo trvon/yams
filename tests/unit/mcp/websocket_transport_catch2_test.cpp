@@ -19,7 +19,7 @@ using json = nlohmann::json;
 // because WebSocketTransport may not be fully implemented.
 // These tests are kept as placeholders for when it becomes available.
 
-#if 0  // Disabled: WebSocketTransport not fully implemented
+#if 0 // Disabled: WebSocketTransport not fully implemented
 
 namespace {
 
@@ -116,7 +116,7 @@ TEST_CASE_METHOD(WebSocketTransportFixture, "WebSocketTransport - Send without c
     REQUIRE_THROWS_AS(transport.send(testMessage), std::runtime_error);
 }
 
-#endif  // Disabled WebSocket tests
+#endif // Disabled WebSocket tests
 
 // Placeholder test to ensure the test file compiles
 TEST_CASE("WebSocketTransport - Placeholder", "[mcp][transport][websocket][catch2][placeholder]") {

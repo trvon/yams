@@ -112,8 +112,9 @@ TEST_CASE_METHOD(LZMACompressorFixture, "LZMACompressor - CompressSmallData",
                  "[compression][lzma][catch2]") {
     skipIfUnavailable();
 
-    std::vector<std::byte> data = {std::byte{0x48}, std::byte{0x65}, std::byte{0x6C},
-                                   std::byte{0x6C}, std::byte{0x6F} // "Hello"
+    std::vector<std::byte> data = {
+        std::byte{0x48}, std::byte{0x65}, std::byte{0x6C}, std::byte{0x6C}, std::byte{0x6F}
+        // "Hello"
     };
 
     auto result = compressor_->compress(data);

@@ -7,8 +7,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/VectorSystemManager.h>
 
 #include <chrono>
 #include <cstdlib>
@@ -50,8 +50,7 @@ struct VectorSystemManagerFixture {
 
 } // namespace
 
-TEST_CASE_METHOD(VectorSystemManagerFixture,
-                 "VectorSystemManager construction",
+TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager construction",
                  "[daemon][components][vector][catch2]") {
     auto deps = makeDeps();
 
@@ -61,8 +60,7 @@ TEST_CASE_METHOD(VectorSystemManagerFixture,
     }
 }
 
-TEST_CASE_METHOD(VectorSystemManagerFixture,
-                 "VectorSystemManager initialize/shutdown lifecycle",
+TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initialize/shutdown lifecycle",
                  "[daemon][components][vector][catch2]") {
     auto deps = makeDeps();
     VectorSystemManager mgr(deps);
@@ -89,8 +87,7 @@ TEST_CASE_METHOD(VectorSystemManagerFixture,
     }
 }
 
-TEST_CASE_METHOD(VectorSystemManagerFixture,
-                 "VectorSystemManager initializeOnce semantics",
+TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce semantics",
                  "[daemon][components][vector][catch2]") {
     auto deps = makeDeps();
     VectorSystemManager mgr(deps);
@@ -103,8 +100,7 @@ TEST_CASE_METHOD(VectorSystemManagerFixture,
 
     SECTION("second call to initializeOnce skips work") {
         // Skip this test if vectors are disabled - the semantics change
-        if (std::getenv("YAMS_SQLITE_VEC_SKIP_INIT") ||
-            std::getenv("YAMS_DISABLE_VECTORS") ||
+        if (std::getenv("YAMS_SQLITE_VEC_SKIP_INIT") || std::getenv("YAMS_DISABLE_VECTORS") ||
             std::getenv("YAMS_DISABLE_VECTOR_DB")) {
             SKIP("Vector initialization disabled - skipping initializeOnce semantics test");
         }
@@ -128,8 +124,7 @@ TEST_CASE_METHOD(VectorSystemManagerFixture,
     }
 }
 
-TEST_CASE_METHOD(VectorSystemManagerFixture,
-                 "VectorSystemManager accessors before/after init",
+TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager accessors before/after init",
                  "[daemon][components][vector][catch2]") {
     auto deps = makeDeps();
     VectorSystemManager mgr(deps);
@@ -147,8 +142,7 @@ TEST_CASE_METHOD(VectorSystemManagerFixture,
     }
 }
 
-TEST_CASE_METHOD(VectorSystemManagerFixture,
-                 "VectorSystemManager index manager operations",
+TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager index manager operations",
                  "[daemon][components][vector][catch2]") {
     auto deps = makeDeps();
     VectorSystemManager mgr(deps);

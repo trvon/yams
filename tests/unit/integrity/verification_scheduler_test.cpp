@@ -24,7 +24,8 @@ struct SchedulerFixture {
 
 } // namespace
 
-TEST_CASE_METHOD(SchedulerFixture, "VerificationScheduler block management", "[integrity][scheduler]") {
+TEST_CASE_METHOD(SchedulerFixture, "VerificationScheduler block management",
+                 "[integrity][scheduler]") {
     SECTION("empty scheduler returns nullopt") {
         CHECK_FALSE(scheduler.getNextBlock().has_value());
     }
@@ -32,7 +33,7 @@ TEST_CASE_METHOD(SchedulerFixture, "VerificationScheduler block management", "[i
     SECTION("adds and retrieves single block") {
         auto block = makeBlock("hash_1");
         scheduler.addBlock(block);
-        
+
         auto next = scheduler.getNextBlock();
         REQUIRE(next.has_value());
         CHECK(next->hash == "hash_1");
@@ -40,10 +41,10 @@ TEST_CASE_METHOD(SchedulerFixture, "VerificationScheduler block management", "[i
 
     SECTION("queue size is tracked") {
         CHECK(scheduler.getQueueSize() == 0u);
-        
+
         scheduler.addBlock(makeBlock("a"));
         CHECK(scheduler.getQueueSize() == 1u);
-        
+
         scheduler.addBlock(makeBlock("b"));
         CHECK(scheduler.getQueueSize() == 2u);
     }
@@ -52,20 +53,21 @@ TEST_CASE_METHOD(SchedulerFixture, "VerificationScheduler block management", "[i
         scheduler.addBlock(makeBlock("x"));
         scheduler.addBlock(makeBlock("y"));
         scheduler.addBlock(makeBlock("z"));
-        
+
         scheduler.clearQueue();
         CHECK(scheduler.getQueueSize() == 0u);
         CHECK_FALSE(scheduler.getNextBlock().has_value());
     }
 }
 
-TEST_CASE_METHOD(SchedulerFixture, "VerificationScheduler batch operations", "[integrity][scheduler]") {
+TEST_CASE_METHOD(SchedulerFixture, "VerificationScheduler batch operations",
+                 "[integrity][scheduler]") {
     SECTION("adds multiple blocks at once") {
         std::vector<BlockInfo> blocks;
         blocks.push_back(makeBlock("block_1"));
         blocks.push_back(makeBlock("block_2"));
         blocks.push_back(makeBlock("block_3"));
-        
+
         scheduler.addBlocks(blocks);
         CHECK(scheduler.getQueueSize() == 3u);
     }

@@ -289,9 +289,10 @@ build_typed_providers(ServiceManager* sm, const yams::daemon::StateComponent* st
         } catch (...) {
         }
         const std::string lastErr = sm->lastModelError();
-        // Use cached snapshot - refreshed on plugin load/unload events, not on every status request.
-        // Calling refreshPluginStatusSnapshot() here caused 5+ second blocking when external plugins
-        // (e.g., Ghidra) are slow, leading to CLI timeouts on `yams daemon status -d`.
+        // Use cached snapshot - refreshed on plugin load/unload events, not on every status
+        // request. Calling refreshPluginStatusSnapshot() here caused 5+ second blocking when
+        // external plugins (e.g., Ghidra) are slow, leading to CLI timeouts on `yams daemon status
+        // -d`.
         const auto statusSnapshot = sm->getPluginStatusSnapshot();
         if (!statusSnapshot.records.empty()) {
             for (const auto& rec : statusSnapshot.records) {

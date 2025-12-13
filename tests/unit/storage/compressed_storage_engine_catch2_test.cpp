@@ -212,7 +212,7 @@ TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine policy rules
     auto rules = engine->getPolicyRules();
 
     CompressionPolicy::Rules newRules;
-    newRules.neverCompressBelow = 8192; // Change from default 4096
+    newRules.neverCompressBelow = 8192;             // Change from default 4096
     newRules.alwaysCompressAbove = 5 * 1024 * 1024; // 5MB instead of 10MB
     engine->setPolicyRules(newRules);
 

@@ -110,7 +110,7 @@ TEST(InitCommandCLI, NonInteractiveFlagWorks) {
     // Create temp directory first
     auto tempDir = fs::temp_directory_path() / "yams-test-init-ni";
     fs::create_directories(tempDir);
-    
+
     // Set env vars BEFORE creating YamsCLI (constructor reads them for defaults)
     ScopedEnvVar configEnv("YAMS_CONFIG", (tempDir / "config.toml").string());
     ScopedEnvVar dataEnv("YAMS_DATA_DIR", (tempDir / "data").string());
@@ -132,7 +132,7 @@ TEST(InitCommandCLI, AutoFlagAccepted) {
     // Create temp directory first
     auto tempDir = fs::temp_directory_path() / "yams-test-init-auto";
     fs::create_directories(tempDir);
-    
+
     // Set env vars BEFORE creating YamsCLI (constructor reads them for defaults)
     ScopedEnvVar configEnv("YAMS_CONFIG", (tempDir / "config.toml").string());
     ScopedEnvVar dataEnv("YAMS_DATA_DIR", (tempDir / "data").string());
@@ -154,7 +154,7 @@ TEST(InitCommandCLI, ForceFlagAccepted) {
     // Create temp directory first
     auto tempDir = fs::temp_directory_path() / "yams-test-init-force";
     fs::create_directories(tempDir);
-    
+
     // Set env vars BEFORE creating YamsCLI (constructor reads them for defaults)
     ScopedEnvVar configEnv("YAMS_CONFIG", (tempDir / "config.toml").string());
     ScopedEnvVar dataEnv("YAMS_DATA_DIR", (tempDir / "data").string());

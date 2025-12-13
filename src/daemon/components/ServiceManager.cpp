@@ -209,10 +209,12 @@ void ServiceManager::refreshPluginStatusSnapshot() {
         }
 
         // PBI-096: External (Python/JS) plugins
-        spdlog::info("[refreshPluginStatusSnapshot] Checking external plugins, pluginManager_={}", (void*)pluginManager_.get());
+        spdlog::info("[refreshPluginStatusSnapshot] Checking external plugins, pluginManager_={}",
+                     (void*)pluginManager_.get());
         if (auto* external = getExternalPluginHost()) {
             auto externalLoaded = external->listLoaded();
-            spdlog::info("[refreshPluginStatusSnapshot] External host returned {} plugins", externalLoaded.size());
+            spdlog::info("[refreshPluginStatusSnapshot] External host returned {} plugins",
+                         externalLoaded.size());
             // Reserve additional space for external plugins
             snapshot.records.reserve(snapshot.records.size() + externalLoaded.size());
             addPluginRecords(externalLoaded, "external");
@@ -2593,7 +2595,6 @@ ServiceManager::co_initPluginSystem(boost::asio::any_io_executor exec,
 } // namespace yams::daemon
 
 namespace yams::daemon {
-
 
 // Start background task coroutines (EmbedJob/Fts5Job consumers, OrphanScan)
 // Must be called after shared_ptr construction so shared_from_this() works.

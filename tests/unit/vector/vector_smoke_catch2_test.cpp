@@ -81,8 +81,7 @@ TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke insert and search basic",
     CHECK(results->at(0).hash == "test_hash_001");
 }
 
-TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke get vector count",
-                 "[vector][smoke][catch2]") {
+TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke get vector count", "[vector][smoke][catch2]") {
     skipIfNeeded();
 
     VectorDatabaseConfig config;

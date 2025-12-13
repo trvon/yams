@@ -99,8 +99,7 @@ TEST_CASE_METHOD(ZstandardCompressorFixture, "ZstandardCompressor - CompressDeco
         const auto& compressed = compressResult.value();
         CHECK(compressed.compressedSize < compressed.originalSize);
 
-        auto decompressResult =
-            compressor_->decompress(compressed.data, compressed.originalSize);
+        auto decompressResult = compressor_->decompress(compressed.data, compressed.originalSize);
         REQUIRE(decompressResult.has_value());
 
         const auto& decompressed = decompressResult.value();

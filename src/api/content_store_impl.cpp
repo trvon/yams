@@ -685,8 +685,9 @@ public:
         }
 
         const auto& stats = result.value();
-        spdlog::info("Garbage collection complete: {} blocks scanned, {} deleted, {} bytes reclaimed",
-                     stats.blocksScanned, stats.blocksDeleted, stats.bytesReclaimed);
+        spdlog::info(
+            "Garbage collection complete: {} blocks scanned, {} deleted, {} bytes reclaimed",
+            stats.blocksScanned, stats.blocksDeleted, stats.bytesReclaimed);
 
         // Update our stats
         if (stats.blocksDeleted > 0) {

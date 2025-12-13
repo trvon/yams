@@ -35,7 +35,7 @@ namespace fs = std::filesystem;
 
 /**
  * @brief Stub implementation of IPluginRepoClient for unit testing
- * 
+ *
  * This stub provides basic default behaviors without requiring GMock.
  * For tests that need specific behaviors, test-specific stubs can be created.
  */
@@ -46,7 +46,7 @@ public:
     }
 
     Result<RemotePluginInfo> get(const std::string& /*name*/,
-                                  const std::optional<std::string>& /*version*/) override {
+                                 const std::optional<std::string>& /*version*/) override {
         return Error{ErrorCode::NotFound, "Stub: plugin not found"};
     }
 
@@ -94,8 +94,7 @@ TEST_CASE_METHOD(PluginInstallerFixture, "Installer creation", "[plugins][instal
     }
 }
 
-TEST_CASE_METHOD(PluginInstallerFixture, "listInstalled behavior",
-                 "[plugins][installer][list]") {
+TEST_CASE_METHOD(PluginInstallerFixture, "listInstalled behavior", "[plugins][installer][list]") {
     SECTION("returns empty on fresh install") {
         auto installer = makePluginInstaller(stubClient, installDir, trustFile);
         auto result = installer->listInstalled();

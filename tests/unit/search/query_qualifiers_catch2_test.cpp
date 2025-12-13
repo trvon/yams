@@ -68,7 +68,8 @@ TEST_CASE("Query Qualifiers - ParsesFiltersNameExtMime", "[search][qualifiers][c
     CHECK(parsed.normalizedQuery == "refactor source code");
 }
 
-TEST_CASE("Query Qualifiers - MixedQualifiersAndTextNormalization", "[search][qualifiers][catch2]") {
+TEST_CASE("Query Qualifiers - MixedQualifiersAndTextNormalization",
+          "[search][qualifiers][catch2]") {
     const std::string q = R"(init lines:1-50 name:main.cpp ext:.cpp mime:text/x-c++ src project)";
     ParsedQuery parsed = parseQueryQualifiers(q);
 
@@ -91,7 +92,8 @@ TEST_CASE("Query Qualifiers - CaseInsensitiveKeysAreAccepted", "[search][qualifi
     CHECK(parsed.normalizedQuery == "topic");
 }
 
-TEST_CASE("Query Qualifiers - OnlyQualifiersResultsInEmptyNormalizedQuery", "[search][qualifiers][catch2]") {
+TEST_CASE("Query Qualifiers - OnlyQualifiersResultsInEmptyNormalizedQuery",
+          "[search][qualifiers][catch2]") {
     const std::string q = R"(lines:1-3 pages:2 section:"Body")";
     ParsedQuery parsed = parseQueryQualifiers(q);
 

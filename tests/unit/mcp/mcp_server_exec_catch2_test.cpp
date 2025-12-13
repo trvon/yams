@@ -70,7 +70,7 @@ class MCPAsyncExecFixture {
 public:
     std::unique_ptr<yams::mcp::MCPServer> server;
     std::filesystem::path socketPath;
-    
+
     MCPAsyncExecFixture() {
         setenv("YAMS_ENABLE_LOCAL_MCP_DISCOVERY", "0", 1);
         setenv("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1", 1);
@@ -99,30 +99,31 @@ public:
                                    "Daemon socket not found for test harness"};
             });
     }
-    
+
     ~MCPAsyncExecFixture() {
         if (server) {
             server->testShutdown();
         }
     }
-    
+
     template <typename Awaitable>
     void expectAsyncCompletion(Awaitable makeAwaitable, const std::string& toolName) {
         auto start = std::chrono::steady_clock::now();
         auto result = run_awaitable_with_timeout(makeAwaitable(), std::chrono::seconds(3));
         auto elapsed = std::chrono::steady_clock::now() - start;
-        
+
         REQUIRE_MESSAGE(result.has_value(), toolName << " handler timed out");
         auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed);
-        CHECK_MESSAGE(elapsedMs < 500ms, toolName << " harness took too long: " << elapsedMs.count() << "ms");
-        
+        CHECK_MESSAGE(elapsedMs < 500ms,
+                      toolName << " harness took too long: " << elapsedMs.count() << "ms");
+
         if (result->has_value()) {
             SUCCEED(toolName << " handler completed successfully");
         } else {
             const auto& error = result->error();
             CHECK_MESSAGE(!error.message.empty(), toolName << " error message missing");
-            CHECK_MESSAGE(error.message.find("test harness") != std::string::npos, 
-                         toolName << " unexpected error message: " << error.message);
+            CHECK_MESSAGE(error.message.find("test harness") != std::string::npos,
+                          toolName << " unexpected error message: " << error.message);
         }
     }
 };
@@ -130,16 +131,21 @@ public:
 } // namespace
 
 // Helper macro for better test output
-#define REQUIRE_MESSAGE(cond, msg) \
-    do { INFO(msg); REQUIRE(cond); } while(0)
-#define CHECK_MESSAGE(cond, msg) \
-    do { INFO(msg); CHECK(cond); } while(0)
+#define REQUIRE_MESSAGE(cond, msg)                                                                 \
+    do {                                                                                           \
+        INFO(msg);                                                                                 \
+        REQUIRE(cond);                                                                             \
+    } while (0)
+#define CHECK_MESSAGE(cond, msg)                                                                   \
+    do {                                                                                           \
+        INFO(msg);                                                                                 \
+        CHECK(cond);                                                                               \
+    } while (0)
 
-// Ensure async tool handlers return robustly (error or value), not crash/hang, 
+// Ensure async tool handlers return robustly (error or value), not crash/hang,
 // when daemon is unavailable in test environment.
 TEST_CASE_METHOD(MCPAsyncExecFixture, "MCP async tools return structured errors without daemon",
                  "[mcp][async][exec][catch2]") {
-    
     SECTION("search tool returns error") {
         expectAsyncCompletion(
             [&]() -> boost::asio::awaitable<yams::Result<yams::mcp::MCPSearchResponse>> {
@@ -192,10 +198,10 @@ TEST_CASE_METHOD(MCPAsyncExecFixture, "MCP async tools return structured errors 
         auto syncResult = run_awaitable_with_timeout(
             server->testCallToolAsync("search", nlohmann::json{{"query", "foo"}}),
             std::chrono::seconds(3));
-        
+
         REQUIRE(syncResult.has_value());
         REQUIRE(syncResult->is_object());
-        
+
         if (syncResult->contains("error")) {
             const auto& error = (*syncResult)["error"];
             REQUIRE(error.contains("message"));
@@ -205,12 +211,12 @@ TEST_CASE_METHOD(MCPAsyncExecFixture, "MCP async tools return structured errors 
             REQUIRE(syncResult->contains("isError"));
             REQUIRE((*syncResult)["isError"].is_boolean());
             CHECK((*syncResult)["isError"].get<bool>());
-            
+
             REQUIRE(syncResult->contains("content"));
             const auto& content = (*syncResult)["content"];
             REQUIRE(content.is_array());
             REQUIRE_FALSE(content.empty());
-            
+
             const auto& first = content.front();
             REQUIRE(first.contains("text"));
             CHECK_THAT(first["text"].get<std::string>(), ContainsSubstring("test harness"));

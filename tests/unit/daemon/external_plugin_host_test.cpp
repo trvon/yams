@@ -243,7 +243,8 @@ TEST_CASE("ExternalPluginHost - Trust Management", "[external-plugin][host][trus
         // Verify each canonical path is in the list
         for (const auto& path : paths) {
             auto canonical = fs::weakly_canonical(path);
-            bool found = std::find(trustList.begin(), trustList.end(), canonical) != trustList.end();
+            bool found =
+                std::find(trustList.begin(), trustList.end(), canonical) != trustList.end();
             INFO("Checking path: " << canonical.string());
             CHECK(found);
         }

@@ -275,9 +275,7 @@ public:
         policy_.updateRules(std::move(rules));
     }
 
-    compression::CompressionPolicy::Rules getPolicyRules() const {
-        return policy_.rules();
-    }
+    compression::CompressionPolicy::Rules getPolicyRules() const { return policy_.rules(); }
 
     void setCompressionEnabled(bool enable) { compressionEnabled_ = enable; }
 

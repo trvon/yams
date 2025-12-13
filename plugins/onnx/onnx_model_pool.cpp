@@ -105,8 +105,8 @@ public:
         // exhaustion and "resource deadlock would occur" errors. The Windows thread
         // scheduler behaves differently than Linux. Do NOT use config.num_threads
         // here as it defaults to hardware_concurrency() which causes issues.
-        int intra_default = 1;  // Single thread for intra-op
-        int inter_default = 1;  // Single thread for inter-op
+        int intra_default = 1;               // Single thread for intra-op
+        int inter_default = 1;               // Single thread for inter-op
         bool allow_spinning_default = false; // No spinning on Windows
 #else
         int intra_default = 4;
@@ -134,8 +134,8 @@ public:
         sessionOptions_->AddConfigEntry("session.inter_op.allow_spinning",
                                         allow_spinning ? "1" : "0");
 
-        spdlog::info("[ONNX] SessionOptions threads: intra-op={} inter-op={} spinning={}",
-                     intra, inter, allow_spinning);
+        spdlog::info("[ONNX] SessionOptions threads: intra-op={} inter-op={} spinning={}", intra,
+                     inter, allow_spinning);
 
 #ifdef _WIN32
         // On Windows, use sequential execution mode to avoid thread pool issues

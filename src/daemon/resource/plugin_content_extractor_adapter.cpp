@@ -3,8 +3,8 @@
 //
 // PBI-096: Unified content extractor adapter implementation
 
-#include <yams/daemon/resource/plugin_content_extractor_adapter.h>
 #include <yams/daemon/resource/external_plugin_host.h>
+#include <yams/daemon/resource/plugin_content_extractor_adapter.h>
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -115,13 +115,14 @@ bool PluginContentExtractorAdapter::supportsExternal(const std::string& mime,
         if (!ext_normalized.empty() && ext_normalized[0] != '.')
             ext_normalized = "." + ext_normalized;
 
-        auto it =
-            std::find(ext.supportedExtensions.begin(), ext.supportedExtensions.end(), ext_normalized);
+        auto it = std::find(ext.supportedExtensions.begin(), ext.supportedExtensions.end(),
+                            ext_normalized);
         if (it != ext.supportedExtensions.end())
             return true;
 
         // Also check without dot for flexibility
-        auto it2 = std::find(ext.supportedExtensions.begin(), ext.supportedExtensions.end(), extension);
+        auto it2 =
+            std::find(ext.supportedExtensions.begin(), ext.supportedExtensions.end(), extension);
         if (it2 != ext.supportedExtensions.end())
             return true;
     }
@@ -132,10 +133,8 @@ bool PluginContentExtractorAdapter::supportsExternal(const std::string& mime,
     return false;
 }
 
-std::optional<std::string>
-PluginContentExtractorAdapter::extractExternal(const std::vector<std::byte>& bytes,
-                                               const std::string& mime,
-                                               const std::string& extension) {
+std::optional<std::string> PluginContentExtractorAdapter::extractExternal(
+    const std::vector<std::byte>& bytes, const std::string& mime, const std::string& extension) {
     auto& ext = std::get<ExternalBackend>(backend_);
     if (!ext.host)
         return std::nullopt;
@@ -185,26 +184,26 @@ PluginContentExtractorAdapter::extractExternal(const std::vector<std::byte>& byt
 
         // Check for error in result (plugin-level error, not RPC error)
         if (resp.contains("error") && !resp["error"].is_null()) {
-            std::string errMsg = resp["error"].is_string()
-                ? resp["error"].get<std::string>()
-                : resp["error"].dump();
-            spdlog::warn("PluginContentExtractorAdapter[{}]: plugin returned error: {}", name_, errMsg);
+            std::string errMsg =
+                resp["error"].is_string() ? resp["error"].get<std::string>() : resp["error"].dump();
+            spdlog::warn("PluginContentExtractorAdapter[{}]: plugin returned error: {}", name_,
+                         errMsg);
             return std::nullopt;
         }
 
         // Extract text from response
         if (resp.contains("text") && resp["text"].is_string()) {
             auto text = resp["text"].get<std::string>();
-            spdlog::info("PluginContentExtractorAdapter[{}]: extraction succeeded ({} chars)", name_,
-                         text.size());
+            spdlog::info("PluginContentExtractorAdapter[{}]: extraction succeeded ({} chars)",
+                         name_, text.size());
             return text;
         }
 
         // Some extractors return content instead of text
         if (resp.contains("content") && resp["content"].is_string()) {
             auto content = resp["content"].get<std::string>();
-            spdlog::info("PluginContentExtractorAdapter[{}]: extraction succeeded ({} chars)", name_,
-                         content.size());
+            spdlog::info("PluginContentExtractorAdapter[{}]: extraction succeeded ({} chars)",
+                         name_, content.size());
             return content;
         }
 

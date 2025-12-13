@@ -1,4 +1,5 @@
 // Replace stub with actual ONNX-backed implementation
+#include "model_provider.h"
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <cstdlib>
@@ -6,7 +7,6 @@
 #include <filesystem>
 #include <fstream>
 #include <thread>
-#include "model_provider.h"
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/resource/onnx_model_pool.h>
 

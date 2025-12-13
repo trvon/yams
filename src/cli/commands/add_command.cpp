@@ -414,8 +414,8 @@ public:
                         render(result.value(), filePath);
                         ok++;
                     } else {
-                        spdlog::warn("Daemon add failed for file '{}': {}",
-                                     filePath.string(), result.error().message);
+                        spdlog::warn("Daemon add failed for file '{}': {}", filePath.string(),
+                                     result.error().message);
                         failed++;
                     }
                 }

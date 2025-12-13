@@ -53,7 +53,8 @@ private:
     };
 
     boost::asio::awaitable<void> channelPoller();
-    boost::asio::awaitable<EmbedJobResult> processEmbedJobWithStatus(const InternalEventBus::EmbedJob& job);
+    boost::asio::awaitable<EmbedJobResult>
+    processEmbedJobWithStatus(const InternalEventBus::EmbedJob& job);
 
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::MetadataRepository> meta_;

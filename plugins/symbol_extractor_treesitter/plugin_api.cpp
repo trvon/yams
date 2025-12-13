@@ -101,7 +101,8 @@ static int extract_symbols_abi(void* /*self*/, const char* content, size_t conte
             std::fprintf(stderr,
                          "[yams] auto-download disabled, skipping grammar install for '%s'\n",
                          language);
-            dl_err = "Grammar not found. Set YAMS_AUTO_DOWNLOAD_GRAMMARS=1 to enable auto-download.";
+            dl_err =
+                "Grammar not found. Set YAMS_AUTO_DOWNLOAD_GRAMMARS=1 to enable auto-download.";
         } else {
             dl_err = "Grammar download already attempted for this language.";
         }

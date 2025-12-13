@@ -49,18 +49,18 @@ yams_symbol_extractor_v1* load_plugin(const char* so_path, PluginHandle& ph) {
     auto init = (int (*)(const char*, const void*))dlsym(ph.h, "yams_plugin_init");
     if (!getabi || !getiface || !init)
         return nullptr;
-    
+
     if (getabi() <= 0)
         return nullptr;
-    
+
     if (init("{\n  \"languages\": [\"cpp\", \"python\"]\n}", nullptr) != 0)
         return nullptr;
-    
+
     void* ptr = nullptr;
     int rc = getiface(YAMS_IFACE_SYMBOL_EXTRACTOR_V1, YAMS_IFACE_SYMBOL_EXTRACTOR_V1_VERSION, &ptr);
     if (rc != 0 || !ptr)
         return nullptr;
-    
+
     return reinterpret_cast<yams_symbol_extractor_v1*>(ptr);
 }
 
@@ -94,8 +94,9 @@ TEST_CASE("Symbol extractor C++ detection", "[plugins][symbol-extractor][cpp]") 
         )CPP";
 
         yams_symbol_extraction_result_v1* out = nullptr;
-        int rc = api->extract_symbols(api->self, code, std::strlen(code), "/tmp/test.cpp", "cpp", &out);
-        
+        int rc =
+            api->extract_symbols(api->self, code, std::strlen(code), "/tmp/test.cpp", "cpp", &out);
+
         if (rc != 0 || !out) {
             SKIP("Symbol grammar not available");
         }
@@ -132,8 +133,9 @@ TEST_CASE("Symbol extractor Python detection", "[plugins][symbol-extractor][pyth
         )PY";
 
         yams_symbol_extraction_result_v1* out = nullptr;
-        int rc = api->extract_symbols(api->self, code, std::strlen(code), "/tmp/test.py", "python", &out);
-        
+        int rc = api->extract_symbols(api->self, code, std::strlen(code), "/tmp/test.py", "python",
+                                      &out);
+
         if (rc != 0 || !out) {
             SKIP("Symbol grammar not available");
         }

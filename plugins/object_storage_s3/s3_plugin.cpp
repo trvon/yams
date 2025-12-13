@@ -11,8 +11,8 @@ extern "C" {
 #include <yams/plugins/object_storage_v1.h>
 }
 
-#include <curl/curl.h>
 #include <nlohmann/json.hpp>
+#include <curl/curl.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -832,7 +832,6 @@ YAMS_PLUGIN_API int yams_plugin_get_health_json(char** out_json) {
     *out_json = strdup("{\"status\":\"ok\"}");
     return YAMS_PLUGIN_OK;
 }
-
 }
 
 extern "C" yams::storage::IStorageBackend* yams_plugin_create_object_storage() {

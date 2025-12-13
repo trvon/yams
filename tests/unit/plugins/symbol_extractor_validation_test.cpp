@@ -106,7 +106,7 @@ struct SymbolExtractorValidationFixture {
         if (!extractor) {
             return nullptr;
         }
-        
+
         yams_symbol_extraction_result_v1* result = nullptr;
         int rc = extractor->extract_symbols(extractor->self, code.c_str(), code.length(),
                                             filePath.c_str(), language.c_str(), &result);
@@ -131,7 +131,8 @@ struct SymbolExtractorValidationFixture {
      */
     bool hasSymbol(yams_symbol_extraction_result_v1* result, const std::string& kind,
                    const std::string& expectedName) {
-        if (!result) return false;
+        if (!result)
+            return false;
 
         for (size_t i = 0; i < result->symbol_count; ++i) {
             auto& symbol = result->symbols[i];
@@ -147,9 +148,7 @@ struct SymbolExtractorValidationFixture {
     /**
      * @brief Check if plugin is available
      */
-    bool isAvailable() const {
-        return pluginHandle != nullptr && extractor != nullptr;
-    }
+    bool isAvailable() const { return pluginHandle != nullptr && extractor != nullptr; }
 
     void* pluginHandle{nullptr};
     yams_symbol_extractor_v1* extractor{nullptr};
@@ -290,7 +289,7 @@ TEST_CASE_METHOD(SymbolExtractorValidationFixture, "Symbol positioning validatio
         if (!result) {
             SKIP("Symbol grammar not available");
         }
-        
+
         REQUIRE(result->symbol_count > 0u);
 
         for (size_t i = 0; i < result->symbol_count; ++i) {

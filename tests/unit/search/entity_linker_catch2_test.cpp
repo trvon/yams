@@ -113,7 +113,8 @@ TEST_CASE("SimpleHeuristicEntityLinker - NgramLongestFirst", "[search][entity][c
     CHECK(e->mention.text == "new york");
 }
 
-TEST_CASE("SimpleHeuristicEntityLinker - MinConfidenceThresholdFiltersLowPrior", "[search][entity][catch2]") {
+TEST_CASE("SimpleHeuristicEntityLinker - MinConfidenceThresholdFiltersLowPrior",
+          "[search][entity][catch2]") {
     EntityLinkerConfig cfg;
     cfg.min_confidence = 0.60f;
     cfg.max_ngram = 1;
@@ -135,7 +136,8 @@ TEST_CASE("SimpleHeuristicEntityLinker - MinConfidenceThresholdFiltersLowPrior",
     CHECK(ents.empty());
 }
 
-TEST_CASE("SimpleHeuristicEntityLinker - PicksHighestPriorWhenMultipleAliases", "[search][entity][catch2]") {
+TEST_CASE("SimpleHeuristicEntityLinker - PicksHighestPriorWhenMultipleAliases",
+          "[search][entity][catch2]") {
     EntityLinkerConfig cfg;
     cfg.min_confidence = 0.50f;
     cfg.max_ngram = 1;

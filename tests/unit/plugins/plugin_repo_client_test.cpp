@@ -87,7 +87,8 @@ TEST_CASE_METHOD(PluginRepoClientFixture, "Client creation", "[plugins][repo-cli
     }
 }
 
-TEST_CASE_METHOD(PluginRepoClientFixture, "Custom config options", "[plugins][repo-client][config]") {
+TEST_CASE_METHOD(PluginRepoClientFixture, "Custom config options",
+                 "[plugins][repo-client][config]") {
     SECTION("custom timeout is preserved") {
         PluginRepoConfig customConfig;
         customConfig.timeout = std::chrono::milliseconds{60000};

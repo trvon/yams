@@ -33,7 +33,8 @@ std::vector<std::byte> generateRandomBytes(size_t size) {
 struct StorageEngineFixture {
     StorageEngineFixture() {
         testDir = std::filesystem::temp_directory_path() /
-                  std::format("yams_storage_catch2_{}", std::chrono::steady_clock::now().time_since_epoch().count());
+                  std::format("yams_storage_catch2_{}",
+                              std::chrono::steady_clock::now().time_since_epoch().count());
         storagePath = testDir / "storage_test";
         std::filesystem::create_directories(storagePath);
 
@@ -96,8 +97,7 @@ TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine retrieve non-existent",
     CHECK(result.error() == ErrorCode::ChunkNotFound);
 }
 
-TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine exists check",
-                 "[storage][engine][catch2]") {
+TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine exists check", "[storage][engine][catch2]") {
     auto [hash, data] = generateTestData(512);
 
     auto exists1 = storage->exists(hash);
@@ -111,8 +111,7 @@ TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine exists check",
     CHECK(exists2.value());
 }
 
-TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine remove object",
-                 "[storage][engine][catch2]") {
+TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine remove object", "[storage][engine][catch2]") {
     auto [hash, data] = generateTestData(2048);
 
     storage->store(hash, data);
@@ -365,8 +364,7 @@ TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine cleanup temp files",
                         std::filesystem::directory_iterator{}) == 5);
 }
 
-TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine storage size",
-                 "[storage][engine][catch2]") {
+TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine storage size", "[storage][engine][catch2]") {
     size_t totalSize = 0;
     for (int i = 0; i < 5; ++i) {
         auto [hash, data] = generateTestData(1024);

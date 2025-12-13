@@ -20,10 +20,10 @@
 #include <cctype>
 #include <cerrno>
 #include <chrono>
-#include <deque>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -157,7 +157,8 @@ public:
         log->add_option("-n,--lines", logLines_, "Number of lines to show (default: 50)")
             ->default_val(50);
         log->add_flag("-f,--follow", logFollow_, "Follow log output (like tail -f)");
-        log->add_option("--level", logFilterLevel_, "Filter by log level (trace, debug, info, warn, error)");
+        log->add_option("--level", logFilterLevel_,
+                        "Filter by log level (trace, debug, info, warn, error)");
         log->callback([this]() { showLog(); });
     }
 
@@ -2173,7 +2174,8 @@ private:
             }
         }
         // Fallback to /tmp
-        candidates.push_back(fs::path("/tmp") / ("yams-daemon-" + std::to_string(getuid()) + ".log"));
+        candidates.push_back(fs::path("/tmp") /
+                             ("yams-daemon-" + std::to_string(getuid()) + ".log"));
 #endif
 
         // Find the first candidate that exists
@@ -2201,22 +2203,27 @@ private:
         }
 
         auto matchesLevel = [&](const std::string& line) -> bool {
-            if (levelFilter.empty()) return true;
+            if (levelFilter.empty())
+                return true;
             // spdlog format: [YYYY-MM-DD HH:MM:SS.mmm] [level] message
             // Look for level in brackets
             auto pos = line.find("] [");
-            if (pos == std::string::npos) return true;  // Can't parse, show anyway
+            if (pos == std::string::npos)
+                return true; // Can't parse, show anyway
             auto endPos = line.find(']', pos + 3);
-            if (endPos == std::string::npos) return true;
+            if (endPos == std::string::npos)
+                return true;
             std::string lineLevel = line.substr(pos + 3, endPos - pos - 3);
             std::transform(lineLevel.begin(), lineLevel.end(), lineLevel.begin(),
                            [](unsigned char c) { return std::tolower(c); });
 
             // Level hierarchy: trace < debug < info < warn < error
-            static const std::vector<std::string> levels = {"trace", "debug", "info", "warn", "error"};
+            static const std::vector<std::string> levels = {"trace", "debug", "info", "warn",
+                                                            "error"};
             auto filterIt = std::find(levels.begin(), levels.end(), levelFilter);
             auto lineIt = std::find(levels.begin(), levels.end(), lineLevel);
-            if (filterIt == levels.end() || lineIt == levels.end()) return true;
+            if (filterIt == levels.end() || lineIt == levels.end())
+                return true;
             return lineIt >= filterIt;
         };
 
