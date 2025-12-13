@@ -65,7 +65,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: recursive  # sqlite-vec-cpp submodule required for build
+          submodules: false  # Manual submodule init below (some use SSH URLs)
+      - name: Initialize required submodules
+        shell: bash
+        run: |
+          # Only init sqlite-vec-cpp which is required for the build
+          # Skip other submodules that use SSH URLs requiring authentication
+          git submodule update --init --depth 1 third_party/sqlite-vec-cpp
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         shell: bash
