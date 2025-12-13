@@ -164,14 +164,7 @@ public:
                              dataPath.string());
 
                 // Still offer grammar download even if already initialized
-                if (!nonInteractive_) {
-                    bool setupGrammars = prompt_yes_no(
-                        "\nDownload tree-sitter grammars for symbol extraction? [Y/n]: ",
-                        YesNoOptions{.defaultYes = true});
-                    if (setupGrammars) {
-                        promptAndDownloadGrammars(dataPath, false);
-                    }
-                }
+                maybeSetupGrammars(dataPath);
                 return Result<void>();
             }
 
@@ -376,19 +369,7 @@ public:
             }
 
             // 7) Tree-sitter Grammar Setup (for symbol extraction)
-            bool setupGrammars = false;
-            if (!nonInteractive_) {
-                setupGrammars = prompt_yes_no(
-                    "\nDownload tree-sitter grammars for symbol extraction? [Y/n]: ",
-                    YesNoOptions{.defaultYes = true});
-            } else if (autoInit_) {
-                // In auto mode, download recommended grammars
-                setupGrammars = true;
-            }
-
-            if (setupGrammars) {
-                promptAndDownloadGrammars(dataPath, nonInteractive_ || autoInit_);
-            }
+            maybeSetupGrammars(dataPath);
 
             spdlog::info("YAMS initialization complete.");
             spdlog::info("Config file: {}", configPath.string());
@@ -1093,8 +1074,37 @@ private:
         return false;
     }
 
-    // Grammar download helper
-    void promptAndDownloadGrammars(const fs::path& dataPath, bool useDefaults) {
+    /**
+     * @brief Unified grammar setup entry point for both init and already-initialized states.
+     *
+     * Handles the prompt logic based on nonInteractive_ and autoInit_ flags:
+     * - Interactive mode: prompts user, then shows menu
+     * - Auto mode: downloads recommended grammars without prompting
+     * - Non-interactive (non-auto): skips grammar setup entirely
+     */
+    void maybeSetupGrammars(const fs::path& dataPath) {
+        if (autoInit_) {
+            // Auto mode: download recommended grammars without prompting
+            downloadGrammars(dataPath, true);
+        } else if (!nonInteractive_) {
+            // Interactive mode: prompt user
+            bool setupGrammars = prompt_yes_no(
+                "\nDownload tree-sitter grammars for symbol extraction? [Y/n]: ",
+                YesNoOptions{.defaultYes = true});
+            if (setupGrammars) {
+                downloadGrammars(dataPath, false);
+            }
+        }
+        // Non-interactive non-auto: skip grammar setup
+    }
+
+    /**
+     * @brief Downloads and builds tree-sitter grammars.
+     *
+     * @param dataPath Base data directory for fallback grammar path
+     * @param useDefaults If true, downloads recommended grammars without menu
+     */
+    void downloadGrammars(const fs::path& dataPath, bool useDefaults) {
         // Determine grammar output directory
         fs::path grammarDir;
 #ifdef _WIN32
@@ -1276,9 +1286,16 @@ private:
         };
 
         try {
-            // Clone repository
+            // Clone repository (some grammars need specific branches)
             std::string repoUrl = "https://github.com/" + std::string(grammarInfo->repo);
-            std::string cloneCmd = "git clone --depth 1 --quiet " + repoUrl + " " +
+            std::string branch;
+
+            // SQL grammar has generated files only on gh-pages branch
+            if (language == "sql") {
+                branch = " -b gh-pages";
+            }
+
+            std::string cloneCmd = "git clone --depth 1 --quiet" + branch + " " + repoUrl + " " +
                                    (tempDir / ("tree-sitter-" + language)).string();
 #ifdef _WIN32
             cloneCmd += " 2>NUL";
@@ -1298,18 +1315,8 @@ private:
                 buildDir = buildDir / "typescript";
             } else if (language == "php") {
                 buildDir = buildDir / "php";
-            } else if (language == "sql") {
-                // tree-sitter-sql uses different structure, check for src in root first
-                if (!fs::exists(buildDir / "src" / "parser.c")) {
-                    // Some forks use different layouts
-                    for (const auto& entry : fs::directory_iterator(buildDir)) {
-                        if (entry.is_directory() && fs::exists(entry.path() / "src" / "parser.c")) {
-                            buildDir = entry.path();
-                            break;
-                        }
-                    }
-                }
             }
+            // Note: SQL uses gh-pages branch which has src/parser.c in root
 
             auto parserC = buildDir / "src" / "parser.c";
             auto scannerC = buildDir / "src" / "scanner.c";
@@ -1378,21 +1385,37 @@ private:
                 buildCmd << " -o \"" << outputPath.string() << "\" >NUL 2>&1";
             }
 #elif defined(__APPLE__)
-            buildCmd << compiler << " -dynamiclib -O2 -I. src/parser.c";
+            // macOS build with absolute paths
+            auto srcDir = buildDir / "src";
+            auto parserCPath = srcDir / "parser.c";
+            auto scannerCPath = srcDir / "scanner.c";
+            auto scannerCCPath = srcDir / "scanner.cc";
+            auto outputPath = buildDir / libName;
+
+            buildCmd << compiler << " -dynamiclib -O2 -I\"" << srcDir.string() << "\" ";
+            buildCmd << "\"" << parserCPath.string() << "\"";
             if (fs::exists(scannerC)) {
-                buildCmd << " src/scanner.c";
+                buildCmd << " \"" << scannerCPath.string() << "\"";
             } else if (fs::exists(scannerCC)) {
-                buildCmd << " src/scanner.cc";
+                buildCmd << " \"" << scannerCCPath.string() << "\"";
             }
-            buildCmd << " -o " << libName << " 2>/dev/null";
+            buildCmd << " -o \"" << outputPath.string() << "\" 2>/dev/null";
 #else
-            buildCmd << compiler << " -shared -fPIC -O2 -I. src/parser.c";
+            // Linux build with absolute paths
+            auto srcDir = buildDir / "src";
+            auto parserCPath = srcDir / "parser.c";
+            auto scannerCPath = srcDir / "scanner.c";
+            auto scannerCCPath = srcDir / "scanner.cc";
+            auto outputPath = buildDir / libName;
+
+            buildCmd << compiler << " -shared -fPIC -O2 -I\"" << srcDir.string() << "\" ";
+            buildCmd << "\"" << parserCPath.string() << "\"";
             if (fs::exists(scannerC)) {
-                buildCmd << " src/scanner.c";
+                buildCmd << " \"" << scannerCPath.string() << "\"";
             } else if (fs::exists(scannerCC)) {
-                buildCmd << " src/scanner.cc";
+                buildCmd << " \"" << scannerCCPath.string() << "\"";
             }
-            buildCmd << " -o " << libName << " 2>/dev/null";
+            buildCmd << " -o \"" << outputPath.string() << "\" 2>/dev/null";
 #endif
 
             if (std::system(buildCmd.str().c_str()) != 0) {
@@ -1400,21 +1423,15 @@ private:
                 return Error{ErrorCode::InternalError, "build failed"};
             }
 
-            // Copy to output directory
-#ifdef _WIN32
-            // On Windows we built directly to outputPath, just need to move it
-            auto builtLib = outputPath;
-#else
-            auto builtLib = buildDir / libName;
-#endif
-            if (!fs::exists(builtLib)) {
+            // Copy to output directory (all platforms now use outputPath)
+            if (!fs::exists(outputPath)) {
                 cleanup();
                 return Error{ErrorCode::NotFound, "built library not found"};
             }
 
             auto finalPath = outputDir / libName;
-            if (builtLib != finalPath) {
-                fs::copy_file(builtLib, finalPath, fs::copy_options::overwrite_existing);
+            if (outputPath != finalPath) {
+                fs::copy_file(outputPath, finalPath, fs::copy_options::overwrite_existing);
             }
 
             cleanup();
