@@ -185,20 +185,23 @@ unit_manifest = files(
   # excluded: manifest/manifest_test.cpp
 )
 
+# MCP tests migrated to Catch2 - see tests/meson.build (catch2_mcp_submodule)
+# Migration: yams-3s4 / yams-84g
 unit_mcp = files(
-  'mcp/initialize_response_test.cpp',
-  'mcp/mcp_jsonrpc_roundtrip_test.cpp',
-  'mcp/mcp_search_dto_test.cpp',
-  'mcp/mcp_server_exec_test.cpp',
-  'mcp/mcp_server_test.cpp',
-  'mcp/mcp_tools_schema_and_smoke_test.cpp',
-  'mcp/mcp_tool_registry_wrappers_test.cpp',
-  'mcp/stdio_transport_test.cpp',
-  'mcp/websocket_transport_test.cpp',
-  'mcp/mcp_socket_resolution_test.cpp',
-  'mcp/mcp_doctor_flags_test.cpp',
-  'mcp/mcp_add_disconnect_test.cpp',
-  'mcp/mcp_disconnect_uniform_errors_test.cpp',
+  # 'mcp/initialize_response_test.cpp',              # Migrated to Catch2
+  # 'mcp/mcp_jsonrpc_roundtrip_test.cpp',            # Migrated to Catch2
+  # 'mcp/mcp_search_dto_test.cpp',                   # Migrated to Catch2
+  # 'mcp/mcp_server_exec_test.cpp',                  # Migrated to Catch2
+  # 'mcp/mcp_server_test.cpp',                       # Migrated to Catch2
+  # 'mcp/mcp_tools_schema_and_smoke_test.cpp',       # Migrated to Catch2
+  # 'mcp/mcp_tool_registry_wrappers_test.cpp',       # Migrated to Catch2
+  # 'mcp/stdio_transport_test.cpp',                  # Migrated to Catch2
+  # 'mcp/websocket_transport_test.cpp',              # Migrated to Catch2
+  # 'mcp/mcp_socket_resolution_test.cpp',            # Migrated to Catch2
+  # 'mcp/mcp_doctor_flags_test.cpp',                 # Migrated to Catch2
+  # 'mcp/mcp_add_disconnect_test.cpp',               # Migrated to Catch2
+  # 'mcp/mcp_disconnect_uniform_errors_test.cpp',    # Migrated to Catch2
+  # 'mcp/mcp_status_response_test.cpp',              # Placeholder - not migrated (empty)
 )
 
 unit_metadata = files(

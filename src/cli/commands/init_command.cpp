@@ -1,5 +1,6 @@
 #include <yams/cli/command.h>
 #include <yams/cli/prompt_util.h>
+#include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
@@ -8,6 +9,11 @@
 
 #include <spdlog/spdlog.h>
 #include <fmt/format.h>
+
+// For grammar downloading on Windows
+#ifdef _WIN32
+#include <cstdlib>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -50,6 +56,31 @@ static const std::vector<EmbeddingModel> EMBEDDING_MODELS = {
      "https://huggingface.co/sentence-transformers/multi-qa-MiniLM-L6-cos-v1/resolve/main/onnx/"
      "model.onnx",
      "Optimized for semantic search on QA pairs (215M training samples)", 90, 384}};
+
+// Available tree-sitter grammars for symbol extraction
+struct GrammarInfo {
+    std::string_view language;
+    std::string_view repo;
+    std::string_view description;
+    bool recommended; // Show in default selection
+};
+
+static constexpr GrammarInfo SUPPORTED_GRAMMARS[] = {
+    {"c", "tree-sitter/tree-sitter-c", "C language", true},
+    {"cpp", "tree-sitter/tree-sitter-cpp", "C++ language", true},
+    {"python", "tree-sitter/tree-sitter-python", "Python language", true},
+    {"javascript", "tree-sitter/tree-sitter-javascript", "JavaScript/JSX", true},
+    {"typescript", "tree-sitter/tree-sitter-typescript", "TypeScript/TSX", true},
+    {"rust", "tree-sitter/tree-sitter-rust", "Rust language", true},
+    {"go", "tree-sitter/tree-sitter-go", "Go language", true},
+    {"java", "tree-sitter/tree-sitter-java", "Java language", false},
+    {"csharp", "tree-sitter/tree-sitter-c-sharp", "C# language", false},
+    {"php", "tree-sitter/tree-sitter-php", "PHP language", false},
+    {"kotlin", "fwcd/tree-sitter-kotlin", "Kotlin language", false},
+    {"dart", "UserNobody14/tree-sitter-dart", "Dart/Flutter", false},
+    {"sql", "DerekStride/tree-sitter-sql", "SQL queries", false},
+    {"solidity", "JoranHonig/tree-sitter-solidity", "Solidity (Ethereum)", false},
+};
 
 class InitCommand : public ICommand {
 public:
@@ -131,6 +162,16 @@ public:
             if (alreadyInitialized && !force_) {
                 spdlog::info("YAMS is already initialized at {} (use --force to overwrite).",
                              dataPath.string());
+
+                // Still offer grammar download even if already initialized
+                if (!nonInteractive_) {
+                    bool setupGrammars = prompt_yes_no(
+                        "\nDownload tree-sitter grammars for symbol extraction? [Y/n]: ",
+                        YesNoOptions{.defaultYes = true});
+                    if (setupGrammars) {
+                        promptAndDownloadGrammars(dataPath, false);
+                    }
+                }
                 return Result<void>();
             }
 
@@ -332,6 +373,21 @@ public:
                 } catch (const std::exception& e) {
                     spdlog::debug("Skipping plugin_name_policy write: {}", e.what());
                 }
+            }
+
+            // 7) Tree-sitter Grammar Setup (for symbol extraction)
+            bool setupGrammars = false;
+            if (!nonInteractive_) {
+                setupGrammars = prompt_yes_no(
+                    "\nDownload tree-sitter grammars for symbol extraction? [Y/n]: ",
+                    YesNoOptions{.defaultYes = true});
+            } else if (autoInit_) {
+                // In auto mode, download recommended grammars
+                setupGrammars = true;
+            }
+
+            if (setupGrammars) {
+                promptAndDownloadGrammars(dataPath, nonInteractive_ || autoInit_);
             }
 
             spdlog::info("YAMS initialization complete.");
@@ -1035,6 +1091,339 @@ private:
 
     bool downloadModel(const EmbeddingModel& /*model*/, const fs::path& /*outputDir*/) {
         return false;
+    }
+
+    // Grammar download helper
+    void promptAndDownloadGrammars(const fs::path& dataPath, bool useDefaults) {
+        // Determine grammar output directory
+        fs::path grammarDir;
+#ifdef _WIN32
+        // On Windows, use %LOCALAPPDATA%\yams\grammars or dataPath\grammars
+        if (const char* localAppData = std::getenv("LOCALAPPDATA")) {
+            grammarDir = fs::path(localAppData) / "yams" / "grammars";
+        } else {
+            grammarDir = dataPath / "grammars";
+        }
+#else
+        // On Unix, use XDG_DATA_HOME or ~/.local/share/yams/grammars
+        if (const char* xdgData = std::getenv("XDG_DATA_HOME")) {
+            grammarDir = fs::path(xdgData) / "yams" / "grammars";
+        } else if (const char* home = std::getenv("HOME")) {
+            grammarDir = fs::path(home) / ".local" / "share" / "yams" / "grammars";
+        } else {
+            grammarDir = dataPath / "grammars";
+        }
+#endif
+        fs::create_directories(grammarDir);
+
+        std::vector<std::string> selectedLanguages;
+
+        if (useDefaults) {
+            // Auto mode: download all recommended grammars
+            for (const auto& g : SUPPORTED_GRAMMARS) {
+                if (g.recommended) {
+                    selectedLanguages.emplace_back(g.language);
+                }
+            }
+            std::cout << "\nDownloading recommended grammars: ";
+            for (size_t i = 0; i < selectedLanguages.size(); ++i) {
+                std::cout << selectedLanguages[i];
+                if (i + 1 < selectedLanguages.size()) std::cout << ", ";
+            }
+            std::cout << "\n";
+        } else {
+            // Interactive mode: show menu
+            std::cout << "\nAvailable tree-sitter grammars:\n";
+            std::cout << "  [1] Recommended (C, C++, Python, JS, TS, Rust, Go)\n";
+            std::cout << "  [2] All supported grammars\n";
+            std::cout << "  [3] Select specific languages\n";
+            std::cout << "  [4] Skip grammar download\n";
+            std::cout << "Choice [1]: ";
+
+            std::string choice;
+            std::getline(std::cin, choice);
+            if (choice.empty()) choice = "1";
+
+            if (choice == "1") {
+                for (const auto& g : SUPPORTED_GRAMMARS) {
+                    if (g.recommended) {
+                        selectedLanguages.emplace_back(g.language);
+                    }
+                }
+            } else if (choice == "2") {
+                for (const auto& g : SUPPORTED_GRAMMARS) {
+                    selectedLanguages.emplace_back(g.language);
+                }
+            } else if (choice == "3") {
+                std::cout << "\nEnter language names separated by commas (e.g., c,cpp,python):\n";
+                std::cout << "Available: ";
+                for (size_t i = 0; i < std::size(SUPPORTED_GRAMMARS); ++i) {
+                    std::cout << SUPPORTED_GRAMMARS[i].language;
+                    if (i + 1 < std::size(SUPPORTED_GRAMMARS)) std::cout << ", ";
+                }
+                std::cout << "\nLanguages: ";
+                std::string langs;
+                std::getline(std::cin, langs);
+
+                // Parse comma-separated list
+                std::istringstream iss(langs);
+                std::string lang;
+                while (std::getline(iss, lang, ',')) {
+                    // Trim whitespace
+                    lang.erase(0, lang.find_first_not_of(" \t"));
+                    lang.erase(lang.find_last_not_of(" \t") + 1);
+                    if (!lang.empty()) {
+                        selectedLanguages.push_back(lang);
+                    }
+                }
+            } else {
+                std::cout << "Skipping grammar download.\n";
+                std::cout << "You can download grammars later with: yams grammar download <language>\n";
+                return;
+            }
+        }
+
+        if (selectedLanguages.empty()) {
+            std::cout << "No grammars selected.\n";
+            return;
+        }
+
+        // Check if build tools are available
+        bool canBuild = checkBuildToolsAvailable();
+        if (!canBuild) {
+            std::cout << "\n" << cli::ui::status_warning("Build tools not found (git + compiler required).") << "\n";
+            std::cout << "Please install:\n";
+#ifdef _WIN32
+            std::cout << "  " << cli::ui::bullet("Git for Windows: https://git-scm.com/download/win") << "\n";
+            std::cout << "  " << cli::ui::bullet("Visual Studio Build Tools or MinGW-w64") << "\n";
+#else
+            std::cout << "  " << cli::ui::bullet("git, gcc/g++ or clang") << "\n";
+#endif
+            std::cout << "\nYou can download grammars later with: yams grammar download <language>\n";
+            return;
+        }
+
+        std::cout << "\nDownloading and building grammars to: " << grammarDir.string() << "\n\n";
+
+        size_t succeeded = 0;
+        size_t failed = 0;
+
+        for (const auto& lang : selectedLanguages) {
+            std::cout << "  " << cli::ui::pad_right(lang, 12) << " ";
+            std::cout.flush();
+
+            auto result = downloadAndBuildGrammar(lang, grammarDir);
+            if (result) {
+                std::cout << cli::ui::status_ok("") << "\n";
+                succeeded++;
+            } else {
+                std::cout << cli::ui::status_error(result.error().message) << "\n";
+                failed++;
+            }
+        }
+
+        std::cout << "\nGrammar setup complete: "
+                  << cli::ui::colorize(std::to_string(succeeded) + " succeeded", cli::ui::Ansi::GREEN);
+        if (failed > 0) {
+            std::cout << ", " << cli::ui::colorize(std::to_string(failed) + " failed", cli::ui::Ansi::RED);
+        }
+        std::cout << "\n";
+    }
+
+    static bool checkBuildToolsAvailable() {
+        auto have = [](const char* tool) {
+#ifdef _WIN32
+            std::string cmd = std::string("where ") + tool + " > NUL 2>&1";
+#else
+            std::string cmd = std::string("which ") + tool + " > /dev/null 2>&1";
+#endif
+            return std::system(cmd.c_str()) == 0;
+        };
+
+        bool hasGit = have("git");
+#ifdef _WIN32
+        bool hasCompiler = have("cl") || have("g++") || have("clang++");
+#else
+        bool hasCompiler = have("g++") || have("gcc") || have("clang++") || have("clang");
+#endif
+        return hasGit && hasCompiler;
+    }
+
+    static Result<void> downloadAndBuildGrammar(const std::string& language,
+                                                 const fs::path& outputDir) {
+        // Find the grammar repo
+        const GrammarInfo* grammarInfo = nullptr;
+        for (const auto& g : SUPPORTED_GRAMMARS) {
+            if (g.language == language) {
+                grammarInfo = &g;
+                break;
+            }
+        }
+
+        if (!grammarInfo) {
+            return Error{ErrorCode::NotFound, "Unknown language: " + language};
+        }
+
+        // Create temp directory for build
+        auto tempDir = fs::temp_directory_path() / ("yams-grammar-" + language);
+        fs::create_directories(tempDir);
+
+        // Cleanup helper
+        auto cleanup = [&tempDir]() {
+            try {
+                fs::remove_all(tempDir);
+            } catch (...) {}
+        };
+
+        try {
+            // Clone repository
+            std::string repoUrl = "https://github.com/" + std::string(grammarInfo->repo);
+            std::string cloneCmd = "git clone --depth 1 --quiet " + repoUrl + " " +
+                                   (tempDir / ("tree-sitter-" + language)).string();
+#ifdef _WIN32
+            cloneCmd += " 2>NUL";
+#else
+            cloneCmd += " 2>/dev/null";
+#endif
+
+            if (std::system(cloneCmd.c_str()) != 0) {
+                cleanup();
+                return Error{ErrorCode::NetworkError, "git clone failed"};
+            }
+
+            auto buildDir = tempDir / ("tree-sitter-" + language);
+
+            // Some grammars have subdirectory structures
+            if (language == "typescript") {
+                buildDir = buildDir / "typescript";
+            } else if (language == "php") {
+                buildDir = buildDir / "php";
+            } else if (language == "sql") {
+                // tree-sitter-sql uses different structure, check for src in root first
+                if (!fs::exists(buildDir / "src" / "parser.c")) {
+                    // Some forks use different layouts
+                    for (const auto& entry : fs::directory_iterator(buildDir)) {
+                        if (entry.is_directory() && fs::exists(entry.path() / "src" / "parser.c")) {
+                            buildDir = entry.path();
+                            break;
+                        }
+                    }
+                }
+            }
+
+            auto parserC = buildDir / "src" / "parser.c";
+            auto scannerC = buildDir / "src" / "scanner.c";
+            auto scannerCC = buildDir / "src" / "scanner.cc";
+
+            if (!fs::exists(parserC)) {
+                cleanup();
+                return Error{ErrorCode::NotFound, "parser.c not found"};
+            }
+
+            // Determine library name and compiler
+#ifdef _WIN32
+            std::string libName = "tree-sitter-" + language + ".dll";
+            std::string compiler = "cl";  // Try MSVC first
+
+            // Check if cl.exe is available, fallback to g++
+            if (std::system("where cl > NUL 2>&1") != 0) {
+                if (std::system("where g++ > NUL 2>&1") == 0) {
+                    compiler = "g++";
+                } else if (std::system("where clang++ > NUL 2>&1") == 0) {
+                    compiler = "clang++";
+                } else {
+                    cleanup();
+                    return Error{ErrorCode::NotFound, "No compiler found"};
+                }
+            }
+#elif defined(__APPLE__)
+            std::string libName = "libtree-sitter-" + language + ".dylib";
+            std::string compiler = "clang++";
+#else
+            std::string libName = "libtree-sitter-" + language + ".so";
+            std::string compiler = "g++";
+#endif
+
+            // Build command - use absolute paths for MSVC compatibility
+            std::ostringstream buildCmd;
+
+#ifdef _WIN32
+            // MSVC needs to run from the build directory with pushd/popd
+            // or use absolute paths. We'll use absolute paths.
+            auto srcDir = buildDir / "src";
+            auto parserCPath = srcDir / "parser.c";
+            auto scannerCPath = srcDir / "scanner.c";
+            auto scannerCCPath = srcDir / "scanner.cc";
+            auto outputPath = buildDir / libName;
+
+            if (compiler == "cl") {
+                // MSVC build with absolute paths, suppress all output
+                buildCmd << "cl /nologo /LD /O2 /I\"" << srcDir.string() << "\" ";
+                buildCmd << "\"" << parserCPath.string() << "\"";
+                if (fs::exists(scannerC)) {
+                    buildCmd << " \"" << scannerCPath.string() << "\"";
+                } else if (fs::exists(scannerCC)) {
+                    buildCmd << " \"" << scannerCCPath.string() << "\"";
+                }
+                buildCmd << " /Fe:\"" << outputPath.string() << "\" >NUL 2>&1";
+            } else {
+                // MinGW/Clang build with absolute paths
+                buildCmd << compiler << " -shared -O2 -I\"" << srcDir.string() << "\" ";
+                buildCmd << "\"" << parserCPath.string() << "\"";
+                if (fs::exists(scannerC)) {
+                    buildCmd << " \"" << scannerCPath.string() << "\"";
+                } else if (fs::exists(scannerCC)) {
+                    buildCmd << " \"" << scannerCCPath.string() << "\"";
+                }
+                buildCmd << " -o \"" << outputPath.string() << "\" >NUL 2>&1";
+            }
+#elif defined(__APPLE__)
+            buildCmd << compiler << " -dynamiclib -O2 -I. src/parser.c";
+            if (fs::exists(scannerC)) {
+                buildCmd << " src/scanner.c";
+            } else if (fs::exists(scannerCC)) {
+                buildCmd << " src/scanner.cc";
+            }
+            buildCmd << " -o " << libName << " 2>/dev/null";
+#else
+            buildCmd << compiler << " -shared -fPIC -O2 -I. src/parser.c";
+            if (fs::exists(scannerC)) {
+                buildCmd << " src/scanner.c";
+            } else if (fs::exists(scannerCC)) {
+                buildCmd << " src/scanner.cc";
+            }
+            buildCmd << " -o " << libName << " 2>/dev/null";
+#endif
+
+            if (std::system(buildCmd.str().c_str()) != 0) {
+                cleanup();
+                return Error{ErrorCode::InternalError, "build failed"};
+            }
+
+            // Copy to output directory
+#ifdef _WIN32
+            // On Windows we built directly to outputPath, just need to move it
+            auto builtLib = outputPath;
+#else
+            auto builtLib = buildDir / libName;
+#endif
+            if (!fs::exists(builtLib)) {
+                cleanup();
+                return Error{ErrorCode::NotFound, "built library not found"};
+            }
+
+            auto finalPath = outputDir / libName;
+            if (builtLib != finalPath) {
+                fs::copy_file(builtLib, finalPath, fs::copy_options::overwrite_existing);
+            }
+
+            cleanup();
+            return Result<void>();
+
+        } catch (const std::exception& e) {
+            cleanup();
+            return Error{ErrorCode::InternalError, e.what()};
+        }
     }
 
     YamsCLI* cli_ = nullptr;

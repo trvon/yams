@@ -932,6 +932,31 @@ if catch2_dep.found()
     install: false,
   )
 
+  # MCP submodule tests (MCPServer, Transport, JSON-RPC, Tools Schema, etc.)
+  # Migrated from GTest as part of yams-3s4 / yams-84g
+  catch2_mcp_submodule_exe = executable('catch2_mcp_submodule',
+    files(
+      'unit/mcp/initialize_response_catch2_test.cpp',
+      'unit/mcp/mcp_add_disconnect_catch2_test.cpp',
+      'unit/mcp/mcp_disconnect_uniform_errors_catch2_test.cpp',
+      'unit/mcp/mcp_doctor_flags_catch2_test.cpp',
+      'unit/mcp/mcp_jsonrpc_roundtrip_catch2_test.cpp',
+      'unit/mcp/mcp_search_dto_catch2_test.cpp',
+      'unit/mcp/mcp_server_catch2_test.cpp',
+      'unit/mcp/mcp_server_exec_catch2_test.cpp',
+      'unit/mcp/mcp_socket_resolution_catch2_test.cpp',
+      'unit/mcp/mcp_tool_registry_wrappers_catch2_test.cpp',
+      'unit/mcp/mcp_tools_schema_and_smoke_catch2_test.cpp',
+      'unit/mcp/stdio_transport_catch2_test.cpp',
+      'unit/mcp/websocket_transport_catch2_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # Vector Test Suites (Catch2) - requires enable-vector-tests
   # Migrated from GTest as part of yams-3s4 / yams-1d4
   # --------------------------------------------------------------------------
@@ -1502,6 +1527,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'compression', 'yams-pmf'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 300
+  )
+
+  test('mcp_submodule', catch2_mcp_submodule_exe,
+    suite: ['catch2', 'unit', 'mcp', 'yams-84g'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 180
   )
 
   # Vector test suite (requires enable-vector-tests)

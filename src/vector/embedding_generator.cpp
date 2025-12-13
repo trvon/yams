@@ -291,7 +291,13 @@ std::string TextPreprocessor::decodeToken(int32_t token_id) const {
 class ModelManager::Impl {
 public:
     Impl() : env_(ORT_LOGGING_LEVEL_WARNING, "yams") {
-        int threads = 4; // safe default
+#ifdef _WIN32
+        // Windows-specific: Use minimal thread counts to avoid thread pool exhaustion
+        // and "resource deadlock would occur" errors.
+        int threads = 1;
+#else
+        int threads = 4; // safe default for non-Windows
+#endif
         if (const char* env = std::getenv("YAMS_ONNX_INTRA_OP_THREADS")) {
             try {
                 unsigned long v = std::stoul(std::string(env));
@@ -307,6 +313,10 @@ public:
             }
         }
         session_options_.SetIntraOpNumThreads(threads);
+#ifdef _WIN32
+        session_options_.SetInterOpNumThreads(1);
+        session_options_.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
+#endif
         session_options_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
     }
 

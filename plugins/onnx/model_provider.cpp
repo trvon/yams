@@ -1,6 +1,4 @@
 // Replace stub with actual ONNX-backed implementation
-#include <future>
-
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <cstdlib>
@@ -183,60 +181,20 @@ struct ProviderCtx {
             // ignore config parse errors
         }
         pool = std::make_unique<yams::daemon::OnnxModelPool>(cfg);
-        // Initialize pool asynchronously (non-blocking)
-        // Note: With lazyLoading=true, initialize() just sets a flag and returns immediately.
-        // Actual model loading happens on-demand via loadModel() when first requested.
-        // NOTE: On MSVC/Windows, std::async(std::launch::async, ...) can throw
-        // std::system_error("resource deadlock would occur") in some environments.
-        // Use an explicit std::thread + std::promise instead.
-        auto promise = std::make_shared<std::promise<yams::Result<void>>>();
-        auto fut = promise->get_future();
-
-        std::thread worker;
         try {
-            worker = std::thread([this, promise]() {
-                try {
-                    promise->set_value(pool->initialize());
-                } catch (const std::exception& e) {
-                    promise->set_value(yams::Error{yams::ErrorCode::InternalError, e.what()});
-                } catch (...) {
-                    promise->set_value(yams::Error{yams::ErrorCode::InternalError, "unknown exception"});
-                }
-            });
-        } catch (const std::system_error& e) {
-            spdlog::error("[ONNX-Plugin] failed to start init thread: {} (category='{}' value={})",
-                          e.what(), e.code().category().name(), e.code().value());
-            ready = false;
-            last_error = std::string("init thread start failed: ") + e.what();
-            return;
-        } catch (const std::exception& e) {
-            spdlog::error("[ONNX-Plugin] failed to start init thread: {}", e.what());
-            ready = false;
-            last_error = std::string("init thread start failed: ") + e.what();
-            return;
-        }
-
-        if (fut.wait_for(std::chrono::seconds(10)) == std::future_status::ready) {
-            if (worker.joinable())
-                worker.join();
-            auto res = fut.get();
+            auto res = pool->initialize();
             if (res) {
                 ready = true;
                 last_error.clear();
             } else {
-                // Initialization failed (rare - only happens if mutex deadlock or similar)
                 ready = false;
                 last_error = res.error().message;
                 spdlog::warn("[ONNX-Plugin] Pool initialize failed: {}", last_error);
             }
-        } else {
-            // Timeout during init (should be rare with lazyLoading=true)
-            // Mark as ready anyway - models can still be loaded on-demand
-            spdlog::warn("[ONNX-Plugin] Pool initialize timed out after 10s, marking ready anyway "
-                         "(lazy loading enabled)");
-            worker.detach();
-            ready = true;
-            last_error.clear();
+        } catch (const std::exception& e) {
+            spdlog::error("[ONNX-Plugin] Pool initialize exception: {}", e.what());
+            ready = false;
+            last_error = e.what();
         }
     }
 };

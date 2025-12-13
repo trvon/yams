@@ -101,21 +101,27 @@ public:
         };
 
 #ifdef _WIN32
-        // Windows-specific defaults to avoid thread pool exhaustion and deadlocks
-        // when multiple embedding requests run concurrently. The Windows thread
-        // scheduler behaves differently than Linux, and high intra-op thread counts
-        // can cause "resource deadlock would occur" errors under load.
-        int intra_default = 2;
-        int inter_default = 1;
-        bool allow_spinning_default = false; // Reduce CPU contention on Windows
+        // Windows-specific: ALWAYS use minimal thread counts to avoid thread pool
+        // exhaustion and "resource deadlock would occur" errors. The Windows thread
+        // scheduler behaves differently than Linux. Do NOT use config.num_threads
+        // here as it defaults to hardware_concurrency() which causes issues.
+        int intra_default = 1;  // Single thread for intra-op
+        int inter_default = 1;  // Single thread for inter-op
+        bool allow_spinning_default = false; // No spinning on Windows
 #else
         int intra_default = 4;
         int inter_default = 1;
         bool allow_spinning_default = true;
 #endif
 
+        // On Windows, ignore config.num_threads to enforce safe defaults
+        // On other platforms, respect the config
+#ifdef _WIN32
+        int intra = detect_threads("YAMS_ONNX_INTRA_OP_THREADS", intra_default);
+#else
         int intra = config.num_threads > 0 ? config.num_threads : intra_default;
         intra = detect_threads("YAMS_ONNX_INTRA_OP_THREADS", intra);
+#endif
         int inter = detect_threads("YAMS_ONNX_INTER_OP_THREADS", inter_default);
         sessionOptions_->SetIntraOpNumThreads(intra);
         sessionOptions_->SetInterOpNumThreads(inter);
@@ -130,6 +136,13 @@ public:
 
         spdlog::info("[ONNX] SessionOptions threads: intra-op={} inter-op={} spinning={}",
                      intra, inter, allow_spinning);
+
+#ifdef _WIN32
+        // On Windows, use sequential execution mode to avoid thread pool issues
+        // This ensures ONNX Runtime doesn't spawn additional threads internally
+        sessionOptions_->SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
+        spdlog::info("[ONNX] Windows: using sequential execution mode");
+#endif
 
         // Graph optimization level: BASIC for fast startup, ALL for production
         // ORT_ENABLE_ALL performs expensive graph transformations (minutes for large models)
@@ -958,7 +971,18 @@ OnnxModelPool::OnnxModelPool(const ModelPoolConfig& config) : config_(config) {
         ortEnv_ = std::make_shared<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "YamsDaemon");
 
         sessionOptions_ = std::make_shared<Ort::SessionOptions>();
+
+#ifdef _WIN32
+        // Windows-specific: Use minimal thread counts to avoid thread pool exhaustion
+        // and "resource deadlock would occur" errors. Do NOT use config.numThreads
+        // which defaults to hardware_concurrency() and causes Windows thread issues.
+        sessionOptions_->SetIntraOpNumThreads(1);
+        sessionOptions_->SetInterOpNumThreads(1);
+        sessionOptions_->SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
+        spdlog::info("[ONNX] Pool: Windows mode - using single-threaded sequential execution");
+#else
         sessionOptions_->SetIntraOpNumThreads(config.numThreads);
+#endif
         sessionOptions_->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
         if (config.enableGPU) {
@@ -1196,12 +1220,7 @@ Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
     poolConfig.maxSize = 3; // Allow up to 3 concurrent users per model
     poolConfig.maxIdle = 2;
     poolConfig.idleTimeout = config_.modelIdleTimeout;
-    // CRITICAL FIX: Always use lazy loading to avoid deadlock!
-    // When preCreateResources=true, ResourcePool constructor synchronously calls factory_(),
-    // which happens while we hold mutex_ in loadModel(). This causes a deadlock.
-    // By setting preCreateResources=false, resources are created lazily on first acquire(),
-    // which is safer and doesn't block the loadModel() call.
-    poolConfig.preCreateResources = false; // Always lazy to avoid deadlock
+    poolConfig.preCreateResources = false;
     // Allow override via env for debugging
     if (const char* pc = std::getenv("YAMS_ONNX_PRECREATE_RESOURCES")) {
         std::string v(pc);

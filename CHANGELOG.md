@@ -37,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Generates authentication keys
   - Skips S3 configuration (uses local storage)
   - Non-interactive: no prompts, uses sensible defaults
+- **Tree-sitter grammar download**: `yams init` now offers to download tree-sitter grammars
+  - Interactive menu: recommended (C, C++, Python, JS, TS, Rust, Go), all, or custom selection
+  - Auto-downloads and builds grammars from official GitHub repos
+  - Supports 14 languages: C, C++, Python, JavaScript, TypeScript, Rust, Go, Java, C#, PHP, Kotlin, Dart, SQL, Solidity
+  - Cross-platform: MSVC, MinGW, GCC, Clang compilation support
+  - Grammar prompt also available when YAMS is already initialized
+  - Grammars installed to XDG_DATA_HOME/yams/grammars (Unix) or %LOCALAPPDATA%\yams\grammars (Windows)
 - **New embedding model option**: Added `multi-qa-MiniLM-L6-cos-v1` as second model choice
   - Trained on 215M question-answer pairs for semantic search optimization
   - Same dimensions (384) as default model for compatibility
