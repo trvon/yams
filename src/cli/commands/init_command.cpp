@@ -1375,24 +1375,56 @@ private:
             auto scannerCCPath = srcDir / "scanner.cc";
             auto outputPath = buildDir / libName;
 
+            // Determine if we have a C++ scanner - this affects our compilation strategy
+            bool hasCppScanner = fs::exists(scannerCC);
+
             if (compiler == "cl") {
                 // MSVC build with absolute paths, suppress all output
+                // MSVC handles mixed C/C++ in a single invocation correctly via file extension
                 buildCmd << "cl /nologo /LD /O2 /I\"" << srcDir.string() << "\" ";
                 buildCmd << "\"" << parserCPath.string() << "\"";
                 if (fs::exists(scannerC)) {
                     buildCmd << " \"" << scannerCPath.string() << "\"";
-                } else if (fs::exists(scannerCC)) {
+                } else if (hasCppScanner) {
                     buildCmd << " \"" << scannerCCPath.string() << "\"";
                 }
                 buildCmd << " /Fe:\"" << outputPath.string() << "\" >NUL 2>&1";
+            } else if (hasCppScanner) {
+                // MinGW/Clang with C++ scanner: compile separately then link
+                auto parserObj = buildDir / "parser.o";
+                auto scannerObj = buildDir / "scanner.o";
+
+                // Compile parser.c as C
+                std::ostringstream compileParserCmd;
+                compileParserCmd << "gcc -c -O2 -I\"" << srcDir.string() << "\" ";
+                compileParserCmd << "\"" << parserCPath.string() << "\" ";
+                compileParserCmd << "-o \"" << parserObj.string() << "\" >NUL 2>&1";
+                if (std::system(compileParserCmd.str().c_str()) != 0) {
+                    cleanup();
+                    return Error{ErrorCode::InternalError, "parser.c compile failed"};
+                }
+
+                // Compile scanner.cc as C++
+                std::ostringstream compileScannerCmd;
+                compileScannerCmd << "g++ -c -O2 -std=c++14 -I\"" << srcDir.string() << "\" ";
+                compileScannerCmd << "\"" << scannerCCPath.string() << "\" ";
+                compileScannerCmd << "-o \"" << scannerObj.string() << "\" >NUL 2>&1";
+                if (std::system(compileScannerCmd.str().c_str()) != 0) {
+                    cleanup();
+                    return Error{ErrorCode::InternalError, "scanner.cc compile failed"};
+                }
+
+                // Link with g++
+                buildCmd << "g++ -shared -O2 ";
+                buildCmd << "\"" << parserObj.string() << "\" ";
+                buildCmd << "\"" << scannerObj.string() << "\" ";
+                buildCmd << "-o \"" << outputPath.string() << "\" >NUL 2>&1";
             } else {
-                // MinGW/Clang build with absolute paths
-                buildCmd << compiler << " -shared -O2 -I\"" << srcDir.string() << "\" ";
+                // MinGW/Clang pure C build: use gcc
+                buildCmd << "gcc -shared -O2 -I\"" << srcDir.string() << "\" ";
                 buildCmd << "\"" << parserCPath.string() << "\"";
                 if (fs::exists(scannerC)) {
                     buildCmd << " \"" << scannerCPath.string() << "\"";
-                } else if (fs::exists(scannerCC)) {
-                    buildCmd << " \"" << scannerCCPath.string() << "\"";
                 }
                 buildCmd << " -o \"" << outputPath.string() << "\" >NUL 2>&1";
             }
@@ -1404,14 +1436,49 @@ private:
             auto scannerCCPath = srcDir / "scanner.cc";
             auto outputPath = buildDir / libName;
 
-            buildCmd << compiler << " -dynamiclib -O2 -I\"" << srcDir.string() << "\" ";
-            buildCmd << "\"" << parserCPath.string() << "\"";
-            if (fs::exists(scannerC)) {
-                buildCmd << " \"" << scannerCPath.string() << "\"";
-            } else if (fs::exists(scannerCC)) {
-                buildCmd << " \"" << scannerCCPath.string() << "\"";
+            // Determine if we have a C++ scanner - this affects our compilation strategy
+            bool hasCppScanner = fs::exists(scannerCC);
+
+            if (hasCppScanner) {
+                // Mixed C/C++ build: compile separately then link
+                auto parserObj = buildDir / "parser.o";
+                auto scannerObj = buildDir / "scanner.o";
+
+                // Compile parser.c as C
+                std::ostringstream compileParserCmd;
+                compileParserCmd << "clang -c -fPIC -O2 -I\"" << srcDir.string() << "\" ";
+                compileParserCmd << "\"" << parserCPath.string() << "\" ";
+                compileParserCmd << "-o \"" << parserObj.string() << "\" 2>/dev/null";
+                if (std::system(compileParserCmd.str().c_str()) != 0) {
+                    cleanup();
+                    return Error{ErrorCode::InternalError, "parser.c compile failed"};
+                }
+
+                // Compile scanner.cc as C++
+                std::ostringstream compileScannerCmd;
+                compileScannerCmd << "clang++ -c -fPIC -O2 -std=c++14 -I\"" << srcDir.string()
+                                  << "\" ";
+                compileScannerCmd << "\"" << scannerCCPath.string() << "\" ";
+                compileScannerCmd << "-o \"" << scannerObj.string() << "\" 2>/dev/null";
+                if (std::system(compileScannerCmd.str().c_str()) != 0) {
+                    cleanup();
+                    return Error{ErrorCode::InternalError, "scanner.cc compile failed"};
+                }
+
+                // Link with clang++ (needed for C++ runtime)
+                buildCmd << "clang++ -dynamiclib -O2 ";
+                buildCmd << "\"" << parserObj.string() << "\" ";
+                buildCmd << "\"" << scannerObj.string() << "\" ";
+                buildCmd << "-o \"" << outputPath.string() << "\" 2>/dev/null";
+            } else {
+                // Pure C build: use clang (not clang++)
+                buildCmd << "clang -dynamiclib -fPIC -O2 -I\"" << srcDir.string() << "\" ";
+                buildCmd << "\"" << parserCPath.string() << "\"";
+                if (fs::exists(scannerC)) {
+                    buildCmd << " \"" << scannerCPath.string() << "\"";
+                }
+                buildCmd << " -o \"" << outputPath.string() << "\" 2>/dev/null";
             }
-            buildCmd << " -o \"" << outputPath.string() << "\" 2>/dev/null";
 #else
             // Linux build with absolute paths
             auto srcDir = buildDir / "src";
@@ -1420,14 +1487,48 @@ private:
             auto scannerCCPath = srcDir / "scanner.cc";
             auto outputPath = buildDir / libName;
 
-            buildCmd << compiler << " -shared -fPIC -O2 -I\"" << srcDir.string() << "\" ";
-            buildCmd << "\"" << parserCPath.string() << "\"";
-            if (fs::exists(scannerC)) {
-                buildCmd << " \"" << scannerCPath.string() << "\"";
-            } else if (fs::exists(scannerCC)) {
-                buildCmd << " \"" << scannerCCPath.string() << "\"";
+            // Determine if we have a C++ scanner - this affects our compilation strategy
+            bool hasCppScanner = fs::exists(scannerCC);
+
+            if (hasCppScanner) {
+                // Mixed C/C++ build: compile separately then link
+                auto parserObj = buildDir / "parser.o";
+                auto scannerObj = buildDir / "scanner.o";
+
+                // Compile parser.c as C
+                std::ostringstream compileParserCmd;
+                compileParserCmd << "gcc -c -fPIC -O2 -I\"" << srcDir.string() << "\" ";
+                compileParserCmd << "\"" << parserCPath.string() << "\" ";
+                compileParserCmd << "-o \"" << parserObj.string() << "\" 2>/dev/null";
+                if (std::system(compileParserCmd.str().c_str()) != 0) {
+                    cleanup();
+                    return Error{ErrorCode::InternalError, "parser.c compile failed"};
+                }
+
+                // Compile scanner.cc as C++
+                std::ostringstream compileScannerCmd;
+                compileScannerCmd << "g++ -c -fPIC -O2 -std=c++14 -I\"" << srcDir.string() << "\" ";
+                compileScannerCmd << "\"" << scannerCCPath.string() << "\" ";
+                compileScannerCmd << "-o \"" << scannerObj.string() << "\" 2>/dev/null";
+                if (std::system(compileScannerCmd.str().c_str()) != 0) {
+                    cleanup();
+                    return Error{ErrorCode::InternalError, "scanner.cc compile failed"};
+                }
+
+                // Link with g++ (needed for C++ runtime)
+                buildCmd << "g++ -shared -O2 ";
+                buildCmd << "\"" << parserObj.string() << "\" ";
+                buildCmd << "\"" << scannerObj.string() << "\" ";
+                buildCmd << "-o \"" << outputPath.string() << "\" 2>/dev/null";
+            } else {
+                // Pure C build: use gcc (not g++)
+                buildCmd << "gcc -shared -fPIC -O2 -I\"" << srcDir.string() << "\" ";
+                buildCmd << "\"" << parserCPath.string() << "\"";
+                if (fs::exists(scannerC)) {
+                    buildCmd << " \"" << scannerCPath.string() << "\"";
+                }
+                buildCmd << " -o \"" << outputPath.string() << "\" 2>/dev/null";
             }
-            buildCmd << " -o \"" << outputPath.string() << "\" 2>/dev/null";
 #endif
 
             if (std::system(buildCmd.str().c_str()) != 0) {
