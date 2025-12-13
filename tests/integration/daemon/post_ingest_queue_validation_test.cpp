@@ -408,16 +408,6 @@ TEST_CASE("PostIngestQueue - Error Handling", "[daemon][post-ingest][errors]") {
 // ============================================================================
 // Thread Scaling Tests
 // ============================================================================
-
-TEST_CASE("PostIngestQueue - Thread Scaling", "[daemon][post-ingest][scaling]") {
-    SKIP_DAEMON_TEST_ON_WINDOWS();
-    PostIngestQueueFixture fixture;
-
-    SECTION("Thread scaling not supported in strand-based implementation") {
-        auto* queue = fixture.serviceManager_->getPostIngestQueue();
-        REQUIRE(queue != nullptr);
-
-        bool scaled = fixture.serviceManager_->resizePostIngestThreads(4);
-        REQUIRE_FALSE(scaled);
-    }
-}
+// NOTE: Thread scaling test removed - resizePostIngestThreads API does not exist
+// in the current ServiceManager implementation. If this functionality is added
+// in the future, tests should be re-enabled.

@@ -1,10 +1,8 @@
 #include <spdlog/spdlog.h>
-#include <regex>
 #include <thread>
+#include <boost/asio.hpp>
 #include <boost/asio/co_spawn.hpp>
-#include <boost/asio/deferred.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/experimental/parallel_group.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/api/content_store.h>
@@ -33,8 +31,8 @@ PostIngestQueue::PostIngestQueue(
     std::size_t capacity)
     : store_(std::move(store)), meta_(std::move(meta)), extractors_(std::move(extractors)),
       kg_(std::move(kg)), graphComponent_(std::move(graphComponent)), coordinator_(coordinator),
-      strand_(coordinator_->makeStrand()), capacity_(capacity ? capacity : 1000) {
-    spdlog::info("[PostIngestQueue] Created with strand from WorkCoordinator");
+      capacity_(capacity ? capacity : 1000) {
+    spdlog::info("[PostIngestQueue] Created (parallel processing via WorkCoordinator)");
 }
 
 PostIngestQueue::~PostIngestQueue() {
@@ -42,15 +40,22 @@ PostIngestQueue::~PostIngestQueue() {
 }
 
 void PostIngestQueue::start() {
+    spdlog::info("[PostIngestQueue] start() called, stop_={}", stop_.load());
     if (!stop_.load()) {
-        boost::asio::co_spawn(strand_, channelPoller(), boost::asio::detached);
+        spdlog::info("[PostIngestQueue] Spawning channelPoller coroutine...");
+        boost::asio::co_spawn(coordinator_->getExecutor(), channelPoller(), boost::asio::detached);
+        spdlog::info("[PostIngestQueue] Spawning kgPoller coroutine...");
+        boost::asio::co_spawn(coordinator_->getExecutor(), kgPoller(), boost::asio::detached);
 
         constexpr int maxWaitMs = 100;
-        for (int i = 0; i < maxWaitMs && !started_.load(); ++i) {
+        for (int i = 0; i < maxWaitMs && (!started_.load() || !kgStarted_.load()); ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
-        spdlog::info("[PostIngestQueue] Channel poller started (ready={})", started_.load());
+        spdlog::info("[PostIngestQueue] Pollers started (extraction={}, kg={})",
+                     started_.load(), kgStarted_.load());
+    } else {
+        spdlog::warn("[PostIngestQueue] start() skipped because stop_=true");
     }
 }
 
@@ -60,38 +65,30 @@ void PostIngestQueue::stop() {
 }
 
 boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
+    spdlog::info("[PostIngestQueue] channelPoller coroutine STARTED");
+    const std::size_t channelCapacity =
+        std::max<std::size_t>(65536, TuneAdvisor::postIngestQueueMax());
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
-            "post_ingest", 4096);
+            "post_ingest", channelCapacity);
+    spdlog::info("[PostIngestQueue] channelPoller got channel (cap={})", channelCapacity);
 
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+    spdlog::info("[PostIngestQueue] channelPoller got timer");
 
     started_.store(true);
 
     while (!stop_.load()) {
         InternalEventBus::PostIngestTask task;
-        if (channel->try_pop(task)) {
-            try {
-                co_await processMetadataStage(task.hash, task.mime);
-
-                using namespace boost::asio::experimental;
-                auto ex = co_await boost::asio::this_coro::executor;
-
-                auto result = co_await make_parallel_group(
-                                  co_spawn(ex, processKnowledgeGraphStage(task.hash, task.mime),
-                                           boost::asio::deferred),
-                                  co_spawn(ex, processEmbeddingStage(task.hash, task.mime),
-                                           boost::asio::deferred))
-                                  .async_wait(wait_for_all(), boost::asio::use_awaitable);
-
-                processed_++;
-                InternalEventBus::instance().incPostConsumed();
-            } catch (const std::exception& e) {
-                spdlog::error("[PostIngestQueue] Failed to process {}: {}", task.hash, e.what());
-                failed_++;
-            }
+        if (inFlight_.load() < kMaxConcurrent_ && channel->try_pop(task)) {
+            inFlight_.fetch_add(1);
+            boost::asio::post(coordinator_->getExecutor(),
+                              [this, hash = std::move(task.hash), mime = std::move(task.mime)]() {
+                                  processTask(hash, mime);
+                                  inFlight_.fetch_sub(1);
+                              });
         } else {
-            timer.expires_after(std::chrono::milliseconds(100));
+            timer.expires_after(std::chrono::milliseconds(50));
             co_await timer.async_wait(boost::asio::use_awaitable);
         }
     }
@@ -100,22 +97,26 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
 }
 
 void PostIngestQueue::enqueue(Task t) {
+    const std::size_t channelCapacity =
+        std::max<std::size_t>(65536, TuneAdvisor::postIngestQueueMax());
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
-            "post_ingest", 4096);
+            "post_ingest", channelCapacity);
 
     InternalEventBus::PostIngestTask task;
     task.hash = std::move(t.hash);
     task.mime = std::move(t.mime);
 
-    constexpr int maxRetries = 3;
-    constexpr auto baseBackoff = std::chrono::milliseconds(10);
+    constexpr int maxRetries = 10;
+    constexpr auto baseBackoff = std::chrono::milliseconds(50);
+    constexpr auto maxBackoff = std::chrono::milliseconds(1000);
 
     for (int i = 0; i < maxRetries; ++i) {
         if (channel->try_push(task)) {
             return;
         }
-        std::this_thread::sleep_for(baseBackoff * (1 << i));
+        auto delay = std::min(baseBackoff * (1 << i), maxBackoff);
+        std::this_thread::sleep_for(delay);
     }
 
     spdlog::error("[PostIngestQueue] Channel full after {} retries, dropping task for hash: {}",
@@ -123,9 +124,11 @@ void PostIngestQueue::enqueue(Task t) {
 }
 
 bool PostIngestQueue::tryEnqueue(const Task& t) {
+    const std::size_t channelCapacity =
+        std::max<std::size_t>(65536, TuneAdvisor::postIngestQueueMax());
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
-            "post_ingest", 4096);
+            "post_ingest", channelCapacity);
 
     InternalEventBus::PostIngestTask task;
     task.hash = t.hash;
@@ -139,15 +142,25 @@ bool PostIngestQueue::tryEnqueue(Task&& t) {
 }
 
 std::size_t PostIngestQueue::size() const {
-    // Channel size not available, return 0
     return 0;
 }
 
-boost::asio::awaitable<void> PostIngestQueue::processMetadataStage(const std::string& hash,
-                                                                   const std::string& mime) {
+void PostIngestQueue::processTask(const std::string& hash, const std::string& mime) {
+    try {
+        processMetadataStage(hash, mime);
+        processEmbeddingStage(hash, mime);
+        processed_++;
+        InternalEventBus::instance().incPostConsumed();
+    } catch (const std::exception& e) {
+        spdlog::error("[PostIngestQueue] Failed to process {}: {}", hash, e.what());
+        failed_++;
+    }
+}
+
+void PostIngestQueue::processMetadataStage(const std::string& hash, const std::string& mime) {
     if (!store_ || !meta_) {
         spdlog::warn("[PostIngestQueue] store or metadata unavailable; dropping task {}", hash);
-        co_return;
+        return;
     }
 
     try {
@@ -171,7 +184,7 @@ boost::asio::awaitable<void> PostIngestQueue::processMetadataStage(const std::st
         } else {
             spdlog::warn("[PostIngestQueue] Metadata not found for hash {}; content may be orphaned",
                          hash);
-            co_return;
+            return;
         }
 
         auto txt = extractDocumentText(store_, hash, mimeType, extension, extractors_);
@@ -199,35 +212,34 @@ boost::asio::awaitable<void> PostIngestQueue::processMetadataStage(const std::st
                               ms);
             }
         }
+
+        if (docId >= 0) {
+            auto tagsRes = meta_->getDocumentTags(docId);
+            std::vector<std::string> tags;
+            if (tagsRes && !tagsRes.value().empty()) {
+                tags = tagsRes.value();
+            }
+            dispatchToKgChannel(hash, docId, fileName, std::move(tags));
+        }
     } catch (const std::exception& e) {
         spdlog::error("[PostIngestQueue] Metadata stage failed for {}: {}", hash, e.what());
     }
 }
-boost::asio::awaitable<void>
-PostIngestQueue::processKnowledgeGraphStage(const std::string& hash, const std::string& /*mime*/) {
-    if (!graphComponent_ || !meta_) {
-        co_return;
+
+void PostIngestQueue::processKnowledgeGraphStage(const std::string& hash, int64_t docId,
+                                                  const std::string& filePath,
+                                                  const std::vector<std::string>& tags) {
+    if (!graphComponent_) {
+        return;
     }
 
     try {
         auto start = std::chrono::steady_clock::now();
 
-        auto infoRes = meta_->getDocumentByHash(hash);
-        if (!infoRes || !infoRes.value().has_value()) {
-            co_return;
-        }
-
-        const auto& doc = *infoRes.value();
-        auto tagsRes = meta_->getDocumentTags(doc.id);
-        std::vector<std::string> tags;
-        if (tagsRes && !tagsRes.value().empty()) {
-            tags = tagsRes.value();
-        }
-
         GraphComponent::DocumentGraphContext ctx{.documentHash = hash,
-                                                 .filePath = doc.fileName,
-                                                 .tags = std::move(tags),
-                                                 .documentDbId = doc.id};
+                                                 .filePath = filePath,
+                                                 .tags = tags,
+                                                 .documentDbId = docId};
 
         auto result = graphComponent_->onDocumentIngested(ctx);
         if (!result) {
@@ -238,13 +250,13 @@ PostIngestQueue::processKnowledgeGraphStage(const std::string& hash, const std::
             double ms = std::chrono::duration<double, std::milli>(duration).count();
             spdlog::debug("[PostIngestQueue] KG stage completed for {} in {:.2f}ms", hash, ms);
         }
+        InternalEventBus::instance().incKgConsumed();
     } catch (const std::exception& e) {
         spdlog::error("[PostIngestQueue] KG stage failed for {}: {}", hash, e.what());
     }
 }
 
-boost::asio::awaitable<void> PostIngestQueue::processEmbeddingStage(const std::string& hash,
-                                                                    const std::string& mime) {
+void PostIngestQueue::processEmbeddingStage(const std::string& hash, const std::string& /*mime*/) {
     try {
         auto embedChannel =
             InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
@@ -252,7 +264,7 @@ boost::asio::awaitable<void> PostIngestQueue::processEmbeddingStage(const std::s
 
         if (!embedChannel) {
             spdlog::warn("[PostIngestQueue] Embed channel unavailable for {}", hash);
-            co_return;
+            return;
         }
 
         InternalEventBus::EmbedJob job;
@@ -271,7 +283,56 @@ boost::asio::awaitable<void> PostIngestQueue::processEmbeddingStage(const std::s
     } catch (const std::exception& e) {
         spdlog::error("[PostIngestQueue] Embedding dispatch failed for {}: {}", hash, e.what());
     }
-    co_return;
+}
+
+void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId,
+                                          const std::string& filePath,
+                                          std::vector<std::string> tags) {
+    constexpr std::size_t kgChannelCapacity = 16384;
+    auto channel = InternalEventBus::instance().get_or_create_channel<InternalEventBus::KgJob>(
+        "kg_jobs", kgChannelCapacity);
+
+    InternalEventBus::KgJob job;
+    job.hash = hash;
+    job.documentId = docId;
+    job.filePath = filePath;
+    job.tags = std::move(tags);
+
+    if (!channel->try_push(std::move(job))) {
+        spdlog::warn("[PostIngestQueue] KG channel full, dropping job for {}", hash);
+        InternalEventBus::instance().incKgDropped();
+    } else {
+        InternalEventBus::instance().incKgQueued();
+    }
+}
+
+boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
+    constexpr std::size_t kgChannelCapacity = 16384;
+    auto channel = InternalEventBus::instance().get_or_create_channel<InternalEventBus::KgJob>(
+        "kg_jobs", kgChannelCapacity);
+
+    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+
+    kgStarted_.store(true);
+
+    while (!stop_.load()) {
+        InternalEventBus::KgJob job;
+        if (kgInFlight_.load() < kMaxKgConcurrent_ && channel->try_pop(job)) {
+            kgInFlight_.fetch_add(1);
+            boost::asio::post(
+                coordinator_->getExecutor(),
+                [this, hash = std::move(job.hash), docId = job.documentId,
+                 filePath = std::move(job.filePath), tags = std::move(job.tags)]() {
+                    processKnowledgeGraphStage(hash, docId, filePath, tags);
+                    kgInFlight_.fetch_sub(1);
+                });
+        } else {
+            timer.expires_after(std::chrono::milliseconds(25));
+            co_await timer.async_wait(boost::asio::use_awaitable);
+        }
+    }
+
+    spdlog::info("[PostIngestQueue] KG poller exited");
 }
 
 } // namespace yams::daemon

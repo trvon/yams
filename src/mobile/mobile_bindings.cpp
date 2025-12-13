@@ -1257,8 +1257,6 @@ yams_mobile_string_view yams_mobile_search_result_json(const yams_mobile_search_
 
     if (!result->response.paths.empty())
         root["paths"] = result->response.paths;
-    if (!result->response.jsonOutput.empty())
-        root["jsonOutput"] = result->response.jsonOutput;
     if (!result->response.searchStats.empty())
         root["stats"] = result->response.searchStats;
 
@@ -1330,8 +1328,6 @@ yams_mobile_string_view yams_mobile_grep_result_json(const yams_mobile_grep_resu
         root["filesWithout"] = result->response.filesWithout;
     if (!result->response.pathsOnly.empty())
         root["pathsOnly"] = result->response.pathsOnly;
-    if (!result->response.jsonOutput.empty())
-        root["jsonOutput"] = result->response.jsonOutput;
     root["format"] = result->response.format;
 
     g_temp_string = root.dump();

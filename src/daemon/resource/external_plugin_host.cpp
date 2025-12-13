@@ -47,6 +47,11 @@ struct ExternalPluginHost::Impl {
     std::set<std::filesystem::path> trusted;
     ExternalPluginHost::StateCallback state_callback;
 
+    // Manifest cache: maps canonical path -> cached descriptor
+    // This avoids spawning duplicate processes during scan + load sequences
+    mutable std::mutex manifest_cache_mutex;
+    std::unordered_map<std::string, PluginDescriptor> manifest_cache;
+
     Impl(ServiceManager* sm, const std::filesystem::path& trustFile, ExternalPluginHostConfig cfg)
         : service_manager(sm), trust_file(trustFile), config(std::move(cfg)) {
         loadTrust();
@@ -67,37 +72,19 @@ struct ExternalPluginHost::Impl {
     }
 
     //--------------------------------------------------------------------------
-    // IPluginHost interface implementation
+    // Helper: Build PluginDescriptor from manifest JSON
     //--------------------------------------------------------------------------
 
-    auto scanTarget(const std::filesystem::path& file) -> Result<PluginDescriptor> {
-        if (!isExternalPluginFile(file)) {
-            return Error{ErrorCode::InvalidArgument,
-                         "File is not a valid external plugin: " + file.string()};
-        }
-
-        // Launch process temporarily to get manifest
-        auto proc_config = buildProcessConfig(file);
-        auto process = std::make_unique<extraction::PluginProcess>(std::move(proc_config));
-
-        auto rpc_client = std::make_unique<extraction::JsonRpcClient>(*process);
-
-        // Call handshake to get manifest
-        auto result = rpc_client->call("handshake.manifest");
-        if (!result) {
-            return Error{ErrorCode::IOError,
-                         "Failed to get manifest from plugin: " + file.string()};
-        }
-
-        auto manifest = result.value();
+    static PluginDescriptor buildDescriptorFromManifest(const json& manifest,
+                                                        const std::filesystem::path& path) {
         PluginDescriptor desc;
-        desc.name = manifest.value("name", file.stem().string());
+        desc.name = manifest.value("name", path.stem().string());
         desc.version = manifest.value("version", "0.0.0");
         desc.abiVersion = manifest.value("abi_version", 0U);
-        desc.path = file;
+        desc.path = path;
         desc.manifestJson = manifest.dump();
 
-        // Parse interfaces - prefer explicit interfaces array from plugin manifest
+        // Parse interfaces - prefer explicit interfaces array
         if (manifest.contains("interfaces") && manifest["interfaces"].is_array()) {
             for (const auto& iface : manifest["interfaces"]) {
                 if (iface.is_string()) {
@@ -106,7 +93,7 @@ struct ExternalPluginHost::Impl {
             }
         } else if (manifest.contains("capabilities")) {
             // Fallback: infer interfaces from capabilities (legacy support)
-            auto caps = manifest["capabilities"];
+            const auto& caps = manifest["capabilities"];
             if (caps.contains("content_extraction")) {
                 desc.interfaces.push_back("content_extractor_v1");
             }
@@ -118,10 +105,70 @@ struct ExternalPluginHost::Impl {
             }
         }
 
-        // Shutdown the temporary process
-        (void)rpc_client->call("plugin.shutdown");
-
         return desc;
+    }
+
+    //--------------------------------------------------------------------------
+    // IPluginHost interface implementation
+    //--------------------------------------------------------------------------
+
+    auto scanTarget(const std::filesystem::path& file) -> Result<PluginDescriptor> {
+        if (!isExternalPluginFile(file)) {
+            return Error{ErrorCode::InvalidArgument,
+                         "File is not a valid external plugin: " + file.string()};
+        }
+
+        // Canonicalize path for cache lookup
+        auto canonical_path = fs::weakly_canonical(file).string();
+
+        // Check cache first to avoid spawning duplicate processes
+        {
+            std::lock_guard<std::mutex> cache_lock(manifest_cache_mutex);
+            auto it = manifest_cache.find(canonical_path);
+            if (it != manifest_cache.end()) {
+                spdlog::debug("ExternalPluginHost: Using cached manifest for {}", file.string());
+                return it->second;
+            }
+        }
+
+        // Try to get descriptor without spawning a process
+        std::optional<PluginDescriptor> desc;
+
+        // For plugin directories with yams-plugin.json, read manifest from disk
+        if (isPluginDirectory(file)) {
+            if (auto disk_manifest = readManifest(file)) {
+                desc = buildDescriptorFromManifest(*disk_manifest, file);
+                spdlog::info("ExternalPluginHost: Read manifest from disk for {} (no process spawned)",
+                             file.string());
+            }
+        }
+
+        // Fall back to launching process to get manifest (for standalone scripts)
+        if (!desc) {
+            spdlog::debug("ExternalPluginHost: Spawning process to get manifest for {}", file.string());
+            auto proc_config = buildProcessConfig(file);
+            auto process = std::make_unique<extraction::PluginProcess>(std::move(proc_config));
+            auto rpc_client = std::make_unique<extraction::JsonRpcClient>(*process);
+
+            auto result = rpc_client->call("handshake.manifest");
+            if (!result) {
+                return Error{ErrorCode::IOError,
+                             "Failed to get manifest from plugin: " + file.string()};
+            }
+
+            desc = buildDescriptorFromManifest(result.value(), file);
+
+            // Shutdown the temporary process
+            (void)rpc_client->call("plugin.shutdown");
+        }
+
+        // Cache the result
+        {
+            std::lock_guard<std::mutex> cache_lock(manifest_cache_mutex);
+            manifest_cache[canonical_path] = *desc;
+        }
+
+        return *desc;
     }
 
     auto scanDirectory(const std::filesystem::path& dir) -> Result<std::vector<PluginDescriptor>> {
@@ -164,62 +211,44 @@ struct ExternalPluginHost::Impl {
         -> Result<PluginDescriptor> {
         spdlog::info("ExternalPluginHost::load() called for: {}", file.string());
 
-        // Check if file exists
+        // Validate file exists and is trusted
         if (!fs::exists(file)) {
-            spdlog::warn("ExternalPluginHost::load() file not found: {}", file.string());
             return Error{ErrorCode::FileNotFound, "Plugin file not found: " + file.string()};
         }
-
-        // Check trust policy
         if (!trust_file.empty() && !isTrusted(file)) {
-            spdlog::warn("ExternalPluginHost::load() not trusted: {}", file.string());
             return Error{ErrorCode::Unauthorized, "Plugin is not in trust list: " + file.string()};
         }
 
-        // Scan to get descriptor
-        spdlog::info("ExternalPluginHost::load() scanning...");
+        // Get descriptor from cache (populated by scanDirectory) or scan now
         auto scan_result = scanTarget(file);
         if (!scan_result) {
-            spdlog::warn("ExternalPluginHost::load() scan failed: {}", scan_result.error().message);
             return scan_result;
         }
 
         auto descriptor = std::move(scan_result.value());
         const auto& name = descriptor.name;
-        spdlog::info("ExternalPluginHost::load() scan succeeded, name={}", name);
 
-        // Check if already loaded
+        // Check if already loaded and max plugins limit
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (loaded.find(name) != loaded.end()) {
-                spdlog::warn("ExternalPluginHost::load() already loaded: {}", name);
                 return Error{ErrorCode::InvalidState, "Plugin already loaded: " + name};
             }
-        }
-
-        // Check max plugins limit
-        {
-            std::lock_guard<std::mutex> lock(mutex);
             if (loaded.size() >= config.maxPlugins) {
-                spdlog::warn("ExternalPluginHost::load() max plugins reached");
                 return Error{ErrorCode::ResourceExhausted, "Maximum number of plugins loaded"};
             }
         }
 
-        // Launch the plugin process
-        spdlog::info("ExternalPluginHost::load() launching process for real load...");
+        // Launch the persistent plugin process
+        spdlog::info("ExternalPluginHost: Launching plugin process for '{}'", name);
         auto proc_config = buildProcessConfig(file);
         auto process = std::make_unique<extraction::PluginProcess>(std::move(proc_config));
         auto rpc_client = std::make_unique<extraction::JsonRpcClient>(*process);
 
-        // Handshake again (real load)
-        spdlog::info("ExternalPluginHost::load() calling handshake.manifest...");
-        auto handshake_result = rpc_client->call("handshake.manifest");
-        if (!handshake_result) {
-            spdlog::warn("ExternalPluginHost::load() handshake failed");
+        // Handshake (required by plugin protocol)
+        if (!rpc_client->call("handshake.manifest")) {
             return Error{ErrorCode::IOError, "Handshake failed during load"};
         }
-        spdlog::info("ExternalPluginHost::load() handshake succeeded");
 
         // Initialize plugin with config
         json init_params;
@@ -231,13 +260,9 @@ struct ExternalPluginHost::Impl {
             }
         }
 
-        spdlog::info("ExternalPluginHost::load() calling plugin.init...");
-        auto init_result = rpc_client->call("plugin.init", init_params);
-        if (!init_result) {
-            spdlog::warn("ExternalPluginHost::load() init failed");
+        if (!rpc_client->call("plugin.init", init_params)) {
             return Error{ErrorCode::IOError, "Plugin init failed"};
         }
-        spdlog::info("ExternalPluginHost::load() init succeeded");
 
         // Store instance
         {

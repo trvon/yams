@@ -14,15 +14,16 @@
 namespace yams::daemon {
 
 /**
- * @brief Manages background task consumers (embedding jobs, FTS5 indexing, orphan scanning).
+ * @brief Manages background task consumers (FTS5 indexing, orphan scanning, etc.).
  *
  * Extracts background task orchestration from ServiceManager into a focused component.
  * Owns coroutines that process InternalEventBus job queues and runs periodic maintenance.
  *
  * ## Architecture
- * - **EmbedJob Consumer**: Processes embedding generation requests from the event bus.
  * - **Fts5Job Consumer**: Handles FTS5 full-text indexing and orphan cleanup operations.
  * - **OrphanScan Task**: Periodic scan for orphaned FTS5 index entries.
+ *
+ * NOTE: EmbedJob is handled by EmbeddingService (on a strand for proper serialization).
  *
  * ## FSM Integration
  * - Reports subsystem health to `DaemonLifecycleFsm` via `setSubsystemDegraded()`.
@@ -77,10 +78,12 @@ public:
     /**
      * @brief Starts all background task consumers.
      *
-     * Launches three coroutines:
-     * - EmbedJob consumer (processes embedding generation requests)
+     * Launches several coroutines:
      * - Fts5Job consumer (handles full-text indexing)
      * - OrphanScan task (periodic maintenance)
+     * - PathTreeRepair task
+     * - Checkpoint task
+     * - StorageGc task
      *
      * @note Idempotent - safe to call multiple times (no-op if already running).
      * @throws std::runtime_error if ServiceManager weak_ptr has expired
@@ -103,17 +106,6 @@ public:
     bool isRunning() const noexcept { return running_.load(std::memory_order_acquire); }
 
 private:
-    /**
-     * @brief Launches the EmbedJob consumer coroutine.
-     *
-     * Subscribes to "embed_jobs" channel on InternalEventBus and processes
-     * embedding generation requests by calling repairMissingEmbeddings().
-     *
-     * Polls queue at 100ms intervals; triggers embedding generator initialization
-     * if not yet ready.
-     */
-    void launchEmbedJobConsumer();
-
     /**
      * @brief Launches the Fts5Job consumer coroutine.
      *

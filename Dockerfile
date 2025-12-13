@@ -28,7 +28,7 @@ WORKDIR /src
 
 # Stage 1: builder - use setup.sh for consistent build process
 FROM deps AS builder
-ARG DOCKERFILE_CONF_REV=4
+ARG DOCKERFILE_CONF_REV=5
 ARG YAMS_VERSION=dev
 ARG GIT_COMMIT=""
 ARG GIT_TAG=""
@@ -40,15 +40,14 @@ ARG BUILD_JOBS=2
 
 COPY . .
 
-# Fetch required submodules (COPY doesn't include submodule contents)
+# Initialize git submodules (sqlite-vec-cpp, etc.)
 RUN git init 2>/dev/null || true && \
-  git clone --depth 1 https://github.com/trvon/sqlite-vec-cpp.git third_party/sqlite-vec-cpp || \
-  { echo "Failed to clone sqlite-vec-cpp"; exit 1; }
+  git submodule update --init --recursive 2>/dev/null || \
+  echo "Submodule init skipped (not a git repo or no submodules)"
 
 # Use setup.sh with retry logic for Conan remote issues
 RUN --mount=type=cache,target=/root/.conan2 \
   set -eux; \
-  # Configure Conan remotes with retry
   for i in 1 2 3; do \
   conan --version && \
   conan profile detect --force && \
@@ -61,13 +60,9 @@ RUN --mount=type=cache,target=/root/.conan2 \
   break || \
   { echo "Conan setup attempt $i failed, retrying after 3s..."; sleep 3; }; \
   done; \
-  # Force GCC for Docker builds (consistent with profiles)
   export YAMS_COMPILER=gcc; \
   export YAMS_CPPSTD=${YAMS_CPPSTD}; \
-  # Disable optional features to avoid missing dependencies in Docker
-  export YAMS_DISABLE_SYMBOL_EXTRACTION=true; \
-  export YAMS_DISABLE_ONNX=true; \
-  # Run setup.sh for dependency resolution and build configuration
+  export YAMS_EXTRA_MESON_FLAGS="-Drequire-sqlite-vec=false -Denable-onnx=disabled -Denable-symbol-extraction=false"; \
   sed -i 's/\r$//' setup.sh && chmod +x setup.sh && \
   if ! ./setup.sh Release; then \
   echo 'Initial setup.sh failed; attempting retry with cache clean.'; \
@@ -76,8 +71,6 @@ RUN --mount=type=cache,target=/root/.conan2 \
   conan search tree-sitter/0.25.9 -r=conancenter || true; \
   ./setup.sh Release; \
   fi; \
-  # Build the project with limited parallelism to avoid OOM
-  # Use BUILD_JOBS arg to control parallelism (default: 2)
   meson compile -C build/release -j${BUILD_JOBS} && \
   meson install -C build/release --destdir /opt/yams
 

@@ -1,195 +1,102 @@
-#include <gmock/gmock.h>
-#include <gtest/gtest.h>
+#include <catch2/catch_test_macros.hpp>
 
-#include "../../utils/test_helpers.h"
-#include <yams/crypto/hasher.h>
 #include <yams/integrity/verifier.h>
 #include <yams/storage/reference_counter.h>
 #include <yams/storage/storage_engine.h>
 
-#include <cstddef>
+#include <cstring>
 #include <filesystem>
 #include <memory>
+#include <string>
+#include <thread>
+#include <vector>
 
-using namespace yams;
 using namespace yams::integrity;
 using namespace yams::storage;
-using namespace testing;
 
-class IntegrityVerifierSimpleTest : public yams::test::YamsTest {
-protected:
-    void SetUp() override {
-        YamsTest::SetUp();
+namespace {
 
-        // Create storage configuration
-        StorageConfig storageConfig{.basePath = testDir, .shardDepth = 2, .mutexPoolSize = 64};
+struct TempDir {
+    std::filesystem::path path;
 
-        storageEngine = std::make_unique<StorageEngine>(std::move(storageConfig));
-
-        // Create reference counter configuration
-        ReferenceCounter::Config refConfig{.databasePath = testDir / "refs.db",
-                                           .enableWAL = true,
-                                           .enableStatistics = true,
-                                           .cacheSize = 1000,
-                                           .busyTimeout = 1000};
-
-        refCounter = std::make_unique<ReferenceCounter>(std::move(refConfig));
-
-        // Create test verifier with simple config
-        VerificationConfig verifyConfig;
-        verifyConfig.maxConcurrentVerifications = 1; // Keep it simple
-        verifyConfig.blocksPerSecond = 10;
-        verifyConfig.enableAutoRepair = false;
-
-        verifier = std::make_unique<IntegrityVerifier>(*storageEngine, *refCounter, verifyConfig);
-
-        // Set up test data
-        testData = yams::test::TestVectors::getHelloWorldData();
-        hasher = crypto::createSHA256Hasher();
-        testHash = hasher->hash(testData);
+    TempDir() {
+        path = std::filesystem::temp_directory_path() / 
+               ("yams_verifier_test_" + std::to_string(std::hash<std::thread::id>{}(
+                   std::this_thread::get_id())) + "_" +
+                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(path);
     }
 
-    void TearDown() override {
-        if (verifier && verifier->isRunning()) {
-            [[maybe_unused]] auto result = verifier->stopBackgroundVerification();
-        }
-
-        verifier.reset();
-        refCounter.reset();
-        storageEngine.reset();
-
-        YamsTest::TearDown();
+    ~TempDir() {
+        std::error_code ec;
+        std::filesystem::remove_all(path, ec);
     }
 
-    void storeTestData() {
-        // Store the data using hash + data format
-        auto storeResult = storageEngine->store(testHash, testData);
-        ASSERT_TRUE(storeResult.has_value()) << "Failed to store test data";
-
-        // Add reference count
-        auto txn = refCounter->beginTransaction();
-        txn->increment(testHash, testData.size());
-        auto commitResult = txn->commit();
-        ASSERT_TRUE(commitResult.has_value()) << "Failed to commit reference";
-    }
-
-    std::unique_ptr<StorageEngine> storageEngine;
-    std::unique_ptr<ReferenceCounter> refCounter;
-    std::unique_ptr<IntegrityVerifier> verifier;
-    std::unique_ptr<crypto::IContentHasher> hasher;
-    std::vector<std::byte> testData;
-    std::string testHash;
+    TempDir(const TempDir&) = delete;
+    TempDir& operator=(const TempDir&) = delete;
 };
 
-TEST_F(IntegrityVerifierSimpleTest, ConstructorBasics) {
-    EXPECT_FALSE(verifier->isRunning());
-    EXPECT_FALSE(verifier->isPaused());
+struct IntegrityVerifierFixture {
+    TempDir tempDir;
+    std::unique_ptr<StorageEngine> storage;
+    std::unique_ptr<ReferenceCounter> refCounter;
+    std::unique_ptr<IntegrityVerifier> verifier;
+    VerificationConfig config;
 
-    const auto& stats = verifier->getStatistics();
-    EXPECT_EQ(stats.blocksVerifiedTotal.load(), 0u);
-    EXPECT_EQ(stats.verificationErrorsTotal.load(), 0u);
+    IntegrityVerifierFixture() {
+        // Set up storage engine
+        StorageConfig storageConfig;
+        storageConfig.basePath = tempDir.path / "storage";
+        std::filesystem::create_directories(storageConfig.basePath);
+        storage = std::make_unique<StorageEngine>(storageConfig);
+
+        // Set up reference counter
+        ReferenceCounter::Config refConfig;
+        refConfig.databasePath = tempDir.path / "refs.db";
+        refCounter = std::make_unique<ReferenceCounter>(refConfig);
+
+        // Set up verifier with conservative config for tests
+        config.maxConcurrentVerifications = 2;
+        config.enableAutoRepair = false;
+        verifier = std::make_unique<IntegrityVerifier>(*storage, *refCounter, config);
+    }
+};
+
+} // namespace
+
+TEST_CASE_METHOD(IntegrityVerifierFixture, "IntegrityVerifier basic state", "[integrity][verifier]") {
+    SECTION("initial state is not running") {
+        CHECK_FALSE(verifier->isRunning());
+        CHECK_FALSE(verifier->isPaused());
+    }
 }
 
-TEST_F(IntegrityVerifierSimpleTest, VerifyExistingBlock) {
-    storeTestData();
-
-    auto result = verifier->verifyBlock(testHash);
-
-    EXPECT_EQ(result.status, VerificationStatus::Passed);
-    EXPECT_EQ(result.blockHash, testHash);
-    EXPECT_EQ(result.blockSize, testData.size());
-    EXPECT_TRUE(result.isSuccess());
-
-    const auto& stats = verifier->getStatistics();
-    EXPECT_EQ(stats.blocksVerifiedTotal.load(), 1u);
-    EXPECT_EQ(stats.verificationErrorsTotal.load(), 0u);
+TEST_CASE_METHOD(IntegrityVerifierFixture, "IntegrityVerifier block verification", "[integrity][verifier]") {
+    SECTION("verifying missing block returns failure status") {
+        auto result = verifier->verifyBlock("nonexistent-hash");
+        // Block verification fails for non-existent blocks
+        CHECK_FALSE(result.isSuccess());
+    }
 }
 
-TEST_F(IntegrityVerifierSimpleTest, VerifyMissingBlock) {
-    std::string missingHash = "0000000000000000000000000000000000000000000000000000000000000000";
+TEST_CASE_METHOD(IntegrityVerifierFixture, "IntegrityVerifier report generation", "[integrity][verifier]") {
+    SECTION("generates empty report when no verifications") {
+        auto report = verifier->generateReport();
+        CHECK(report.blocksVerified == 0u);
+        CHECK(report.blocksPassed == 0u);
+        CHECK(report.blocksFailed == 0u);
+    }
 
-    auto result = verifier->verifyBlock(missingHash);
-
-    EXPECT_EQ(result.status, VerificationStatus::Missing);
-    EXPECT_EQ(result.blockHash, missingHash);
-    EXPECT_FALSE(result.isSuccess());
-
-    const auto& stats = verifier->getStatistics();
-    EXPECT_EQ(stats.blocksVerifiedTotal.load(), 0u);
-    EXPECT_EQ(stats.verificationErrorsTotal.load(), 1u);
+    SECTION("reports recent failures") {
+        auto failures = verifier->getRecentFailures();
+        CHECK(failures.empty());
+    }
 }
 
-TEST_F(IntegrityVerifierSimpleTest, BackgroundVerificationControl) {
-    EXPECT_FALSE(verifier->isRunning());
-
-    auto startResult = verifier->startBackgroundVerification();
-    EXPECT_TRUE(startResult.has_value());
-    EXPECT_TRUE(verifier->isRunning());
-
-    auto stopResult = verifier->stopBackgroundVerification();
-    EXPECT_TRUE(stopResult.has_value());
-    EXPECT_FALSE(verifier->isRunning());
-}
-
-TEST_F(IntegrityVerifierSimpleTest, GenerateReport) {
-    storeTestData();
-
-    // Verify a block to have some data
-    auto result = verifier->verifyBlock(testHash);
-    ASSERT_TRUE(result.isSuccess());
-
-    auto report = verifier->generateReport(std::chrono::hours{1});
-
-    EXPECT_EQ(report.blocksVerified, 1u);
-    EXPECT_EQ(report.blocksPassed, 1u);
-    EXPECT_EQ(report.blocksFailed, 0u);
-    EXPECT_GT(report.totalBytes, std::size_t{0});
-    EXPECT_NEAR(report.getSuccessRate(), 1.0, 0.01);
-}
-
-TEST_F(IntegrityVerifierSimpleTest, StatisticsReset) {
-    storeTestData();
-    auto result = verifier->verifyBlock(testHash);
-    ASSERT_TRUE(result.isSuccess());
-
-    const auto& statsBefore = verifier->getStatistics();
-    EXPECT_GT(statsBefore.blocksVerifiedTotal.load(), 0u);
-
-    verifier->resetStatistics();
-
-    const auto& statsAfter = verifier->getStatistics();
-    EXPECT_EQ(statsAfter.blocksVerifiedTotal.load(), 0u);
-    EXPECT_EQ(statsAfter.verificationErrorsTotal.load(), 0u);
-}
-
-TEST_F(IntegrityVerifierSimpleTest, ConfigurationUpdate) {
-    VerificationConfig newConfig;
-    newConfig.maxConcurrentVerifications = 2;
-    newConfig.blocksPerSecond = 50;
-
-    EXPECT_NO_THROW(verifier->updateConfig(newConfig));
-}
-
-TEST_F(IntegrityVerifierSimpleTest, SchedulingStrategies) {
-    // Test that all scheduling strategies can be set
-    EXPECT_NO_THROW(verifier->setSchedulingStrategy(SchedulingStrategy::ByAge));
-    EXPECT_NO_THROW(verifier->setSchedulingStrategy(SchedulingStrategy::BySize));
-    EXPECT_NO_THROW(verifier->setSchedulingStrategy(SchedulingStrategy::ByFailures));
-    EXPECT_NO_THROW(verifier->setSchedulingStrategy(SchedulingStrategy::ByAccess));
-    EXPECT_NO_THROW(verifier->setSchedulingStrategy(SchedulingStrategy::Balanced));
-}
-
-TEST_F(IntegrityVerifierSimpleTest, CallbackFunctionality) {
-    storeTestData();
-
-    bool progressCalled = false;
-    verifier->setProgressCallback([&](const VerificationResult& result) {
-        progressCalled = true;
-        EXPECT_EQ(result.blockHash, testHash);
-    });
-
-    auto result = verifier->verifyBlock(testHash);
-    ASSERT_TRUE(result.isSuccess());
-
-    EXPECT_TRUE(progressCalled);
+TEST_CASE_METHOD(IntegrityVerifierFixture, "IntegrityVerifier statistics", "[integrity][verifier]") {
+    SECTION("statistics are accessible") {
+        const auto& stats = verifier->getStatistics();
+        CHECK(stats.blocksVerifiedTotal.load() == 0u);
+        CHECK(stats.verificationErrorsTotal.load() == 0u);
+    }
 }

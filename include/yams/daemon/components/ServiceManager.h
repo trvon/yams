@@ -149,8 +149,6 @@ public:
     // Resize the worker pool to a target size; creates pool on demand.
     bool resizeWorkerPool(std::size_t target);
     PostIngestQueue* getPostIngestQueue() const { return postIngest_.get(); }
-    // Resize PostIngestQueue worker threads; returns false if unchanged/missing.
-    bool resizePostIngestThreads(std::size_t target);
     struct SearchLoadMetrics {
         std::uint32_t active{0};
         std::uint32_t queued{0};
@@ -261,29 +259,17 @@ public:
         tuningConfig_ = cfg;
         if (postIngest_ && cfg.postIngestCapacity > 0)
             postIngest_->setCapacity(cfg.postIngestCapacity);
-        if (cfg.postIngestThreadsMin > 0)
-            (void)resizePostIngestThreads(cfg.postIngestThreadsMin);
-        // Align PoolManager bounds for post_ingest with new config
-        try {
-            PoolManager::Config piCfg{};
-            piCfg.min_size =
-                static_cast<uint32_t>(std::max<std::size_t>(1, cfg.postIngestThreadsMin));
-            piCfg.max_size =
-                static_cast<uint32_t>(std::max(cfg.postIngestThreadsMin, cfg.postIngestThreadsMax));
-            piCfg.cooldown_ms = TuneAdvisor::poolCooldownMs();
-            piCfg.low_watermark = TuneAdvisor::poolLowWatermarkPercent();
-            piCfg.high_watermark = TuneAdvisor::poolHighWatermarkPercent();
-            PoolManager::instance().configure("post_ingest", piCfg);
-        } catch (...) {
-        }
     }
     const std::vector<std::shared_ptr<yams::extraction::IContentExtractor>>&
     getContentExtractors() const {
         return contentExtractors_;
     }
-    // Symbol extractors (ABI adapters)
+    // Symbol extractors (ABI adapters) - delegate to PluginManager
     const std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>>& getSymbolExtractors() const {
-        return symbolExtractors_;
+        if (pluginManager_) {
+            return pluginManager_->getSymbolExtractors();
+        }
+        return symbolExtractors_; // Empty fallback
     }
 
     // Knowledge Graph Store (PBI-059)

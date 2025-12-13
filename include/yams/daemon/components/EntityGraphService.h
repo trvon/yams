@@ -5,18 +5,16 @@
  * and updates the canonical Knowledge Graph (KG) plus a materialized symbol index
  * for fast grep/search. Provides a small facade API used by post-ingest pipeline
  * and repair flows.
+ *
+ * Jobs are dispatched to WorkCoordinator's shared thread pool for parallel processing.
  */
 #pragma once
 
 #include <atomic>
-#include <condition_variable>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <optional>
-#include <queue>
 #include <string>
-#include <thread>
 #include <vector>
 
 #include <yams/core/types.h>
@@ -98,10 +96,7 @@ public:
     std::vector<std::string> findSymbolsByName(const std::string& name) const;
 
 private:
-    void workerLoop();
     bool process(Job& job);
-
-private:
     // KG population helper: builds rich multi-layered symbol graph
     bool populateKnowledgeGraph(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
                                 const Job& job, const yams_symbol_extraction_result_v1* result);
@@ -132,16 +127,8 @@ private:
                       const yams_symbol_extraction_result_v1* result,
                       const std::vector<std::int64_t>& symbolNodeIds);
 
-    ServiceManager* services_{}; // not owning
-    std::vector<std::thread> threads_;
+    ServiceManager* services_{};
     std::atomic<bool> stop_{false};
-
-    // Minimal MPMC queue via mutex/condition (low traffic expected initially)
-    mutable std::mutex qmu_;
-    std::condition_variable qcv_;
-    std::deque<Job> q_;
-
-    // Stats
     std::atomic<std::uint64_t> accepted_{0}, processed_{0}, failed_{0};
 };
 

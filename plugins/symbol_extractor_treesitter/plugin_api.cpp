@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <set>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -39,6 +41,11 @@ static bool supports_language_abi(void* /*self*/, const char* language) {
     return supported_languages.count(lang) > 0;
 }
 
+// Cache for languages where grammar download has already been attempted (success or failure)
+// This prevents spawning download processes for every file of the same language type
+static std::mutex s_download_attempted_mutex;
+static std::set<std::string> s_download_attempted;
+
 static int extract_symbols_abi(void* /*self*/, const char* content, size_t content_len,
                                const char* file_path, const char* language,
                                yams_symbol_extraction_result_v1** out) {
@@ -63,11 +70,24 @@ static int extract_symbols_abi(void* /*self*/, const char* content, size_t conte
     std::fprintf(stderr, "[yams] loadGrammar returned (ok=%d)\n", lg.has_value());
     std::string dl_err;
     if (!lg) {
-        // Check if auto-download is enabled (default: true for backwards compatibility)
+        // Check if auto-download is enabled (default: disabled to prevent process spawning)
         const char* auto_dl = std::getenv("YAMS_AUTO_DOWNLOAD_GRAMMARS");
-        bool should_auto_download = (!auto_dl || std::string(auto_dl) != "0");
+        bool should_auto_download = (auto_dl && std::string(auto_dl) == "1");
 
-        if (should_auto_download) {
+        // Check if we've already attempted download for this language
+        bool already_attempted = false;
+        {
+            std::lock_guard<std::mutex> lock(s_download_attempted_mutex);
+            already_attempted = s_download_attempted.count(language) > 0;
+        }
+
+        if (should_auto_download && !already_attempted) {
+            // Mark as attempted BEFORE downloading to prevent concurrent attempts
+            {
+                std::lock_guard<std::mutex> lock(s_download_attempted_mutex);
+                s_download_attempted.insert(language);
+            }
+
             std::fprintf(stderr,
                          "[yams] auto-installing tree-sitter grammar for '%s' into datadir...\n",
                          language);
@@ -77,11 +97,13 @@ static int extract_symbols_abi(void* /*self*/, const char* content, size_t conte
             } else if (dl.error().size()) {
                 dl_err = dl.error();
             }
-        } else {
+        } else if (!should_auto_download) {
             std::fprintf(stderr,
                          "[yams] auto-download disabled, skipping grammar install for '%s'\n",
                          language);
-            dl_err = "Grammar auto-download is disabled (YAMS_AUTO_DOWNLOAD_GRAMMARS=0)";
+            dl_err = "Grammar not found. Set YAMS_AUTO_DOWNLOAD_GRAMMARS=1 to enable auto-download.";
+        } else {
+            dl_err = "Grammar download already attempted for this language.";
         }
     }
     if (!lg) {

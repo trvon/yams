@@ -1,282 +1,208 @@
-#include <cstdint>
-#include <filesystem>
-#include <fstream>
-#include <vector>
-#include <gtest/gtest.h>
+#include <array>
+#include <catch2/catch_test_macros.hpp>
 #include <yams/detection/file_type_detector.h>
 
-namespace yams::detection {
-namespace fs = std::filesystem;
+#include "detection_test_helpers.h"
 
-class FileTypeDetectorTest : public ::testing::Test {
-protected:
-    void SetUp() override {
-        testDataDir = fs::current_path() / "test_data";
-        validJsonPath = testDataDir / "valid_magic_numbers.json";
-        invalidJsonPath = testDataDir / "invalid_magic_numbers.json";
-        nonExistentPath = testDataDir / "non_existent.json";
+using namespace yams::detection;
+using yams::detection::test_utils::ScopedCurrentPath;
+using yams::detection::test_utils::TestDirectory;
 
-        // Create test files with known signatures
-        createTestFile("test.jpg", {0xFF, 0xD8, 0xFF, 0xE0}); // JPEG
-        createTestFile("test.png", {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A,
-                                    0x0A});                    // PNG (full 8-byte signature)
-        createTestFile("test.pdf", {0x25, 0x50, 0x44, 0x46});  // PDF
-        createTestFile("test.zip", {0x50, 0x4B, 0x03, 0x04});  // ZIP
-        createTestFile("test.json", {0x7B, 0x22, 0x74, 0x65}); // JSON (starts with {"te)
-        createTestFile("test.txt", {0x48, 0x65, 0x6C, 0x6C});  // Plain text (Hell...)
+namespace {
+struct DetectorFixture {
+    DetectorFixture() = default;
+    ~DetectorFixture() = default;
+
+    FileTypeDetectorConfig configWithCustomPatterns() const {
+        FileTypeDetectorConfig config{};
+        config.patternsFile = dir.validJson();
+        config.useCustomPatterns = true;
+        config.useBuiltinPatterns = true;
+        return config;
     }
 
-    void TearDown() override {
-        // Clean up test files
-        for (const auto& file : testFiles) {
-            if (fs::exists(file)) {
-                fs::remove(file);
-            }
+    FileTypeDetectorConfig configWithRepoFallback() const {
+        FileTypeDetectorConfig config{};
+        auto repoMagic = dir.repoMagicNumbers();
+        if (!repoMagic.empty()) {
+            config.patternsFile = repoMagic;
+            config.useCustomPatterns = true;
+        } else {
+            config.useCustomPatterns = false;
         }
-        // Clear detector state
-        FileTypeDetector::instance().clearCache();
+        config.useBuiltinPatterns = true;
+        return config;
     }
 
-    void createTestFile(const std::string& name, const std::vector<uint8_t>& data) {
-        fs::path filePath = testDataDir / name;
-        std::ofstream file(filePath, std::ios::binary);
-        file.write(reinterpret_cast<const char*>(data.data()), data.size());
-        file.close();
-        testFiles.push_back(filePath);
-    }
-
-    fs::path testDataDir;
-    fs::path validJsonPath;
-    fs::path invalidJsonPath;
-    fs::path nonExistentPath;
-    std::vector<fs::path> testFiles;
+    TestDirectory dir{};
+    FileTypeDetector& detector = FileTypeDetector::instance();
 };
+} // namespace
 
-TEST_F(FileTypeDetectorTest, InitializeWithValidConfig) {
-    FileTypeDetectorConfig config;
-    config.patternsFile = validJsonPath;
-    config.useCustomPatterns = true;
-
-    auto result = FileTypeDetector::instance().initialize(config);
-    EXPECT_TRUE(result.has_value()) << "Should successfully initialize with valid config";
+TEST_CASE_METHOD(DetectorFixture, "Initialize succeeds with valid config", "[detection][init]") {
+    auto config = configWithCustomPatterns();
+    auto result = detector.initialize(config);
+    REQUIRE(result);
 }
 
-TEST_F(FileTypeDetectorTest, InitializeWithNonExistentFile) {
-    FileTypeDetectorConfig config;
-    config.patternsFile = nonExistentPath;
-    config.useCustomPatterns = true;
+TEST_CASE_METHOD(DetectorFixture, "Initialize uses built-in patterns when file missing",
+                 "[detection][init]") {
+    auto config = configWithCustomPatterns();
+    config.patternsFile = dir.nonExistentJson();
 
-    auto result = FileTypeDetector::instance().initialize(config);
-    EXPECT_TRUE(result.has_value()) << "Should succeed with built-in patterns when file missing";
+    auto result = detector.initialize(config);
+    REQUIRE(result);
 }
 
-TEST_F(FileTypeDetectorTest, DetectFromBuffer_JPEG) {
-    FileTypeDetectorConfig config;
-    // Use the actual magic_numbers.json if it exists, otherwise use built-in patterns
-    fs::path actualMagicFile =
-        fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path() / "data" /
-        "magic_numbers.json";
-    if (fs::exists(actualMagicFile)) {
-        config.patternsFile = actualMagicFile;
-        config.useCustomPatterns = true;
-    } else {
-        config.useCustomPatterns = false; // Use built-in patterns
+TEST_CASE_METHOD(DetectorFixture, "Buffer detection succeeds for known formats",
+                 "[detection][buffer]") {
+    auto config = configWithRepoFallback();
+    REQUIRE(detector.initialize(config));
+
+    SECTION("JPEG buffer") {
+        std::array<std::byte, 4> jpegData{std::byte{0xFF}, std::byte{0xD8}, std::byte{0xFF},
+                                          std::byte{0xE0}};
+
+        auto result = detector.detectFromBuffer(jpegData);
+        REQUIRE(result);
+        const auto sig = result.value();
+        CHECK(sig.mimeType == "image/jpeg");
+        CHECK(sig.fileType == "image");
+        CHECK(sig.isBinary);
     }
-    FileTypeDetector::instance().initialize(config);
 
-    std::vector<std::byte> jpegData = {std::byte(0xFF), std::byte(0xD8), std::byte(0xFF),
-                                       std::byte(0xE0)};
+    SECTION("PNG buffer") {
+        std::array<std::byte, 8> pngData{std::byte{0x89}, std::byte{0x50}, std::byte{0x4E},
+                                         std::byte{0x47}, std::byte{0x0D}, std::byte{0x0A},
+                                         std::byte{0x1A}, std::byte{0x0A}};
 
-    auto result = FileTypeDetector::instance().detectFromBuffer(jpegData);
-    ASSERT_TRUE(result.has_value()) << "Should detect JPEG from buffer";
-
-    const auto& sig = result.value();
-    EXPECT_EQ(sig.mimeType, "image/jpeg");
-    EXPECT_EQ(sig.fileType, "image");
-    EXPECT_TRUE(sig.isBinary);
-}
-
-TEST_F(FileTypeDetectorTest, DetectFromBuffer_PNG) {
-    FileTypeDetectorConfig config;
-    // Use the actual magic_numbers.json if it exists, otherwise use built-in patterns
-    fs::path actualMagicFile =
-        fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path() / "data" /
-        "magic_numbers.json";
-    if (fs::exists(actualMagicFile)) {
-        config.patternsFile = actualMagicFile;
-        config.useCustomPatterns = true;
-    } else {
-        config.useCustomPatterns = false; // Use built-in patterns
+        auto result = detector.detectFromBuffer(pngData);
+        REQUIRE(result);
+        const auto sig = result.value();
+        CHECK(sig.mimeType == "image/png");
+        CHECK(sig.fileType == "image");
+        CHECK(sig.isBinary);
     }
-    FileTypeDetector::instance().initialize(config);
-
-    std::vector<std::byte> pngData = {std::byte(0x89), std::byte(0x50), std::byte(0x4E),
-                                      std::byte(0x47), std::byte(0x0D), std::byte(0x0A),
-                                      std::byte(0x1A), std::byte(0x0A)};
-
-    auto result = FileTypeDetector::instance().detectFromBuffer(pngData);
-    ASSERT_TRUE(result.has_value()) << "Should detect PNG from buffer";
-
-    const auto& sig = result.value();
-    EXPECT_EQ(sig.mimeType, "image/png");
-    EXPECT_EQ(sig.fileType, "image");
-    EXPECT_TRUE(sig.isBinary);
 }
 
-TEST_F(FileTypeDetectorTest, DetectFromBuffer_EmptyBuffer) {
-    std::vector<std::byte> emptyData;
-
-    auto result = FileTypeDetector::instance().detectFromBuffer(emptyData);
-    EXPECT_FALSE(result.has_value()) << "Should fail on empty buffer";
+TEST_CASE_METHOD(DetectorFixture, "Empty buffer returns no detection", "[detection][buffer]") {
+    auto result = detector.detectFromBuffer(std::span<const std::byte>{});
+    REQUIRE_FALSE(result);
 }
 
-TEST_F(FileTypeDetectorTest, DetectFromFile_JPEG) {
-    FileTypeDetectorConfig config;
-    config.patternsFile = validJsonPath;
-    config.useCustomPatterns = true;
-    FileTypeDetector::instance().initialize(config);
+TEST_CASE_METHOD(DetectorFixture, "File detection works for known types", "[detection][file]") {
+    auto config = configWithCustomPatterns();
+    REQUIRE(detector.initialize(config));
 
-    auto result = FileTypeDetector::instance().detectFromFile(testDataDir / "test.jpg");
-    ASSERT_TRUE(result.has_value()) << "Should detect JPEG from file";
+    auto jpegPath = dir.createBinaryFile(
+        "test.jpg", std::array<std::byte, 4>{std::byte{0xFF}, std::byte{0xD8}, std::byte{0xFF},
+                                             std::byte{0xE0}});
 
-    const auto& sig = result.value();
-    EXPECT_EQ(sig.mimeType, "image/jpeg");
-    EXPECT_EQ(sig.fileType, "image");
+    auto result = detector.detectFromFile(jpegPath);
+    REQUIRE(result);
+    const auto sig = result.value();
+    CHECK(sig.mimeType == "image/jpeg");
+    CHECK(sig.fileType == "image");
 }
 
-TEST_F(FileTypeDetectorTest, DetectFromFile_NonExistent) {
-    auto result = FileTypeDetector::instance().detectFromFile(nonExistentPath);
-    EXPECT_FALSE(result.has_value()) << "Should fail on non-existent file";
+TEST_CASE_METHOD(DetectorFixture, "File detection handles missing files", "[detection][file]") {
+    auto result = detector.detectFromFile(dir.nonExistentJson());
+    REQUIRE_FALSE(result);
 }
 
-TEST_F(FileTypeDetectorTest, ClassificationMethods_TextMimeType) {
-    FileTypeDetectorConfig config;
-    config.patternsFile = validJsonPath;
-    config.useCustomPatterns = true;
-    FileTypeDetector::instance().initialize(config);
+TEST_CASE_METHOD(DetectorFixture, "Classification utilities report mime details",
+                 "[detection][classification]") {
+    auto config = configWithCustomPatterns();
+    REQUIRE(detector.initialize(config));
 
-    EXPECT_TRUE(FileTypeDetector::instance().isTextMimeType("application/json"));
-    EXPECT_TRUE(FileTypeDetector::instance().isTextMimeType("text/plain"));
-    EXPECT_FALSE(FileTypeDetector::instance().isTextMimeType("image/jpeg"));
-    EXPECT_FALSE(FileTypeDetector::instance().isTextMimeType("application/pdf"));
+    CHECK(detector.isTextMimeType("application/json"));
+    CHECK(detector.isTextMimeType("text/plain"));
+    CHECK_FALSE(detector.isTextMimeType("image/jpeg"));
+    CHECK_FALSE(detector.isTextMimeType("application/pdf"));
+
+    CHECK(detector.isBinaryMimeType("image/jpeg"));
+    CHECK(detector.isBinaryMimeType("application/pdf"));
+    CHECK_FALSE(detector.isBinaryMimeType("application/json"));
+    CHECK_FALSE(detector.isBinaryMimeType("text/plain"));
+
+    CHECK(detector.getFileTypeCategory("image/jpeg") == "image");
+    CHECK(detector.getFileTypeCategory("application/pdf") == "document");
+    CHECK(detector.getFileTypeCategory("application/json") == "text");
+    CHECK(detector.getFileTypeCategory("application/zip") == "archive");
 }
 
-TEST_F(FileTypeDetectorTest, ClassificationMethods_BinaryMimeType) {
-    FileTypeDetectorConfig config;
-    config.patternsFile = validJsonPath;
-    config.useCustomPatterns = true;
-    FileTypeDetector::instance().initialize(config);
-
-    EXPECT_TRUE(FileTypeDetector::instance().isBinaryMimeType("image/jpeg"));
-    EXPECT_TRUE(FileTypeDetector::instance().isBinaryMimeType("application/pdf"));
-    EXPECT_FALSE(FileTypeDetector::instance().isBinaryMimeType("application/json"));
-    EXPECT_FALSE(FileTypeDetector::instance().isBinaryMimeType("text/plain"));
+TEST_CASE("Extension-based mime fallback", "[detection][classification]") {
+    CHECK(FileTypeDetector::getMimeTypeFromExtension(".jpg") == "image/jpeg");
+    CHECK(FileTypeDetector::getMimeTypeFromExtension(".png") == "image/png");
+    CHECK(FileTypeDetector::getMimeTypeFromExtension(".pdf") == "application/pdf");
+    CHECK(FileTypeDetector::getMimeTypeFromExtension(".txt") == "text/plain");
+    CHECK(FileTypeDetector::getMimeTypeFromExtension(".unknown") == "application/octet-stream");
 }
 
-TEST_F(FileTypeDetectorTest, ClassificationMethods_FileTypeCategory) {
-    FileTypeDetectorConfig config;
-    config.patternsFile = validJsonPath;
-    config.useCustomPatterns = true;
-    FileTypeDetector::instance().initialize(config);
-
-    EXPECT_EQ(FileTypeDetector::instance().getFileTypeCategory("image/jpeg"), "image");
-    EXPECT_EQ(FileTypeDetector::instance().getFileTypeCategory("application/pdf"), "document");
-    EXPECT_EQ(FileTypeDetector::instance().getFileTypeCategory("application/json"), "text");
-    EXPECT_EQ(FileTypeDetector::instance().getFileTypeCategory("application/zip"), "archive");
-}
-
-TEST_F(FileTypeDetectorTest, ExtensionBasedMimeType) {
-    EXPECT_EQ(FileTypeDetector::getMimeTypeFromExtension(".jpg"), "image/jpeg");
-    EXPECT_EQ(FileTypeDetector::getMimeTypeFromExtension(".png"), "image/png");
-    EXPECT_EQ(FileTypeDetector::getMimeTypeFromExtension(".pdf"), "application/pdf");
-    EXPECT_EQ(FileTypeDetector::getMimeTypeFromExtension(".txt"), "text/plain");
-    EXPECT_EQ(FileTypeDetector::getMimeTypeFromExtension(".unknown"), "application/octet-stream");
-}
-
-TEST_F(FileTypeDetectorTest, CacheFunctionality) {
-    FileTypeDetectorConfig config;
+TEST_CASE_METHOD(DetectorFixture, "Cache statistics are reported", "[detection][cache]") {
+    auto config = configWithCustomPatterns();
     config.cacheResults = true;
     config.cacheSize = 10;
-    config.patternsFile = validJsonPath;
-    config.useCustomPatterns = true;
-    FileTypeDetector::instance().initialize(config);
+    REQUIRE(detector.initialize(config));
 
-    std::vector<std::byte> jpegData = {std::byte(0xFF), std::byte(0xD8), std::byte(0xFF),
-                                       std::byte(0xE0)};
+    std::array<std::byte, 4> jpegData{std::byte{0xFF}, std::byte{0xD8}, std::byte{0xFF},
+                                      std::byte{0xE0}};
 
-    // First detection
-    auto result1 = FileTypeDetector::instance().detectFromBuffer(jpegData);
-    ASSERT_TRUE(result1.has_value());
+    auto result1 = detector.detectFromBuffer(jpegData);
+    REQUIRE(result1);
 
-    // Second detection (should use cache)
-    auto result2 = FileTypeDetector::instance().detectFromBuffer(jpegData);
-    ASSERT_TRUE(result2.has_value());
+    auto result2 = detector.detectFromBuffer(jpegData);
+    REQUIRE(result2);
+    CHECK(result1.value().mimeType == result2.value().mimeType);
 
-    EXPECT_EQ(result1.value().mimeType, result2.value().mimeType);
-
-    // Check cache stats
-    auto cacheStats = FileTypeDetector::instance().getCacheStats();
-    EXPECT_GT(cacheStats.hits, 0) << "Should have cache hits";
-    EXPECT_GT(cacheStats.entries, 0) << "Should have cache entries";
+    auto cacheStats = detector.getCacheStats();
+    CHECK(cacheStats.hits > 0);
+    CHECK(cacheStats.entries > 0);
 }
 
-TEST_F(FileTypeDetectorTest, ClearCache) {
-    FileTypeDetectorConfig config;
+TEST_CASE_METHOD(DetectorFixture, "Cache can be cleared", "[detection][cache]") {
+    auto config = configWithCustomPatterns();
     config.cacheResults = true;
-    FileTypeDetector::instance().initialize(config);
+    REQUIRE(detector.initialize(config));
 
-    // Detect multiple file types to populate cache
-    std::vector<std::byte> jpegData = {std::byte(0xFF), std::byte(0xD8), std::byte(0xFF)};
-    FileTypeDetector::instance().detectFromBuffer(jpegData);
+    std::array<std::byte, 3> jpegData{std::byte{0xFF}, std::byte{0xD8}, std::byte{0xFF}};
+    detector.detectFromBuffer(jpegData);
 
-    std::vector<std::byte> pngData = {std::byte(0x89), std::byte(0x50), std::byte(0x4E),
-                                      std::byte(0x47), std::byte(0x0D), std::byte(0x0A),
-                                      std::byte(0x1A), std::byte(0x0A)};
-    FileTypeDetector::instance().detectFromBuffer(pngData);
+    std::array<std::byte, 8> pngData{std::byte{0x89}, std::byte{0x50}, std::byte{0x4E},
+                                     std::byte{0x47}, std::byte{0x0D}, std::byte{0x0A},
+                                     std::byte{0x1A}, std::byte{0x0A}};
+    detector.detectFromBuffer(pngData);
 
-    auto statsBefore = FileTypeDetector::instance().getCacheStats();
-    // If cache is still empty, skip the test
+    auto statsBefore = detector.getCacheStats();
     if (statsBefore.entries == 0) {
-        GTEST_SKIP() << "Cache functionality not available or not working";
+        SKIP("Cache functionality not available or not populated in this environment");
     }
 
-    EXPECT_GT(statsBefore.entries, 0);
-
-    FileTypeDetector::instance().clearCache();
-
-    auto statsAfter = FileTypeDetector::instance().getCacheStats();
-    EXPECT_EQ(statsAfter.entries, 0) << "Cache should be empty after clearing";
+    detector.clearCache();
+    auto statsAfter = detector.getCacheStats();
+    CHECK(statsAfter.entries == 0);
 }
 
-TEST_F(FileTypeDetectorTest, LoadPatternsFromValidFile) {
-    auto result = FileTypeDetector::instance().loadPatternsFromFile(validJsonPath);
-    EXPECT_TRUE(result.has_value()) << "Should load valid patterns file";
+TEST_CASE_METHOD(DetectorFixture, "Patterns load from JSON", "[detection][patterns]") {
+    auto loadResult = detector.loadPatternsFromFile(dir.validJson());
+    REQUIRE(loadResult);
 
-    auto patterns = FileTypeDetector::instance().getPatterns();
-    EXPECT_GT(patterns.size(), 0) << "Should have loaded patterns";
+    auto patterns = detector.getPatterns();
+    REQUIRE_FALSE(patterns.empty());
 }
 
-TEST_F(FileTypeDetectorTest, HexToBytes_ValidHex) {
-    auto result = FileTypeDetector::hexToBytes("FFD8FF");
-    ASSERT_TRUE(result.has_value()) << "Should convert valid hex";
+TEST_CASE("Hex helpers convert values", "[detection][utilities]") {
+    auto bytes = FileTypeDetector::hexToBytes("FFD8FF");
+    REQUIRE(bytes);
+    const auto vec = bytes.value();
+    REQUIRE(vec.size() == 3);
+    CHECK(vec.at(0) == std::byte{0xFF});
+    CHECK(vec.at(1) == std::byte{0xD8});
+    CHECK(vec.at(2) == std::byte{0xFF});
 
-    const auto& bytes = result.value();
-    EXPECT_EQ(bytes.size(), 3);
-    EXPECT_EQ(bytes[0], std::byte(0xFF));
-    EXPECT_EQ(bytes[1], std::byte(0xD8));
-    EXPECT_EQ(bytes[2], std::byte(0xFF));
+    auto invalid = FileTypeDetector::hexToBytes("INVALID");
+    CHECK_FALSE(invalid);
+
+    std::vector<std::byte> expected{std::byte{0xFF}, std::byte{0xD8}, std::byte{0xFF}};
+    CHECK(FileTypeDetector::bytesToHex(expected) == "ffd8ff");
 }
-
-TEST_F(FileTypeDetectorTest, HexToBytes_InvalidHex) {
-    auto result = FileTypeDetector::hexToBytes("INVALID");
-    EXPECT_FALSE(result.has_value()) << "Should fail on invalid hex";
-}
-
-TEST_F(FileTypeDetectorTest, BytesToHex) {
-    std::vector<std::byte> bytes = {std::byte(0xFF), std::byte(0xD8), std::byte(0xFF)};
-
-    std::string hex = FileTypeDetector::bytesToHex(bytes);
-    EXPECT_EQ(hex, "ffd8ff") << "Should convert bytes to lowercase hex";
-}
-
-} // namespace yams::detection

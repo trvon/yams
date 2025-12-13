@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // Unit tests for CheckpointManager component (PBI-090)
+//
+// Catch2 migration from GTest (yams-3s4 / yams-zns)
 
-#include <gtest/gtest.h>
+#include <catch2/catch_test_macros.hpp>
 
 #include <yams/daemon/components/CheckpointManager.h>
 
@@ -12,39 +14,46 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
-#include <fstream>
 #include <thread>
 
 using namespace yams::daemon;
 using namespace std::chrono_literals;
 
-namespace yams::daemon::test {
+namespace {
 
-class CheckpointManagerTest : public ::testing::Test {
-protected:
-    void SetUp() override {
-        io_ = std::make_shared<boost::asio::io_context>();
-        work_guard_ = std::make_unique<
+struct CheckpointManagerFixture {
+    std::shared_ptr<boost::asio::io_context> io;
+    std::unique_ptr<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>
+        workGuard;
+    std::thread ioThread;
+    std::shared_ptr<std::atomic<bool>> stopRequested;
+    std::filesystem::path tempDir;
+
+    CheckpointManagerFixture() {
+        io = std::make_shared<boost::asio::io_context>();
+        workGuard = std::make_unique<
             boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>(
-            io_->get_executor());
-        io_thread_ = std::thread([this]() { io_->run(); });
+            io->get_executor());
+        ioThread = std::thread([this]() { io->run(); });
 
-        stopRequested_ = std::make_shared<std::atomic<bool>>(false);
+        stopRequested = std::make_shared<std::atomic<bool>>(false);
 
-        temp_dir_ = std::filesystem::temp_directory_path() / "yams_checkpoint_test";
-        std::filesystem::create_directories(temp_dir_);
+        tempDir = std::filesystem::temp_directory_path() /
+                  ("yams_checkpoint_test_" +
+                   std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(tempDir);
     }
 
-    void TearDown() override {
-        stopRequested_->store(true);
-        work_guard_.reset();
-        io_->stop();
-        if (io_thread_.joinable()) {
-            io_thread_.join();
+    ~CheckpointManagerFixture() {
+        stopRequested->store(true);
+        workGuard.reset();
+        io->stop();
+        if (ioThread.joinable()) {
+            ioThread.join();
         }
 
         std::error_code ec;
-        std::filesystem::remove_all(temp_dir_, ec);
+        std::filesystem::remove_all(tempDir, ec);
     }
 
     CheckpointManager::Config makeConfig(std::chrono::seconds interval = 1s) {
@@ -52,7 +61,7 @@ protected:
         cfg.checkpoint_interval = interval;
         cfg.vector_index_insert_threshold = 100;
         cfg.enable_hotzone_persistence = false;
-        cfg.data_dir = temp_dir_;
+        cfg.data_dir = tempDir;
         return cfg;
     }
 
@@ -60,149 +69,120 @@ protected:
         CheckpointManager::Dependencies deps;
         deps.vectorSystemManager = nullptr;
         deps.hotzoneManager = nullptr;
-        deps.executor = io_->get_executor();
-        deps.stopRequested = stopRequested_;
+        deps.executor = io->get_executor();
+        deps.stopRequested = stopRequested;
         return deps;
     }
-
-    std::shared_ptr<boost::asio::io_context> io_;
-    std::unique_ptr<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>
-        work_guard_;
-    std::thread io_thread_;
-    std::shared_ptr<std::atomic<bool>> stopRequested_;
-    std::filesystem::path temp_dir_;
 };
 
-TEST_F(CheckpointManagerTest, Construction) {
+} // namespace
+
+TEST_CASE_METHOD(CheckpointManagerFixture,
+                 "CheckpointManager construction and state",
+                 "[daemon][components][checkpoint][catch2]") {
     auto cfg = makeConfig();
     auto deps = makeDeps();
-
     CheckpointManager mgr(cfg, deps);
 
-    EXPECT_FALSE(mgr.isRunning());
-    EXPECT_EQ(mgr.vectorCheckpointCount(), 0);
-    EXPECT_EQ(mgr.hotzoneCheckpointCount(), 0);
-    EXPECT_EQ(mgr.checkpointErrorCount(), 0);
+    SECTION("initial state is not running") {
+        CHECK_FALSE(mgr.isRunning());
+    }
+
+    SECTION("initial counters are zero") {
+        CHECK(mgr.vectorCheckpointCount() == 0);
+        CHECK(mgr.hotzoneCheckpointCount() == 0);
+        CHECK(mgr.checkpointErrorCount() == 0);
+    }
+
+    SECTION("stats are initially zero") {
+        CHECK(mgr.lastVectorCheckpointEpoch() == 0);
+        CHECK(mgr.lastHotzoneCheckpointEpoch() == 0);
+    }
 }
 
-TEST_F(CheckpointManagerTest, StartStop) {
+TEST_CASE_METHOD(CheckpointManagerFixture,
+                 "CheckpointManager start/stop lifecycle",
+                 "[daemon][components][checkpoint][catch2]") {
     auto cfg = makeConfig(60s);
     auto deps = makeDeps();
-
     CheckpointManager mgr(cfg, deps);
 
-    EXPECT_FALSE(mgr.isRunning());
+    SECTION("start and stop work correctly") {
+        CHECK_FALSE(mgr.isRunning());
 
-    mgr.start();
-    std::this_thread::sleep_for(50ms);
-    EXPECT_TRUE(mgr.isRunning());
-
-    mgr.stop();
-    std::this_thread::sleep_for(50ms);
-    EXPECT_FALSE(mgr.isRunning());
-}
-
-TEST_F(CheckpointManagerTest, StartIdempotent) {
-    auto cfg = makeConfig(60s);
-    auto deps = makeDeps();
-
-    CheckpointManager mgr(cfg, deps);
-
-    mgr.start();
-    mgr.start();
-    mgr.start();
-
-    std::this_thread::sleep_for(50ms);
-    EXPECT_TRUE(mgr.isRunning());
-
-    mgr.stop();
-}
-
-TEST_F(CheckpointManagerTest, StopIdempotent) {
-    auto cfg = makeConfig(60s);
-    auto deps = makeDeps();
-
-    CheckpointManager mgr(cfg, deps);
-
-    mgr.start();
-    std::this_thread::sleep_for(50ms);
-
-    mgr.stop();
-    mgr.stop();
-    mgr.stop();
-
-    EXPECT_FALSE(mgr.isRunning());
-}
-
-TEST_F(CheckpointManagerTest, CheckpointNow_NoDependencies) {
-    auto cfg = makeConfig();
-    auto deps = makeDeps();
-
-    CheckpointManager mgr(cfg, deps);
-
-    bool result = mgr.checkpointNow();
-    EXPECT_TRUE(result);
-
-    EXPECT_EQ(mgr.vectorCheckpointCount(), 0);
-    EXPECT_EQ(mgr.hotzoneCheckpointCount(), 0);
-    EXPECT_EQ(mgr.checkpointErrorCount(), 0);
-}
-
-TEST_F(CheckpointManagerTest, ConfigDefaults) {
-    CheckpointManager::Config cfg;
-
-    EXPECT_EQ(cfg.checkpoint_interval.count(), 300);
-    EXPECT_EQ(cfg.vector_index_insert_threshold, 1000);
-    EXPECT_FALSE(cfg.enable_hotzone_persistence);
-}
-
-TEST_F(CheckpointManagerTest, StatsInitiallyZero) {
-    auto cfg = makeConfig();
-    auto deps = makeDeps();
-
-    CheckpointManager mgr(cfg, deps);
-
-    EXPECT_EQ(mgr.vectorCheckpointCount(), 0);
-    EXPECT_EQ(mgr.hotzoneCheckpointCount(), 0);
-    EXPECT_EQ(mgr.checkpointErrorCount(), 0);
-    EXPECT_EQ(mgr.lastVectorCheckpointEpoch(), 0);
-    EXPECT_EQ(mgr.lastHotzoneCheckpointEpoch(), 0);
-}
-
-TEST_F(CheckpointManagerTest, DestructorStops) {
-    auto cfg = makeConfig(60s);
-    auto deps = makeDeps();
-
-    {
-        CheckpointManager mgr(cfg, deps);
         mgr.start();
         std::this_thread::sleep_for(50ms);
-        EXPECT_TRUE(mgr.isRunning());
+        CHECK(mgr.isRunning());
+
+        mgr.stop();
+        std::this_thread::sleep_for(50ms);
+        CHECK_FALSE(mgr.isRunning());
+    }
+
+    SECTION("start is idempotent") {
+        mgr.start();
+        mgr.start();
+        mgr.start();
+
+        std::this_thread::sleep_for(50ms);
+        CHECK(mgr.isRunning());
+
+        mgr.stop();
+    }
+
+    SECTION("stop is idempotent") {
+        mgr.start();
+        std::this_thread::sleep_for(50ms);
+
+        mgr.stop();
+        mgr.stop();
+        mgr.stop();
+
+        CHECK_FALSE(mgr.isRunning());
     }
 }
 
-TEST_F(CheckpointManagerTest, CheckpointNow_WithHotzoneEnabled) {
-    auto cfg = makeConfig();
-    cfg.enable_hotzone_persistence = true;
-    auto deps = makeDeps();
+TEST_CASE_METHOD(CheckpointManagerFixture,
+                 "CheckpointManager manual checkpoint",
+                 "[daemon][components][checkpoint][catch2]") {
+    SECTION("checkpoint with no dependencies succeeds") {
+        auto cfg = makeConfig();
+        auto deps = makeDeps();
+        CheckpointManager mgr(cfg, deps);
 
-    CheckpointManager mgr(cfg, deps);
-
-    bool result = mgr.checkpointNow();
-    EXPECT_TRUE(result);
-}
-
-TEST_F(CheckpointManagerTest, MultipleManualCheckpoints) {
-    auto cfg = makeConfig();
-    auto deps = makeDeps();
-
-    CheckpointManager mgr(cfg, deps);
-
-    for (int i = 0; i < 5; ++i) {
-        EXPECT_TRUE(mgr.checkpointNow());
+        bool result = mgr.checkpointNow();
+        CHECK(result);
+        CHECK(mgr.vectorCheckpointCount() == 0);
+        CHECK(mgr.hotzoneCheckpointCount() == 0);
+        CHECK(mgr.checkpointErrorCount() == 0);
     }
 
-    EXPECT_EQ(mgr.checkpointErrorCount(), 0);
+    SECTION("checkpoint with hotzone enabled succeeds") {
+        auto cfg = makeConfig();
+        cfg.enable_hotzone_persistence = true;
+        auto deps = makeDeps();
+        CheckpointManager mgr(cfg, deps);
+
+        bool result = mgr.checkpointNow();
+        CHECK(result);
+    }
+
+    SECTION("multiple manual checkpoints work") {
+        auto cfg = makeConfig();
+        auto deps = makeDeps();
+        CheckpointManager mgr(cfg, deps);
+
+        for (int i = 0; i < 5; ++i) {
+            CHECK(mgr.checkpointNow());
+        }
+        CHECK(mgr.checkpointErrorCount() == 0);
+    }
 }
 
-} // namespace yams::daemon::test
+TEST_CASE("CheckpointManager config defaults", "[daemon][components][checkpoint][catch2]") {
+    CheckpointManager::Config cfg;
+
+    CHECK(cfg.checkpoint_interval.count() == 300);
+    CHECK(cfg.vector_index_insert_threshold == 1000);
+    CHECK_FALSE(cfg.enable_hotzone_persistence);
+}

@@ -11,6 +11,7 @@
 
 #include <chrono>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <variant>
@@ -44,11 +45,11 @@ public:
 
     ~PluginContentExtractorAdapter() override = default;
 
-    // Non-copyable (due to raw pointers), movable
+    // Non-copyable, non-movable (due to mutex)
     PluginContentExtractorAdapter(const PluginContentExtractorAdapter&) = delete;
     PluginContentExtractorAdapter& operator=(const PluginContentExtractorAdapter&) = delete;
-    PluginContentExtractorAdapter(PluginContentExtractorAdapter&&) = default;
-    PluginContentExtractorAdapter& operator=(PluginContentExtractorAdapter&&) = default;
+    PluginContentExtractorAdapter(PluginContentExtractorAdapter&&) = delete;
+    PluginContentExtractorAdapter& operator=(PluginContentExtractorAdapter&&) = delete;
 
     /// Check if this extractor supports the given MIME type or extension
     bool supports(const std::string& mime, const std::string& extension) const override;
@@ -63,6 +64,9 @@ public:
 
     /// Check if this is an external plugin adapter
     bool isExternal() const { return std::holds_alternative<ExternalBackend>(backend_); }
+
+    /// Check if the external plugin is currently busy (for backpressure)
+    bool isBusy() const;
 
 private:
     // ABI backend - direct function table calls
@@ -80,6 +84,7 @@ private:
 
     std::string name_;
     std::variant<AbiBackend, ExternalBackend> backend_;
+    mutable std::mutex externalMutex_;
 
     // Implementation helpers
     bool supportsAbi(const std::string& mime, const std::string& extension) const;

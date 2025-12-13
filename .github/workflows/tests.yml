@@ -65,7 +65,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: false  # No submodules required; prevents stale gitlink errors
+          submodules: recursive  # sqlite-vec-cpp submodule required for build
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         shell: bash
@@ -265,7 +265,8 @@ jobs:
           conan config show core.download:parallel 2>/dev/null || true
           conan --version
 
-      - name: Configure and Build with Meson
+      - name: Configure and Build with Meson (Unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -284,14 +285,20 @@ jobs:
           export YAMS_CONAN_HOST_PROFILE="${{ matrix.conan_host_profile }}"
           export YAMS_CONAN_ARCH="${{ matrix.conan_arch }}"
           export YAMS_EXTRA_MESON_FLAGS="${{ matrix.extra_meson_flags }}"
-          
-          if [ "$RUNNER_OS" = "Windows" ]; then
-             pwsh -File setup.ps1 Debug
-          else
-             chmod +x setup.sh
-             $ARCH_PREFIX ./setup.sh Debug
-             $ARCH_PREFIX meson compile -C builddir
-          fi
+
+          chmod +x setup.sh
+          $ARCH_PREFIX ./setup.sh Debug
+          $ARCH_PREFIX meson compile -C builddir
+
+      - name: Configure and Build with Meson (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          YAMS_CONAN_HOST_PROFILE: ${{ matrix.conan_host_profile }}
+          YAMS_CONAN_ARCH: ${{ matrix.conan_arch }}
+          YAMS_EXTRA_MESON_FLAGS: ${{ matrix.extra_meson_flags }}
+        run: |
+          .\setup.ps1 Debug
 
       # - name: Check mobile ABI surface
       #   shell: bash
@@ -306,9 +313,9 @@ jobs:
 
       
 
-      - name: Run Tests with Meson (native)
-        id: meson_tests_native
-        if: ${{ !matrix.needs_rosetta }}
+      - name: Run Tests with Meson (Unix)
+        id: meson_tests_unix
+        if: ${{ !matrix.needs_rosetta && runner.os != 'Windows' }}
         shell: bash
         continue-on-error: true
         env:
@@ -325,6 +332,28 @@ jobs:
             mkdir -p "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" || true
             echo "Using XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
           fi
+          # Run only unit and integration tests (exclude bench, stress, daemon-long, etc.)
+          meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs
+
+      - name: Run Tests with Meson (Windows)
+        id: meson_tests_windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        env:
+          YAMS_TEST_SAFE_SINGLE_INSTANCE: "1"
+          YAMS_SQLITE_MINIMAL_PRAGMAS: "1"
+          YAMS_SQLITE_VEC_INIT_TIMEOUT_MS: "1500"
+          YAMS_SQLITE_BUSY_TIMEOUT_MS: "1000"
+          YAMS_VDB_IN_MEMORY: "1"
+          YAMS_SQLITE_VEC_SKIP_INIT: "1"
+          YAMS_DISABLE_VECTORS: "1"
+          YAMS_TESTING: "1"
+        run: |
+          # Ensure meson/ninja are on PATH
+          $UserBase = python -m site --user-base
+          $UserBin = Join-Path $UserBase 'Scripts'
+          $env:PATH = "$UserBin;$env:PATH"
           # Run only unit and integration tests (exclude bench, stress, daemon-long, etc.)
           meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs
 
@@ -349,7 +378,7 @@ jobs:
           arch -x86_64 meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs
 
       - name: Upload test logs (artifacts)
-        if: ${{ steps.meson_tests_native.outcome == 'failure' || steps.meson_tests_rosetta.outcome == 'failure' }}
+        if: ${{ steps.meson_tests_unix.outcome == 'failure' || steps.meson_tests_windows.outcome == 'failure' || steps.meson_tests_rosetta.outcome == 'failure' }}
         uses: actions/upload-artifact@v4
         with:
           name: logs-${{ matrix.suffix }}-${{ github.run_number }}
@@ -369,7 +398,7 @@ jobs:
           echo "[View artifacts for this run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Enforce failure on protected branches
-        if: ${{ github.ref_protected && (steps.meson_tests_native.outcome == 'failure' || steps.meson_tests_rosetta.outcome == 'failure') }}
+        if: ${{ github.ref_protected && (steps.meson_tests_unix.outcome == 'failure' || steps.meson_tests_windows.outcome == 'failure' || steps.meson_tests_rosetta.outcome == 'failure') }}
         shell: bash
         run: |
           echo "Meson tests reported failures; enforcing job failure for protected branch." >&2

@@ -664,6 +664,10 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 out.postIngestLatencyMsEma = pq->latencyMsEma();
                 out.postIngestRateSecEma = pq->ratePerSecEma();
             }
+            auto& bus = InternalEventBus::instance();
+            out.kgQueued = bus.kgQueued();
+            out.kgDropped = bus.kgDropped();
+            out.kgConsumed = bus.kgConsumed();
         } else {
             out.workerThreads = std::max(1u, std::thread::hardware_concurrency());
         }

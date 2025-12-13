@@ -102,6 +102,24 @@ yams search hello --limit 5
 yams list --format minimal --limit 1 
 ```
 
+### Symbol Extraction (Tree-sitter Grammars)
+
+YAMS can extract symbols (functions, classes, etc.) from source code using tree-sitter grammars. During `yams init`, you'll be prompted to download grammars:
+
+```bash
+# Interactive: choose recommended, all, or specific languages
+yams init
+
+# Auto mode: downloads recommended grammars (C, C++, Python, JS, TS, Rust, Go)
+yams init --auto
+```
+
+**Supported languages:** C, C++, Python, JavaScript, TypeScript, Rust, Go, Java, C#, PHP, Kotlin, Dart, SQL, Solidity
+
+**Requirements:** git + compiler (MSVC/MinGW on Windows, gcc/clang on Unix)
+
+**Manual grammar paths:** Set environment variables like `YAMS_TS_CPP_LIB=/path/to/libtree-sitter-cpp.so`
+
 ### Path-Tree Search (Experimental)
 
 Enable hierarchical index for faster prefix/path scans in `config.toml`:
@@ -111,7 +129,6 @@ Enable hierarchical index for faster prefix/path scans in `config.toml`:
 enable = true
 mode = "preferred" # or "fallback" to keep legacy scans as backup
 ```
-
 
 Optimizes `yams grep` with explicit path prefixes via `listPathTreeChildren` index.
 

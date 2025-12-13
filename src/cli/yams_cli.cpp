@@ -1008,12 +1008,19 @@ std::filesystem::path YamsCLI::findMagicNumbersFile() {
         // Ignore errors in getting executable path
     }
 
-    // 3. Check common installation paths
+    // 3. Check relative to current working directory (development/testing)
+    searchPaths.push_back("data/magic_numbers.json");
+    searchPaths.push_back("../data/magic_numbers.json");
+    searchPaths.push_back("../../data/magic_numbers.json");
+    searchPaths.push_back("../../../data/magic_numbers.json");
+    searchPaths.push_back("../../../../data/magic_numbers.json");
+
+    // 4. Check common installation paths
     searchPaths.push_back("/usr/local/share/yams/data/magic_numbers.json");
     searchPaths.push_back("/usr/share/yams/data/magic_numbers.json");
     searchPaths.push_back("/opt/yams/share/data/magic_numbers.json");
 
-    // 4. Check in home directory
+    // 5. Check in home directory
     if (const char* home = std::getenv("HOME")) {
         searchPaths.push_back(fs::path(home) / ".local" / "share" / "yams" / "data" /
                               "magic_numbers.json");
@@ -1022,8 +1029,9 @@ std::filesystem::path YamsCLI::findMagicNumbersFile() {
     // Find the first existing file
     for (const auto& path : searchPaths) {
         if (fs::exists(path) && fs::is_regular_file(path)) {
-            spdlog::debug("Found magic_numbers.json at: {}", path.string());
-            return path;
+            auto resolved = path.is_absolute() ? path : fs::absolute(path);
+            spdlog::debug("Found magic_numbers.json at: {}", resolved.string());
+            return resolved;
         }
     }
 

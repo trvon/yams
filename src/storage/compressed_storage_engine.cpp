@@ -276,8 +276,7 @@ public:
     }
 
     compression::CompressionPolicy::Rules getPolicyRules() const {
-        // getRules method not exposed, return default rules
-        return compression::CompressionPolicy::Rules{};
+        return policy_.rules();
     }
 
     void setCompressionEnabled(bool enable) { compressionEnabled_ = enable; }

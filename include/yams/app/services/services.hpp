@@ -265,7 +265,6 @@ struct SearchResponse {
 
     // LLM-optimized outputs
     std::vector<std::string> paths; // pathsOnly=true output
-    std::string jsonOutput;         // pre-formatted JSON for LLM parsing
 
     // Search metadata
     bool usedHybrid{false};

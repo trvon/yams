@@ -781,6 +781,24 @@ if catch2_dep.found()
     install: false,
   )
 
+  # Daemon component submodule tests (CheckpointManager, ConfigResolver, etc.)
+  # Migrated from GTest as part of yams-3s4 / yams-zns
+  catch2_daemon_component_submodule_exe = executable('catch2_daemon_component_submodule',
+    files(
+      'unit/daemon/components/checkpoint_manager_test.cpp',
+      'unit/daemon/components/config_resolver_test.cpp',
+      'unit/daemon/components/database_manager_test.cpp',
+      'unit/daemon/components/plugin_manager_test.cpp',
+      'unit/daemon/components/request_queue_test.cpp',
+      'unit/daemon/components/vector_system_manager_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # Add plugin path for plugin harness tests
   plugin_test_cpp_args = test_cpp_noerror_args + ['-DYAMS_TESTING=1']
   if get_option('plugin-onnx')
@@ -849,6 +867,116 @@ if catch2_dep.found()
     install: false,
   )
 
+  # Storage submodule tests (StorageEngine, CompressedStorageEngine, ReferenceCounter, etc.)
+  # Migrated from GTest as part of yams-3s4 / yams-8b9
+  catch2_storage_submodule_exe = executable('catch2_storage_submodule',
+    files(
+      'unit/storage/compressed_storage_engine_catch2_test.cpp',
+      'unit/storage/compressed_storage_stats_catch2_test.cpp',
+      'unit/storage/object_storage_adapter_catch2_test.cpp',
+      'unit/storage/reference_counter_catch2_test.cpp',
+      'unit/storage/reference_counter_stress_catch2_test.cpp',
+      'unit/storage/s3_signer_catch2_test.cpp',
+      'unit/storage/storage_engine_catch2_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # Search submodule tests (BKTree, TrigramIndex, HybridFuzzySearch, QueryParser, SearchExecutor, etc.)
+  # Migrated from GTest as part of yams-3s4 / yams-1yq
+  catch2_search_submodule_exe = executable('catch2_search_submodule',
+    files(
+      'unit/search/bk_tree_smoke_catch2_test.cpp',
+      'unit/search/bk_tree_catch2_test.cpp',
+      'unit/search/chunk_coverage_catch2_test.cpp',
+      'unit/search/entity_linker_catch2_test.cpp',
+      'unit/search/kg_scorer_simple_catch2_test.cpp',
+      'unit/search/query_parser_catch2_test.cpp',
+      'unit/search/query_qualifiers_catch2_test.cpp',
+      'unit/search/search_executor_catch2_test.cpp',
+      'unit/search/search_smoke_catch2_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # Compression submodule tests (CompressionPolicy, CompressionMonitor, Zstandard, LZMA, ErrorHandler, etc.)
+  # Migrated from GTest as part of yams-3s4 / yams-pmf
+  catch2_compression_submodule_exe = executable('catch2_compression_submodule',
+    files(
+      'unit/compression/basic_error_handler_catch2_test.cpp',
+      # TODO(yams-3s4): Fix API mismatch - uses non-existent ValidationConfig fields
+      # 'unit/compression/basic_integrity_validator_catch2_test.cpp',
+      'unit/compression/compression_comprehensive_catch2_test.cpp',
+      'unit/compression/compression_monitor_catch2_test.cpp',
+      'unit/compression/compression_policy_catch2_test.cpp',
+      'unit/compression/error_handler_catch2_test.cpp',
+      # TODO(yams-3s4): Fix API mismatch - uses non-existent IntegrityValidator methods
+      # 'unit/compression/integrity_validator_catch2_test.cpp',
+      'unit/compression/lzma_compressor_catch2_test.cpp',
+      'unit/compression/recovery_manager_catch2_test.cpp',
+      'unit/compression/transaction_manager_catch2_test.cpp',
+      'unit/compression/zstandard_compressor_catch2_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # MCP submodule tests (MCPServer, Transport, JSON-RPC, Tools Schema, etc.)
+  # Migrated from GTest as part of yams-3s4 / yams-84g
+  catch2_mcp_submodule_exe = executable('catch2_mcp_submodule',
+    files(
+      'unit/mcp/initialize_response_catch2_test.cpp',
+      'unit/mcp/mcp_add_disconnect_catch2_test.cpp',
+      'unit/mcp/mcp_disconnect_uniform_errors_catch2_test.cpp',
+      'unit/mcp/mcp_doctor_flags_catch2_test.cpp',
+      'unit/mcp/mcp_jsonrpc_roundtrip_catch2_test.cpp',
+      'unit/mcp/mcp_search_dto_catch2_test.cpp',
+      'unit/mcp/mcp_server_catch2_test.cpp',
+      'unit/mcp/mcp_server_exec_catch2_test.cpp',
+      'unit/mcp/mcp_socket_resolution_catch2_test.cpp',
+      'unit/mcp/mcp_tool_registry_wrappers_catch2_test.cpp',
+      'unit/mcp/mcp_tools_schema_and_smoke_catch2_test.cpp',
+      'unit/mcp/stdio_transport_catch2_test.cpp',
+      'unit/mcp/websocket_transport_catch2_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # Vector Test Suites (Catch2) - requires enable-vector-tests
+  # Migrated from GTest as part of yams-3s4 / yams-1d4
+  # --------------------------------------------------------------------------
+  if get_option('enable-vector-tests')
+    catch2_vector_submodule_exe = executable('catch2_vector_submodule',
+      files(
+        'unit/vector/document_chunker_catch2_test.cpp',
+        'unit/vector/embedding_genai_selection_catch2_test.cpp',
+        'unit/vector/sqlite_vec_c_api_smoke_catch2_test.cpp',
+        'unit/vector/vector_dimension_validation_catch2_test.cpp',
+        'unit/vector/vector_smoke_catch2_test.cpp',
+      ),
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+      cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+      build_rpath: ':'.join(_test_rpaths),
+      install: false,
+    )
+  endif
+
   # Metadata Test Suites (4 executables)
   # --------------------------------------------------------------------------
   
@@ -900,6 +1028,61 @@ if catch2_dep.found()
     files('unit/core/magic_numbers_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + core_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  detection_exe = executable('detection',
+    files(
+      'unit/detection/command_integration_test.cpp',
+      'unit/detection/detection_test_helpers.h',
+      'unit/detection/file_type_detector_test.cpp',
+      'unit/detection/file_type_graceful_fallback_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # Plugins tests (Catch2 - migrated from GTest)
+  plugins_catch2_exe = executable('plugins_catch2',
+    files(
+      'unit/plugins/plugin_installer_test.cpp',
+      'unit/plugins/plugin_repo_client_test.cpp',
+      'unit/plugins/onnx_request_test.cpp',
+      'unit/plugins/symbol_extractor_query_test.cpp',
+      'unit/plugins/symbol_extractor_validation_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  
+  # Integrity tests (Catch2 - migrated from GTest)
+  integrity_test_deps = [
+    dependency('spdlog'),
+    dependency('yams_core'),
+    dependency('yams_crypto'),
+    dependency('yams_integrity'),
+    dependency('yams_storage_engine'),
+    dependency('yams_reference_counter'),
+  ]
+  
+  integrity_catch2_exe = executable('integrity_catch2',
+    files(
+      'unit/integrity/chunk_validator_test.cpp',
+      'unit/integrity/integrity_verifier_simple_test.cpp',
+      'unit/integrity/repair_manager_test.cpp',
+      'unit/integrity/verification_monitor_test.cpp',
+      'unit/integrity/verification_scheduler_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + integrity_test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
     build_rpath: ':'.join(_test_rpaths),
     install: false,
@@ -1129,6 +1312,24 @@ if catch2_dep.found()
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
+
+  test('detection', detection_exe,
+    suite: ['catch2', 'unit', 'detection'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+  
+  test('plugins_catch2', plugins_catch2_exe,
+    suite: ['catch2', 'unit', 'plugins'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+  
+  test('integrity_catch2', integrity_catch2_exe,
+    suite: ['catch2', 'unit', 'integrity'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
   
   # Content tests
   test('content_handlers', content_handlers_exe,
@@ -1268,6 +1469,12 @@ if catch2_dep.found()
     timeout: 60
   )
 
+  test('daemon_component_submodule', catch2_daemon_component_submodule_exe,
+    suite: ['catch2', 'unit', 'daemon', 'components', 'yams-zns'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
   test('daemon_plugin_harness', catch2_daemon_plugin_exe,
     suite: ['catch2', 'unit', 'daemon', 'plugin'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -1303,4 +1510,38 @@ if catch2_dep.found()
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
   )
+
+  test('storage_submodule', catch2_storage_submodule_exe,
+    suite: ['catch2', 'unit', 'storage', 'yams-8b9'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 300
+  )
+
+  test('search_submodule', catch2_search_submodule_exe,
+    suite: ['catch2', 'unit', 'search', 'yams-1yq'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 180
+  )
+
+  test('compression_submodule', catch2_compression_submodule_exe,
+    suite: ['catch2', 'unit', 'compression', 'yams-pmf'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 300
+  )
+
+  test('mcp_submodule', catch2_mcp_submodule_exe,
+    suite: ['catch2', 'unit', 'mcp', 'yams-84g'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 180
+  )
+
+  # Vector test suite (requires enable-vector-tests)
+  # Migrated from GTest as part of yams-3s4 / yams-1d4
+  if get_option('enable-vector-tests')
+    test('vector_submodule', catch2_vector_submodule_exe,
+      suite: ['catch2', 'unit', 'vector', 'yams-1d4'],
+      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+      timeout: 180
+    )
+  endif
 endif

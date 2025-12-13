@@ -45,14 +45,8 @@ public:
     // Configuration
     void setTrustFile(const std::filesystem::path& f) {
         trustFile_ = f;
-        // Reset trust set to ensure a clean start for callers (e.g., unit tests)
-        trusted_.clear();
-        // Ensure no stale content remains on disk
-        std::error_code ec;
-        std::filesystem::remove(trustFile_, ec);
-        // Persist an empty trust file to define the set explicitly
-        saveTrust();
-        // No implicit load here; start empty
+        // Load existing trust entries from disk (if any)
+        loadTrust();
     }
     void setNamePolicy(NamePolicy p) { namePolicy_ = p; }
     NamePolicy getNamePolicy() const { return namePolicy_; }

@@ -145,6 +145,9 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 static_cast<size_t>(snap->postIngestLatencyMsEma);
             res.requestCounts["post_ingest_rate_sec_ema"] =
                 static_cast<size_t>(snap->postIngestRateSecEma);
+            res.requestCounts["kg_queued"] = snap->kgQueued;
+            res.requestCounts["kg_dropped"] = snap->kgDropped;
+            res.requestCounts["kg_consumed"] = snap->kgConsumed;
             // Surface whether the InternalEventBus is being used for post-ingest
             try {
                 res.requestCounts["post_ingest_use_bus"] =

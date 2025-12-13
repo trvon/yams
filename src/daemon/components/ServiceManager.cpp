@@ -316,14 +316,14 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
         // Defer vector DB initialization to async phase to avoid blocking daemon startup (PBI-057).
         spdlog::debug("[Startup] deferring vector DB init to async phase");
 
-        // PBI-088: Delegate trust setup to PluginManager which owns the FSM
-        // Auto-trust plugin directories (env, config, system) via PluginManager
-        if (pluginManager_) {
+        // Auto-trust plugin directories (env, config, system) via AbiPluginHost
+        // Note: Use abiHost_ directly since PluginManager is created later
+        if (abiHost_) {
             // Trust from env
             if (const char* env = std::getenv("YAMS_PLUGIN_DIR")) {
                 std::filesystem::path penv(env);
                 if (!penv.empty()) {
-                    if (auto tr = pluginManager_->trustAdd(penv); !tr) {
+                    if (auto tr = abiHost_->trustAdd(penv); !tr) {
                         spdlog::warn("Failed to auto-trust YAMS_PLUGIN_DIR {}: {}", penv.string(),
                                      tr.error().message);
                     }
@@ -333,7 +333,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             // Trust from config
             if (!config_.pluginDir.empty()) {
                 std::filesystem::path pconf = config_.pluginDir;
-                if (auto tr = pluginManager_->trustAdd(pconf); !tr) {
+                if (auto tr = abiHost_->trustAdd(pconf); !tr) {
                     spdlog::warn("Failed to trust configured pluginDir {}: {}", pconf.string(),
                                  tr.error().message);
                 } else {
@@ -343,7 +343,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
 
             // Trust explicit entries from config ([plugins].trusted_paths or daemon.trusted_paths)
             for (const auto& p : config_.trustedPluginPaths) {
-                if (auto tr = pluginManager_->trustAdd(p); !tr) {
+                if (auto tr = abiHost_->trustAdd(p); !tr) {
                     spdlog::warn("Failed to trust configured plugin path {}: {}", p.string(),
                                  tr.error().message);
                 } else {
@@ -356,7 +356,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             namespace fs = std::filesystem;
             fs::path system_plugins = fs::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins";
             if (fs::exists(system_plugins) && fs::is_directory(system_plugins)) {
-                if (auto tr = pluginManager_->trustAdd(system_plugins)) {
+                if (auto tr = abiHost_->trustAdd(system_plugins)) {
                     spdlog::info("Auto-trusted system plugin directory: {}",
                                  system_plugins.string());
                 } else {
@@ -365,7 +365,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             }
 #endif
         } else {
-            spdlog::debug("[ServiceManager] PluginManager not available for trust setup");
+            spdlog::debug("[ServiceManager] AbiPluginHost not available for trust setup");
         }
 
         try {
@@ -550,26 +550,8 @@ yams::Result<void> ServiceManager::initialize() {
         ioCfg.low_watermark = TuneAdvisor::poolLowWatermarkPercent();
         ioCfg.high_watermark = TuneAdvisor::poolHighWatermarkPercent();
         PoolManager::instance().configure("ipc_io", ioCfg);
-        // Post-ingest pool (background CPU) — derive bounds from TuningConfig
-        PoolManager::Config piCfg{};
-        try {
-            const auto& cfg = tuningConfig_;
-            piCfg.min_size =
-                static_cast<uint32_t>(std::max<std::size_t>(1, cfg.postIngestThreadsMin));
-            piCfg.max_size =
-                static_cast<uint32_t>(std::max(cfg.postIngestThreadsMin, cfg.postIngestThreadsMax));
-        } catch (...) {
-            piCfg.min_size = 1;
-            piCfg.max_size = 8;
-        }
-        piCfg.cooldown_ms = TuneAdvisor::poolCooldownMs();
-        piCfg.low_watermark = TuneAdvisor::poolLowWatermarkPercent();
-        piCfg.high_watermark = TuneAdvisor::poolHighWatermarkPercent();
-        PoolManager::instance().configure("post_ingest", piCfg);
-        spdlog::info("PoolManager defaults configured: ipc[min={},max={}] io[min={},max={}] "
-                     "post_ingest[min={},max={}]",
-                     ipcCfg.min_size, ipcCfg.max_size, ioCfg.min_size, ioCfg.max_size,
-                     piCfg.min_size, piCfg.max_size);
+        spdlog::info("PoolManager defaults configured: ipc[min={},max={}] io[min={},max={}]",
+                     ipcCfg.min_size, ipcCfg.max_size, ioCfg.min_size, ioCfg.max_size);
     } catch (const std::exception& e) {
         spdlog::debug("PoolManager configure error: {}", e.what());
     }
@@ -2612,11 +2594,6 @@ ServiceManager::co_initPluginSystem(boost::asio::any_io_executor exec,
 
 namespace yams::daemon {
 
-bool ServiceManager::resizePostIngestThreads(std::size_t target) {
-    // PostIngestQueue now uses strand, no dynamic thread pool resizing
-    (void)target;
-    return false;
-}
 
 // Start background task coroutines (EmbedJob/Fts5Job consumers, OrphanScan)
 // Must be called after shared_ptr construction so shared_from_this() works.

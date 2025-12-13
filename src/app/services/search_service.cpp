@@ -25,7 +25,6 @@
 #include <mutex>
 #include <optional>
 #include <regex>
-#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -377,38 +376,6 @@ public:
         }
     }
 
-    // Minimal JSON emission for LLM/CLI when requested.
-    static void maybeEmitJson(const SearchRequest& req, SearchResponse& resp) {
-        if (!req.jsonOutput)
-            return;
-        std::ostringstream os;
-        os << "{";
-        os << "\"type\":\"" << (resp.type.empty() ? (req.fuzzy ? "fuzzy" : "keyword") : resp.type)
-           << "\",";
-        os << "\"total\":" << resp.total << ",";
-        if (req.pathsOnly) {
-            os << "\"paths\":[";
-            for (size_t i = 0; i < resp.paths.size(); ++i) {
-                if (i)
-                    os << ",";
-                os << "\"" << resp.paths[i] << "\"";
-            }
-            os << "]";
-        } else {
-            os << "\"results\":[";
-            for (size_t i = 0; i < resp.results.size(); ++i) {
-                if (i)
-                    os << ",";
-                const auto& it = resp.results[i];
-                os << "{\"path\":\"" << it.path << "\",\"title\":\"" << it.title
-                   << "\",\"score\":" << (it.score < 0.0 ? 0.0 : it.score) << "}";
-            }
-            os << "]";
-        }
-        os << "}";
-        resp.jsonOutput = os.str();
-    }
-
     boost::asio::awaitable<Result<SearchResponse>> search(const SearchRequest& req) override {
         using namespace std::chrono;
         const auto t0 = steady_clock::now();
@@ -453,9 +420,7 @@ public:
             auto result = co_await searchByHashPrefix(normalizedReq, &metadataTelemetry);
             setExecTime(result, t0);
             if (result) {
-                auto r = std::move(result).value();
-                maybeEmitJson(req, r);
-                co_return Result<SearchResponse>(std::move(r));
+                co_return result;
             }
             co_return result;
         }
@@ -464,9 +429,7 @@ public:
             auto result = co_await searchByHashPrefix(normalizedReq, &metadataTelemetry);
             setExecTime(result, t0);
             if (result) {
-                auto r = std::move(result).value();
-                maybeEmitJson(req, r);
-                co_return Result<SearchResponse>(std::move(r));
+                co_return result;
             }
             co_return result;
         }
@@ -500,7 +463,6 @@ public:
                 resp.type = "path";
                 resp.searchStats["mode"] = "path";
                 resp.queryInfo = "path/name contains match";
-                maybeEmitJson(req, resp);
                 co_return Result<SearchResponse>(std::move(resp));
             }
             // Fall through to standard paths on error.
@@ -632,11 +594,6 @@ public:
             result = Result<SearchResponse>(std::move(resp));
         }
 
-        if (result) {
-            auto r = std::move(result).value();
-            maybeEmitJson(req, r);
-            co_return Result<SearchResponse>(std::move(r));
-        }
         co_return result;
     }
 
@@ -1252,7 +1209,9 @@ private:
         }
 
         if (req.pathsOnly) {
+            const size_t effectiveLimit = req.limit > 0 ? req.limit : vec.size();
             for (const auto& r : vec) {
+                if (resp.paths.size() >= effectiveLimit) break;
                 if (!r.document.filePath.empty()) {
                     resp.paths.push_back(r.document.filePath);
                 }
@@ -1263,8 +1222,10 @@ private:
 
         {
             // Defensive: limit processing to prevent crash on large result sets
+            // Also enforce req.limit to honor user's requested limit
             constexpr size_t kMaxProcessableResults = 10000;
-            const size_t n = std::min(vec.size(), kMaxProcessableResults);
+            const size_t effectiveLimit = req.limit > 0 ? req.limit : kMaxProcessableResults;
+            const size_t n = std::min({vec.size(), kMaxProcessableResults, effectiveLimit});
 
             // Cap worker count to avoid thread explosion
             constexpr size_t kMaxWorkers = 16;
@@ -1438,7 +1399,9 @@ private:
             resp.usedHybrid = false;
 
             if (searchReq.pathsOnly) {
+                const size_t effectiveLimit = searchReq.limit > 0 ? searchReq.limit : res.results.size();
                 for (const auto& item : res.results) {
+                    if (resp.paths.size() >= effectiveLimit) break;
                     const auto& d = item.document;
                     resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
                 }
@@ -1474,7 +1437,9 @@ private:
             resp.usedHybrid = false;
 
             if (searchReq.pathsOnly) {
+                const size_t effectiveLimit = searchReq.limit > 0 ? searchReq.limit : res.results.size();
                 for (const auto& item : res.results) {
+                    if (resp.paths.size() >= effectiveLimit) break;
                     const auto& d = item.document;
                     resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
                 }

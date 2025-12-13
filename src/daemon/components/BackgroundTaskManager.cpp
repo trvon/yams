@@ -9,7 +9,6 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/integrity/repair_manager.h>
-#include <yams/repair/embedding_repair_util.h>
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -66,8 +65,10 @@ void BackgroundTaskManager::start() {
     }
 
     // Launch all consumer coroutines
+    // NOTE: EmbedJob is handled by EmbeddingService (on a strand for serialization)
+    // Do NOT launch a duplicate consumer here - it causes race conditions and
+    // Windows thread pool exhaustion ("resource deadlock would occur").
     try {
-        launchEmbedJobConsumer();
         launchFts5JobConsumer();
         launchOrphanScanTask();
         launchPathTreeRepairTask();
@@ -97,92 +98,9 @@ void BackgroundTaskManager::stop() {
     // Timer cancellation happens in destructor for RAII cleanup
 }
 
-void BackgroundTaskManager::launchEmbedJobConsumer() {
-    auto self = deps_.serviceManager.lock();
-    if (!self) {
-        throw std::runtime_error(
-            "BackgroundTaskManager: ServiceManager weak_ptr expired in launchEmbedJobConsumer");
-    }
-
-    auto exec = deps_.executor;
-    auto stopFlag = stopRequested_;
-
-    spdlog::debug("[BackgroundTaskManager] Launching EmbedJob consumer");
-    boost::asio::co_spawn(
-        exec,
-        [self, stopFlag]() -> boost::asio::awaitable<void> {
-            spdlog::debug("[EmbedJob] Consumer started");
-            using Bus = yams::daemon::InternalEventBus;
-            auto channel = Bus::instance().get_or_create_channel<Bus::EmbedJob>("embed_jobs", 512);
-            using namespace std::chrono_literals;
-
-            // Create local timer (not a member, no shared state)
-            auto executor = co_await boost::asio::this_coro::executor;
-            boost::asio::steady_timer timer(executor);
-
-            while (!stopFlag->load(std::memory_order_acquire)) {
-                Bus::EmbedJob job;
-                if (channel && channel->try_pop(job)) {
-                    auto store = self->getContentStore();
-                    auto meta = self->getMetadataRepo();
-                    auto vecDb = self->getVectorDatabase();
-                    auto provider = self->getModelProvider();
-
-                    std::string modelName;
-                    if (provider && provider->isAvailable()) {
-                        try {
-                            modelName = self->getEmbeddingModelName();
-                        } catch (...) {
-                        }
-                    }
-
-                    if (!meta || !vecDb || !provider || modelName.empty()) {
-                        spdlog::debug("[EmbedJob] Services not ready, dropping {} docs",
-                                      job.hashes.size());
-                        Bus::instance().incEmbedDropped();
-                    } else {
-                        const auto& extractors = self->getContentExtractors();
-                        yams::repair::EmbeddingRepairConfig cfg;
-                        cfg.batchSize = job.batchSize;
-                        cfg.skipExisting = job.skipExisting;
-
-                        try {
-                            cfg.dataPath = self->getResolvedDataDir();
-                        } catch (...) {
-                        }
-
-                        auto result = yams::repair::repairMissingEmbeddings(
-                            store, meta, provider, modelName, cfg, job.hashes, nullptr, extractors);
-
-                        if (result) {
-                            spdlog::debug("[EmbedJob] Processed {} docs (gen={}, skip={}, fail={})",
-                                          job.hashes.size(), result.value().embeddingsGenerated,
-                                          result.value().embeddingsSkipped,
-                                          result.value().failedOperations);
-                        } else {
-                            spdlog::warn("[EmbedJob] Batch failed: {}", result.error().message);
-                        }
-                    }
-
-                    Bus::instance().incEmbedConsumed();
-                    continue;
-                }
-
-                timer.expires_after(100ms);
-                try {
-                    co_await timer.async_wait(boost::asio::use_awaitable);
-                } catch (const boost::system::system_error& e) {
-                    if (e.code() == boost::asio::error::operation_aborted) {
-                        break; // Exit gracefully on cancellation
-                    }
-                    throw;
-                }
-            }
-            spdlog::debug("[EmbedJob] Consumer stopped");
-            co_return;
-        },
-        boost::asio::detached);
-}
+// NOTE: EmbedJob consumer was removed - EmbeddingService now handles embed_jobs
+// on a strand for proper serialization. Having two consumers caused race conditions
+// and Windows thread pool exhaustion ("resource deadlock would occur").
 
 void BackgroundTaskManager::launchFts5JobConsumer() {
     auto self = deps_.serviceManager.lock();

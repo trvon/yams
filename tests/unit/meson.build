@@ -69,14 +69,15 @@ if tests_has_cli
 endif
 
 unit_compression = files(
-  'compression/basic_error_handler_test.cpp',
-  'compression/basic_integrity_validator_test.cpp',
-  'compression/compression_comprehensive_test.cpp',
-  'compression/compression_monitor_test.cpp',
-  'compression/compression_policy_test.cpp',
-  'compression/recovery_manager_test.cpp',
-  'compression/transaction_manager_test.cpp',
-  'compression/zstandard_compressor_test.cpp',
+  # Migrated to Catch2: see tests/meson.build catch2_compression_submodule_exe (yams-pmf)
+  # 'compression/basic_error_handler_test.cpp',
+  # 'compression/basic_integrity_validator_test.cpp',
+  # 'compression/compression_comprehensive_test.cpp',
+  # 'compression/compression_monitor_test.cpp',
+  # 'compression/compression_policy_test.cpp',
+  # 'compression/recovery_manager_test.cpp',
+  # 'compression/transaction_manager_test.cpp',
+  # 'compression/zstandard_compressor_test.cpp',
   # excluded: error_handler_test_simple.cpp, error_handler_test.cpp, integrity_validator*_test.cpp
 )
 
@@ -85,7 +86,8 @@ lzma_opt = get_option('enable-lzma')
 lzma_dep = dependency('lzma', required: false)
 unit_compression_opt = []
 if lzma_dep.found() and lzma_opt.allowed()
-  unit_compression_opt += files('compression/lzma_compressor_test.cpp')
+  # Migrated to Catch2: lzma_compressor_catch2_test.cpp (yams-pmf)
+  # unit_compression_opt += files('compression/lzma_compressor_test.cpp')
 endif
 
 unit_daemon_base = files(
@@ -111,13 +113,14 @@ unit_daemon_base = files(
   # Daemon plugin harness migrated to Catch2 (onnx_plugin_harness_test.cpp)
   # Now uses Catch2 with timeout handling and enhanced isolation
 
-  # Extracted component tests (PBI-088)
-  'daemon/components/config_resolver_test.cpp',
-  'daemon/components/vector_system_manager_test.cpp',
-  'daemon/components/plugin_manager_test.cpp',
-  'daemon/components/database_manager_test.cpp',
-  'daemon/components/request_queue_test.cpp',
-  'daemon/components/checkpoint_manager_test.cpp',
+  # Extracted component tests (PBI-088) - MIGRATED TO CATCH2 (yams-3s4 / yams-zns)
+  # Now in tests/meson.build as catch2_daemon_component_submodule_exe
+  # 'daemon/components/config_resolver_test.cpp',
+  # 'daemon/components/vector_system_manager_test.cpp',
+  # 'daemon/components/plugin_manager_test.cpp',
+  # 'daemon/components/database_manager_test.cpp',
+  # 'daemon/components/request_queue_test.cpp',
+  # 'daemon/components/checkpoint_manager_test.cpp',
 
   # Legacy GTest tests (to be migrated)
   'daemon/daemon_test.cpp',
@@ -155,14 +158,16 @@ unit_downloader = files(
   'downloader/test_downloader_basic.cpp',
 )
 
-unit_integrity = files(
-  'integrity/chunk_validator_test.cpp',
-  'integrity/integrity_verifier_simple_test.cpp',
-  'integrity/repair_manager_test.cpp',
-  'integrity/verification_monitor_test.cpp',
-  'integrity/verification_scheduler_test.cpp',
-  # excluded: integrity_verifier_test.cpp
-)
+# Migrated to Catch2 - see tests/meson.build integrity_catch2_exe
+# unit_integrity = files(
+#   'integrity/chunk_validator_test.cpp',
+#   'integrity/integrity_verifier_simple_test.cpp',
+#   'integrity/repair_manager_test.cpp',
+#   'integrity/verification_monitor_test.cpp',
+#   'integrity/verification_scheduler_test.cpp',
+#   # excluded: integrity_verifier_test.cpp
+# )
+unit_integrity = []
 
 unit_repair_base = []
 
@@ -180,20 +185,23 @@ unit_manifest = files(
   # excluded: manifest/manifest_test.cpp
 )
 
+# MCP tests migrated to Catch2 - see tests/meson.build (catch2_mcp_submodule)
+# Migration: yams-3s4 / yams-84g
 unit_mcp = files(
-  'mcp/initialize_response_test.cpp',
-  'mcp/mcp_jsonrpc_roundtrip_test.cpp',
-  'mcp/mcp_search_dto_test.cpp',
-  'mcp/mcp_server_exec_test.cpp',
-  'mcp/mcp_server_test.cpp',
-  'mcp/mcp_tools_schema_and_smoke_test.cpp',
-  'mcp/mcp_tool_registry_wrappers_test.cpp',
-  'mcp/stdio_transport_test.cpp',
-  'mcp/websocket_transport_test.cpp',
-  'mcp/mcp_socket_resolution_test.cpp',
-  'mcp/mcp_doctor_flags_test.cpp',
-  'mcp/mcp_add_disconnect_test.cpp',
-  'mcp/mcp_disconnect_uniform_errors_test.cpp',
+  # 'mcp/initialize_response_test.cpp',              # Migrated to Catch2
+  # 'mcp/mcp_jsonrpc_roundtrip_test.cpp',            # Migrated to Catch2
+  # 'mcp/mcp_search_dto_test.cpp',                   # Migrated to Catch2
+  # 'mcp/mcp_server_exec_test.cpp',                  # Migrated to Catch2
+  # 'mcp/mcp_server_test.cpp',                       # Migrated to Catch2
+  # 'mcp/mcp_tools_schema_and_smoke_test.cpp',       # Migrated to Catch2
+  # 'mcp/mcp_tool_registry_wrappers_test.cpp',       # Migrated to Catch2
+  # 'mcp/stdio_transport_test.cpp',                  # Migrated to Catch2
+  # 'mcp/websocket_transport_test.cpp',              # Migrated to Catch2
+  # 'mcp/mcp_socket_resolution_test.cpp',            # Migrated to Catch2
+  # 'mcp/mcp_doctor_flags_test.cpp',                 # Migrated to Catch2
+  # 'mcp/mcp_add_disconnect_test.cpp',               # Migrated to Catch2
+  # 'mcp/mcp_disconnect_uniform_errors_test.cpp',    # Migrated to Catch2
+  # 'mcp/mcp_status_response_test.cpp',              # Placeholder - not migrated (empty)
 )
 
 unit_metadata = files(
@@ -226,40 +234,47 @@ unit_resolve = files(
   'resolve/resolver_tests.cpp',
 )
 
+# Search tests migrated to Catch2 - see tests/meson.build (catch2_search_submodule)
+# Migration: yams-3s4 / yams-1yq
 unit_search = files(
-  'search/bk_tree_smoke_test.cpp',
-  'search/bk_tree_test.cpp',
-  'search/chunk_coverage_test.cpp',
-  'search/entity_linker_test.cpp',
-  'search/kg_scorer_simple_test.cpp',
-  'search/query_parser_test.cpp',
-  'search/query_qualifiers_test.cpp',
-  'search/search_executor_test.cpp',
-  'search/search_smoke_test.cpp',
+  # 'search/bk_tree_smoke_test.cpp',      # Migrated to Catch2 (bk_tree_smoke_catch2_test.cpp)
+  # 'search/bk_tree_test.cpp',            # Migrated to Catch2 (bk_tree_catch2_test.cpp)
+  # 'search/chunk_coverage_test.cpp',     # Migrated to Catch2 (chunk_coverage_catch2_test.cpp)
+  # 'search/entity_linker_test.cpp',      # Migrated to Catch2 (entity_linker_catch2_test.cpp)
+  # 'search/kg_scorer_simple_test.cpp',   # Migrated to Catch2 (kg_scorer_simple_catch2_test.cpp)
+  # 'search/query_parser_test.cpp',       # Migrated to Catch2 (query_parser_catch2_test.cpp)
+  # 'search/query_qualifiers_test.cpp',   # Migrated to Catch2 (query_qualifiers_catch2_test.cpp)
+  # 'search/search_executor_test.cpp',    # Migrated to Catch2 (search_executor_catch2_test.cpp)
+  # 'search/search_smoke_test.cpp',       # Migrated to Catch2 (search_smoke_catch2_test.cpp)
 )
 
+# Plugin tests migrated to Catch2 - see tests/meson.build (plugins_catch2)
 unit_plugins = files(
-  'plugins/plugin_installer_test.cpp',
-  'plugins/plugin_repo_client_test.cpp',
-  'plugins/symbol_extractor_query_test.cpp',
+  # 'plugins/plugin_installer_test.cpp',        # Migrated to Catch2
+  # 'plugins/plugin_repo_client_test.cpp',      # Migrated to Catch2
+  # 'plugins/symbol_extractor_query_test.cpp',  # Migrated to Catch2
 )
 
+# Storage tests migrated to Catch2 - see tests/meson.build (catch2_storage_submodule)
+# GTest files commented out as part of yams-3s4 / yams-8b9
 unit_storage = files(
-  'storage/compressed_storage_stats_test.cpp',
-  'storage/object_storage_adapter_test.cpp',
-  'storage/reference_counter_test.cpp',
-  'storage/reference_counter_stress_test.cpp',
-  'storage/s3_signer_test.cpp',
+  # 'storage/compressed_storage_stats_test.cpp',   # Migrated to Catch2
+  # 'storage/object_storage_adapter_test.cpp',     # Migrated to Catch2
+  # 'storage/reference_counter_test.cpp',          # Migrated to Catch2
+  # 'storage/reference_counter_stress_test.cpp',   # Migrated to Catch2
+  # 'storage/s3_signer_test.cpp',                  # Migrated to Catch2
   # test_storage_backend.cpp migrated to Catch2 - see tests/meson.build (storage_backend_catch2_test.cpp)
 )
 
+# Vector tests migrated to Catch2 - see tests/meson.build (catch2_vector_submodule)
+# GTest files commented out as part of yams-3s4 / yams-1d4
 unit_vector = []
 if get_option('enable-vector-tests')
   unit_vector += files(
-    'vector/document_chunker_test.cpp',
-    'vector/embedding_genai_selection_test.cpp',
-    'vector/sqlite_vec_c_api_smoke_test.cpp',
-    'vector/vector_dimension_validation_test.cpp',  # Dimension validation - Vector DB layer
+    # 'vector/document_chunker_test.cpp',
+    # 'vector/embedding_genai_selection_test.cpp',
+    # 'vector/sqlite_vec_c_api_smoke_test.cpp',
+    # 'vector/vector_dimension_validation_test.cpp',
   )
 endif
 

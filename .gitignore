@@ -1,4 +1,5 @@
-# Build directories and CMake artifacts
+#  Build directories and CMake artifacts
+.beads
 build/
 _deps/
 _build/

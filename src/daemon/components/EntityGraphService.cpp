@@ -2,9 +2,11 @@
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <boost/asio.hpp>
 #include <chrono>
 #include <unordered_map>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
@@ -12,63 +14,42 @@
 
 namespace yams::daemon {
 
-EntityGraphService::EntityGraphService(ServiceManager* services, std::size_t workers)
-    : services_(services) {
-    if (workers < 1)
-        workers = 1;
-    threads_.reserve(workers);
-}
+EntityGraphService::EntityGraphService(ServiceManager* services, std::size_t /*workers*/)
+    : services_(services) {}
 
 EntityGraphService::~EntityGraphService() {
-    spdlog::info("[EntityGraphService] Destructor called");
     stop();
-    spdlog::info("[EntityGraphService] Destructor complete");
 }
 
-void EntityGraphService::start() {
-    if (!threads_.empty())
-        return;
-    auto n = threads_.capacity();
-    for (std::size_t i = 0; i < n; ++i) {
-        threads_.emplace_back([this] { workerLoop(); });
-    }
-}
+void EntityGraphService::start() {}
 
 void EntityGraphService::stop() {
-    spdlog::info("[EntityGraphService] stop() entry, stop_={}", stop_.load());
-    bool wasAlreadyStopped = stop_.exchange(true);
-    spdlog::info("[EntityGraphService] stop_.exchange(true) returned: {}", wasAlreadyStopped);
-
-    if (!wasAlreadyStopped) {
-        spdlog::info("[EntityGraphService] Notifying {} worker threads", threads_.size());
-        qcv_.notify_all();
-        spdlog::info("[EntityGraphService] Joining {} threads", threads_.size());
-        for (size_t i = 0; i < threads_.size(); ++i) {
-            auto& t = threads_[i];
-            spdlog::info("[EntityGraphService] Checking thread {}: joinable={}", i, t.joinable());
-            if (t.joinable()) {
-                spdlog::info("[EntityGraphService] Joining thread {}...", i);
-                t.join();
-                spdlog::info("[EntityGraphService] Thread {} joined", i);
-            }
-        }
-        threads_.clear();
-        spdlog::info("[EntityGraphService] All threads joined and cleared");
-    } else {
-        spdlog::info("[EntityGraphService] stop() already called previously (no-op)");
-    }
-    spdlog::info("[EntityGraphService] stop() exiting");
+    stop_.store(true);
 }
 
 Result<void> EntityGraphService::submitExtraction(Job job) {
-    try {
-        std::lock_guard<std::mutex> lk(qmu_);
-        q_.push_back(std::move(job));
-        accepted_.fetch_add(1, std::memory_order_relaxed);
-    } catch (...) {
-        return Error{ErrorCode::InternalError, "queue_failed"};
+    if (stop_.load(std::memory_order_relaxed)) {
+        return Error{ErrorCode::InvalidState, "service_stopped"};
     }
-    qcv_.notify_one();
+    if (!services_) {
+        return Error{ErrorCode::InternalError, "no_services"};
+    }
+    auto* coordinator = services_->getWorkCoordinator();
+    if (!coordinator) {
+        return Error{ErrorCode::InternalError, "no_coordinator"};
+    }
+    accepted_.fetch_add(1, std::memory_order_relaxed);
+    boost::asio::post(coordinator->getExecutor(), [this, j = std::move(job)]() mutable {
+        if (stop_.load(std::memory_order_relaxed))
+            return;
+        try {
+            if (!process(j))
+                failed_.fetch_add(1, std::memory_order_relaxed);
+        } catch (...) {
+            failed_.fetch_add(1, std::memory_order_relaxed);
+        }
+        processed_.fetch_add(1, std::memory_order_relaxed);
+    });
     return Result<void>();
 }
 
@@ -88,35 +69,7 @@ Result<void> EntityGraphService::materializeSymbolIndex() {
 }
 
 std::vector<std::string> EntityGraphService::findSymbolsByName(const std::string& /*name*/) const {
-    // TODO: implement via KG/materialized index
     return {};
-}
-
-void EntityGraphService::workerLoop() {
-    while (!stop_.load(std::memory_order_relaxed)) {
-        Job job;
-        bool have = false;
-        {
-            std::unique_lock<std::mutex> lk(qmu_);
-            if (q_.empty()) {
-                qcv_.wait_for(lk, std::chrono::milliseconds(50));
-            }
-            if (!q_.empty()) {
-                job = std::move(q_.front());
-                q_.pop_front();
-                have = true;
-            }
-        }
-        if (!have)
-            continue;
-        try {
-            if (!process(job))
-                failed_.fetch_add(1, std::memory_order_relaxed);
-        } catch (...) {
-            failed_.fetch_add(1, std::memory_order_relaxed);
-        }
-        processed_.fetch_add(1, std::memory_order_relaxed);
-    }
 }
 
 bool EntityGraphService::process(Job& job) {

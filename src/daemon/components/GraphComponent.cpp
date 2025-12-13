@@ -1,14 +1,17 @@
 #include <yams/daemon/components/GraphComponent.h>
 
+#include <yams/api/content_store.h>
 #include <yams/app/services/graph_query_service.hpp>
 #include <yams/daemon/components/EntityGraphService.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
 
 #include <spdlog/spdlog.h>
 
+#include <filesystem>
 #include <unordered_set>
 
 namespace yams::daemon {
@@ -39,9 +42,9 @@ Result<void> GraphComponent::initialize() {
 
     if (serviceManager_) {
         try {
-            entityService_ = std::make_shared<EntityGraphService>(serviceManager_, 1);
+            entityService_ = std::make_shared<EntityGraphService>(serviceManager_);
             entityService_->start();
-            spdlog::info("[GraphComponent] EntityGraphService initialized (workers=1)");
+            spdlog::info("[GraphComponent] EntityGraphService initialized");
         } catch (const std::exception& e) {
             spdlog::warn("[GraphComponent] Failed to initialize EntityGraphService: {}", e.what());
         }
@@ -76,7 +79,83 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
         return Error{ErrorCode::NotInitialized, "GraphComponent not initialized"};
     }
 
-    (void)ctx;
+    // Skip if no entity service available
+    if (!entityService_) {
+        spdlog::debug("[GraphComponent] No entity service, skipping extraction for {}",
+                      ctx.documentHash.substr(0, 12));
+        return Result<void>();
+    }
+
+    // Need ServiceManager to access content store and symbol extractors
+    if (!serviceManager_) {
+        spdlog::debug("[GraphComponent] No service manager, skipping extraction");
+        return Result<void>();
+    }
+
+    // Get content store to load document content
+    auto contentStore = serviceManager_->getContentStore();
+    if (!contentStore) {
+        spdlog::debug("[GraphComponent] No content store available");
+        return Result<void>();
+    }
+
+    // Detect language from file extension
+    std::string language;
+    if (!ctx.filePath.empty()) {
+        std::filesystem::path path(ctx.filePath);
+        std::string ext = path.extension().string();
+        if (!ext.empty() && ext[0] == '.') {
+            ext = ext.substr(1);
+        }
+
+        // Query symbol extractors for language mapping
+        const auto& extractors = serviceManager_->getSymbolExtractors();
+        for (const auto& extractor : extractors) {
+            if (!extractor)
+                continue;
+            auto supported = extractor->getSupportedExtensions();
+            auto it = supported.find(ext);
+            if (it != supported.end()) {
+                language = it->second;
+                break;
+            }
+        }
+    }
+
+    // Skip if no language detected (not a supported source file)
+    if (language.empty()) {
+        spdlog::debug("[GraphComponent] No language detected for {}, skipping extraction",
+                      ctx.filePath);
+        return Result<void>();
+    }
+
+    // Load document content
+    auto contentResult = contentStore->retrieveBytes(ctx.documentHash);
+    if (!contentResult) {
+        spdlog::warn("[GraphComponent] Failed to load content for {}: {}", ctx.documentHash.substr(0, 12),
+                     contentResult.error().message);
+        return Result<void>(); // Non-fatal, continue
+    }
+
+    // Convert bytes to UTF-8 string
+    const auto& bytes = contentResult.value();
+    std::string contentUtf8(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+
+    // Submit for entity extraction
+    EntityExtractionJob job;
+    job.documentHash = ctx.documentHash;
+    job.filePath = ctx.filePath;
+    job.contentUtf8 = std::move(contentUtf8);
+    job.language = std::move(language);
+
+    auto submitResult = submitEntityExtraction(std::move(job));
+    if (!submitResult) {
+        spdlog::warn("[GraphComponent] Failed to submit extraction for {}: {}",
+                     ctx.documentHash.substr(0, 12), submitResult.error().message);
+    } else {
+        spdlog::debug("[GraphComponent] Queued symbol extraction for {} ({})",
+                      ctx.filePath, ctx.documentHash.substr(0, 12));
+    }
 
     return Result<void>();
 }

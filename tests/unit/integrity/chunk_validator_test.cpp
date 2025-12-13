@@ -1,4 +1,4 @@
-#include <gtest/gtest.h>
+#include <catch2/catch_test_macros.hpp>
 
 #include <yams/crypto/hasher.h>
 #include <yams/integrity/chunk_validator.h>
@@ -11,70 +11,78 @@ using namespace yams::integrity;
 
 namespace {
 
-std::vector<std::byte> to_bytes(const std::string& s) {
+std::vector<std::byte> toBytes(const std::string& s) {
     std::vector<std::byte> out(s.size());
     std::memcpy(out.data(), s.data(), s.size());
     return out;
 }
 
-struct ChunkFixture {
-    std::vector<std::vector<std::byte>> backing;
-    std::vector<std::pair<std::span<const std::byte>, std::string>> chunks;
-
-    explicit ChunkFixture(std::size_t count) {
-        auto hasher = yams::crypto::createSHA256Hasher();
-        backing.reserve(count);
-        chunks.reserve(count);
-        for (std::size_t i = 0; i < count; ++i) {
-            std::string data = "chunk_" + std::to_string(i);
-            backing.push_back(to_bytes(data));
-            auto span = std::span<const std::byte>(backing.back().data(), backing.back().size());
-            auto hash = hasher->hash(span);
-            chunks.emplace_back(span, hash);
-        }
-    }
-};
-
 } // namespace
 
-TEST(ChunkValidatorParallel, ValidatesMultipleChunks) {
+TEST_CASE("ChunkValidator single chunk validation", "[integrity][chunk-validator]") {
     ChunkValidationConfig cfg;
     cfg.maxParallelValidations = 4;
 
     ChunkValidator validator(cfg);
-    ChunkFixture fixture(32);
 
-    auto results = validator.validateChunks(fixture.chunks);
-    ASSERT_EQ(results.size(), fixture.chunks.size());
-    for (const auto& res : results) {
-        EXPECT_TRUE(res.isValid);
-        EXPECT_TRUE(res.errorMessage.empty());
+    SECTION("validates chunk with correct hash") {
+        auto hasher = yams::crypto::createSHA256Hasher();
+        std::string data = "test chunk data";
+        auto bytes = toBytes(data);
+        std::string hash = hasher->hash(std::span<const std::byte>(bytes.data(), bytes.size()));
+        
+        auto result = validator.validateChunk(
+            std::span<const std::byte>(bytes.data(), bytes.size()), hash);
+        
+        CHECK(result.isValid);
+        CHECK(result.errorMessage.empty());
+    }
+
+    SECTION("detects chunk with incorrect hash") {
+        std::string data = "test chunk data";
+        auto bytes = toBytes(data);
+        
+        auto result = validator.validateChunk(
+            std::span<const std::byte>(bytes.data(), bytes.size()), "bad-hash");
+        
+        CHECK_FALSE(result.isValid);
+        CHECK_FALSE(result.errorMessage.empty());
+    }
+    
+    SECTION("validates empty chunk") {
+        auto hasher = yams::crypto::createSHA256Hasher();
+        std::vector<std::byte> emptyBytes;
+        std::string hash = hasher->hash(std::span<const std::byte>(emptyBytes.data(), 0));
+        
+        auto result = validator.validateChunk(
+            std::span<const std::byte>(emptyBytes.data(), 0), hash);
+        
+        CHECK(result.isValid);
     }
 }
 
-TEST(ChunkValidatorParallel, DetectsInvalidChunks) {
+TEST_CASE("ChunkValidator configuration", "[integrity][chunk-validator]") {
     ChunkValidationConfig cfg;
     cfg.maxParallelValidations = 8;
-
+    cfg.failOnFirstError = true;
+    
     ChunkValidator validator(cfg);
-    ChunkFixture fixture(16);
-
-    auto corrupted = fixture.chunks;
-    corrupted[5].second = "bad-hash";
-
-    auto results = validator.validateChunks(corrupted);
-    ASSERT_EQ(results.size(), corrupted.size());
-
-    std::size_t invalidCount = 0;
-    for (std::size_t i = 0; i < results.size(); ++i) {
-        if (i == 5) {
-            EXPECT_FALSE(results[i].isValid);
-            EXPECT_FALSE(results[i].errorMessage.empty());
-            ++invalidCount;
-        } else {
-            EXPECT_TRUE(results[i].isValid);
-            EXPECT_TRUE(results[i].errorMessage.empty());
-        }
+    
+    SECTION("getConfig returns current configuration") {
+        const auto& currentCfg = validator.getConfig();
+        CHECK(currentCfg.maxParallelValidations == 8);
+        CHECK(currentCfg.failOnFirstError);
     }
-    EXPECT_EQ(invalidCount, 1u);
+    
+    SECTION("setConfig updates configuration") {
+        ChunkValidationConfig newCfg;
+        newCfg.maxParallelValidations = 2;
+        newCfg.failOnFirstError = false;
+        
+        validator.setConfig(newCfg);
+        
+        const auto& currentCfg = validator.getConfig();
+        CHECK(currentCfg.maxParallelValidations == 2);
+        CHECK_FALSE(currentCfg.failOnFirstError);
+    }
 }

@@ -442,7 +442,7 @@ void AbiPluginLoader::loadTrust() {
     spdlog::debug("AbiPluginLoader::loadTrust reading file: {}", trustFile_.string());
     std::string line;
     while (std::getline(in, line)) {
-        if (line.empty())
+        if (line.empty() || line[0] == '#')
             continue;
         trusted_.insert(std::filesystem::path(line));
     }

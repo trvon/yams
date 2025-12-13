@@ -3787,8 +3787,14 @@ MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, i
         };
 
         std::unordered_set<int64_t> seenDocIds;
+        const size_t effectiveLimit = limit > 0 ? static_cast<size_t>(limit) : SIZE_MAX;
 
         for (const auto& fuzzyResult : fuzzyResults) {
+            // Early termination once we have enough results
+            if (results.results.size() >= effectiveLimit) {
+                break;
+            }
+
             auto docIdOpt = parseDocId(fuzzyResult.id);
             if (!docIdOpt.has_value()) {
                 continue;
@@ -3810,9 +3816,9 @@ MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, i
 
             SearchResult result;
             result.document = docResult.value().value();
-            result.snippet =
-                common::sanitizeUtf8("Match type: " + fuzzyResult.matchType +
-                                     " (similarity: " + std::to_string(fuzzyResult.score) + ")");
+            // Snippet will be populated by the service layer if needed
+            // Store match metadata in matchedTerms for debugging if needed
+            result.matchedTerms.push_back(fuzzyResult.matchType);
             result.score = static_cast<double>(fuzzyResult.score);
 
             results.results.push_back(result);
