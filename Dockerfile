@@ -40,6 +40,11 @@ ARG BUILD_JOBS=2
 
 COPY . .
 
+# Fetch required submodules (COPY doesn't include submodule contents)
+RUN git init 2>/dev/null || true && \
+  git clone --depth 1 https://github.com/trvon/sqlite-vec-cpp.git third_party/sqlite-vec-cpp || \
+  { echo "Failed to clone sqlite-vec-cpp"; exit 1; }
+
 # Use setup.sh with retry logic for Conan remote issues
 RUN --mount=type=cache,target=/root/.conan2 \
   set -eux; \
