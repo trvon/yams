@@ -327,11 +327,7 @@ if [[ "${LIBCXX_HARDENING}" != "none" ]]; then
 fi
 
 echo "--- Exporting custom Conan recipes... ---"
-# Export custom qpdf recipe if it exists
-if [[ -f "conan/qpdf/conanfile.py" ]]; then
-  echo "Exporting qpdf/11.9.0 from conan/qpdf/"
-  conan export conan/qpdf --name=qpdf --version=11.9.0
-fi
+# qpdf export removed - PDF plugin will be updated in separate PBI
 
 # Export custom onnxruntime recipe if it exists
 if [[ -f "conan/onnxruntime/conanfile.py" ]]; then
@@ -378,8 +374,7 @@ fi
 
 # Force building missing packages to ensure ABI compatibility
 # This is especially important for C++23 with Clang + libstdc++
-# Always rebuild qpdf to ensure it's built with -fPIC for plugins
-CONAN_ARGS+=(--build=missing --build=qpdf/*)
+CONAN_ARGS+=(--build=missing)
 
 # Use runtime_deploy to copy shared libraries next to executables (mainly for Windows, no-op on Unix with RPATH)
 conan install . -of "${BUILD_DIR}" "${CONAN_ARGS[@]}" --deployer=runtime_deploy --deployer-folder="${BUILD_DIR}"

@@ -9,13 +9,13 @@
 # - Exclude: integrity/integrity_verifier_test.cpp
 # - Exclude: storage/{storage_engine_test.cpp,compressed_storage_engine_test.cpp}
 
+# Migrated to Catch2 - see tests/meson.build (catch2_versioning_submodule)
 unit_root = files(
-  'versioning_document_indexer_test.cpp',
+  # 'versioning_document_indexer_test.cpp', # Migrated to Catch2
 )
 
 unit_api = files(
-  'api/content_store_test.cpp',
-  # 'api/metadata_api_test.cpp' excluded
+  # All API tests migrated to Catch2 - see tests/meson.build catch2_api_submodule_exe
 )
 
 unit_app_services = files(
@@ -46,26 +46,28 @@ unit_core = files(
 
 unit_cli = []
 if tests_has_cli
-  unit_cli += files(
-    'cli/config_command_test.cpp',
-    'cli/daemon_command_test.cpp',
-    'cli/doctor_command_test.cpp',
-    # init_command_test.cpp moved to Catch2 (init_command_catch2_test.cpp)
-    'cli/model_command_test.cpp',
-    'cli/recommendation_util_test.cpp',
-    'cli/session_command_test.cpp',
-    'cli/stream_heuristics_test.cpp',
-    'cli/update_command_test.cpp',
-    'cli/add_command_stdin_test.cpp',
-    'cli/grep_command_path_tree_test.cpp',
-    # Error hints and prompt utilities
-    'cli/error_hints_test.cpp',
-    'cli/prompt_util_test.cpp',
-    # CLI11 option isolation (descriptions not leaking into values)
-    'cli/cli_option_isolation_test.cpp',
-    # Data dir resolution precedence (config > env > CLI)
-    'cli/data_dir_resolution_test.cpp',
-  )
+  # Migrated to Catch2: see tests/meson.build catch2_cli_submodule_exe (yams-cli)
+  # All CLI tests moved to catch2_cli_submodule_exe
+  # unit_cli += files(
+  #   'cli/config_command_test.cpp',
+  #   'cli/daemon_command_test.cpp',
+  #   'cli/doctor_command_test.cpp',
+  #   # init_command_test.cpp moved to Catch2 (init_command_catch2_test.cpp)
+  #   'cli/model_command_test.cpp',
+  #   'cli/recommendation_util_test.cpp',
+  #   'cli/session_command_test.cpp',
+  #   'cli/stream_heuristics_test.cpp',
+  #   'cli/update_command_test.cpp',
+  #   'cli/add_command_stdin_test.cpp',
+  #   'cli/grep_command_path_tree_test.cpp',
+  #   # Error hints and prompt utilities
+  #   'cli/error_hints_test.cpp',
+  #   'cli/prompt_util_test.cpp',
+  #   # CLI11 option isolation (descriptions not leaking into values)
+  #   'cli/cli_option_isolation_test.cpp',
+  #   # Data dir resolution precedence (config > env > CLI)
+  #   'cli/data_dir_resolution_test.cpp',
+  # )
 endif
 
 unit_compression = files(
@@ -155,7 +157,7 @@ endif
 unit_daemon = unit_daemon_base + unit_daemon_embedding
 
 unit_downloader = files(
-  'downloader/test_downloader_basic.cpp',
+  # All downloader tests migrated to Catch2 - see tests/meson.build catch2_downloader_submodule_exe
 )
 
 # Migrated to Catch2 - see tests/meson.build integrity_catch2_exe
@@ -171,13 +173,13 @@ unit_integrity = []
 
 unit_repair_base = []
 
-# Repair embedding tests - requires vector support
+# Repair embedding tests - migrated to Catch2 (catch2_repair_submodule)
 unit_repair_embedding = []
-if get_option('enable-vector-tests')
-  unit_repair_embedding += files(
-    'repair/embedding_repair_scan_test.cpp',
-  )
-endif
+# if get_option('enable-vector-tests')
+#   unit_repair_embedding += files(
+#     'repair/embedding_repair_scan_test.cpp',  # Migrated to Catch2
+#   )
+# endif
 
 unit_repair = unit_repair_base + unit_repair_embedding
 
@@ -205,33 +207,37 @@ unit_mcp = files(
 )
 
 unit_metadata = files(
-  'metadata/concepts_compile_test.cpp',
-  'metadata/connection_pool_maintenance_smoke_test.cpp',
-  'metadata/connection_pool_waiting_guard_test.cpp',
-  'metadata/database_statement_time_test.cpp',
-  'metadata/database_test.cpp',
+  # Migrated to Catch2 - see tests/meson.build (catch2_metadata_unit_exe)
+  # 'metadata/concepts_compile_test.cpp',
+  # 'metadata/database_statement_time_test.cpp',
+  # 'metadata/query_helpers_test.cpp',
+  # 'metadata/sql_build_select_test.cpp',
+  # 'metadata/metadata_value_variant_test.cpp',
+  
+  # Migrated to Catch2 - see tests/meson.build (catch2_connection_pool_exe)
+  # 'metadata/connection_pool_maintenance_smoke_test.cpp',
+  # 'metadata/connection_pool_waiting_guard_test.cpp',
+
+  # 'metadata/database_test.cpp',  # Migrated to Catch2 (database_catch2_test.cpp)
   'metadata/fts_queryspec_integration_test.cpp',
   'metadata/fts5_performance_stress_test.cpp',
-  'metadata/fts5_test.cpp',
+  # 'metadata/fts5_test.cpp',  # Migrated to Catch2 (fts5_catch2_test.cpp)
   'metadata/fuzzy_index_prioritization_test.cpp',
   'metadata/kg_store_alias_and_entities_test.cpp',
-  'metadata/kg_store_test.cpp',
+  # 'metadata/kg_store_test.cpp',  # Migrated to Catch2 (kg_store_catch2_test.cpp)
   'metadata/metadata_repository_cache_test.cpp',
   'metadata/metadata_repository_test.cpp',
   'metadata/metadata_schema_test.cpp',
-  'metadata/metadata_value_variant_test.cpp',
   'metadata/path_tree_delete_test.cpp',
   'metadata/query_helpers_integration_test.cpp',
-  'metadata/query_helpers_test.cpp',
   'metadata/session_isolation_test.cpp',
-  'metadata/sql_build_select_test.cpp',
   'metadata/tags_queryspec_integration_test.cpp',
   'metadata/tree_builder_test.cpp',
   'metadata/tree_differ_test.cpp',
 )
 
 unit_resolve = files(
-  'resolve/resolver_tests.cpp',
+  # All resolve tests migrated to Catch2 - see tests/meson.build catch2_resolve_submodule_exe
 )
 
 # Search tests migrated to Catch2 - see tests/meson.build (catch2_search_submodule)

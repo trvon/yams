@@ -85,6 +85,9 @@ RUN set -euxo pipefail; \
 # Ensure venv tools (including conan) are on PATH
 ENV PATH="/opt/venv/bin:${PATH}"
 
+# Upgrade meson in venv to latest version (system meson may be too old)
+RUN /opt/venv/bin/pip install --no-cache-dir --upgrade meson
+
 # Set Clang as default compiler
 ENV CC=clang-18 \
     CXX=clang++-18

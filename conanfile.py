@@ -93,9 +93,8 @@ class YamsConan(ConanFile):
         
         self.requires("xz_utils/5.4.5")
         if self.options.enable_pdf:  # type: ignore
-            # Build qpdf from source with proper fPIC flags using custom recipe
-            # This ensures PIC code generation for shared library linking
-            self.requires("qpdf/11.9.0")  # Custom recipe in conan/qpdf/
+            # qpdf removed - PDF plugin will be updated in separate PBI
+            # self.requires("qpdf/11.9.0")  # Custom recipe in conan/qpdf/
             self.requires("libmediainfo/22.03")
 
     def build_requirements(self):
@@ -133,12 +132,12 @@ class YamsConan(ConanFile):
         self.options["taglib"].shared = False
         self.options["spdlog"].header_only = False
 
-        # Configure qpdf only when PDF support is enabled
-        if self.options.enable_pdf:  # type: ignore
-            self.options["qpdf"].fPIC = True
-            self.options["qpdf"].shared = False
-            self.options["qpdf"].with_jpeg = "libjpeg"
-            self.options["qpdf"].with_ssl = "openssl"
+        # qpdf configuration removed - PDF plugin will be updated in separate PBI
+        # if self.options.enable_pdf:  # type: ignore
+        #     self.options["qpdf"].fPIC = True
+        #     self.options["qpdf"].shared = False
+        #     self.options["qpdf"].with_jpeg = "libjpeg"
+        #     self.options["qpdf"].with_ssl = "openssl"
         
         # Configure ONNX Runtime if enabled
         # Note: onnxruntime uses pre-built shared libraries (DLLs on Windows),

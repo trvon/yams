@@ -112,35 +112,25 @@ public:
         auto result = run_awaitable_with_timeout(makeAwaitable(), std::chrono::seconds(3));
         auto elapsed = std::chrono::steady_clock::now() - start;
 
-        REQUIRE_MESSAGE(result.has_value(), toolName << " handler timed out");
+        INFO(toolName + " handler timed out");
+        REQUIRE(result.has_value());
         auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed);
-        CHECK_MESSAGE(elapsedMs < 500ms,
-                      toolName << " harness took too long: " << elapsedMs.count() << "ms");
+        INFO(toolName + " harness took too long: " + std::to_string(elapsedMs.count()) + "ms");
+        CHECK(elapsedMs < 500ms);
 
         if (result->has_value()) {
-            SUCCEED(toolName << " handler completed successfully");
+            SUCCEED(toolName + " handler completed successfully");
         } else {
             const auto& error = result->error();
-            CHECK_MESSAGE(!error.message.empty(), toolName << " error message missing");
-            CHECK_MESSAGE(error.message.find("test harness") != std::string::npos,
-                          toolName << " unexpected error message: " << error.message);
+            INFO(toolName + " error message missing");
+            CHECK_FALSE(error.message.empty());
+            INFO(toolName + " unexpected error message: " + error.message);
+            CHECK(error.message.find("test harness") != std::string::npos);
         }
     }
 };
 
 } // namespace
-
-// Helper macro for better test output
-#define REQUIRE_MESSAGE(cond, msg)                                                                 \
-    do {                                                                                           \
-        INFO(msg);                                                                                 \
-        REQUIRE(cond);                                                                             \
-    } while (0)
-#define CHECK_MESSAGE(cond, msg)                                                                   \
-    do {                                                                                           \
-        INFO(msg);                                                                                 \
-        CHECK(cond);                                                                               \
-    } while (0)
 
 // Ensure async tool handlers return robustly (error or value), not crash/hang,
 // when daemon is unavailable in test environment.

@@ -241,9 +241,11 @@ onnx_opt = get_option('enable-onnx')
 # Enforce sqlite3 FTS5 presence at configure time (configurable)
 require_fts5 = get_option('require-fts5')
 sqlite_dep = dependency('sqlite3', required: true)
-# Skip runtime test when cross-compiling
+# Skip runtime test when cross-compiling or using subproject sqlite (internal dep can't be used with cpp.run in newer meson)
 if meson.is_cross_build()
   warning('Cross-compiling: skipping SQLite FTS5 runtime check. Ensure FTS5 is enabled in your target SQLite build.')
+elif sqlite_dep.type_name() == 'internal'
+  warning('Using subproject sqlite3: skipping FTS5 runtime check. Subproject sqlite3 has FTS5 enabled by default.')
 else
   fts5_prog = cpp.run(files('meson/fts5_check.cpp'), dependencies: sqlite_dep, name: 'sqlite3 FTS5 check')
   if fts5_prog.returncode() != 0

@@ -278,19 +278,12 @@ $conanArgs = @(
 # VS 2025/2024 is version 18, MSVC compiler version 195
 $conanArgs += @('-c', "tools.microsoft.msbuild:vs_version=$vsVersion")
 
-# Always rebuild missing packages and qpdf (for plugins parity)
-$conanArgs += @('--build=missing', '--build=qpdf/*', '-c', 'tools.env.virtualenv:powershell=True')
+# Always rebuild missing packages
+$conanArgs += @('--build=missing', '-c', 'tools.env.virtualenv:powershell=True')
 
 # Export custom Conan recipes before install (must happen before conan install)
 Write-Host '--- Exporting custom Conan recipes... ---'
-if (Test-Path 'conan/qpdf/conanfile.py') {
-    Write-Host 'Exporting qpdf/11.9.0 from conan/qpdf/'
-    conan export conan/qpdf --name=qpdf --version=11.9.0
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "Failed to export qpdf recipe"
-        exit $LASTEXITCODE
-    }
-}
+# qpdf export removed - PDF plugin will be updated in separate PBI
 
 if (Test-Path 'conan/onnxruntime/conanfile.py') {
     Write-Host 'Exporting onnxruntime/1.23.2 from conan/onnxruntime/'
