@@ -3,6 +3,7 @@
 #include <yams/daemon/components/RepairCoordinator.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
+#include <yams/metadata/document_metadata.h>
 #include <yams/metadata/query_helpers.h>
 
 #include <spdlog/spdlog.h>
@@ -454,6 +455,14 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                                         if (!running_.load(std::memory_order_relaxed))
                                             break;
 
+                                        // Skip documents already processed or in progress
+                                        if (d.repairStatus ==
+                                                yams::metadata::RepairStatus::Completed ||
+                                            d.repairStatus ==
+                                                yams::metadata::RepairStatus::Processing) {
+                                            continue;
+                                        }
+
                                         // Check if document needs repair
                                         const bool missingEmb =
                                             !vectorDb->hasEmbedding(d.sha256Hash);
@@ -579,6 +588,11 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                 auto docRes = meta->getDocumentByHash(hash);
                 if (docRes && docRes.value().has_value()) {
                     const auto& d = docRes.value().value();
+                    // Skip documents already processed or in progress
+                    if (d.repairStatus == yams::metadata::RepairStatus::Completed ||
+                        d.repairStatus == yams::metadata::RepairStatus::Processing) {
+                        continue;
+                    }
                     // Check if FTS5 content needs extraction
                     if (!d.contentExtracted ||
                         d.extractionStatus != yams::metadata::ExtractionStatus::Success) {

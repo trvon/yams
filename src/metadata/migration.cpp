@@ -335,7 +335,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             addFTS5PorterStemmer(),
             removeFTS5ContentType(),
             renameDocEntitiesToKgDocEntities(),
-            createSessionIndexes()};
+            createSessionIndexes(),
+            createRepairTrackingSchema()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -2089,6 +2090,56 @@ Migration YamsMetadataMigrations::createSessionIndexes() {
 
     m.downSQL = R"(
         DROP INDEX IF EXISTS idx_metadata_session_id;
+    )";
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::createRepairTrackingSchema() {
+    Migration m;
+    m.version = 21;
+    m.name = "Add repair tracking fields to documents";
+    m.created = std::chrono::system_clock::now();
+
+    m.upFunc = [](Database& db) -> Result<void> {
+        std::unordered_set<std::string> cols;
+        if (auto ti = db.prepare("PRAGMA table_info(documents)"); ti) {
+            auto stmt = std::move(ti).value();
+            while (true) {
+                auto s = stmt.step();
+                if (!s)
+                    break;
+                if (!s.value())
+                    break;
+                cols.insert(stmt.getString(1));
+            }
+        }
+
+        auto add_col = [&](const std::string& name, const std::string& ddl) -> Result<void> {
+            if (!cols.count(name)) {
+                return db.execute("ALTER TABLE documents ADD COLUMN " + ddl);
+            }
+            return Result<void>();
+        };
+
+        if (auto r = add_col("repair_status", "repair_status TEXT DEFAULT 'pending'"); !r)
+            return r;
+        if (auto r = add_col("repair_attempted_at", "repair_attempted_at INTEGER"); !r)
+            return r;
+        if (auto r = add_col("repair_attempts", "repair_attempts INTEGER DEFAULT 0"); !r)
+            return r;
+
+        if (auto r = db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_documents_repair_status ON documents(repair_status)");
+            !r)
+            return r;
+
+        spdlog::info("v21: Added repair tracking fields to documents table");
+        return Result<void>();
+    };
+
+    m.downSQL = R"(
+        DROP INDEX IF EXISTS idx_documents_repair_status;
     )";
 
     return m;

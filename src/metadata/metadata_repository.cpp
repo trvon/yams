@@ -30,27 +30,31 @@ namespace {
 constexpr const char* kDocumentColumnListNew =
     "id, file_path, file_name, file_extension, file_size, sha256_hash, mime_type, "
     "created_time, modified_time, indexed_time, content_extracted, extraction_status, "
-    "extraction_error, path_prefix, reverse_path, path_hash, parent_hash, path_depth";
+    "extraction_error, path_prefix, reverse_path, path_hash, parent_hash, path_depth, "
+    "repair_status, repair_attempted_at, repair_attempts";
 
 constexpr const char* kDocumentColumnListCompat =
     "id, file_path, file_name, file_extension, file_size, sha256_hash, mime_type, "
     "created_time, modified_time, indexed_time, content_extracted, extraction_status, "
     "extraction_error, NULL as path_prefix, '' as reverse_path, '' as path_hash, '' as "
-    "parent_hash, 0 as path_depth";
+    "parent_hash, 0 as path_depth, 'pending' as repair_status, NULL as repair_attempted_at, "
+    "0 as repair_attempts";
 
 constexpr const char* kDocumentColumnListNewQualified =
     "documents.id, documents.file_path, documents.file_name, documents.file_extension, "
     "documents.file_size, documents.sha256_hash, documents.mime_type, documents.created_time, "
     "documents.modified_time, documents.indexed_time, documents.content_extracted, "
     "documents.extraction_status, documents.extraction_error, documents.path_prefix, "
-    "documents.reverse_path, documents.path_hash, documents.parent_hash, documents.path_depth";
+    "documents.reverse_path, documents.path_hash, documents.parent_hash, documents.path_depth, "
+    "documents.repair_status, documents.repair_attempted_at, documents.repair_attempts";
 
 constexpr const char* kDocumentColumnListCompatQualified =
     "documents.id, documents.file_path, documents.file_name, documents.file_extension, "
     "documents.file_size, documents.sha256_hash, documents.mime_type, documents.created_time, "
     "documents.modified_time, documents.indexed_time, documents.content_extracted, "
     "documents.extraction_status, documents.extraction_error, NULL as path_prefix, '' as "
-    "reverse_path, '' as path_hash, '' as parent_hash, 0 as path_depth";
+    "reverse_path, '' as path_hash, '' as parent_hash, 0 as path_depth, 'pending' as "
+    "repair_status, NULL as repair_attempted_at, 0 as repair_attempts";
 
 constexpr int64_t kPathTreeNullParent = PathTreeNode::kNullParent;
 
@@ -2480,6 +2484,31 @@ Result<void> MetadataRepository::updateDocumentEmbeddingStatusByHash(const std::
     });
 }
 
+Result<void> MetadataRepository::updateDocumentRepairStatus(const std::string& hash,
+                                                            RepairStatus status) {
+    return executeQuery<void>([&](Database& db) -> Result<void> {
+        auto updateStmt = db.prepare(R"(
+            UPDATE documents
+            SET repair_status = ?, repair_attempted_at = unixepoch(), repair_attempts = repair_attempts + 1
+            WHERE sha256_hash = ?
+        )");
+        if (!updateStmt)
+            return updateStmt.error();
+
+        auto& stmt = updateStmt.value();
+        if (auto r = stmt.bind(1, RepairStatusUtils::toString(status)); !r)
+            return r.error();
+        if (auto r = stmt.bind(2, hash); !r)
+            return r.error();
+
+        auto execResult = stmt.execute();
+        if (!execResult)
+            return execResult.error();
+
+        return Result<void>();
+    });
+}
+
 Result<void> MetadataRepository::checkpointWal() {
     return executeQuery<void>([](Database& db) -> Result<void> {
         auto result = db.execute("PRAGMA wal_checkpoint(TRUNCATE)");
@@ -3496,6 +3525,12 @@ DocumentInfo MetadataRepository::mapDocumentRow(Statement& stmt) {
     info.pathHash = stmt.getString(15);
     info.parentHash = stmt.getString(16);
     info.pathDepth = stmt.getInt(17);
+    info.repairStatus = RepairStatusUtils::fromString(stmt.getString(18));
+    if (!stmt.isNull(19)) {
+        info.repairAttemptedAt =
+            std::chrono::sys_seconds{std::chrono::seconds{stmt.getInt64(19)}};
+    }
+    info.repairAttempts = stmt.getInt(20);
     return info;
 }
 

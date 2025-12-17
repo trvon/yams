@@ -944,3 +944,103 @@ TEST_F(MetadataSchemaTest, SymbolMetadataForeignKeyConstraint) {
     ASSERT_FALSE(result.has_value());
     EXPECT_NE(result.error().message.find("constraint"), std::string::npos);
 }
+
+TEST_F(MetadataSchemaTest, RepairStatusHandling) {
+    // Test all repair status values
+    std::vector<RepairStatus> statuses = {RepairStatus::Pending, RepairStatus::Processing,
+                                          RepairStatus::Completed, RepairStatus::Failed,
+                                          RepairStatus::Skipped};
+
+    std::vector<int64_t> docIds;
+
+    for (auto status : statuses) {
+        auto doc = createTestDocument("repair_" + RepairStatusUtils::toString(status) + ".txt");
+        auto result = repo_->insertDocument(doc);
+        ASSERT_TRUE(result.has_value());
+        docIds.push_back(result.value());
+    }
+
+    // Update repair status for each document
+    for (size_t i = 0; i < statuses.size(); i++) {
+        auto doc = repo_->getDocument(docIds[i]);
+        ASSERT_TRUE(doc.has_value() && doc.value().has_value());
+        auto hash = doc.value().value().sha256Hash;
+
+        auto updateResult = repo_->updateDocumentRepairStatus(hash, statuses[i]);
+        ASSERT_TRUE(updateResult.has_value());
+    }
+
+    // Retrieve and verify
+    for (size_t i = 0; i < statuses.size(); i++) {
+        auto result = repo_->getDocument(docIds[i]);
+        ASSERT_TRUE(result.has_value());
+        ASSERT_TRUE(result.value().has_value());
+        auto doc = result.value().value();
+        EXPECT_EQ(doc.repairStatus, statuses[i]);
+        EXPECT_GE(doc.repairAttempts, 1);
+    }
+}
+
+TEST_F(MetadataSchemaTest, RepairStatusStringConversion) {
+    // Test toString
+    EXPECT_EQ(RepairStatusUtils::toString(RepairStatus::Pending), "pending");
+    EXPECT_EQ(RepairStatusUtils::toString(RepairStatus::Processing), "processing");
+    EXPECT_EQ(RepairStatusUtils::toString(RepairStatus::Completed), "completed");
+    EXPECT_EQ(RepairStatusUtils::toString(RepairStatus::Failed), "failed");
+    EXPECT_EQ(RepairStatusUtils::toString(RepairStatus::Skipped), "skipped");
+
+    // Test fromString
+    EXPECT_EQ(RepairStatusUtils::fromString("pending"), RepairStatus::Pending);
+    EXPECT_EQ(RepairStatusUtils::fromString("processing"), RepairStatus::Processing);
+    EXPECT_EQ(RepairStatusUtils::fromString("completed"), RepairStatus::Completed);
+    EXPECT_EQ(RepairStatusUtils::fromString("failed"), RepairStatus::Failed);
+    EXPECT_EQ(RepairStatusUtils::fromString("skipped"), RepairStatus::Skipped);
+    EXPECT_EQ(RepairStatusUtils::fromString("unknown"), RepairStatus::Pending);
+}
+
+TEST_F(MetadataSchemaTest, MigrationVersion21RepairTracking) {
+    // Test that migration v21 exists and repair tracking columns are present
+    auto result = pool_->withConnection([](Database& db) -> Result<void> {
+        MigrationManager mm(db);
+        auto initResult = mm.initialize();
+        if (!initResult)
+            return initResult.error();
+
+        // Check current version is at least 21
+        auto versionResult = mm.getCurrentVersion();
+        if (!versionResult)
+            return versionResult.error();
+
+        int currentVersion = versionResult.value();
+        if (currentVersion < 21) {
+            return Error{ErrorCode::InvalidData, "Migration v21 not applied"};
+        }
+
+        // Check repair tracking columns exist
+        const char* columns[] = {"repair_status", "repair_attempted_at", "repair_attempts"};
+        for (const char* col : columns) {
+            auto colStmt = db.prepare("SELECT " + std::string(col) + " FROM documents LIMIT 0");
+            if (!colStmt) {
+                return Error{ErrorCode::NotFound, std::string("Column not found: ") + col};
+            }
+        }
+
+        // Check index exists
+        auto idxStmt =
+            db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name=?");
+        if (!idxStmt)
+            return idxStmt.error();
+        if (auto r = idxStmt.value().bind(1, "idx_documents_repair_status"); !r)
+            return r.error();
+        auto idxStep = idxStmt.value().step();
+        if (!idxStep)
+            return idxStep.error();
+        if (!idxStep.value()) {
+            return Error{ErrorCode::NotFound, "Index idx_documents_repair_status not found"};
+        }
+
+        return Result<void>();
+    });
+
+    ASSERT_TRUE(result.has_value()) << result.error().message;
+}

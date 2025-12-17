@@ -206,6 +206,9 @@ private:
 
     // Version 20: Session-isolated memory index (PBI-082)
     static Migration createSessionIndexes();
+
+    // Version 21: Repair tracking fields to prevent duplicate work
+    static Migration createRepairTrackingSchema();
 };
 
 /**

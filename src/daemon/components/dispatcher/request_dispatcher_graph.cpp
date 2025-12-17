@@ -7,9 +7,6 @@
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/metadata/knowledge_graph_store.h>
 
-#include <queue>
-#include <unordered_set>
-
 namespace yams::daemon {
 
 using namespace yams::app::services;
@@ -55,137 +52,56 @@ RequestDispatcher::handleGraphQueryRequest(const GraphQueryRequest& req) {
         originNodeId = nodeResult.value()->id;
     }
 
-    if (originNodeId < 0) {
-        // Need to resolve from document hash, name, or snapshot
-        if (!req.documentHash.empty()) {
-            auto docIdResult = kgStore->getDocumentIdByHash(req.documentHash);
-            if (!docIdResult || !docIdResult.value()) {
-                co_return ErrorResponse{.code = ErrorCode::NotFound,
-                                        .message = "Document not found: " + req.documentHash};
-            }
-            // In this implementation, we'll use document ID as node ID directly
-            // This is a simplified approach - in a full implementation, you might need
-            // to look up the corresponding KG node via a mapping table
-            originNodeId = docIdResult.value().value();
-        } else if (!req.documentName.empty()) {
-            auto docIdResult = kgStore->getDocumentIdByName(req.documentName);
-            if (!docIdResult || !docIdResult.value()) {
-                co_return ErrorResponse{.code = ErrorCode::NotFound,
-                                        .message = "Document not found: " + req.documentName};
-            }
-            originNodeId = docIdResult.value().value();
-        } else {
-            co_return ErrorResponse{
-                .code = ErrorCode::InvalidArgument,
-                .message = "Must specify documentHash, documentName, nodeId, or nodeKey"};
-        }
+    auto graphService = makeGraphQueryService(kgStore, metaRepo);
+    if (!graphService) {
+        co_return ErrorResponse{.code = ErrorCode::InternalError,
+                                .message = "Failed to create graph query service"};
     }
 
-    // Get origin node
-    auto originNodeResult = kgStore->getNodeById(originNodeId);
-    if (!originNodeResult || !originNodeResult.value()) {
-        co_return ErrorResponse{.code = ErrorCode::NotFound,
-                                .message = "Origin node not found in knowledge graph"};
+    app::services::GraphQueryRequest svcReq;
+    svcReq.nodeId = (originNodeId >= 0) ? std::make_optional(originNodeId) : std::nullopt;
+    svcReq.documentHash = req.documentHash.empty() ? std::nullopt : std::make_optional(req.documentHash);
+    svcReq.documentName = req.documentName.empty() ? std::nullopt : std::make_optional(req.documentName);
+    svcReq.snapshotId = req.snapshotId.empty() ? std::nullopt : std::make_optional(req.snapshotId);
+    svcReq.maxDepth = req.maxDepth;
+    svcReq.maxResults = req.maxResults;
+    svcReq.maxResultsPerDepth = req.maxResultsPerDepth;
+    svcReq.offset = req.offset;
+    svcReq.limit = req.limit;
+    svcReq.hydrateFully = req.includeNodeProperties;
+    svcReq.includeEdgeProperties = req.includeEdgeProperties;
+
+    auto result = graphService->query(svcReq);
+    if (!result) {
+        co_return ErrorResponse{.code = result.error().code, .message = result.error().message};
     }
+
+    const auto& svcResp = result.value();
 
     GraphQueryResponse resp;
-    resp.kgAvailable = true;
+    resp.kgAvailable = svcResp.kgAvailable;
+    resp.warning = svcResp.warning.value_or("");
+    resp.totalNodesFound = svcResp.totalNodesFound;
+    resp.totalEdgesTraversed = svcResp.totalEdgesTraversed;
+    resp.truncated = svcResp.truncated;
+    resp.maxDepthReached = svcResp.maxDepthReached;
 
-    // Populate origin node
-    const auto& originNode = originNodeResult.value().value();
-    resp.originNode.nodeId = originNode.id;
-    resp.originNode.nodeKey = originNode.nodeKey;
-    resp.originNode.label = originNode.label.value_or("");
-    resp.originNode.type = originNode.type.value_or("");
+    resp.originNode.nodeId = svcResp.originNode.node.nodeId;
+    resp.originNode.nodeKey = svcResp.originNode.node.nodeKey;
+    resp.originNode.label = svcResp.originNode.node.label.value_or("");
+    resp.originNode.type = svcResp.originNode.node.type.value_or("");
     resp.originNode.distance = 0;
 
-    // BFS traversal to find connected nodes
-    std::vector<int64_t> visited;
-    std::queue<std::pair<int64_t, int32_t>> queue; // <nodeId, depth>
-    std::unordered_set<int64_t> visitedSet;
-
-    queue.push({originNodeId, 0});
-    visitedSet.insert(originNodeId);
-
-    uint64_t edgesTraversed = 0;
-    int32_t maxDepthReached = 0;
-
-    while (!queue.empty() && visited.size() < req.maxResults) {
-        auto [currentNodeId, depth] = queue.front();
-        queue.pop();
-
-        if (depth > req.maxDepth) {
-            continue;
-        }
-
-        maxDepthReached = std::max(maxDepthReached, depth);
-
-        // Get outgoing edges
-        auto edgesResult =
-            kgStore->getEdgesFrom(currentNodeId, std::nullopt, req.maxResultsPerDepth, 0);
-        if (edgesResult) {
-            for (const auto& edge : edgesResult.value()) {
-                edgesTraversed++;
-
-                // Filter by relation if specified
-                if (!req.relationFilters.empty()) {
-                    bool matchesFilter = false;
-                    for (const auto& filter : req.relationFilters) {
-                        if (edge.relation == filter) {
-                            matchesFilter = true;
-                            break;
-                        }
-                    }
-                    if (!matchesFilter) {
-                        continue;
-                    }
-                }
-
-                if (visitedSet.find(edge.dstNodeId) == visitedSet.end()) {
-                    visitedSet.insert(edge.dstNodeId);
-                    visited.push_back(edge.dstNodeId);
-
-                    if (depth + 1 <= req.maxDepth) {
-                        queue.push({edge.dstNodeId, depth + 1});
-                    }
-                }
-            }
-        }
-    }
-
-    resp.totalNodesFound = visited.size();
-    resp.totalEdgesTraversed = edgesTraversed;
-    resp.truncated = (visited.size() >= req.maxResults);
-    resp.maxDepthReached = maxDepthReached;
-
-    // Populate connected nodes (with pagination)
-    const size_t startIdx = req.offset;
-    const size_t endIdx = std::min(startIdx + req.limit, visited.size());
-
-    resp.connectedNodes.reserve(endIdx - startIdx);
-    for (size_t i = startIdx; i < endIdx; ++i) {
-        int64_t nodeId = visited[i];
-
-        auto nodeResult = kgStore->getNodeById(nodeId);
-        if (nodeResult && nodeResult.value()) {
-            const auto& node = nodeResult.value().value();
-
-            GraphNode graphNode;
-            graphNode.nodeId = node.id;
-            graphNode.nodeKey = node.nodeKey;
-            graphNode.label = node.label.value_or("");
-            graphNode.type = node.type.value_or("");
-
-            // Try to get document info if this is a document node
-            if (auto hashResult = kgStore->getDocumentHashById(nodeId);
-                hashResult && hashResult.value()) {
-                graphNode.documentHash = hashResult.value().value();
-            }
-
-            graphNode.distance = 1; // Simplified - would need to track actual distance
-
-            resp.connectedNodes.push_back(std::move(graphNode));
-        }
+    resp.connectedNodes.reserve(svcResp.allConnectedNodes.size());
+    for (const auto& cn : svcResp.allConnectedNodes) {
+        GraphNode graphNode;
+        graphNode.nodeId = cn.nodeMetadata.node.nodeId;
+        graphNode.nodeKey = cn.nodeMetadata.node.nodeKey;
+        graphNode.label = cn.nodeMetadata.node.label.value_or("");
+        graphNode.type = cn.nodeMetadata.node.type.value_or("");
+        graphNode.documentHash = cn.nodeMetadata.documentHash.value_or("");
+        graphNode.distance = cn.distance;
+        resp.connectedNodes.push_back(std::move(graphNode));
     }
 
     spdlog::debug("GraphQuery: returning {} connected nodes, totalFound={}, truncated={}",

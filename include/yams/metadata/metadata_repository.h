@@ -232,6 +232,9 @@ public:
                                                              bool hasEmbedding,
                                                              const std::string& modelId = "") = 0;
 
+    // Repair status operations
+    virtual Result<void> updateDocumentRepairStatus(const std::string& hash, RepairStatus status) = 0;
+
     /**
      * @brief Force a WAL checkpoint.
      */
@@ -406,6 +409,9 @@ public:
                                                const std::string& modelId = "") override;
     Result<void> updateDocumentEmbeddingStatusByHash(const std::string& hash, bool hasEmbedding,
                                                      const std::string& modelId = "") override;
+
+    // Repair status operations
+    Result<void> updateDocumentRepairStatus(const std::string& hash, RepairStatus status) override;
 
     Result<void> checkpointWal() override;
 

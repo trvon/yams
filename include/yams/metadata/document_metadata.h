@@ -21,6 +21,21 @@ enum class ExtractionStatus {
 };
 
 /**
+ * @brief Repair processing status for documents
+ *
+ * Tracks whether a document has been processed by the repair system
+ * (embedding generation, FTS5 indexing, symbol extraction, etc.)
+ * to prevent duplicate work and deadlocks.
+ */
+enum class RepairStatus {
+    Pending,    ///< Not yet processed by repair system
+    Processing, ///< Currently being processed
+    Completed,  ///< Successfully processed
+    Failed,     ///< Processing failed (may retry after backoff)
+    Skipped     ///< Skipped (not applicable for this document type)
+};
+
+/**
  * @brief Document relationship types
  */
 enum class RelationshipType {
@@ -148,6 +163,11 @@ struct DocumentInfo {
     bool contentExtracted = false;         ///< Text extraction completed
     ExtractionStatus extractionStatus = ExtractionStatus::Pending; ///< Extraction status
     std::string extractionError;                                   ///< Error message if failed
+
+    // Repair tracking fields (v21 migration)
+    RepairStatus repairStatus = RepairStatus::Pending;    ///< Repair processing status
+    std::chrono::sys_seconds repairAttemptedAt;           ///< When repair was last attempted
+    int repairAttempts = 0;                               ///< Number of repair attempts
 
     // Legacy Unix timestamp accessors removed; bind/get sys_seconds directly via Statement.
 
@@ -398,6 +418,47 @@ namespace ExtractionStatusUtils {
     return ExtractionStatus::Pending;
 }
 } // namespace ExtractionStatusUtils
+
+/**
+ * @brief Utility functions for repair status
+ */
+namespace RepairStatusUtils {
+/**
+ * @brief Convert repair status to string
+ */
+[[nodiscard]] inline std::string toString(RepairStatus status) {
+    switch (status) {
+        case RepairStatus::Pending:
+            return "pending";
+        case RepairStatus::Processing:
+            return "processing";
+        case RepairStatus::Completed:
+            return "completed";
+        case RepairStatus::Failed:
+            return "failed";
+        case RepairStatus::Skipped:
+            return "skipped";
+    }
+    return "pending";
+}
+
+/**
+ * @brief Convert string to repair status
+ */
+[[nodiscard]] inline RepairStatus fromString(const std::string& str) {
+    if (str == "pending")
+        return RepairStatus::Pending;
+    if (str == "processing")
+        return RepairStatus::Processing;
+    if (str == "completed")
+        return RepairStatus::Completed;
+    if (str == "failed")
+        return RepairStatus::Failed;
+    if (str == "skipped")
+        return RepairStatus::Skipped;
+    return RepairStatus::Pending;
+}
+} // namespace RepairStatusUtils
 
 /**
  * @brief Utility functions for metadata value types

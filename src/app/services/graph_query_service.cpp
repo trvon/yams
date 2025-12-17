@@ -320,10 +320,38 @@ private:
         return metadata;
     }
 
-    // Perform breadth-first traversal from origin
+    void collectNeighbors(std::int64_t nodeId, int distance, int maxDepth,
+                          const std::vector<GraphRelationType>& relationFilters,
+                          std::unordered_set<std::int64_t>& visited,
+                          std::queue<std::pair<std::int64_t, int>>& queue) {
+        auto outgoing = kgStore_->getEdgesFrom(nodeId);
+        if (outgoing) {
+            for (const auto& edge : outgoing.value()) {
+                if (!matchesRelationFilter(edge, relationFilters))
+                    continue;
+                if (visited.find(edge.dstNodeId) == visited.end() && distance + 1 <= maxDepth) {
+                    queue.push({edge.dstNodeId, distance + 1});
+                    visited.insert(edge.dstNodeId);
+                }
+            }
+        }
+
+        auto incoming = kgStore_->getEdgesTo(nodeId);
+        if (incoming) {
+            for (const auto& edge : incoming.value()) {
+                if (!matchesRelationFilter(edge, relationFilters))
+                    continue;
+                if (visited.find(edge.srcNodeId) == visited.end() && distance + 1 <= maxDepth) {
+                    queue.push({edge.srcNodeId, distance + 1});
+                    visited.insert(edge.srcNodeId);
+                }
+            }
+        }
+    }
+
     Result<void> performBFSTraversal(std::int64_t originNodeId, const GraphQueryRequest& req,
                                      GraphQueryResponse& response) {
-        std::queue<std::pair<std::int64_t, int>> queue; // (nodeId, distance)
+        std::queue<std::pair<std::int64_t, int>> queue;
         std::unordered_set<std::int64_t> visited;
 
         queue.push({originNodeId, 0});
@@ -336,27 +364,12 @@ private:
             auto [currentNodeId, distance] = queue.front();
             queue.pop();
 
-            // Skip origin node (already in response.originNode)
             if (distance == 0) {
-                // Get neighbors for next iteration
-                auto neighborsResult = kgStore_->getEdgesFrom(currentNodeId);
-                if (neighborsResult) {
-                    for (const auto& edge : neighborsResult.value()) {
-                        if (!matchesRelationFilter(edge, req.relationFilters)) {
-                            continue;
-                        }
-
-                        if (visited.find(edge.dstNodeId) == visited.end() &&
-                            distance + 1 <= req.maxDepth) {
-                            queue.push({edge.dstNodeId, distance + 1});
-                            visited.insert(edge.dstNodeId);
-                        }
-                    }
-                }
+                collectNeighbors(currentNodeId, distance, req.maxDepth, req.relationFilters, visited,
+                                 queue);
                 continue;
             }
 
-            // Hydrate node metadata
             auto nodeMetadataResult = hydrateNodeMetadata(currentNodeId, req.hydrateFully);
             if (!nodeMetadataResult) {
                 spdlog::warn("Failed to hydrate node {}: {}", currentNodeId,
@@ -368,10 +381,9 @@ private:
             connectedNode.nodeMetadata = std::move(nodeMetadataResult.value());
             connectedNode.distance = distance;
 
-            // Find connecting edges (edges that led to this node)
-            auto incomingEdgesResult = kgStore_->getEdgesTo(currentNodeId);
-            if (incomingEdgesResult) {
-                for (const auto& edge : incomingEdgesResult.value()) {
+            auto inEdges = kgStore_->getEdgesTo(currentNodeId);
+            if (inEdges) {
+                for (const auto& edge : inEdges.value()) {
                     if (visited.find(edge.srcNodeId) != visited.end()) {
                         GraphEdgeDescriptor edgeDesc;
                         edgeDesc.edgeId = edge.id;
@@ -379,41 +391,43 @@ private:
                         edgeDesc.dstNodeId = edge.dstNodeId;
                         edgeDesc.relation = edge.relation;
                         edgeDesc.weight = edge.weight;
-                        if (req.includeEdgeProperties) {
+                        if (req.includeEdgeProperties)
                             edgeDesc.properties = edge.properties;
-                        }
                         connectedNode.connectingEdges.push_back(std::move(edgeDesc));
                         totalEdges++;
                     }
                 }
             }
 
-            // Add to results
+            auto outEdges = kgStore_->getEdgesFrom(currentNodeId);
+            if (outEdges) {
+                for (const auto& edge : outEdges.value()) {
+                    if (visited.find(edge.dstNodeId) != visited.end()) {
+                        GraphEdgeDescriptor edgeDesc;
+                        edgeDesc.edgeId = edge.id;
+                        edgeDesc.srcNodeId = edge.srcNodeId;
+                        edgeDesc.dstNodeId = edge.dstNodeId;
+                        edgeDesc.relation = edge.relation;
+                        edgeDesc.weight = edge.weight;
+                        if (req.includeEdgeProperties)
+                            edgeDesc.properties = edge.properties;
+                        connectedNode.connectingEdges.push_back(std::move(edgeDesc));
+                        totalEdges++;
+                    }
+                }
+            }
+
             response.nodesByDistance[distance].push_back(connectedNode);
             response.allConnectedNodes.push_back(std::move(connectedNode));
             totalNodes++;
 
-            // Check per-depth limit
             if (response.nodesByDistance[distance].size() >= req.maxResultsPerDepth) {
                 response.truncated = true;
-                continue; // Don't expand this depth further
+                continue;
             }
 
-            // Get neighbors for next iteration
-            auto neighborsResult = kgStore_->getEdgesFrom(currentNodeId);
-            if (neighborsResult) {
-                for (const auto& edge : neighborsResult.value()) {
-                    if (!matchesRelationFilter(edge, req.relationFilters)) {
-                        continue;
-                    }
-
-                    if (visited.find(edge.dstNodeId) == visited.end() &&
-                        distance + 1 <= req.maxDepth) {
-                        queue.push({edge.dstNodeId, distance + 1});
-                        visited.insert(edge.dstNodeId);
-                    }
-                }
-            }
+            collectNeighbors(currentNodeId, distance, req.maxDepth, req.relationFilters, visited,
+                             queue);
 
             response.maxDepthReached = std::max(response.maxDepthReached, distance);
         }
@@ -421,11 +435,9 @@ private:
         response.totalNodesFound = totalNodes;
         response.totalEdgesTraversed = totalEdges;
 
-        if (totalNodes >= req.maxResults) {
+        if (totalNodes >= req.maxResults)
             response.truncated = true;
-        }
 
-        // Apply pagination to allConnectedNodes
         if (req.offset > 0 || req.limit < response.allConnectedNodes.size()) {
             std::size_t start = std::min(req.offset, response.allConnectedNodes.size());
             std::size_t end = std::min(start + req.limit, response.allConnectedNodes.size());

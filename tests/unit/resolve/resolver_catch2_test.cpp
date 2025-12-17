@@ -313,6 +313,12 @@ public:
         return Error{ErrorCode::NotImplemented, "NI"};
     }
 
+    // Repair status operations
+    Result<void> updateDocumentRepairStatus(const std::string&,
+                                            yams::metadata::RepairStatus) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+
     Result<void> checkpointWal() override { return {}; }
 
     Result<std::optional<metadata::PathTreeNode>> findPathTreeNode(int64_t,
