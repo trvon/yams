@@ -129,6 +129,9 @@ bool EntityGraphService::populateKnowledgeGraph(
         return true; // No symbols to process
     }
 
+    spdlog::info("EntityGraphService: received {} symbols, {} relations from {}",
+                 result->symbol_count, result->relation_count, job.filePath);
+
     try {
         std::optional<std::int64_t> documentDbId;
         auto contextNodesRes = resolveContextNodes(kg, job, documentDbId);
@@ -410,6 +413,44 @@ yams::Result<void> EntityGraphService::createSymbolEdges(
 
         std::vector<yams::metadata::KGEdge> symbolEdges;
         auto now = std::chrono::system_clock::now().time_since_epoch().count();
+
+        // Helper to resolve symbol/alias to node ID
+        auto resolveSymbolNodeId = [&](const std::string& key) -> std::optional<std::int64_t> {
+            auto it = qualNameToId.find(key);
+            if (it != qualNameToId.end())
+                return it->second;
+            auto aliasRes = kg->resolveAliasExact(key, 1);
+            if (aliasRes.has_value() && !aliasRes.value().empty())
+                return aliasRes.value()[0].nodeId;
+            return std::nullopt;
+        };
+
+        // Helper to resolve/create file node for includes
+        auto resolveOrCreateFileNode = [&](const std::string& path) -> std::optional<std::int64_t> {
+            // First try to find existing file node
+            std::string nodeKey = "file:" + path;
+            auto existingRes = kg->getNodeByKey(nodeKey);
+            if (existingRes.has_value() && existingRes.value().has_value()) {
+                return existingRes.value().value().id;
+            }
+
+            // Create a placeholder file node for the included file
+            yams::metadata::KGNode fileNode;
+            fileNode.nodeKey = nodeKey;
+            fileNode.label = path;
+            fileNode.type = "file";
+            nlohmann::json fileProps;
+            fileProps["path"] = path;
+            fileProps["is_external"] = true;  // Mark as external/unresolved
+            fileNode.properties = fileProps.dump();
+
+            auto newNodeRes = kg->upsertNode(fileNode);
+            if (newNodeRes.has_value()) {
+                return newNodeRes.value();
+            }
+            return std::nullopt;
+        };
+
         for (size_t i = 0; i < result->relation_count; ++i) {
             const auto& rel = result->relations[i];
             if (!rel.src_symbol || !rel.dst_symbol || !rel.kind)
@@ -417,19 +458,21 @@ yams::Result<void> EntityGraphService::createSymbolEdges(
 
             std::string src(rel.src_symbol);
             std::string dst(rel.dst_symbol);
+            std::string kind(rel.kind);
 
-            auto resolveNodeId = [&](const std::string& key) -> std::optional<std::int64_t> {
-                auto it = qualNameToId.find(key);
-                if (it != qualNameToId.end())
-                    return it->second;
-                auto aliasRes = kg->resolveAliasExact(key, 1);
-                if (aliasRes.has_value() && !aliasRes.value().empty())
-                    return aliasRes.value()[0].nodeId;
-                return std::nullopt;
-            };
+            std::optional<std::int64_t> srcNodeIdOpt;
+            std::optional<std::int64_t> dstNodeIdOpt;
 
-            auto srcNodeIdOpt = resolveNodeId(src);
-            auto dstNodeIdOpt = resolveNodeId(dst);
+            if (kind == "includes") {
+                // For includes: src is the source file, dst is the included file/module
+                // Use the current file node as source
+                srcNodeIdOpt = contextNodes.fileNodeId;
+                dstNodeIdOpt = resolveOrCreateFileNode(dst);
+            } else {
+                // For calls, inherits, implements: resolve as symbols
+                srcNodeIdOpt = resolveSymbolNodeId(src);
+                dstNodeIdOpt = resolveSymbolNodeId(dst);
+            }
 
             if (srcNodeIdOpt && dstNodeIdOpt) {
                 nlohmann::json relProps;
@@ -438,13 +481,14 @@ yams::Result<void> EntityGraphService::createSymbolEdges(
                 yams::metadata::KGEdge edge;
                 edge.srcNodeId = *srcNodeIdOpt;
                 edge.dstNodeId = *dstNodeIdOpt;
-                edge.relation = std::string(rel.kind);
+                edge.relation = kind;
                 edge.weight = static_cast<float>(rel.weight);
                 edge.properties = relProps.dump();
                 symbolEdges.push_back(edge);
             }
         }
         if (!symbolEdges.empty()) {
+            spdlog::info("EntityGraphService: creating {} symbol/include edges", symbolEdges.size());
             kg->addEdgesUnique(symbolEdges);
         }
     }

@@ -68,14 +68,24 @@ std::vector<std::filesystem::path> GrammarLoader::getGrammarSearchPaths() const 
         }
     }
 
-    // Config-specified data_dir (highest priority): ~/.config/yams/config.toml
-    auto cfgHome = std::getenv("XDG_CONFIG_HOME");
+    // Config-specified data_dir (highest priority)
     std::filesystem::path cfgPath;
+#ifdef _WIN32
+    // Windows: LOCALAPPDATA/yams/config.toml or APPDATA/yams/config.toml
+    if (const char* localappdata = std::getenv("LOCALAPPDATA")) {
+        cfgPath = std::filesystem::path(localappdata) / "yams" / "config.toml";
+    } else if (const char* appdata = std::getenv("APPDATA")) {
+        cfgPath = std::filesystem::path(appdata) / "yams" / "config.toml";
+    }
+#else
+    // Unix: ~/.config/yams/config.toml
+    auto cfgHome = std::getenv("XDG_CONFIG_HOME");
     if (cfgHome && *cfgHome) {
         cfgPath = std::filesystem::path(cfgHome) / "yams" / "config.toml";
     } else if (const char* home = std::getenv("HOME")) {
         cfgPath = std::filesystem::path(home) / ".config" / "yams" / "config.toml";
     }
+#endif
     if (!cfgPath.empty() && std::filesystem::exists(cfgPath)) {
         // Naive parse: look for a line with 'data_dir = "..."' (TOML)
         std::ifstream in(cfgPath);
@@ -92,19 +102,52 @@ std::vector<std::filesystem::path> GrammarLoader::getGrammarSearchPaths() const 
                 continue;
             auto val = line.substr(q1 + 1, q2 - (q1 + 1));
             std::filesystem::path dataDir = val;
-            // Expand ~
+            // Expand ~ (Unix) or %USERPROFILE% style paths
             if (!val.empty() && val[0] == '~') {
+#ifdef _WIN32
+                if (const char* userprofile = std::getenv("USERPROFILE")) {
+                    std::string rest = val.size() > 2 ? val.substr(2) : std::string();
+                    dataDir = std::filesystem::path(userprofile) / rest;
+                }
+#else
                 if (const char* home = std::getenv("HOME")) {
                     std::string rest = val.size() > 2 ? val.substr(2) : std::string();
                     dataDir = std::filesystem::path(home) / rest;
                 }
+#endif
             }
             paths.emplace_back(dataDir / "grammars");
             break;
         }
     }
 
-    // XDG standard locations
+#ifdef _WIN32
+    // Windows paths: LOCALAPPDATA/yams/grammars (primary)
+    if (const char* localappdata = std::getenv("LOCALAPPDATA")) {
+        if (*localappdata) {
+            paths.emplace_back(std::filesystem::path(localappdata) / "yams" / "grammars");
+        }
+    }
+    // Fallback to APPDATA
+    if (const char* appdata = std::getenv("APPDATA")) {
+        if (*appdata) {
+            paths.emplace_back(std::filesystem::path(appdata) / "yams" / "grammars");
+        }
+    }
+    // User profile fallback
+    if (const char* userprofile = std::getenv("USERPROFILE")) {
+        if (*userprofile) {
+            paths.emplace_back(std::filesystem::path(userprofile) / ".yams" / "grammars");
+        }
+    }
+    // Program installation paths
+    if (const char* localappdata = std::getenv("LOCALAPPDATA")) {
+        if (*localappdata) {
+            paths.emplace_back(std::filesystem::path(localappdata) / "Programs" / "yams" / "lib" / "yams" / "grammars");
+        }
+    }
+#else
+    // XDG standard locations (Unix/Linux/macOS)
     if (const char* xdg_data_home = std::getenv("XDG_DATA_HOME")) {
         if (*xdg_data_home) {
             paths.emplace_back(std::filesystem::path(xdg_data_home) / "yams" / "grammars");
@@ -119,6 +162,7 @@ std::vector<std::filesystem::path> GrammarLoader::getGrammarSearchPaths() const 
     // System-wide locations
     paths.emplace_back("/usr/local/share/yams/grammars");
     paths.emplace_back("/usr/share/yams/grammars");
+#endif
 
     return paths;
 }
@@ -130,55 +174,72 @@ std::vector<std::string> GrammarLoader::getLibraryCandidates(std::string_view la
     }
 
     std::vector<std::string> candidates;
-
-    // For each search path, try different library name variants
     auto search_paths = getGrammarSearchPaths();
 
+    // Extract the base name from spec (e.g., "tree-sitter-cpp" from "libtree-sitter-cpp.so")
+    std::string spec_name(spec->default_so);
+
+    // Remove extension
+    auto dot_pos = spec_name.rfind('.');
+    if (dot_pos != std::string::npos) {
+        spec_name = spec_name.substr(0, dot_pos);
+    }
+
+    // Remove "lib" prefix if present to get the core name
+    std::string core_name = spec_name;
+    if (core_name.rfind("lib", 0) == 0) {
+        core_name = core_name.substr(3);
+    }
+
+    // Generate all library name variants for this platform
+    std::vector<std::string> lib_names;
+
+#ifdef _WIN32
+    // Windows: typically no "lib" prefix, .dll extension
+    // Primary: tree-sitter-cpp.dll
+    lib_names.push_back(core_name + ".dll");
+    // Also try with lib prefix: libtree-sitter-cpp.dll
+    lib_names.push_back("lib" + core_name + ".dll");
+    // Underscore variants
+    std::string underscore_name = core_name;
+    std::replace(underscore_name.begin(), underscore_name.end(), '-', '_');
+    lib_names.push_back(underscore_name + ".dll");
+    lib_names.push_back("lib" + underscore_name + ".dll");
+#elif defined(__APPLE__)
+    // macOS: typically "lib" prefix, .dylib extension
+    // Primary: libtree-sitter-cpp.dylib
+    lib_names.push_back("lib" + core_name + ".dylib");
+    // Also try without lib prefix
+    lib_names.push_back(core_name + ".dylib");
+    // Try .so extension (some builds use this)
+    lib_names.push_back("lib" + core_name + ".so");
+    lib_names.push_back(core_name + ".so");
+    // Underscore variants
+    std::string underscore_name = core_name;
+    std::replace(underscore_name.begin(), underscore_name.end(), '-', '_');
+    lib_names.push_back("lib" + underscore_name + ".dylib");
+    lib_names.push_back(underscore_name + ".dylib");
+#else
+    // Linux: typically "lib" prefix, .so extension
+    // Primary: libtree-sitter-cpp.so
+    lib_names.push_back("lib" + core_name + ".so");
+    // Also try without lib prefix
+    lib_names.push_back(core_name + ".so");
+    // Underscore variants
+    std::string underscore_name = core_name;
+    std::replace(underscore_name.begin(), underscore_name.end(), '-', '_');
+    lib_names.push_back("lib" + underscore_name + ".so");
+    lib_names.push_back(underscore_name + ".so");
+#endif
+
+    // For each search path, add all library name variants
     for (const auto& base_path : search_paths) {
         if (!std::filesystem::exists(base_path))
             continue;
 
-        // Standard library name (as provided for Linux)
-        auto standard_path = base_path / spec->default_so;
-        candidates.push_back(standard_path.string());
-
-        // Alternative naming conventions
-        std::string lib_name(spec->default_so);
-
-        // Underscore variant
-        if (lib_name.find("tree-sitter-") != std::string::npos) {
-            std::string alt_name = lib_name;
-            std::replace(alt_name.begin(), alt_name.end(), '-', '_');
-            candidates.push_back((base_path / alt_name).string());
+        for (const auto& lib_name : lib_names) {
+            candidates.push_back((base_path / lib_name).string());
         }
-
-        // Without "lib" prefix
-        if (lib_name.rfind("lib", 0) == 0) {
-            std::string no_prefix = lib_name.substr(3);
-            candidates.push_back((base_path / no_prefix).string());
-        }
-
-        // Platform-specific extensions
-#ifdef __APPLE__
-        // Replace .so with .dylib if present
-        std::string dylib_name = lib_name;
-        auto pos = dylib_name.rfind(".so");
-        if (pos != std::string::npos) {
-            dylib_name.replace(pos, 3, ".dylib");
-        } else {
-            dylib_name += ".dylib";
-        }
-        candidates.push_back((base_path / dylib_name).string());
-#elif defined(_WIN32)
-        std::string dll_name = lib_name;
-        auto pos2 = dll_name.rfind(".so");
-        if (pos2 != std::string::npos) {
-            dll_name.replace(pos2, 3, ".dll");
-        } else {
-            dll_name += ".dll";
-        }
-        candidates.push_back((base_path / dll_name).string());
-#endif
     }
 
     return candidates;
@@ -338,17 +399,34 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
 #ifdef __APPLE__
         std::string lib_name = std::format("libtree-sitter-{}.dylib", language);
         std::string flags = "-dynamiclib";
+#elif defined(_WIN32)
+        std::string lib_name = std::format("tree-sitter-{}.dll", language);
+        std::string flags = "-shared";
 #else
         std::string lib_name = std::format("libtree-sitter-{}.so", language);
         std::string flags = "-shared -fPIC";
 #endif
 
         // Find tree-sitter include directory
-        std::vector<std::string> include_search = {"/usr/local/include", "/usr/include",
-                                                   "/opt/homebrew/include"};
+        std::vector<std::string> include_search;
+#ifdef _WIN32
+        // Windows: check vcpkg, conan, and common install locations
+        if (const char* vcpkg_root = std::getenv("VCPKG_ROOT")) {
+            include_search.push_back(std::string(vcpkg_root) + "/installed/x64-windows/include");
+        }
+        if (const char* localappdata = std::getenv("LOCALAPPDATA")) {
+            include_search.push_back(std::string(localappdata) + "/yams/include");
+        }
+#else
+        include_search = {"/usr/local/include", "/usr/include", "/opt/homebrew/include"};
+#endif
 
-        // Add conan tree-sitter paths (works on macOS and Linux)
+        // Add conan tree-sitter paths (works on all platforms)
+#ifdef _WIN32
+        const char* home = std::getenv("USERPROFILE");
+#else
         const char* home = std::getenv("HOME");
+#endif
         if (home) {
             std::string conan_base = std::string(home) + "/.conan2/p/b";
             if (std::filesystem::exists(conan_base)) {
@@ -401,6 +479,8 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
         // Find built library
 #ifdef __APPLE__
         auto built_lib = build_dir / std::format("libtree-sitter-{}.dylib", language);
+#elif defined(_WIN32)
+        auto built_lib = build_dir / std::format("tree-sitter-{}.dll", language);
 #else
         auto built_lib = build_dir / std::format("libtree-sitter-{}.so", language);
 #endif

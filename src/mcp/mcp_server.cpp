@@ -607,9 +607,9 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
         }
         cfg.enableChunkedResponses = true;
         cfg.singleUseConnections = false;
-        cfg.requestTimeout = std::chrono::milliseconds(10000);
-        cfg.headerTimeout = std::chrono::milliseconds(5000);
-        cfg.bodyTimeout = std::chrono::milliseconds(15000);
+        cfg.requestTimeout = std::chrono::milliseconds(60000);
+        cfg.headerTimeout = std::chrono::milliseconds(10000);
+        cfg.bodyTimeout = std::chrono::milliseconds(120000);
         cfg.maxInflight = 128;
         cfg.autoStart = false; // MCP server should not be responsible for starting the daemon
         daemon_client_config_ = cfg;

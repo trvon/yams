@@ -260,7 +260,7 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
             auto result = response_future.get();
             co_return result;
         }
-        timer.expires_after(1ms);
+        timer.expires_after(10ms);
         co_await timer.async_wait(use_awaitable);
     }
 
@@ -354,7 +354,7 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
 
                 co_return result;
             }
-            timer.expires_after(1ms);
+            timer.expires_after(10ms);
             co_await timer.async_wait(use_awaitable);
         }
 

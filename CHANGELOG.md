@@ -139,6 +139,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Documents process in parallel across all worker threads with work stealing
 
 ### Fixed
+- **Graph query bidirectional traversal**: Fixed graph queries showing 0 connections for blob nodes
+  - BFS traversal now follows both incoming and outgoing edges by default
+  - Blob nodes (which only have incoming `has_version` edges from path nodes) now return connected nodes
+  - Refactored dispatcher to delegate to GraphQueryService (single responsibility)
+- **Repair tracking (migration v21)**: Added repair status tracking to prevent duplicate work
+  - New `repair_status` column (pending, processing, completed, failed, skipped)
+  - `repair_attempted_at` timestamp and `repair_attempts` counter
+  - RepairCoordinator filters by status to avoid re-queuing processed documents
 - **Plugin interface parsing**: Fixed object-format interfaces not parsing correctly
 - **Plugin host sharing**: Fixed model provider adoption failure after component extraction
 - **VectorIndexManager initialization**: Fixed "VectorIndexManager not provided" search engine build failure

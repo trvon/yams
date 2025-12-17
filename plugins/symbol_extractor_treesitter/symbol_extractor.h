@@ -85,6 +85,7 @@ struct ExtractionResult {
         size_t relations = 0;
         size_t calls = 0;
         size_t inherits = 0;
+        size_t includes = 0;
     } stats;
 
     std::optional<std::string> error;
@@ -111,8 +112,10 @@ struct ExtractionResult {
         for (const auto& rel : relations) {
             if (rel.kind == "calls")
                 ++stats.calls;
-            else if (rel.kind == "inherits")
+            else if (rel.kind == "inherits" || rel.kind == "implements")
                 ++stats.inherits;
+            else if (rel.kind == "includes")
+                ++stats.includes;
         }
     }
 
@@ -179,6 +182,9 @@ private:
     Result extractStructs(const ExtractionContext& ctx);
     Result extractCallRelations(const ExtractionContext& ctx,
                                 const std::vector<SymbolInfo>& symbols);
+    Result extractIncludes(const ExtractionContext& ctx);
+    Result extractInheritance(const ExtractionContext& ctx,
+                              const std::vector<SymbolInfo>& symbols);
 
     bool executeQuery(const ExtractionContext& ctx, std::string_view query_text,
                       std::string_view symbol_kind, std::vector<SymbolInfo>& output);

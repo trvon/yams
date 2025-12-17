@@ -29,12 +29,13 @@ extractor_headers = files(
 )
 
 tl_expected_dep = dependency('tl-expected', required: true)
+spdlog_dep = dependency('spdlog', required: true)
 
 shared_module(
   'yams_symbol_extractor',
   extractor_sources,
   include_directories: [ include_directories('../../include'), include_directories('.') ],
-  dependencies: [ts_dep, libdl_dep, tl_expected_dep],
+  dependencies: [ts_dep, libdl_dep, tl_expected_dep, spdlog_dep],
   cpp_args: ['-std=c++23', '-fexceptions'],  # C++23 with exceptions for error handling
   build_by_default: true,
   install: true,
