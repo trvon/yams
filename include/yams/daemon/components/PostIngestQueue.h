@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -68,17 +69,28 @@ public:
         extractors_ = std::move(extractors);
     }
 
+    // Set extension-to-language map for symbol extraction (from plugin capabilities)
+    void setSymbolExtensionMap(std::unordered_map<std::string, std::string> extMap) {
+        std::lock_guard<std::mutex> lock(extMapMutex_);
+        symbolExtensionMap_ = std::move(extMap);
+    }
+
 private:
     boost::asio::awaitable<void> channelPoller();
     boost::asio::awaitable<void> kgPoller();
+    boost::asio::awaitable<void> symbolPoller();
     void processTask(const std::string& hash, const std::string& mime);
     void processMetadataStage(const std::string& hash, const std::string& mime);
     void processKnowledgeGraphStage(const std::string& hash, int64_t docId,
                                     const std::string& filePath,
                                     const std::vector<std::string>& tags);
+    void processSymbolExtractionStage(const std::string& hash, int64_t docId,
+                                      const std::string& filePath, const std::string& language);
     void processEmbeddingStage(const std::string& hash, const std::string& mime);
     void dispatchToKgChannel(const std::string& hash, int64_t docId, const std::string& filePath,
                              std::vector<std::string> tags);
+    void dispatchToSymbolChannel(const std::string& hash, int64_t docId, const std::string& filePath,
+                                 const std::string& language);
 
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::MetadataRepository> meta_;
@@ -90,18 +102,24 @@ private:
     std::atomic<bool> stop_{false};
     std::atomic<bool> started_{false};
     std::atomic<bool> kgStarted_{false};
+    std::atomic<bool> symbolStarted_{false};
     std::atomic<std::size_t> processed_{0};
     std::atomic<std::size_t> failed_{0};
     std::atomic<std::size_t> inFlight_{0};
     std::atomic<std::size_t> kgInFlight_{0};
+    std::atomic<std::size_t> symbolInFlight_{0};
     std::atomic<double> latencyMsEma_{0.0};
     std::atomic<double> ratePerSecEma_{0.0};
     std::size_t capacity_{1000};
     static constexpr std::size_t kMaxConcurrent_ = 4;
     static constexpr std::size_t kMaxKgConcurrent_ = 8;
+    static constexpr std::size_t kMaxSymbolConcurrent_ = 4;
 
     std::chrono::steady_clock::time_point lastCompleteTs_{};
     static constexpr double kAlpha_ = 0.2;
+
+    mutable std::mutex extMapMutex_;
+    std::unordered_map<std::string, std::string> symbolExtensionMap_;
 };
 
 } // namespace yams::daemon

@@ -305,7 +305,7 @@ void RepairCoordinator::onDocumentAdded(const DocumentAddedEvent& event) {
                 std::string extension;
                 auto dotPos = event.path.find_last_of('.');
                 if (dotPos != std::string::npos) {
-                    extension = event.path.substr(dotPos);
+                    extension = event.path.substr(dotPos + 1); // Skip the dot
                 }
 
                 auto it = extToLang.find(extension);

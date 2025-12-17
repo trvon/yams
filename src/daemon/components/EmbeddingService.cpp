@@ -186,6 +186,9 @@ EmbeddingService::processEmbedJobWithStatus(const InternalEventBus::EmbedJob& jo
                                   r.value(), hash);
                     succeeded++;
                     done = true;
+                    // Mark repair as completed
+                    (void)meta_->updateDocumentRepairStatus(hash,
+                                                            metadata::RepairStatus::Completed);
                     break;
                 }
 
@@ -208,6 +211,8 @@ EmbeddingService::processEmbedJobWithStatus(const InternalEventBus::EmbedJob& jo
                     spdlog::warn("EmbeddingService: embed/insert failed for {} (attempt {}/{}): {}",
                                  hash, attempt, maxAttempts, msg);
                     failed_.fetch_add(1);
+                    // Mark repair as failed after exhausting retries
+                    (void)meta_->updateDocumentRepairStatus(hash, metadata::RepairStatus::Failed);
                     done = true;
                     break;
                 }
@@ -230,6 +235,8 @@ EmbeddingService::processEmbedJobWithStatus(const InternalEventBus::EmbedJob& jo
                 spdlog::error("EmbeddingService: exception processing {}: {}", hash, e.what());
             }
             failed_.fetch_add(1);
+            // Mark repair as failed on exception
+            (void)meta_->updateDocumentRepairStatus(hash, metadata::RepairStatus::Failed);
         }
     }
 

@@ -2065,7 +2065,27 @@ Result<size_t> ServiceManager::adoptContentExtractorsFromHosts() {
 // NOTE: Implementation delegated to PluginManager (PBI-088 decomposition)
 Result<size_t> ServiceManager::adoptSymbolExtractorsFromHosts() {
     if (pluginManager_) {
-        return pluginManager_->adoptSymbolExtractors();
+        auto result = pluginManager_->adoptSymbolExtractors();
+        if (result && result.value() > 0) {
+            // Build extension-to-language map from symbol extractors and pass to PostIngestQueue
+            if (postIngest_) {
+                std::unordered_map<std::string, std::string> extMap;
+                const auto& extractors = pluginManager_->getSymbolExtractors();
+                for (const auto& extractor : extractors) {
+                    if (!extractor)
+                        continue;
+                    auto supported = extractor->getSupportedExtensions();
+                    for (const auto& [ext, lang] : supported) {
+                        extMap[ext] = lang;
+                    }
+                }
+                auto mapSize = extMap.size();
+                postIngest_->setSymbolExtensionMap(std::move(extMap));
+                spdlog::info("[ServiceManager] Updated PostIngestQueue with {} symbol extension mappings",
+                             mapSize);
+            }
+        }
+        return result;
     }
     spdlog::warn("[Plugin] PluginManager not initialized");
     return Result<size_t>(0);

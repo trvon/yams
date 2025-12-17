@@ -45,7 +45,11 @@ Result<void> EntityGraphService::submitExtraction(Job job) {
         try {
             if (!process(j))
                 failed_.fetch_add(1, std::memory_order_relaxed);
+        } catch (const std::exception& e) {
+            spdlog::error("EntityGraphService: exception processing {}: {}", j.filePath, e.what());
+            failed_.fetch_add(1, std::memory_order_relaxed);
         } catch (...) {
+            spdlog::error("EntityGraphService: unknown exception processing {}", j.filePath);
             failed_.fetch_add(1, std::memory_order_relaxed);
         }
         processed_.fetch_add(1, std::memory_order_relaxed);
@@ -100,9 +104,12 @@ bool EntityGraphService::process(Job& job) {
     int rc = table->extract_symbols(table->self, job.contentUtf8.data(), job.contentUtf8.size(),
                                     job.filePath.c_str(), job.language.c_str(), &result);
     if (rc != 0 || !result) {
-        spdlog::debug("EntityGraphService: extract_symbols failed rc={} for {}", rc, job.filePath);
+        spdlog::warn("EntityGraphService: extract_symbols failed rc={} for {}", rc, job.filePath);
         return false;
     }
+
+    spdlog::info("EntityGraphService: extracted {} symbols from {} (lang={})",
+                 result->symbol_count, job.filePath, job.language);
 
     // Populate KG with rich symbol relationships
     bool success = populateKnowledgeGraph(kg, job, result);

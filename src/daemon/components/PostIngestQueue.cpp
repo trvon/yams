@@ -46,14 +46,16 @@ void PostIngestQueue::start() {
         boost::asio::co_spawn(coordinator_->getExecutor(), channelPoller(), boost::asio::detached);
         spdlog::info("[PostIngestQueue] Spawning kgPoller coroutine...");
         boost::asio::co_spawn(coordinator_->getExecutor(), kgPoller(), boost::asio::detached);
+        spdlog::info("[PostIngestQueue] Spawning symbolPoller coroutine...");
+        boost::asio::co_spawn(coordinator_->getExecutor(), symbolPoller(), boost::asio::detached);
 
         constexpr int maxWaitMs = 100;
-        for (int i = 0; i < maxWaitMs && (!started_.load() || !kgStarted_.load()); ++i) {
+        for (int i = 0; i < maxWaitMs && (!started_.load() || !kgStarted_.load() || !symbolStarted_.load()); ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
-        spdlog::info("[PostIngestQueue] Pollers started (extraction={}, kg={})", started_.load(),
-                     kgStarted_.load());
+        spdlog::info("[PostIngestQueue] Pollers started (extraction={}, kg={}, symbol={})", started_.load(),
+                     kgStarted_.load(), symbolStarted_.load());
     } else {
         spdlog::warn("[PostIngestQueue] start() skipped because stop_=true");
     }
@@ -220,6 +222,15 @@ void PostIngestQueue::processMetadataStage(const std::string& hash, const std::s
                 tags = tagsRes.value();
             }
             dispatchToKgChannel(hash, docId, fileName, std::move(tags));
+
+            // Dispatch symbol extraction for code files (if plugin supports this extension)
+            {
+                std::lock_guard<std::mutex> lock(extMapMutex_);
+                auto it = symbolExtensionMap_.find(extension);
+                if (it != symbolExtensionMap_.end()) {
+                    dispatchToSymbolChannel(hash, docId, fileName, it->second);
+                }
+            }
         }
     } catch (const std::exception& e) {
         spdlog::error("[PostIngestQueue] Metadata stage failed for {}: {}", hash, e.what());
@@ -230,8 +241,11 @@ void PostIngestQueue::processKnowledgeGraphStage(const std::string& hash, int64_
                                                  const std::string& filePath,
                                                  const std::vector<std::string>& tags) {
     if (!graphComponent_) {
+        spdlog::warn("[PostIngestQueue] KG stage skipped for {} - no graphComponent", hash);
         return;
     }
+
+    spdlog::info("[PostIngestQueue] KG stage starting for {} ({})", filePath, hash.substr(0, 12));
 
     try {
         auto start = std::chrono::steady_clock::now();
@@ -300,6 +314,7 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
         spdlog::warn("[PostIngestQueue] KG channel full, dropping job for {}", hash);
         InternalEventBus::instance().incKgDropped();
     } else {
+        spdlog::info("[PostIngestQueue] Dispatched KG job for {} ({})", filePath, hash.substr(0, 12));
         InternalEventBus::instance().incKgQueued();
     }
 }
@@ -330,6 +345,112 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
     }
 
     spdlog::info("[PostIngestQueue] KG poller exited");
+}
+
+boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
+    constexpr std::size_t symbolChannelCapacity = 16384;
+    auto channel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::SymbolExtractionJob>(
+            "symbol_extraction", symbolChannelCapacity);
+
+    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+
+    symbolStarted_.store(true);
+    spdlog::info("[PostIngestQueue] Symbol extraction poller started");
+
+    while (!stop_.load()) {
+        InternalEventBus::SymbolExtractionJob job;
+        if (symbolInFlight_.load() < kMaxSymbolConcurrent_ && channel->try_pop(job)) {
+            symbolInFlight_.fetch_add(1);
+            boost::asio::post(
+                coordinator_->getExecutor(),
+                [this, hash = std::move(job.hash), docId = job.documentId,
+                 filePath = std::move(job.filePath), language = std::move(job.language)]() {
+                    processSymbolExtractionStage(hash, docId, filePath, language);
+                    symbolInFlight_.fetch_sub(1);
+                });
+        } else {
+            timer.expires_after(std::chrono::milliseconds(25));
+            co_await timer.async_wait(boost::asio::use_awaitable);
+        }
+    }
+
+    spdlog::info("[PostIngestQueue] Symbol extraction poller exited");
+}
+
+void PostIngestQueue::dispatchToSymbolChannel(const std::string& hash, int64_t docId,
+                                               const std::string& filePath,
+                                               const std::string& language) {
+    constexpr std::size_t symbolChannelCapacity = 16384;
+    auto channel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::SymbolExtractionJob>(
+            "symbol_extraction", symbolChannelCapacity);
+
+    InternalEventBus::SymbolExtractionJob job;
+    job.hash = hash;
+    job.documentId = docId;
+    job.filePath = filePath;
+    job.language = language;
+
+    if (!channel->try_push(std::move(job))) {
+        spdlog::warn("[PostIngestQueue] Symbol channel full, dropping job for {}", hash);
+        InternalEventBus::instance().incSymbolDropped();
+    } else {
+        spdlog::info("[PostIngestQueue] Dispatched symbol extraction job for {} ({}) lang={}",
+                     filePath, hash.substr(0, 12), language);
+        InternalEventBus::instance().incSymbolQueued();
+    }
+}
+
+void PostIngestQueue::processSymbolExtractionStage(const std::string& hash, int64_t docId,
+                                                    const std::string& filePath,
+                                                    const std::string& language) {
+    if (!graphComponent_) {
+        spdlog::warn("[PostIngestQueue] Symbol extraction skipped for {} - no graphComponent", hash);
+        return;
+    }
+
+    spdlog::info("[PostIngestQueue] Symbol extraction starting for {} ({}) lang={}", filePath,
+                 hash.substr(0, 12), language);
+
+    try {
+        auto start = std::chrono::steady_clock::now();
+
+        // Use GraphComponent to submit the extraction job
+        GraphComponent::EntityExtractionJob extractJob;
+        extractJob.documentHash = hash;
+        extractJob.filePath = filePath;
+        extractJob.language = language;
+
+        // Load content from store
+        if (store_) {
+            auto contentResult = store_->retrieveBytes(hash);
+            if (contentResult) {
+                const auto& bytes = contentResult.value();
+                extractJob.contentUtf8 = std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+            } else {
+                spdlog::warn("[PostIngestQueue] Failed to load content for symbol extraction: {}",
+                             hash.substr(0, 12));
+                return;
+            }
+        } else {
+            spdlog::warn("[PostIngestQueue] No content store for symbol extraction");
+            return;
+        }
+
+        auto result = graphComponent_->submitEntityExtraction(std::move(extractJob));
+        if (!result) {
+            spdlog::warn("[PostIngestQueue] Symbol extraction failed for {}: {}", hash,
+                         result.error().message);
+        } else {
+            auto duration = std::chrono::steady_clock::now() - start;
+            double ms = std::chrono::duration<double, std::milli>(duration).count();
+            spdlog::debug("[PostIngestQueue] Symbol extraction submitted for {} in {:.2f}ms", hash, ms);
+        }
+        InternalEventBus::instance().incSymbolConsumed();
+    } catch (const std::exception& e) {
+        spdlog::error("[PostIngestQueue] Symbol extraction failed for {}: {}", hash, e.what());
+    }
 }
 
 } // namespace yams::daemon

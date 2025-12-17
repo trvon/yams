@@ -124,8 +124,9 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
 
     // Skip if no language detected (not a supported source file)
     if (language.empty()) {
-        spdlog::debug("[GraphComponent] No language detected for {}, skipping extraction",
-                      ctx.filePath);
+        // Only log at debug for non-code files, but trace why for debugging
+        spdlog::debug("[GraphComponent] No language detected for {} (ext='{}'), skipping extraction",
+                      ctx.filePath, ctx.filePath.empty() ? "" : std::filesystem::path(ctx.filePath).extension().string());
         return Result<void>();
     }
 
@@ -146,15 +147,15 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
     job.documentHash = ctx.documentHash;
     job.filePath = ctx.filePath;
     job.contentUtf8 = std::move(contentUtf8);
-    job.language = std::move(language);
+    job.language = language; // Keep copy for logging
 
     auto submitResult = submitEntityExtraction(std::move(job));
     if (!submitResult) {
         spdlog::warn("[GraphComponent] Failed to submit extraction for {}: {}",
                      ctx.documentHash.substr(0, 12), submitResult.error().message);
     } else {
-        spdlog::debug("[GraphComponent] Queued symbol extraction for {} ({})", ctx.filePath,
-                      ctx.documentHash.substr(0, 12));
+        spdlog::info("[GraphComponent] Queued symbol extraction for {} ({}) lang={}",
+                     ctx.filePath, ctx.documentHash.substr(0, 12), language);
     }
 
     return Result<void>();
