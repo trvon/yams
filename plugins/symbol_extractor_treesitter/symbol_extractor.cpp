@@ -165,6 +165,12 @@ SymbolExtractor::Result SymbolExtractor::extractFunctions(const ExtractionContex
             // Template method declarations in class
             "(template_declaration (field_declaration declarator: (function_declarator declarator: "
             "(field_identifier) @name)))",
+            // Conversion operators: operator bool(), operator int()
+            "(function_definition declarator: (function_declarator declarator: (operator_cast "
+            "type: (_) @name)))",
+            // Static member function definitions outside class
+            "(function_definition declarator: (function_declarator declarator: "
+            "(qualified_identifier scope: (_) name: (identifier) @name)))",
         };
     } else if (language == "python") {
         queries = {

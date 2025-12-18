@@ -2468,6 +2468,9 @@ struct GraphQueryRequest {
     int32_t maxDepth{1};                      // BFS depth limit (1-4)
     uint32_t maxResults{200};                 // Total result cap
     uint32_t maxResultsPerDepth{100};         // Per-depth cap
+    bool reverseTraversal{false};             // Traverse incoming edges instead of outgoing
+    bool isolatedMode{false};                 // Find isolated nodes (no incoming edges of relationFilters[0])
+    std::string isolatedRelation;             // Relation to check for isolation (default: "calls")
 
     // Snapshot context
     std::string scopeToSnapshot;
@@ -2485,7 +2488,8 @@ struct GraphQueryRequest {
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
         ser << documentHash << documentName << snapshotId << nodeId << listByType << nodeType
-            << nodeKey << relationFilters << maxDepth << maxResults << maxResultsPerDepth
+            << nodeKey << relationFilters << maxDepth << maxResults << maxResultsPerDepth << reverseTraversal
+            << isolatedMode << isolatedRelation
             << scopeToSnapshot << offset << limit << includeEdgeProperties << includeNodeProperties
             << hydrateFully;
     }
@@ -2548,6 +2552,20 @@ struct GraphQueryRequest {
 
         if (auto r = deser.template read<uint32_t>(); r)
             req.maxResultsPerDepth = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<bool>(); r)
+            req.reverseTraversal = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<bool>(); r)
+            req.isolatedMode = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            req.isolatedRelation = std::move(r.value());
         else
             return r.error();
 

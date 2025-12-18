@@ -132,6 +132,18 @@ bool EntityGraphService::populateKnowledgeGraph(
     spdlog::info("EntityGraphService: received {} symbols, {} relations from {}",
                  result->symbol_count, result->relation_count, job.filePath);
 
+    // Clean up stale edges from previous extraction of this file
+    // This prevents accumulating old relationships when code is updated
+    if (!job.filePath.empty()) {
+        auto cleanupResult = kg->deleteEdgesForSourceFile(job.filePath);
+        if (cleanupResult) {
+            if (cleanupResult.value() > 0) {
+                spdlog::debug("EntityGraphService: cleaned up {} stale edges for {}",
+                              cleanupResult.value(), job.filePath);
+            }
+        }
+    }
+
     try {
         std::optional<std::int64_t> documentDbId;
         auto contextNodesRes = resolveContextNodes(kg, job, documentDbId);

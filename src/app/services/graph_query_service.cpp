@@ -323,27 +323,32 @@ private:
     void collectNeighbors(std::int64_t nodeId, int distance, int maxDepth,
                           const std::vector<GraphRelationType>& relationFilters,
                           std::unordered_set<std::int64_t>& visited,
-                          std::queue<std::pair<std::int64_t, int>>& queue) {
-        auto outgoing = kgStore_->getEdgesFrom(nodeId);
-        if (outgoing) {
-            for (const auto& edge : outgoing.value()) {
-                if (!matchesRelationFilter(edge, relationFilters))
-                    continue;
-                if (visited.find(edge.dstNodeId) == visited.end() && distance + 1 <= maxDepth) {
-                    queue.push({edge.dstNodeId, distance + 1});
-                    visited.insert(edge.dstNodeId);
+                          std::queue<std::pair<std::int64_t, int>>& queue,
+                          bool reverseTraversal = false) {
+        // Normal traversal: follow outgoing edges (A calls B -> traverse to B)
+        // Reverse traversal: follow incoming edges (A calls B -> traverse to A)
+        if (!reverseTraversal) {
+            auto outgoing = kgStore_->getEdgesFrom(nodeId);
+            if (outgoing) {
+                for (const auto& edge : outgoing.value()) {
+                    if (!matchesRelationFilter(edge, relationFilters))
+                        continue;
+                    if (visited.find(edge.dstNodeId) == visited.end() && distance + 1 <= maxDepth) {
+                        queue.push({edge.dstNodeId, distance + 1});
+                        visited.insert(edge.dstNodeId);
+                    }
                 }
             }
-        }
-
-        auto incoming = kgStore_->getEdgesTo(nodeId);
-        if (incoming) {
-            for (const auto& edge : incoming.value()) {
-                if (!matchesRelationFilter(edge, relationFilters))
-                    continue;
-                if (visited.find(edge.srcNodeId) == visited.end() && distance + 1 <= maxDepth) {
-                    queue.push({edge.srcNodeId, distance + 1});
-                    visited.insert(edge.srcNodeId);
+        } else {
+            auto incoming = kgStore_->getEdgesTo(nodeId);
+            if (incoming) {
+                for (const auto& edge : incoming.value()) {
+                    if (!matchesRelationFilter(edge, relationFilters))
+                        continue;
+                    if (visited.find(edge.srcNodeId) == visited.end() && distance + 1 <= maxDepth) {
+                        queue.push({edge.srcNodeId, distance + 1});
+                        visited.insert(edge.srcNodeId);
+                    }
                 }
             }
         }
@@ -366,7 +371,7 @@ private:
 
             if (distance == 0) {
                 collectNeighbors(currentNodeId, distance, req.maxDepth, req.relationFilters, visited,
-                                 queue);
+                                 queue, req.reverseTraversal);
                 continue;
             }
 
@@ -427,7 +432,7 @@ private:
             }
 
             collectNeighbors(currentNodeId, distance, req.maxDepth, req.relationFilters, visited,
-                             queue);
+                             queue, req.reverseTraversal);
 
             response.maxDepthReached = std::max(response.maxDepthReached, distance);
         }

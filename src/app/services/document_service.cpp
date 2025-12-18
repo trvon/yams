@@ -1880,6 +1880,15 @@ public:
                     continue;
                 }
 
+                // Clean up KG nodes associated with this document
+                if (ctx_.kgStore) {
+                    auto kgResult = ctx_.kgStore->deleteNodesForDocumentHash(doc.sha256Hash);
+                    if (!kgResult) {
+                        spdlog::warn("Failed to clean up KG nodes for document {}: {}",
+                                     doc.sha256Hash, kgResult.error().message);
+                    }
+                }
+
                 r.deleted = true;
                 resp.deleted.push_back(r);
             } else {

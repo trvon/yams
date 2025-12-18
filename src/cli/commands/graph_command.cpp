@@ -65,6 +65,10 @@ public:
         cmd->add_option("--prop-filter", propFilter_,
                         "Filter nodes by JSON property (e.g., 'decompiled:malloc')");
 
+        // Isolated node detection (nodes with no incoming edges of specified relation)
+        cmd->add_flag("--isolated", showIsolated_,
+                      "Find isolated nodes (no incoming edges for --relation type)");
+
         cmd->callback([this]() { cli_->setPendingCommand(this); });
     }
 
@@ -76,6 +80,9 @@ public:
 
             // Handle --list-type mode (list nodes by type without traversal)
             if (!listNodeType_.empty()) {
+                if (showIsolated_) {
+                    co_return co_await executeIsolatedNodes();
+                }
                 co_return co_await executeListByType();
             }
 
@@ -216,6 +223,81 @@ private:
         co_return Result<void>();
     }
 
+    boost::asio::awaitable<Result<void>> executeIsolatedNodes() {
+        using namespace yams::daemon;
+
+        ClientConfig cfg;
+        if (cli_ && cli_->hasExplicitDataDir()) {
+            cfg.dataDir = cli_->getDataPath();
+        }
+        cfg.requestTimeout = std::chrono::milliseconds(60000);
+
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        if (!leaseRes) {
+            co_return leaseRes.error();
+        }
+        auto leaseHandle = std::move(leaseRes.value());
+        auto& client = **leaseHandle;
+
+        std::string relation = relationFilter_.empty() ? "calls" : relationFilter_;
+
+        // Use optimized isolated mode query (single SQL query instead of N+1)
+        GraphQueryRequest req;
+        req.isolatedMode = true;
+        req.nodeType = listNodeType_;
+        req.isolatedRelation = relation;
+        req.limit = static_cast<uint32_t>(limit_ > 0 ? limit_ : 1000);
+
+        auto result = co_await client.call(req);
+        if (!result) {
+            std::cerr << "Error querying isolated nodes: " << result.error().message << "\n";
+            co_return result.error();
+        }
+
+        const auto& isolatedNodes = result.value().connectedNodes;
+
+        if (jsonOutput_ || outputFormat_ == "json") {
+            json out;
+            out["type"] = listNodeType_;
+            out["relation"] = relation;
+            out["isolatedCount"] = isolatedNodes.size();
+
+            json nodes = json::array();
+            for (const auto& node : isolatedNodes) {
+                json n;
+                n["nodeId"] = node.nodeId;
+                n["nodeKey"] = node.nodeKey;
+                n["label"] = node.label;
+                n["type"] = node.type;
+                nodes.push_back(n);
+            }
+            out["isolatedNodes"] = nodes;
+            std::cout << out.dump(2) << "\n";
+        } else {
+            std::cout << yams::cli::ui::section_header("Isolated " + listNodeType_ + " nodes") << "\n\n";
+            std::cout << yams::cli::ui::status_info(
+                "Found " + std::to_string(isolatedNodes.size()) + " isolated " + listNodeType_ +
+                " nodes (no incoming " + relation + " edges)") << "\n\n";
+
+            if (!isolatedNodes.empty()) {
+                yams::cli::ui::Table table;
+                table.headers = {"ID", "LABEL", "KEY"};
+                table.has_header = true;
+
+                for (const auto& node : isolatedNodes) {
+                    table.add_row({
+                        std::to_string(node.nodeId),
+                        yams::cli::ui::truncate_to_width(node.label, 40),
+                        yams::cli::ui::truncate_to_width(node.nodeKey, 50)
+                    });
+                }
+                yams::cli::ui::render_table(std::cout, table);
+            }
+        }
+
+        co_return Result<void>();
+    }
+
     boost::asio::awaitable<Result<void>> executeGraphTraversal() {
         using namespace yams::daemon;
 
@@ -244,6 +326,7 @@ private:
             gReq.limit = static_cast<uint32_t>(limit_);
             gReq.includeNodeProperties = verbose_;
             gReq.includeEdgeProperties = verbose_;
+            gReq.reverseTraversal = reverseTraversal_;
 
             if (!relationFilter_.empty()) {
                 gReq.relationFilters.push_back(relationFilter_);
@@ -500,6 +583,7 @@ private:
     bool jsonOutput_{false};
     std::string outputFormat_{"table"};
     std::string propFilter_;
+    bool showIsolated_{false};
 };
 
 std::unique_ptr<ICommand> createGraphCommand() {

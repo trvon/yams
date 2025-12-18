@@ -253,6 +253,26 @@ public:
     virtual Result<void> deleteDocEntitiesForDocument(std::int64_t documentId) = 0;
 
     // -----------------------------------------------------------------------------
+    // Document/File Cleanup (for cascade on delete and re-indexing)
+    // -----------------------------------------------------------------------------
+
+    // Delete KG nodes associated with a document hash (for cascade cleanup on document deletion).
+    // This deletes the doc:<hash> node and any symbol nodes with matching document_hash property.
+    // Returns the count of nodes deleted.
+    virtual Result<std::int64_t> deleteNodesForDocumentHash(std::string_view documentHash) = 0;
+
+    // Delete all edges where properties.source_file matches the given path.
+    // Used to clean up stale relationships when re-indexing a file.
+    // Returns the count of edges deleted.
+    virtual Result<std::int64_t> deleteEdgesForSourceFile(std::string_view filePath) = 0;
+
+    // Find isolated nodes of a given type (nodes with no incoming edges of specified relation).
+    // More efficient than N+1 queries - single SQL query with LEFT JOIN.
+    virtual Result<std::vector<KGNode>> findIsolatedNodes(std::string_view nodeType,
+                                                          std::string_view relation,
+                                                          std::size_t limit = 1000) = 0;
+
+    // -----------------------------------------------------------------------------
     // Statistics
     // -----------------------------------------------------------------------------
 

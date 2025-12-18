@@ -99,6 +99,7 @@ struct GraphQueryRequest {
     int maxDepth{1};                                // BFS depth limit (1-4)
     std::size_t maxResults{200};                    // Total result cap
     std::size_t maxResultsPerDepth{100};            // Per-depth cap
+    bool reverseTraversal{false};                   // Traverse incoming edges instead of outgoing
 
     // Snapshot context (scope results to specific snapshot)
     std::optional<std::string> scopeToSnapshot;

@@ -1021,6 +1021,123 @@ public:
         });
     }
 
+    // Document/File Cleanup
+    Result<std::int64_t> deleteNodesForDocumentHash(std::string_view documentHash) override {
+        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+            std::int64_t totalDeleted = 0;
+
+            // Delete the doc:<hash> node
+            std::string docNodeKey = "doc:" + std::string(documentHash);
+            auto docStmtR = db.prepare("DELETE FROM kg_nodes WHERE node_key = ?");
+            if (!docStmtR)
+                return docStmtR.error();
+            auto docStmt = std::move(docStmtR).value();
+            auto br = docStmt.bind(1, docNodeKey);
+            if (!br)
+                return br.error();
+            auto execR = docStmt.execute();
+            if (!execR)
+                return execR.error();
+            totalDeleted += db.changes();
+
+            // Delete symbol nodes that have this document_hash in their properties
+            auto symStmtR = db.prepare(
+                "DELETE FROM kg_nodes WHERE json_extract(properties, '$.document_hash') = ?");
+            if (!symStmtR)
+                return symStmtR.error();
+            auto symStmt = std::move(symStmtR).value();
+            br = symStmt.bind(1, documentHash);
+            if (!br)
+                return br.error();
+            execR = symStmt.execute();
+            if (!execR)
+                return execR.error();
+            totalDeleted += db.changes();
+
+            spdlog::debug("deleteNodesForDocumentHash: deleted {} nodes for hash {}", totalDeleted,
+                          documentHash);
+            return totalDeleted;
+        });
+    }
+
+    Result<std::int64_t> deleteEdgesForSourceFile(std::string_view filePath) override {
+        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+            auto stmtR = db.prepare(
+                "DELETE FROM kg_edges WHERE json_extract(properties, '$.source_file') = ?");
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+            auto br = stmt.bind(1, filePath);
+            if (!br)
+                return br.error();
+            auto execR = stmt.execute();
+            if (!execR)
+                return execR.error();
+            auto deleted = db.changes();
+            spdlog::debug("deleteEdgesForSourceFile: deleted {} edges for path {}", deleted,
+                          filePath);
+            return deleted;
+        });
+    }
+
+    Result<std::vector<KGNode>> findIsolatedNodes(std::string_view nodeType,
+                                                  std::string_view relation,
+                                                  std::size_t limit) override {
+        return pool_->withConnection([&](Database& db) -> Result<std::vector<KGNode>> {
+            auto stmtR = db.prepare(R"(
+                SELECT n.id, n.node_key, n.label, n.type, n.created_time, n.updated_time, n.properties
+                FROM kg_nodes n
+                WHERE n.type = ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM kg_edges e
+                      WHERE e.dst_node_id = n.id AND e.relation = ?
+                  )
+                ORDER BY n.label
+                LIMIT ?
+            )");
+            if (!stmtR)
+                return stmtR.error();
+
+            auto stmt = std::move(stmtR).value();
+            auto br = stmt.bind(1, nodeType);
+            if (!br)
+                return br.error();
+            br = stmt.bind(2, relation);
+            if (!br)
+                return br.error();
+            br = stmt.bind(3, static_cast<std::int64_t>(limit));
+            if (!br)
+                return br.error();
+
+            std::vector<KGNode> results;
+            while (true) {
+                auto step = stmt.step();
+                if (!step)
+                    return step.error();
+                if (!step.value())
+                    break;
+
+                KGNode node;
+                node.id = stmt.getInt64(0);
+                node.nodeKey = stmt.getString(1);
+                if (!stmt.isNull(2))
+                    node.label = stmt.getString(2);
+                if (!stmt.isNull(3))
+                    node.type = stmt.getString(3);
+                if (!stmt.isNull(4))
+                    node.createdTime = stmt.getInt64(4);
+                if (!stmt.isNull(5))
+                    node.updatedTime = stmt.getInt64(5);
+                if (!stmt.isNull(6))
+                    node.properties = stmt.getString(6);
+
+                results.push_back(std::move(node));
+            }
+            return results;
+        });
+    }
+
+
     // Statistics (not needed for MVP)
     Result<std::optional<KGNodeStats>> getNodeStats(std::int64_t) override {
         return Error{ErrorCode::NotImplemented, "getNodeStats not implemented"};

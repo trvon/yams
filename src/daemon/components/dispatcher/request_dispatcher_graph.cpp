@@ -41,6 +41,11 @@ RequestDispatcher::handleGraphQueryRequest(const GraphQueryRequest& req) {
         co_return co_await handleGraphQueryListByType(req, kgStore.get());
     }
 
+    // Handle isolated mode - find nodes with no incoming edges (optimized single query)
+    if (req.isolatedMode) {
+        co_return co_await handleGraphQueryIsolatedMode(req, kgStore.get());
+    }
+
     // PBI-093: Handle nodeKey lookup - resolve key to nodeId first
     int64_t originNodeId = req.nodeId;
     if (originNodeId < 0 && !req.nodeKey.empty()) {
@@ -70,6 +75,7 @@ RequestDispatcher::handleGraphQueryRequest(const GraphQueryRequest& req) {
     svcReq.limit = req.limit;
     svcReq.hydrateFully = req.includeNodeProperties;
     svcReq.includeEdgeProperties = req.includeEdgeProperties;
+    svcReq.reverseTraversal = req.reverseTraversal;
 
     auto result = graphService->query(svcReq);
     if (!result) {
@@ -161,6 +167,56 @@ RequestDispatcher::handleGraphQueryListByType(const GraphQueryRequest& req,
 
     spdlog::debug("GraphQuery listByType: returning {} nodes of type '{}'",
                   resp.connectedNodes.size(), req.nodeType);
+    co_return resp;
+}
+
+boost::asio::awaitable<Response>
+RequestDispatcher::handleGraphQueryIsolatedMode(const GraphQueryRequest& req,
+                                                KnowledgeGraphStore* kgStore) {
+    std::string nodeType = req.nodeType.empty() ? "function" : req.nodeType;
+    std::string relation = req.isolatedRelation.empty() ? "calls" : req.isolatedRelation;
+
+    spdlog::debug("GraphQuery isolatedMode: type='{}', relation='{}', limit={}", nodeType, relation,
+                  req.limit);
+
+    // Use the optimized single-query method
+    auto nodesResult = kgStore->findIsolatedNodes(nodeType, relation, req.limit);
+    if (!nodesResult) {
+        co_return ErrorResponse{.code = nodesResult.error().code,
+                                .message = nodesResult.error().message};
+    }
+
+    GraphQueryResponse resp;
+    resp.kgAvailable = true;
+    resp.totalNodesFound = nodesResult.value().size();
+    resp.truncated = (nodesResult.value().size() >= req.limit);
+    resp.maxDepthReached = 0;
+
+    // No origin node in isolated mode
+    resp.originNode.nodeId = -1;
+    resp.originNode.nodeKey = "";
+    resp.originNode.label = "isolated:" + nodeType + ":" + relation;
+    resp.originNode.type = "query";
+    resp.originNode.distance = 0;
+
+    resp.connectedNodes.reserve(nodesResult.value().size());
+    for (const auto& node : nodesResult.value()) {
+        GraphNode graphNode;
+        graphNode.nodeId = node.id;
+        graphNode.nodeKey = node.nodeKey;
+        graphNode.label = node.label.value_or("");
+        graphNode.type = node.type.value_or("");
+        graphNode.distance = 0;
+
+        if (req.includeNodeProperties && node.properties) {
+            graphNode.properties = node.properties.value();
+        }
+
+        resp.connectedNodes.push_back(std::move(graphNode));
+    }
+
+    spdlog::debug("GraphQuery isolatedMode: found {} isolated {} nodes (no incoming {} edges)",
+                  resp.connectedNodes.size(), nodeType, relation);
     co_return resp;
 }
 
