@@ -349,9 +349,16 @@ public:
                             {
                                 try {
                                     uint64_t docs = 0, logical = 0, physical = 0;
-                                    auto itDocs = s.requestCounts.find("storage_documents");
-                                    if (itDocs != s.requestCounts.end())
-                                        docs = itDocs->second;
+                                    // Prefer documents_total (from metadata, initialized on startup)
+                                    // over storage_documents (CAS object count, requires scan)
+                                    auto itDocsTotal = s.requestCounts.find("documents_total");
+                                    if (itDocsTotal != s.requestCounts.end()) {
+                                        docs = itDocsTotal->second;
+                                    } else {
+                                        auto itDocs = s.requestCounts.find("storage_documents");
+                                        if (itDocs != s.requestCounts.end())
+                                            docs = itDocs->second;
+                                    }
                                     auto itLogical = s.requestCounts.find("storage_logical_bytes");
                                     if (itLogical != s.requestCounts.end())
                                         logical = itLogical->second;

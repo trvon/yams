@@ -245,6 +245,62 @@ public:
         });
     }
 
+    Result<std::vector<KGNode>> getNodesByIds(const std::vector<std::int64_t>& nodeIds) override {
+        if (nodeIds.empty()) {
+            return std::vector<KGNode>{};
+        }
+        return pool_->withConnection([&](Database& db) -> Result<std::vector<KGNode>> {
+            // Build IN clause with placeholders: WHERE id IN (?, ?, ...)
+            std::string placeholders;
+            for (std::size_t i = 0; i < nodeIds.size(); ++i) {
+                if (i > 0)
+                    placeholders += ", ";
+                placeholders += "?";
+            }
+            std::string sql =
+                "SELECT id, node_key, label, type, created_time, updated_time, properties "
+                "FROM kg_nodes WHERE id IN (" +
+                placeholders + ")";
+
+            auto stmtR = db.prepare(sql);
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+
+            // Bind all node IDs
+            for (std::size_t i = 0; i < nodeIds.size(); ++i) {
+                auto br = stmt.bind(static_cast<int>(i + 1), nodeIds[i]);
+                if (!br)
+                    return br.error();
+            }
+
+            std::vector<KGNode> out;
+            out.reserve(nodeIds.size());
+            while (true) {
+                auto step = stmt.step();
+                if (!step)
+                    return step.error();
+                if (!step.value())
+                    break;
+                KGNode n;
+                n.id = stmt.getInt64(0);
+                n.nodeKey = stmt.getString(1);
+                if (!stmt.isNull(2))
+                    n.label = stmt.getString(2);
+                if (!stmt.isNull(3))
+                    n.type = stmt.getString(3);
+                if (!stmt.isNull(4))
+                    n.createdTime = stmt.getInt64(4);
+                if (!stmt.isNull(5))
+                    n.updatedTime = stmt.getInt64(5);
+                if (!stmt.isNull(6))
+                    n.properties = stmt.getString(6);
+                out.push_back(std::move(n));
+            }
+            return out;
+        });
+    }
+
     Result<std::vector<KGNode>> findNodesByType(std::string_view type, std::size_t limit,
                                                 std::size_t offset) override {
         return pool_->withConnection([&](Database& db) -> Result<std::vector<KGNode>> {
@@ -736,6 +792,76 @@ public:
             if (!br)
                 return br.error();
             br = stmt.bind(idx++, static_cast<int64_t>(offset));
+            if (!br)
+                return br.error();
+
+            std::vector<KGEdge> out;
+            while (true) {
+                auto step = stmt.step();
+                if (!step)
+                    return step.error();
+                if (!step.value())
+                    break;
+                KGEdge e;
+                e.id = stmt.getInt64(0);
+                e.srcNodeId = stmt.getInt64(1);
+                e.dstNodeId = stmt.getInt64(2);
+                e.relation = stmt.getString(3);
+                e.weight = static_cast<float>(stmt.getDouble(4));
+                if (!stmt.isNull(5))
+                    e.createdTime = stmt.getInt64(5);
+                if (!stmt.isNull(6))
+                    e.properties = stmt.getString(6);
+                out.push_back(std::move(e));
+            }
+            return out;
+        });
+    }
+
+    Result<std::vector<KGEdge>> getEdgesBidirectional(std::int64_t nodeId,
+                                                       std::optional<std::string_view> relation,
+                                                       std::size_t limit) override {
+        return pool_->withConnection([&](Database& db) -> Result<std::vector<KGEdge>> {
+            // Single query for both incoming and outgoing edges using UNION
+            std::string sql =
+                "SELECT id, src_node_id, dst_node_id, relation, weight, created_time, properties "
+                "FROM kg_edges WHERE src_node_id = ?";
+            if (relation.has_value()) {
+                sql += " AND relation = ?";
+            }
+            sql += " UNION ALL "
+                   "SELECT id, src_node_id, dst_node_id, relation, weight, created_time, properties "
+                   "FROM kg_edges WHERE dst_node_id = ?";
+            if (relation.has_value()) {
+                sql += " AND relation = ?";
+            }
+            sql += " LIMIT ?";
+
+            auto stmtR = db.prepare(sql);
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+
+            int idx = 1;
+            // Bind for first SELECT (src_node_id = ?)
+            auto br = stmt.bind(idx++, nodeId);
+            if (!br)
+                return br.error();
+            if (relation.has_value()) {
+                br = stmt.bind(idx++, relation.value());
+                if (!br)
+                    return br.error();
+            }
+            // Bind for second SELECT (dst_node_id = ?)
+            br = stmt.bind(idx++, nodeId);
+            if (!br)
+                return br.error();
+            if (relation.has_value()) {
+                br = stmt.bind(idx++, relation.value());
+                if (!br)
+                    return br.error();
+            }
+            br = stmt.bind(idx++, static_cast<int64_t>(limit));
             if (!br)
                 return br.error();
 

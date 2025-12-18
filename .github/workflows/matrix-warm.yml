@@ -87,6 +87,8 @@ jobs:
       - name: Initialize required submodules
         shell: bash
         run: |
+          # Force HTTPS for GitHub to handle SSH submodule URLs in CI
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
           # Only init sqlite-vec-cpp which is required for the build
           # Skip other submodules that use SSH URLs requiring authentication
           git submodule update --init --depth 1 third_party/sqlite-vec-cpp

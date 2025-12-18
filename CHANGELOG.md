@@ -173,6 +173,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - EntityGraphService now posts extraction jobs to shared WorkCoordinator thread pool
   - Removed unused PoolManager "post_ingest" pool and associated TuningManager tuning logic
   - Documents process in parallel across all worker threads with work stealing
+- **Graph BFS traversal optimization**: Reduced N+1 query patterns in graph traversal
+  - New `getEdgesBidirectional()` API: returns incoming + outgoing edges in single query (UNION)
+  - New `getNodesByIds()` API: batch node retrieval for hydration
+  - Edge cache in BFS: edges fetched during neighbor collection reused for connecting edges
+  - Reduces per-node queries from 4 (2×getEdgesFrom + 2×getEdgesTo) to 1
+  - Location: `src/app/services/graph_query_service.cpp`, `src/metadata/knowledge_graph_store_sqlite.cpp`
 
 ### Fixed
 - **Graph `--name` query now shows symbol relationships**: Fixed `yams graph --name <file>` showing "Graph data unavailable"
@@ -210,6 +216,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Plugin trust initialization order**: Fixed plugins not loading despite being trusted
 - **Post-ingestion pipeline reliability**: Improved async processing consistency
 - **Graph IPC serialization**: Added missing ProtoBinding specializations for GraphQueryRequest/Response
+- **Status command document count**: Fixed `yams status` showing `docs=0` after daemon restart
+  - Short status now uses `documents_total` (from metadata DB, initialized on startup)
+  - Previously used `storage_documents` (CAS object count, which was 0 on fresh start)
+  - Detailed status was unaffected as it already used the correct field
+  - Location: `src/cli/commands/status_command.cpp`
 
 ### CLI Improvements
 - **PowerShell completion**: Added `yams completion powershell` for PowerShell auto-complete

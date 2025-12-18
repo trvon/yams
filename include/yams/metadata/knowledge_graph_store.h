@@ -158,6 +158,10 @@ public:
     virtual Result<std::optional<KGNode>> getNodeById(std::int64_t nodeId) = 0;
     virtual Result<std::optional<KGNode>> getNodeByKey(std::string_view nodeKey) = 0;
 
+    // Batch node retrieval: returns nodes by IDs in a single query
+    // More efficient than calling getNodeById N times for BFS hydration
+    virtual Result<std::vector<KGNode>> getNodesByIds(const std::vector<std::int64_t>& nodeIds) = 0;
+
     // Simple scans/filters
     virtual Result<std::vector<KGNode>>
     findNodesByType(std::string_view type, std::size_t limit = 100, std::size_t offset = 0) = 0;
@@ -210,6 +214,12 @@ public:
     virtual Result<std::vector<KGEdge>>
     getEdgesTo(std::int64_t dstNodeId, std::optional<std::string_view> relation = std::nullopt,
                std::size_t limit = 200, std::size_t offset = 0) = 0;
+
+    // Bidirectional edges: returns both incoming and outgoing edges in a single query
+    // More efficient than calling getEdgesFrom + getEdgesTo separately for BFS traversal
+    virtual Result<std::vector<KGEdge>>
+    getEdgesBidirectional(std::int64_t nodeId, std::optional<std::string_view> relation = std::nullopt,
+                          std::size_t limit = 400) = 0;
 
     // For quick structural scoring: neighbor ids only (fast path)
     virtual Result<std::vector<std::int64_t>> neighbors(std::int64_t nodeId,

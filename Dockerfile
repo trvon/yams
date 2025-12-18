@@ -42,6 +42,7 @@ COPY . .
 
 # Initialize git submodules (sqlite-vec-cpp, etc.)
 RUN git init 2>/dev/null || true && \
+  git config --global url."https://github.com/".insteadOf "git@github.com:" && \
   git submodule update --init --recursive 2>/dev/null || \
   echo "Submodule init skipped (not a git repo or no submodules)"
 

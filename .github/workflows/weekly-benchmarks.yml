@@ -51,6 +51,14 @@ jobs:
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          submodules: false
+
+      - name: Initialize required submodules
+        shell: bash
+        run: |
+          # Force HTTPS for GitHub to handle SSH submodule URLs in CI
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule update --init --depth 1 third_party/sqlite-vec-cpp
 
       - name: Install system dependencies
         shell: bash

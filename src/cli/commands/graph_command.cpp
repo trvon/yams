@@ -50,8 +50,6 @@ public:
         // Relation filtering for traversal
         cmd->add_option("--relation,-r", relationFilter_,
                         "Filter edges by relation (e.g., CALLS, CONTAINS, IMPORTS)");
-        cmd->add_flag("--reverse", reverseTraversal_,
-                      "Traverse incoming edges instead of outgoing");
 
         // Output options
         cmd->add_option("--limit,-l", limit_, "Maximum results to return")->default_val(100);
@@ -326,7 +324,6 @@ private:
             gReq.limit = static_cast<uint32_t>(limit_);
             gReq.includeNodeProperties = verbose_;
             gReq.includeEdgeProperties = verbose_;
-            gReq.reverseTraversal = reverseTraversal_;
 
             if (!relationFilter_.empty()) {
                 gReq.relationFilters.push_back(relationFilter_);
@@ -358,7 +355,6 @@ private:
             gReq.limit = static_cast<uint32_t>(limit_);
             gReq.includeNodeProperties = verbose_;
             gReq.includeEdgeProperties = verbose_;
-            gReq.reverseTraversal = reverseTraversal_;
 
             if (!relationFilter_.empty()) {
                 gReq.relationFilters.push_back(relationFilter_);
@@ -605,7 +601,6 @@ private:
     int64_t nodeId_{-1};
     std::string listNodeType_;
     std::string relationFilter_;
-    bool reverseTraversal_{false};
     int depth_{1};
     size_t limit_{100};
     size_t offset_{0};

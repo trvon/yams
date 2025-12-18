@@ -320,44 +320,66 @@ private:
         return metadata;
     }
 
+    // Edge cache type: nodeId -> vector of all edges (both incoming and outgoing)
+    using EdgeCache = std::unordered_map<std::int64_t, std::vector<metadata::KGEdge>>;
+
+    // Collect neighbors and cache edges for later reuse
+    void collectNeighborsWithCache(std::int64_t nodeId, int distance, int maxDepth,
+                                   const std::vector<GraphRelationType>& relationFilters,
+                                   std::unordered_set<std::int64_t>& visited,
+                                   std::queue<std::pair<std::int64_t, int>>& queue,
+                                   EdgeCache& edgeCache, bool reverseTraversal = false) {
+        // Use bidirectional query to get all edges in one call (optimization: reduces 2 queries to 1)
+        auto allEdges = kgStore_->getEdgesBidirectional(nodeId);
+        if (!allEdges) {
+            return;
+        }
+
+        // Cache edges for this node (used later for connectingEdges)
+        edgeCache[nodeId] = allEdges.value();
+
+        // Normal traversal: follow outgoing edges (A calls B -> traverse to B)
+        // Reverse traversal: follow incoming edges (A calls B -> traverse to A)
+        for (const auto& edge : allEdges.value()) {
+            if (!matchesRelationFilter(edge, relationFilters))
+                continue;
+
+            std::int64_t neighborId;
+            if (!reverseTraversal) {
+                // Follow outgoing: nodeId is src, neighbor is dst
+                if (edge.srcNodeId != nodeId)
+                    continue;
+                neighborId = edge.dstNodeId;
+            } else {
+                // Follow incoming: nodeId is dst, neighbor is src
+                if (edge.dstNodeId != nodeId)
+                    continue;
+                neighborId = edge.srcNodeId;
+            }
+
+            if (visited.find(neighborId) == visited.end() && distance + 1 <= maxDepth) {
+                queue.push({neighborId, distance + 1});
+                visited.insert(neighborId);
+            }
+        }
+    }
+
+    // Legacy collectNeighbors for backward compatibility (without cache)
     void collectNeighbors(std::int64_t nodeId, int distance, int maxDepth,
                           const std::vector<GraphRelationType>& relationFilters,
                           std::unordered_set<std::int64_t>& visited,
                           std::queue<std::pair<std::int64_t, int>>& queue,
                           bool reverseTraversal = false) {
-        // Normal traversal: follow outgoing edges (A calls B -> traverse to B)
-        // Reverse traversal: follow incoming edges (A calls B -> traverse to A)
-        if (!reverseTraversal) {
-            auto outgoing = kgStore_->getEdgesFrom(nodeId);
-            if (outgoing) {
-                for (const auto& edge : outgoing.value()) {
-                    if (!matchesRelationFilter(edge, relationFilters))
-                        continue;
-                    if (visited.find(edge.dstNodeId) == visited.end() && distance + 1 <= maxDepth) {
-                        queue.push({edge.dstNodeId, distance + 1});
-                        visited.insert(edge.dstNodeId);
-                    }
-                }
-            }
-        } else {
-            auto incoming = kgStore_->getEdgesTo(nodeId);
-            if (incoming) {
-                for (const auto& edge : incoming.value()) {
-                    if (!matchesRelationFilter(edge, relationFilters))
-                        continue;
-                    if (visited.find(edge.srcNodeId) == visited.end() && distance + 1 <= maxDepth) {
-                        queue.push({edge.srcNodeId, distance + 1});
-                        visited.insert(edge.srcNodeId);
-                    }
-                }
-            }
-        }
+        EdgeCache dummyCache;
+        collectNeighborsWithCache(nodeId, distance, maxDepth, relationFilters, visited, queue,
+                                  dummyCache, reverseTraversal);
     }
 
     Result<void> performBFSTraversal(std::int64_t originNodeId, const GraphQueryRequest& req,
                                      GraphQueryResponse& response) {
         std::queue<std::pair<std::int64_t, int>> queue;
         std::unordered_set<std::int64_t> visited;
+        EdgeCache edgeCache; // Cache edges to avoid duplicate queries
 
         queue.push({originNodeId, 0});
         visited.insert(originNodeId);
@@ -370,8 +392,8 @@ private:
             queue.pop();
 
             if (distance == 0) {
-                collectNeighbors(currentNodeId, distance, req.maxDepth, req.relationFilters, visited,
-                                 queue, req.reverseTraversal);
+                collectNeighborsWithCache(currentNodeId, distance, req.maxDepth, req.relationFilters,
+                                          visited, queue, edgeCache, req.reverseTraversal);
                 continue;
             }
 
@@ -386,39 +408,42 @@ private:
             connectedNode.nodeMetadata = std::move(nodeMetadataResult.value());
             connectedNode.distance = distance;
 
-            auto inEdges = kgStore_->getEdgesTo(currentNodeId);
-            if (inEdges) {
-                for (const auto& edge : inEdges.value()) {
-                    if (visited.find(edge.srcNodeId) != visited.end()) {
-                        GraphEdgeDescriptor edgeDesc;
-                        edgeDesc.edgeId = edge.id;
-                        edgeDesc.srcNodeId = edge.srcNodeId;
-                        edgeDesc.dstNodeId = edge.dstNodeId;
-                        edgeDesc.relation = edge.relation;
-                        edgeDesc.weight = edge.weight;
-                        if (req.includeEdgeProperties)
-                            edgeDesc.properties = edge.properties;
-                        connectedNode.connectingEdges.push_back(std::move(edgeDesc));
-                        totalEdges++;
-                    }
+            // Use cached edges if available, otherwise fetch with bidirectional query
+            auto cacheIt = edgeCache.find(currentNodeId);
+            std::vector<metadata::KGEdge> nodeEdges;
+            if (cacheIt != edgeCache.end()) {
+                nodeEdges = cacheIt->second;
+            } else {
+                // Fetch edges using single bidirectional query (optimization: 1 query instead of 2)
+                auto allEdges = kgStore_->getEdgesBidirectional(currentNodeId);
+                if (allEdges) {
+                    nodeEdges = std::move(allEdges.value());
+                    edgeCache[currentNodeId] = nodeEdges;
                 }
             }
 
-            auto outEdges = kgStore_->getEdgesFrom(currentNodeId);
-            if (outEdges) {
-                for (const auto& edge : outEdges.value()) {
-                    if (visited.find(edge.dstNodeId) != visited.end()) {
-                        GraphEdgeDescriptor edgeDesc;
-                        edgeDesc.edgeId = edge.id;
-                        edgeDesc.srcNodeId = edge.srcNodeId;
-                        edgeDesc.dstNodeId = edge.dstNodeId;
-                        edgeDesc.relation = edge.relation;
-                        edgeDesc.weight = edge.weight;
-                        if (req.includeEdgeProperties)
-                            edgeDesc.properties = edge.properties;
-                        connectedNode.connectingEdges.push_back(std::move(edgeDesc));
-                        totalEdges++;
-                    }
+            // Build connecting edges from cached/fetched edges
+            for (const auto& edge : nodeEdges) {
+                // Check if edge connects to a visited node
+                bool connects = false;
+                if (edge.srcNodeId == currentNodeId && visited.find(edge.dstNodeId) != visited.end()) {
+                    connects = true;
+                } else if (edge.dstNodeId == currentNodeId &&
+                           visited.find(edge.srcNodeId) != visited.end()) {
+                    connects = true;
+                }
+
+                if (connects) {
+                    GraphEdgeDescriptor edgeDesc;
+                    edgeDesc.edgeId = edge.id;
+                    edgeDesc.srcNodeId = edge.srcNodeId;
+                    edgeDesc.dstNodeId = edge.dstNodeId;
+                    edgeDesc.relation = edge.relation;
+                    edgeDesc.weight = edge.weight;
+                    if (req.includeEdgeProperties)
+                        edgeDesc.properties = edge.properties;
+                    connectedNode.connectingEdges.push_back(std::move(edgeDesc));
+                    totalEdges++;
                 }
             }
 
@@ -431,8 +456,8 @@ private:
                 continue;
             }
 
-            collectNeighbors(currentNodeId, distance, req.maxDepth, req.relationFilters, visited,
-                             queue, req.reverseTraversal);
+            collectNeighborsWithCache(currentNodeId, distance, req.maxDepth, req.relationFilters,
+                                      visited, queue, edgeCache, req.reverseTraversal);
 
             response.maxDepthReached = std::max(response.maxDepthReached, distance);
         }
