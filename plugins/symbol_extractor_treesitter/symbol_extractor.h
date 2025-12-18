@@ -39,6 +39,7 @@ struct SymbolInfo {
     std::optional<std::string> return_type;
     std::vector<std::string> parameters;
     std::optional<std::string> documentation;
+    std::optional<std::string> parent_class; // Containing class/struct for members
 
     [[nodiscard]] bool is_valid() const noexcept {
         return !name.empty() && start_line > 0 && end_line >= start_line &&
@@ -82,10 +83,13 @@ struct ExtractionResult {
         size_t classes = 0;
         size_t structs = 0;
         size_t variables = 0;
+        size_t fields = 0;
+        size_t methods = 0;
         size_t relations = 0;
         size_t calls = 0;
         size_t inherits = 0;
         size_t includes = 0;
+        size_t contains = 0;
     } stats;
 
     std::optional<std::string> error;
@@ -101,12 +105,16 @@ struct ExtractionResult {
         for (const auto& sym : symbols) {
             if (sym.kind == "function")
                 ++stats.functions;
+            else if (sym.kind == "method")
+                ++stats.methods;
             else if (sym.kind == "class")
                 ++stats.classes;
             else if (sym.kind == "struct")
                 ++stats.structs;
             else if (sym.kind == "variable")
                 ++stats.variables;
+            else if (sym.kind == "field")
+                ++stats.fields;
         }
 
         for (const auto& rel : relations) {
@@ -116,6 +124,8 @@ struct ExtractionResult {
                 ++stats.inherits;
             else if (rel.kind == "includes")
                 ++stats.includes;
+            else if (rel.kind == "contains")
+                ++stats.contains;
         }
     }
 
@@ -185,6 +195,10 @@ private:
     Result extractIncludes(const ExtractionContext& ctx);
     Result extractInheritance(const ExtractionContext& ctx,
                               const std::vector<SymbolInfo>& symbols);
+    Result extractFields(const ExtractionContext& ctx);
+    Result extractMemberRelations(const ExtractionContext& ctx,
+                                  const std::vector<SymbolInfo>& symbols);
+    Result extractSymbolsByNodeType(const ExtractionContext& ctx, std::string_view symbol_kind);
 
     bool executeQuery(const ExtractionContext& ctx, std::string_view query_text,
                       std::string_view symbol_kind, std::vector<SymbolInfo>& output);

@@ -62,6 +62,19 @@ public:
     double ratePerSecEma() const { return ratePerSecEma_.load(); }
     std::size_t capacity() const { return capacity_; }
 
+    // Per-stage inflight counts
+    std::size_t extractionInFlight() const { return inFlight_.load(); }
+    std::size_t kgInFlight() const { return kgInFlight_.load(); }
+    std::size_t symbolInFlight() const { return symbolInFlight_.load(); }
+    std::size_t totalInFlight() const {
+        return inFlight_.load() + kgInFlight_.load() + symbolInFlight_.load();
+    }
+
+    // Stage concurrency limits
+    static constexpr std::size_t maxExtractionConcurrent() { return kMaxConcurrent_; }
+    static constexpr std::size_t maxKgConcurrent() { return kMaxKgConcurrent_; }
+    static constexpr std::size_t maxSymbolConcurrent() { return kMaxSymbolConcurrent_; }
+
     void setCapacity(std::size_t cap) { capacity_ = cap > 0 ? cap : capacity_; }
 
     // Update extractors after plugins are loaded (called by ServiceManager)

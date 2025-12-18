@@ -276,6 +276,13 @@ public:
                                 pj["capacity"] = getCount("post_ingest_capacity");
                                 pj["rate_sec_ema"] = getCount("post_ingest_rate_sec_ema");
                                 pj["latency_ms_ema"] = getCount("post_ingest_latency_ms_ema");
+                                // Per-stage breakdown
+                                nlohmann::json stages;
+                                stages["extraction_inflight"] = getCount("extraction_inflight");
+                                stages["kg_inflight"] = getCount("kg_inflight");
+                                stages["kg_queued"] = getCount("kg_queued");
+                                stages["symbol_inflight"] = getCount("symbol_inflight");
+                                pj["stages"] = std::move(stages);
                                 j["post_ingest"] = std::move(pj);
                             }
                             std::cout << j.dump(2) << std::endl;
@@ -380,6 +387,16 @@ public:
                                 }
                             }
 
+                            // Post-ingest pipeline summary (show when there's activity)
+                            {
+                                uint64_t piq = getCount("post_ingest_queued");
+                                uint64_t pii = getCount("post_ingest_inflight");
+                                if (piq > 0 || pii > 0) {
+                                    std::cout << "POST : queued=" << piq << ", inflight=" << pii
+                                              << "\n";
+                                }
+                            }
+
                             // Short plugins summary (typed providers)
                             if (!s.providers.empty()) {
                                 std::cout << "PLUG : " << s.providers.size() << " loaded";
@@ -437,15 +454,30 @@ public:
 
                                 // Post-ingest pipeline
                                 {
-                                    uint64_t pit = getU64("post_ingest_threads");
                                     uint64_t piq = getU64("post_ingest_queued");
                                     uint64_t pii = getU64("post_ingest_inflight");
                                     uint64_t pic = getU64("post_ingest_capacity");
                                     uint64_t pil = getU64("post_ingest_latency_ms_ema");
                                     uint64_t pir = getU64("post_ingest_rate_sec_ema");
-                                    std::cout << "POST : threads=" << pit << ", queued=" << piq
-                                              << ", inflight=" << pii << ", cap=" << pic
-                                              << ", rate=" << pir << "/s, lat=" << pil << "ms\n";
+                                    uint64_t pip = getU64("post_ingest_processed");
+                                    uint64_t pif = getU64("post_ingest_failed");
+                                    std::cout << "POST : queued=" << piq << ", inflight=" << pii
+                                              << ", cap=" << pic << ", rate=" << pir
+                                              << "/s, lat=" << pil << "ms"
+                                              << ", proc=" << pip << ", fail=" << pif << "\n";
+                                    // Per-stage breakdown
+                                    uint64_t ext = getU64("extraction_inflight");
+                                    uint64_t kgq = getU64("kg_queued");
+                                    uint64_t kgc = getU64("kg_consumed");
+                                    uint64_t kgi = getU64("kg_inflight");
+                                    uint64_t sym = getU64("symbol_inflight");
+                                    // kgq is cumulative queued, kgc is cumulative consumed
+                                    // Pending = queued - consumed - inflight (inflight haven't been consumed yet)
+                                    int64_t kgPending = static_cast<int64_t>(kgq) - static_cast<int64_t>(kgc) - static_cast<int64_t>(kgi);
+                                    if (kgPending < 0) kgPending = 0;
+                                    std::cout << "      stages: extract=" << ext
+                                              << ", kg(q=" << kgPending << "/i=" << kgi << ")"
+                                              << ", symbol=" << sym << "\n";
                                 }
 
                                 std::cout << "SEARCH: active=" << s.searchMetrics.active

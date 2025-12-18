@@ -658,12 +658,16 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             if (auto* pq = services_->getPostIngestQueue()) {
                 out.postIngestThreads = 1; // Strand-based now, conceptually 1 "thread"
                 out.postIngestQueued = pq->size();
-                out.postIngestInflight = 0; // Not tracked in new implementation
+                out.postIngestInflight = pq->totalInFlight();
                 out.postIngestCapacity = pq->capacity();
                 out.postIngestProcessed = pq->processed();
                 out.postIngestFailed = pq->failed();
                 out.postIngestLatencyMsEma = pq->latencyMsEma();
                 out.postIngestRateSecEma = pq->ratePerSecEma();
+                // Per-stage inflight counts
+                out.extractionInFlight = pq->extractionInFlight();
+                out.kgInFlight = pq->kgInFlight();
+                out.symbolInFlight = pq->symbolInFlight();
             }
             auto& bus = InternalEventBus::instance();
             out.kgQueued = bus.kgQueued();

@@ -2,10 +2,12 @@
 #include "grammar_loader.h"
 
 #include <algorithm>
+#include <array>
 #include <expected>
 #include <format>
 #include <ranges>
 #include <set>
+#include <span>
 #include <unordered_map>
 #include <vector>
 
@@ -18,6 +20,582 @@ extern "C" {
 }
 
 namespace yams::plugins::treesitter {
+
+// ============================================================================
+// Language Configuration - Constexpr Node Type Tables
+// ============================================================================
+
+// Maximum sizes for constexpr arrays
+inline constexpr size_t MaxNodeTypes = 8;
+inline constexpr size_t MaxQueries = 16;
+
+// Fixed-size array wrapper for constexpr compatibility
+template <size_t N>
+struct ConstList {
+    std::array<std::string_view, N> items{};
+    size_t count = 0;
+
+    constexpr bool contains(std::string_view item) const noexcept {
+        for (size_t i = 0; i < count; ++i) {
+            if (items[i] == item)
+                return true;
+        }
+        return false;
+    }
+
+    constexpr bool matches(const char* cstr) const noexcept {
+        if (!cstr)
+            return false;
+        return contains(std::string_view(cstr));
+    }
+
+    constexpr std::string_view operator[](size_t i) const noexcept {
+        return i < count ? items[i] : std::string_view{};
+    }
+
+    constexpr auto begin() const noexcept { return items.begin(); }
+    constexpr auto end() const noexcept { return items.begin() + count; }
+};
+
+// Type aliases for clarity
+using NodeTypeList = ConstList<MaxNodeTypes>;
+using QueryList = ConstList<MaxQueries>;
+
+// Language configuration with all extraction settings
+struct LanguageConfig {
+    std::string_view name;
+    std::array<std::string_view, 4> aliases;
+    size_t alias_count = 0;
+
+    // Node types for AST traversal fallback
+    NodeTypeList class_types;
+    NodeTypeList field_types;
+    NodeTypeList function_types;
+    NodeTypeList import_types;
+    NodeTypeList identifier_types;
+
+    // Tree-sitter query patterns
+    QueryList function_queries;
+    QueryList class_queries;
+    QueryList import_queries;
+    QueryList call_queries;
+};
+
+// Helper to create lists at compile time
+template <size_t N, typename... Args>
+constexpr auto makeList(Args... args) -> ConstList<N> {
+    ConstList<N> result;
+    result.count = sizeof...(args);
+    size_t i = 0;
+    ((result.items[i++] = args), ...);
+    return result;
+}
+
+// Convenience wrappers
+template <typename... Args>
+constexpr auto makeNodeTypes(Args... args) { return makeList<MaxNodeTypes>(args...); }
+
+template <typename... Args>
+constexpr auto makeQueries(Args... args) { return makeList<MaxQueries>(args...); }
+
+// ============================================================================
+// Per-Language Configurations
+// ============================================================================
+
+inline constexpr LanguageConfig lang_cpp = {
+    .name = "cpp",
+    .aliases = {"c++", "cxx", "cc"},
+    .alias_count = 3,
+    .class_types = makeNodeTypes("class_specifier", "struct_specifier", "union_specifier",
+                                 "enum_specifier"),
+    .field_types = makeNodeTypes("field_declaration"),
+    .function_types = makeNodeTypes("function_definition", "function_declarator",
+                                    "template_declaration"),
+    .import_types = makeNodeTypes("preproc_include", "preproc_import"),
+    .identifier_types = makeNodeTypes("identifier", "type_identifier", "field_identifier"),
+    .function_queries = makeQueries(
+        "(function_definition declarator: (function_declarator declarator: (identifier) @name))",
+        "(function_definition declarator: (function_declarator declarator: (qualified_identifier name: (identifier) @name)))",
+        "(function_definition declarator: (function_declarator declarator: (field_identifier) @name))",
+        "(field_declaration declarator: (function_declarator declarator: (field_identifier) @name))",
+        "(field_declaration declarator: (function_declarator declarator: (identifier) @name))",
+        "(declaration declarator: (function_declarator declarator: (identifier) @name))",
+        "(function_definition declarator: (function_declarator declarator: (destructor_name) @name))",
+        "(template_declaration (function_definition declarator: (function_declarator declarator: (identifier) @name)))"),
+    .class_queries = makeQueries(
+        "(class_specifier name: (type_identifier) @name)",
+        "(struct_specifier name: (type_identifier) @name)",
+        "(union_specifier name: (type_identifier) @name)",
+        "(enum_specifier name: (type_identifier) @name)",
+        "(template_declaration (class_specifier name: (type_identifier) @name))",
+        "(template_declaration (struct_specifier name: (type_identifier) @name))"),
+    .import_queries = makeQueries(
+        "(preproc_include path: (string_literal) @path)",
+        "(preproc_include path: (system_lib_string) @path)"),
+    .call_queries = makeQueries(
+        "(call_expression function: (identifier) @callee) @call",
+        "(call_expression function: (field_expression field: (field_identifier) @callee)) @call",
+        "(call_expression function: (qualified_identifier name: (identifier) @callee)) @call"),
+};
+
+inline constexpr LanguageConfig lang_c = {
+    .name = "c",
+    .aliases = {},
+    .alias_count = 0,
+    .class_types = makeNodeTypes("struct_specifier", "union_specifier", "enum_specifier"),
+    .field_types = makeNodeTypes("field_declaration"),
+    .function_types = makeNodeTypes("function_definition", "function_declarator"),
+    .import_types = makeNodeTypes("preproc_include"),
+    .identifier_types = makeNodeTypes("identifier", "type_identifier", "field_identifier"),
+    .function_queries = makeQueries(
+        "(function_definition declarator: (function_declarator declarator: (identifier) @name))",
+        "(declaration declarator: (function_declarator declarator: (identifier) @name))"),
+    .class_queries = makeQueries(
+        "(struct_specifier name: (type_identifier) @name)",
+        "(union_specifier name: (type_identifier) @name)",
+        "(enum_specifier name: (type_identifier) @name)"),
+    .import_queries = makeQueries("(preproc_include path: (string_literal) @path)",
+                                  "(preproc_include path: (system_lib_string) @path)"),
+    .call_queries = makeQueries(
+        "(call_expression function: (identifier) @callee) @call",
+        "(call_expression function: (field_expression field: (field_identifier) @callee)) @call"),
+};
+
+inline constexpr LanguageConfig lang_python = {
+    .name = "python",
+    .aliases = {"py"},
+    .alias_count = 1,
+    .class_types = makeNodeTypes("class_definition"),
+    .field_types = makeNodeTypes("attribute", "assignment"),
+    .function_types = makeNodeTypes("function_definition", "decorated_definition"),
+    .import_types = makeNodeTypes("import_statement", "import_from_statement"),
+    .identifier_types = makeNodeTypes("identifier"),
+    .function_queries = makeQueries(
+        "(function_definition name: (identifier) @name)",
+        "(decorated_definition (function_definition name: (identifier) @name))"),
+    .class_queries = makeQueries(
+        "(class_definition name: (identifier) @name)",
+        "(decorated_definition (class_definition name: (identifier) @name))"),
+    .import_queries = makeQueries(
+        "(import_statement name: (dotted_name) @module)",
+        "(import_from_statement module_name: (dotted_name) @module)",
+        "(import_from_statement module_name: (relative_import) @module)"),
+    .call_queries = makeQueries(
+        "(call function: (identifier) @callee) @call",
+        "(call function: (attribute attribute: (identifier) @callee)) @call"),
+};
+
+inline constexpr LanguageConfig lang_rust = {
+    .name = "rust",
+    .aliases = {"rs"},
+    .alias_count = 1,
+    .class_types = makeNodeTypes("struct_item", "enum_item", "trait_item", "impl_item"),
+    .field_types = makeNodeTypes("field_declaration", "field_pattern"),
+    .function_types = makeNodeTypes("function_item", "function_signature_item"),
+    .import_types = makeNodeTypes("use_declaration"),
+    .identifier_types = makeNodeTypes("identifier", "type_identifier", "field_identifier"),
+    .function_queries = makeQueries(
+        "(function_item name: (identifier) @name)",
+        "(function_signature_item name: (identifier) @name)",
+        "(impl_item (function_item name: (identifier) @name))",
+        "(trait_item (function_signature_item name: (identifier) @name))"),
+    .class_queries = makeQueries(
+        "(struct_item name: (type_identifier) @name)",
+        "(enum_item name: (type_identifier) @name)",
+        "(trait_item name: (type_identifier) @name)"),
+    .import_queries = makeQueries(
+        "(use_declaration argument: (scoped_identifier) @path)",
+        "(use_declaration argument: (identifier) @path)",
+        "(extern_crate_declaration name: (identifier) @path)"),
+    .call_queries = makeQueries(
+        "(call_expression function: (identifier) @callee) @call",
+        "(call_expression function: (field_expression field: (field_identifier) @callee)) @call"),
+};
+
+inline constexpr LanguageConfig lang_go = {
+    .name = "go",
+    .aliases = {"golang"},
+    .alias_count = 1,
+    .class_types = makeNodeTypes("type_spec", "type_declaration"),
+    .field_types = makeNodeTypes("field_declaration"),
+    .function_types = makeNodeTypes("function_declaration", "method_declaration"),
+    .import_types = makeNodeTypes("import_declaration", "import_spec"),
+    .identifier_types = makeNodeTypes("identifier", "type_identifier", "field_identifier"),
+    .function_queries = makeQueries(
+        "(function_declaration name: (identifier) @name)",
+        "(method_declaration name: (field_identifier) @name)"),
+    .class_queries = makeQueries("(type_declaration (type_spec name: (type_identifier) @name))"),
+    .import_queries = makeQueries(
+        "(import_declaration (import_spec path: (interpreted_string_literal) @path))",
+        "(import_spec path: (interpreted_string_literal) @path)"),
+    .call_queries = makeQueries(
+        "(call_expression function: (identifier) @callee) @call",
+        "(call_expression function: (selector_expression field: (field_identifier) @callee)) @call"),
+};
+
+inline constexpr LanguageConfig lang_java = {
+    .name = "java",
+    .aliases = {},
+    .alias_count = 0,
+    .class_types = makeNodeTypes("class_declaration", "interface_declaration", "enum_declaration",
+                                 "annotation_type_declaration"),
+    .field_types = makeNodeTypes("field_declaration"),
+    .function_types = makeNodeTypes("method_declaration", "constructor_declaration"),
+    .import_types = makeNodeTypes("import_declaration"),
+    .identifier_types = makeNodeTypes("identifier"),
+    .function_queries = makeQueries(
+        "(method_declaration name: (identifier) @name)",
+        "(constructor_declaration name: (identifier) @name)"),
+    .class_queries = makeQueries(
+        "(class_declaration name: (identifier) @name)",
+        "(interface_declaration name: (identifier) @name)",
+        "(enum_declaration name: (identifier) @name)",
+        "(annotation_type_declaration name: (identifier) @name)"),
+    .import_queries = makeQueries("(import_declaration (scoped_identifier) @path)"),
+    .call_queries = makeQueries("(method_invocation name: (identifier) @callee) @call"),
+};
+
+inline constexpr LanguageConfig lang_javascript = {
+    .name = "javascript",
+    .aliases = {"js"},
+    .alias_count = 1,
+    .class_types = makeNodeTypes("class_declaration", "class"),
+    .field_types = makeNodeTypes("public_field_definition", "field_definition",
+                                 "property_signature"),
+    .function_types = makeNodeTypes("function_declaration", "function", "arrow_function",
+                                    "method_definition"),
+    .import_types = makeNodeTypes("import_statement", "import_specifier"),
+    .identifier_types = makeNodeTypes("identifier", "property_identifier"),
+    .function_queries = makeQueries(
+        "(function_declaration name: (identifier) @name)",
+        "(method_definition name: (property_identifier) @name)",
+        "(variable_declarator name: (identifier) @name value: (arrow_function))",
+        "(variable_declarator name: (identifier) @name value: (function))",
+        "(generator_function_declaration name: (identifier) @name)"),
+    .class_queries = makeQueries(
+        "(class_declaration name: (identifier) @name)",
+        "(class name: (identifier) @name)"),
+    .import_queries = makeQueries(
+        "(import_statement source: (string) @source)",
+        "(call_expression function: (import) arguments: (arguments (string) @source))",
+        "(call_expression function: (identifier) @fn arguments: (arguments (string) @source))"),
+    .call_queries = makeQueries(
+        "(call_expression function: (identifier) @callee) @call",
+        "(call_expression function: (member_expression property: (property_identifier) @callee)) @call"),
+};
+
+inline constexpr LanguageConfig lang_typescript = {
+    .name = "typescript",
+    .aliases = {"ts"},
+    .alias_count = 1,
+    .class_types = makeNodeTypes("class_declaration", "class", "interface_declaration",
+                                 "type_alias_declaration"),
+    .field_types = makeNodeTypes("public_field_definition", "field_definition",
+                                 "property_signature"),
+    .function_types = makeNodeTypes("function_declaration", "function", "arrow_function",
+                                    "method_definition", "method_signature"),
+    .import_types = makeNodeTypes("import_statement", "import_specifier"),
+    .identifier_types = makeNodeTypes("identifier", "property_identifier", "type_identifier"),
+    .function_queries = makeQueries(
+        "(function_declaration name: (identifier) @name)",
+        "(method_definition name: (property_identifier) @name)",
+        "(variable_declarator name: (identifier) @name value: (arrow_function))",
+        "(variable_declarator name: (identifier) @name value: (function))",
+        "(method_signature name: (property_identifier) @name)"),
+    .class_queries = makeQueries(
+        "(class_declaration name: (identifier) @name)",
+        "(class name: (identifier) @name)",
+        "(interface_declaration name: (type_identifier) @name)",
+        "(type_alias_declaration name: (type_identifier) @name)",
+        "(enum_declaration name: (identifier) @name)"),
+    .import_queries = makeQueries(
+        "(import_statement source: (string) @source)",
+        "(call_expression function: (import) arguments: (arguments (string) @source))"),
+    .call_queries = makeQueries(
+        "(call_expression function: (identifier) @callee) @call",
+        "(call_expression function: (member_expression property: (property_identifier) @callee)) @call"),
+};
+
+inline constexpr LanguageConfig lang_csharp = {
+    .name = "csharp",
+    .aliases = {"c#", "cs"},
+    .alias_count = 2,
+    .class_types = makeNodeTypes("class_declaration", "struct_declaration",
+                                 "interface_declaration", "enum_declaration"),
+    .field_types = makeNodeTypes("field_declaration", "property_declaration"),
+    .function_types = makeNodeTypes("method_declaration", "constructor_declaration",
+                                    "local_function_statement"),
+    .import_types = makeNodeTypes("using_directive"),
+    .identifier_types = makeNodeTypes("identifier"),
+    .function_queries = makeQueries(
+        "(method_declaration name: (identifier) @name)",
+        "(constructor_declaration name: (identifier) @name)",
+        "(destructor_declaration name: (identifier) @name)",
+        "(property_declaration name: (identifier) @name)"),
+    .class_queries = makeQueries(
+        "(class_declaration name: (identifier) @name)",
+        "(struct_declaration name: (identifier) @name)",
+        "(interface_declaration name: (identifier) @name)",
+        "(enum_declaration name: (identifier) @name)",
+        "(record_declaration name: (identifier) @name)"),
+    .import_queries = makeQueries(
+        "(using_directive (identifier) @path)",
+        "(using_directive (qualified_name) @path)"),
+    .call_queries = makeQueries(
+        "(invocation_expression function: (identifier) @callee) @call",
+        "(invocation_expression function: (member_access_expression name: (identifier) @callee)) @call"),
+};
+
+inline constexpr LanguageConfig lang_php = {
+    .name = "php",
+    .aliases = {},
+    .alias_count = 0,
+    .class_types = makeNodeTypes("class_declaration", "interface_declaration", "trait_declaration"),
+    .field_types = makeNodeTypes("property_declaration", "property_element"),
+    .function_types = makeNodeTypes("function_definition", "method_declaration"),
+    .import_types = makeNodeTypes("namespace_use_declaration", "use_declaration"),
+    .identifier_types = makeNodeTypes("name", "variable_name"),
+    .function_queries = makeQueries(
+        "(function_definition name: (name) @name)",
+        "(method_declaration name: (name) @name)"),
+    .class_queries = makeQueries(
+        "(class_declaration name: (name) @name)",
+        "(interface_declaration name: (name) @name)",
+        "(trait_declaration name: (name) @name)",
+        "(enum_declaration name: (name) @name)"),
+    .import_queries = makeQueries(
+        "(namespace_use_clause (qualified_name) @path)",
+        "(include_expression (string) @path)",
+        "(require_expression (string) @path)"),
+    .call_queries = makeQueries(
+        "(function_call_expression function: (name) @callee) @call",
+        "(member_call_expression name: (name) @callee) @call"),
+};
+
+inline constexpr LanguageConfig lang_kotlin = {
+    .name = "kotlin",
+    .aliases = {"kt"},
+    .alias_count = 1,
+    .class_types = makeNodeTypes("class_declaration", "object_declaration",
+                                 "interface_declaration"),
+    .field_types = makeNodeTypes("property_declaration"),
+    .function_types = makeNodeTypes("function_declaration"),
+    .import_types = makeNodeTypes("import_header", "import_list"),
+    .identifier_types = makeNodeTypes("simple_identifier"),
+    .function_queries = makeQueries("(function_declaration (simple_identifier) @name)"),
+    .class_queries = makeQueries(
+        "(class_declaration (type_identifier) @name)",
+        "(object_declaration (type_identifier) @name)",
+        "(interface_declaration (type_identifier) @name)"),
+    .import_queries = makeQueries("(import_header (identifier) @path)"),
+    .call_queries = makeQueries(
+        "(call_expression (simple_identifier) @callee) @call",
+        "(call_expression (navigation_expression (simple_identifier) @callee)) @call"),
+};
+
+inline constexpr LanguageConfig lang_perl = {
+    .name = "perl",
+    .aliases = {"pl"},
+    .alias_count = 1,
+    .class_types = makeNodeTypes("package_statement"),
+    .field_types = makeNodeTypes(),
+    .function_types = makeNodeTypes("subroutine_declaration_statement", "function_definition"),
+    .import_types = makeNodeTypes("use_statement", "require_statement"),
+    .identifier_types = makeNodeTypes("identifier", "scalar_variable"),
+    .function_queries = makeQueries("(subroutine_declaration_statement name: (identifier) @name)"),
+    .class_queries = makeQueries("(package_statement (package_name) @name)"),
+    .import_queries = makeQueries("(use_statement (package_name) @path)"),
+    .call_queries = makeQueries("(function_call_expression (identifier) @callee) @call"),
+};
+
+inline constexpr LanguageConfig lang_r = {
+    .name = "r",
+    .aliases = {},
+    .alias_count = 0,
+    .class_types = makeNodeTypes(),
+    .field_types = makeNodeTypes(),
+    .function_types = makeNodeTypes("function_definition"),
+    .import_types = makeNodeTypes("call"),
+    .identifier_types = makeNodeTypes("identifier"),
+    .function_queries = makeQueries(
+        "(binary_operator lhs: (identifier) @name operator: \"<-\")",
+        "(binary_operator lhs: (identifier) @name operator: \"=\")"),
+    .class_queries = makeQueries(),
+    .import_queries = makeQueries(),
+    .call_queries = makeQueries("(call function: (identifier) @callee) @call"),
+};
+
+inline constexpr LanguageConfig lang_sql = {
+    .name = "sql",
+    .aliases = {},
+    .alias_count = 0,
+    .class_types = makeNodeTypes("create_table_statement"),
+    .field_types = makeNodeTypes("column_definition"),
+    .function_types = makeNodeTypes("create_function_statement", "create_procedure_statement"),
+    .import_types = makeNodeTypes(),
+    .identifier_types = makeNodeTypes("identifier", "object_reference"),
+    .function_queries = makeQueries(
+        "(create_function_statement name: (identifier) @name)",
+        "(create_procedure_statement name: (identifier) @name)"),
+    .class_queries = makeQueries("(create_table_statement name: (identifier) @name)"),
+    .import_queries = makeQueries(),
+    .call_queries = makeQueries(),
+};
+
+inline constexpr LanguageConfig lang_solidity = {
+    .name = "solidity",
+    .aliases = {"sol"},
+    .alias_count = 1,
+    .class_types = makeNodeTypes("contract_declaration", "interface_declaration",
+                                 "library_declaration", "struct_declaration"),
+    .field_types = makeNodeTypes("state_variable_declaration"),
+    .function_types = makeNodeTypes("function_definition", "constructor_definition",
+                                    "modifier_definition"),
+    .import_types = makeNodeTypes("import_directive"),
+    .identifier_types = makeNodeTypes("identifier"),
+    .function_queries = makeQueries(
+        "(function_definition name: (identifier) @name)",
+        "(modifier_definition name: (identifier) @name)"),
+    .class_queries = makeQueries(
+        "(contract_declaration name: (identifier) @name)",
+        "(interface_declaration name: (identifier) @name)",
+        "(library_declaration name: (identifier) @name)",
+        "(struct_declaration name: (identifier) @name)",
+        "(enum_declaration name: (identifier) @name)",
+        "(event_definition name: (identifier) @name)"),
+    .import_queries = makeQueries("(import_directive source: (string) @path)"),
+    .call_queries = makeQueries(
+        "(call_expression function: (identifier) @callee) @call",
+        "(call_expression function: (member_expression property: (identifier) @callee)) @call"),
+};
+
+inline constexpr LanguageConfig lang_dart = {
+    .name = "dart",
+    .aliases = {"flutter"},
+    .alias_count = 1,
+    .class_types = makeNodeTypes("class_definition", "mixin_declaration", "enum_declaration"),
+    .field_types = makeNodeTypes("declaration", "initialized_variable_definition"),
+    .function_types = makeNodeTypes("function_signature", "method_signature", "function_body"),
+    .import_types = makeNodeTypes("import_or_export"),
+    .identifier_types = makeNodeTypes("identifier"),
+    .function_queries = makeQueries(
+        "(function_signature name: (identifier) @name)",
+        "(method_signature name: (identifier) @name)",
+        "(getter_signature name: (identifier) @name)",
+        "(setter_signature name: (identifier) @name)"),
+    .class_queries = makeQueries(
+        "(class_definition name: (identifier) @name)",
+        "(mixin_declaration name: (identifier) @name)",
+        "(extension_declaration name: (identifier) @name)",
+        "(enum_declaration name: (identifier) @name)"),
+    .import_queries = makeQueries("(import_or_export (string_literal) @path)"),
+    .call_queries = makeQueries(
+        "(function_expression_invocation function: (identifier) @callee) @call",
+        "(cascade_selector (identifier) @callee) @call"),
+};
+
+// Master configuration table
+inline constexpr std::array<const LanguageConfig*, 16> language_configs = {
+    &lang_cpp,        &lang_c,      &lang_python,   &lang_rust,     &lang_go,
+    &lang_java,       &lang_javascript, &lang_typescript, &lang_csharp,
+    &lang_php,        &lang_kotlin, &lang_perl,     &lang_r,        &lang_sql,
+    &lang_solidity,   &lang_dart,
+};
+
+// Lookup function - returns nullptr if language not found
+constexpr const LanguageConfig* getLanguageConfig(std::string_view language) noexcept {
+    for (const auto* config : language_configs) {
+        if (config->name == language)
+            return config;
+        for (size_t i = 0; i < config->alias_count; ++i) {
+            if (config->aliases[i] == language)
+                return config;
+        }
+    }
+    return nullptr;
+}
+
+// ============================================================================
+// Helper: Extract symbols by node type (fallback when queries don't work)
+// ============================================================================
+
+SymbolExtractor::Result
+SymbolExtractor::extractSymbolsByNodeType(const ExtractionContext& ctx,
+                                          std::string_view symbol_kind) {
+    ExtractionResult result;
+    const auto* config = getLanguageConfig(ctx.language);
+    if (!config)
+        return result;
+
+    const NodeTypeList* type_list = nullptr;
+    if (symbol_kind == "function")
+        type_list = &config->function_types;
+    else if (symbol_kind == "class")
+        type_list = &config->class_types;
+    else if (symbol_kind == "field")
+        type_list = &config->field_types;
+
+    if (!type_list || type_list->count == 0)
+        return result;
+
+    // Find identifier in node
+    auto find_identifier = [&config](TSNode n) -> TSNode {
+        std::function<TSNode(TSNode)> search = [&](TSNode node) -> TSNode {
+            if (ts_node_is_null(node))
+                return TSNode{};
+
+            const char* type = ts_node_type(node);
+            if (config->identifier_types.matches(type))
+                return node;
+
+            uint32_t child_count = ts_node_child_count(node);
+            for (uint32_t i = 0; i < child_count; ++i) {
+                TSNode found = search(ts_node_child(node, i));
+                if (!ts_node_is_null(found))
+                    return found;
+            }
+            return TSNode{};
+        };
+        return search(n);
+    };
+
+    // Traverse AST
+    std::function<void(TSNode)> traverse = [&](TSNode node) {
+        if (ts_node_is_null(node))
+            return;
+
+        const char* node_type = ts_node_type(node);
+        if (type_list->matches(node_type)) {
+            TSNode name_node = find_identifier(node);
+            if (!ts_node_is_null(name_node)) {
+                SymbolInfo sym;
+                sym.name = ctx.extractNodeText(name_node);
+                sym.qualified_name = sym.name;
+                sym.kind = std::string(symbol_kind);
+                sym.file_path = std::string(ctx.file_path);
+
+                TSPoint start = ts_node_start_point(node);
+                TSPoint end = ts_node_end_point(node);
+                sym.start_line = start.row + 1;
+                sym.end_line = end.row + 1;
+                sym.start_offset = ts_node_start_byte(node);
+                sym.end_offset = ts_node_end_byte(node);
+
+                if (sym.is_valid()) {
+                    result.symbols.push_back(std::move(sym));
+                }
+            }
+        }
+
+        uint32_t child_count = ts_node_child_count(node);
+        for (uint32_t i = 0; i < child_count; ++i) {
+            traverse(ts_node_child(node, i));
+        }
+    };
+
+    traverse(ctx.root);
+    return result;
+}
 
 // SymbolExtractor Implementation
 SymbolExtractor::SymbolExtractor(TSLanguage* language)
@@ -77,12 +655,18 @@ SymbolExtractor::Result SymbolExtractor::extract(std::string_view content,
         if (!struct_result)
             return struct_result;
 
+        // Extract fields/member variables
+        auto field_result = extractFields(ctx);
+        if (!field_result)
+            return field_result;
+
         // Combine all symbols
         result.symbols.reserve(func_result->symbols.size() + class_result->symbols.size() +
-                               struct_result->symbols.size());
+                               struct_result->symbols.size() + field_result->symbols.size());
         std::ranges::move(func_result->symbols, std::back_inserter(result.symbols));
         std::ranges::move(class_result->symbols, std::back_inserter(result.symbols));
         std::ranges::move(struct_result->symbols, std::back_inserter(result.symbols));
+        std::ranges::move(field_result->symbols, std::back_inserter(result.symbols));
 
         // Extract call relationships if enabled
         if (enable_call_graph) {
@@ -104,6 +688,12 @@ SymbolExtractor::Result SymbolExtractor::extract(std::string_view content,
             std::ranges::move(inherit_result->relations, std::back_inserter(result.relations));
         }
 
+        // Extract member containment relationships (class contains methods/fields)
+        auto member_result = extractMemberRelations(ctx, result.symbols);
+        if (member_result) {
+            std::ranges::move(member_result->relations, std::back_inserter(result.relations));
+        }
+
         result.calculate_stats();
 
     } catch (const std::exception& e) {
@@ -120,434 +710,50 @@ SymbolExtractor::Result SymbolExtractor::extract(std::string_view content,
 SymbolExtractor::Result SymbolExtractor::extractFunctions(const ExtractionContext& ctx) {
     ExtractionResult result;
 
-    std::string_view language = ctx.language;
-    std::vector<std::string_view> queries;
-
-    // Language-specific queries for function extraction
-    if (language == "cpp" || language == "c++" || language == "c") {
-        queries = {
-            // Function definitions: int foo() { ... }
-            "(function_definition declarator: (function_declarator declarator: (identifier) "
-            "@name))",
-            // Method definitions with qualified names: class::method() { ... }
-            // This also captures constructors like MyClass::MyClass()
-            "(function_definition declarator: (function_declarator declarator: "
-            "(qualified_identifier name: (identifier) @name)))",
-            // Method definitions with field_identifier: void method() { ... }
-            "(function_definition declarator: (function_declarator declarator: (field_identifier) "
-            "@name))",
-            // Method declarations inside class bodies: void method();
-            // Also captures constructor declarations: MyClass();
-            "(field_declaration declarator: (function_declarator declarator: (field_identifier) "
-            "@name))",
-            // Constructor declarations inside class (alternative pattern)
-            "(field_declaration declarator: (function_declarator declarator: (identifier) @name))",
-            // Function declarations in headers: int foo();
-            "(declaration declarator: (function_declarator declarator: (identifier) @name))",
-            // Destructor definitions: ~Foo() { ... }
-            "(function_definition declarator: (function_declarator declarator: (destructor_name) "
-            "@name))",
-            // Destructor declarations inside class
-            "(field_declaration declarator: (function_declarator declarator: (destructor_name) "
-            "@name))",
-            // Operator overload definitions: operator==, operator+, etc.
-            "(function_definition declarator: (function_declarator declarator: (operator_name) "
-            "@name))",
-            // Operator overload declarations
-            "(field_declaration declarator: (function_declarator declarator: (operator_name) "
-            "@name))",
-            // Template function definitions: template<typename T> void foo() { ... }
-            "(template_declaration (function_definition declarator: (function_declarator "
-            "declarator: (identifier) @name)))",
-            // Template method definitions
-            "(template_declaration (function_definition declarator: (function_declarator "
-            "declarator: (qualified_identifier name: (identifier) @name))))",
-            // Template method declarations in class
-            "(template_declaration (field_declaration declarator: (function_declarator declarator: "
-            "(field_identifier) @name)))",
-            // Conversion operators: operator bool(), operator int()
-            "(function_definition declarator: (function_declarator declarator: (operator_cast "
-            "type: (_) @name)))",
-            // Static member function definitions outside class
-            "(function_definition declarator: (function_declarator declarator: "
-            "(qualified_identifier scope: (_) name: (identifier) @name)))",
-        };
-    } else if (language == "python") {
-        queries = {
-            // Function definitions
-            "(function_definition name: (identifier) @name)",
-            // Async function definitions (same AST node type)
-            // Decorated functions
-            "(decorated_definition (function_definition name: (identifier) @name))",
-            // Class methods (also function_definition)
-            // Lambda expressions are unnamed, skip
-        };
-    } else if (language == "rust") {
-        queries = {
-            // Function items (standalone functions)
-            "(function_item name: (identifier) @name)",
-            // Associated functions (in impl blocks)
-            "(function_signature_item name: (identifier) @name)",
-            // Methods in impl blocks
-            "(impl_item (function_item name: (identifier) @name))",
-            // Trait methods
-            "(trait_item (function_signature_item name: (identifier) @name))",
-        };
-    } else if (language == "go") {
-        queries = {
-            // Function declarations
-            "(function_declaration name: (identifier) @name)",
-            // Method declarations with receiver
-            "(method_declaration name: (field_identifier) @name)",
-        };
-    } else if (language == "javascript" || language == "js" || language == "typescript" ||
-               language == "ts") {
-        queries = {
-            // Function declarations: function foo() {}
-            "(function_declaration name: (identifier) @name)",
-            // Method definitions in classes: class { method() {} }
-            "(method_definition name: (property_identifier) @name)",
-            // Arrow functions assigned to variables: const foo = () => {}
-            "(variable_declarator name: (identifier) @name value: (arrow_function))",
-            // Function expressions: const foo = function() {}
-            "(variable_declarator name: (identifier) @name value: (function))",
-            // Generator functions: function* foo() {}
-            "(generator_function_declaration name: (identifier) @name)",
-            // Async functions: async function foo() {}
-            "(function_declaration name: (identifier) @name)",
-        };
-    } else if (language == "java") {
-        queries = {
-            // Method declarations
-            "(method_declaration name: (identifier) @name)",
-            // Constructor declarations
-            "(constructor_declaration name: (identifier) @name)",
-        };
-    } else if (language == "csharp" || language == "cs") {
-        queries = {
-            // Method declarations
-            "(method_declaration name: (identifier) @name)",
-            // Constructor declarations
-            "(constructor_declaration name: (identifier) @name)",
-            // Destructor declarations
-            "(destructor_declaration name: (identifier) @name)",
-            // Property declarations
-            "(property_declaration name: (identifier) @name)",
-        };
-    } else if (language == "php") {
-        queries = {
-            // Function definitions
-            "(function_definition name: (name) @name)",
-            // Method declarations
-            "(method_declaration name: (name) @name)",
-        };
-    } else if (language == "kotlin" || language == "kt") {
-        queries = {
-            // Function declarations: fun foo() {}
-            "(function_declaration (simple_identifier) @name)",
-            // Secondary/companion object functions
-            "(property_declaration (variable_declaration (simple_identifier) @name))",
-        };
-    } else if (language == "perl" || language == "pl") {
-        queries = {
-            // Subroutine definitions
-            "(subroutine_declaration_statement name: (identifier) @name)",
-        };
-    } else if (language == "r") {
-        queries = {
-            // Function definitions with <-
-            "(binary_operator lhs: (identifier) @name operator: \"<-\")",
-            // Function definitions with =
-            "(binary_operator lhs: (identifier) @name operator: \"=\")",
-        };
-    } else if (language == "sql") {
-        queries = {
-            // CREATE FUNCTION
-            "(create_function_statement name: (identifier) @name)",
-            // CREATE PROCEDURE
-            "(create_procedure_statement name: (identifier) @name)",
-        };
-    } else if (language == "sol" || language == "solidity") {
-        queries = {
-            // Regular functions
-            "(function_definition name: (identifier) @name)",
-            // Constructors (may have optional name)
-            "(constructor_definition)",
-            // Fallback/receive functions
-            "(fallback_receive_definition)",
-            // Modifiers
-            "(modifier_definition name: (identifier) @name)",
-        };
-    } else if (language == "dart" || language == "flutter") {
-        queries = {
-            // Function declarations: void foo() {}
-            "(function_signature name: (identifier) @name)",
-            // Method declarations in classes
-            "(method_signature name: (identifier) @name)",
-            // Getter declarations: get foo => ...
-            "(getter_signature name: (identifier) @name)",
-            // Setter declarations: set foo(x) => ...
-            "(setter_signature name: (identifier) @name)",
-            // Function expressions assigned to variables: final foo = () {};
-            "(initialized_variable_definition name: (identifier) @name)",
-        };
+    const auto* config = getLanguageConfig(ctx.language);
+    if (!config || config->function_queries.count == 0) {
+        // Fallback for unknown language: use node type traversal
+        return extractSymbolsByNodeType(ctx, "function");
     }
 
-    // Execute queries - try all patterns to get comprehensive coverage
+    // Execute queries from config
     bool any_query_succeeded = false;
-    for (auto query : queries) {
-        if (executeQuery(ctx, query, "function", result.symbols)) {
+    for (size_t i = 0; i < config->function_queries.count; ++i) {
+        if (executeQuery(ctx, config->function_queries[i], "function", result.symbols)) {
             any_query_succeeded = true;
-            // Continue trying other queries to capture all symbol types
         }
     }
 
-    // If any query succeeded, return accumulated results
     if (any_query_succeeded) {
         return result;
     }
 
-    // Fallback: recursive traversal
-    std::function<void(TSNode)> traverse;
-    traverse = [&ctx, &result, &traverse, this](TSNode node) {
-        if (ts_node_is_null(node))
-            return;
-
-        const char* node_type = ts_node_type(node);
-
-        // Language-specific function detection
-        bool is_function = false;
-        std::string_view lang = ctx.language;
-
-        if ((lang == "cpp" || lang == "c++" || lang == "c") &&
-            (std::strstr(node_type, "function_definition") ||
-             std::strstr(node_type, "function_declaration"))) {
-            is_function = true;
-        } else if (lang == "python" && std::strcmp(node_type, "function_definition") == 0) {
-            is_function = true;
-        } else if (lang == "rust" && std::strcmp(node_type, "function_item") == 0) {
-            is_function = true;
-        } else if (lang == "go" && (std::strcmp(node_type, "function_declaration") == 0 ||
-                                    std::strcmp(node_type, "method_declaration") == 0)) {
-            is_function = true;
-        } else if ((lang == "javascript" || lang == "js") &&
-                   (std::strcmp(node_type, "function_declaration") == 0 ||
-                    std::strcmp(node_type, "method_definition") == 0)) {
-            is_function = true;
-        }
-
-        if (is_function) {
-            // Find function identifier
-            std::function<TSNode(TSNode)> find_identifier;
-            find_identifier = [&find_identifier](TSNode n) -> TSNode {
-                if (ts_node_is_null(n))
-                    return TSNode{};
-
-                const char* type = ts_node_type(n);
-                if (std::strcmp(type, "identifier") == 0 ||
-                    std::strcmp(type, "field_identifier") == 0 ||
-                    std::strcmp(type, "property_identifier") == 0) {
-                    return n;
-                }
-
-                // Check children
-                uint32_t child_count = ts_node_child_count(n);
-                for (uint32_t i = 0; i < child_count; ++i) {
-                    TSNode child = ts_node_child(n, i);
-                    TSNode found = find_identifier(child);
-                    if (!ts_node_is_null(found))
-                        return found;
-                }
-                return TSNode{};
-            };
-
-            TSNode name_node = find_identifier(node);
-            if (!ts_node_is_null(name_node)) {
-                SymbolInfo sym;
-                sym.name = ctx.extractNodeText(name_node);
-                sym.qualified_name = sym.name; // Simple case
-                sym.kind = "function";
-                sym.file_path = std::string(ctx.file_path);
-
-                TSPoint start = ts_node_start_point(node);
-                TSPoint end = ts_node_end_point(node);
-                sym.start_line = start.row + 1;
-                sym.end_line = end.row + 1;
-                sym.start_offset = ts_node_start_byte(node);
-                sym.end_offset = ts_node_end_byte(node);
-
-                // Try to extract return type
-                uint32_t child_count = ts_node_child_count(node);
-                if (child_count > 0) {
-                    TSNode first_child = ts_node_child(node, 0);
-                    if (std::strcmp(ts_node_type(first_child), "primitive_type") == 0 ||
-                        std::strcmp(ts_node_type(first_child), "type_identifier") == 0) {
-                        sym.return_type = ctx.extractNodeText(first_child);
-                    }
-                }
-
-                if (sym.is_valid()) {
-                    result.symbols.push_back(std::move(sym));
-                }
-            }
-        }
-
-        // Recurse to children
-        uint32_t child_count = ts_node_child_count(node);
-        for (uint32_t i = 0; i < child_count; ++i) {
-            traverse(ts_node_child(node, i));
-        }
-    };
-
-    traverse(ctx.root);
-    return result;
+    // Fallback: node type traversal
+    return extractSymbolsByNodeType(ctx, "function");
 }
 
 SymbolExtractor::Result SymbolExtractor::extractClasses(const ExtractionContext& ctx) {
     ExtractionResult result;
 
-    // Class extraction is primarily for C++/Java style languages
-    std::string_view language = ctx.language;
-    std::vector<std::string_view> queries;
-
-    if (language == "cpp" || language == "c++" || language == "c") {
-        queries = {
-            // Class specifiers
-            "(class_specifier name: (type_identifier) @name)",
-            // Struct specifiers
-            "(struct_specifier name: (type_identifier) @name)",
-            // Union specifiers
-            "(union_specifier name: (type_identifier) @name)",
-            // Enum specifiers
-            "(enum_specifier name: (type_identifier) @name)",
-            // Template class declarations
-            "(template_declaration (class_specifier name: (type_identifier) @name))",
-            // Template struct declarations
-            "(template_declaration (struct_specifier name: (type_identifier) @name))",
-        };
-    } else if (language == "python") {
-        queries = {
-            // Class definitions
-            "(class_definition name: (identifier) @name)",
-            // Decorated class definitions
-            "(decorated_definition (class_definition name: (identifier) @name))",
-        };
-    } else if (language == "rust") {
-        queries = {
-            // Struct items
-            "(struct_item name: (type_identifier) @name)",
-            // Enum items
-            "(enum_item name: (type_identifier) @name)",
-            // Trait items
-            "(trait_item name: (type_identifier) @name)",
-        };
-    } else if (language == "go") {
-        queries = {
-            // Type declarations (structs, interfaces)
-            "(type_declaration (type_spec name: (type_identifier) @name))",
-        };
-    } else if (language == "java") {
-        queries = {
-            // Class declarations
-            "(class_declaration name: (identifier) @name)",
-            // Interface declarations
-            "(interface_declaration name: (identifier) @name)",
-            // Enum declarations
-            "(enum_declaration name: (identifier) @name)",
-            // Annotation type declarations
-            "(annotation_type_declaration name: (identifier) @name)",
-        };
-    } else if (language == "javascript" || language == "js" || language == "typescript" ||
-               language == "ts") {
-        queries = {
-            // Class declarations
-            "(class_declaration name: (identifier) @name)",
-            // Class expressions
-            "(class name: (identifier) @name)",
-        };
-    } else if (language == "typescript" || language == "ts") {
-        queries = {
-            // Interface declarations
-            "(interface_declaration name: (type_identifier) @name)",
-            // Type alias declarations
-            "(type_alias_declaration name: (type_identifier) @name)",
-            // Enum declarations
-            "(enum_declaration name: (identifier) @name)",
-        };
-    } else if (language == "csharp" || language == "cs") {
-        queries = {
-            // Class declarations
-            "(class_declaration name: (identifier) @name)",
-            // Struct declarations
-            "(struct_declaration name: (identifier) @name)",
-            // Interface declarations
-            "(interface_declaration name: (identifier) @name)",
-            // Enum declarations
-            "(enum_declaration name: (identifier) @name)",
-            // Record declarations
-            "(record_declaration name: (identifier) @name)",
-        };
-    } else if (language == "php") {
-        queries = {
-            // Class declarations
-            "(class_declaration name: (name) @name)",
-            // Interface declarations
-            "(interface_declaration name: (name) @name)",
-            // Trait declarations
-            "(trait_declaration name: (name) @name)",
-            // Enum declarations (PHP 8.1+)
-            "(enum_declaration name: (name) @name)",
-        };
-    } else if (language == "kotlin" || language == "kt") {
-        queries = {
-            // Class declarations
-            "(class_declaration (type_identifier) @name)",
-            // Object declarations
-            "(object_declaration (type_identifier) @name)",
-            // Interface declarations
-            "(interface_declaration (type_identifier) @name)",
-        };
-    } else if (language == "sol" || language == "solidity") {
-        queries = {
-            // Contract declarations
-            "(contract_declaration name: (identifier) @name)",
-            // Interface declarations
-            "(interface_declaration name: (identifier) @name)",
-            // Library declarations
-            "(library_declaration name: (identifier) @name)",
-            // Struct declarations
-            "(struct_declaration name: (identifier) @name)",
-            // Enum declarations
-            "(enum_declaration name: (identifier) @name)",
-            // Event declarations
-            "(event_definition name: (identifier) @name)",
-        };
-    } else if (language == "dart" || language == "flutter") {
-        queries = {
-            // Class declarations: class Foo {}
-            "(class_definition name: (identifier) @name)",
-            // Mixin declarations: mixin Bar {}
-            "(mixin_declaration name: (identifier) @name)",
-            // Extension declarations: extension FooExt on Foo {}
-            "(extension_declaration name: (identifier) @name)",
-            // Enum declarations: enum Color { red, green }
-            "(enum_declaration name: (identifier) @name)",
-        };
+    const auto* config = getLanguageConfig(ctx.language);
+    if (!config || config->class_queries.count == 0) {
+        return extractSymbolsByNodeType(ctx, "class");
     }
 
-    // Execute queries
-    for (auto query : queries) {
+    // Execute queries from config, inferring kind from query pattern
+    for (size_t i = 0; i < config->class_queries.count; ++i) {
+        std::string_view query = config->class_queries[i];
         std::string kind = "class";
-        if (std::strstr(query.data(), "struct"))
+        if (query.find("struct") != std::string_view::npos)
             kind = "struct";
-        else if (std::strstr(query.data(), "interface"))
+        else if (query.find("interface") != std::string_view::npos)
             kind = "interface";
-        else if (std::strstr(query.data(), "enum"))
+        else if (query.find("enum") != std::string_view::npos)
             kind = "enum";
+        else if (query.find("trait") != std::string_view::npos)
+            kind = "trait";
 
-        if (executeQuery(ctx, query, kind, result.symbols)) {
-            // Query succeeded for this type
-        }
+        executeQuery(ctx, query, kind, result.symbols);
     }
 
     return result;
@@ -675,7 +881,6 @@ SymbolExtractor::extractCallRelations(const ExtractionContext& ctx,
                  symbols.size());
 
     // Collect function symbols with valid byte ranges
-    // We use the already-extracted symbols instead of re-querying
     std::vector<const SymbolInfo*> function_symbols;
     for (const auto& sym : symbols) {
         if (sym.kind == "function" && sym.start_offset < sym.end_offset) {
@@ -688,53 +893,9 @@ SymbolExtractor::extractCallRelations(const ExtractionContext& ctx,
         return result;
     }
 
-    // Query patterns for call expressions - language specific
-    std::vector<std::string_view> call_patterns;
-    std::string_view lang = ctx.language;
-
-    if (lang == "cpp" || lang == "c++" || lang == "c") {
-        call_patterns = {
-            // Direct function calls: foo()
-            "(call_expression function: (identifier) @callee) @call",
-            // Method calls: obj.method()
-            "(call_expression function: (field_expression field: (field_identifier) @callee)) @call",
-            // Qualified calls: Class::method()
-            "(call_expression function: (qualified_identifier name: (identifier) @callee)) @call",
-        };
-    } else if (lang == "python") {
-        call_patterns = {
-            "(call function: (identifier) @callee) @call",
-            "(call function: (attribute attribute: (identifier) @callee)) @call",
-        };
-    } else if (lang == "rust") {
-        call_patterns = {
-            "(call_expression function: (identifier) @callee) @call",
-            "(call_expression function: (field_expression field: (field_identifier) @callee)) @call",
-        };
-    } else if (lang == "go") {
-        call_patterns = {
-            "(call_expression function: (identifier) @callee) @call",
-            "(call_expression function: (selector_expression field: (field_identifier) @callee)) "
-            "@call",
-        };
-    } else if (lang == "javascript" || lang == "js" || lang == "typescript" || lang == "ts") {
-        call_patterns = {
-            "(call_expression function: (identifier) @callee) @call",
-            "(call_expression function: (member_expression property: (property_identifier) "
-            "@callee)) @call",
-        };
-    } else if (lang == "java") {
-        call_patterns = {
-            "(method_invocation name: (identifier) @callee) @call",
-        };
-    } else if (lang == "sol" || lang == "solidity") {
-        call_patterns = {
-            "(call_expression function: (identifier) @callee) @call",
-            "(call_expression function: (member_expression property: (identifier) @callee)) @call",
-        };
-    }
-
-    if (call_patterns.empty()) {
+    // Get call patterns from config
+    const auto* config = getLanguageConfig(ctx.language);
+    if (!config || config->call_queries.count == 0) {
         spdlog::info("[CallExtraction] No call patterns for language={}", ctx.language);
         return result;
     }
@@ -747,7 +908,8 @@ SymbolExtractor::extractCallRelations(const ExtractionContext& ctx,
     };
     std::vector<CallSite> all_calls;
 
-    for (auto pattern : call_patterns) {
+    for (size_t i = 0; i < config->call_queries.count; ++i) {
+        std::string_view pattern = config->call_queries[i];
         uint32_t error_offset = 0;
         TSQueryError error_type = TSQueryErrorNone;
         TSQuery* query =
@@ -861,108 +1023,16 @@ SymbolExtractor::extractCallRelations(const ExtractionContext& ctx,
 SymbolExtractor::Result SymbolExtractor::extractIncludes(const ExtractionContext& ctx) {
     ExtractionResult result;
 
-    std::string_view lang = ctx.language;
-    std::vector<std::pair<std::string_view, std::string_view>> patterns; // {query, capture_name}
-
-    if (lang == "cpp" || lang == "c++" || lang == "c") {
-        // C/C++ #include directives
-        patterns = {
-            // #include "header.h" or #include <header>
-            {"(preproc_include path: (string_literal) @path)", "path"},
-            {"(preproc_include path: (system_lib_string) @path)", "path"},
-        };
-    } else if (lang == "python") {
-        // Python import statements
-        patterns = {
-            // import foo
-            {"(import_statement name: (dotted_name) @module)", "module"},
-            // from foo import bar
-            {"(import_from_statement module_name: (dotted_name) @module)", "module"},
-            // from . import bar (relative)
-            {"(import_from_statement module_name: (relative_import) @module)", "module"},
-        };
-    } else if (lang == "javascript" || lang == "js" || lang == "typescript" || lang == "ts") {
-        // ES6 import statements
-        patterns = {
-            // import foo from "module"
-            {"(import_statement source: (string) @source)", "source"},
-            // import("module") dynamic imports
-            {"(call_expression function: (import) arguments: (arguments (string) @source))",
-             "source"},
-            // require("module")
-            {"(call_expression function: (identifier) @fn arguments: (arguments (string) @source))",
-             "source"},
-        };
-    } else if (lang == "rust") {
-        // Rust use statements
-        patterns = {
-            // use std::collections::HashMap;
-            {"(use_declaration argument: (scoped_identifier) @path)", "path"},
-            {"(use_declaration argument: (identifier) @path)", "path"},
-            {"(use_declaration argument: (use_wildcard) @path)", "path"},
-            // extern crate foo;
-            {"(extern_crate_declaration name: (identifier) @path)", "path"},
-        };
-    } else if (lang == "go") {
-        // Go import statements
-        patterns = {
-            // import "fmt"
-            {"(import_declaration (import_spec path: (interpreted_string_literal) @path))", "path"},
-            // import ( "fmt" "os" )
-            {"(import_spec path: (interpreted_string_literal) @path)", "path"},
-        };
-    } else if (lang == "java") {
-        // Java import statements
-        patterns = {
-            // import java.util.HashMap;
-            {"(import_declaration (scoped_identifier) @path)", "path"},
-            // import static java.util.Collections.sort;
-            {"(import_declaration (scoped_identifier) @path)", "path"},
-        };
-    } else if (lang == "csharp" || lang == "cs") {
-        // C# using statements
-        patterns = {
-            // using System.Collections.Generic;
-            {"(using_directive (identifier) @path)", "path"},
-            {"(using_directive (qualified_name) @path)", "path"},
-        };
-    } else if (lang == "php") {
-        // PHP use statements
-        patterns = {
-            // use Namespace\ClassName;
-            {"(namespace_use_clause (qualified_name) @path)", "path"},
-            // require/include
-            {"(include_expression (string) @path)", "path"},
-            {"(require_expression (string) @path)", "path"},
-        };
-    } else if (lang == "kotlin" || lang == "kt") {
-        // Kotlin import statements
-        patterns = {
-            // import kotlin.collections.HashMap
-            {"(import_header (identifier) @path)", "path"},
-        };
-    } else if (lang == "sol" || lang == "solidity") {
-        // Solidity import statements
-        patterns = {
-            // import "./Contract.sol";
-            {"(import_directive source: (string) @path)", "path"},
-        };
-    } else if (lang == "dart" || lang == "flutter") {
-        // Dart import statements
-        patterns = {
-            // import 'package:foo/foo.dart';
-            {"(import_or_export (string_literal) @path)", "path"},
-        };
-    }
-
-    if (patterns.empty()) {
+    const auto* config = getLanguageConfig(ctx.language);
+    if (!config || config->import_queries.count == 0) {
         return result;
     }
 
     std::string file_path_str = std::string(ctx.file_path);
     size_t extracted_count = 0;
 
-    for (const auto& [pattern, capture_name] : patterns) {
+    for (size_t i = 0; i < config->import_queries.count; ++i) {
+        std::string_view pattern = config->import_queries[i];
         uint32_t error_offset = 0;
         TSQueryError error_type = TSQueryErrorNone;
         TSQuery* query =
@@ -988,36 +1058,31 @@ SymbolExtractor::Result SymbolExtractor::extractIncludes(const ExtractionContext
 
         TSQueryMatch match;
         while (ts_query_cursor_next_match(cursor, &match)) {
-            for (uint32_t i = 0; i < match.capture_count; ++i) {
-                TSQueryCapture capture = match.captures[i];
-                uint32_t name_len = 0;
-                const char* captured_name =
-                    ts_query_capture_name_for_id(query, capture.index, &name_len);
+            // Take the first capture (queries are structured with path/module first)
+            if (match.capture_count > 0) {
+                TSQueryCapture capture = match.captures[0];
+                std::string include_path = ctx.extractNodeText(capture.node);
 
-                if (captured_name && std::string_view(captured_name, name_len) == capture_name) {
-                    std::string include_path = ctx.extractNodeText(capture.node);
+                // Clean up quotes from string literals
+                if (!include_path.empty() &&
+                    (include_path.front() == '"' || include_path.front() == '\'' ||
+                     include_path.front() == '<')) {
+                    include_path = include_path.substr(1);
+                }
+                if (!include_path.empty() &&
+                    (include_path.back() == '"' || include_path.back() == '\'' ||
+                     include_path.back() == '>')) {
+                    include_path.pop_back();
+                }
 
-                    // Clean up quotes from string literals
-                    if (!include_path.empty() &&
-                        (include_path.front() == '"' || include_path.front() == '\'' ||
-                         include_path.front() == '<')) {
-                        include_path = include_path.substr(1);
-                    }
-                    if (!include_path.empty() &&
-                        (include_path.back() == '"' || include_path.back() == '\'' ||
-                         include_path.back() == '>')) {
-                        include_path.pop_back();
-                    }
-
-                    if (!include_path.empty()) {
-                        SymbolRelation rel;
-                        rel.src_symbol = file_path_str;
-                        rel.dst_symbol = include_path;
-                        rel.kind = "includes";
-                        rel.weight = 1.0;
-                        result.relations.push_back(std::move(rel));
-                        ++extracted_count;
-                    }
+                if (!include_path.empty()) {
+                    SymbolRelation rel;
+                    rel.src_symbol = file_path_str;
+                    rel.dst_symbol = include_path;
+                    rel.kind = "includes";
+                    rel.weight = 1.0;
+                    result.relations.push_back(std::move(rel));
+                    ++extracted_count;
                 }
             }
         }
@@ -1380,6 +1445,64 @@ SymbolExtractor::extractInheritance(const ExtractionContext& ctx,
 
     if (!result.relations.empty()) {
         spdlog::info("[InheritanceExtraction] Extracted {} inheritance relations from {}",
+                     result.relations.size(), ctx.file_path);
+    }
+
+    return result;
+}
+
+SymbolExtractor::Result SymbolExtractor::extractFields(const ExtractionContext& ctx) {
+    // Use the generic node type traversal with field types
+    return extractSymbolsByNodeType(ctx, "field");
+}
+
+SymbolExtractor::Result
+SymbolExtractor::extractMemberRelations(const ExtractionContext& ctx,
+                                        const std::vector<SymbolInfo>& symbols) {
+    ExtractionResult result;
+
+    // Build map of classes/structs by name with their byte ranges
+    struct ClassInfo {
+        std::string name;
+        uint32_t start_offset;
+        uint32_t end_offset;
+    };
+    std::vector<ClassInfo> classes;
+
+    for (const auto& sym : symbols) {
+        if (sym.kind == "class" || sym.kind == "struct" || sym.kind == "trait" ||
+            sym.kind == "interface") {
+            classes.push_back({sym.name, sym.start_offset, sym.end_offset});
+        }
+    }
+
+    if (classes.empty()) {
+        return result;
+    }
+
+    // For each function/method/field, check if it's within a class boundary
+    for (const auto& sym : symbols) {
+        if (sym.kind == "function" || sym.kind == "method" || sym.kind == "field") {
+            // Find containing class by byte range
+            for (const auto& cls : classes) {
+                if (sym.start_offset >= cls.start_offset && sym.end_offset <= cls.end_offset) {
+                    // This symbol is contained within this class
+                    if (sym.name != cls.name) { // Don't create self-contains
+                        SymbolRelation rel;
+                        rel.src_symbol = cls.name;
+                        rel.dst_symbol = sym.name;
+                        rel.kind = "contains";
+                        rel.weight = 1.0;
+                        result.relations.push_back(std::move(rel));
+                    }
+                    break; // A symbol can only be in one class
+                }
+            }
+        }
+    }
+
+    if (!result.relations.empty()) {
+        spdlog::info("[MemberRelations] Extracted {} contains relations from {}",
                      result.relations.size(), ctx.file_path);
     }
 

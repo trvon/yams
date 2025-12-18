@@ -226,7 +226,12 @@ void PostIngestQueue::processMetadataStage(const std::string& hash, const std::s
             // Dispatch symbol extraction for code files (if plugin supports this extension)
             {
                 std::lock_guard<std::mutex> lock(extMapMutex_);
-                auto it = symbolExtensionMap_.find(extension);
+                // Extension map keys don't have leading dots, but DB stores with dots
+                std::string extKey = extension;
+                if (!extKey.empty() && extKey[0] == '.') {
+                    extKey = extKey.substr(1);
+                }
+                auto it = symbolExtensionMap_.find(extKey);
                 if (it != symbolExtensionMap_.end()) {
                     dispatchToSymbolChannel(hash, docId, fileName, it->second);
                 }

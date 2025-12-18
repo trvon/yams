@@ -431,7 +431,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
   if get_option('enable-bench-tests')
   # Note: All bench tests use suite 'bench' or ['bench', 'isolated']
   # Run unified benchmarks with: meson test -C builddir --suite bench
-  
+
   test('unit_isolated_integrity_verifier', unit_exe,
     suite: ['bench', 'isolated', 'perf'],
     args: ['--gtest_filter=IntegrityVerifierTest.*'],
@@ -723,10 +723,10 @@ endif
 # ============================================================================
 
 if catch2_dep.found()
-  
+
   # Daemon Test Suites (6 consolidated executables)
   # --------------------------------------------------------------------------
-  
+
   catch2_daemon_fsm_exe = executable('catch2_daemon_fsm',
     files('unit/daemon/daemon_fsm_suite_test.cpp'),
     include_directories: incs,
@@ -735,7 +735,7 @@ if catch2_dep.found()
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
-  
+
   catch2_daemon_metrics_exe = executable('catch2_daemon_metrics',
     files('unit/daemon/daemon_metrics_status_test.cpp'),
     include_directories: incs,
@@ -744,7 +744,7 @@ if catch2_dep.found()
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
-  
+
   catch2_daemon_components_exe = executable('catch2_daemon_components',
     files('unit/daemon/daemon_components_test.cpp'),
     include_directories: incs,
@@ -753,7 +753,7 @@ if catch2_dep.found()
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
-  
+
   catch2_daemon_protocol_exe = executable('catch2_daemon_protocol',
     files('unit/daemon/daemon_protocol_test.cpp'),
     include_directories: incs,
@@ -762,7 +762,7 @@ if catch2_dep.found()
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
-  
+
   catch2_daemon_background_exe = executable('catch2_daemon_background',
     files('unit/daemon/daemon_background_processing_test.cpp'),
     include_directories: incs,
@@ -806,7 +806,7 @@ if catch2_dep.found()
     onnx_plugin_path = join_paths(meson.project_build_root(), 'plugins', 'onnx', 'libyams_onnx_plugin.so')
     plugin_test_cpp_args += ['-Dyams_onnx_plugin_BUILT="' + onnx_plugin_path + '"']
   endif
-  
+
   catch2_daemon_plugin_exe = executable('catch2_daemon_plugin',
     files('unit/daemon/onnx_plugin_harness_test.cpp'),
     include_directories: incs,
@@ -971,6 +971,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_daemon_exe = executable('catch2_daemon',
+    files('unit/daemon/daemon_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # NOTE: onnx_model_pool tests require linking with the ONNX plugin library,
   # which is not directly available as a dependency. The original GTest version
   # was also never properly linked. Skipping Catch2 migration until plugin
@@ -986,7 +995,7 @@ if catch2_dep.found()
 
   # CLI Test Suites (Catch2)
   # --------------------------------------------------------------------------
-  
+
   catch2_cli_init_command_exe = executable('catch2_cli_init_command',
     files('unit/cli/init_command_catch2_test.cpp'),
     include_directories: incs,
@@ -998,7 +1007,7 @@ if catch2_dep.found()
 
   # Storage Test Suites (Catch2)
   # --------------------------------------------------------------------------
-  
+
   catch2_storage_backend_exe = executable('catch2_storage_backend',
     files('unit/storage/storage_backend_catch2_test.cpp'),
     include_directories: incs,
@@ -1231,7 +1240,7 @@ if catch2_dep.found()
 
   # Metadata Test Suites (4 executables)
   # --------------------------------------------------------------------------
-  
+
   catch2_metadata_retrieval_exe = executable('catch2_metadata_retrieval',
     files('unit/app/services/retrieval_schema_validation_test.cpp'),
     include_directories: incs,
@@ -1240,9 +1249,9 @@ if catch2_dep.found()
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
-  
+
   # Removed: catch2_metadata_search (search_metadata_interface_test.cpp) - HybridSearchEngine specific
-  
+
   catch2_metadata_symbol_exe = executable('catch2_metadata_symbol',
     files('unit/metadata/symbol_metadata_schema_test.cpp'),
     include_directories: incs,
@@ -1251,7 +1260,7 @@ if catch2_dep.found()
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
-  
+
   catch2_metadata_migration_exe = executable('catch2_metadata_migration',
     files('unit/metadata/migration_validation_test.cpp'),
     include_directories: incs,
@@ -1320,13 +1329,13 @@ if catch2_dep.found()
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
-  
+
   # Core tests (minimal dependencies - no daemon)
   core_test_deps = [
     dependency('spdlog'),
     dependency('yams_core'),
   ]
-  
+
   core_cpp23_features_exe = executable('core_cpp23_features',
     files('unit/core/cpp23_features_test.cpp'),
     include_directories: incs,
@@ -1335,7 +1344,7 @@ if catch2_dep.found()
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
-  
+
   core_magic_numbers_exe = executable('core_magic_numbers',
     files('unit/core/magic_numbers_test.cpp'),
     include_directories: incs,
@@ -1374,7 +1383,7 @@ if catch2_dep.found()
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
-  
+
   # Integrity tests (Catch2 - migrated from GTest)
   integrity_test_deps = [
     dependency('spdlog'),
@@ -1384,7 +1393,7 @@ if catch2_dep.found()
     dependency('yams_storage_engine'),
     dependency('yams_reference_counter'),
   ]
-  
+
   integrity_catch2_exe = executable('integrity_catch2',
     files(
       'unit/integrity/chunk_validator_test.cpp',
@@ -1399,7 +1408,7 @@ if catch2_dep.found()
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
-  
+
   # Content tests (depends on content, extraction, detection modules)
   content_test_deps = [
     dependency('spdlog'),
@@ -1409,7 +1418,7 @@ if catch2_dep.found()
     dependency('yams_detection'),
     dependency('sqlite3'),
   ]
-  
+
   content_handlers_exe = executable('content_handlers',
     files('unit/content/content_handlers_test.cpp'),
     include_directories: incs,
@@ -1418,7 +1427,7 @@ if catch2_dep.found()
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
-  
+
   html_extractor_robust_exe = executable('html_extractor_robust',
     files('unit/extraction/html_extractor_robust_test.cpp'),
     include_directories: incs,
@@ -1427,7 +1436,7 @@ if catch2_dep.found()
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
-  
+
   # Plugin process tests (external plugin infrastructure)
   plugin_process_test_deps = [
     dependency('spdlog'),
@@ -1435,7 +1444,7 @@ if catch2_dep.found()
     dependency('yams_extraction'),
     dependency('nlohmann_json'),
   ]
-  
+
   plugin_process_exe = executable('plugin_process',
     files('unit/extraction/plugin_process_test.cpp'),
     include_directories: incs,
@@ -1488,7 +1497,7 @@ if catch2_dep.found()
     dependency('yams_chunking'),
     dependency('yams_crypto'),
   ]
-  
+
   chunking_exe = executable('chunking',
     files('unit/chunking/chunking_test.cpp'),
     include_directories: incs,
@@ -1497,14 +1506,14 @@ if catch2_dep.found()
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
-  
+
   # Crypto tests (depends on crypto module)
   crypto_test_deps = [
     dependency('spdlog'),
     dependency('yams_core'),
     dependency('yams_crypto'),
   ]
-  
+
   crypto_exe = executable('crypto',
     files('unit/crypto/crypto_test.cpp'),
     include_directories: incs,
@@ -1590,22 +1599,22 @@ if catch2_dep.found()
 
   # Test Registrations
   # --------------------------------------------------------------------------
-  
+
   # Metadata tests
   test('metadata_retrieval_schema', catch2_metadata_retrieval_exe,
     suite: ['catch2', 'unit', 'metadata', 'retrieval'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
-  
+
   # Removed: metadata_search test - HybridSearchEngine specific
-  
+
   test('metadata_symbol_schema', catch2_metadata_symbol_exe,
     suite: ['catch2', 'unit', 'metadata', 'symbol'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
   )
-  
+
   test('metadata_migration_validation', catch2_metadata_migration_exe,
     suite: ['catch2', 'unit', 'metadata', 'migration'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -1641,14 +1650,14 @@ if catch2_dep.found()
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
-  
+
   # Core tests
   test('core_cpp23_features', core_cpp23_features_exe,
     suite: ['catch2', 'unit', 'core', 'cpp23'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
-  
+
   test('core_magic_numbers', core_magic_numbers_exe,
     suite: ['catch2', 'unit', 'core', 'magic'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -1660,32 +1669,32 @@ if catch2_dep.found()
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
   )
-  
+
   test('plugins_catch2', plugins_catch2_exe,
     suite: ['catch2', 'unit', 'plugins'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
   )
-  
+
   test('integrity_catch2', integrity_catch2_exe,
     suite: ['catch2', 'unit', 'integrity'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
   )
-  
+
   # Content tests
   test('content_handlers', content_handlers_exe,
     suite: ['catch2', 'unit', 'content', 'handlers'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
-  
+
   test('html_extractor_robust', html_extractor_robust_exe,
     suite: ['catch2', 'unit', 'extraction', 'html'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120  # Allow longer timeout for large file tests
   )
-  
+
   test('plugin_process', plugin_process_exe,
     suite: ['catch2', 'unit', 'extraction', 'plugin'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -1722,7 +1731,7 @@ if catch2_dep.found()
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
-  
+
   # Crypto tests
   test('crypto', crypto_exe,
     suite: ['catch2', 'unit', 'crypto'],
@@ -1780,25 +1789,25 @@ if catch2_dep.found()
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
-  
+
   test('daemon_metrics_status', catch2_daemon_metrics_exe,
     suite: ['catch2', 'unit', 'daemon', 'metrics', 'status'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
-  
+
   test('daemon_components', catch2_daemon_components_exe,
     suite: ['catch2', 'unit', 'daemon', 'components'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
-  
+
   test('daemon_protocol', catch2_daemon_protocol_exe,
     suite: ['catch2', 'unit', 'daemon', 'protocol'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
-  
+
   test('daemon_background_processing', catch2_daemon_background_exe,
     suite: ['catch2', 'unit', 'daemon', 'background'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -1929,6 +1938,14 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 30,
+    # Test skips on Windows (Unix domain sockets not supported)
+    should_fail: host_machine.system() == 'windows'
+  )
+
+  test('daemon', catch2_daemon_exe,
+    suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120,
     # Test skips on Windows (Unix domain sockets not supported)
     should_fail: host_machine.system() == 'windows'
   )

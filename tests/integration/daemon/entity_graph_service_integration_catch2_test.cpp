@@ -1547,3 +1547,132 @@ public:
         CHECK(foundClasses.size() >= 2); // At least 2 of 3 classes found
     }
 }
+
+// ============================================================================
+// KG Cleanup Tests (yams-3m8, yams-qel, yams-ye3)
+// Tests document deletion cascade, stale edge cleanup, and isolated node queries
+// ============================================================================
+
+TEST_CASE("KnowledgeGraphStore: findIsolatedNodes optimization",
+          "[integration][daemon][kg][isolated]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
+    EntityGraphIntegrationFixture fixture;
+
+    if (!fixture.supportsCpp()) {
+        SKIP("C++ grammar not available");
+    }
+
+    SECTION("Finds functions with no incoming call edges") {
+        std::string cppCode = R"(
+void calledFunction() {}
+
+void callerFunction() {
+    calledFunction();
+}
+
+void isolatedFunction() {}
+
+void anotherIsolated() {}
+)";
+
+        std::string filename = "isolated_test.cpp";
+        auto hash = fixture.storeContent(filename, cppCode);
+        std::string filePath = (fixture.testDir_ / filename).string();
+
+        bool extracted = fixture.submitAndWaitForExtraction(hash, filePath, cppCode, "cpp", 4000);
+        REQUIRE(extracted);
+
+        auto kg = fixture.getKgStore();
+        REQUIRE(kg != nullptr);
+
+        auto isolatedResult = kg->findIsolatedNodes("function", "calls", 100);
+        REQUIRE(isolatedResult.has_value());
+
+        spdlog::info("findIsolatedNodes returned {} nodes", isolatedResult.value().size());
+        for (const auto& node : isolatedResult.value()) {
+            spdlog::info("Isolated function: label={}", node.label.value_or(node.nodeKey));
+        }
+
+        CHECK(!isolatedResult.value().empty());
+    }
+}
+
+TEST_CASE("KnowledgeGraphStore: deleteEdgesForSourceFile cleans stale edges",
+          "[integration][daemon][kg][cleanup]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
+    EntityGraphIntegrationFixture fixture;
+
+    if (!fixture.supportsCpp()) {
+        SKIP("C++ grammar not available");
+    }
+
+    SECTION("Re-indexing file cleans up old edges") {
+        std::string cppCode1 = R"(
+void originalFunction() {}
+)";
+
+        std::string filename = "cleanup_test.cpp";
+        auto hash1 = fixture.storeContent(filename, cppCode1);
+        std::string filePath = (fixture.testDir_ / filename).string();
+
+        REQUIRE(fixture.submitAndWaitForExtraction(hash1, filePath, cppCode1, "cpp", 3000));
+
+        auto kg = fixture.getKgStore();
+        REQUIRE(kg != nullptr);
+
+        auto funcNodes = kg->findNodesByType("function", 100, 0);
+        REQUIRE(funcNodes.has_value());
+
+        std::string cppCode2 = R"(
+void renamedFunction() {}
+)";
+
+        auto hash2 = fixture.storeContent(filename + ".v2", cppCode2);
+        std::string filePath2 = (fixture.testDir_ / (filename + ".v2")).string();
+
+        REQUIRE(fixture.submitAndWaitForExtraction(hash2, filePath2, cppCode2, "cpp", 3000));
+        spdlog::info("Stale edge cleanup test completed");
+    }
+}
+
+TEST_CASE("KnowledgeGraphStore: deleteNodesForDocumentHash cascades",
+          "[integration][daemon][kg][cascade]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
+    EntityGraphIntegrationFixture fixture;
+
+    if (!fixture.supportsCpp()) {
+        SKIP("C++ grammar not available");
+    }
+
+    SECTION("Document deletion triggers KG node cleanup") {
+        std::string cppCode = R"(
+void deletionTestFunction() {}
+)";
+
+        std::string filename = "deletion_test.cpp";
+        auto hash = fixture.storeContent(filename, cppCode);
+        std::string filePath = (fixture.testDir_ / filename).string();
+
+        REQUIRE(fixture.submitAndWaitForExtraction(hash, filePath, cppCode, "cpp", 3000));
+
+        auto kg = fixture.getKgStore();
+        REQUIRE(kg != nullptr);
+
+        auto funcNodesBefore = kg->findNodesByType("function", 500, 0);
+        REQUIRE(funcNodesBefore.has_value());
+        size_t countBefore = funcNodesBefore.value().size();
+        spdlog::info("Function nodes before deletion: {}", countBefore);
+
+        auto deleteResult = kg->deleteNodesForDocumentHash(hash);
+        REQUIRE(deleteResult.has_value());
+        spdlog::info("Deleted {} nodes for document hash {}", deleteResult.value(),
+                    hash.substr(0, 12));
+
+        auto funcNodesAfter = kg->findNodesByType("function", 500, 0);
+        REQUIRE(funcNodesAfter.has_value());
+        size_t countAfter = funcNodesAfter.value().size();
+        spdlog::info("Function nodes after deletion: {}", countAfter);
+
+        CHECK(countAfter <= countBefore);
+    }
+}

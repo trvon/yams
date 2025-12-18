@@ -342,6 +342,36 @@ private:
             co_return printGraphQueryResponse(r.value());
         }
 
+        // If --name is provided, try to resolve it to a file node in the KG first
+        if (!name_.empty()) {
+            // Extract just the filename from the path for the node key
+            std::filesystem::path namePath(name_);
+            std::string fileName = namePath.filename().string();
+            std::string fileNodeKey = "file:" + fileName;
+
+            GraphQueryRequest gReq;
+            gReq.nodeKey = fileNodeKey;
+            gReq.maxDepth = depth_;
+            gReq.maxResults = static_cast<uint32_t>(limit_);
+            gReq.maxResultsPerDepth = 100;
+            gReq.offset = static_cast<uint32_t>(offset_);
+            gReq.limit = static_cast<uint32_t>(limit_);
+            gReq.includeNodeProperties = verbose_;
+            gReq.includeEdgeProperties = verbose_;
+            gReq.reverseTraversal = reverseTraversal_;
+
+            if (!relationFilter_.empty()) {
+                gReq.relationFilters.push_back(relationFilter_);
+            }
+
+            auto r = co_await client.call(gReq);
+            if (r && r.value().kgAvailable && r.value().originNode.nodeId > 0) {
+                // Found the file node, show the KG graph response
+                co_return printGraphQueryResponse(r.value());
+            }
+            // Fall through to document-based lookup if file node not found
+        }
+
         // Fall back to document-based lookup via GetRequest
         GetRequest req;
         req.hash = hash_;

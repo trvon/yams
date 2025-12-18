@@ -1755,6 +1755,72 @@ private:
                 }
                 render_rows(std::cout, searchRows);
 
+                // Post-Ingest Pipeline section
+                std::cout << "\n" << section_header("Post-Ingest Pipeline") << "\n\n";
+                std::vector<Row> postIngestRows;
+                auto findPostIngestCount = [&](const char* key) -> uint64_t {
+                    auto it = status.requestCounts.find(key);
+                    return it != status.requestCounts.end() ? it->second : 0ULL;
+                };
+                {
+                    uint64_t queued = findPostIngestCount("post_ingest_queued");
+                    uint64_t inflight = findPostIngestCount("post_ingest_inflight");
+                    uint64_t cap = findPostIngestCount("post_ingest_capacity");
+                    uint64_t processed = findPostIngestCount("post_ingest_processed");
+                    uint64_t failed = findPostIngestCount("post_ingest_failed");
+                    uint64_t latency = findPostIngestCount("post_ingest_latency_ms_ema");
+                    uint64_t rate = findPostIngestCount("post_ingest_rate_sec_ema");
+
+                    std::ostringstream queueVal;
+                    queueVal << queued << " queued · " << inflight << " inflight";
+                    if (cap > 0)
+                        queueVal << " · cap " << cap;
+                    Severity qSev = queued > cap * 0.8 ? Severity::Bad
+                                                       : (queued > cap * 0.5 ? Severity::Warn
+                                                                             : Severity::Good);
+                    postIngestRows.push_back({"Queue", paint(qSev, queueVal.str()), ""});
+
+                    std::ostringstream throughput;
+                    throughput << rate << "/s · " << latency << "ms latency";
+                    postIngestRows.push_back({"Throughput", neutral(throughput.str()), ""});
+
+                    std::ostringstream stats;
+                    stats << processed << " processed";
+                    if (failed > 0)
+                        stats << " · " << failed << " failed";
+                    Severity statSev = failed > 0 ? Severity::Warn : Severity::Good;
+                    postIngestRows.push_back({"Stats", paint(statSev, stats.str()), ""});
+
+                    // Per-stage breakdown
+                    uint64_t extractInFlight = findPostIngestCount("extraction_inflight");
+                    uint64_t kgQueuedTotal = findPostIngestCount("kg_queued");
+                    uint64_t kgConsumed = findPostIngestCount("kg_consumed");
+                    uint64_t kgInFlight = findPostIngestCount("kg_inflight");
+                    uint64_t symbolInFlight = findPostIngestCount("symbol_inflight");
+                    // Calculate actual pending = queued - consumed - inflight
+                    int64_t kgPending = static_cast<int64_t>(kgQueuedTotal) - static_cast<int64_t>(kgConsumed) - static_cast<int64_t>(kgInFlight);
+                    if (kgPending < 0) kgPending = 0;
+
+                    if (extractInFlight > 0 || kgPending > 0 || kgInFlight > 0 ||
+                        symbolInFlight > 0) {
+                        postIngestRows.push_back({"", "", ""}); // Separator
+                        postIngestRows.push_back({subsection_header("Pipeline Stages"), "", ""});
+
+                        std::ostringstream extractVal;
+                        extractVal << extractInFlight << " inflight (max 4)";
+                        postIngestRows.push_back({"  Extraction", neutral(extractVal.str()), ""});
+
+                        std::ostringstream kgVal;
+                        kgVal << kgPending << " queued · " << kgInFlight << " inflight (max 8)";
+                        postIngestRows.push_back({"  Knowledge Graph", neutral(kgVal.str()), ""});
+
+                        std::ostringstream symbolVal;
+                        symbolVal << symbolInFlight << " inflight (max 4)";
+                        postIngestRows.push_back({"  Symbol Extraction", neutral(symbolVal.str()), ""});
+                    }
+                }
+                render_rows(std::cout, postIngestRows);
+
                 std::cout << "\n" << section_header("Storage & Embeddings") << "\n\n";
                 std::vector<Row> storageRows;
                 auto findCount = [&](const char* key) -> uint64_t {

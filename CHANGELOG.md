@@ -19,6 +19,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.7.10] - Unreleased
 
 ### Added
+- **Constexpr language configuration for symbol extraction**: Centralized compile-time configuration
+  - 16 languages with constexpr node types and query patterns: C, C++, Python, Rust, Go, Java, JavaScript, TypeScript, C#, PHP, Kotlin, Perl, R, SQL, Solidity, Dart
+  - `LanguageConfig` struct with `class_types`, `field_types`, `function_types`, `import_types`, `identifier_types`
+  - Query patterns: `function_queries`, `class_queries`, `import_queries`, `call_queries`
+  - Language alias support (e.g., "cpp" → "c++", "cxx", "cc")
+  - `getLanguageConfig()` constexpr lookup function
+  - Location: `plugins/symbol_extractor_treesitter/symbol_extractor.cpp`
+- **Field extraction**: New `extractFields()` method extracts class member variables
+  - Uses node type traversal with language-specific field types
+  - Creates `field` kind symbols with proper byte ranges
+- **Member containment relations**: New `extractMemberRelations()` method
+  - Creates `contains` edges from classes to their methods/fields
+  - Uses byte range containment to determine class membership
+  - Improves knowledge graph structure for code navigation
+- **PostIngestQueue per-stage metrics**: Exposed extraction/KG/symbol stage inflight counts
+  - New getters: `extractionInFlight()`, `kgInFlight()`, `symbolInFlight()`, `totalInFlight()`
+  - Static constexpr limits: `maxExtractionConcurrent()`, `maxKgConcurrent()`, `maxSymbolConcurrent()`
+  - Exposed via daemon status: `extraction_inflight`, `kg_inflight`, `symbol_inflight`
+  - `yams status` shows POST line when there's active work
+  - `yams status -v` shows per-stage breakdown
+  - `yams daemon status -d` shows full Post-Ingest Pipeline section
+  - JSON output includes `stages` object with per-stage counts
+  - Location: `include/yams/daemon/components/PostIngestQueue.h`, `src/cli/commands/status_command.cpp`, `src/cli/commands/daemon_command.cpp`
+- **Knowledge Graph cleanup on document deletion**: Deleting documents now cascades to KG
+  - `deleteNodesForDocumentHash()`: Removes `doc:<hash>` nodes and symbol nodes with matching document_hash
+  - Integrated into document deletion flow for automatic cleanup
+  - Location: `include/yams/metadata/knowledge_graph_store.h`, `src/app/services/document_service.cpp`
+- **Stale edge cleanup on re-indexing**: Symbol extraction now cleans up old relationships
+  - `deleteEdgesForSourceFile()`: Removes edges where `properties.source_file` matches path
+  - Called automatically before re-extraction to prevent stale relationship accumulation
+  - Location: `src/daemon/components/EntityGraphService.cpp`
+- **Optimized isolated node query**: `yams graph --isolated` now uses single SQL query
+  - `findIsolatedNodes()`: Efficient `NOT EXISTS` subquery instead of N+1 pattern
+  - New IPC fields: `isolatedMode`, `isolatedRelation` in `GraphQueryRequest`
+  - Significant performance improvement for large graphs
+  - Location: `src/cli/commands/graph_command.cpp`, `src/daemon/components/dispatcher/request_dispatcher_graph.cpp`
 - **Daemon log command**: Added `yams daemon log`
 - **ExternalPluginHost**: New plugin host for Python/process-based plugins (RFC-EPH-001)
   - Implements `IPluginHost` interface for external plugins running as separate processes
@@ -139,6 +175,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Documents process in parallel across all worker threads with work stealing
 
 ### Fixed
+- **Graph `--name` query now shows symbol relationships**: Fixed `yams graph --name <file>` showing "Graph data unavailable"
+  - Now resolves filename to file node key and uses KG query path
+  - Shows connected symbols, includes, and document nodes
+  - Falls back to document-based lookup if file node not found
+  - Location: `src/cli/commands/graph_command.cpp`
+- **KG queue metric now shows pending count**: Fixed `kg(q=N)` showing cumulative total instead of pending items
+  - Now calculates: `pending = queued - consumed - inflight`
+  - Affects `yams status -v` and `yams daemon status -d` displays
+  - Location: `src/cli/commands/status_command.cpp`, `src/cli/commands/daemon_command.cpp`
+- **Symbol extraction extension mapping**: Fixed extension lookup not matching due to leading dot mismatch
+  - Database stores extensions with dots (`.cpp`), map keys without (`cpp`)
+  - PostIngestQueue now strips leading dot before lookup
+  - Location: `src/daemon/components/PostIngestQueue.cpp`
 - **Graph query bidirectional traversal**: Fixed graph queries showing 0 connections for blob nodes
   - BFS traversal now follows both incoming and outgoing edges by default
   - Blob nodes (which only have incoming `has_version` edges from path nodes) now return connected nodes

@@ -125,7 +125,7 @@ unit_daemon_base = files(
   # 'daemon/components/checkpoint_manager_test.cpp',
 
   # Legacy GTest tests (to be migrated)
-  'daemon/daemon_test.cpp',
+  # 'daemon/daemon_test.cpp',  # Migrated to Catch2 (daemon_catch2_test.cpp)
   # Migrated to Catch2 - see tests/meson.build (plugin_infrastructure_test.cpp)
   # 'daemon/plugin_host_test.cpp',
   'daemon/repair_coordinator_test.cpp',
@@ -213,7 +213,7 @@ unit_metadata = files(
   # 'metadata/query_helpers_test.cpp',
   # 'metadata/sql_build_select_test.cpp',
   # 'metadata/metadata_value_variant_test.cpp',
-  
+
   # Migrated to Catch2 - see tests/meson.build (catch2_connection_pool_exe)
   # 'metadata/connection_pool_maintenance_smoke_test.cpp',
   # 'metadata/connection_pool_waiting_guard_test.cpp',
