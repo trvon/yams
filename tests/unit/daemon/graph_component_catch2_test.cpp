@@ -252,7 +252,7 @@ TEST_CASE("KnowledgeGraphStore: findNodesByType with pagination", "[daemon][grap
     SECTION("Pagination with offset") {
         auto result = fixture.kgStore->findNodesByType("function", 10, 20);
         REQUIRE(result.has_value());
-        REQUIRE(result.value().size() == 5);  // Only 5 remaining after offset 20
+        REQUIRE(result.value().size() == 5); // Only 5 remaining after offset 20
     }
 
     SECTION("Pagination with offset and limit") {
@@ -362,7 +362,7 @@ TEST_CASE("KnowledgeGraphStore: getNodeTypeCounts", "[daemon][graph][query]") {
     SECTION("Returns all types with counts") {
         auto result = fixture.kgStore->getNodeTypeCounts();
         REQUIRE(result.has_value());
-        REQUIRE(result.value().size() == 3);  // function, class, file
+        REQUIRE(result.value().size() == 3); // function, class, file
     }
 
     SECTION("Counts are correct and ordered by count desc") {

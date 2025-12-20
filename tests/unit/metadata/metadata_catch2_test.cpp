@@ -7,8 +7,8 @@
 //   - sql_build_select_test.cpp
 //   - metadata_value_variant_test.cpp
 
-#include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
+#include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
 #include <variant>
@@ -178,7 +178,7 @@ TEST_CASE("MetadataValue constructors and variant types", "[metadata][value]") {
 
 TEST_CASE("MetadataValue setVariant syncs legacy fields", "[metadata][value]") {
     MetadataValue v;
-    
+
     SECTION("Integer variant syncs legacy") {
         v.setVariant(int64_t{99});
         CHECK(v.type == MetadataValueType::Integer);

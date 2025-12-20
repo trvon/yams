@@ -36,9 +36,11 @@ struct CliTestHelper {
 
         configEnv.emplace("YAMS_CONFIG", (tempDir / "config.toml").string());
         dataEnv.emplace("YAMS_DATA_DIR", (tempDir / "data").string());
-        nonInteractiveEnv.emplace(std::string("YAMS_NON_INTERACTIVE"), std::optional<std::string>("1"));
+        nonInteractiveEnv.emplace(std::string("YAMS_NON_INTERACTIVE"),
+                                  std::optional<std::string>("1"));
         // Disable daemon autostart to prevent cleanup crashes
-        disableDaemonEnv.emplace(std::string("YAMS_CLI_DISABLE_DAEMON_AUTOSTART"), std::optional<std::string>("1"));
+        disableDaemonEnv.emplace(std::string("YAMS_CLI_DISABLE_DAEMON_AUTOSTART"),
+                                 std::optional<std::string>("1"));
     }
 
     ~CliTestHelper() {

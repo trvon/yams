@@ -46,7 +46,8 @@ TEST_CASE("ErrorHints - Vector error pattern detected", "[cli][error_hints][catc
 }
 
 TEST_CASE("ErrorHints - Dimension mismatch pattern detected", "[cli][error_hints][catch2]") {
-    auto hint = getErrorHint(ErrorCode::InvalidArgument, "dimension mismatch: expected 384, got 768");
+    auto hint =
+        getErrorHint(ErrorCode::InvalidArgument, "dimension mismatch: expected 384, got 768");
     CHECK(hint.hint == "Embedding model or vector index issue detected");
     CHECK(hint.command == "yams doctor --check-embeddings");
 }
@@ -209,23 +210,28 @@ TEST_CASE("ErrorHints - Format error passes command", "[cli][error_hints][catch2
 // shouldSuggestInit() tests
 // ============================================================================
 
-TEST_CASE("ErrorHints - Should suggest init for NotInitialized code", "[cli][error_hints][catch2]") {
+TEST_CASE("ErrorHints - Should suggest init for NotInitialized code",
+          "[cli][error_hints][catch2]") {
     CHECK(shouldSuggestInit(ErrorCode::NotInitialized, "any message"));
 }
 
-TEST_CASE("ErrorHints - Should suggest init for not initialized message", "[cli][error_hints][catch2]") {
+TEST_CASE("ErrorHints - Should suggest init for not initialized message",
+          "[cli][error_hints][catch2]") {
     CHECK(shouldSuggestInit(ErrorCode::Unknown, "storage not initialized"));
 }
 
-TEST_CASE("ErrorHints - Should suggest init for no such table message", "[cli][error_hints][catch2]") {
+TEST_CASE("ErrorHints - Should suggest init for no such table message",
+          "[cli][error_hints][catch2]") {
     CHECK(shouldSuggestInit(ErrorCode::DatabaseError, "no such table: documents"));
 }
 
-TEST_CASE("ErrorHints - Should suggest init for database not found message", "[cli][error_hints][catch2]") {
+TEST_CASE("ErrorHints - Should suggest init for database not found message",
+          "[cli][error_hints][catch2]") {
     CHECK(shouldSuggestInit(ErrorCode::FileNotFound, "database not found"));
 }
 
-TEST_CASE("ErrorHints - Should not suggest init for unrelated error", "[cli][error_hints][catch2]") {
+TEST_CASE("ErrorHints - Should not suggest init for unrelated error",
+          "[cli][error_hints][catch2]") {
     CHECK_FALSE(shouldSuggestInit(ErrorCode::NetworkError, "connection refused"));
 }
 
@@ -233,11 +239,13 @@ TEST_CASE("ErrorHints - Should not suggest init for unrelated error", "[cli][err
 // shouldSuggestDoctor() tests
 // ============================================================================
 
-TEST_CASE("ErrorHints - Should suggest doctor for DatabaseError code", "[cli][error_hints][catch2]") {
+TEST_CASE("ErrorHints - Should suggest doctor for DatabaseError code",
+          "[cli][error_hints][catch2]") {
     CHECK(shouldSuggestDoctor(ErrorCode::DatabaseError, "any message"));
 }
 
-TEST_CASE("ErrorHints - Should suggest doctor for CorruptedData code", "[cli][error_hints][catch2]") {
+TEST_CASE("ErrorHints - Should suggest doctor for CorruptedData code",
+          "[cli][error_hints][catch2]") {
     CHECK(shouldSuggestDoctor(ErrorCode::CorruptedData, "any message"));
 }
 
@@ -245,19 +253,23 @@ TEST_CASE("ErrorHints - Should suggest doctor for FTS5 message", "[cli][error_hi
     CHECK(shouldSuggestDoctor(ErrorCode::Unknown, "FTS5 error occurred"));
 }
 
-TEST_CASE("ErrorHints - Should suggest doctor for constraint message", "[cli][error_hints][catch2]") {
+TEST_CASE("ErrorHints - Should suggest doctor for constraint message",
+          "[cli][error_hints][catch2]") {
     CHECK(shouldSuggestDoctor(ErrorCode::Unknown, "constraint failed"));
 }
 
-TEST_CASE("ErrorHints - Should suggest doctor for integrity message", "[cli][error_hints][catch2]") {
+TEST_CASE("ErrorHints - Should suggest doctor for integrity message",
+          "[cli][error_hints][catch2]") {
     CHECK(shouldSuggestDoctor(ErrorCode::Unknown, "integrity check failed"));
 }
 
-TEST_CASE("ErrorHints - Should suggest doctor for embedding message", "[cli][error_hints][catch2]") {
+TEST_CASE("ErrorHints - Should suggest doctor for embedding message",
+          "[cli][error_hints][catch2]") {
     CHECK(shouldSuggestDoctor(ErrorCode::Unknown, "embedding dimension mismatch"));
 }
 
-TEST_CASE("ErrorHints - Should not suggest doctor for unrelated error", "[cli][error_hints][catch2]") {
+TEST_CASE("ErrorHints - Should not suggest doctor for unrelated error",
+          "[cli][error_hints][catch2]") {
     CHECK_FALSE(shouldSuggestDoctor(ErrorCode::NetworkError, "connection refused"));
 }
 
@@ -265,27 +277,33 @@ TEST_CASE("ErrorHints - Should not suggest doctor for unrelated error", "[cli][e
 // isDaemonConnectionError() tests
 // ============================================================================
 
-TEST_CASE("ErrorHints - Is daemon connection error for NetworkError code", "[cli][error_hints][catch2]") {
+TEST_CASE("ErrorHints - Is daemon connection error for NetworkError code",
+          "[cli][error_hints][catch2]") {
     CHECK(isDaemonConnectionError(ErrorCode::NetworkError, "any message"));
 }
 
-TEST_CASE("ErrorHints - Is daemon connection error for daemon message", "[cli][error_hints][catch2]") {
+TEST_CASE("ErrorHints - Is daemon connection error for daemon message",
+          "[cli][error_hints][catch2]") {
     CHECK(isDaemonConnectionError(ErrorCode::Unknown, "daemon not responding"));
 }
 
-TEST_CASE("ErrorHints - Is daemon connection error for socket message", "[cli][error_hints][catch2]") {
+TEST_CASE("ErrorHints - Is daemon connection error for socket message",
+          "[cli][error_hints][catch2]") {
     CHECK(isDaemonConnectionError(ErrorCode::Unknown, "socket error"));
 }
 
-TEST_CASE("ErrorHints - Is daemon connection error for connection refused message", "[cli][error_hints][catch2]") {
+TEST_CASE("ErrorHints - Is daemon connection error for connection refused message",
+          "[cli][error_hints][catch2]") {
     CHECK(isDaemonConnectionError(ErrorCode::Unknown, "connection refused"));
 }
 
-TEST_CASE("ErrorHints - Is daemon connection error for ECONNREFUSED message", "[cli][error_hints][catch2]") {
+TEST_CASE("ErrorHints - Is daemon connection error for ECONNREFUSED message",
+          "[cli][error_hints][catch2]") {
     CHECK(isDaemonConnectionError(ErrorCode::Unknown, "ECONNREFUSED"));
 }
 
-TEST_CASE("ErrorHints - Is not daemon connection error for unrelated error", "[cli][error_hints][catch2]") {
+TEST_CASE("ErrorHints - Is not daemon connection error for unrelated error",
+          "[cli][error_hints][catch2]") {
     CHECK_FALSE(isDaemonConnectionError(ErrorCode::DatabaseError, "constraint failed"));
 }
 
@@ -299,7 +317,8 @@ TEST_CASE("ErrorHints - Message pattern takes precedence over code", "[cli][erro
     CHECK(hint.command == "yams doctor --fix");
 }
 
-TEST_CASE("ErrorHints - Daemon message with database code gives daemon hint", "[cli][error_hints][catch2]") {
+TEST_CASE("ErrorHints - Daemon message with database code gives daemon hint",
+          "[cli][error_hints][catch2]") {
     auto hint = getErrorHint(ErrorCode::DatabaseError, "daemon connection refused");
     CHECK(hint.hint == "Daemon may not be running");
     CHECK(hint.command == "yams daemon start");

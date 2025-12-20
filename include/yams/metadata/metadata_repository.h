@@ -233,7 +233,8 @@ public:
                                                              const std::string& modelId = "") = 0;
 
     // Repair status operations
-    virtual Result<void> updateDocumentRepairStatus(const std::string& hash, RepairStatus status) = 0;
+    virtual Result<void> updateDocumentRepairStatus(const std::string& hash,
+                                                    RepairStatus status) = 0;
 
     /**
      * @brief Force a WAL checkpoint.

@@ -887,7 +887,7 @@ struct AddDirectoryRequest {
     bool bypassSession{false}; // skip session tagging even if session is active
 
     // Gitignore handling
-    bool noGitignore{false};   // when true, ignore .gitignore patterns during traversal
+    bool noGitignore{false}; // when true, ignore .gitignore patterns during traversal
 };
 
 struct IndexedFileResult {

@@ -1587,7 +1587,7 @@ struct AddDocumentRequest {
     bool noEmbeddings = false;    // Disable automatic embedding generation
 
     // Gitignore handling
-    bool noGitignore = false;     // Ignore .gitignore patterns when adding files
+    bool noGitignore = false; // Ignore .gitignore patterns when adding files
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -2480,8 +2480,8 @@ struct GraphQueryRequest {
     uint32_t maxResults{200};                 // Total result cap
     uint32_t maxResultsPerDepth{100};         // Per-depth cap
     bool reverseTraversal{false};             // Traverse incoming edges instead of outgoing
-    bool isolatedMode{false};                 // Find isolated nodes (no incoming edges of relationFilters[0])
-    std::string isolatedRelation;             // Relation to check for isolation (default: "calls")
+    bool isolatedMode{false};     // Find isolated nodes (no incoming edges of relationFilters[0])
+    std::string isolatedRelation; // Relation to check for isolation (default: "calls")
 
     // Snapshot context
     std::string scopeToSnapshot;
@@ -2499,8 +2499,8 @@ struct GraphQueryRequest {
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
         ser << documentHash << documentName << snapshotId << nodeId << listByType << nodeType
-            << nodeKey << listTypes << relationFilters << maxDepth << maxResults << maxResultsPerDepth << reverseTraversal
-            << isolatedMode << isolatedRelation
+            << nodeKey << listTypes << relationFilters << maxDepth << maxResults
+            << maxResultsPerDepth << reverseTraversal << isolatedMode << isolatedRelation
             << scopeToSnapshot << offset << limit << includeEdgeProperties << includeNodeProperties
             << hydrateFully;
     }
@@ -3614,8 +3614,8 @@ struct StatusResponse {
         bool degraded{false};
         std::string error; // if degraded
         uint32_t modelsLoaded{0};
-        bool isProvider{false}; // true if this plugin is the adopted model provider
-        std::vector<std::string> interfaces; // plugin interfaces (e.g., content_extractor_v1)
+        bool isProvider{false};                // true if this plugin is the adopted model provider
+        std::vector<std::string> interfaces;   // plugin interfaces (e.g., content_extractor_v1)
         std::vector<std::string> capabilities; // capability categories (e.g., content_extraction)
 
         template <typename Serializer>

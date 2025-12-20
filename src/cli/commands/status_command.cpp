@@ -364,8 +364,9 @@ public:
                             {
                                 try {
                                     uint64_t docs = 0, logical = 0, physical = 0;
-                                    // Prefer documents_total (from metadata, initialized on startup)
-                                    // over storage_documents (CAS object count, requires scan)
+                                    // Prefer documents_total (from metadata, initialized on
+                                    // startup) over storage_documents (CAS object count, requires
+                                    // scan)
                                     auto itDocsTotal = s.requestCounts.find("documents_total");
                                     if (itDocsTotal != s.requestCounts.end()) {
                                         docs = itDocsTotal->second;
@@ -502,17 +503,26 @@ public:
                                     uint64_t enti = getU64("entity_inflight");
                                     uint64_t entLim = getU64("post_entity_limit");
                                     // kgq is cumulative queued, kgc is cumulative consumed
-                                    // Pending = queued - consumed - inflight (inflight haven't been consumed yet)
-                                    int64_t kgPending = static_cast<int64_t>(kgq) - static_cast<int64_t>(kgc) - static_cast<int64_t>(kgi);
-                                    if (kgPending < 0) kgPending = 0;
-                                    int64_t entPending = static_cast<int64_t>(entq) - static_cast<int64_t>(entc) - static_cast<int64_t>(enti);
-                                    if (entPending < 0) entPending = 0;
+                                    // Pending = queued - consumed - inflight (inflight haven't been
+                                    // consumed yet)
+                                    int64_t kgPending = static_cast<int64_t>(kgq) -
+                                                        static_cast<int64_t>(kgc) -
+                                                        static_cast<int64_t>(kgi);
+                                    if (kgPending < 0)
+                                        kgPending = 0;
+                                    int64_t entPending = static_cast<int64_t>(entq) -
+                                                         static_cast<int64_t>(entc) -
+                                                         static_cast<int64_t>(enti);
+                                    if (entPending < 0)
+                                        entPending = 0;
                                     std::cout << "      stages: extract=" << ext << "/" << extLim
-                                              << ", kg(q=" << kgPending << "/i=" << kgi << "/" << kgLim << ")"
+                                              << ", kg(q=" << kgPending << "/i=" << kgi << "/"
+                                              << kgLim << ")"
                                               << ", symbol=" << sym << "/" << symLim;
                                     // Only show entity stage if there's any activity
                                     if (entq > 0 || enti > 0) {
-                                        std::cout << ", entity(q=" << entPending << "/i=" << enti << "/" << entLim << ")";
+                                        std::cout << ", entity(q=" << entPending << "/i=" << enti
+                                                  << "/" << entLim << ")";
                                     }
                                     std::cout << "\n";
                                 }

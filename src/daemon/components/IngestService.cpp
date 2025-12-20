@@ -83,7 +83,7 @@ static void processTask(ServiceManager* sm, const InternalEventBus::StoreDocumen
         serviceReq.includePatterns = req.includePatterns;
         serviceReq.excludePatterns = req.excludePatterns;
         serviceReq.recursive = true;
-        serviceReq.sessionId = req.sessionId; // Session-isolated memory (PBI-082)
+        serviceReq.sessionId = req.sessionId;     // Session-isolated memory (PBI-082)
         serviceReq.noGitignore = req.noGitignore; // Gitignore handling
         for (const auto& [key, value] : req.metadata) {
             serviceReq.metadata[key] = value;

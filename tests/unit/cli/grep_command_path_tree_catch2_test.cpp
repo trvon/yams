@@ -31,7 +31,8 @@ struct GrepPathTreeFixture {
 
     GrepPathTreeFixture() {
         // Create temporary directory for test database
-        testDir = fs::temp_directory_path() / ("yams_test_" + std::to_string(std::random_device{}()));
+        testDir =
+            fs::temp_directory_path() / ("yams_test_" + std::to_string(std::random_device{}()));
         fs::create_directories(testDir);
         dbPath = testDir / "metadata.db";
 
@@ -92,7 +93,8 @@ TEST_CASE("GrepPathTree - mode disabled by default", "[cli][grep][path_tree][cat
     // When daemon connection fails, falls back to local error (no documents indexed)
     // Current implementation returns error (connection timeout or IPC error)
     // We're validating the code path compiles and executes without crash
-    CHECK((result.has_value() || !result.has_value())); // Either succeeds with empty or fails with error
+    CHECK((result.has_value() ||
+           !result.has_value())); // Either succeeds with empty or fails with error
 }
 
 TEST_CASE("GrepPathTree - mode with empty repository", "[cli][grep][path_tree][catch2]") {

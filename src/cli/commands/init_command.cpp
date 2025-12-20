@@ -845,8 +845,13 @@ private:
             }
 
             // Optional: if a system ONNX plugin exists, hint the user
+#ifdef __APPLE__
+            fs::path sys1 = fs::path("/opt/homebrew/lib/yams/plugins/libyams_onnx_plugin.dylib");
+            fs::path sys2 = fs::path("/usr/local/lib/yams/plugins/libyams_onnx_plugin.dylib");
+#else
             fs::path sys1 = fs::path("/usr/local/lib/yams/plugins/libyams_onnx_plugin.so");
             fs::path sys2 = fs::path("/usr/lib/yams/plugins/libyams_onnx_plugin.so");
+#endif
             if (fs::exists(sys1) || fs::exists(sys2)) {
                 spdlog::info("ONNX plugin found in system plugins. It will be auto-loaded.");
             } else {

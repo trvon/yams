@@ -108,8 +108,8 @@ bool EntityGraphService::process(Job& job) {
         return false;
     }
 
-    spdlog::info("EntityGraphService: extracted {} symbols from {} (lang={})",
-                 result->symbol_count, job.filePath, job.language);
+    spdlog::info("EntityGraphService: extracted {} symbols from {} (lang={})", result->symbol_count,
+                 job.filePath, job.language);
 
     // Populate KG with rich symbol relationships
     bool success = populateKnowledgeGraph(kg, job, result);
@@ -453,7 +453,7 @@ yams::Result<void> EntityGraphService::createSymbolEdges(
             fileNode.type = "file";
             nlohmann::json fileProps;
             fileProps["path"] = path;
-            fileProps["is_external"] = true;  // Mark as external/unresolved
+            fileProps["is_external"] = true; // Mark as external/unresolved
             fileNode.properties = fileProps.dump();
 
             auto newNodeRes = kg->upsertNode(fileNode);
@@ -500,7 +500,8 @@ yams::Result<void> EntityGraphService::createSymbolEdges(
             }
         }
         if (!symbolEdges.empty()) {
-            spdlog::info("EntityGraphService: creating {} symbol/include edges", symbolEdges.size());
+            spdlog::info("EntityGraphService: creating {} symbol/include edges",
+                         symbolEdges.size());
             kg->addEdgesUnique(symbolEdges);
         }
     }

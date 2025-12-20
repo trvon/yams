@@ -14,7 +14,6 @@
 #include <spdlog/spdlog.h>
 #include <catch2/catch_test_macros.hpp>
 
-
 #include "test_daemon_harness.h"
 
 #include <yams/daemon/components/EntityGraphService.h>
@@ -254,7 +253,8 @@ int multiply(int x, int y) {
         bool foundAdd = false;
         bool foundMultiply = false;
         for (const auto& node : nodes) {
-            spdlog::info("Function node: key={}, label={}", node.nodeKey, node.label.value_or("<no label>"));
+            spdlog::info("Function node: key={}, label={}", node.nodeKey,
+                         node.label.value_or("<no label>"));
             if (node.label == "add" || node.nodeKey.find("add") != std::string::npos) {
                 foundAdd = true;
             }
@@ -297,7 +297,8 @@ private:
 
         bool foundCalculator = false;
         for (const auto& node : classNodes) {
-            spdlog::info("Class node: key={}, label={}", node.nodeKey, node.label.value_or("<no label>"));
+            spdlog::info("Class node: key={}, label={}", node.nodeKey,
+                         node.label.value_or("<no label>"));
             if (node.label == "Calculator" ||
                 node.nodeKey.find("Calculator") != std::string::npos) {
                 foundCalculator = true;
@@ -344,10 +345,10 @@ void processData() {
         // Find the function node first
         auto funcNodes = kg->findNodesByType("function", 100, 0);
         REQUIRE(funcNodes.has_value());
-        
+
         bool foundDefinedInEdge = false;
         bool foundLocatedInEdge = false;
-        
+
         for (const auto& funcNode : funcNodes.value()) {
             // Check edges from this function node
             auto edgesResult = kg->getEdgesFrom(funcNode.id, std::nullopt, 100, 0);
@@ -364,7 +365,7 @@ void processData() {
                 }
             }
         }
-        
+
         // At least one type of location edge should exist
         CHECK((foundDefinedInEdge || foundLocatedInEdge));
 
@@ -482,8 +483,7 @@ public:
     }
 }
 
-TEST_CASE("EntityGraphService: Graph traversal from symbol",
-          "[integration][daemon][kg][pbi-009]") {
+TEST_CASE("EntityGraphService: Graph traversal from symbol", "[integration][daemon][kg][pbi-009]") {
     SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     EntityGraphIntegrationFixture fixture;
 
@@ -1666,7 +1666,7 @@ void deletionTestFunction() {}
         auto deleteResult = kg->deleteNodesForDocumentHash(hash);
         REQUIRE(deleteResult.has_value());
         spdlog::info("Deleted {} nodes for document hash {}", deleteResult.value(),
-                    hash.substr(0, 12));
+                     hash.substr(0, 12));
 
         auto funcNodesAfter = kg->findNodesByType("function", 500, 0);
         REQUIRE(funcNodesAfter.has_value());

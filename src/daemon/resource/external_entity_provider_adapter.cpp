@@ -14,11 +14,11 @@ namespace yams::daemon {
 
 // Dynamic batch sizing thresholds
 // Smaller binaries can use larger batches; larger binaries need smaller batches to avoid timeouts
-constexpr size_t BATCH_SIZE_TINY = 1000;   // < 1MB: fast analysis
-constexpr size_t BATCH_SIZE_SMALL = 500;   // 1-5MB: moderate
-constexpr size_t BATCH_SIZE_MEDIUM = 200;  // 5-20MB: careful
-constexpr size_t BATCH_SIZE_LARGE = 100;   // 20-50MB: slow
-constexpr size_t BATCH_SIZE_HUGE = 50;     // > 50MB: very slow
+constexpr size_t BATCH_SIZE_TINY = 1000;  // < 1MB: fast analysis
+constexpr size_t BATCH_SIZE_SMALL = 500;  // 1-5MB: moderate
+constexpr size_t BATCH_SIZE_MEDIUM = 200; // 5-20MB: careful
+constexpr size_t BATCH_SIZE_LARGE = 100;  // 20-50MB: slow
+constexpr size_t BATCH_SIZE_HUGE = 50;    // > 50MB: very slow
 
 using json = nlohmann::json;
 
@@ -52,10 +52,8 @@ bool ExternalEntityProviderAdapter::supports(const std::string& extension) const
     return false;
 }
 
-Result<ExternalEntityProviderAdapter::EntityResult>
-ExternalEntityProviderAdapter::extractEntities(const std::vector<std::byte>& bytes,
-                                               const std::string& filePath, size_t offset,
-                                               size_t limit) {
+Result<ExternalEntityProviderAdapter::EntityResult> ExternalEntityProviderAdapter::extractEntities(
+    const std::vector<std::byte>& bytes, const std::string& filePath, size_t offset, size_t limit) {
     if (!host_) {
         return Error{ErrorCode::InvalidState, "No external plugin host"};
     }
@@ -95,12 +93,14 @@ ExternalEntityProviderAdapter::extractEntities(const std::vector<std::byte>& byt
                          {"include_decompiled", false}, // Don't need decompiled code for KG
                          {"include_call_graph", true}}}};
 
-        spdlog::info("ExternalEntityProviderAdapter[{}]: calling {} ({} bytes, offset={}, limit={})",
-                     pluginName_, rpcMethod_, bytes.size(), offset, limit);
+        spdlog::info(
+            "ExternalEntityProviderAdapter[{}]: calling {} ({} bytes, offset={}, limit={})",
+            pluginName_, rpcMethod_, bytes.size(), offset, limit);
 
         auto result = host_->callRpc(pluginName_, rpcMethod_, params, timeout_);
         if (!result) {
-            spdlog::warn("ExternalEntityProviderAdapter[{}]: {} RPC failed", pluginName_, rpcMethod_);
+            spdlog::warn("ExternalEntityProviderAdapter[{}]: {} RPC failed", pluginName_,
+                         rpcMethod_);
             return Error{ErrorCode::IOError, "Entity extraction RPC failed"};
         }
 
@@ -197,18 +197,18 @@ ExternalEntityProviderAdapter::extractEntities(const std::vector<std::byte>& byt
             }
         }
 
-        spdlog::info(
-            "ExternalEntityProviderAdapter[{}]: extracted {} nodes, {} edges, {} aliases "
-            "(hasMore={}, nextOffset={})",
-            pluginName_, entityResult.nodes.size(), entityResult.edges.size(),
-            entityResult.aliases.size(), entityResult.hasMore, entityResult.nextOffset);
+        spdlog::info("ExternalEntityProviderAdapter[{}]: extracted {} nodes, {} edges, {} aliases "
+                     "(hasMore={}, nextOffset={})",
+                     pluginName_, entityResult.nodes.size(), entityResult.edges.size(),
+                     entityResult.aliases.size(), entityResult.hasMore, entityResult.nextOffset);
 
         return entityResult;
 
     } catch (const std::exception& e) {
         spdlog::warn("ExternalEntityProviderAdapter[{}]: extraction failed: {}", pluginName_,
                      e.what());
-        return Error{ErrorCode::InternalError, std::string("Entity extraction failed: ") + e.what()};
+        return Error{ErrorCode::InternalError,
+                     std::string("Entity extraction failed: ") + e.what()};
     }
 }
 
@@ -283,10 +283,9 @@ ExternalEntityProviderAdapter::extractAllEntities(const std::vector<std::byte>& 
 }
 
 Result<ExternalEntityProviderAdapter::ExtractionProgress>
-ExternalEntityProviderAdapter::extractEntitiesStreaming(
-    const std::vector<std::byte>& bytes, const std::string& filePath,
-    BatchCallback callback, size_t batchSize) {
-
+ExternalEntityProviderAdapter::extractEntitiesStreaming(const std::vector<std::byte>& bytes,
+                                                        const std::string& filePath,
+                                                        BatchCallback callback, size_t batchSize) {
     // Use dynamic batch sizing if not specified
     size_t effectiveBatchSize = batchSize > 0 ? batchSize : calculateBatchSize(bytes.size());
 
@@ -304,8 +303,8 @@ ExternalEntityProviderAdapter::extractEntitiesStreaming(
     while (true) {
         auto batchResult = extractEntities(bytes, filePath, offset, effectiveBatchSize);
         if (!batchResult) {
-            spdlog::warn("ExternalEntityProviderAdapter[{}]: batch {} failed: {}",
-                         pluginName_, batchNumber, batchResult.error().message);
+            spdlog::warn("ExternalEntityProviderAdapter[{}]: batch {} failed: {}", pluginName_,
+                         batchNumber, batchResult.error().message);
             // Return progress so far - partial success is better than total failure
             if (batchNumber > 0) {
                 spdlog::info("ExternalEntityProviderAdapter[{}]: returning partial progress "
@@ -336,15 +335,15 @@ ExternalEntityProviderAdapter::extractEntitiesStreaming(
 
         // Estimate total batches
         if (batch.totalFunctions > 0 && effectiveBatchSize > 0) {
-            progress.totalBatchesEstimate = (batch.totalFunctions + effectiveBatchSize - 1) / effectiveBatchSize;
+            progress.totalBatchesEstimate =
+                (batch.totalFunctions + effectiveBatchSize - 1) / effectiveBatchSize;
         }
 
         spdlog::info("ExternalEntityProviderAdapter[{}]: batch {}/{} complete "
                      "(funcs={}/{}, nodes={}, edges={}, aliases={}, elapsed={:.1f}s)",
                      pluginName_, batchNumber, progress.totalBatchesEstimate,
-                     progress.functionsProcessed, progress.totalFunctions,
-                     batch.nodes.size(), batch.edges.size(), batch.aliases.size(),
-                     progress.elapsedSeconds);
+                     progress.functionsProcessed, progress.totalFunctions, batch.nodes.size(),
+                     batch.edges.size(), batch.aliases.size(), progress.elapsedSeconds);
 
         // Call the callback with this batch - it can ingest immediately
         if (!callback(std::move(batch), progress)) {

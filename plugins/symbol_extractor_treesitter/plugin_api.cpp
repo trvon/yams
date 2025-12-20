@@ -34,10 +34,10 @@ static bool supports_language_abi(void* /*self*/, const char* language) {
     std::transform(lang.begin(), lang.end(), lang.begin(), ::tolower);
 
     static const std::unordered_set<std::string> supported_languages = {
-        "c",          "cpp",  "c++",  "python", "rust", "go",  "javascript", "js",
-        "typescript", "ts",   "java", "csharp", "c#",   "cs",  "php",        "kotlin",
-        "kt",         "perl", "pl",   "r",      "sql",  "sol", "solidity",   "dart",
-        "flutter",    "p4",   "p4_16", "p4lang"};
+        "c",   "cpp",        "c++",  "python",  "rust",   "go",    "javascript",
+        "js",  "typescript", "ts",   "java",    "csharp", "c#",    "cs",
+        "php", "kotlin",     "kt",   "perl",    "pl",     "r",     "sql",
+        "sol", "solidity",   "dart", "flutter", "p4",     "p4_16", "p4lang"};
 
     return supported_languages.count(lang) > 0;
 }

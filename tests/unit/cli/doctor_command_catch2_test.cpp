@@ -39,9 +39,11 @@ struct CliTestHelper {
 
         configEnv.emplace("YAMS_CONFIG", (tempDir / "config.toml").string());
         dataEnv.emplace("YAMS_DATA_DIR", (tempDir / "data").string());
-        nonInteractiveEnv.emplace(std::string("YAMS_NON_INTERACTIVE"), std::optional<std::string>("1"));
+        nonInteractiveEnv.emplace(std::string("YAMS_NON_INTERACTIVE"),
+                                  std::optional<std::string>("1"));
         // Disable daemon autostart to prevent cleanup crashes
-        disableDaemonEnv.emplace(std::string("YAMS_CLI_DISABLE_DAEMON_AUTOSTART"), std::optional<std::string>("1"));
+        disableDaemonEnv.emplace(std::string("YAMS_CLI_DISABLE_DAEMON_AUTOSTART"),
+                                 std::optional<std::string>("1"));
     }
 
     ~CliTestHelper() {
@@ -54,9 +56,7 @@ struct CliTestHelper {
         fs::remove_all(tempDir, ec);
     }
 
-    std::unique_ptr<YamsCLI> makeCli() const {
-        return std::make_unique<YamsCLI>();
-    }
+    std::unique_ptr<YamsCLI> makeCli() const { return std::make_unique<YamsCLI>(); }
 
     int runCommand(const std::vector<std::string>& args) {
         auto cli = makeCli();
@@ -111,7 +111,8 @@ TEST_CASE("DoctorCommand - prune help does not run doctor diagnostics", "[cli][d
     CHECK(output.find("Daemon Status") == std::string::npos);
 }
 
-TEST_CASE("DoctorCommand - prune with category does not run doctor diagnostics", "[cli][doctor][catch2]") {
+TEST_CASE("DoctorCommand - prune with category does not run doctor diagnostics",
+          "[cli][doctor][catch2]") {
     CliTestHelper helper;
 
     CaptureStdout capture;

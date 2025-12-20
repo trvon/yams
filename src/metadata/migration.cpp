@@ -2129,8 +2129,8 @@ Migration YamsMetadataMigrations::createRepairTrackingSchema() {
         if (auto r = add_col("repair_attempts", "repair_attempts INTEGER DEFAULT 0"); !r)
             return r;
 
-        if (auto r = db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_documents_repair_status ON documents(repair_status)");
+        if (auto r = db.execute("CREATE INDEX IF NOT EXISTS idx_documents_repair_status ON "
+                                "documents(repair_status)");
             !r)
             return r;
 

@@ -3527,8 +3527,7 @@ DocumentInfo MetadataRepository::mapDocumentRow(Statement& stmt) {
     info.pathDepth = stmt.getInt(17);
     info.repairStatus = RepairStatusUtils::fromString(stmt.getString(18));
     if (!stmt.isNull(19)) {
-        info.repairAttemptedAt =
-            std::chrono::sys_seconds{std::chrono::seconds{stmt.getInt64(19)}};
+        info.repairAttemptedAt = std::chrono::sys_seconds{std::chrono::seconds{stmt.getInt64(19)}};
     }
     info.repairAttempts = stmt.getInt(20);
     return info;

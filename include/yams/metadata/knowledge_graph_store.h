@@ -218,7 +218,8 @@ public:
     // Bidirectional edges: returns both incoming and outgoing edges in a single query
     // More efficient than calling getEdgesFrom + getEdgesTo separately for BFS traversal
     virtual Result<std::vector<KGEdge>>
-    getEdgesBidirectional(std::int64_t nodeId, std::optional<std::string_view> relation = std::nullopt,
+    getEdgesBidirectional(std::int64_t nodeId,
+                          std::optional<std::string_view> relation = std::nullopt,
                           std::size_t limit = 400) = 0;
 
     // For quick structural scoring: neighbor ids only (fast path)

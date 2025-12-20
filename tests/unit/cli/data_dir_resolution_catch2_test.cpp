@@ -120,7 +120,8 @@ TEST_CASE("DataDirResolution - get_data_dir contains yams", "[cli][data_dir][cat
 }
 
 #ifndef _WIN32
-TEST_CASE("DataDirResolution - get_data_dir respects XDG_DATA_HOME", "[cli][data_dir][catch2][!mayfail]") {
+TEST_CASE("DataDirResolution - get_data_dir respects XDG_DATA_HOME",
+          "[cli][data_dir][catch2][!mayfail]") {
     ScopedEnv xdg("XDG_DATA_HOME", "/custom/data");
     auto dataDir = yams::config::get_data_dir();
     CHECK(dataDir == fs::path("/custom/data/yams"));
@@ -169,7 +170,8 @@ TEST_CASE("DataDirResolution - env YAMS_DATA_DIR used if no storage", "[cli][dat
     CHECK(resolved == fs::path("/env/data/path"));
 }
 
-TEST_CASE("DataDirResolution - config data_dir used with YAMS_CONFIG env", "[cli][data_dir][catch2]") {
+TEST_CASE("DataDirResolution - config data_dir used with YAMS_CONFIG env",
+          "[cli][data_dir][catch2]") {
     TempConfig config(R"(
 [core]
 data_dir = "/from/config/file"
@@ -218,7 +220,8 @@ data_dir = "/test/path"
     CHECK(value == "/test/path");
 }
 
-TEST_CASE("DataDirResolution - parse_config_value handles quoted values", "[cli][data_dir][catch2]") {
+TEST_CASE("DataDirResolution - parse_config_value handles quoted values",
+          "[cli][data_dir][catch2]") {
     TempConfig config(R"(
 [core]
 data_dir = "/path/with spaces"
@@ -228,7 +231,8 @@ data_dir = "/path/with spaces"
     CHECK(value == "/path/with spaces");
 }
 
-TEST_CASE("DataDirResolution - parse_config_value handles single quotes", "[cli][data_dir][catch2]") {
+TEST_CASE("DataDirResolution - parse_config_value handles single quotes",
+          "[cli][data_dir][catch2]") {
     TempConfig config(R"(
 [core]
 data_dir = '/single/quoted'
@@ -249,7 +253,8 @@ data_dir = "/actual/value" # inline comment
     CHECK(value == "/actual/value");
 }
 
-TEST_CASE("DataDirResolution - parse_config_value returns empty for missing key", "[cli][data_dir][catch2]") {
+TEST_CASE("DataDirResolution - parse_config_value returns empty for missing key",
+          "[cli][data_dir][catch2]") {
     TempConfig config(R"(
 [core]
 other_key = "value"
@@ -259,7 +264,8 @@ other_key = "value"
     CHECK(value.empty());
 }
 
-TEST_CASE("DataDirResolution - parse_config_value returns empty for missing section", "[cli][data_dir][catch2]") {
+TEST_CASE("DataDirResolution - parse_config_value returns empty for missing section",
+          "[cli][data_dir][catch2]") {
     TempConfig config(R"(
 [other]
 data_dir = "/wrong/section"
@@ -276,7 +282,8 @@ TEST_CASE("DataDirResolution - parse_config_value handles empty file", "[cli][da
     CHECK(value.empty());
 }
 
-TEST_CASE("DataDirResolution - parse_config_value returns empty for nonexistent file", "[cli][data_dir][catch2]") {
+TEST_CASE("DataDirResolution - parse_config_value returns empty for nonexistent file",
+          "[cli][data_dir][catch2]") {
     auto value = yams::config::parse_config_value("/nonexistent/config.toml", "core", "data_dir");
     CHECK(value.empty());
 }
@@ -293,12 +300,14 @@ TEST_CASE("DataDirResolution - expand_tilde expands home", "[cli][data_dir][catc
     CHECK(expanded == fs::path("/home/testuser/some/path"));
 }
 
-TEST_CASE("DataDirResolution - expand_tilde leaves absolute paths unchanged", "[cli][data_dir][catch2]") {
+TEST_CASE("DataDirResolution - expand_tilde leaves absolute paths unchanged",
+          "[cli][data_dir][catch2]") {
     auto expanded = yams::config::expand_tilde("/absolute/path");
     CHECK(expanded == fs::path("/absolute/path"));
 }
 
-TEST_CASE("DataDirResolution - expand_tilde leaves relative paths unchanged", "[cli][data_dir][catch2]") {
+TEST_CASE("DataDirResolution - expand_tilde leaves relative paths unchanged",
+          "[cli][data_dir][catch2]") {
     auto expanded = yams::config::expand_tilde("relative/path");
     CHECK(expanded == fs::path("relative/path"));
 }
@@ -308,11 +317,11 @@ TEST_CASE("DataDirResolution - expand_tilde leaves relative paths unchanged", "[
 // Values must NOT contain description strings
 // ============================================================================
 
-TEST_CASE("DataDirResolution - resolved path does not contain descriptions", "[cli][data_dir][catch2]") {
-    std::vector<std::string> badPatterns = {
-        "[Deprecated]", "Single path to file", "use '-' for stdin",
-        "Data directory for storage", "especially useful for", "File or directory paths"
-    };
+TEST_CASE("DataDirResolution - resolved path does not contain descriptions",
+          "[cli][data_dir][catch2]") {
+    std::vector<std::string> badPatterns = {"[Deprecated]",          "Single path to file",
+                                            "use '-' for stdin",     "Data directory for storage",
+                                            "especially useful for", "File or directory paths"};
 
     auto dataDir = yams::config::get_data_dir();
     auto configDir = yams::config::get_config_dir();
@@ -328,7 +337,8 @@ TEST_CASE("DataDirResolution - resolved path does not contain descriptions", "[c
     }
 }
 
-TEST_CASE("DataDirResolution - config value does not contain descriptions", "[cli][data_dir][catch2]") {
+TEST_CASE("DataDirResolution - config value does not contain descriptions",
+          "[cli][data_dir][catch2]") {
     TempConfig config(R"(
 [core]
 data_dir = "/proper/path"
@@ -381,7 +391,8 @@ socket_path = "/from/config/yams.sock"
 // parse_path_list() tests
 // ============================================================================
 
-TEST_CASE("DataDirResolution - parse_path_list handles comma-separated", "[cli][data_dir][catch2]") {
+TEST_CASE("DataDirResolution - parse_path_list handles comma-separated",
+          "[cli][data_dir][catch2]") {
     auto paths = yams::config::parse_path_list("/path/a,/path/b,/path/c");
     REQUIRE(paths.size() == 3);
     CHECK(paths[0] == fs::path("/path/a"));

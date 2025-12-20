@@ -383,7 +383,11 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
             {"daemon",
              {{"enable", "true"},
               {"auto_load_plugins", "true"},
+#ifdef __APPLE__
+              {"plugin_dir", "/opt/homebrew/lib/yams/plugins"}, // macOS Homebrew install location
+#else
               {"plugin_dir", "/usr/local/lib/yams/plugins"}, // System install location
+#endif
               {"plugin_name_policy", "relaxed"},
               {"use_legacy_tuner", "false"},
               {"auto_repair_batch_size", "16"},

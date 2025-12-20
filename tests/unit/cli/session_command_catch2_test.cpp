@@ -35,9 +35,11 @@ struct CliTestHelper {
 
         configEnv.emplace("YAMS_CONFIG", (tempDir / "config.toml").string());
         dataEnv.emplace("YAMS_DATA_DIR", (tempDir / "data").string());
-        nonInteractiveEnv.emplace(std::string("YAMS_NON_INTERACTIVE"), std::optional<std::string>("1"));
+        nonInteractiveEnv.emplace(std::string("YAMS_NON_INTERACTIVE"),
+                                  std::optional<std::string>("1"));
         // Disable daemon autostart to prevent cleanup crashes
-        disableDaemonEnv.emplace(std::string("YAMS_CLI_DISABLE_DAEMON_AUTOSTART"), std::optional<std::string>("1"));
+        disableDaemonEnv.emplace(std::string("YAMS_CLI_DISABLE_DAEMON_AUTOSTART"),
+                                 std::optional<std::string>("1"));
     }
 
     ~CliTestHelper() {
@@ -89,7 +91,7 @@ TEST_CASE("SessionCommand - warm parses with budgets", "[cli][session][catch2][.
 
     // Ensure CLI constructs and registers commands without throwing
     // Return code may be non-zero due to environment (no daemon)
-    (void)helper.runCommand({"yams", "session", "warm", "--limit", "10",
-                             "--cores", "2", "--snippet-len", "80"});
+    (void)helper.runCommand(
+        {"yams", "session", "warm", "--limit", "10", "--cores", "2", "--snippet-len", "80"});
     SUCCEED();
 }

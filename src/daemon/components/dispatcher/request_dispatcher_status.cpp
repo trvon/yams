@@ -481,7 +481,8 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
         response.additionalStats["wal_pending_entries"] = "0";
         // Populate plugins_json with actual plugin data including interfaces
         {
-            auto [pluginsJson, pluginsCount] = yams::daemon::dispatch::build_plugins_json(serviceManager_);
+            auto [pluginsJson, pluginsCount] =
+                yams::daemon::dispatch::build_plugins_json(serviceManager_);
             response.additionalStats["plugins_loaded"] = std::to_string(pluginsCount);
             response.additionalStats["plugins_json"] = pluginsJson;
         }

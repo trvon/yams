@@ -125,8 +125,10 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
     // Skip if no language detected (not a supported source file)
     if (language.empty()) {
         // Only log at debug for non-code files, but trace why for debugging
-        spdlog::debug("[GraphComponent] No language detected for {} (ext='{}'), skipping extraction",
-                      ctx.filePath, ctx.filePath.empty() ? "" : std::filesystem::path(ctx.filePath).extension().string());
+        spdlog::debug(
+            "[GraphComponent] No language detected for {} (ext='{}'), skipping extraction",
+            ctx.filePath,
+            ctx.filePath.empty() ? "" : std::filesystem::path(ctx.filePath).extension().string());
         return Result<void>();
     }
 
@@ -154,8 +156,8 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
         spdlog::warn("[GraphComponent] Failed to submit extraction for {}: {}",
                      ctx.documentHash.substr(0, 12), submitResult.error().message);
     } else {
-        spdlog::info("[GraphComponent] Queued symbol extraction for {} ({}) lang={}",
-                     ctx.filePath, ctx.documentHash.substr(0, 12), language);
+        spdlog::info("[GraphComponent] Queued symbol extraction for {} ({}) lang={}", ctx.filePath,
+                     ctx.documentHash.substr(0, 12), language);
     }
 
     return Result<void>();

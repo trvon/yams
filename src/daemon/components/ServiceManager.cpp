@@ -494,6 +494,10 @@ yams::Result<void> ServiceManager::initialize() {
         if (const char* home = std::getenv("HOME"))
             pluginDirs.push_back(std::filesystem::path(home) / ".local" / "lib" / "yams" /
                                  "plugins");
+#ifdef __APPLE__
+        // macOS: Homebrew default install location
+        pluginDirs.push_back(std::filesystem::path("/opt/homebrew/lib/yams/plugins"));
+#endif
         pluginDirs.push_back(std::filesystem::path("/usr/local/lib/yams/plugins"));
         pluginDirs.push_back(std::filesystem::path("/usr/lib/yams/plugins"));
 #endif
@@ -2082,8 +2086,9 @@ Result<size_t> ServiceManager::adoptSymbolExtractorsFromHosts() {
                 }
                 auto mapSize = extMap.size();
                 postIngest_->setSymbolExtensionMap(std::move(extMap));
-                spdlog::info("[ServiceManager] Updated PostIngestQueue with {} symbol extension mappings",
-                             mapSize);
+                spdlog::info(
+                    "[ServiceManager] Updated PostIngestQueue with {} symbol extension mappings",
+                    mapSize);
             }
         }
         return result;

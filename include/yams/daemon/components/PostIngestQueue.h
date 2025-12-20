@@ -69,7 +69,8 @@ public:
     std::size_t symbolInFlight() const { return symbolInFlight_.load(); }
     std::size_t entityInFlight() const { return entityInFlight_.load(); }
     std::size_t totalInFlight() const {
-        return inFlight_.load() + kgInFlight_.load() + symbolInFlight_.load() + entityInFlight_.load();
+        return inFlight_.load() + kgInFlight_.load() + symbolInFlight_.load() +
+               entityInFlight_.load();
     }
 
     // Stage concurrency limits (dynamic via TuneAdvisor)
@@ -112,10 +113,10 @@ private:
     void processEmbeddingStage(const std::string& hash, const std::string& mime);
     void dispatchToKgChannel(const std::string& hash, int64_t docId, const std::string& filePath,
                              std::vector<std::string> tags);
-    void dispatchToSymbolChannel(const std::string& hash, int64_t docId, const std::string& filePath,
-                                 const std::string& language);
-    void dispatchToEntityChannel(const std::string& hash, int64_t docId, const std::string& filePath,
-                                 const std::string& extension);
+    void dispatchToSymbolChannel(const std::string& hash, int64_t docId,
+                                 const std::string& filePath, const std::string& language);
+    void dispatchToEntityChannel(const std::string& hash, int64_t docId,
+                                 const std::string& filePath, const std::string& extension);
     void processEntityExtractionStage(const std::string& hash, int64_t docId,
                                       const std::string& filePath, const std::string& extension);
 

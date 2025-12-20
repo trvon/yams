@@ -42,8 +42,8 @@ static std::vector<std::string> loadGitignorePatterns(const std::filesystem::pat
     std::string line;
     while (std::getline(file, line)) {
         // Trim trailing whitespace (but not escaped trailing space)
-        while (!line.empty() && (line.back() == ' ' || line.back() == '\t' ||
-                                  line.back() == '\r' || line.back() == '\n')) {
+        while (!line.empty() && (line.back() == ' ' || line.back() == '\t' || line.back() == '\r' ||
+                                 line.back() == '\n')) {
             line.pop_back();
         }
 
@@ -251,10 +251,9 @@ public:
                             break;
                         AddDirectoryResponse localResp; // partial counts
                         const auto& ent = entries[i];
-                        bool willInclude =
-                            shouldIncludeFile(req.directoryPath, ent.path().string(),
-                                              req.includePatterns, req.excludePatterns,
-                                              gitignorePatterns);
+                        bool willInclude = shouldIncludeFile(
+                            req.directoryPath, ent.path().string(), req.includePatterns,
+                            req.excludePatterns, gitignorePatterns);
                         spdlog::info("[IndexingService] candidate: '{}' -> {}", ent.path().string(),
                                      willInclude ? "include" : "skip");
                         processDirectoryEntry(ent, req, localResp, snapshotId, gitignorePatterns);
@@ -603,9 +602,11 @@ private:
                             }
                         }
                     } catch (const std::exception& e) {
-                        spdlog::debug("[IndexingService] Post-ingest dispatch failed: {}", e.what());
+                        spdlog::debug("[IndexingService] Post-ingest dispatch failed: {}",
+                                      e.what());
                     } catch (...) {
-                        spdlog::warn("[IndexingService] Post-ingest dispatch failed with unknown exception");
+                        spdlog::warn(
+                            "[IndexingService] Post-ingest dispatch failed with unknown exception");
                     }
                 }
 
@@ -679,7 +680,8 @@ private:
         // Check gitignore patterns first (if any)
         if (!gitignorePatterns.empty()) {
             if (yams::common::matches_any_path(relPath, gitignorePatterns)) {
-                spdlog::debug("[IndexingService] File '{}' excluded by .gitignore pattern", relPath);
+                spdlog::debug("[IndexingService] File '{}' excluded by .gitignore pattern",
+                              relPath);
                 return false;
             }
         }

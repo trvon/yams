@@ -472,8 +472,8 @@ public:
                         render(result.value(), dir);
                         ok++;
                     } else {
-                        spdlog::warn("Daemon add failed for directory '{}': {}",
-                                     dir.string(), result.error().message);
+                        spdlog::warn("Daemon add failed for directory '{}': {}", dir.string(),
+                                     result.error().message);
                         failed++;
                     }
                 }

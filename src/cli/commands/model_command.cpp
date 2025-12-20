@@ -1263,8 +1263,16 @@ private:
 #endif
         // Best-effort plugin presence check
         const char* plugin_env = std::getenv("YAMS_PLUGIN_DIR");
-        fs::path plugin_dir =
-            plugin_env ? fs::path(plugin_env) : fs::path("/usr/local/lib/yams/plugins");
+        fs::path plugin_dir;
+        if (plugin_env) {
+            plugin_dir = fs::path(plugin_env);
+        } else {
+#ifdef __APPLE__
+            plugin_dir = fs::path("/opt/homebrew/lib/yams/plugins");
+#else
+            plugin_dir = fs::path("/usr/local/lib/yams/plugins");
+#endif
+        }
         std::error_code ec;
         size_t plugin_files = 0;
         if (fs::exists(plugin_dir, ec) && fs::is_directory(plugin_dir, ec)) {

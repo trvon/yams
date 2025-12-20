@@ -184,14 +184,18 @@ TEST_CASE("PromptUtil - Input validator rejects invalid with retry", "[cli][prom
     MockStdin input("invalid\nvalid\n");
     SuppressCout suppress;
     auto validator = [](const std::string& s) { return s == "valid"; };
-    CHECK(prompt_input("Enter value:", {.retryOnInvalid = true, .validator = validator}) == "valid");
+    CHECK(prompt_input("Enter value:", {.retryOnInvalid = true, .validator = validator}) ==
+          "valid");
 }
 
-TEST_CASE("PromptUtil - Input validator rejects invalid returns default", "[cli][prompt_util][catch2]") {
+TEST_CASE("PromptUtil - Input validator rejects invalid returns default",
+          "[cli][prompt_util][catch2]") {
     MockStdin input("invalid\n");
     SuppressCout suppress;
     auto validator = [](const std::string& s) { return s == "valid"; };
-    CHECK(prompt_input("Enter value:", {.defaultValue = "fallback", .retryOnInvalid = false, .validator = validator}) == "fallback");
+    CHECK(prompt_input("Enter value:", {.defaultValue = "fallback",
+                                        .retryOnInvalid = false,
+                                        .validator = validator}) == "fallback");
 }
 
 TEST_CASE("PromptUtil - Input trims tabs and newlines", "[cli][prompt_util][catch2]") {
@@ -282,7 +286,8 @@ TEST_CASE("PromptUtil - Choice throws on empty items", "[cli][prompt_util][catch
     REQUIRE_THROWS_AS(prompt_choice("Select:", items), std::invalid_argument);
 }
 
-TEST_CASE("PromptUtil - Choice uses value as label when label empty", "[cli][prompt_util][catch2]") {
+TEST_CASE("PromptUtil - Choice uses value as label when label empty",
+          "[cli][prompt_util][catch2]") {
     MockStdin input("1\n");
     SuppressCout suppress;
     std::vector<ChoiceItem> items = {{"value_only", "", "description"}};
@@ -299,7 +304,8 @@ TEST_CASE("PromptUtil - YesNo whitespace only treated as empty", "[cli][prompt_u
     CHECK(prompt_yes_no("Continue?", {.defaultYes = true, .retryOnInvalid = false}));
 }
 
-TEST_CASE("PromptUtil - Input only whitespace returns default when trimmed", "[cli][prompt_util][catch2]") {
+TEST_CASE("PromptUtil - Input only whitespace returns default when trimmed",
+          "[cli][prompt_util][catch2]") {
     MockStdin input("   \t  \n");
     SuppressCout suppress;
     CHECK(prompt_input("Value:", {.defaultValue = "default", .trimWhitespace = true}) == "default");

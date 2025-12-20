@@ -173,9 +173,9 @@ public:
         bool degraded{false};
         std::string error;
         std::uint32_t modelsLoaded{0};
-        std::vector<std::string> interfaces;        // Plugin interfaces (e.g., content_extractor_v1)
-        std::vector<std::string> capabilities;      // Capability categories (e.g., content_extraction)
-        std::string healthJson;                     // Full health response as JSON string
+        std::vector<std::string> interfaces;   // Plugin interfaces (e.g., content_extractor_v1)
+        std::vector<std::string> capabilities; // Capability categories (e.g., content_extraction)
+        std::string healthJson;                // Full health response as JSON string
     };
 
     struct PluginStatusSnapshot {

@@ -16,7 +16,8 @@
 // Positional argument isolation tests
 // ============================================================================
 
-TEST_CASE("CLIOptionIsolation - Positional description does not leak into value", "[cli][option_isolation][catch2]") {
+TEST_CASE("CLIOptionIsolation - Positional description does not leak into value",
+          "[cli][option_isolation][catch2]") {
     CLI::App app("Test");
 
     std::string targetPath;
@@ -36,7 +37,8 @@ TEST_CASE("CLIOptionIsolation - Positional description does not leak into value"
     CHECK(targetPath != "[Deprecated] Single path to file/directory (use '-' for stdin)");
 }
 
-TEST_CASE("CLIOptionIsolation - Positional without argument remains empty", "[cli][option_isolation][catch2]") {
+TEST_CASE("CLIOptionIsolation - Positional without argument remains empty",
+          "[cli][option_isolation][catch2]") {
     CLI::App app("Test");
 
     std::string targetPath;
@@ -49,7 +51,8 @@ TEST_CASE("CLIOptionIsolation - Positional without argument remains empty", "[cl
     CHECK(targetPath.empty());
 }
 
-TEST_CASE("CLIOptionIsolation - Multiple positionals remain isolated", "[cli][option_isolation][catch2]") {
+TEST_CASE("CLIOptionIsolation - Multiple positionals remain isolated",
+          "[cli][option_isolation][catch2]") {
     CLI::App app("Test");
 
     std::vector<std::string> targetPaths;
@@ -74,7 +77,8 @@ TEST_CASE("CLIOptionIsolation - Multiple positionals remain isolated", "[cli][op
 // Named option isolation tests
 // ============================================================================
 
-TEST_CASE("CLIOptionIsolation - Named option description does not leak into value", "[cli][option_isolation][catch2]") {
+TEST_CASE("CLIOptionIsolation - Named option description does not leak into value",
+          "[cli][option_isolation][catch2]") {
     CLI::App app("Test");
 
     std::string dataDir;
@@ -87,7 +91,8 @@ TEST_CASE("CLIOptionIsolation - Named option description does not leak into valu
     CHECK(dataDir != "Data directory for storage");
 }
 
-TEST_CASE("CLIOptionIsolation - Named option with default val does not contain description", "[cli][option_isolation][catch2]") {
+TEST_CASE("CLIOptionIsolation - Named option with default val does not contain description",
+          "[cli][option_isolation][catch2]") {
     CLI::App app("Test");
 
     std::string dataDir;
@@ -101,7 +106,8 @@ TEST_CASE("CLIOptionIsolation - Named option with default val does not contain d
     CHECK(dataDir != "Data directory for storage");
 }
 
-TEST_CASE("CLIOptionIsolation - Named option without argument uses default", "[cli][option_isolation][catch2]") {
+TEST_CASE("CLIOptionIsolation - Named option without argument uses default",
+          "[cli][option_isolation][catch2]") {
     CLI::App app("Test");
 
     std::string name;
@@ -119,7 +125,8 @@ TEST_CASE("CLIOptionIsolation - Named option without argument uses default", "[c
 // Subcommand isolation tests
 // ============================================================================
 
-TEST_CASE("CLIOptionIsolation - Subcommand option descriptions remain isolated", "[cli][option_isolation][catch2]") {
+TEST_CASE("CLIOptionIsolation - Subcommand option descriptions remain isolated",
+          "[cli][option_isolation][catch2]") {
     CLI::App app("Test");
 
     std::string dataDir;
@@ -156,7 +163,8 @@ TEST_CASE("CLIOptionIsolation - Subcommand option descriptions remain isolated",
 // Edge cases - the actual bug scenario
 // ============================================================================
 
-TEST_CASE("CLIOptionIsolation - Path does not become description when missing", "[cli][option_isolation][catch2]") {
+TEST_CASE("CLIOptionIsolation - Path does not become description when missing",
+          "[cli][option_isolation][catch2]") {
     CLI::App app("YAMS");
 
     std::string dataDir;
@@ -184,7 +192,8 @@ TEST_CASE("CLIOptionIsolation - Path does not become description when missing", 
     CHECK(dataDir.find("Data directory") == std::string::npos);
 }
 
-TEST_CASE("CLIOptionIsolation - Global option not polluted by subcommand descriptions", "[cli][option_isolation][catch2]") {
+TEST_CASE("CLIOptionIsolation - Global option not polluted by subcommand descriptions",
+          "[cli][option_isolation][catch2]") {
     CLI::App app("YAMS");
     app.prefix_command();
 
@@ -212,17 +221,16 @@ TEST_CASE("CLIOptionIsolation - Global option not polluted by subcommand descrip
 // Value validation - ensure descriptions are never valid file paths
 // ============================================================================
 
-TEST_CASE("CLIOptionIsolation - Description strings are not valid paths", "[cli][option_isolation][catch2]") {
+TEST_CASE("CLIOptionIsolation - Description strings are not valid paths",
+          "[cli][option_isolation][catch2]") {
     std::vector<std::string> descriptions = {
         "[Deprecated] Single path to file/directory (use '-' for stdin)",
         "File or directory paths to add (use '-' for stdin). Accepts multiple.",
-        "Name for the document (especially useful for stdin)", 
-        "Data directory for storage"
-    };
+        "Name for the document (especially useful for stdin)", "Data directory for storage"};
 
     for (const auto& desc : descriptions) {
         INFO("Checking description: " << desc);
-        
+
         std::filesystem::path p(desc);
 
         bool hasSpecialChars =
@@ -233,11 +241,13 @@ TEST_CASE("CLIOptionIsolation - Description strings are not valid paths", "[cli]
                                    desc.find("file") != std::string::npos ||
                                    desc.find("path") != std::string::npos;
 
-        CHECK((hasSpecialChars || isLongDescription || containsMultipleSpaces || hasDescriptionWords));
+        CHECK((hasSpecialChars || isLongDescription || containsMultipleSpaces ||
+               hasDescriptionWords));
     }
 }
 
-TEST_CASE("CLIOptionIsolation - Empty value does not become description", "[cli][option_isolation][catch2]") {
+TEST_CASE("CLIOptionIsolation - Empty value does not become description",
+          "[cli][option_isolation][catch2]") {
     CLI::App app("Test");
 
     std::string value;
@@ -255,7 +265,8 @@ TEST_CASE("CLIOptionIsolation - Empty value does not become description", "[cli]
 // Multiple values with same description pattern
 // ============================================================================
 
-TEST_CASE("CLIOptionIsolation - Multiple options with similar descriptions", "[cli][option_isolation][catch2]") {
+TEST_CASE("CLIOptionIsolation - Multiple options with similar descriptions",
+          "[cli][option_isolation][catch2]") {
     CLI::App app("Test");
 
     std::string queryPath;

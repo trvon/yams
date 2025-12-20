@@ -165,9 +165,9 @@ struct DocumentInfo {
     std::string extractionError;                                   ///< Error message if failed
 
     // Repair tracking fields (v21 migration)
-    RepairStatus repairStatus = RepairStatus::Pending;    ///< Repair processing status
-    std::chrono::sys_seconds repairAttemptedAt;           ///< When repair was last attempted
-    int repairAttempts = 0;                               ///< Number of repair attempts
+    RepairStatus repairStatus = RepairStatus::Pending; ///< Repair processing status
+    std::chrono::sys_seconds repairAttemptedAt;        ///< When repair was last attempted
+    int repairAttempts = 0;                            ///< Number of repair attempts
 
     // Legacy Unix timestamp accessors removed; bind/get sys_seconds directly via Statement.
 

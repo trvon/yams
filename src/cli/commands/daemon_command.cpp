@@ -1309,6 +1309,12 @@ private:
             waiting.reserve(readinessList.size());
             for (const auto& rd : readinessList) {
                 if (rd.issue) {
+                    // Skip "build reason" keys - they're informational, not readiness indicators
+                    std::string lowerLabel = rd.label;
+                    std::transform(lowerLabel.begin(), lowerLabel.end(), lowerLabel.begin(),
+                                   ::tolower);
+                    if (lowerLabel.find("build reason") != std::string::npos)
+                        continue;
                     anyDegraded = true;
                     waiting.push_back(rd.label);
                 }
@@ -1603,8 +1609,15 @@ private:
                 std::vector<std::string> waiting;
                 waiting.reserve(readinessList.size());
                 for (const auto& rd : readinessList) {
-                    if (rd.issue)
-                        waiting.push_back(rd.label);
+                    if (rd.issue) {
+                        // Skip "build reason" keys - they're informational, not readiness
+                        // indicators
+                        std::string lowerLabel = rd.label;
+                        std::transform(lowerLabel.begin(), lowerLabel.end(), lowerLabel.begin(),
+                                       ::tolower);
+                        if (lowerLabel.find("build reason") == std::string::npos)
+                            waiting.push_back(rd.label);
+                    }
                 }
                 std::sort(waiting.begin(), waiting.end());
                 waiting.erase(std::unique(waiting.begin(), waiting.end()), waiting.end());
@@ -1775,9 +1788,9 @@ private:
                     queueVal << queued << " queued · " << inflight << " inflight";
                     if (cap > 0)
                         queueVal << " · cap " << cap;
-                    Severity qSev = queued > cap * 0.8 ? Severity::Bad
-                                                       : (queued > cap * 0.5 ? Severity::Warn
-                                                                             : Severity::Good);
+                    Severity qSev = queued > cap * 0.8
+                                        ? Severity::Bad
+                                        : (queued > cap * 0.5 ? Severity::Warn : Severity::Good);
                     postIngestRows.push_back({"Queue", paint(qSev, queueVal.str()), ""});
 
                     std::ostringstream throughput;
@@ -1798,8 +1811,11 @@ private:
                     uint64_t kgInFlight = findPostIngestCount("kg_inflight");
                     uint64_t symbolInFlight = findPostIngestCount("symbol_inflight");
                     // Calculate actual pending = queued - consumed - inflight
-                    int64_t kgPending = static_cast<int64_t>(kgQueuedTotal) - static_cast<int64_t>(kgConsumed) - static_cast<int64_t>(kgInFlight);
-                    if (kgPending < 0) kgPending = 0;
+                    int64_t kgPending = static_cast<int64_t>(kgQueuedTotal) -
+                                        static_cast<int64_t>(kgConsumed) -
+                                        static_cast<int64_t>(kgInFlight);
+                    if (kgPending < 0)
+                        kgPending = 0;
 
                     if (extractInFlight > 0 || kgPending > 0 || kgInFlight > 0 ||
                         symbolInFlight > 0) {
@@ -1816,7 +1832,8 @@ private:
 
                         std::ostringstream symbolVal;
                         symbolVal << symbolInFlight << " inflight (max 4)";
-                        postIngestRows.push_back({"  Symbol Extraction", neutral(symbolVal.str()), ""});
+                        postIngestRows.push_back(
+                            {"  Symbol Extraction", neutral(symbolVal.str()), ""});
                     }
                 }
                 render_rows(std::cout, postIngestRows);
@@ -1974,8 +1991,11 @@ private:
                     bool isDegraded = lowerLabel.find("degraded") != std::string::npos;
                     bool isAlreadyShown = lowerLabel.find("vector db") != std::string::npos ||
                                           lowerLabel.find("embedding") != std::string::npos;
+                    // Skip "build reason" keys - they're informational, not readiness indicators.
+                    // The search_engine key itself indicates readiness.
+                    bool isBuildReason = lowerLabel.find("build reason") != std::string::npos;
 
-                    if (!isDegraded && !isAlreadyShown && rd.issue) {
+                    if (!isDegraded && !isAlreadyShown && !isBuildReason && rd.issue) {
                         issueRows.push_back({rd.label, paint(rd.severity, rd.text), ""});
                     }
                 }

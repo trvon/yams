@@ -11,10 +11,10 @@
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
+#include <yams/daemon/resource/external_entity_provider_adapter.h>
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_content_extractor_adapter.h>
-#include <yams/daemon/resource/external_entity_provider_adapter.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/plugins/content_extractor_v1.h>
 #include <yams/plugins/model_provider_v1.h>
@@ -269,6 +269,10 @@ PluginManager::autoloadPlugins(boost::asio::any_io_executor executor) {
         if (const char* home = std::getenv("HOME")) {
             roots.push_back(fs::path(home) / ".local" / "lib" / "yams" / "plugins");
         }
+#ifdef __APPLE__
+        // macOS: Homebrew default install location
+        roots.push_back(fs::path("/opt/homebrew/lib/yams/plugins"));
+#endif
         roots.push_back(fs::path("/usr/local/lib/yams/plugins"));
         roots.push_back(fs::path("/usr/lib/yams/plugins"));
 #endif
@@ -363,6 +367,10 @@ PluginManager::autoloadPlugins(boost::asio::any_io_executor executor) {
                 externalRoots.push_back(fs::path(home) / ".local" / "lib" / "yams" /
                                         "external-plugins");
             }
+#ifdef __APPLE__
+            // macOS: Homebrew default install location
+            externalRoots.push_back(fs::path("/opt/homebrew/lib/yams/external-plugins"));
+#endif
             externalRoots.push_back(fs::path("/usr/local/lib/yams/external-plugins"));
             externalRoots.push_back(fs::path("/usr/lib/yams/external-plugins"));
 #endif
@@ -669,8 +677,9 @@ Result<size_t> PluginManager::adoptEntityProviders() {
                      externalHost_->listLoaded().size());
 
         for (const auto& desc : externalHost_->listLoaded()) {
-            spdlog::info("[PluginManager] adoptEntityProviders: Checking plugin '{}' with {} interfaces",
-                         desc.name, desc.interfaces.size());
+            spdlog::info(
+                "[PluginManager] adoptEntityProviders: Checking plugin '{}' with {} interfaces",
+                desc.name, desc.interfaces.size());
             for (const auto& iface : desc.interfaces) {
                 spdlog::debug("[PluginManager]   - interface: {}", iface);
             }
@@ -679,7 +688,8 @@ Result<size_t> PluginManager::adoptEntityProviders() {
             bool hasInterface = std::find(desc.interfaces.begin(), desc.interfaces.end(),
                                           "kg_entity_provider_v1") != desc.interfaces.end();
             if (!hasInterface) {
-                spdlog::debug("[PluginManager] Plugin '{}' does not have kg_entity_provider_v1", desc.name);
+                spdlog::debug("[PluginManager] Plugin '{}' does not have kg_entity_provider_v1",
+                              desc.name);
                 continue;
             }
 
@@ -733,7 +743,8 @@ Result<size_t> PluginManager::adoptEntityProviders() {
             postIngestQueue_->setEntityProviders(entityProviders_);
             spdlog::info("[PluginManager] Wired {} entity providers to PostIngestQueue", adopted);
         } else if (adopted > 0) {
-            spdlog::debug("[PluginManager] Entity providers adopted but PostIngestQueue not yet available");
+            spdlog::debug(
+                "[PluginManager] Entity providers adopted but PostIngestQueue not yet available");
         }
 
         return Result<size_t>(adopted);

@@ -12,6 +12,7 @@
 #include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/WorkCoordinator.h>
+#include <yams/daemon/resource/external_entity_provider_adapter.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/extraction/text_extractor.h>
 #include <yams/ingest/ingest_helpers.h>
@@ -19,7 +20,6 @@
 #include <yams/vector/document_chunker.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
-#include <yams/daemon/resource/external_entity_provider_adapter.h>
 
 using yams::extraction::util::extractDocumentText;
 
@@ -71,12 +71,15 @@ void PostIngestQueue::start() {
         boost::asio::co_spawn(coordinator_->getExecutor(), entityPoller(), boost::asio::detached);
 
         constexpr int maxWaitMs = 100;
-        for (int i = 0; i < maxWaitMs && (!started_.load() || !kgStarted_.load() || !symbolStarted_.load() || !entityStarted_.load()); ++i) {
+        for (int i = 0; i < maxWaitMs && (!started_.load() || !kgStarted_.load() ||
+                                          !symbolStarted_.load() || !entityStarted_.load());
+             ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
-        spdlog::info("[PostIngestQueue] Pollers started (extraction={}, kg={}, symbol={}, entity={})", started_.load(),
-                     kgStarted_.load(), symbolStarted_.load(), entityStarted_.load());
+        spdlog::info(
+            "[PostIngestQueue] Pollers started (extraction={}, kg={}, symbol={}, entity={})",
+            started_.load(), kgStarted_.load(), symbolStarted_.load(), entityStarted_.load());
     } else {
         spdlog::warn("[PostIngestQueue] start() skipped because stop_=true");
     }
@@ -238,8 +241,9 @@ void PostIngestQueue::processMetadataStage(const std::string& hash, const std::s
                     updated.extractionStatus = metadata::ExtractionStatus::Failed;
                     auto updateRes = meta_->updateDocument(updated);
                     if (!updateRes) {
-                        spdlog::warn("[PostIngestQueue] Failed to mark extraction failed for {}: {}",
-                                     hash, updateRes.error().message);
+                        spdlog::warn(
+                            "[PostIngestQueue] Failed to mark extraction failed for {}: {}", hash,
+                            updateRes.error().message);
                     }
                 }
             }
@@ -279,7 +283,8 @@ void PostIngestQueue::processMetadataStage(const std::string& hash, const std::s
                 }
             }
 
-            // Dispatch entity extraction for binary files (if entity provider supports this extension)
+            // Dispatch entity extraction for binary files (if entity provider supports this
+            // extension)
             {
                 std::lock_guard<std::mutex> lock(entityMutex_);
                 spdlog::debug("[PostIngestQueue] Checking {} entity providers for ext={}",
@@ -374,7 +379,8 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
         spdlog::warn("[PostIngestQueue] KG channel full, dropping job for {}", hash);
         InternalEventBus::instance().incKgDropped();
     } else {
-        spdlog::info("[PostIngestQueue] Dispatched KG job for {} ({})", filePath, hash.substr(0, 12));
+        spdlog::info("[PostIngestQueue] Dispatched KG job for {} ({})", filePath,
+                     hash.substr(0, 12));
         InternalEventBus::instance().incKgQueued();
     }
 }
@@ -426,13 +432,13 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
         const std::size_t maxConcurrent = maxSymbolConcurrent();
         if (symbolInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
             symbolInFlight_.fetch_add(1);
-            boost::asio::post(
-                coordinator_->getExecutor(),
-                [this, hash = std::move(job.hash), docId = job.documentId,
-                 filePath = std::move(job.filePath), language = std::move(job.language)]() {
-                    processSymbolExtractionStage(hash, docId, filePath, language);
-                    symbolInFlight_.fetch_sub(1);
-                });
+            boost::asio::post(coordinator_->getExecutor(),
+                              [this, hash = std::move(job.hash), docId = job.documentId,
+                               filePath = std::move(job.filePath),
+                               language = std::move(job.language)]() {
+                                  processSymbolExtractionStage(hash, docId, filePath, language);
+                                  symbolInFlight_.fetch_sub(1);
+                              });
         } else {
             timer.expires_after(std::chrono::milliseconds(25));
             co_await timer.async_wait(boost::asio::use_awaitable);
@@ -443,8 +449,8 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
 }
 
 void PostIngestQueue::dispatchToSymbolChannel(const std::string& hash, int64_t docId,
-                                               const std::string& filePath,
-                                               const std::string& language) {
+                                              const std::string& filePath,
+                                              const std::string& language) {
     constexpr std::size_t symbolChannelCapacity = 16384;
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::SymbolExtractionJob>(
@@ -467,10 +473,11 @@ void PostIngestQueue::dispatchToSymbolChannel(const std::string& hash, int64_t d
 }
 
 void PostIngestQueue::processSymbolExtractionStage(const std::string& hash, int64_t docId,
-                                                    const std::string& filePath,
-                                                    const std::string& language) {
+                                                   const std::string& filePath,
+                                                   const std::string& language) {
     if (!graphComponent_) {
-        spdlog::warn("[PostIngestQueue] Symbol extraction skipped for {} - no graphComponent", hash);
+        spdlog::warn("[PostIngestQueue] Symbol extraction skipped for {} - no graphComponent",
+                     hash);
         return;
     }
 
@@ -491,7 +498,8 @@ void PostIngestQueue::processSymbolExtractionStage(const std::string& hash, int6
             auto contentResult = store_->retrieveBytes(hash);
             if (contentResult) {
                 const auto& bytes = contentResult.value();
-                extractJob.contentUtf8 = std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+                extractJob.contentUtf8 =
+                    std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
             } else {
                 spdlog::warn("[PostIngestQueue] Failed to load content for symbol extraction: {}",
                              hash.substr(0, 12));
@@ -509,7 +517,8 @@ void PostIngestQueue::processSymbolExtractionStage(const std::string& hash, int6
         } else {
             auto duration = std::chrono::steady_clock::now() - start;
             double ms = std::chrono::duration<double, std::milli>(duration).count();
-            spdlog::debug("[PostIngestQueue] Symbol extraction submitted for {} in {:.2f}ms", hash, ms);
+            spdlog::debug("[PostIngestQueue] Symbol extraction submitted for {} in {:.2f}ms", hash,
+                          ms);
         }
         InternalEventBus::instance().incSymbolConsumed();
     } catch (const std::exception& e) {
@@ -518,8 +527,8 @@ void PostIngestQueue::processSymbolExtractionStage(const std::string& hash, int6
 }
 
 void PostIngestQueue::dispatchToEntityChannel(const std::string& hash, int64_t docId,
-                                               const std::string& filePath,
-                                               const std::string& extension) {
+                                              const std::string& filePath,
+                                              const std::string& extension) {
     constexpr std::size_t entityChannelCapacity = 4096;
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::EntityExtractionJob>(
@@ -558,13 +567,13 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
         const std::size_t maxConcurrent = maxEntityConcurrent();
         if (entityInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
             entityInFlight_.fetch_add(1);
-            boost::asio::post(
-                coordinator_->getExecutor(),
-                [this, hash = std::move(job.hash), docId = job.documentId,
-                 filePath = std::move(job.filePath), extension = std::move(job.extension)]() {
-                    processEntityExtractionStage(hash, docId, filePath, extension);
-                    entityInFlight_.fetch_sub(1);
-                });
+            boost::asio::post(coordinator_->getExecutor(),
+                              [this, hash = std::move(job.hash), docId = job.documentId,
+                               filePath = std::move(job.filePath),
+                               extension = std::move(job.extension)]() {
+                                  processEntityExtractionStage(hash, docId, filePath, extension);
+                                  entityInFlight_.fetch_sub(1);
+                              });
         } else {
             timer.expires_after(std::chrono::milliseconds(50));
             co_await timer.async_wait(boost::asio::use_awaitable);
@@ -575,8 +584,8 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
 }
 
 void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int64_t /*docId*/,
-                                                    const std::string& filePath,
-                                                    const std::string& extension) {
+                                                   const std::string& filePath,
+                                                   const std::string& extension) {
     spdlog::info("[PostIngestQueue] Entity extraction starting for {} ({}) ext={}", filePath,
                  hash.substr(0, 12), extension);
 
@@ -634,7 +643,6 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
             [this, &keyToId, &totalNodesInserted, &totalEdgesInserted, &totalAliasesInserted,
              &hash](ExternalEntityProviderAdapter::EntityResult batch,
                     const ExternalEntityProviderAdapter::ExtractionProgress& progress) -> bool {
-
                 if (batch.nodes.empty()) {
                     return true; // Continue to next batch
                 }
@@ -657,7 +665,8 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                 std::vector<metadata::KGEdge> resolvedEdges;
                 for (auto& edge : batch.edges) {
                     try {
-                        if (!edge.properties) continue;
+                        if (!edge.properties)
+                            continue;
                         auto props = nlohmann::json::parse(*edge.properties);
                         std::string srcKey = props.value("_src_key", "");
                         std::string dstKey = props.value("_dst_key", "");
@@ -705,9 +714,8 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                 spdlog::info("[PostIngestQueue] Batch {}/{} ingested for {} "
                              "(nodes={}, edges={}, aliases={}, elapsed={:.1f}s)",
                              progress.batchNumber, progress.totalBatchesEstimate,
-                             hash.substr(0, 12), nodeIds.value().size(),
-                             resolvedEdges.size(), resolvedAliases.size(),
-                             progress.elapsedSeconds);
+                             hash.substr(0, 12), nodeIds.value().size(), resolvedEdges.size(),
+                             resolvedAliases.size(), progress.elapsedSeconds);
 
                 return true; // Continue to next batch
             });
@@ -718,8 +726,8 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
         if (result) {
             spdlog::info("[PostIngestQueue] Entity extraction completed for {} in {:.2f}ms "
                          "(batches={}, nodes={}, edges={}, aliases={})",
-                         hash.substr(0, 12), ms, result.value().batchNumber,
-                         totalNodesInserted, totalEdgesInserted, totalAliasesInserted);
+                         hash.substr(0, 12), ms, result.value().batchNumber, totalNodesInserted,
+                         totalEdgesInserted, totalAliasesInserted);
         } else {
             // Partial success - some batches may have been ingested
             if (totalNodesInserted > 0) {

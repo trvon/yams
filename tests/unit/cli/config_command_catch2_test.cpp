@@ -57,9 +57,11 @@ struct ConfigCommandFixture {
         configEnv.emplace("YAMS_CONFIG", (testConfigHome / "config.toml").string());
         dataEnv.emplace("YAMS_DATA_DIR", testDataHome.string());
         // Skip interactive prompts (e.g., migration confirmation)
-        nonInteractiveEnv.emplace(std::string("YAMS_NON_INTERACTIVE"), std::optional<std::string>("1"));
+        nonInteractiveEnv.emplace(std::string("YAMS_NON_INTERACTIVE"),
+                                  std::optional<std::string>("1"));
         // Disable daemon autostart to prevent cleanup crashes
-        disableDaemonEnv.emplace(std::string("YAMS_CLI_DISABLE_DAEMON_AUTOSTART"), std::optional<std::string>("1"));
+        disableDaemonEnv.emplace(std::string("YAMS_CLI_DISABLE_DAEMON_AUTOSTART"),
+                                 std::optional<std::string>("1"));
 
         // Also set XDG vars for Unix compatibility
         xdgDataEnv.emplace("XDG_DATA_HOME", testDataHome.string());
@@ -98,7 +100,8 @@ struct ConfigCommandFixture {
 
 } // namespace
 
-TEST_CASE("ConfigCommand - set model finds model in XDG data home", "[cli][config][embeddings][catch2]") {
+TEST_CASE("ConfigCommand - set model finds model in XDG data home",
+          "[cli][config][embeddings][catch2]") {
     ConfigCommandFixture fixture;
     fixture.createModel("test-model");
 
@@ -109,20 +112,21 @@ TEST_CASE("ConfigCommand - set model finds model in XDG data home", "[cli][confi
     CHECK(rc == 0);
 }
 
-TEST_CASE("ConfigCommand - set model fails for missing model", "[cli][config][embeddings][catch2][.death_test]") {
+TEST_CASE("ConfigCommand - set model fails for missing model",
+          "[cli][config][embeddings][catch2][.death_test]") {
     // SKIP: This test cannot be run in Catch2 because the CLI command calls std::exit(1)
     // on failure, which terminates the entire test process. The original GTest test used
     // ASSERT_EXIT which forks a new process. Catch2 doesn't have a direct equivalent.
     // Tagged with [.death_test] to exclude from default runs.
     SKIP("Death test - CLI calls std::exit() which terminates test process");
-    
+
     ConfigCommandFixture fixture;
     // Don't create any models
 
     // Run the config embeddings model command
     // This will call std::exit(1) which terminates the test process
     int rc = fixture.runCommand({"yams", "config", "embeddings", "model", "no-model-here"});
-    CHECK(rc != 0);  // Should fail with non-zero exit
+    CHECK(rc != 0); // Should fail with non-zero exit
 }
 
 TEST_CASE("ConfigCommand - config command parses without crash", "[cli][config][catch2]") {

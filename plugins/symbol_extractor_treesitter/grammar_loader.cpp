@@ -143,7 +143,8 @@ std::vector<std::filesystem::path> GrammarLoader::getGrammarSearchPaths() const 
     // Program installation paths
     if (const char* localappdata = std::getenv("LOCALAPPDATA")) {
         if (*localappdata) {
-            paths.emplace_back(std::filesystem::path(localappdata) / "Programs" / "yams" / "lib" / "yams" / "grammars");
+            paths.emplace_back(std::filesystem::path(localappdata) / "Programs" / "yams" / "lib" /
+                               "yams" / "grammars");
         }
     }
 #else

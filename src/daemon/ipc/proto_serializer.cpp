@@ -2200,7 +2200,7 @@ template <> struct ProtoBinding<GraphQueryRequest> {
         o->set_list_by_type(r.listByType);
         o->set_node_type(r.nodeType);
         o->set_node_key(r.nodeKey);
-        o->set_list_types(r.listTypes);  // yams-66h
+        o->set_list_types(r.listTypes); // yams-66h
         set_string_list(r.relationFilters, o->mutable_relation_filters());
         o->set_max_depth(r.maxDepth);
         o->set_max_results(r.maxResults);
@@ -2225,7 +2225,7 @@ template <> struct ProtoBinding<GraphQueryRequest> {
         r.listByType = i.list_by_type();
         r.nodeType = i.node_type();
         r.nodeKey = i.node_key();
-        r.listTypes = i.list_types();  // yams-66h
+        r.listTypes = i.list_types(); // yams-66h
         r.relationFilters = get_string_list(i.relation_filters());
         r.maxDepth = i.max_depth();
         r.maxResults = i.max_results();

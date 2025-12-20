@@ -11,9 +11,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include <spdlog/spdlog.h>
 #include <cstring>
 #include <functional>
-#include <spdlog/spdlog.h>
 
 extern "C" {
 #include <tree_sitter/api.h>
@@ -30,8 +30,7 @@ inline constexpr size_t MaxNodeTypes = 8;
 inline constexpr size_t MaxQueries = 16;
 
 // Fixed-size array wrapper for constexpr compatibility
-template <size_t N>
-struct ConstList {
+template <size_t N> struct ConstList {
     std::array<std::string_view, N> items{};
     size_t count = 0;
 
@@ -82,8 +81,7 @@ struct LanguageConfig {
 };
 
 // Helper to create lists at compile time
-template <size_t N, typename... Args>
-constexpr auto makeList(Args... args) -> ConstList<N> {
+template <size_t N, typename... Args> constexpr auto makeList(Args... args) -> ConstList<N> {
     ConstList<N> result;
     result.count = sizeof...(args);
     size_t i = 0;
@@ -92,11 +90,13 @@ constexpr auto makeList(Args... args) -> ConstList<N> {
 }
 
 // Convenience wrappers
-template <typename... Args>
-constexpr auto makeNodeTypes(Args... args) { return makeList<MaxNodeTypes>(args...); }
+template <typename... Args> constexpr auto makeNodeTypes(Args... args) {
+    return makeList<MaxNodeTypes>(args...);
+}
 
-template <typename... Args>
-constexpr auto makeQueries(Args... args) { return makeList<MaxQueries>(args...); }
+template <typename... Args> constexpr auto makeQueries(Args... args) {
+    return makeList<MaxQueries>(args...);
+}
 
 // ============================================================================
 // Per-Language Configurations
@@ -106,32 +106,36 @@ inline constexpr LanguageConfig lang_cpp = {
     .name = "cpp",
     .aliases = {"c++", "cxx", "cc"},
     .alias_count = 3,
-    .class_types = makeNodeTypes("class_specifier", "struct_specifier", "union_specifier",
-                                 "enum_specifier"),
+    .class_types =
+        makeNodeTypes("class_specifier", "struct_specifier", "union_specifier", "enum_specifier"),
     .field_types = makeNodeTypes("field_declaration"),
-    .function_types = makeNodeTypes("function_definition", "function_declarator",
-                                    "template_declaration"),
+    .function_types =
+        makeNodeTypes("function_definition", "function_declarator", "template_declaration"),
     .import_types = makeNodeTypes("preproc_include", "preproc_import"),
     .identifier_types = makeNodeTypes("identifier", "type_identifier", "field_identifier"),
     .function_queries = makeQueries(
         "(function_definition declarator: (function_declarator declarator: (identifier) @name))",
-        "(function_definition declarator: (function_declarator declarator: (qualified_identifier name: (identifier) @name)))",
-        "(function_definition declarator: (function_declarator declarator: (field_identifier) @name))",
-        "(field_declaration declarator: (function_declarator declarator: (field_identifier) @name))",
+        "(function_definition declarator: (function_declarator declarator: (qualified_identifier "
+        "name: (identifier) @name)))",
+        "(function_definition declarator: (function_declarator declarator: (field_identifier) "
+        "@name))",
+        "(field_declaration declarator: (function_declarator declarator: (field_identifier) "
+        "@name))",
         "(field_declaration declarator: (function_declarator declarator: (identifier) @name))",
         "(declaration declarator: (function_declarator declarator: (identifier) @name))",
-        "(function_definition declarator: (function_declarator declarator: (destructor_name) @name))",
-        "(template_declaration (function_definition declarator: (function_declarator declarator: (identifier) @name)))"),
-    .class_queries = makeQueries(
-        "(class_specifier name: (type_identifier) @name)",
-        "(struct_specifier name: (type_identifier) @name)",
-        "(union_specifier name: (type_identifier) @name)",
-        "(enum_specifier name: (type_identifier) @name)",
-        "(template_declaration (class_specifier name: (type_identifier) @name))",
-        "(template_declaration (struct_specifier name: (type_identifier) @name))"),
-    .import_queries = makeQueries(
-        "(preproc_include path: (string_literal) @path)",
-        "(preproc_include path: (system_lib_string) @path)"),
+        "(function_definition declarator: (function_declarator declarator: (destructor_name) "
+        "@name))",
+        "(template_declaration (function_definition declarator: (function_declarator declarator: "
+        "(identifier) @name)))"),
+    .class_queries =
+        makeQueries("(class_specifier name: (type_identifier) @name)",
+                    "(struct_specifier name: (type_identifier) @name)",
+                    "(union_specifier name: (type_identifier) @name)",
+                    "(enum_specifier name: (type_identifier) @name)",
+                    "(template_declaration (class_specifier name: (type_identifier) @name))",
+                    "(template_declaration (struct_specifier name: (type_identifier) @name))"),
+    .import_queries = makeQueries("(preproc_include path: (string_literal) @path)",
+                                  "(preproc_include path: (system_lib_string) @path)"),
     .call_queries = makeQueries(
         "(call_expression function: (identifier) @callee) @call",
         "(call_expression function: (field_expression field: (field_identifier) @callee)) @call",
@@ -150,10 +154,9 @@ inline constexpr LanguageConfig lang_c = {
     .function_queries = makeQueries(
         "(function_definition declarator: (function_declarator declarator: (identifier) @name))",
         "(declaration declarator: (function_declarator declarator: (identifier) @name))"),
-    .class_queries = makeQueries(
-        "(struct_specifier name: (type_identifier) @name)",
-        "(union_specifier name: (type_identifier) @name)",
-        "(enum_specifier name: (type_identifier) @name)"),
+    .class_queries = makeQueries("(struct_specifier name: (type_identifier) @name)",
+                                 "(union_specifier name: (type_identifier) @name)",
+                                 "(enum_specifier name: (type_identifier) @name)"),
     .import_queries = makeQueries("(preproc_include path: (string_literal) @path)",
                                   "(preproc_include path: (system_lib_string) @path)"),
     .call_queries = makeQueries(
@@ -170,19 +173,18 @@ inline constexpr LanguageConfig lang_python = {
     .function_types = makeNodeTypes("function_definition", "decorated_definition"),
     .import_types = makeNodeTypes("import_statement", "import_from_statement"),
     .identifier_types = makeNodeTypes("identifier"),
-    .function_queries = makeQueries(
-        "(function_definition name: (identifier) @name)",
-        "(decorated_definition (function_definition name: (identifier) @name))"),
-    .class_queries = makeQueries(
-        "(class_definition name: (identifier) @name)",
-        "(decorated_definition (class_definition name: (identifier) @name))"),
-    .import_queries = makeQueries(
-        "(import_statement name: (dotted_name) @module)",
-        "(import_from_statement module_name: (dotted_name) @module)",
-        "(import_from_statement module_name: (relative_import) @module)"),
-    .call_queries = makeQueries(
-        "(call function: (identifier) @callee) @call",
-        "(call function: (attribute attribute: (identifier) @callee)) @call"),
+    .function_queries =
+        makeQueries("(function_definition name: (identifier) @name)",
+                    "(decorated_definition (function_definition name: (identifier) @name))"),
+    .class_queries =
+        makeQueries("(class_definition name: (identifier) @name)",
+                    "(decorated_definition (class_definition name: (identifier) @name))"),
+    .import_queries = makeQueries("(import_statement name: (dotted_name) @module)",
+                                  "(import_from_statement module_name: (dotted_name) @module)",
+                                  "(import_from_statement module_name: (relative_import) @module)"),
+    .call_queries =
+        makeQueries("(call function: (identifier) @callee) @call",
+                    "(call function: (attribute attribute: (identifier) @callee)) @call"),
 };
 
 inline constexpr LanguageConfig lang_rust = {
@@ -194,19 +196,17 @@ inline constexpr LanguageConfig lang_rust = {
     .function_types = makeNodeTypes("function_item", "function_signature_item"),
     .import_types = makeNodeTypes("use_declaration"),
     .identifier_types = makeNodeTypes("identifier", "type_identifier", "field_identifier"),
-    .function_queries = makeQueries(
-        "(function_item name: (identifier) @name)",
-        "(function_signature_item name: (identifier) @name)",
-        "(impl_item (function_item name: (identifier) @name))",
-        "(trait_item (function_signature_item name: (identifier) @name))"),
-    .class_queries = makeQueries(
-        "(struct_item name: (type_identifier) @name)",
-        "(enum_item name: (type_identifier) @name)",
-        "(trait_item name: (type_identifier) @name)"),
-    .import_queries = makeQueries(
-        "(use_declaration argument: (scoped_identifier) @path)",
-        "(use_declaration argument: (identifier) @path)",
-        "(extern_crate_declaration name: (identifier) @path)"),
+    .function_queries =
+        makeQueries("(function_item name: (identifier) @name)",
+                    "(function_signature_item name: (identifier) @name)",
+                    "(impl_item (function_item name: (identifier) @name))",
+                    "(trait_item (function_signature_item name: (identifier) @name))"),
+    .class_queries = makeQueries("(struct_item name: (type_identifier) @name)",
+                                 "(enum_item name: (type_identifier) @name)",
+                                 "(trait_item name: (type_identifier) @name)"),
+    .import_queries = makeQueries("(use_declaration argument: (scoped_identifier) @path)",
+                                  "(use_declaration argument: (identifier) @path)",
+                                  "(extern_crate_declaration name: (identifier) @path)"),
     .call_queries = makeQueries(
         "(call_expression function: (identifier) @callee) @call",
         "(call_expression function: (field_expression field: (field_identifier) @callee)) @call"),
@@ -221,16 +221,15 @@ inline constexpr LanguageConfig lang_go = {
     .function_types = makeNodeTypes("function_declaration", "method_declaration"),
     .import_types = makeNodeTypes("import_declaration", "import_spec"),
     .identifier_types = makeNodeTypes("identifier", "type_identifier", "field_identifier"),
-    .function_queries = makeQueries(
-        "(function_declaration name: (identifier) @name)",
-        "(method_declaration name: (field_identifier) @name)"),
+    .function_queries = makeQueries("(function_declaration name: (identifier) @name)",
+                                    "(method_declaration name: (field_identifier) @name)"),
     .class_queries = makeQueries("(type_declaration (type_spec name: (type_identifier) @name))"),
-    .import_queries = makeQueries(
-        "(import_declaration (import_spec path: (interpreted_string_literal) @path))",
-        "(import_spec path: (interpreted_string_literal) @path)"),
-    .call_queries = makeQueries(
-        "(call_expression function: (identifier) @callee) @call",
-        "(call_expression function: (selector_expression field: (field_identifier) @callee)) @call"),
+    .import_queries =
+        makeQueries("(import_declaration (import_spec path: (interpreted_string_literal) @path))",
+                    "(import_spec path: (interpreted_string_literal) @path)"),
+    .call_queries = makeQueries("(call_expression function: (identifier) @callee) @call",
+                                "(call_expression function: (selector_expression field: "
+                                "(field_identifier) @callee)) @call"),
 };
 
 inline constexpr LanguageConfig lang_java = {
@@ -243,14 +242,12 @@ inline constexpr LanguageConfig lang_java = {
     .function_types = makeNodeTypes("method_declaration", "constructor_declaration"),
     .import_types = makeNodeTypes("import_declaration"),
     .identifier_types = makeNodeTypes("identifier"),
-    .function_queries = makeQueries(
-        "(method_declaration name: (identifier) @name)",
-        "(constructor_declaration name: (identifier) @name)"),
-    .class_queries = makeQueries(
-        "(class_declaration name: (identifier) @name)",
-        "(interface_declaration name: (identifier) @name)",
-        "(enum_declaration name: (identifier) @name)",
-        "(annotation_type_declaration name: (identifier) @name)"),
+    .function_queries = makeQueries("(method_declaration name: (identifier) @name)",
+                                    "(constructor_declaration name: (identifier) @name)"),
+    .class_queries = makeQueries("(class_declaration name: (identifier) @name)",
+                                 "(interface_declaration name: (identifier) @name)",
+                                 "(enum_declaration name: (identifier) @name)",
+                                 "(annotation_type_declaration name: (identifier) @name)"),
     .import_queries = makeQueries("(import_declaration (scoped_identifier) @path)"),
     .call_queries = makeQueries("(method_invocation name: (identifier) @callee) @call"),
 };
@@ -260,32 +257,31 @@ inline constexpr LanguageConfig lang_javascript = {
     .aliases = {"js"},
     .alias_count = 1,
     .class_types = makeNodeTypes("class_declaration", "class", "class_static_block"),
-    .field_types = makeNodeTypes("public_field_definition", "field_definition",
-                                 "property_signature"),
-    .function_types = makeNodeTypes("function_declaration", "function_expression", "arrow_function",
-                                    "method_definition", "generator_function",
-                                    "generator_function_declaration"),
+    .field_types =
+        makeNodeTypes("public_field_definition", "field_definition", "property_signature"),
+    .function_types =
+        makeNodeTypes("function_declaration", "function_expression", "arrow_function",
+                      "method_definition", "generator_function", "generator_function_declaration"),
     .import_types = makeNodeTypes("import_statement", "import_specifier", "namespace_import",
                                   "export_statement", "export_specifier"),
     .identifier_types = makeNodeTypes("identifier", "property_identifier"),
-    .function_queries = makeQueries(
-        "(function_declaration name: (identifier) @name)",
-        "(function_expression name: (identifier) @name)",
-        "(method_definition name: (property_identifier) @name)",
-        "(variable_declarator name: (identifier) @name value: (arrow_function))",
-        "(variable_declarator name: (identifier) @name value: (function_expression))",
-        "(generator_function_declaration name: (identifier) @name)",
-        "(generator_function name: (identifier) @name)"),
-    .class_queries = makeQueries(
-        "(class_declaration name: (identifier) @name)",
-        "(class name: (identifier) @name)"),
-    .import_queries = makeQueries(
-        "(import_statement source: (string) @source)",
-        "(export_statement source: (string) @source)",
-        "(call_expression function: (import) arguments: (arguments (string) @source))"),
-    .call_queries = makeQueries(
-        "(call_expression function: (identifier) @callee) @call",
-        "(call_expression function: (member_expression property: (property_identifier) @callee)) @call"),
+    .function_queries =
+        makeQueries("(function_declaration name: (identifier) @name)",
+                    "(function_expression name: (identifier) @name)",
+                    "(method_definition name: (property_identifier) @name)",
+                    "(variable_declarator name: (identifier) @name value: (arrow_function))",
+                    "(variable_declarator name: (identifier) @name value: (function_expression))",
+                    "(generator_function_declaration name: (identifier) @name)",
+                    "(generator_function name: (identifier) @name)"),
+    .class_queries = makeQueries("(class_declaration name: (identifier) @name)",
+                                 "(class name: (identifier) @name)"),
+    .import_queries =
+        makeQueries("(import_statement source: (string) @source)",
+                    "(export_statement source: (string) @source)",
+                    "(call_expression function: (import) arguments: (arguments (string) @source))"),
+    .call_queries = makeQueries("(call_expression function: (identifier) @callee) @call",
+                                "(call_expression function: (member_expression property: "
+                                "(property_identifier) @callee)) @call"),
 };
 
 inline constexpr LanguageConfig lang_typescript = {
@@ -294,66 +290,62 @@ inline constexpr LanguageConfig lang_typescript = {
     .alias_count = 1,
     .class_types = makeNodeTypes("class_declaration", "class", "interface_declaration",
                                  "type_alias_declaration", "abstract_class_declaration"),
-    .field_types = makeNodeTypes("public_field_definition", "field_definition",
-                                 "property_signature"),
+    .field_types =
+        makeNodeTypes("public_field_definition", "field_definition", "property_signature"),
     .function_types = makeNodeTypes("function_declaration", "function_expression", "arrow_function",
                                     "method_definition", "method_signature",
                                     "abstract_method_signature", "generator_function"),
     .import_types = makeNodeTypes("import_statement", "import_specifier", "namespace_import",
                                   "export_statement", "import_alias"),
     .identifier_types = makeNodeTypes("identifier", "property_identifier", "type_identifier"),
-    .function_queries = makeQueries(
-        "(function_declaration name: (identifier) @name)",
-        "(function_expression name: (identifier) @name)",
-        "(method_definition name: (property_identifier) @name)",
-        "(variable_declarator name: (identifier) @name value: (arrow_function))",
-        "(variable_declarator name: (identifier) @name value: (function_expression))",
-        "(method_signature name: (property_identifier) @name)",
-        "(abstract_method_signature name: (property_identifier) @name)"),
-    .class_queries = makeQueries(
-        "(class_declaration name: (identifier) @name)",
-        "(class name: (identifier) @name)",
-        "(abstract_class_declaration name: (identifier) @name)",
-        "(interface_declaration name: (type_identifier) @name)",
-        "(type_alias_declaration name: (type_identifier) @name)",
-        "(enum_declaration name: (identifier) @name)"),
-    .import_queries = makeQueries(
-        "(import_statement source: (string) @source)",
-        "(export_statement source: (string) @source)",
-        "(call_expression function: (import) arguments: (arguments (string) @source))"),
-    .call_queries = makeQueries(
-        "(call_expression function: (identifier) @callee) @call",
-        "(call_expression function: (member_expression property: (property_identifier) @callee)) @call"),
+    .function_queries =
+        makeQueries("(function_declaration name: (identifier) @name)",
+                    "(function_expression name: (identifier) @name)",
+                    "(method_definition name: (property_identifier) @name)",
+                    "(variable_declarator name: (identifier) @name value: (arrow_function))",
+                    "(variable_declarator name: (identifier) @name value: (function_expression))",
+                    "(method_signature name: (property_identifier) @name)",
+                    "(abstract_method_signature name: (property_identifier) @name)"),
+    .class_queries = makeQueries("(class_declaration name: (identifier) @name)",
+                                 "(class name: (identifier) @name)",
+                                 "(abstract_class_declaration name: (identifier) @name)",
+                                 "(interface_declaration name: (type_identifier) @name)",
+                                 "(type_alias_declaration name: (type_identifier) @name)",
+                                 "(enum_declaration name: (identifier) @name)"),
+    .import_queries =
+        makeQueries("(import_statement source: (string) @source)",
+                    "(export_statement source: (string) @source)",
+                    "(call_expression function: (import) arguments: (arguments (string) @source))"),
+    .call_queries = makeQueries("(call_expression function: (identifier) @callee) @call",
+                                "(call_expression function: (member_expression property: "
+                                "(property_identifier) @callee)) @call"),
 };
 
 inline constexpr LanguageConfig lang_csharp = {
     .name = "csharp",
     .aliases = {"c#", "cs"},
     .alias_count = 2,
-    .class_types = makeNodeTypes("class_declaration", "struct_declaration",
-                                 "interface_declaration", "enum_declaration"),
+    .class_types = makeNodeTypes("class_declaration", "struct_declaration", "interface_declaration",
+                                 "enum_declaration"),
     .field_types = makeNodeTypes("field_declaration", "property_declaration"),
-    .function_types = makeNodeTypes("method_declaration", "constructor_declaration",
-                                    "local_function_statement"),
+    .function_types =
+        makeNodeTypes("method_declaration", "constructor_declaration", "local_function_statement"),
     .import_types = makeNodeTypes("using_directive"),
     .identifier_types = makeNodeTypes("identifier"),
-    .function_queries = makeQueries(
-        "(method_declaration name: (identifier) @name)",
-        "(constructor_declaration name: (identifier) @name)",
-        "(destructor_declaration name: (identifier) @name)",
-        "(property_declaration name: (identifier) @name)"),
-    .class_queries = makeQueries(
-        "(class_declaration name: (identifier) @name)",
-        "(struct_declaration name: (identifier) @name)",
-        "(interface_declaration name: (identifier) @name)",
-        "(enum_declaration name: (identifier) @name)",
-        "(record_declaration name: (identifier) @name)"),
-    .import_queries = makeQueries(
-        "(using_directive (identifier) @path)",
-        "(using_directive (qualified_name) @path)"),
-    .call_queries = makeQueries(
-        "(invocation_expression function: (identifier) @callee) @call",
-        "(invocation_expression function: (member_access_expression name: (identifier) @callee)) @call"),
+    .function_queries = makeQueries("(method_declaration name: (identifier) @name)",
+                                    "(constructor_declaration name: (identifier) @name)",
+                                    "(destructor_declaration name: (identifier) @name)",
+                                    "(property_declaration name: (identifier) @name)"),
+    .class_queries = makeQueries("(class_declaration name: (identifier) @name)",
+                                 "(struct_declaration name: (identifier) @name)",
+                                 "(interface_declaration name: (identifier) @name)",
+                                 "(enum_declaration name: (identifier) @name)",
+                                 "(record_declaration name: (identifier) @name)"),
+    .import_queries = makeQueries("(using_directive (identifier) @path)",
+                                  "(using_directive (qualified_name) @path)"),
+    .call_queries = makeQueries("(invocation_expression function: (identifier) @callee) @call",
+                                "(invocation_expression function: (member_access_expression name: "
+                                "(identifier) @callee)) @call"),
 };
 
 inline constexpr LanguageConfig lang_php = {
@@ -365,42 +357,36 @@ inline constexpr LanguageConfig lang_php = {
     .function_types = makeNodeTypes("function_definition", "method_declaration"),
     .import_types = makeNodeTypes("namespace_use_declaration", "use_declaration"),
     .identifier_types = makeNodeTypes("name", "variable_name"),
-    .function_queries = makeQueries(
-        "(function_definition name: (name) @name)",
-        "(method_declaration name: (name) @name)"),
+    .function_queries = makeQueries("(function_definition name: (name) @name)",
+                                    "(method_declaration name: (name) @name)"),
     .class_queries = makeQueries(
-        "(class_declaration name: (name) @name)",
-        "(interface_declaration name: (name) @name)",
-        "(trait_declaration name: (name) @name)",
-        "(enum_declaration name: (name) @name)"),
-    .import_queries = makeQueries(
-        "(namespace_use_clause (qualified_name) @path)",
-        "(include_expression (string) @path)",
-        "(require_expression (string) @path)"),
-    .call_queries = makeQueries(
-        "(function_call_expression function: (name) @callee) @call",
-        "(member_call_expression name: (name) @callee) @call"),
+        "(class_declaration name: (name) @name)", "(interface_declaration name: (name) @name)",
+        "(trait_declaration name: (name) @name)", "(enum_declaration name: (name) @name)"),
+    .import_queries =
+        makeQueries("(namespace_use_clause (qualified_name) @path)",
+                    "(include_expression (string) @path)", "(require_expression (string) @path)"),
+    .call_queries = makeQueries("(function_call_expression function: (name) @callee) @call",
+                                "(member_call_expression name: (name) @callee) @call"),
 };
 
 inline constexpr LanguageConfig lang_kotlin = {
     .name = "kotlin",
     .aliases = {"kt"},
     .alias_count = 1,
-    .class_types = makeNodeTypes("class_declaration", "object_declaration",
-                                 "interface_declaration"),
+    .class_types =
+        makeNodeTypes("class_declaration", "object_declaration", "interface_declaration"),
     .field_types = makeNodeTypes("property_declaration"),
     .function_types = makeNodeTypes("function_declaration"),
     .import_types = makeNodeTypes("import_header", "import_list"),
     .identifier_types = makeNodeTypes("simple_identifier"),
     .function_queries = makeQueries("(function_declaration (simple_identifier) @name)"),
-    .class_queries = makeQueries(
-        "(class_declaration (type_identifier) @name)",
-        "(object_declaration (type_identifier) @name)",
-        "(interface_declaration (type_identifier) @name)"),
+    .class_queries = makeQueries("(class_declaration (type_identifier) @name)",
+                                 "(object_declaration (type_identifier) @name)",
+                                 "(interface_declaration (type_identifier) @name)"),
     .import_queries = makeQueries("(import_header (identifier) @path)"),
-    .call_queries = makeQueries(
-        "(call_expression (simple_identifier) @callee) @call",
-        "(call_expression (navigation_expression (simple_identifier) @callee)) @call"),
+    .call_queries =
+        makeQueries("(call_expression (simple_identifier) @callee) @call",
+                    "(call_expression (navigation_expression (simple_identifier) @callee)) @call"),
 };
 
 inline constexpr LanguageConfig lang_perl = {
@@ -427,9 +413,8 @@ inline constexpr LanguageConfig lang_r = {
     .function_types = makeNodeTypes("function_definition"),
     .import_types = makeNodeTypes("call"),
     .identifier_types = makeNodeTypes("identifier"),
-    .function_queries = makeQueries(
-        "(binary_operator lhs: (identifier) @name operator: \"<-\")",
-        "(binary_operator lhs: (identifier) @name operator: \"=\")"),
+    .function_queries = makeQueries("(binary_operator lhs: (identifier) @name operator: \"<-\")",
+                                    "(binary_operator lhs: (identifier) @name operator: \"=\")"),
     .class_queries = makeQueries(),
     .import_queries = makeQueries(),
     .call_queries = makeQueries("(call function: (identifier) @callee) @call"),
@@ -444,9 +429,8 @@ inline constexpr LanguageConfig lang_sql = {
     .function_types = makeNodeTypes("create_function_statement", "create_procedure_statement"),
     .import_types = makeNodeTypes(),
     .identifier_types = makeNodeTypes("identifier", "object_reference"),
-    .function_queries = makeQueries(
-        "(create_function_statement name: (identifier) @name)",
-        "(create_procedure_statement name: (identifier) @name)"),
+    .function_queries = makeQueries("(create_function_statement name: (identifier) @name)",
+                                    "(create_procedure_statement name: (identifier) @name)"),
     .class_queries = makeQueries("(create_table_statement name: (identifier) @name)"),
     .import_queries = makeQueries(),
     .call_queries = makeQueries(),
@@ -459,20 +443,18 @@ inline constexpr LanguageConfig lang_solidity = {
     .class_types = makeNodeTypes("contract_declaration", "interface_declaration",
                                  "library_declaration", "struct_declaration"),
     .field_types = makeNodeTypes("state_variable_declaration"),
-    .function_types = makeNodeTypes("function_definition", "constructor_definition",
-                                    "modifier_definition"),
+    .function_types =
+        makeNodeTypes("function_definition", "constructor_definition", "modifier_definition"),
     .import_types = makeNodeTypes("import_directive"),
     .identifier_types = makeNodeTypes("identifier"),
-    .function_queries = makeQueries(
-        "(function_definition name: (identifier) @name)",
-        "(modifier_definition name: (identifier) @name)"),
-    .class_queries = makeQueries(
-        "(contract_declaration name: (identifier) @name)",
-        "(interface_declaration name: (identifier) @name)",
-        "(library_declaration name: (identifier) @name)",
-        "(struct_declaration name: (identifier) @name)",
-        "(enum_declaration name: (identifier) @name)",
-        "(event_definition name: (identifier) @name)"),
+    .function_queries = makeQueries("(function_definition name: (identifier) @name)",
+                                    "(modifier_definition name: (identifier) @name)"),
+    .class_queries = makeQueries("(contract_declaration name: (identifier) @name)",
+                                 "(interface_declaration name: (identifier) @name)",
+                                 "(library_declaration name: (identifier) @name)",
+                                 "(struct_declaration name: (identifier) @name)",
+                                 "(enum_declaration name: (identifier) @name)",
+                                 "(event_definition name: (identifier) @name)"),
     .import_queries = makeQueries("(import_directive source: (string) @path)"),
     .call_queries = makeQueries(
         "(call_expression function: (identifier) @callee) @call",
@@ -488,20 +470,18 @@ inline constexpr LanguageConfig lang_dart = {
     .function_types = makeNodeTypes("function_signature", "method_signature", "function_body"),
     .import_types = makeNodeTypes("import_or_export"),
     .identifier_types = makeNodeTypes("identifier"),
-    .function_queries = makeQueries(
-        "(function_signature name: (identifier) @name)",
-        "(method_signature name: (identifier) @name)",
-        "(getter_signature name: (identifier) @name)",
-        "(setter_signature name: (identifier) @name)"),
-    .class_queries = makeQueries(
-        "(class_definition name: (identifier) @name)",
-        "(mixin_declaration name: (identifier) @name)",
-        "(extension_declaration name: (identifier) @name)",
-        "(enum_declaration name: (identifier) @name)"),
+    .function_queries = makeQueries("(function_signature name: (identifier) @name)",
+                                    "(method_signature name: (identifier) @name)",
+                                    "(getter_signature name: (identifier) @name)",
+                                    "(setter_signature name: (identifier) @name)"),
+    .class_queries = makeQueries("(class_definition name: (identifier) @name)",
+                                 "(mixin_declaration name: (identifier) @name)",
+                                 "(extension_declaration name: (identifier) @name)",
+                                 "(enum_declaration name: (identifier) @name)"),
     .import_queries = makeQueries("(import_or_export (string_literal) @path)"),
-    .call_queries = makeQueries(
-        "(function_expression_invocation function: (identifier) @callee) @call",
-        "(cascade_selector (identifier) @callee) @call"),
+    .call_queries =
+        makeQueries("(function_expression_invocation function: (identifier) @callee) @call",
+                    "(cascade_selector (identifier) @callee) @call"),
 };
 
 // P4 (Programming Protocol-independent Packet Processors) - network data plane language
@@ -512,34 +492,31 @@ inline constexpr LanguageConfig lang_p4 = {
     .class_types = makeNodeTypes("headerTypeDeclaration", "structTypeDeclaration",
                                  "controlDeclaration", "parserDeclaration"),
     .field_types = makeNodeTypes("structField", "parameter"),
-    .function_types = makeNodeTypes("actionDeclaration", "functionDeclaration",
-                                    "externDeclaration", "methodPrototype"),
+    .function_types = makeNodeTypes("actionDeclaration", "functionDeclaration", "externDeclaration",
+                                    "methodPrototype"),
     .import_types = makeNodeTypes("includeStatement"),
     .identifier_types = makeNodeTypes("IDENTIFIER", "nonTypeName", "typeName"),
-    .function_queries = makeQueries(
-        "(actionDeclaration name: (IDENTIFIER) @name)",
-        "(functionDeclaration (functionPrototype name: (IDENTIFIER) @name))",
-        "(externDeclaration name: (IDENTIFIER) @name)",
-        "(methodPrototype name: (IDENTIFIER) @name)"),
-    .class_queries = makeQueries(
-        "(headerTypeDeclaration name: (IDENTIFIER) @name)",
-        "(structTypeDeclaration name: (IDENTIFIER) @name)",
-        "(controlDeclaration name: (IDENTIFIER) @name)",
-        "(parserDeclaration name: (IDENTIFIER) @name)",
-        "(tableDeclaration name: (IDENTIFIER) @name)",
-        "(typedefDeclaration name: (IDENTIFIER) @name)"),
+    .function_queries =
+        makeQueries("(actionDeclaration name: (IDENTIFIER) @name)",
+                    "(functionDeclaration (functionPrototype name: (IDENTIFIER) @name))",
+                    "(externDeclaration name: (IDENTIFIER) @name)",
+                    "(methodPrototype name: (IDENTIFIER) @name)"),
+    .class_queries = makeQueries("(headerTypeDeclaration name: (IDENTIFIER) @name)",
+                                 "(structTypeDeclaration name: (IDENTIFIER) @name)",
+                                 "(controlDeclaration name: (IDENTIFIER) @name)",
+                                 "(parserDeclaration name: (IDENTIFIER) @name)",
+                                 "(tableDeclaration name: (IDENTIFIER) @name)",
+                                 "(typedefDeclaration name: (IDENTIFIER) @name)"),
     .import_queries = makeQueries("(includeStatement (STRING_LITERAL) @path)"),
-    .call_queries = makeQueries(
-        "(functionCall function: (IDENTIFIER) @callee) @call",
-        "(methodCallExpression method: (IDENTIFIER) @callee) @call"),
+    .call_queries = makeQueries("(functionCall function: (IDENTIFIER) @callee) @call",
+                                "(methodCallExpression method: (IDENTIFIER) @callee) @call"),
 };
 
 // Master configuration table
 inline constexpr std::array<const LanguageConfig*, 17> language_configs = {
-    &lang_cpp,        &lang_c,      &lang_python,   &lang_rust,     &lang_go,
-    &lang_java,       &lang_javascript, &lang_typescript, &lang_csharp,
-    &lang_php,        &lang_kotlin, &lang_perl,     &lang_r,        &lang_sql,
-    &lang_solidity,   &lang_dart,   &lang_p4,
+    &lang_cpp,        &lang_c,          &lang_python,   &lang_rust, &lang_go,     &lang_java,
+    &lang_javascript, &lang_typescript, &lang_csharp,   &lang_php,  &lang_kotlin, &lang_perl,
+    &lang_r,          &lang_sql,        &lang_solidity, &lang_dart, &lang_p4,
 };
 
 // Lookup function - returns nullptr if language not found
@@ -559,9 +536,8 @@ constexpr const LanguageConfig* getLanguageConfig(std::string_view language) noe
 // Helper: Extract symbols by node type (fallback when queries don't work)
 // ============================================================================
 
-SymbolExtractor::Result
-SymbolExtractor::extractSymbolsByNodeType(const ExtractionContext& ctx,
-                                          std::string_view symbol_kind) {
+SymbolExtractor::Result SymbolExtractor::extractSymbolsByNodeType(const ExtractionContext& ctx,
+                                                                  std::string_view symbol_kind) {
     ExtractionResult result;
     const auto* config = getLanguageConfig(ctx.language);
     if (!config)
@@ -881,8 +857,8 @@ bool SymbolExtractor::executeQuery(const ExtractionContext& ctx, std::string_vie
                                 // Check if there's a template_declaration above
                                 TSNode grandparent = ts_node_parent(parent_node);
                                 if (!ts_node_is_null(grandparent) &&
-                                    std::strcmp(ts_node_type(grandparent), "template_declaration") ==
-                                        0) {
+                                    std::strcmp(ts_node_type(grandparent),
+                                                "template_declaration") == 0) {
                                     best_match = grandparent;
                                 }
                             }
@@ -1025,21 +1001,20 @@ SymbolExtractor::extractCallRelations(const ExtractionContext& ctx,
     size_t logged = 0;
     for (const auto& [caller, callees] : call_sites) {
         if (logged++ < 5) {
-            spdlog::info("[CallExtraction] {} calls: {}", caller,
-                         [&]() {
-                             std::string s;
-                             size_t count = 0;
-                             for (const auto& c : callees) {
-                                 if (count++ > 0)
-                                     s += ", ";
-                                 s += c;
-                                 if (count >= 5) {
-                                     s += "...";
-                                     break;
-                                 }
-                             }
-                             return s;
-                         }());
+            spdlog::info("[CallExtraction] {} calls: {}", caller, [&]() {
+                std::string s;
+                size_t count = 0;
+                for (const auto& c : callees) {
+                    if (count++ > 0)
+                        s += ", ";
+                    s += c;
+                    if (count >= 5) {
+                        s += "...";
+                        break;
+                    }
+                }
+                return s;
+            }());
         }
     }
 

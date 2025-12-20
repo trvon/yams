@@ -18,7 +18,8 @@ TEST_CASE("StreamHeuristics - Search should stream by limit", "[cli][stream_heur
     CHECK(cli::should_stream(r));
 }
 
-TEST_CASE("StreamHeuristics - Search should stream JSON output", "[cli][stream_heuristics][catch2]") {
+TEST_CASE("StreamHeuristics - Search should stream JSON output",
+          "[cli][stream_heuristics][catch2]") {
     daemon::SearchRequest r{};
     r.query = "q";
     r.limit = 10;
@@ -26,7 +27,8 @@ TEST_CASE("StreamHeuristics - Search should stream JSON output", "[cli][stream_h
     CHECK(cli::should_stream(r));
 }
 
-TEST_CASE("StreamHeuristics - List should stream when snippets or paths only", "[cli][stream_heuristics][catch2]") {
+TEST_CASE("StreamHeuristics - List should stream when snippets or paths only",
+          "[cli][stream_heuristics][catch2]") {
     daemon::ListRequest r{};
     r.limit = 10; // below default threshold (100)
     r.showSnippets = false;
@@ -41,7 +43,8 @@ TEST_CASE("StreamHeuristics - List should stream when snippets or paths only", "
     CHECK(cli::should_stream(r));
 }
 
-TEST_CASE("StreamHeuristics - Grep should stream for paths only or recursive", "[cli][stream_heuristics][catch2]") {
+TEST_CASE("StreamHeuristics - Grep should stream for paths only or recursive",
+          "[cli][stream_heuristics][catch2]") {
     daemon::GrepRequest r{};
     r.pattern = "foo";
     r.pathsOnly = true;

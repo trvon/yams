@@ -70,8 +70,10 @@ RequestDispatcher::handleGraphQueryRequest(const GraphQueryRequest& req) {
 
     app::services::GraphQueryRequest svcReq;
     svcReq.nodeId = (originNodeId >= 0) ? std::make_optional(originNodeId) : std::nullopt;
-    svcReq.documentHash = req.documentHash.empty() ? std::nullopt : std::make_optional(req.documentHash);
-    svcReq.documentName = req.documentName.empty() ? std::nullopt : std::make_optional(req.documentName);
+    svcReq.documentHash =
+        req.documentHash.empty() ? std::nullopt : std::make_optional(req.documentHash);
+    svcReq.documentName =
+        req.documentName.empty() ? std::nullopt : std::make_optional(req.documentName);
     svcReq.snapshotId = req.snapshotId.empty() ? std::nullopt : std::make_optional(req.snapshotId);
     svcReq.maxDepth = req.maxDepth;
     svcReq.maxResults = req.maxResults;

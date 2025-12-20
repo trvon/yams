@@ -1026,8 +1026,7 @@ TEST_F(MetadataSchemaTest, MigrationVersion21RepairTracking) {
         }
 
         // Check index exists
-        auto idxStmt =
-            db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name=?");
+        auto idxStmt = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name=?");
         if (!idxStmt)
             return idxStmt.error();
         if (auto r = idxStmt.value().bind(1, "idx_documents_repair_status"); !r)

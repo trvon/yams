@@ -819,8 +819,8 @@ public:
     }
 
     Result<std::vector<KGEdge>> getEdgesBidirectional(std::int64_t nodeId,
-                                                       std::optional<std::string_view> relation,
-                                                       std::size_t limit) override {
+                                                      std::optional<std::string_view> relation,
+                                                      std::size_t limit) override {
         return pool_->withConnection([&](Database& db) -> Result<std::vector<KGEdge>> {
             // Single query for both incoming and outgoing edges using UNION
             std::string sql =
@@ -829,9 +829,10 @@ public:
             if (relation.has_value()) {
                 sql += " AND relation = ?";
             }
-            sql += " UNION ALL "
-                   "SELECT id, src_node_id, dst_node_id, relation, weight, created_time, properties "
-                   "FROM kg_edges WHERE dst_node_id = ?";
+            sql +=
+                " UNION ALL "
+                "SELECT id, src_node_id, dst_node_id, relation, weight, created_time, properties "
+                "FROM kg_edges WHERE dst_node_id = ?";
             if (relation.has_value()) {
                 sql += " AND relation = ?";
             }

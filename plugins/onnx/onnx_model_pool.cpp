@@ -715,8 +715,7 @@ private:
                                     inputs.size(), out_names.data(), out_names.size());
         } catch (const Ort::Exception& e) {
             fprintf(stderr, "[ONNX Plugin] Ort::Exception in Run: %s\n", e.what());
-            return Error{ErrorCode::InternalError,
-                         std::string("ONNX runtime error: ") + e.what()};
+            return Error{ErrorCode::InternalError, std::string("ONNX runtime error: ") + e.what()};
         } catch (const std::system_error& e) {
             fprintf(stderr, "[ONNX Plugin] std::system_error in Run: %s\n", e.what());
             return Error{ErrorCode::InternalError,
@@ -1621,7 +1620,8 @@ std::string OnnxModelPool::resolveModelPath(const std::string& modelName) const 
     // Windows: Check APPDATA/yams/models (roaming profile)
     if (!appData.empty()) {
         searchPaths.push_back(appData + "\\yams\\models\\" + modelName + "\\model.onnx");
-        searchPaths.push_back(appData + "\\yams\\models\\" + modelName + "\\" + modelName + ".onnx");
+        searchPaths.push_back(appData + "\\yams\\models\\" + modelName + "\\" + modelName +
+                              ".onnx");
         searchPaths.push_back(appData + "\\yams\\models\\" + modelName + ".onnx");
     }
 #endif
@@ -1648,8 +1648,8 @@ std::string OnnxModelPool::resolveModelPath(const std::string& modelName) const 
     spdlog::info("[ONNX Plugin] Resolving model path for '{}', searching {} locations", modelName,
                  searchPaths.size());
 #ifdef _WIN32
-    spdlog::debug("[ONNX Plugin] Windows paths: LOCALAPPDATA={}, APPDATA={}, HOME={}",
-                  localAppData, appData, homeDir);
+    spdlog::debug("[ONNX Plugin] Windows paths: LOCALAPPDATA={}, APPDATA={}, HOME={}", localAppData,
+                  appData, homeDir);
 #endif
 
     // Direct filesystem checks - no async, no timeouts needed for local files

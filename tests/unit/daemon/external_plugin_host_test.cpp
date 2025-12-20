@@ -387,7 +387,8 @@ TEST_CASE("ExternalPluginHost - Plugin Manifest Interfaces Parsing",
         nlohmann::json manifest;
         manifest["name"] = "test_interfaces_plugin";
         manifest["version"] = "1.0.0";
-        manifest["interfaces"] = nlohmann::json::array({"content_extractor_v1", "kg_entity_provider_v1"});
+        manifest["interfaces"] =
+            nlohmann::json::array({"content_extractor_v1", "kg_entity_provider_v1"});
         manifest["entry"] = {{"fallback_cmd", nlohmann::json::array({"python", "plugin.py"})}};
 
         std::ofstream manifestFile(pluginDir / "yams-plugin.json");
@@ -445,8 +446,7 @@ TEST_CASE("ExternalPluginHost - Plugin Manifest Interfaces Parsing",
         manifest["version"] = "1.0.0";
         manifest["capabilities"] = {
             {"content_extraction", {{"formats", nlohmann::json::array({"text/plain"})}}},
-            {"symbol_extraction", {{"languages", nlohmann::json::array({"python"})}}}
-        };
+            {"symbol_extraction", {{"languages", nlohmann::json::array({"python"})}}}};
         manifest["entry"] = {{"fallback_cmd", nlohmann::json::array({"python", "plugin.py"})}};
 
         std::ofstream manifestFile(pluginDir / "yams-plugin.json");

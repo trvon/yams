@@ -1146,6 +1146,9 @@ private:
                  (std::getenv("HOME") ? std::filesystem::path(std::getenv("HOME")) / ".local" /
                                             "lib" / "yams" / "plugins"
                                       : std::filesystem::path()),
+#ifdef __APPLE__
+                 std::filesystem::path("/opt/homebrew/lib/yams/plugins"),
+#endif
                  std::filesystem::path("/usr/local/lib/yams/plugins"),
                  std::filesystem::path("/usr/lib/yams/plugins")
 #ifdef YAMS_INSTALL_PREFIX
@@ -1172,6 +1175,9 @@ private:
                  (std::getenv("HOME") ? std::filesystem::path(std::getenv("HOME")) / ".local" /
                                             "lib" / "yams" / "plugins"
                                       : std::filesystem::path()),
+#ifdef __APPLE__
+                 std::filesystem::path("/opt/homebrew/lib/yams/plugins"),
+#endif
                  std::filesystem::path("/usr/local/lib/yams/plugins"),
                  std::filesystem::path("/usr/lib/yams/plugins")
 #ifdef YAMS_INSTALL_PREFIX
@@ -1207,6 +1213,9 @@ private:
                  (std::getenv("HOME") ? std::filesystem::path(std::getenv("HOME")) / ".local" /
                                             "lib" / "yams" / "plugins"
                                       : std::filesystem::path()),
+#ifdef __APPLE__
+                 std::filesystem::path("/opt/homebrew/lib/yams/plugins"),
+#endif
                  std::filesystem::path("/usr/local/lib/yams/plugins"),
                  std::filesystem::path("/usr/lib/yams/plugins")
 #ifdef YAMS_INSTALL_PREFIX

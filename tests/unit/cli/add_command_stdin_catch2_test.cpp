@@ -22,7 +22,8 @@
 
 namespace fs = std::filesystem;
 
-TEST_CASE("AddCommand - reads from piped stdin and stores content", "[cli][add][stdin][catch2][!mayfail]") {
+TEST_CASE("AddCommand - reads from piped stdin and stores content",
+          "[cli][add][stdin][catch2][!mayfail]") {
 #ifdef _WIN32
     SKIP("Test requires Unix shell with 'cat' and pipe support");
 #else

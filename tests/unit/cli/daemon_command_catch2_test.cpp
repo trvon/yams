@@ -32,7 +32,8 @@ CLI::App* getSub(CLI::App& app, const std::string& name) {
 
 } // namespace
 
-TEST_CASE("DaemonCommand - parses unordered flags with help without executing", "[cli][daemon][catch2]") {
+TEST_CASE("DaemonCommand - parses unordered flags with help without executing",
+          "[cli][daemon][catch2]") {
     CLI::App app{"yams"};
     auto daemonCmd = yams::cli::createDaemonCommand();
     daemonCmd->registerCommand(app, /*cli*/ nullptr);

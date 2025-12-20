@@ -297,7 +297,8 @@ public:
         writeToFile();
         if (expectedSize && currentSize == 0) {
             std::error_code ec;
-            std::filesystem::resize_file(currentPath_, static_cast<std::uint64_t>(*expectedSize), ec);
+            std::filesystem::resize_file(currentPath_, static_cast<std::uint64_t>(*expectedSize),
+                                         ec);
             if (!ec) {
                 data_.resize(static_cast<std::size_t>(*expectedSize));
                 writeToFile();
@@ -326,7 +327,8 @@ public:
         std::filesystem::create_directories(lastFinalPath_.parent_path(), ec);
         std::ofstream out(lastFinalPath_, std::ios::binary | std::ios::trunc);
         if (!out) {
-            return Error{ErrorCode::IoError, "Failed to write CAS object: " + lastFinalPath_.string()};
+            return Error{ErrorCode::IoError,
+                         "Failed to write CAS object: " + lastFinalPath_.string()};
         }
         if (!data_.empty()) {
             out.write(reinterpret_cast<const char*>(data_.data()),
@@ -399,14 +401,12 @@ fs::path meta_path_for(const fs::path& exportPath) {
 
 TEST_CASE("HTTP Header Parsing: Basic extraction", "[downloader][http][headers]") {
     SECTION("Extracts ETag and Last-Modified") {
-        std::vector<std::string> headers = {
-            "Date: Tue, 19 Aug 2025 10:11:12 GMT",
-            "Server: test-http",
-            "ETag: \"abc123-xyz\"",
-            "Last-Modified: Tue, 19 Aug 2025 09:00:00 GMT",
-            "Accept-Ranges: bytes",
-            "Content-Length: 1048576"
-        };
+        std::vector<std::string> headers = {"Date: Tue, 19 Aug 2025 10:11:12 GMT",
+                                            "Server: test-http",
+                                            "ETag: \"abc123-xyz\"",
+                                            "Last-Modified: Tue, 19 Aug 2025 09:00:00 GMT",
+                                            "Accept-Ranges: bytes",
+                                            "Content-Length: 1048576"};
 
         auto parsed = parse_http_headers_for_meta(headers);
         REQUIRE(parsed.etag.has_value());
@@ -416,11 +416,8 @@ TEST_CASE("HTTP Header Parsing: Basic extraction", "[downloader][http][headers]"
     }
 
     SECTION("Handles missing values") {
-        std::vector<std::string> headers = {
-            "date: Tue, 19 Aug 2025 10:11:12 GMT",
-            "server: test-http",
-            "content-length: 512"
-        };
+        std::vector<std::string> headers = {"date: Tue, 19 Aug 2025 10:11:12 GMT",
+                                            "server: test-http", "content-length: 512"};
 
         auto parsed = parse_http_headers_for_meta(headers);
         CHECK_FALSE(parsed.etag.has_value());
@@ -428,10 +425,8 @@ TEST_CASE("HTTP Header Parsing: Basic extraction", "[downloader][http][headers]"
     }
 
     SECTION("Case insensitive header names") {
-        std::vector<std::string> headers = {
-            "eTaG: 'W/\"weak-etag-value\"'",
-            "LAST-MODIFIED:   Wed, 20 Aug 2025 00:00:00 GMT  "
-        };
+        std::vector<std::string> headers = {"eTaG: 'W/\"weak-etag-value\"'",
+                                            "LAST-MODIFIED:   Wed, 20 Aug 2025 00:00:00 GMT  "};
 
         auto parsed = parse_http_headers_for_meta(headers);
         REQUIRE(parsed.etag.has_value());
@@ -441,10 +436,7 @@ TEST_CASE("HTTP Header Parsing: Basic extraction", "[downloader][http][headers]"
     }
 
     SECTION("First occurrence wins") {
-        std::vector<std::string> headers = {
-            "ETag: first-etag",
-            "ETag: second-etag"
-        };
+        std::vector<std::string> headers = {"ETag: first-etag", "ETag: second-etag"};
 
         auto parsed = parse_http_headers_for_meta(headers);
         REQUIRE(parsed.etag.has_value());
@@ -452,18 +444,14 @@ TEST_CASE("HTTP Header Parsing: Basic extraction", "[downloader][http][headers]"
     }
 
     SECTION("Strips quotes from ETag") {
-        std::vector<std::string> headers = {
-            "ETag: \"quoted-etag\""
-        };
+        std::vector<std::string> headers = {"ETag: \"quoted-etag\""};
         auto parsed = parse_http_headers_for_meta(headers);
         REQUIRE(parsed.etag.has_value());
         CHECK(*parsed.etag == "quoted-etag");
     }
 
     SECTION("Handles unquoted ETag") {
-        std::vector<std::string> headers = {
-            "ETag: unquoted-etag"
-        };
+        std::vector<std::string> headers = {"ETag: unquoted-etag"};
         auto parsed = parse_http_headers_for_meta(headers);
         REQUIRE(parsed.etag.has_value());
         CHECK(*parsed.etag == "unquoted-etag");
@@ -565,8 +553,7 @@ TEST_CASE("PersistentResumeStore: Round-trip", "[downloader][resume]") {
 
 TEST_CASE("CAS Helpers: Path and ID formatting", "[downloader][cas]") {
     fs::path objectsDir = "/tmp/yams-objects";
-    const std::string digest =
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const std::string digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     SECTION("CAS path includes shard directories") {
         auto path = yams::downloader::casPathForSha256(objectsDir, digest);
@@ -614,8 +601,8 @@ TEST_CASE("DownloadManager: Resume functionality", "[downloader][resume]") {
         initial.etag = "etag-123";
         resumePtr->initialState = initial;
 
-        auto dm = makeDownloadManagerWithDependencies(storage, cfg, std::move(http), std::move(disk),
-                                                      nullptr, std::move(resume), nullptr);
+        auto dm = makeDownloadManagerWithDependencies(
+            storage, cfg, std::move(http), std::move(disk), nullptr, std::move(resume), nullptr);
 
         DownloadRequest req;
         req.url = "https://example.com/file.bin";
@@ -673,8 +660,8 @@ TEST_CASE("DownloadManager: Export with ETag matching", "[downloader][export]") 
         auto resume = std::make_unique<TrackingResumeStore>();
         auto* resumePtr = resume.get();
 
-        auto dm = makeDownloadManagerWithDependencies(storage, cfg, std::move(http), std::move(disk),
-                                                      nullptr, std::move(resume), nullptr);
+        auto dm = makeDownloadManagerWithDependencies(
+            storage, cfg, std::move(http), std::move(disk), nullptr, std::move(resume), nullptr);
 
         fs::path exportDir = tempDir / "exports";
         fs::create_directories(exportDir);
@@ -747,7 +734,8 @@ TEST_CASE("TestHttpAdapter: Behavior verification", "[downloader][adapter]") {
         std::optional<std::string> etag, lastModified, contentType, filename;
 
         adapter.probe("http://test.com", {}, resumeSupported, contentLength, etag, lastModified,
-                      contentType, filename, TlsConfig{}, std::nullopt, std::chrono::milliseconds{1000});
+                      contentType, filename, TlsConfig{}, std::nullopt,
+                      std::chrono::milliseconds{1000});
 
         CHECK(adapter.probeCallCount == 1);
         CHECK(resumeSupported == true);
@@ -860,7 +848,8 @@ TEST_CASE("FakeDiskWriter: Operations", "[downloader][disk]") {
     SECTION("Handles initial data") {
         writer.setInitialData(to_bytes("PREFIX"));
         std::uint64_t currentSize;
-        auto result = writer.createOrOpenStagingFile(storage, "session-789", ".part", 100, currentSize);
+        auto result =
+            writer.createOrOpenStagingFile(storage, "session-789", ".part", 100, currentSize);
         REQUIRE(result.ok());
         CHECK(currentSize == 6);
     }
@@ -909,20 +898,14 @@ TEST_CASE("HTTP header parsing edge cases", "[downloader][http][edge]") {
     }
 
     SECTION("Malformed headers (no colon)") {
-        std::vector<std::string> headers = {
-            "InvalidHeaderNoColon",
-            "ETag: valid-etag"
-        };
+        std::vector<std::string> headers = {"InvalidHeaderNoColon", "ETag: valid-etag"};
         auto parsed = parse_http_headers_for_meta(headers);
         REQUIRE(parsed.etag.has_value());
         CHECK(*parsed.etag == "valid-etag");
     }
 
     SECTION("Empty header value") {
-        std::vector<std::string> headers = {
-            "ETag: ",
-            "Last-Modified:    "
-        };
+        std::vector<std::string> headers = {"ETag: ", "Last-Modified:    "};
         auto parsed = parse_http_headers_for_meta(headers);
         // Empty values should still be captured
         REQUIRE(parsed.etag.has_value());
@@ -930,9 +913,7 @@ TEST_CASE("HTTP header parsing edge cases", "[downloader][http][edge]") {
     }
 
     SECTION("Whitespace only value") {
-        std::vector<std::string> headers = {
-            "ETag:     "
-        };
+        std::vector<std::string> headers = {"ETag:     "};
         auto parsed = parse_http_headers_for_meta(headers);
         REQUIRE(parsed.etag.has_value());
         CHECK(parsed.etag->empty());

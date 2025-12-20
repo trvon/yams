@@ -2,19 +2,19 @@
 // Epic: yams-3s4 | Migration: resolve tests
 
 #include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_vector.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
+#include <catch2/matchers/catch_matchers_vector.hpp>
 
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <optional>
+#include <random>
 #include <span>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
-#include <random>
 
 #include <yams/common/delete_resolver/resolver.hpp>
 #include <yams/common/pattern_utils.h>
@@ -56,9 +56,7 @@ public:
     Result<void> updateDocument(const DocumentInfo&) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
-    Result<void> deleteDocument(int64_t) override {
-        return Error{ErrorCode::NotImplemented, "NI"};
-    }
+    Result<void> deleteDocument(int64_t) override { return Error{ErrorCode::NotImplemented, "NI"}; }
 
     // Content operations (unused)
     Result<void> insertContent(const yams::metadata::DocumentContent&) override {
@@ -70,9 +68,7 @@ public:
     Result<void> updateContent(const yams::metadata::DocumentContent&) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
-    Result<void> deleteContent(int64_t) override {
-        return Error{ErrorCode::NotImplemented, "NI"};
-    }
+    Result<void> deleteContent(int64_t) override { return Error{ErrorCode::NotImplemented, "NI"}; }
 
     // Metadata ops (unused)
     Result<void> setMetadata(int64_t, const std::string&,
@@ -153,9 +149,7 @@ public:
                 const std::optional<std::vector<int64_t>>& = std::nullopt) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
-    Result<void> buildFuzzyIndex() override {
-        return Error{ErrorCode::NotImplemented, "NI"};
-    }
+    Result<void> buildFuzzyIndex() override { return Error{ErrorCode::NotImplemented, "NI"}; }
     Result<void> updateFuzzyIndex(int64_t) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
@@ -204,8 +198,9 @@ public:
                     "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH");
         }
         // Additional mock documents for expanded tests
-        if (pathPattern == "%/c.cpp" || pathPattern == "%c.cpp" || pathPattern == "/root/src/c.cpp" ||
-            pathPattern == "/root/src/%" || pathPattern == "/root/src%" || pathPattern == "%") {
+        if (pathPattern == "%/c.cpp" || pathPattern == "%c.cpp" ||
+            pathPattern == "/root/src/c.cpp" || pathPattern == "/root/src/%" ||
+            pathPattern == "/root/src%" || pathPattern == "%") {
             pushDoc("/root/src/c.cpp", "c.cpp",
                     "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC");
         }
@@ -272,9 +267,7 @@ public:
     }
 
     // Stats (unused)
-    Result<int64_t> getDocumentCount() override {
-        return Error{ErrorCode::NotImplemented, "NI"};
-    }
+    Result<int64_t> getDocumentCount() override { return Error{ErrorCode::NotImplemented, "NI"}; }
     Result<int64_t> getIndexedDocumentCount() override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
@@ -415,7 +408,7 @@ fs::path make_temp_dir(const std::string& prefix = "yams_resolve_test_") {
 
 TEST_CASE("Resolver FilesystemBackend: Name resolution", "[resolve][filesystem]") {
     auto root = make_temp_dir();
-    
+
     SECTION("Resolves relative path to absolute file path") {
         // Create test file
         fs::path file = root / "file.txt";
@@ -484,7 +477,7 @@ TEST_CASE("Resolver FilesystemBackend: Directory resolution", "[resolve][filesys
         auto root = make_temp_dir();
         fs::path subdir = root / "subdir";
         fs::create_directories(subdir);
-        
+
         fs::path file1 = root / "file1.txt";
         fs::path file2 = subdir / "file2.txt";
         {
@@ -495,7 +488,7 @@ TEST_CASE("Resolver FilesystemBackend: Directory resolution", "[resolve][filesys
         Options opts;
         opts.recursive = true;
         Resolver<FilesystemBackend> resolver2{FilesystemBackend{}, opts};
-        
+
         auto res = resolver2.directory(root.string());
         REQUIRE(res);
         // At minimum should find at least one file
@@ -573,7 +566,7 @@ TEST_CASE("Resolver MetadataBackend: Pattern resolution", "[resolve][metadata][p
         auto r = resolver.pattern("b.txt");
         REQUIRE(r);
         REQUIRE_FALSE(r.value().empty());
-        
+
         bool found = false;
         for (const auto& t : r.value()) {
             if (t.display == "b.txt") {
@@ -598,7 +591,8 @@ TEST_CASE("Resolver MetadataBackend: Pattern resolution", "[resolve][metadata][p
     }
 }
 
-TEST_CASE("Resolver MetadataBackend: Directory resolution with hidden files", "[resolve][metadata][directory]") {
+TEST_CASE("Resolver MetadataBackend: Directory resolution with hidden files",
+          "[resolve][metadata][directory]") {
     auto repo = std::make_shared<MockRepo>();
 
     SECTION("Recursive includes hidden when enabled") {
@@ -609,11 +603,11 @@ TEST_CASE("Resolver MetadataBackend: Directory resolution with hidden files", "[
 
         auto r = resolver.directory("/root/sub");
         REQUIRE(r);
-        
+
         std::vector<std::string> names;
         for (const auto& t : r.value())
             names.push_back(t.display);
-        
+
         CHECK_THAT(names, Catch::Matchers::VectorContains(std::string("b.txt")));
         CHECK_THAT(names, Catch::Matchers::VectorContains(std::string(".hidden.txt")));
     }
@@ -626,11 +620,11 @@ TEST_CASE("Resolver MetadataBackend: Directory resolution with hidden files", "[
 
         auto r = resolver.directory("/root/sub");
         REQUIRE(r);
-        
+
         std::vector<std::string> names;
         for (const auto& t : r.value())
             names.push_back(t.display);
-        
+
         CHECK_THAT(names, Catch::Matchers::VectorContains(std::string("b.txt")));
         CHECK_THAT(names, !Catch::Matchers::VectorContains(std::string(".hidden.txt")));
     }
@@ -667,7 +661,7 @@ TEST_CASE("Resolver Options: Configuration", "[resolve][options]") {
 
         auto repo = std::make_shared<MockRepo>();
         Resolver<MetadataBackend> resolver{MetadataBackend{repo}, opt};
-        
+
         // Resolver should use the custom options
         auto r = resolver.directory("/root/sub");
         REQUIRE(r);
@@ -683,7 +677,7 @@ TEST_CASE("Target: Structure validation", "[resolve][target]") {
         Target t;
         t.id = "hash123";
         t.display = "file.txt";
-        
+
         CHECK(t.id == "hash123");
         CHECK(t.display == "file.txt");
     }
@@ -692,11 +686,11 @@ TEST_CASE("Target: Structure validation", "[resolve][target]") {
         Target t1;
         t1.id = "hash123";
         t1.display = "file.txt";
-        
+
         Target t2;
         t2.id = "hash123";
         t2.display = "file.txt";
-        
+
         // Targets with same ID should be considered equal
         CHECK(t1.id == t2.id);
     }
@@ -749,7 +743,7 @@ TEST_CASE("Resolver: Edge cases", "[resolve][edge]") {
 
         auto res = hiddenResolver.directory("/root/sub");
         REQUIRE(res);
-        
+
         bool foundHidden = false;
         for (const auto& t : res.value()) {
             if (t.display.front() == '.') {
@@ -767,7 +761,7 @@ TEST_CASE("Resolver: Edge cases", "[resolve][edge]") {
 
 TEST_CASE("MetadataBackend: Repository interaction", "[resolve][metadata][backend]") {
     auto repo = std::make_shared<MockRepo>();
-    
+
     SECTION("Backend uses repository for queries") {
         MetadataBackend backend{repo};
         // Backend should properly forward queries to repository
@@ -778,7 +772,7 @@ TEST_CASE("MetadataBackend: Repository interaction", "[resolve][metadata][backen
         // When repository returns errors, backend should propagate them
         Options opt;
         Resolver<MetadataBackend> resolver{MetadataBackend{repo}, opt};
-        
+
         auto res = resolver.names({"nonexistent.txt"});
         CHECK_FALSE(res);
     }

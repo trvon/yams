@@ -79,7 +79,7 @@ TEST_CASE("Connection pool waiting counter resets on timeout", "[metadata][conne
 
     auto second = pool.acquire(100ms);
     REQUIRE_FALSE(second.has_value());
-    
+
     auto stats = pool.getStats();
     CHECK(stats.waitingRequests == 0u);
     CHECK(stats.maxObservedWaiting >= 1u);
@@ -89,7 +89,8 @@ TEST_CASE("Connection pool waiting counter resets on timeout", "[metadata][conne
     pool.shutdown();
 }
 
-TEST_CASE("Connection pool immediate acquire does not count waiting", "[metadata][connection_pool]") {
+TEST_CASE("Connection pool immediate acquire does not count waiting",
+          "[metadata][connection_pool]") {
     ConnectionPoolConfig cfg;
     cfg.minConnections = 1;
     cfg.maxConnections = 2;

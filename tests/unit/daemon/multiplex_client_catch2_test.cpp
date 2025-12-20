@@ -22,7 +22,8 @@ bool daemon_available() {
 
 } // namespace
 
-TEST_CASE("MultiplexClient concurrent unary out of order", "[daemon][multiplex][.requires_daemon]") {
+TEST_CASE("MultiplexClient concurrent unary out of order",
+          "[daemon][multiplex][.requires_daemon]") {
     if (!daemon_available()) {
         SKIP("Daemon not available for multiplex tests");
     }

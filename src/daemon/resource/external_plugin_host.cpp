@@ -553,12 +553,10 @@ struct ExternalPluginHost::Impl {
         // Universal/FAT: 0xCAFEBABE (big-endian) or 0xBEBAFECA (little-endian)
         uint32_t magic32 = (static_cast<uint32_t>(magic[0]) << 24) |
                            (static_cast<uint32_t>(magic[1]) << 16) |
-                           (static_cast<uint32_t>(magic[2]) << 8) |
-                           static_cast<uint32_t>(magic[3]);
-        uint32_t magic32_le = (static_cast<uint32_t>(magic[3]) << 24) |
-                              (static_cast<uint32_t>(magic[2]) << 16) |
-                              (static_cast<uint32_t>(magic[1]) << 8) |
-                              static_cast<uint32_t>(magic[0]);
+                           (static_cast<uint32_t>(magic[2]) << 8) | static_cast<uint32_t>(magic[3]);
+        uint32_t magic32_le =
+            (static_cast<uint32_t>(magic[3]) << 24) | (static_cast<uint32_t>(magic[2]) << 16) |
+            (static_cast<uint32_t>(magic[1]) << 8) | static_cast<uint32_t>(magic[0]);
 
         if (magic32 == 0xFEEDFACE || magic32 == 0xFEEDFACF || magic32 == 0xCAFEBABE ||
             magic32_le == 0xFEEDFACE || magic32_le == 0xFEEDFACF || magic32_le == 0xCAFEBABE) {

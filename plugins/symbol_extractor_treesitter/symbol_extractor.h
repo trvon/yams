@@ -193,8 +193,7 @@ private:
     Result extractCallRelations(const ExtractionContext& ctx,
                                 const std::vector<SymbolInfo>& symbols);
     Result extractIncludes(const ExtractionContext& ctx);
-    Result extractInheritance(const ExtractionContext& ctx,
-                              const std::vector<SymbolInfo>& symbols);
+    Result extractInheritance(const ExtractionContext& ctx, const std::vector<SymbolInfo>& symbols);
     Result extractFields(const ExtractionContext& ctx);
     Result extractMemberRelations(const ExtractionContext& ctx,
                                   const std::vector<SymbolInfo>& symbols);

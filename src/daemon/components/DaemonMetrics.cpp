@@ -10,6 +10,7 @@
 #include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
+#include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/MetricsSnapshotRegistry.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -19,7 +20,6 @@
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
-#include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
 #include <yams/version.hpp>
@@ -35,7 +35,6 @@
 #endif
 #include <Psapi.h>
 #include <Windows.h>
-
 
 #endif
 #if defined(TRACY_ENABLE)
@@ -1094,8 +1093,8 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
 
     // Vector diagnostics (uses non-blocking cached snapshots)
     try {
-        auto d = yams::daemon::dispatch::collect_vector_diag(
-            const_cast<ServiceManager*>(services_));
+        auto d =
+            yams::daemon::dispatch::collect_vector_diag(const_cast<ServiceManager*>(services_));
         out.vectorEmbeddingsAvailable = d.embeddingsAvailable;
         out.vectorScoringEnabled = d.scoringEnabled;
         out.searchEngineBuildReason = d.buildReason;

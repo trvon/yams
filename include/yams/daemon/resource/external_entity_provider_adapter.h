@@ -70,7 +70,8 @@ public:
      *
      * Called after each batch is extracted. Return false to abort extraction.
      */
-    using BatchCallback = std::function<bool(EntityResult batch, const ExtractionProgress& progress)>;
+    using BatchCallback =
+        std::function<bool(EntityResult batch, const ExtractionProgress& progress)>;
 
     /**
      * @brief Construct adapter for an external plugin.
@@ -140,9 +141,10 @@ public:
      * @param batchSize Entities per batch (0 = auto-size based on binary)
      * @return Total extraction stats on success
      */
-    Result<ExtractionProgress> extractEntitiesStreaming(
-        const std::vector<std::byte>& bytes, const std::string& filePath,
-        BatchCallback callback, size_t batchSize = 0);
+    Result<ExtractionProgress> extractEntitiesStreaming(const std::vector<std::byte>& bytes,
+                                                        const std::string& filePath,
+                                                        BatchCallback callback,
+                                                        size_t batchSize = 0);
 
     /**
      * @brief Calculate optimal batch size based on binary size.

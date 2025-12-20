@@ -166,11 +166,10 @@ private:
                 yams::cli::ui::render_table(std::cout, table);
 
                 std::cout << "\n"
-                          << yams::cli::ui::status_info("Total: " +
-                                                         yams::cli::ui::format_number(totalNodes) +
-                                                         " nodes across " +
-                                                         std::to_string(resp.nodeTypeCounts.size()) +
-                                                         " types")
+                          << yams::cli::ui::status_info(
+                                 "Total: " + yams::cli::ui::format_number(totalNodes) +
+                                 " nodes across " + std::to_string(resp.nodeTypeCounts.size()) +
+                                 " types")
                           << "\n";
                 std::cout << "\nUsage: yams graph --list-type <type> to view nodes of a type\n";
             }
@@ -358,10 +357,12 @@ private:
             out["isolatedNodes"] = nodes;
             std::cout << out.dump(2) << "\n";
         } else {
-            std::cout << yams::cli::ui::section_header("Isolated " + listNodeType_ + " nodes") << "\n\n";
+            std::cout << yams::cli::ui::section_header("Isolated " + listNodeType_ + " nodes")
+                      << "\n\n";
             std::cout << yams::cli::ui::status_info(
-                "Found " + std::to_string(isolatedNodes.size()) + " isolated " + listNodeType_ +
-                " nodes (no incoming " + relation + " edges)") << "\n\n";
+                             "Found " + std::to_string(isolatedNodes.size()) + " isolated " +
+                             listNodeType_ + " nodes (no incoming " + relation + " edges)")
+                      << "\n\n";
 
             if (!isolatedNodes.empty()) {
                 yams::cli::ui::Table table;
@@ -369,11 +370,9 @@ private:
                 table.has_header = true;
 
                 for (const auto& node : isolatedNodes) {
-                    table.add_row({
-                        std::to_string(node.nodeId),
-                        yams::cli::ui::truncate_to_width(node.label, 40),
-                        yams::cli::ui::truncate_to_width(node.nodeKey, 50)
-                    });
+                    table.add_row({std::to_string(node.nodeId),
+                                   yams::cli::ui::truncate_to_width(node.label, 40),
+                                   yams::cli::ui::truncate_to_width(node.nodeKey, 50)});
                 }
                 yams::cli::ui::render_table(std::cout, table);
             }

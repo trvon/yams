@@ -81,8 +81,7 @@ TEST_CASE_METHOD(RepairBinaryFilterFixture, "RepairBinaryFilter: recognizes bina
     }
 }
 
-TEST_CASE_METHOD(RepairBinaryFilterFixture, "RepairBinaryFilter: detects binary data",
-                 "[daemon]") {
+TEST_CASE_METHOD(RepairBinaryFilterFixture, "RepairBinaryFilter: detects binary data", "[daemon]") {
     SECTION("Pure text content is not detected as binary") {
         std::string textContent = "This is plain text with newlines\nand tabs\t.";
         std::vector<std::byte> textBytes;

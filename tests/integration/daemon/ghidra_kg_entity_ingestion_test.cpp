@@ -64,7 +64,8 @@ public:
         // Entity providers are loaded via PluginManager
         // For now, check if the entity channel is active
         auto* pq = serviceManager_->getPostIngestQueue();
-        if (!pq) return false;
+        if (!pq)
+            return false;
 
         // Check via entity inflight counter existence (non-zero max concurrent)
         return pq->maxEntityConcurrent() > 0;
@@ -124,12 +125,14 @@ public:
     // Wait for entity extraction to complete
     bool waitForEntityProcessing(int timeoutMs = 10000) {
         auto* pq = serviceManager_->getPostIngestQueue();
-        if (!pq) return false;
+        if (!pq)
+            return false;
 
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
         while (std::chrono::steady_clock::now() < deadline) {
             if (pq->entityInFlight() == 0 && pq->size() == 0) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(200)); // Allow final processing
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(200)); // Allow final processing
                 return true;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -316,10 +319,8 @@ TEST_CASE("GhidraEntityIngestion: Full binary analysis creates KG entities",
         // Create a minimal PE header (not a real executable, just enough structure)
         // This is a placeholder - real test would use an actual small binary
         std::vector<uint8_t> minimalPE = {
-            'M', 'Z', 0x90, 0x00,  // DOS signature
-            0x03, 0x00, 0x00, 0x00,
-            0x04, 0x00, 0x00, 0x00,
-            0xFF, 0xFF, 0x00, 0x00,
+            'M',  'Z',  0x90, 0x00, // DOS signature
+            0x03, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00,
         };
 
         // Pad to reasonable size
@@ -398,9 +399,11 @@ TEST_CASE("GhidraEntityIngestion: Non-binary files don't trigger entity extracti
 
         // Entity inflight should not have increased significantly
         size_t entityInflightAfter = pq->entityInFlight();
-        spdlog::info("Entity inflight: before={}, after={}", entityInflightBefore, entityInflightAfter);
+        spdlog::info("Entity inflight: before={}, after={}", entityInflightBefore,
+                     entityInflightAfter);
 
-        // Text files shouldn't trigger entity extraction (may briefly increase during dispatch check)
+        // Text files shouldn't trigger entity extraction (may briefly increase during dispatch
+        // check)
         CHECK(entityInflightAfter <= entityInflightBefore + 1);
     }
 }

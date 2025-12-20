@@ -511,6 +511,10 @@ bool AbiPluginLoader::isTrusted(const std::filesystem::path& p) const {
             if (const char* home = std::getenv("HOME"))
                 defaults.push_back(std::filesystem::path(home) / ".local" / "lib" / "yams" /
                                    "plugins");
+#ifdef __APPLE__
+            // macOS: Homebrew default install location
+            defaults.push_back(std::filesystem::path("/opt/homebrew/lib/yams/plugins"));
+#endif
             defaults.push_back(std::filesystem::path("/usr/local/lib/yams/plugins"));
             defaults.push_back(std::filesystem::path("/usr/lib/yams/plugins"));
 #endif

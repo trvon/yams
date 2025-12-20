@@ -329,7 +329,8 @@ private:
                                    std::unordered_set<std::int64_t>& visited,
                                    std::queue<std::pair<std::int64_t, int>>& queue,
                                    EdgeCache& edgeCache, bool reverseTraversal = false) {
-        // Use bidirectional query to get all edges in one call (optimization: reduces 2 queries to 1)
+        // Use bidirectional query to get all edges in one call (optimization: reduces 2 queries to
+        // 1)
         auto allEdges = kgStore_->getEdgesBidirectional(nodeId);
         if (!allEdges) {
             return;
@@ -392,8 +393,9 @@ private:
             queue.pop();
 
             if (distance == 0) {
-                collectNeighborsWithCache(currentNodeId, distance, req.maxDepth, req.relationFilters,
-                                          visited, queue, edgeCache, req.reverseTraversal);
+                collectNeighborsWithCache(currentNodeId, distance, req.maxDepth,
+                                          req.relationFilters, visited, queue, edgeCache,
+                                          req.reverseTraversal);
                 continue;
             }
 
@@ -426,7 +428,8 @@ private:
             for (const auto& edge : nodeEdges) {
                 // Check if edge connects to a visited node
                 bool connects = false;
-                if (edge.srcNodeId == currentNodeId && visited.find(edge.dstNodeId) != visited.end()) {
+                if (edge.srcNodeId == currentNodeId &&
+                    visited.find(edge.dstNodeId) != visited.end()) {
                     connects = true;
                 } else if (edge.dstNodeId == currentNodeId &&
                            visited.find(edge.srcNodeId) != visited.end()) {

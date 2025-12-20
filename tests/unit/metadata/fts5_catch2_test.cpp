@@ -4,8 +4,8 @@
 #include <chrono>
 #include <filesystem>
 
-#include <catch2/catch_test_macros.hpp>
 #include <spdlog/spdlog.h>
+#include <catch2/catch_test_macros.hpp>
 
 #include <yams/metadata/database.h>
 
@@ -47,7 +47,8 @@ TEST_CASE("FTS5: check FTS5 support", "[unit][metadata][fts5]") {
         spdlog::info("✓ SQLite FTS5 support is ENABLED");
 
         SECTION("FTS5 table creation and search") {
-            auto createResult = db.execute("CREATE VIRTUAL TABLE test_fts USING fts5(title, content)");
+            auto createResult =
+                db.execute("CREATE VIRTUAL TABLE test_fts USING fts5(title, content)");
             REQUIRE(createResult.has_value());
 
             // Insert test data
@@ -90,8 +91,8 @@ TEST_CASE("FTS5: fallback behavior without FTS5", "[unit][metadata][fts5]") {
         spdlog::info("Testing fallback behavior without FTS5");
 
         SECTION("Regular tables work when FTS5 unavailable") {
-            auto createResult =
-                db.execute("CREATE TABLE documents (id INTEGER PRIMARY KEY, title TEXT, content TEXT)");
+            auto createResult = db.execute(
+                "CREATE TABLE documents (id INTEGER PRIMARY KEY, title TEXT, content TEXT)");
             REQUIRE(createResult.has_value());
 
             auto insertStmt = db.prepare("INSERT INTO documents(title, content) VALUES (?, ?)");

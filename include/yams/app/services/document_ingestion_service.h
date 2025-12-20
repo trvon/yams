@@ -37,7 +37,7 @@ struct AddOptions {
     bool verifyIndexes{false}; // optional: verify index presence (future)
 
     // Gitignore handling
-    bool noGitignore{false};   // ignore .gitignore patterns when adding files
+    bool noGitignore{false}; // ignore .gitignore patterns when adding files
 
     // Daemon behavior
     std::optional<std::filesystem::path> explicitDataDir; // set only when caller overrides

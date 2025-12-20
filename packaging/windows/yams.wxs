@@ -52,6 +52,22 @@
             <RegistryValue Root="HKLM" Key="Software\YAMS" Name="PathSet" Type="integer" Value="1" KeyPath="yes" />
           </Component>
         </Directory>
+        <!-- Plugin directory under lib/yams/plugins -->
+        <Directory Id="LibDir" Name="lib">
+          <Directory Id="YamsLibDir" Name="yams">
+            <Directory Id="PluginsDir" Name="plugins">
+              <Component Id="OnnxPlugin" Guid="E1F2A3B4-8C9D-4E5F-A6B7-C8D9E0F1A2B3">
+                <File Id="onnx_plugin_dll" Source="$(var.StageDir)\lib\yams\plugins\yams_onnx_plugin.dll" KeyPath="yes" />
+              </Component>
+              <Component Id="S3Plugin" Guid="F2A3B4C5-9D0E-4F6A-B7C8-D9E0F1A2B3C4">
+                <File Id="s3_plugin_dll" Source="$(var.StageDir)\lib\yams\plugins\yams_object_storage_s3.dll" KeyPath="yes" />
+              </Component>
+              <Component Id="SymbolPlugin" Guid="A3B4C5D6-0E1F-4A7B-C8D9-E0F1A2B3C4D5">
+                <File Id="symbol_plugin_dll" Source="$(var.StageDir)\lib\yams\plugins\yams_symbol_extractor.dll" KeyPath="yes" />
+              </Component>
+            </Directory>
+          </Directory>
+        </Directory>
       </Directory>
     </StandardDirectory>
 
@@ -62,6 +78,10 @@
       <ComponentRef Id="OnnxRuntimeProvidersSharedDll" />
       <ComponentRef Id="TbbDll" />
       <ComponentRef Id="PathEnvComponent" />
+      <!-- Plugins -->
+      <ComponentRef Id="OnnxPlugin" />
+      <ComponentRef Id="S3Plugin" />
+      <ComponentRef Id="SymbolPlugin" />
     </Feature>
 
     <!-- UI with license agreement -->

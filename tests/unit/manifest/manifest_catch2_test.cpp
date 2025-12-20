@@ -217,8 +217,7 @@ TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager deserialize corrupted dat
     CHECK(result.error() == ErrorCode::CorruptedData);
 }
 
-TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager validate manifest",
-                 "[manifest][catch2]") {
+TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager validate manifest", "[manifest][catch2]") {
     auto chunks = createTestChunks(5, 512);
     auto fileInfo = createTestFileInfo(chunks);
 
@@ -255,8 +254,7 @@ TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager validate manifest with ga
     CHECK_FALSE(validationResult.value());
 }
 
-TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager file reconstruction",
-                 "[manifest][catch2]") {
+TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager file reconstruction", "[manifest][catch2]") {
     auto chunks = createTestChunks(5, 1024);
     auto fileInfo = createTestFileInfo(chunks);
 

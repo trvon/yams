@@ -1,10 +1,10 @@
 // Catch2 migration of content_store_test.cpp with expanded test coverage
 // Epic: yams-3s4 | Migration: api tests
 
-#include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
-#include <catch2/matchers/catch_matchers_string.hpp>
+#include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <yams/api/async_content_store.h>
 #include <yams/api/content_metadata.h>
@@ -109,16 +109,16 @@ TEST_CASE("ContentStore: Basic store and retrieve", "[api][content-store]") {
             binaryContent.push_back(static_cast<char>(i));
         }
         auto file = fixture.createTestFile("binary.bin", binaryContent);
-        
+
         ContentMetadata metadata;
         metadata.mimeType = "application/octet-stream";
         metadata.name = "binary.bin";
-        
+
         auto result = fixture.store_->store(file, metadata);
         REQUIRE(result.has_value());
         // Note: bytesStored may include additional metadata or vary by implementation
         CHECK(result.value().bytesStored >= 256);
-        
+
         // Retrieve and verify binary content intact
         auto outPath = fixture.testDir_ / "binary_out.bin";
         auto retrieved = fixture.store_->retrieve(result.value().contentHash, outPath);
@@ -291,7 +291,8 @@ TEST_CASE("ContentStore: Stream operations", "[api][content-store][stream]") {
         REQUIRE(storeResult.has_value());
 
         std::ostringstream output;
-        auto retrieveResult = fixture.store_->retrieveStream(storeResult.value().contentHash, output);
+        auto retrieveResult =
+            fixture.store_->retrieveStream(storeResult.value().contentHash, output);
         REQUIRE(retrieveResult.has_value());
 
         CHECK(output.str() == content);
@@ -344,10 +345,8 @@ TEST_CASE("ContentStore: Memory operations", "[api][content-store][memory]") {
     }
 
     SECTION("Store binary bytes with null characters") {
-        std::vector<std::byte> data = {
-            std::byte{0x00}, std::byte{0x01}, std::byte{0x00},
-            std::byte{0xFF}, std::byte{0x00}, std::byte{0xFE}
-        };
+        std::vector<std::byte> data = {std::byte{0x00}, std::byte{0x01}, std::byte{0x00},
+                                       std::byte{0xFF}, std::byte{0x00}, std::byte{0xFE}};
 
         auto result = fixture.store_->storeBytes(data);
         REQUIRE(result.has_value());
@@ -450,9 +449,7 @@ TEST_CASE("ContentStore: Progress reporting", "[api][content-store][progress]") 
         auto file = fixture.createTestFile("progress.bin", content);
 
         std::vector<double> percentages;
-        ProgressCallback callback = [&](const Progress& p) {
-            percentages.push_back(p.percentage);
-        };
+        ProgressCallback callback = [&](const Progress& p) { percentages.push_back(p.percentage); };
 
         fixture.store_->store(file, ContentMetadata{}, callback);
 
@@ -724,7 +721,8 @@ TEST_CASE("MetadataQuery: Matching", "[api][metadata][query]") {
 
 TEST_CASE("ContentStoreBuilder: Construction", "[api][builder]") {
     SECTION("Default build") {
-        auto tempDir = fs::temp_directory_path() / ("builder_test_" + std::to_string(std::random_device{}()));
+        auto tempDir =
+            fs::temp_directory_path() / ("builder_test_" + std::to_string(std::random_device{}()));
         fs::create_directories(tempDir);
 
         {
@@ -740,7 +738,8 @@ TEST_CASE("ContentStoreBuilder: Construction", "[api][builder]") {
 
     SECTION("Custom config") {
         ContentStoreConfig config;
-        config.storagePath = fs::temp_directory_path() / ("custom_test_" + std::to_string(std::random_device{}()));
+        config.storagePath =
+            fs::temp_directory_path() / ("custom_test_" + std::to_string(std::random_device{}()));
         config.chunkSize = 128 * 1024;
         config.enableCompression = true;
         config.compressionType = "zstd";
