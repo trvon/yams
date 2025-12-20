@@ -5,6 +5,7 @@
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/PluginManager.h>
+#include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
@@ -13,6 +14,7 @@
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_content_extractor_adapter.h>
+#include <yams/daemon/resource/external_entity_provider_adapter.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/plugins/content_extractor_v1.h>
 #include <yams/plugins/model_provider_v1.h>
@@ -139,6 +141,7 @@ void PluginManager::shutdown() {
     modelProvider_.reset();
     contentExtractors_.clear();
     symbolExtractors_.clear();
+    entityProviders_.clear();
 
     // Unload plugins
     if (getActivePluginHost()) {
@@ -420,6 +423,7 @@ PluginManager::autoloadPlugins(boost::asio::any_io_executor executor) {
 
         adoptContentExtractors();
         adoptSymbolExtractors();
+        adoptEntityProviders();
 
         refreshStatusSnapshot();
         co_return Result<size_t>(loadedCount);
@@ -642,6 +646,96 @@ Result<size_t> PluginManager::adoptSymbolExtractors() {
                 symbolExtractors_, [](const yams_symbol_extractor_v1* table) {
                     return table->abi_version == YAMS_IFACE_SYMBOL_EXTRACTOR_V1_VERSION;
                 });
+        return Result<size_t>(adopted);
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::Unknown, e.what()};
+    }
+}
+
+Result<size_t> PluginManager::adoptEntityProviders() {
+    try {
+        size_t adopted = 0;
+
+        // Clear existing providers to avoid duplicates on re-adoption
+        entityProviders_.clear();
+
+        // Entity providers are only available from external plugins
+        if (!externalHost_) {
+            spdlog::info("[PluginManager] adoptEntityProviders: No external plugin host");
+            return Result<size_t>(0);
+        }
+
+        spdlog::info("[PluginManager] adoptEntityProviders: Scanning {} external plugins",
+                     externalHost_->listLoaded().size());
+
+        for (const auto& desc : externalHost_->listLoaded()) {
+            spdlog::info("[PluginManager] adoptEntityProviders: Checking plugin '{}' with {} interfaces",
+                         desc.name, desc.interfaces.size());
+            for (const auto& iface : desc.interfaces) {
+                spdlog::debug("[PluginManager]   - interface: {}", iface);
+            }
+
+            // Check if plugin implements kg_entity_provider_v1
+            bool hasInterface = std::find(desc.interfaces.begin(), desc.interfaces.end(),
+                                          "kg_entity_provider_v1") != desc.interfaces.end();
+            if (!hasInterface) {
+                spdlog::debug("[PluginManager] Plugin '{}' does not have kg_entity_provider_v1", desc.name);
+                continue;
+            }
+
+            // Parse capabilities from manifest to get supported extensions and RPC method
+            std::vector<std::string> extensions;
+            std::string rpcMethod = "ghidra.getEntities"; // Default for Ghidra plugin
+
+            try {
+                if (!desc.manifestJson.empty()) {
+                    auto manifest = nlohmann::json::parse(desc.manifestJson);
+                    if (manifest.contains("capabilities") &&
+                        manifest["capabilities"].contains("kg_entities")) {
+                        auto& ke = manifest["capabilities"]["kg_entities"];
+                        if (ke.contains("extensions") && ke["extensions"].is_array()) {
+                            for (const auto& ext : ke["extensions"]) {
+                                if (ext.is_string())
+                                    extensions.push_back(ext.get<std::string>());
+                            }
+                        }
+                        if (ke.contains("rpc_method") && ke["rpc_method"].is_string()) {
+                            rpcMethod = ke["rpc_method"].get<std::string>();
+                        }
+                    }
+                }
+            } catch (const std::exception& e) {
+                spdlog::debug("Failed to parse manifest for {}: {}", desc.name, e.what());
+            }
+
+            // If no extensions specified, skip this provider
+            if (extensions.empty()) {
+                spdlog::debug("[PluginManager] kg_entity_provider_v1 from {} has no extensions",
+                              desc.name);
+                continue;
+            }
+
+            try {
+                auto adapter = std::make_shared<ExternalEntityProviderAdapter>(
+                    externalHost_.get(), desc.name, rpcMethod, std::move(extensions));
+                entityProviders_.push_back(std::move(adapter));
+                ++adopted;
+                spdlog::info("Adopted kg_entity_provider_v1 from external plugin: {} (method={})",
+                             desc.name, rpcMethod);
+            } catch (const std::exception& e) {
+                spdlog::warn("Failed to create entity provider adapter for {}: {}", desc.name,
+                             e.what());
+            }
+        }
+
+        // Wire entity providers to PostIngestQueue if available
+        if (adopted > 0 && postIngestQueue_) {
+            postIngestQueue_->setEntityProviders(entityProviders_);
+            spdlog::info("[PluginManager] Wired {} entity providers to PostIngestQueue", adopted);
+        } else if (adopted > 0) {
+            spdlog::debug("[PluginManager] Entity providers adopted but PostIngestQueue not yet available");
+        }
+
         return Result<size_t>(adopted);
     } catch (const std::exception& e) {
         return Error{ErrorCode::Unknown, e.what()};

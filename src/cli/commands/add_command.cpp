@@ -331,7 +331,6 @@ public:
                 size_t ok = 0, failed = 0;
                 size_t totalAdded = 0, totalUpdated = 0, totalSkipped = 0;
                 bool hasStdin = false;
-                std::vector<std::filesystem::path> serviceDirs;
 
                 auto render = [&](const yams::daemon::AddDocumentResponse& resp,
                                   const std::filesystem::path& path) -> void {
@@ -469,10 +468,8 @@ public:
                         render(result.value(), dir);
                         ok++;
                     } else {
-                        spdlog::warn("Daemon add failed for directory '{}': {}. Falling back to "
-                                     "local indexing service.",
+                        spdlog::warn("Daemon add failed for directory '{}': {}",
                                      dir.string(), result.error().message);
-                        serviceDirs.push_back(dir);
                         failed++;
                     }
                 }
@@ -488,27 +485,24 @@ public:
                     }
                     std::cout << std::endl;
                 }
-                // If there were any failures, abort before considering stdin
+                // If there were any failures, abort
                 if (failed > 0) {
                     return Error{ErrorCode::InternalError, "One or more adds failed via daemon"};
                 }
 
-                // Prepare remaining service work: stdin and any directories that failed via daemon
-                if (hasStdin || !serviceDirs.empty()) {
+                // Handle stdin if present
+                if (hasStdin) {
                     targetPaths_.clear();
-                    for (const auto& d : serviceDirs)
-                        targetPaths_.push_back(d);
-                    if (hasStdin)
-                        targetPaths_.push_back(std::filesystem::path("-"));
+                    targetPaths_.push_back(std::filesystem::path("-"));
                 } else {
                     // Nothing left to do if we processed files/directories successfully
-                    if (ok > 0 && failed == 0) {
+                    if (ok > 0) {
                         return Result<void>();
                     }
                 }
             }
 
-            // Fall back to service-based execution for stdin and for any remaining paths
+            // Fall back to service-based execution for stdin
             return executeWithServices();
 
         } catch (const std::exception& e) {

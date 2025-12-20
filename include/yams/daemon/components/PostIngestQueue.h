@@ -26,6 +26,7 @@ class VectorDatabase;
 } // namespace yams
 
 namespace yams::daemon {
+class ExternalEntityProviderAdapter;
 class IModelProvider;
 class WorkCoordinator;
 class GraphComponent;
@@ -66,14 +67,16 @@ public:
     std::size_t extractionInFlight() const { return inFlight_.load(); }
     std::size_t kgInFlight() const { return kgInFlight_.load(); }
     std::size_t symbolInFlight() const { return symbolInFlight_.load(); }
+    std::size_t entityInFlight() const { return entityInFlight_.load(); }
     std::size_t totalInFlight() const {
-        return inFlight_.load() + kgInFlight_.load() + symbolInFlight_.load();
+        return inFlight_.load() + kgInFlight_.load() + symbolInFlight_.load() + entityInFlight_.load();
     }
 
     // Stage concurrency limits
     static constexpr std::size_t maxExtractionConcurrent() { return kMaxConcurrent_; }
     static constexpr std::size_t maxKgConcurrent() { return kMaxKgConcurrent_; }
     static constexpr std::size_t maxSymbolConcurrent() { return kMaxSymbolConcurrent_; }
+    static constexpr std::size_t maxEntityConcurrent() { return kMaxEntityConcurrent_; }
 
     void setCapacity(std::size_t cap) { capacity_ = cap > 0 ? cap : capacity_; }
 
@@ -88,10 +91,17 @@ public:
         symbolExtensionMap_ = std::move(extMap);
     }
 
+    // Set entity providers for binary entity extraction
+    void setEntityProviders(std::vector<std::shared_ptr<ExternalEntityProviderAdapter>> providers) {
+        std::lock_guard<std::mutex> lock(entityMutex_);
+        entityProviders_ = std::move(providers);
+    }
+
 private:
     boost::asio::awaitable<void> channelPoller();
     boost::asio::awaitable<void> kgPoller();
     boost::asio::awaitable<void> symbolPoller();
+    boost::asio::awaitable<void> entityPoller();
     void processTask(const std::string& hash, const std::string& mime);
     void processMetadataStage(const std::string& hash, const std::string& mime);
     void processKnowledgeGraphStage(const std::string& hash, int64_t docId,
@@ -104,6 +114,10 @@ private:
                              std::vector<std::string> tags);
     void dispatchToSymbolChannel(const std::string& hash, int64_t docId, const std::string& filePath,
                                  const std::string& language);
+    void dispatchToEntityChannel(const std::string& hash, int64_t docId, const std::string& filePath,
+                                 const std::string& extension);
+    void processEntityExtractionStage(const std::string& hash, int64_t docId,
+                                      const std::string& filePath, const std::string& extension);
 
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::MetadataRepository> meta_;
@@ -116,23 +130,29 @@ private:
     std::atomic<bool> started_{false};
     std::atomic<bool> kgStarted_{false};
     std::atomic<bool> symbolStarted_{false};
+    std::atomic<bool> entityStarted_{false};
     std::atomic<std::size_t> processed_{0};
     std::atomic<std::size_t> failed_{0};
     std::atomic<std::size_t> inFlight_{0};
     std::atomic<std::size_t> kgInFlight_{0};
     std::atomic<std::size_t> symbolInFlight_{0};
+    std::atomic<std::size_t> entityInFlight_{0};
     std::atomic<double> latencyMsEma_{0.0};
     std::atomic<double> ratePerSecEma_{0.0};
     std::size_t capacity_{1000};
     static constexpr std::size_t kMaxConcurrent_ = 4;
     static constexpr std::size_t kMaxKgConcurrent_ = 8;
     static constexpr std::size_t kMaxSymbolConcurrent_ = 4;
+    static constexpr std::size_t kMaxEntityConcurrent_ = 2;  // Low concurrency for heavy binary analysis
 
     std::chrono::steady_clock::time_point lastCompleteTs_{};
     static constexpr double kAlpha_ = 0.2;
 
     mutable std::mutex extMapMutex_;
     std::unordered_map<std::string, std::string> symbolExtensionMap_;
+
+    mutable std::mutex entityMutex_;
+    std::vector<std::shared_ptr<ExternalEntityProviderAdapter>> entityProviders_;
 };
 
 } // namespace yams::daemon

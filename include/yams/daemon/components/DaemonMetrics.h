@@ -168,6 +168,11 @@ struct MetricsSnapshot {
     std::string embeddingModel;     // preferred/active model name if known
     std::string embeddingModelPath; // resolved model path when known
     uint32_t embeddingDim{0};
+
+    // Vector diagnostics (collected in background to avoid blocking status requests)
+    bool vectorEmbeddingsAvailable{false};
+    bool vectorScoringEnabled{false};
+    std::string searchEngineBuildReason; // "initial"|"rebuild"|"degraded"|"unknown"
 };
 
 class SocketServer; // Forward declaration

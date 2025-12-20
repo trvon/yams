@@ -68,6 +68,12 @@ public:
         std::lock_guard<std::mutex> lk(mu_);
         return inc(head_.load(std::memory_order_acquire)) == tail_.load(std::memory_order_acquire);
     }
+    std::size_t size_approx() const noexcept {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto h = head_.load(std::memory_order_acquire);
+        auto t = tail_.load(std::memory_order_acquire);
+        return (h >= t) ? (h - t) : (cap_ - t + h);
+    }
 #else
     // Original lock-free SPSC variant (unsafe for multiple producers/consumers).
     bool try_push(const T& v) noexcept {
@@ -101,6 +107,11 @@ public:
     }
     bool full() const noexcept {
         return inc(head_.load(std::memory_order_acquire)) == tail_.load(std::memory_order_acquire);
+    }
+    std::size_t size_approx() const noexcept {
+        auto h = head_.load(std::memory_order_acquire);
+        auto t = tail_.load(std::memory_order_acquire);
+        return (h >= t) ? (h - t) : (cap_ - t + h);
     }
 #endif
     std::size_t capacity() const noexcept { return cap_; }
@@ -174,6 +185,12 @@ public:
         std::string filePath;
         std::string language;
     };
+    struct EntityExtractionJob {
+        std::string hash;
+        int64_t documentId{-1};
+        std::string filePath;
+        std::string extension;
+    };
     struct StoreDocumentTask {
         AddDocumentRequest request;
     };
@@ -218,6 +235,9 @@ private:
     std::atomic<std::uint64_t> symbolQueued_{0};
     std::atomic<std::uint64_t> symbolDropped_{0};
     std::atomic<std::uint64_t> symbolConsumed_{0};
+    std::atomic<std::uint64_t> entityQueued_{0};
+    std::atomic<std::uint64_t> entityDropped_{0};
+    std::atomic<std::uint64_t> entityConsumed_{0};
 
 public:
     // Counter helpers
@@ -257,6 +277,9 @@ public:
     void incSymbolQueued() { symbolQueued_.fetch_add(1, std::memory_order_relaxed); }
     void incSymbolDropped() { symbolDropped_.fetch_add(1, std::memory_order_relaxed); }
     void incSymbolConsumed() { symbolConsumed_.fetch_add(1, std::memory_order_relaxed); }
+    void incEntityQueued() { entityQueued_.fetch_add(1, std::memory_order_relaxed); }
+    void incEntityDropped() { entityDropped_.fetch_add(1, std::memory_order_relaxed); }
+    void incEntityConsumed() { entityConsumed_.fetch_add(1, std::memory_order_relaxed); }
 
     std::uint64_t embedQueued() const { return embedQueued_.load(std::memory_order_relaxed); }
     std::uint64_t embedDropped() const { return embedDropped_.load(std::memory_order_relaxed); }
@@ -288,6 +311,9 @@ public:
     std::uint64_t symbolQueued() const { return symbolQueued_.load(std::memory_order_relaxed); }
     std::uint64_t symbolDropped() const { return symbolDropped_.load(std::memory_order_relaxed); }
     std::uint64_t symbolConsumed() const { return symbolConsumed_.load(std::memory_order_relaxed); }
+    std::uint64_t entityQueued() const { return entityQueued_.load(std::memory_order_relaxed); }
+    std::uint64_t entityDropped() const { return entityDropped_.load(std::memory_order_relaxed); }
+    std::uint64_t entityConsumed() const { return entityConsumed_.load(std::memory_order_relaxed); }
 };
 
 } // namespace yams::daemon

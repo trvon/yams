@@ -1,3 +1,4 @@
+#include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <thread>
 #include <boost/asio.hpp>
@@ -18,6 +19,7 @@
 #include <yams/vector/document_chunker.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
+#include <yams/daemon/resource/external_entity_provider_adapter.h>
 
 using yams::extraction::util::extractDocumentText;
 
@@ -48,14 +50,16 @@ void PostIngestQueue::start() {
         boost::asio::co_spawn(coordinator_->getExecutor(), kgPoller(), boost::asio::detached);
         spdlog::info("[PostIngestQueue] Spawning symbolPoller coroutine...");
         boost::asio::co_spawn(coordinator_->getExecutor(), symbolPoller(), boost::asio::detached);
+        spdlog::info("[PostIngestQueue] Spawning entityPoller coroutine...");
+        boost::asio::co_spawn(coordinator_->getExecutor(), entityPoller(), boost::asio::detached);
 
         constexpr int maxWaitMs = 100;
-        for (int i = 0; i < maxWaitMs && (!started_.load() || !kgStarted_.load() || !symbolStarted_.load()); ++i) {
+        for (int i = 0; i < maxWaitMs && (!started_.load() || !kgStarted_.load() || !symbolStarted_.load() || !entityStarted_.load()); ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
-        spdlog::info("[PostIngestQueue] Pollers started (extraction={}, kg={}, symbol={})", started_.load(),
-                     kgStarted_.load(), symbolStarted_.load());
+        spdlog::info("[PostIngestQueue] Pollers started (extraction={}, kg={}, symbol={}, entity={})", started_.load(),
+                     kgStarted_.load(), symbolStarted_.load(), entityStarted_.load());
     } else {
         spdlog::warn("[PostIngestQueue] start() skipped because stop_=true");
     }
@@ -140,11 +144,26 @@ bool PostIngestQueue::tryEnqueue(const Task& t) {
 }
 
 bool PostIngestQueue::tryEnqueue(Task&& t) {
-    return tryEnqueue(t);
+    const std::size_t channelCapacity =
+        std::max<std::size_t>(65536, TuneAdvisor::postIngestQueueMax());
+    auto channel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
+            "post_ingest", channelCapacity);
+
+    InternalEventBus::PostIngestTask task;
+    task.hash = std::move(t.hash);
+    task.mime = std::move(t.mime);
+
+    return channel->try_push(std::move(task));
 }
 
 std::size_t PostIngestQueue::size() const {
-    return 0;
+    const std::size_t channelCapacity =
+        std::max<std::size_t>(65536, TuneAdvisor::postIngestQueueMax());
+    auto channel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
+            "post_ingest", channelCapacity);
+    return channel ? channel->size_approx() : 0;
 }
 
 void PostIngestQueue::processTask(const std::string& hash, const std::string& mime) {
@@ -198,7 +217,11 @@ void PostIngestQueue::processMetadataStage(const std::string& hash, const std::s
                     auto updated = d.value().value();
                     updated.contentExtracted = false;
                     updated.extractionStatus = metadata::ExtractionStatus::Failed;
-                    (void)meta_->updateDocument(updated);
+                    auto updateRes = meta_->updateDocument(updated);
+                    if (!updateRes) {
+                        spdlog::warn("[PostIngestQueue] Failed to mark extraction failed for {}: {}",
+                                     hash, updateRes.error().message);
+                    }
                 }
             }
         } else if (docId >= 0) {
@@ -234,6 +257,19 @@ void PostIngestQueue::processMetadataStage(const std::string& hash, const std::s
                 auto it = symbolExtensionMap_.find(extKey);
                 if (it != symbolExtensionMap_.end()) {
                     dispatchToSymbolChannel(hash, docId, fileName, it->second);
+                }
+            }
+
+            // Dispatch entity extraction for binary files (if entity provider supports this extension)
+            {
+                std::lock_guard<std::mutex> lock(entityMutex_);
+                spdlog::debug("[PostIngestQueue] Checking {} entity providers for ext={}",
+                              entityProviders_.size(), extension);
+                for (const auto& provider : entityProviders_) {
+                    if (provider && provider->supports(extension)) {
+                        dispatchToEntityChannel(hash, docId, fileName, extension);
+                        break; // Only dispatch to first matching provider
+                    }
                 }
             }
         }
@@ -455,6 +491,196 @@ void PostIngestQueue::processSymbolExtractionStage(const std::string& hash, int6
         InternalEventBus::instance().incSymbolConsumed();
     } catch (const std::exception& e) {
         spdlog::error("[PostIngestQueue] Symbol extraction failed for {}: {}", hash, e.what());
+    }
+}
+
+void PostIngestQueue::dispatchToEntityChannel(const std::string& hash, int64_t docId,
+                                               const std::string& filePath,
+                                               const std::string& extension) {
+    constexpr std::size_t entityChannelCapacity = 4096;
+    auto channel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::EntityExtractionJob>(
+            "entity_extraction", entityChannelCapacity);
+
+    InternalEventBus::EntityExtractionJob job;
+    job.hash = hash;
+    job.documentId = docId;
+    job.filePath = filePath;
+    job.extension = extension;
+
+    if (!channel->try_push(std::move(job))) {
+        spdlog::warn("[PostIngestQueue] Entity channel full, dropping job for {}", hash);
+        InternalEventBus::instance().incEntityDropped();
+    } else {
+        spdlog::info("[PostIngestQueue] Dispatched entity extraction job for {} ({}) ext={}",
+                     filePath, hash.substr(0, 12), extension);
+        InternalEventBus::instance().incEntityQueued();
+    }
+}
+
+boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
+    constexpr std::size_t entityChannelCapacity = 4096;
+    auto channel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::EntityExtractionJob>(
+            "entity_extraction", entityChannelCapacity);
+
+    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+
+    entityStarted_.store(true);
+    spdlog::info("[PostIngestQueue] Entity extraction poller started");
+
+    while (!stop_.load()) {
+        InternalEventBus::EntityExtractionJob job;
+        if (entityInFlight_.load() < kMaxEntityConcurrent_ && channel->try_pop(job)) {
+            entityInFlight_.fetch_add(1);
+            boost::asio::post(
+                coordinator_->getExecutor(),
+                [this, hash = std::move(job.hash), docId = job.documentId,
+                 filePath = std::move(job.filePath), extension = std::move(job.extension)]() {
+                    processEntityExtractionStage(hash, docId, filePath, extension);
+                    entityInFlight_.fetch_sub(1);
+                });
+        } else {
+            timer.expires_after(std::chrono::milliseconds(50));
+            co_await timer.async_wait(boost::asio::use_awaitable);
+        }
+    }
+
+    spdlog::info("[PostIngestQueue] Entity extraction poller exited");
+}
+
+void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int64_t /*docId*/,
+                                                    const std::string& filePath,
+                                                    const std::string& extension) {
+    spdlog::info("[PostIngestQueue] Entity extraction starting for {} ({}) ext={}", filePath,
+                 hash.substr(0, 12), extension);
+
+    try {
+        auto start = std::chrono::steady_clock::now();
+
+        // Find the entity provider that supports this extension
+        std::shared_ptr<ExternalEntityProviderAdapter> provider;
+        {
+            std::lock_guard<std::mutex> lock(entityMutex_);
+            for (const auto& p : entityProviders_) {
+                if (p && p->supports(extension)) {
+                    provider = p;
+                    break;
+                }
+            }
+        }
+
+        if (!provider) {
+            spdlog::warn("[PostIngestQueue] No entity provider for extension {}", extension);
+            return;
+        }
+
+        // Load content from store
+        std::vector<std::byte> content;
+        if (store_) {
+            auto contentResult = store_->retrieveBytes(hash);
+            if (contentResult) {
+                content = contentResult.value();
+            } else {
+                spdlog::warn("[PostIngestQueue] Failed to load content for entity extraction: {}",
+                             hash.substr(0, 12));
+                return;
+            }
+        } else {
+            spdlog::warn("[PostIngestQueue] No content store for entity extraction");
+            return;
+        }
+
+        // Extract entities from binary
+        auto result = provider->extractAllEntities(content, filePath);
+        if (!result) {
+            spdlog::warn("[PostIngestQueue] Entity extraction failed for {}: {}", hash,
+                         result.error().message);
+            return;
+        }
+
+        auto& entities = result.value();
+        spdlog::info("[PostIngestQueue] Extracted {} nodes, {} edges, {} aliases from {}",
+                     entities.nodes.size(), entities.edges.size(), entities.aliases.size(),
+                     filePath);
+
+        // Ingest entities into KG
+        if (kg_ && !entities.nodes.empty()) {
+            // First insert all nodes and get their IDs
+            auto nodeIds = kg_->upsertNodes(entities.nodes);
+            if (!nodeIds) {
+                spdlog::warn("[PostIngestQueue] Failed to insert entity nodes: {}",
+                             nodeIds.error().message);
+                return;
+            }
+
+            // Build nodeKey -> nodeId map for edge resolution
+            std::unordered_map<std::string, std::int64_t> keyToId;
+            for (size_t i = 0; i < entities.nodes.size() && i < nodeIds.value().size(); ++i) {
+                keyToId[entities.nodes[i].nodeKey] = nodeIds.value()[i];
+            }
+
+            // Resolve edge src/dst keys to IDs
+            std::vector<metadata::KGEdge> resolvedEdges;
+            for (auto& edge : entities.edges) {
+                // Parse _src_key and _dst_key from properties
+                try {
+                    if (!edge.properties) continue;
+                    auto props = nlohmann::json::parse(*edge.properties);
+                    std::string srcKey = props.value("_src_key", "");
+                    std::string dstKey = props.value("_dst_key", "");
+
+                    auto srcIt = keyToId.find(srcKey);
+                    auto dstIt = keyToId.find(dstKey);
+
+                    if (srcIt != keyToId.end() && dstIt != keyToId.end()) {
+                        edge.srcNodeId = srcIt->second;
+                        edge.dstNodeId = dstIt->second;
+                        // Remove temporary keys from properties
+                        props.erase("_src_key");
+                        props.erase("_dst_key");
+                        edge.properties = props.dump();
+                        resolvedEdges.push_back(std::move(edge));
+                    }
+                } catch (...) {
+                    // Skip edges we can't parse
+                }
+            }
+
+            if (!resolvedEdges.empty()) {
+                kg_->addEdgesUnique(resolvedEdges);
+            }
+
+            // Resolve alias nodeIds
+            std::vector<metadata::KGAlias> resolvedAliases;
+            for (auto& alias : entities.aliases) {
+                // Parse node_key from source field
+                if (alias.source && alias.source->starts_with("_node_key:")) {
+                    std::string nodeKey = alias.source->substr(10);
+                    auto it = keyToId.find(nodeKey);
+                    if (it != keyToId.end()) {
+                        alias.nodeId = it->second;
+                        alias.source = "ghidra";
+                        resolvedAliases.push_back(std::move(alias));
+                    }
+                }
+            }
+
+            if (!resolvedAliases.empty()) {
+                kg_->addAliases(resolvedAliases);
+            }
+
+            auto duration = std::chrono::steady_clock::now() - start;
+            double ms = std::chrono::duration<double, std::milli>(duration).count();
+            spdlog::info("[PostIngestQueue] Entity extraction completed for {} in {:.2f}ms "
+                         "(nodes={}, edges={}, aliases={})",
+                         hash.substr(0, 12), ms, nodeIds.value().size(), resolvedEdges.size(),
+                         resolvedAliases.size());
+        }
+
+        InternalEventBus::instance().incEntityConsumed();
+    } catch (const std::exception& e) {
+        spdlog::error("[PostIngestQueue] Entity extraction failed for {}: {}", hash, e.what());
     }
 }
 

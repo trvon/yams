@@ -184,6 +184,7 @@ void ServiceManager::refreshPluginStatusSnapshot() {
             for (const auto& d : loaded) {
                 PluginStatusRecord rec;
                 rec.name = d.name;
+                rec.interfaces = d.interfaces;
                 rec.isProvider =
                     (!adoptedProviderPluginName_.empty() && adoptedProviderPluginName_ == d.name);
                 if (rec.isProvider) {
@@ -1407,6 +1408,15 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                 postIngest_->setCapacity(config_.tuning.postIngestCapacity);
         } catch (...) {
         }
+
+        // Wire PostIngestQueue to PluginManager so entity providers can be synced
+        if (pluginManager_) {
+            pluginManager_->setPostIngestQueue(postIngest_.get());
+            // Re-adopt entity providers now that PostIngestQueue is available
+            // (they were adopted earlier but couldn't be wired without PostIngestQueue)
+            pluginManager_->adoptEntityProviders();
+        }
+
         spdlog::info("Post-ingest queue initialized (capacity={})", qcap);
     } catch (const std::exception& e) {
         spdlog::warn("Post-ingest queue init failed: {}", e.what());

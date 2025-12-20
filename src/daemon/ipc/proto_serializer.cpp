@@ -1225,6 +1225,12 @@ template <> struct ProtoBinding<StatusResponse> {
             po->set_error(p.error);
             po->set_models_loaded(p.modelsLoaded);
             po->set_is_provider(p.isProvider);
+            for (const auto& iface : p.interfaces) {
+                po->add_interfaces(iface);
+            }
+            for (const auto& cap : p.capabilities) {
+                po->add_capabilities(cap);
+            }
         }
         // skipped plugins
         for (const auto& s : r.skippedPlugins) {
@@ -1344,6 +1350,12 @@ template <> struct ProtoBinding<StatusResponse> {
             p.error = po.error();
             p.modelsLoaded = static_cast<uint32_t>(po.models_loaded());
             p.isProvider = po.is_provider();
+            for (const auto& iface : po.interfaces()) {
+                p.interfaces.push_back(iface);
+            }
+            for (const auto& cap : po.capabilities()) {
+                p.capabilities.push_back(cap);
+            }
             r.providers.push_back(std::move(p));
         }
         for (const auto& sp : i.skipped()) {

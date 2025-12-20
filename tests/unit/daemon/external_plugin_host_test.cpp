@@ -372,4 +372,102 @@ TEST_CASE("ExternalPluginHost - State Callback", "[external-plugin][host][callba
     CHECK(events.empty());
 }
 
+TEST_CASE("ExternalPluginHost - Plugin Manifest Interfaces Parsing",
+          "[external-plugin][host][manifest][interfaces]") {
+    ExternalPluginHostFixture fixture;
+    ExternalPluginHostConfig config;
+    ExternalPluginHost host(nullptr, fixture.trustFile_, config);
+
+    SECTION("String interfaces array is parsed correctly") {
+        // Create plugin directory with manifest containing string interfaces
+        auto pluginDir = fixture.tempDir_ / "test_plugin";
+        fs::create_directories(pluginDir);
+
+        // Write yams-plugin.json with string interfaces
+        nlohmann::json manifest;
+        manifest["name"] = "test_interfaces_plugin";
+        manifest["version"] = "1.0.0";
+        manifest["interfaces"] = nlohmann::json::array({"content_extractor_v1", "kg_entity_provider_v1"});
+        manifest["entry"] = {{"fallback_cmd", nlohmann::json::array({"python", "plugin.py"})}};
+
+        std::ofstream manifestFile(pluginDir / "yams-plugin.json");
+        manifestFile << manifest.dump(2);
+        manifestFile.close();
+
+        // Create a dummy plugin.py
+        std::ofstream pluginFile(pluginDir / "plugin.py");
+        pluginFile << "# Dummy plugin";
+        pluginFile.close();
+
+        // Scan the plugin directory
+        auto result = host.scanTarget(pluginDir);
+        REQUIRE(result.has_value());
+
+        const auto& desc = result.value();
+        CHECK(desc.name == "test_interfaces_plugin");
+        CHECK(desc.version == "1.0.0");
+
+        // Verify interfaces were parsed
+        REQUIRE(desc.interfaces.size() == 2);
+        CHECK(desc.interfaces[0] == "content_extractor_v1");
+        CHECK(desc.interfaces[1] == "kg_entity_provider_v1");
+    }
+
+    SECTION("Empty interfaces array results in empty interfaces") {
+        auto pluginDir = fixture.tempDir_ / "empty_interfaces_plugin";
+        fs::create_directories(pluginDir);
+
+        nlohmann::json manifest;
+        manifest["name"] = "empty_interfaces_plugin";
+        manifest["version"] = "1.0.0";
+        manifest["interfaces"] = nlohmann::json::array();
+        manifest["entry"] = {{"fallback_cmd", nlohmann::json::array({"python", "plugin.py"})}};
+
+        std::ofstream manifestFile(pluginDir / "yams-plugin.json");
+        manifestFile << manifest.dump(2);
+        manifestFile.close();
+
+        std::ofstream pluginFile(pluginDir / "plugin.py");
+        pluginFile << "# Dummy plugin";
+        pluginFile.close();
+
+        auto result = host.scanTarget(pluginDir);
+        REQUIRE(result.has_value());
+        CHECK(result.value().interfaces.empty());
+    }
+
+    SECTION("Interfaces inferred from capabilities when interfaces not present") {
+        auto pluginDir = fixture.tempDir_ / "capabilities_plugin";
+        fs::create_directories(pluginDir);
+
+        nlohmann::json manifest;
+        manifest["name"] = "capabilities_plugin";
+        manifest["version"] = "1.0.0";
+        manifest["capabilities"] = {
+            {"content_extraction", {{"formats", nlohmann::json::array({"text/plain"})}}},
+            {"symbol_extraction", {{"languages", nlohmann::json::array({"python"})}}}
+        };
+        manifest["entry"] = {{"fallback_cmd", nlohmann::json::array({"python", "plugin.py"})}};
+
+        std::ofstream manifestFile(pluginDir / "yams-plugin.json");
+        manifestFile << manifest.dump(2);
+        manifestFile.close();
+
+        std::ofstream pluginFile(pluginDir / "plugin.py");
+        pluginFile << "# Dummy plugin";
+        pluginFile.close();
+
+        auto result = host.scanTarget(pluginDir);
+        REQUIRE(result.has_value());
+
+        const auto& desc = result.value();
+        // Should have inferred interfaces from capabilities
+        REQUIRE(desc.interfaces.size() == 2);
+        CHECK(std::find(desc.interfaces.begin(), desc.interfaces.end(), "content_extractor_v1") !=
+              desc.interfaces.end());
+        CHECK(std::find(desc.interfaces.begin(), desc.interfaces.end(), "symbol_extractor_v1") !=
+              desc.interfaces.end());
+    }
+}
+
 } // namespace yams::daemon

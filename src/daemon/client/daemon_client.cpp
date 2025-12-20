@@ -190,8 +190,10 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_unique<
                     pImpl->config_.dataDir = fs::current_path() / "yams_data";
                 }
             }
+        } catch (const std::exception& e) {
+            spdlog::debug("DaemonClient init: dataDir resolution failed: {}", e.what());
         } catch (...) {
-            // Best-effort only; leave empty if something unexpected happened
+            spdlog::debug("DaemonClient init: dataDir resolution failed with unknown exception");
         }
     }
     pImpl->refresh_transport();
@@ -214,7 +216,8 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_unique<
             auto v = std::stoul(mi);
             if (v > 0)
                 pImpl->config_.maxInflight = v;
-        } catch (...) {
+        } catch (const std::exception& e) {
+            spdlog::debug("DaemonClient init: failed to parse YAMS_MAX_INFLIGHT: {}", e.what());
         }
     }
     // Timeout overrides: prefer explicit env, else bump conservative defaults to 120s
@@ -225,7 +228,8 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_unique<
             long ms = std::stol(std::string(v));
             if (ms > 0)
                 return std::chrono::milliseconds(ms);
-        } catch (...) {
+        } catch (const std::exception& e) {
+            spdlog::debug("DaemonClient init: failed to parse timeout value '{}': {}", v, e.what());
         }
         return std::nullopt;
     };
@@ -276,11 +280,7 @@ void DaemonClient::setBodyTimeout(std::chrono::milliseconds timeout) {
 }
 
 // New: lightweight readiness probe that sends a real Ping and waits briefly
-static bool
-pingDaemonSync(const std::filesystem::path& socketPath,
-               std::chrono::milliseconds /*requestTimeout*/ = std::chrono::milliseconds(500),
-               std::chrono::milliseconds /*headerTimeout*/ = std::chrono::milliseconds(250),
-               std::chrono::milliseconds /*bodyTimeout*/ = std::chrono::milliseconds(250)) {
+static bool pingDaemonSync(const std::filesystem::path& socketPath) {
     // Best-effort synchronous connectivity probe: try to synchronously connect to the UNIX socket.
     try {
         auto path = socketPath.empty() ? DaemonClient::resolveSocketPathConfigFirst() : socketPath;
@@ -398,8 +398,7 @@ bool DaemonClient::isConnected() const {
         return false;
     }
     // Treat connectivity as liveness of the daemon (socket + ping), not a persistent socket
-    return pingDaemonSync(pImpl->config_.socketPath, std::chrono::milliseconds(250),
-                          std::chrono::milliseconds(150), std::chrono::milliseconds(300));
+    return pingDaemonSync(pImpl->config_.socketPath);
 }
 
 boost::asio::awaitable<Result<SearchResponse>> DaemonClient::search(const SearchRequest& req) {
@@ -1226,7 +1225,8 @@ DaemonClient::streamingBatchEmbeddings(const BatchEmbeddingRequest& req) {
             it = ir.metadata.find("count");
             if (it != ir.metadata.end())
                 count = static_cast<size_t>(std::stoul(it->second));
-        } catch (...) {
+        } catch (const std::exception& e) {
+            spdlog::debug("streamingBatchEmbeddings: failed to parse metadata: {}", e.what());
             dim = 0;
             count = 0;
         }
@@ -1278,7 +1278,8 @@ DaemonClient::streamingEmbedDocuments(const EmbedDocumentsRequest& req) {
                               << " inserted=" << e->inserted << " phase=" << e->phase
                               << (e->message.empty() ? "" : (" " + e->message)) << "\n";
                     std::cout.flush();
-                } catch (...) {
+                } catch (const std::exception& ex) {
+                    spdlog::debug("streamingEmbedDocuments: progress output failed: {}", ex.what());
                 }
                 return true;
             }
@@ -1323,7 +1324,8 @@ DaemonClient::callEvents(const EmbedDocumentsRequest& req) {
             if (auto* e = std::get_if<EmbeddingEvent>(&r)) {
                 try {
                     events.push_back(*e);
-                } catch (...) {
+                } catch (const std::exception& ex) {
+                    spdlog::debug("callEvents: failed to push event: {}", ex.what());
                 }
                 return true;
             }
@@ -1540,8 +1542,7 @@ std::filesystem::path DaemonClient::resolveSocketPathConfigFirst() {
 bool DaemonClient::isDaemonRunning(const std::filesystem::path& socketPath) {
     auto path = socketPath.empty() ? resolveSocketPathConfigFirst() : socketPath;
     // Lightweight readiness probe using real Ping via Asio transport
-    return pingDaemonSync(path, std::chrono::milliseconds(400), std::chrono::milliseconds(200),
-                          std::chrono::milliseconds(300));
+    return pingDaemonSync(path);
 }
 
 Result<void> DaemonClient::startDaemon(const ClientConfig& config) {

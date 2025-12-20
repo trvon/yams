@@ -25,6 +25,10 @@ class IContentExtractor;
 }
 
 namespace yams::daemon {
+class ExternalEntityProviderAdapter;
+}
+
+namespace yams::daemon {
 
 class AbiPluginLoader;
 class AbiPluginHost;
@@ -32,6 +36,7 @@ class AbiSymbolExtractorAdapter;
 class DaemonLifecycleFsm;
 class ExternalPluginHost;
 class IModelProvider;
+class PostIngestQueue;
 class StateComponent;
 struct DaemonConfig;
 struct ExternalPluginHostConfig;
@@ -97,6 +102,9 @@ public:
 
         /// Optional: shared plugin host (if null, PluginManager creates its own)
         AbiPluginHost* sharedPluginHost{nullptr};
+
+        /// PostIngestQueue for wiring entity providers
+        PostIngestQueue* postIngestQueue{nullptr};
     };
 
     explicit PluginManager(Dependencies deps);
@@ -123,6 +131,12 @@ public:
      * @brief Get the plugin loader.
      */
     AbiPluginLoader* getPluginLoader() const { return pluginLoader_.get(); }
+
+    /**
+     * @brief Set the PostIngestQueue for wiring entity providers.
+     * Called after PostIngestQueue is created during async initialization.
+     */
+    void setPostIngestQueue(PostIngestQueue* queue) { postIngestQueue_ = queue; }
 
     /**
      * @brief Get trust list paths.
@@ -176,6 +190,16 @@ public:
      */
     Result<size_t> adoptSymbolExtractors();
 
+    /**
+     * @brief Adopt entity providers from loaded external plugins.
+     *
+     * Entity providers extract KG entities (nodes, edges, aliases) from binary files.
+     * Currently supports external plugins implementing kg_entity_provider_v1.
+     *
+     * @return Number of providers adopted
+     */
+    Result<size_t> adoptEntityProviders();
+
     // --- Adopted Interface Accessors ---
 
     std::shared_ptr<IModelProvider> getModelProvider() const { return modelProvider_; }
@@ -188,6 +212,10 @@ public:
 
     const std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>>& getSymbolExtractors() const {
         return symbolExtractors_;
+    }
+
+    const std::vector<std::shared_ptr<ExternalEntityProviderAdapter>>& getEntityProviders() const {
+        return entityProviders_;
     }
 
     // --- Model Provider State ---
@@ -305,6 +333,8 @@ private:
     std::string embeddingModelName_;
     std::vector<std::shared_ptr<extraction::IContentExtractor>> contentExtractors_;
     std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> symbolExtractors_;
+    std::vector<std::shared_ptr<ExternalEntityProviderAdapter>> entityProviders_;
+    PostIngestQueue* postIngestQueue_{nullptr};
 
     // Status snapshot cache
     mutable std::shared_mutex statusMutex_;

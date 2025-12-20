@@ -509,6 +509,12 @@ void PluginCommand::showPluginInfo(const std::string& name) {
                         pluginInfo["provider"] = true;
                         pluginInfo["models_loaded"] = p.modelsLoaded;
                     }
+                    if (!p.interfaces.empty()) {
+                        pluginInfo["interfaces"] = p.interfaces;
+                    }
+                    if (!p.capabilities.empty()) {
+                        pluginInfo["capabilities"] = p.capabilities;
+                    }
                     break;
                 }
             }

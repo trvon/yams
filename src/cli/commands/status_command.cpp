@@ -192,6 +192,12 @@ public:
                                     rec["error"] = p.error;
                                     rec["models_loaded"] = p.modelsLoaded;
                                     rec["is_provider"] = p.isProvider;
+                                    if (!p.interfaces.empty()) {
+                                        rec["interfaces"] = p.interfaces;
+                                    }
+                                    if (!p.capabilities.empty()) {
+                                        rec["capabilities"] = p.capabilities;
+                                    }
                                     pv.push_back(std::move(rec));
                                 }
                                 j["plugins"] = std::move(pv);

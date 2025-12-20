@@ -19,8 +19,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.7.10] - Unreleased
 
 ### Added
+- **P4 language support for symbol extraction**: Network data plane language (P4_16)
+  - Node types: `headerTypeDeclaration`, `structTypeDeclaration`, `controlDeclaration`, `parserDeclaration`, `actionDeclaration`, `tableDeclaration`
+  - Query patterns for actions, functions, headers, structs, controls, parsers, tables, typedefs
+  - Aliases: `p4`, `p4_16`, `p4lang`
+  - Grammar auto-download from `prona-p4-learning-platform/tree-sitter-p4`
+- **Vector diagnostics in DaemonMetrics**: Moved `collect_vector_diag` to background polling
+  - Added `vectorEmbeddingsAvailable`, `vectorScoringEnabled`, `searchEngineBuildReason` to `MetricsSnapshot`
+  - Status requests now read from cached snapshot (non-blocking)
+  - Resolves status command hangs when vector services are slow
+
+### Changed
 - **Constexpr language configuration for symbol extraction**: Centralized compile-time configuration
-  - 16 languages with constexpr node types and query patterns: C, C++, Python, Rust, Go, Java, JavaScript, TypeScript, C#, PHP, Kotlin, Perl, R, SQL, Solidity, Dart
+  - 17 languages with constexpr node types and query patterns: C, C++, Python, Rust, Go, Java, JavaScript, TypeScript, C#, PHP, Kotlin, Perl, R, SQL, Solidity, Dart, P4
   - `LanguageConfig` struct with `class_types`, `field_types`, `function_types`, `import_types`, `identifier_types`
   - Query patterns: `function_queries`, `class_queries`, `import_queries`, `call_queries`
   - Language alias support (e.g., "cpp" → "c++", "cxx", "cc")
@@ -179,8 +190,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Edge cache in BFS: edges fetched during neighbor collection reused for connecting edges
   - Reduces per-node queries from 4 (2×getEdgesFrom + 2×getEdgesTo) to 1
   - Location: `src/app/services/graph_query_service.cpp`, `src/metadata/knowledge_graph_store_sqlite.cpp`
+- **Graph command cleanup**: Removed unused `--reverse` flag
+  - Bidirectional traversal is now the default behavior
+  - Flag was redundant since BFS optimization returns all connected edges
+  - Location: `src/cli/commands/graph_command.cpp`
 
 ### Fixed
+- **JavaScript/TypeScript symbol extraction**: Audited and fixed against Tree-sitter grammars
+  - JavaScript: Added `function_expression`, `generator_function`, `generator_function_declaration`, `namespace_import`, `export_statement`, `export_specifier`
+  - TypeScript: Added `abstract_class_declaration`, `abstract_method_signature`, `function_expression`, `generator_function`, `import_alias`
+  - Added queries for function expressions, generators, abstract methods, export statements
 - **Graph `--name` query now shows symbol relationships**: Fixed `yams graph --name <file>` showing "Graph data unavailable"
   - Now resolves filename to file node key and uses KG query path
   - Shows connected symbols, includes, and document nodes

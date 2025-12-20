@@ -212,7 +212,14 @@ public:
                                                std::chrono::system_clock::now().time_since_epoch())
                                                .count();
                     snapshot.fileCount = response.filesIndexed;
-                    snapshot.totalBytes = 0; // TODO: accumulate from file sizes
+                    // Accumulate total bytes from successful file results
+                    uint64_t totalBytes = 0;
+                    for (const auto& r : response.results) {
+                        if (r.success) {
+                            totalBytes += r.sizeBytes;
+                        }
+                    }
+                    snapshot.totalBytes = totalBytes;
 
                     // Store metadata fields
                     snapshot.metadata["directory_path"] = req.directoryPath;
@@ -500,8 +507,10 @@ private:
                                               fileResult.hash.substr(0, 12));
                             }
                         }
+                    } catch (const std::exception& e) {
+                        spdlog::debug("[IndexingService] Post-ingest dispatch failed: {}", e.what());
                     } catch (...) {
-                        // Non-fatal: entity extraction is best-effort
+                        spdlog::warn("[IndexingService] Post-ingest dispatch failed with unknown exception");
                     }
                 }
 

@@ -21,6 +21,14 @@ argument-hint: [TASK=<issue-id>] [ACTION=<start|checkpoint|complete>]
 3. **Index all code changes** - YAMS provides superior search and code/idea graph connections
 4. **Document discoveries** - File new `bd` issues for discovered work, link with `discovered-from`
 
+### Debugging
+
+```bash
+yams status       # Check daemon status
+yams daemon log   # View daemon logs
+yams doctor       # Check health
+```
+
 ---
 
 ## Beads Workflow (Task Tracking)
@@ -323,9 +331,9 @@ NEXT: `bd ready` shows...
 
 ---
 
-## Quick Reference
+## Quick Reference (code-accurate)
 
-### Beads Commands (Task Tracking)
+### Beads Commands
 ```bash
 bd init                              # Initialize in project
 bd ready --json                      # Find ready work
@@ -339,25 +347,17 @@ bd list --status open                # List issues
 bd sync                              # Sync with git
 ```
 
-### YAMS Commands (Memory, Knowledge & Code)
-```bash
-# Code indexing
-yams add <files> --tags "code,task-X,component"
-yams add <dir> --recursive --include "*.py"
-yams search "query" --tags "code"
-yams graph "concept" --depth 2
-
-# Knowledge storage
-yams add <file> --tags "x,y,z"
-yams add - --name "x.md"             # From stdin
-yams search "query" --tags "tag"
-yams search "query" --fuzzy
-
-# Session management
-yams session pin --path "**/*"
-yams session warm
-yams list --name "pattern-*"
-```
+### YAMS CLI (selected commands)
+- **add**: multi-path add with daemon-first flow; supports `--name`, `--tags`, `--metadata`, `--mime-type`, `--no-auto-mime`, `--no-embeddings`, collections/snapshots (`--collection`, `--snapshot-id`, `--snapshot-label`), directory controls (`-r/--recursive`, `--include`, `--exclude`, `--verify`), session scope (`--global/--no-session`), and daemon robustness (`--daemon-timeout-ms`, `--daemon-retries`, `--daemon-backoff-ms`, `--daemon-ready-timeout-ms`). Stdin supported via `-`.
+- **search**: queries via positional args or `-q/--query`; accepts `--stdin`/`--query-file`; defaults to `--type hybrid`; fuzzy toggle `-f/--fuzzy` with `--similarity`; `--paths-only`; grouping controls (`--no-group-versions`, `--versions {latest|all}`, `--versions-topk`, `--versions-sort`, `--no-tools`, `--json-grouped`); session scope (`--session`, `--global/--no-session`); `--cwd`; streaming (`--streaming`, `--chunk-size`, header/body timeouts); literal text `-F/--literal-text`; display (`--show-hash`, `-v/--verbose`, `--json`); line/context (`-n/--line-numbers`, `-A/-B/-C`); hash search `--hash`; tag filters (`--tags`, `--match-all-tags`); include globs; file filters (`--ext`, `--mime`, `--file-type`, `--text-only`, `--binary-only`); time filters (`--created-*`, `--modified-*`, `--indexed-*`).
+- **graph**: target by positional `hash`, `--name`, `--node-key`, or `--node-id`; traversal depth `--depth 1-5`; filter relations with `--relation/-r`; list-only mode via `--list-type` (use `--isolated` to find nodes with no incoming edges); pagination `--limit/--offset`; output `--format table|json|dot` or `--json`; `--verbose` shows properties/hashes; `--prop-filter` for property text.
+- **session**: lifecycle (`start`, `use`, `ls`, `show --json`, `rm`); selectors (`add --path/--tag/--meta`, `rm-path`, `list --json`); warming (`warm --limit --snippet-len --cores --memory-gb --time-ms --aggressive`); tagging/annotation (`tags --add/--remove`, `annotate --meta`); cache (`clear`); import/export (`save`, `load --name`); emit (`emit --kind names|paths|hashes --materialized --json`); watch (`--start/--stop --interval --session`); session isolation (`create`, `open`, `close`, `status --json`); maintenance (`merge --exclude --dry-run`, `discard --confirm`, `diff --base --target --dir --type --json`). Env: `YAMS_SESSION_CURRENT` selects default.
+- **doctor**: flags `--json`, `--fix`, `--fix-config-dims`, `--recreate-vectors [--dim] [--stop-daemon]`; subcommands: `daemon`, `plugin <target> [--iface --iface-version --no-daemon]`, `plugins`, `embeddings clear-degraded`, `repair` (`--embeddings|--fts5|--graph|--all`), `validate --graph`, `dedupe` (`--apply`, `--mode {path|name|hash}`, `--strategy {keep-newest|keep-oldest|keep-largest}`, `--force`, `--verbose`), `prune` (`--apply`, categories via `--category/-c`, `--extension/-e`, `--older-than`, `--larger-than`, `--smaller-than`, `-v`), `tuning [--apply]`.
+- **daemon**: manage daemon with `start` (`--socket`, `--data-dir/--storage`, `--pid-file`, `--log-level`, `--config`, `--daemon-binary`, `--foreground`, `--restart`), `stop [--force]`, `status [-d/--detailed]`, `restart`, `doctor`, `log` (`-n`, `-f`, `--level`).
+- **status / stats**: `yams status` (alias `yams stats`) with `--json`, `-v/--verbose`, `--no-physical`.
+- **model**: manage ONNX models. Flags `--list`, `--download <name>`, `--info <name>`, `--output`, `--url`, `--force`, `--check`; subcommands mirror these plus `download` options (`--hf`, `--revision`, `--token`, `--offline`, `--apply-config`) and `provider` for daemon model status.
+- **serve**: start MCP server; default quiet; `--daemon-socket` override; `--verbose` shows banner (legacy `--quiet` is no-op).
+- **Other core commands**: `cat`, `get`, `list/ls`, `delete/rm`, `config`, `init`, `migrate`, `uninstall`, `update`, `diff`, `tree`, `grep`, `download`, `restore`, `repair`, `dr`, `completion`, `plugin` (see individual help for flags).
 
 ### Dependency Types (Beads)
 | Type | Meaning | Affects Ready? |

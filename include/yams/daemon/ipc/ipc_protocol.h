@@ -3598,12 +3598,24 @@ struct StatusResponse {
         std::string error; // if degraded
         uint32_t modelsLoaded{0};
         bool isProvider{false}; // true if this plugin is the adopted model provider
+        std::vector<std::string> interfaces; // plugin interfaces (e.g., content_extractor_v1)
+        std::vector<std::string> capabilities; // capability categories (e.g., content_extraction)
 
         template <typename Serializer>
         requires IsSerializer<Serializer>
         void serialize(Serializer& ser) const {
             ser << name << ready << degraded << error << static_cast<uint32_t>(modelsLoaded)
                 << isProvider;
+            // Serialize interfaces
+            ser << static_cast<uint32_t>(interfaces.size());
+            for (const auto& iface : interfaces) {
+                ser << iface;
+            }
+            // Serialize capabilities
+            ser << static_cast<uint32_t>(capabilities.size());
+            for (const auto& cap : capabilities) {
+                ser << cap;
+            }
         }
 
         template <typename Deserializer>
@@ -3634,6 +3646,28 @@ struct StatusResponse {
             if (!ip)
                 return ip.error();
             p.isProvider = ip.value();
+            // Deserialize interfaces
+            auto ifaceCount = deser.template read<uint32_t>();
+            if (!ifaceCount)
+                return ifaceCount.error();
+            p.interfaces.reserve(ifaceCount.value());
+            for (uint32_t i = 0; i < ifaceCount.value(); ++i) {
+                auto iface = deser.readString();
+                if (!iface)
+                    return iface.error();
+                p.interfaces.push_back(std::move(iface.value()));
+            }
+            // Deserialize capabilities
+            auto capCount = deser.template read<uint32_t>();
+            if (!capCount)
+                return capCount.error();
+            p.capabilities.reserve(capCount.value());
+            for (uint32_t i = 0; i < capCount.value(); ++i) {
+                auto cap = deser.readString();
+                if (!cap)
+                    return cap.error();
+                p.capabilities.push_back(std::move(cap.value()));
+            }
             return p;
         }
     };

@@ -417,6 +417,8 @@ message StatusResponse {
     string error = 4;
     uint32 models_loaded = 5;
     bool is_provider = 6;
+    repeated string interfaces = 7;    // plugin interfaces (e.g., content_extractor_v1)
+    repeated string capabilities = 8;  // capability categories (e.g., content_extraction)
   }
   repeated ProviderInfo providers = 14;
   message SkippedPlugin { string path = 1; string reason = 2; }

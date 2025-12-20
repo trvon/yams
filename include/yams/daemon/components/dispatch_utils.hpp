@@ -305,6 +305,8 @@ build_typed_providers(ServiceManager* sm, const yams::daemon::StateComponent* st
                 if (p.isProvider && p.error.empty())
                     p.error = lastErr;
                 p.modelsLoaded = rec.modelsLoaded;
+                p.interfaces = rec.interfaces;
+                p.capabilities = rec.capabilities;
                 spdlog::debug("[build_typed_providers]   snapshot plugin: name='{}' provider={}",
                               rec.name, rec.isProvider);
                 providers.push_back(std::move(p));

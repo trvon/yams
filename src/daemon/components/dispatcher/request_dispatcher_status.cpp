@@ -78,6 +78,18 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             res.embeddingModel = snap->embeddingModel;
             res.embeddingModelPath = snap->embeddingModelPath;
             res.embeddingDim = snap->embeddingDim;
+            // Vector diagnostics (from background snapshot - no blocking)
+            res.readinessStates["vector_embeddings_available"] = snap->vectorEmbeddingsAvailable;
+            res.readinessStates["vector_scoring_enabled"] = snap->vectorScoringEnabled;
+            res.requestCounts["vector_embeddings_available"] =
+                snap->vectorEmbeddingsAvailable ? 1 : 0;
+            res.requestCounts["vector_scoring_enabled"] = snap->vectorScoringEnabled ? 1 : 0;
+            res.readinessStates["search_engine_build_reason_initial"] =
+                (snap->searchEngineBuildReason == "initial");
+            res.readinessStates["search_engine_build_reason_rebuild"] =
+                (snap->searchEngineBuildReason == "rebuild");
+            res.readinessStates["search_engine_build_reason_degraded"] =
+                (snap->searchEngineBuildReason == "degraded");
             res.requestCounts["worker_threads"] = snap->workerThreads;
             res.requestCounts["worker_active"] = snap->workerActive;
             res.requestCounts["worker_queued"] = snap->workerQueued;
@@ -308,34 +320,10 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
         } catch (...) {
             res.readinessStates["search_engine_degraded"] = true;
         }
-        // TODO: BLOCKING CALL - collect_vector_diag acquires locks that can hang
-        // See docs/architecture/servicemanager-refactor.md for architectural solution
-        // Temporarily disabled to unblock development - needs snapshot-based implementation
-        //
-        // Only collect vector diag if daemon is fully ready (avoid blocking during init)
-        // bool isReady = false;
-        // try {
-        //     auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
-        //     isReady = (lifecycleSnapshot.state == LifecycleState::Ready);
-        // } catch (...) {
-        // }
-        // if (isReady) {
-        //     spdlog::info("[StatusRequest] Daemon is Ready, collecting vector diag");
-        //     try {
-        //         auto d = yams::daemon::dispatch::collect_vector_diag(serviceManager_);
-        //         res.readinessStates["vector_embeddings_available"] = d.embeddingsAvailable;
-        //         res.readinessStates["vector_scoring_enabled"] = d.scoringEnabled;
-        //     // Also mirror in counters for MCP/CLI parity
-        //     res.requestCounts["vector_embeddings_available"] = d.embeddingsAvailable ? 1 : 0;
-        //     res.requestCounts["vector_scoring_enabled"] = d.scoringEnabled ? 1 : 0;
-        //     res.readinessStates["search_engine_build_reason_initial"] =
-        //         (d.buildReason == "initial");
-        //     res.readinessStates["search_engine_build_reason_rebuild"] =
-        //         (d.buildReason == "rebuild");
-        //     res.readinessStates["search_engine_build_reason_degraded"] =
-        //         (d.buildReason == "degraded");
-        // } catch (...) {
-        // }
+        // NOTE: Vector diagnostics are now collected via DaemonMetrics background thread
+        // and read from the snapshot above (lines 81-92). This avoids blocking the status
+        // request path. See MetricsSnapshot::vectorEmbeddingsAvailable, vectorScoringEnabled,
+        // and searchEngineBuildReason fields.
         try {
             auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
             switch (lifecycleSnapshot.state) {
@@ -481,8 +469,12 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
         // Always include defaults for keys expected by tests/clients
         response.additionalStats["wal_active_transactions"] = "0";
         response.additionalStats["wal_pending_entries"] = "0";
-        response.additionalStats["plugins_loaded"] = "0";
-        response.additionalStats["plugins_json"] = "[]";
+        // Populate plugins_json with actual plugin data including interfaces
+        {
+            auto [pluginsJson, pluginsCount] = yams::daemon::dispatch::build_plugins_json(serviceManager_);
+            response.additionalStats["plugins_loaded"] = std::to_string(pluginsCount);
+            response.additionalStats["plugins_json"] = pluginsJson;
+        }
         // Internal bus + tuning toggles (doctor hints)
         try {
             response.additionalStats["tuning_use_internal_bus_for_repair"] =
