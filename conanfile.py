@@ -129,6 +129,7 @@ class YamsConan(ConanFile):
         self.options["libcurl"].shared = False
         self.options["openssl"].shared = False
         self.options["libarchive"].shared = False
+        self.options["libarchive"].with_acl = False  # Avoid libacl link issues on Linux CI
         self.options["taglib"].shared = False
         self.options["spdlog"].header_only = False
 

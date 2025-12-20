@@ -17,8 +17,8 @@
 #ifndef NOMINMAX
 #define NOMINMAX 1
 #endif
-#include <Psapi.h>
 #include <Windows.h>
+#include <Psapi.h>
 #endif
 #ifdef __APPLE__
 #include <mach/mach.h>
