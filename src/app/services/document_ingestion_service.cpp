@@ -55,6 +55,7 @@ DocumentIngestionService::addViaDaemon(const AddOptions& opts) const {
     dreq.recursive = opts.recursive;
     dreq.includePatterns = opts.includePatterns;
     dreq.excludePatterns = opts.excludePatterns;
+    dreq.noGitignore = opts.noGitignore;
     dreq.tags = opts.tags;
     for (const auto& [k, v] : opts.metadata) {
         dreq.metadata[k] = v;

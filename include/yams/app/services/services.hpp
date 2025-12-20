@@ -885,6 +885,9 @@ struct AddDirectoryRequest {
     // Session-isolated memory (PBI-082)
     std::string sessionId;     // session to associate documents with
     bool bypassSession{false}; // skip session tagging even if session is active
+
+    // Gitignore handling
+    bool noGitignore{false};   // when true, ignore .gitignore patterns during traversal
 };
 
 struct IndexedFileResult {

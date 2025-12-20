@@ -28,6 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added `vectorEmbeddingsAvailable`, `vectorScoringEnabled`, `searchEngineBuildReason` to `MetricsSnapshot`
   - Status requests now read from cached snapshot (non-blocking)
   - Resolves status command hangs when vector services are slow
+- **Entity extraction metrics in status output**: Added entity queue/inflight counters
+  - New metrics: `entityQueued`, `entityDropped`, `entityConsumed`, `entityInFlight`
+  - Exposed via `yams status` and `yams status -v` output
+  - JSON output includes `entity_queued`, `entity_consumed`, `entity_dropped`, `entity_inflight`
+  - Location: `include/yams/daemon/components/DaemonMetrics.h`, `src/cli/commands/status_command.cpp`
+- **Gitignore support for directory ingestion**: Skip files matching `.gitignore` patterns
+  - New `--no-gitignore` flag for `yams add` command to disable gitignore filtering
+  - Default behavior respects `.gitignore` patterns in the root directory
+  - Supports standard gitignore patterns: wildcards, directory patterns, anchored paths
+  - Location: `src/cli/commands/add_command.cpp`, `src/app/services/indexing_service.cpp`
 
 ### Changed
 - **Constexpr language configuration for symbol extraction**: Centralized compile-time configuration

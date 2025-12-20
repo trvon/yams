@@ -16,6 +16,88 @@
 
 namespace yams::app::services {
 
+/**
+ * Load .gitignore patterns from a directory.
+ * Returns a vector of patterns. Each pattern is normalized for glob matching.
+ * Handles:
+ *  - Lines starting with # (comments)
+ *  - Empty lines (skipped)
+ *  - Lines starting with ! (negation - not fully supported, just skipped for now)
+ *  - Trailing whitespace removal
+ */
+static std::vector<std::string> loadGitignorePatterns(const std::filesystem::path& dir) {
+    std::vector<std::string> patterns;
+    auto gitignorePath = dir / ".gitignore";
+
+    std::error_code ec;
+    if (!std::filesystem::exists(gitignorePath, ec) || ec) {
+        return patterns;
+    }
+
+    std::ifstream file(gitignorePath);
+    if (!file.is_open()) {
+        return patterns;
+    }
+
+    std::string line;
+    while (std::getline(file, line)) {
+        // Trim trailing whitespace (but not escaped trailing space)
+        while (!line.empty() && (line.back() == ' ' || line.back() == '\t' ||
+                                  line.back() == '\r' || line.back() == '\n')) {
+            line.pop_back();
+        }
+
+        // Skip empty lines
+        if (line.empty()) {
+            continue;
+        }
+
+        // Skip comments
+        if (line[0] == '#') {
+            continue;
+        }
+
+        // Skip negation patterns for now (complex to handle)
+        if (line[0] == '!') {
+            continue;
+        }
+
+        // Convert gitignore pattern to glob pattern
+        // Gitignore patterns:
+        //  - foo.txt matches foo.txt anywhere
+        //  - /foo.txt matches foo.txt only in root
+        //  - dir/ matches directory
+        //  - *.txt matches any .txt file
+        //  - **/logs matches logs anywhere
+
+        std::string pattern = line;
+
+        // If pattern starts with /, it's anchored to the root
+        // We remove the leading / and will match against relative paths
+        if (!pattern.empty() && pattern[0] == '/') {
+            pattern = pattern.substr(1);
+        }
+
+        // If pattern ends with /, it matches directories (we include all contents)
+        if (!pattern.empty() && pattern.back() == '/') {
+            pattern.pop_back();
+            // Add pattern to match the directory itself and all its contents
+            patterns.push_back(pattern);
+            patterns.push_back(pattern + "/**");
+        } else {
+            // Standard pattern - match anywhere in path if it doesn't contain /
+            if (pattern.find('/') == std::string::npos && pattern.find('\\') == std::string::npos) {
+                // Pattern without / matches anywhere - prepend **/
+                patterns.push_back("**/" + pattern);
+            } else {
+                patterns.push_back(pattern);
+            }
+        }
+    }
+
+    return patterns;
+}
+
 class IndexingServiceImpl : public IIndexingService {
 public:
     explicit IndexingServiceImpl(const AppContext& ctx) : ctx_(ctx) {}
@@ -34,9 +116,20 @@ public:
             }
 
             spdlog::info("[IndexingService] addDirectory: root='{}' recursive={} include={} "
-                         "exclude={} tags={} collection='{}'",
+                         "exclude={} tags={} collection='{}' noGitignore={}",
                          req.directoryPath, req.recursive, req.includePatterns.size(),
-                         req.excludePatterns.size(), req.tags.size(), req.collection);
+                         req.excludePatterns.size(), req.tags.size(), req.collection,
+                         req.noGitignore ? 1 : 0);
+
+            // Load .gitignore patterns unless noGitignore is set
+            std::vector<std::string> gitignorePatterns;
+            if (!req.noGitignore) {
+                gitignorePatterns = loadGitignorePatterns(dirPath);
+                if (!gitignorePatterns.empty()) {
+                    spdlog::info("[IndexingService] Loaded {} .gitignore patterns from '{}'",
+                                 gitignorePatterns.size(), dirPath.string());
+                }
+            }
 
             // Collect file entries first
             std::vector<std::filesystem::directory_entry> entries;
@@ -160,10 +253,11 @@ public:
                         const auto& ent = entries[i];
                         bool willInclude =
                             shouldIncludeFile(req.directoryPath, ent.path().string(),
-                                              req.includePatterns, req.excludePatterns);
+                                              req.includePatterns, req.excludePatterns,
+                                              gitignorePatterns);
                         spdlog::info("[IndexingService] candidate: '{}' -> {}", ent.path().string(),
                                      willInclude ? "include" : "skip");
-                        processDirectoryEntry(ent, req, localResp, snapshotId);
+                        processDirectoryEntry(ent, req, localResp, snapshotId, gitignorePatterns);
                         auto leftBefore = remaining.fetch_sub(1, std::memory_order_relaxed);
                         if (leftBefore > 0)
                             publishIngestQueued(leftBefore - 1);
@@ -444,7 +538,8 @@ private:
 
     void processDirectoryEntry(const std::filesystem::directory_entry& entry,
                                const AddDirectoryRequest& req, AddDirectoryResponse& response,
-                               const std::string& snapshotId) {
+                               const std::string& snapshotId,
+                               const std::vector<std::string>& gitignorePatterns = {}) {
         if (!entry.is_regular_file()) {
             return;
         }
@@ -453,9 +548,9 @@ private:
 
         std::string filePath = entry.path().string();
 
-        // Apply include/exclude filters
+        // Apply include/exclude filters (gitignore patterns checked first)
         if (!shouldIncludeFile(req.directoryPath, filePath, req.includePatterns,
-                               req.excludePatterns)) {
+                               req.excludePatterns, gitignorePatterns)) {
             response.filesSkipped++;
             return;
         }
@@ -568,7 +663,8 @@ private:
 
     bool shouldIncludeFile(const std::string& rootDir, const std::string& absPath,
                            const std::vector<std::string>& includePatterns,
-                           const std::vector<std::string>& excludePatterns) {
+                           const std::vector<std::string>& excludePatterns,
+                           const std::vector<std::string>& gitignorePatterns = {}) {
         std::error_code ec;
         std::filesystem::path root(rootDir);
         std::filesystem::path p(absPath);
@@ -579,6 +675,14 @@ private:
         // Normalize for matching
         relPath = yams::common::normalize_path(relPath);
         std::string nfile = yams::common::normalize_path(filename);
+
+        // Check gitignore patterns first (if any)
+        if (!gitignorePatterns.empty()) {
+            if (yams::common::matches_any_path(relPath, gitignorePatterns)) {
+                spdlog::debug("[IndexingService] File '{}' excluded by .gitignore pattern", relPath);
+                return false;
+            }
+        }
 
         // Exclude: if any exclude matches filename or rel path, skip
         if (!excludePatterns.empty()) {

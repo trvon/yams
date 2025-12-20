@@ -1586,12 +1586,15 @@ struct AddDocumentRequest {
     bool disableAutoMime = false; // Disable automatic MIME type detection
     bool noEmbeddings = false;    // Disable automatic embedding generation
 
+    // Gitignore handling
+    bool noGitignore = false;     // Ignore .gitignore patterns when adding files
+
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
         ser << path << content << name << tags << metadata << recursive << includeHidden
             << includePatterns << excludePatterns << collection << snapshotId << snapshotLabel
-            << sessionId << mimeType << disableAutoMime << noEmbeddings;
+            << sessionId << mimeType << disableAutoMime << noEmbeddings << noGitignore;
     }
 
     template <typename Deserializer>
@@ -1672,6 +1675,11 @@ struct AddDocumentRequest {
         if (!noEmb)
             return noEmb.error();
         req.noEmbeddings = noEmb.value();
+
+        auto noGit = deser.template read<bool>();
+        if (!noGit)
+            return noGit.error();
+        req.noGitignore = noGit.value();
 
         return req;
     }

@@ -201,6 +201,8 @@ public:
             ->delimiter(',');
         cmd->add_flag("--verify", verify_,
                       "Verify stored content (hash + existence) after add; slower but safer");
+        cmd->add_flag("--no-gitignore", noGitignore_,
+                      "Ignore .gitignore patterns when adding files recursively");
 
         // Session isolation options (PBI-082)
         cmd->add_flag("--global,--no-session", bypassSession_,
@@ -403,6 +405,7 @@ public:
                     aopts.retries = daemonRetries_;
                     aopts.backoffMs = daemonBackoffMs_;
                     aopts.verify = verify_;
+                    aopts.noGitignore = noGitignore_;
 
                     yams::app::services::DocumentIngestionService ing;
                     auto result = ing.addViaDaemon(aopts);
@@ -458,6 +461,7 @@ public:
                     aopts.retries = daemonRetries_;
                     aopts.backoffMs = daemonBackoffMs_;
                     aopts.verify = verify_;
+                    aopts.noGitignore = noGitignore_;
 
                     yams::app::services::DocumentIngestionService ing;
                     auto result = ing.addViaDaemon(aopts);
@@ -830,6 +834,7 @@ private:
     std::vector<std::string> includePatterns_;
     std::vector<std::string> excludePatterns_;
     bool verify_ = false;
+    bool noGitignore_ = false;
 
     // Session isolation options (PBI-082)
     bool bypassSession_ = false;

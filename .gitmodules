@@ -1,18 +1,15 @@
 [submodule "plugins/yams-ghidra-plugin"]
 	path = plugins/yams-ghidra-plugin
-	url = git@github.com:trvon/yams-ghidra-plugin.git
+	url = https://github.com/trvon/yams-ghidra-plugin.git
 [submodule "homebrew-yams"]
 	path = homebrew-yams
   	url = https://github.com/trvon/homebrew-yams.git
-[submodule "yams-sdk"]
-  	path = external/yams-sdk
-  	url = https://git.sr.ht/~trvon/yams-sdk
 [submodule "third_party/sqlite-vec-cpp"]
 	path = third_party/sqlite-vec-cpp
 	url = https://github.com/trvon/sqlite-vec-cpp.git
 [submodule "external/yams-repo"]
 	path = external/yams-repo
 	url = https://github.com/trvon/yams-repo.git
-[submodule "external/yams-sdk"]
-	path = external/yams-sdk
-	url = git@git.sr.ht:~trvon/yams-sdk
+# [submodule "external/yams-sdk"]
+# 	path = external/yams-sdk
+# 	url = git@git.sr.ht:~trvon/yams-sdk
