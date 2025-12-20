@@ -2200,10 +2200,14 @@ template <> struct ProtoBinding<GraphQueryRequest> {
         o->set_list_by_type(r.listByType);
         o->set_node_type(r.nodeType);
         o->set_node_key(r.nodeKey);
+        o->set_list_types(r.listTypes);  // yams-66h
         set_string_list(r.relationFilters, o->mutable_relation_filters());
         o->set_max_depth(r.maxDepth);
         o->set_max_results(r.maxResults);
         o->set_max_results_per_depth(r.maxResultsPerDepth);
+        o->set_reverse_traversal(r.reverseTraversal);
+        o->set_isolated_mode(r.isolatedMode);
+        o->set_isolated_relation(r.isolatedRelation);
         o->set_scope_to_snapshot(r.scopeToSnapshot);
         o->set_offset(r.offset);
         o->set_limit(r.limit);
@@ -2221,10 +2225,14 @@ template <> struct ProtoBinding<GraphQueryRequest> {
         r.listByType = i.list_by_type();
         r.nodeType = i.node_type();
         r.nodeKey = i.node_key();
+        r.listTypes = i.list_types();  // yams-66h
         r.relationFilters = get_string_list(i.relation_filters());
         r.maxDepth = i.max_depth();
         r.maxResults = i.max_results();
         r.maxResultsPerDepth = i.max_results_per_depth();
+        r.reverseTraversal = i.reverse_traversal();
+        r.isolatedMode = i.isolated_mode();
+        r.isolatedRelation = i.isolated_relation();
         r.scopeToSnapshot = i.scope_to_snapshot();
         r.offset = i.offset();
         r.limit = i.limit();
@@ -2270,6 +2278,12 @@ template <> struct ProtoBinding<GraphQueryResponse> {
         o->set_query_time_ms(r.queryTimeMs);
         o->set_kg_available(r.kgAvailable);
         o->set_warning(r.warning);
+        // yams-66h: Node type counts
+        for (const auto& [type, count] : r.nodeTypeCounts) {
+            auto* tc = o->add_node_type_counts();
+            tc->set_type(type);
+            tc->set_count(count);
+        }
     }
     static GraphQueryResponse get(const Envelope& env) {
         const auto& i = env.graph_query_response();
@@ -2307,6 +2321,11 @@ template <> struct ProtoBinding<GraphQueryResponse> {
         r.queryTimeMs = i.query_time_ms();
         r.kgAvailable = i.kg_available();
         r.warning = i.warning();
+        // yams-66h: Node type counts
+        r.nodeTypeCounts.reserve(i.node_type_counts_size());
+        for (const auto& tc : i.node_type_counts()) {
+            r.nodeTypeCounts.emplace_back(tc.type(), tc.count());
+        }
         return r;
     }
 };

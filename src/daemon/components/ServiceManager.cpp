@@ -1473,9 +1473,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                 std::transform(s.begin(), s.end(), s.begin(), ::tolower);
                 return s == "1" || s == "true" || s == "yes" || s == "on";
             };
-            return is_on(std::getenv("YAMS_DISABLE_VECTORS")) ||
-                   is_on(std::getenv("YAMS_DISABLE_VECTOR_INDEX")) ||
-                   is_on(std::getenv("YAMS_DISABLE_VECTOR_DB"));
+            // Removed env-based disabling - use config instead
+            return false;
         }();
         vector::IndexConfig indexConfig;
         // Derive index dimension from Vector DB config if available; else fallback to
@@ -1555,8 +1554,6 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     }
                 }
             }
-        } else {
-            spdlog::warn("Vector index initialization disabled by YAMS_DISABLE_VECTOR_DB");
         }
     } catch (const std::exception& e) {
         spdlog::warn("Exception initializing VectorIndexManager: {}", e.what());
@@ -1709,15 +1706,9 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         }
         int build_timeout = read_timeout_ms("YAMS_SEARCH_BUILD_TIMEOUT_MS", 5000, 250);
 
-        // Determine vector readiness: honor env disables and presence of vector infra
-        const bool vectorsDisabled =
-            ConfigResolver::envTruthy(std::getenv("YAMS_DISABLE_VECTORS")) ||
-            ConfigResolver::envTruthy(std::getenv("YAMS_DISABLE_VECTOR_DB"));
+        // Determine vector readiness based on presence of vector infra
         bool vectorEnabled = false;
-        if (vectorsDisabled) {
-            spdlog::info(
-                "[SearchBuild] Vector search disabled via env flag; building text-only engine");
-        } else if (vectorDatabase_ && vectorIndexManager_) {
+        if (vectorDatabase_ && vectorIndexManager_) {
             try {
                 // Use VectorDatabase directly - it knows the actual DB size
                 auto vectorCount = vectorDatabase_->getVectorCount();

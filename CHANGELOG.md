@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.7.10] - Unreleased
 
 ### Added
+- **Graph command `--list-types` flag (yams-66h)**: Node type discovery for knowledge graph
+  - New `--list-types` flag shows all distinct node types with counts
+  - Table output with TYPE and COUNT columns, ordered by count descending
+  - JSON output with `nodeTypes` array containing `type` and `count` fields
+  - Added `getNodeTypeCounts()` method to `KnowledgeGraphStore` interface
+  - Extended `GraphQueryRequest` IPC protocol with `listTypes` mode
+  - Usage hint when no nodes found: suggests `yams add <path>`
+  - Location: `src/cli/commands/graph_command.cpp`, `include/yams/metadata/knowledge_graph_store.h`
 - **P4 language support for symbol extraction**: Network data plane language (P4_16)
   - Node types: `headerTypeDeclaration`, `structTypeDeclaration`, `controlDeclaration`, `parserDeclaration`, `actionDeclaration`, `tableDeclaration`
   - Query patterns for actions, functions, headers, structs, controls, parsers, tables, typedefs

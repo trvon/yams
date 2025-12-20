@@ -138,6 +138,10 @@ private:
     boost::asio::awaitable<Response>
     handleGraphQueryIsolatedMode(const GraphQueryRequest& req,
                                  yams::metadata::KnowledgeGraphStore* kgStore);
+    // yams-66h: Helper for listTypes mode
+    boost::asio::awaitable<Response>
+    handleGraphQueryListTypes(const GraphQueryRequest& req,
+                              yams::metadata::KnowledgeGraphStore* kgStore);
 
     // Graph maintenance handlers (PBI-009 Phase 4.3)
     boost::asio::awaitable<Response> handleGraphRepairRequest(const GraphRepairRequest& req);

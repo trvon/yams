@@ -59,6 +59,7 @@ packages:
   - libboost-all-dev
   - liburing-dev # enables io_uring async path instead of fallback
   - libarchive-dev # enables archive extraction features
+  - libacl1-dev # required for libarchive ACL support
   - libtag1-dev # enables taglib (audio metadata) detection
   - libsqlite3-dev # enables SQLite database support
   - libssl-dev

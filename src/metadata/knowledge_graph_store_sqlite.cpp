@@ -1263,6 +1263,35 @@ public:
         });
     }
 
+    Result<std::vector<std::pair<std::string, std::size_t>>> getNodeTypeCounts() override {
+        return pool_->withConnection(
+            [&](Database& db) -> Result<std::vector<std::pair<std::string, std::size_t>>> {
+                auto stmtR = db.prepare(R"(
+                SELECT type, COUNT(*) as cnt
+                FROM kg_nodes
+                WHERE type IS NOT NULL AND type != ''
+                GROUP BY type
+                ORDER BY cnt DESC
+            )");
+                if (!stmtR)
+                    return stmtR.error();
+
+                auto stmt = std::move(stmtR).value();
+                std::vector<std::pair<std::string, std::size_t>> results;
+                while (true) {
+                    auto step = stmt.step();
+                    if (!step)
+                        return step.error();
+                    if (!step.value())
+                        break;
+
+                    std::string typeName = stmt.getString(0);
+                    std::size_t count = static_cast<std::size_t>(stmt.getInt64(1));
+                    results.emplace_back(std::move(typeName), count);
+                }
+                return results;
+            });
+    }
 
     // Statistics (not needed for MVP)
     Result<std::optional<KGNodeStats>> getNodeStats(std::int64_t) override {

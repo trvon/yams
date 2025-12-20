@@ -67,6 +67,9 @@ public:
         cmd->add_flag("--isolated", showIsolated_,
                       "Find isolated nodes (no incoming edges for --relation type)");
 
+        // yams-66h: List available node types with counts
+        cmd->add_flag("--list-types", listTypes_, "List available node types with counts");
+
         cmd->callback([this]() { cli_->setPendingCommand(this); });
     }
 
@@ -75,6 +78,11 @@ public:
     boost::asio::awaitable<Result<void>> executeAsync() override {
         try {
             using namespace yams::daemon;
+
+            // yams-66h: Handle --list-types mode (show available node types)
+            if (listTypes_) {
+                co_return co_await executeListTypes();
+            }
 
             // Handle --list-type mode (list nodes by type without traversal)
             if (!listNodeType_.empty()) {
@@ -93,6 +101,84 @@ public:
     }
 
 private:
+    // yams-66h: List available node types with counts
+    boost::asio::awaitable<Result<void>> executeListTypes() {
+        using namespace yams::daemon;
+
+        ClientConfig cfg;
+        if (cli_ && cli_->hasExplicitDataDir()) {
+            cfg.dataDir = cli_->getDataPath();
+        }
+        cfg.requestTimeout = std::chrono::milliseconds(60000);
+
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        if (!leaseRes) {
+            co_return leaseRes.error();
+        }
+        auto leaseHandle = std::move(leaseRes.value());
+        auto& client = **leaseHandle;
+
+        // Build GraphQueryRequest with listTypes mode
+        GraphQueryRequest req;
+        req.listTypes = true;
+
+        auto r = co_await client.call(req);
+        if (!r) {
+            std::cerr << "Graph query error: " << r.error().message << "\n";
+            co_return r.error();
+        }
+
+        const auto& resp = r.value();
+
+        if (!resp.kgAvailable) {
+            std::cout << yams::cli::ui::status_error("Knowledge graph not available") << "\n";
+            co_return Result<void>();
+        }
+
+        if (jsonOutput_ || outputFormat_ == "json") {
+            json out;
+            out["totalTypes"] = resp.nodeTypeCounts.size();
+            json types = json::array();
+            for (const auto& [type, count] : resp.nodeTypeCounts) {
+                types.push_back({{"type", type}, {"count", count}});
+            }
+            out["nodeTypes"] = types;
+            std::cout << out.dump(2) << "\n";
+        } else {
+            std::cout << yams::cli::ui::section_header("Available Node Types") << "\n\n";
+
+            if (resp.nodeTypeCounts.empty()) {
+                std::cout << yams::cli::ui::status_info("No node types found in knowledge graph")
+                          << "\n";
+                std::cout << "\nHint: Add files with 'yams add <path>' to populate the graph.\n";
+            } else {
+                // Build table
+                yams::cli::ui::Table table;
+                table.headers = {"TYPE", "COUNT"};
+                table.has_header = true;
+
+                uint64_t totalNodes = 0;
+                for (const auto& [type, count] : resp.nodeTypeCounts) {
+                    table.add_row({type, yams::cli::ui::format_number(count)});
+                    totalNodes += count;
+                }
+
+                yams::cli::ui::render_table(std::cout, table);
+
+                std::cout << "\n"
+                          << yams::cli::ui::status_info("Total: " +
+                                                         yams::cli::ui::format_number(totalNodes) +
+                                                         " nodes across " +
+                                                         std::to_string(resp.nodeTypeCounts.size()) +
+                                                         " types")
+                          << "\n";
+                std::cout << "\nUsage: yams graph --list-type <type> to view nodes of a type\n";
+            }
+        }
+
+        co_return Result<void>();
+    }
+
     boost::asio::awaitable<Result<void>> executeListByType() {
         using namespace yams::daemon;
 
@@ -609,6 +695,7 @@ private:
     std::string outputFormat_{"table"};
     std::string propFilter_;
     bool showIsolated_{false};
+    bool listTypes_{false};
 };
 
 std::unique_ptr<ICommand> createGraphCommand() {

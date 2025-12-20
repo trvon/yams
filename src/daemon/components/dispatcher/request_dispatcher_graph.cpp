@@ -36,6 +36,11 @@ RequestDispatcher::handleGraphQueryRequest(const GraphQueryRequest& req) {
         co_return resp;
     }
 
+    // yams-66h: Handle listTypes mode - list available node types with counts
+    if (req.listTypes) {
+        co_return co_await handleGraphQueryListTypes(req, kgStore.get());
+    }
+
     // PBI-093: Handle listByType mode - list nodes by type without traversal
     if (req.listByType) {
         co_return co_await handleGraphQueryListByType(req, kgStore.get());
@@ -217,6 +222,42 @@ RequestDispatcher::handleGraphQueryIsolatedMode(const GraphQueryRequest& req,
 
     spdlog::debug("GraphQuery isolatedMode: found {} isolated {} nodes (no incoming {} edges)",
                   resp.connectedNodes.size(), nodeType, relation);
+    co_return resp;
+}
+
+// yams-66h: Helper for listTypes mode - list available node types with counts
+boost::asio::awaitable<Response>
+RequestDispatcher::handleGraphQueryListTypes(const GraphQueryRequest& req,
+                                             KnowledgeGraphStore* kgStore) {
+    spdlog::debug("GraphQuery listTypes: fetching node type counts");
+    (void)req; // Unused for now, but may be used for future filtering
+
+    auto countsResult = kgStore->getNodeTypeCounts();
+    if (!countsResult) {
+        co_return ErrorResponse{.code = countsResult.error().code,
+                                .message = countsResult.error().message};
+    }
+
+    GraphQueryResponse resp;
+    resp.kgAvailable = true;
+    resp.totalNodesFound = countsResult.value().size();
+    resp.truncated = false;
+    resp.maxDepthReached = 0;
+
+    // No origin node in listTypes mode
+    resp.originNode.nodeId = -1;
+    resp.originNode.nodeKey = "";
+    resp.originNode.label = "listTypes";
+    resp.originNode.type = "query";
+    resp.originNode.distance = 0;
+
+    // Populate nodeTypeCounts
+    resp.nodeTypeCounts.reserve(countsResult.value().size());
+    for (const auto& [type, count] : countsResult.value()) {
+        resp.nodeTypeCounts.emplace_back(type, static_cast<uint64_t>(count));
+    }
+
+    spdlog::debug("GraphQuery listTypes: found {} distinct node types", resp.nodeTypeCounts.size());
     co_return resp;
 }
 

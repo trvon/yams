@@ -2471,6 +2471,9 @@ struct GraphQueryRequest {
     std::string nodeType; // Node type to filter (e.g., "binary.function", "binary.import")
     std::string nodeKey;  // Direct node key lookup (e.g., "fn:abc123:0x1000")
 
+    // List-types mode (yams-66h): when true, return available node types with counts
+    bool listTypes{false};
+
     // Traversal options
     std::vector<std::string> relationFilters; // Empty = all relations
     int32_t maxDepth{1};                      // BFS depth limit (1-4)
@@ -2496,7 +2499,7 @@ struct GraphQueryRequest {
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
         ser << documentHash << documentName << snapshotId << nodeId << listByType << nodeType
-            << nodeKey << relationFilters << maxDepth << maxResults << maxResultsPerDepth << reverseTraversal
+            << nodeKey << listTypes << relationFilters << maxDepth << maxResults << maxResultsPerDepth << reverseTraversal
             << isolatedMode << isolatedRelation
             << scopeToSnapshot << offset << limit << includeEdgeProperties << includeNodeProperties
             << hydrateFully;
@@ -2540,6 +2543,12 @@ struct GraphQueryRequest {
 
         if (auto r = deser.readString(); r)
             req.nodeKey = std::move(r.value());
+        else
+            return r.error();
+
+        // yams-66h: listTypes mode
+        if (auto r = deser.template read<bool>(); r)
+            req.listTypes = r.value();
         else
             return r.error();
 
@@ -5542,6 +5551,9 @@ struct GraphQueryResponse {
     bool kgAvailable{true};
     std::string warning;
 
+    // yams-66h: Node type counts for --list-types mode
+    std::vector<std::pair<std::string, uint64_t>> nodeTypeCounts;
+
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
@@ -5552,6 +5564,11 @@ struct GraphQueryResponse {
         }
         ser << totalNodesFound << totalEdgesTraversed << truncated << maxDepthReached << queryTimeMs
             << kgAvailable << warning;
+        // yams-66h: Serialize node type counts
+        ser << static_cast<uint32_t>(nodeTypeCounts.size());
+        for (const auto& [type, count] : nodeTypeCounts) {
+            ser << type << count;
+        }
     }
 
     template <typename Deserializer>
@@ -5609,6 +5626,25 @@ struct GraphQueryResponse {
             res.warning = std::move(r.value());
         else
             return r.error();
+
+        // yams-66h: Deserialize node type counts
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            res.nodeTypeCounts.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                std::string type;
+                uint64_t count{0};
+                if (auto r = deser.readString(); r)
+                    type = std::move(r.value());
+                else
+                    return r.error();
+                if (auto r = deser.template read<uint64_t>(); r)
+                    count = r.value();
+                else
+                    return r.error();
+                res.nodeTypeCounts.emplace_back(std::move(type), count);
+            }
+        } else
+            return cnt.error();
 
         return res;
     }

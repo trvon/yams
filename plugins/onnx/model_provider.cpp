@@ -2,6 +2,7 @@
 #include "model_provider.h"
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -20,14 +21,57 @@ static yams_status_t onnx_set_threading(void* /*self*/, const char* /*model_id*/
 
 struct ProviderCtx {
     enum class State : uint8_t { Unloaded, Loading, Ready, Failed };
+
+    // Track model load failures for backoff and event signaling
+    struct FailureInfo {
+        std::chrono::steady_clock::time_point lastAttempt;
+        std::chrono::steady_clock::time_point lastFailure;
+        uint32_t consecutiveFailures = 0;
+        std::string lastError;
+        bool eventFired = false;  // Whether we've fired ModelLoadFailedEvent
+    };
+
     std::mutex mu;
     yams_model_load_progress_cb progress_cb = nullptr;
     void* progress_user = nullptr;
     std::unique_ptr<yams::daemon::OnnxModelPool> pool;
     std::unordered_map<std::string, State> model_states; // per-model FSM
+    std::unordered_map<std::string, FailureInfo> model_failures; // failure tracking
     bool ready = false;
     bool disabled = false;
     std::string last_error;
+
+    // Check if model is in cooldown period after failures
+    bool isInCooldown(const std::string& modelId) const {
+        auto it = model_failures.find(modelId);
+        if (it == model_failures.end() || it->second.consecutiveFailures == 0) {
+            return false;
+        }
+        // Exponential backoff: 2^min(failures, 6) seconds (max ~64 seconds)
+        auto backoffSeconds = std::chrono::seconds(1 << std::min(it->second.consecutiveFailures, 6u));
+        auto elapsed = std::chrono::steady_clock::now() - it->second.lastFailure;
+        return elapsed < backoffSeconds;
+    }
+
+    // Record a model load failure
+    void recordFailure(const std::string& modelId, const std::string& error) {
+        auto& info = model_failures[modelId];
+        auto now = std::chrono::steady_clock::now();
+        info.lastAttempt = now;
+        info.lastFailure = now;
+        info.consecutiveFailures++;
+        info.lastError = error;
+    }
+
+    // Clear failure tracking on successful load
+    void clearFailure(const std::string& modelId) {
+        auto it = model_failures.find(modelId);
+        if (it != model_failures.end()) {
+            it->second.consecutiveFailures = 0;
+            it->second.lastError.clear();
+            it->second.eventFired = false;
+        }
+    }
 
     ProviderCtx() {
         // Allow disabling via env for diagnostics or platform constraints
@@ -180,12 +224,15 @@ struct ProviderCtx {
         } catch (const std::exception&) {
             // ignore config parse errors
         }
+        spdlog::info("[ONNX-Plugin] Creating OnnxModelPool with modelsRoot={}", cfg.modelsRoot);
         pool = std::make_unique<yams::daemon::OnnxModelPool>(cfg);
+        spdlog::info("[ONNX-Plugin] OnnxModelPool created, calling initialize()...");
         try {
             auto res = pool->initialize();
             if (res) {
                 ready = true;
                 last_error.clear();
+                spdlog::info("[ONNX-Plugin] Pool initialized successfully, ready=true");
             } else {
                 ready = false;
                 last_error = res.error().message;
@@ -196,6 +243,8 @@ struct ProviderCtx {
             ready = false;
             last_error = e.what();
         }
+        spdlog::info("[ONNX-Plugin] ProviderCtx init complete: ready={} pool={}", ready,
+                     pool ? "valid" : "null");
     }
 };
 
@@ -263,36 +312,57 @@ struct ProviderSingleton {
                 }
             } catch (...) {
             }
+            std::string modelIdStr(model_id);
+
             // FSM: if already loading/ready, return OK
             {
                 std::lock_guard<std::mutex> lk(c->mu);
-                auto& st = c->model_states[model_id];
-                if (st == ProviderCtx::State::Ready || st == ProviderCtx::State::Loading)
+                auto& st = c->model_states[modelIdStr];
+                if (st == ProviderCtx::State::Ready) {
+                    spdlog::debug("[ONNX Plugin] load_model: '{}' already ready", model_id);
                     return YAMS_OK;
+                }
+                if (st == ProviderCtx::State::Loading) {
+                    spdlog::debug("[ONNX Plugin] load_model: '{}' already loading", model_id);
+                    return YAMS_OK;
+                }
+                // Check if in cooldown from previous failures
+                if (c->isInCooldown(modelIdStr)) {
+                    auto& info = c->model_failures[modelIdStr];
+                    spdlog::warn("[ONNX Plugin] load_model: '{}' in cooldown ({} failures), skipping",
+                                 model_id, info.consecutiveFailures);
+                    return YAMS_ERR_INTERNAL;
+                }
                 st = ProviderCtx::State::Loading;
             }
+            spdlog::info("[ONNX Plugin] load_model: starting load for '{}'", model_id);
             emit_progress(c, model_id, YAMS_MODEL_PHASE_PROBE, "probe");
 
             // Simply call loadModel synchronously - it returns immediately since the pool uses lazy
             // loading
-            auto r = c->pool->loadModel(model_id);
+            auto r = c->pool->loadModel(modelIdStr);
             if (r) {
                 {
                     std::lock_guard<std::mutex> lk(c->mu);
-                    c->model_states[model_id] = ProviderCtx::State::Ready;
+                    c->model_states[modelIdStr] = ProviderCtx::State::Ready;
+                    c->clearFailure(modelIdStr);
                 }
+                spdlog::info("[ONNX Plugin] load_model: '{}' loaded successfully", model_id);
                 emit_progress(c, model_id, YAMS_MODEL_PHASE_READY, "ready");
                 auto q =
                     yams::daemon::InternalEventBus::instance()
                         .get_or_create_channel<yams::daemon::InternalEventBus::ModelReadyEvent>(
                             "model.events", 256);
-                (void)q->try_push({std::string(model_id)});
+                (void)q->try_push({modelIdStr});
             } else {
+                std::string errMsg = r.error().message;
                 {
                     std::lock_guard<std::mutex> lk(c->mu);
-                    c->model_states[model_id] = ProviderCtx::State::Failed;
+                    c->model_states[modelIdStr] = ProviderCtx::State::Failed;
+                    c->recordFailure(modelIdStr, errMsg);
                 }
-                emit_progress(c, model_id, YAMS_MODEL_PHASE_UNKNOWN, r.error().message.c_str());
+                spdlog::error("[ONNX Plugin] load_model: '{}' failed: {}", model_id, errMsg);
+                emit_progress(c, model_id, YAMS_MODEL_PHASE_UNKNOWN, errMsg.c_str());
                 auto q = yams::daemon::InternalEventBus::instance()
                              .get_or_create_channel<
                                  yams::daemon::InternalEventBus::ModelLoadFailedEvent>(
@@ -420,13 +490,60 @@ struct ProviderSingleton {
                 spdlog::warn("[ONNX Plugin] generate_embedding: pool is null");
                 return YAMS_ERR_INTERNAL;
             }
+            std::string modelIdStr(model_id);
+
+            // Check if model is in cooldown after previous failures
+            {
+                std::lock_guard<std::mutex> lk(c->mu);
+                if (c->isInCooldown(modelIdStr)) {
+                    auto& info = c->model_failures[modelIdStr];
+                    spdlog::debug("[ONNX Plugin] Model '{}' in cooldown ({} failures)",
+                                  model_id, info.consecutiveFailures);
+                    *out_vec = nullptr;
+                    *out_dim = 0;
+                    return YAMS_ERR_INTERNAL;
+                }
+            }
+
             std::string text(reinterpret_cast<const char*>(input), input_len);
             auto h = c->pool->acquireModel(model_id, std::chrono::seconds(30));
             if (!h) {
-                spdlog::warn("[ONNX Plugin] acquireModel failed for {}: {}", model_id,
-                             h.error().message);
+                std::string errMsg = h.error().message;
+                spdlog::warn("[ONNX Plugin] acquireModel failed for {}: {}", model_id, errMsg);
+
+                // Record failure and fire event if this is first failure
+                {
+                    std::lock_guard<std::mutex> lk(c->mu);
+                    c->recordFailure(modelIdStr, errMsg);
+                    auto& info = c->model_failures[modelIdStr];
+                    c->model_states[modelIdStr] = ProviderCtx::State::Failed;
+
+                    if (!info.eventFired) {
+                        info.eventFired = true;
+                        spdlog::error("[ONNX Plugin] Model '{}' load failed, firing event: {}",
+                                      model_id, errMsg);
+                        try {
+                            auto q = yams::daemon::InternalEventBus::instance()
+                                         .get_or_create_channel<
+                                             yams::daemon::InternalEventBus::ModelLoadFailedEvent>(
+                                             "model.events", 256);
+                            (void)q->try_push({modelIdStr, errMsg});
+                        } catch (...) {
+                        }
+                    }
+                }
+                *out_vec = nullptr;
+                *out_dim = 0;
                 return YAMS_ERR_INTERNAL;
             }
+
+            // Model acquired successfully - clear failure tracking
+            {
+                std::lock_guard<std::mutex> lk(c->mu);
+                c->clearFailure(modelIdStr);
+                c->model_states[modelIdStr] = ProviderCtx::State::Ready;
+            }
+
             auto& session = *h.value();
             auto r = const_cast<yams::daemon::OnnxModelSession&>(session).generateEmbedding(text);
             if (!r) {
@@ -474,6 +591,8 @@ struct ProviderSingleton {
                                              const uint8_t* const* inputs, const size_t* input_lens,
                                              size_t batch_size, float** out_vecs, size_t* out_batch,
                                              size_t* out_dim) -> yams_status_t {
+            spdlog::info("[ONNX Plugin] generate_embedding_batch called: model={} batch={}",
+                         model_id ? model_id : "(null)", batch_size);
             if (!self || !model_id || !inputs || !input_lens || !out_vecs || !out_batch || !out_dim)
                 return YAMS_ERR_INVALID_ARG;
             // Wrap entire lambda body in try/catch to prevent exceptions from crossing ABI boundary.
@@ -481,6 +600,8 @@ struct ProviderSingleton {
             // when thread pool resources are exhausted (PBI-1c1).
             try {
             auto* c = static_cast<ProviderCtx*>(self);
+            spdlog::info("[ONNX Plugin] State: disabled={} ready={} pool={}",
+                         c->disabled, c->ready, c->pool ? "valid" : "null");
             if (c->disabled) {
                 spdlog::warn("[ONNX Plugin] generate_embedding_batch: plugin disabled");
                 return YAMS_ERR_UNSUPPORTED;
@@ -499,19 +620,72 @@ struct ProviderSingleton {
                 *out_dim = 0;
                 return YAMS_ERR_INTERNAL;
             }
+            std::string modelIdStr(model_id);
+
+            // Check if model is in cooldown after previous failures
+            {
+                std::lock_guard<std::mutex> lk(c->mu);
+                if (c->isInCooldown(modelIdStr)) {
+                    auto& info = c->model_failures[modelIdStr];
+                    spdlog::debug("[ONNX Plugin] Model '{}' in cooldown ({} failures, last: {})",
+                                  model_id, info.consecutiveFailures, info.lastError);
+                    *out_vecs = nullptr;
+                    *out_batch = 0;
+                    *out_dim = 0;
+                    return YAMS_ERR_INTERNAL;
+                }
+            }
+
             std::vector<std::string> texts;
             texts.reserve(batch_size);
             for (size_t i = 0; i < batch_size; ++i) {
                 texts.emplace_back(reinterpret_cast<const char*>(inputs[i]), input_lens[i]);
             }
-            spdlog::debug("[ONNX Plugin] generate_embedding_batch: model={} batch_size={}",
+            spdlog::info("[ONNX Plugin] generate_embedding_batch: model={} batch_size={}, calling acquireModel...",
                           model_id, batch_size);
             auto h = c->pool->acquireModel(model_id, std::chrono::seconds(30));
+            spdlog::info("[ONNX Plugin] acquireModel returned: has_value={}", h.has_value());
             if (!h) {
+                std::string errMsg = h.error().message;
                 spdlog::warn("[ONNX Plugin] acquireModel failed for '{}' (batch): {}", model_id,
-                             h.error().message);
+                             errMsg);
+
+                // Record failure and fire event if this is first failure
+                {
+                    std::lock_guard<std::mutex> lk(c->mu);
+                    c->recordFailure(modelIdStr, errMsg);
+                    auto& info = c->model_failures[modelIdStr];
+                    c->model_states[modelIdStr] = ProviderCtx::State::Failed;
+
+                    // Fire ModelLoadFailedEvent only once per failure sequence
+                    if (!info.eventFired) {
+                        info.eventFired = true;
+                        spdlog::error("[ONNX Plugin] Model '{}' load failed, firing event: {}",
+                                      model_id, errMsg);
+                        try {
+                            auto q = yams::daemon::InternalEventBus::instance()
+                                         .get_or_create_channel<
+                                             yams::daemon::InternalEventBus::ModelLoadFailedEvent>(
+                                             "model.events", 256);
+                            (void)q->try_push({modelIdStr, errMsg});
+                        } catch (...) {
+                            spdlog::warn("[ONNX Plugin] Failed to push ModelLoadFailedEvent");
+                        }
+                    }
+                }
+                *out_vecs = nullptr;
+                *out_batch = 0;
+                *out_dim = 0;
                 return YAMS_ERR_INTERNAL;
             }
+
+            // Model acquired successfully - clear any previous failure tracking
+            {
+                std::lock_guard<std::mutex> lk(c->mu);
+                c->clearFailure(modelIdStr);
+                c->model_states[modelIdStr] = ProviderCtx::State::Ready;
+            }
+
             auto& session = *h.value();
             auto r =
                 const_cast<yams::daemon::OnnxModelSession&>(session).generateBatchEmbeddings(texts);
@@ -765,7 +939,7 @@ extern "C" yams_model_provider_v1* yams_onnx_get_model_provider() {
 // Provide a small JSON health snapshot for the ABI host
 extern "C" const char* yams_onnx_get_health_json_cstr() {
     static thread_local std::string json;
-    const auto& c = singleton().ctx;
+    auto& c = singleton().ctx;
     // Build a minimal JSON reflecting readiness/disabled and last error
     nlohmann::json j;
     if (c.disabled) {
@@ -780,6 +954,41 @@ extern "C" const char* yams_onnx_get_health_json_cstr() {
     } else {
         j["status"] = "ok";
     }
+
+    // Add model states for diagnostics
+    {
+        std::lock_guard<std::mutex> lk(c.mu);
+        if (!c.model_states.empty() || !c.model_failures.empty()) {
+            nlohmann::json models = nlohmann::json::object();
+            for (const auto& [modelId, state] : c.model_states) {
+                nlohmann::json m;
+                switch (state) {
+                case ProviderCtx::State::Unloaded:
+                    m["state"] = "unloaded";
+                    break;
+                case ProviderCtx::State::Loading:
+                    m["state"] = "loading";
+                    break;
+                case ProviderCtx::State::Ready:
+                    m["state"] = "ready";
+                    break;
+                case ProviderCtx::State::Failed:
+                    m["state"] = "failed";
+                    break;
+                }
+                // Add failure info if present
+                auto fit = c.model_failures.find(modelId);
+                if (fit != c.model_failures.end() && fit->second.consecutiveFailures > 0) {
+                    m["failures"] = fit->second.consecutiveFailures;
+                    m["last_error"] = fit->second.lastError;
+                    m["in_cooldown"] = c.isInCooldown(modelId);
+                }
+                models[modelId] = m;
+            }
+            j["models"] = models;
+        }
+    }
+
     try {
         json = j.dump();
     } catch (...) {

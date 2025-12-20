@@ -1464,9 +1464,26 @@ std::string OnnxModelPool::resolveModelPath(const std::string& modelName) const 
         }
         return s;
     };
-    // Get home directory
-    const char* home = std::getenv("HOME");
-    std::string homeDir = home ? home : "";
+    // Get home directory (cross-platform)
+    std::string homeDir;
+    if (const char* home = std::getenv("HOME")) {
+        homeDir = home;
+    } else if (const char* userprofile = std::getenv("USERPROFILE")) {
+        // Windows: USERPROFILE is the user's home directory
+        homeDir = userprofile;
+    }
+
+    // Windows-specific paths
+    std::string localAppData;
+    std::string appData;
+#ifdef _WIN32
+    if (const char* lad = std::getenv("LOCALAPPDATA")) {
+        localAppData = lad;
+    }
+    if (const char* ad = std::getenv("APPDATA")) {
+        appData = ad;
+    }
+#endif
 
     // Build search paths with priority:
     // 1) Treat modelName as a full path
@@ -1587,20 +1604,53 @@ std::string OnnxModelPool::resolveModelPath(const std::string& modelName) const 
     }
 
     // Legacy ~/.yams/models (for backward compatibility)
-    searchPaths.push_back(homeDir + std::string("/.yams/models/") + modelName + "/model.onnx");
-    searchPaths.push_back(homeDir + std::string("/.yams/models/") + modelName + "/" + modelName +
-                          ".onnx");
-    searchPaths.push_back(homeDir + std::string("/.yams/models/") + modelName + ".onnx");
+    if (!homeDir.empty()) {
+        searchPaths.push_back(homeDir + "/.yams/models/" + modelName + "/model.onnx");
+        searchPaths.push_back(homeDir + "/.yams/models/" + modelName + "/" + modelName + ".onnx");
+        searchPaths.push_back(homeDir + "/.yams/models/" + modelName + ".onnx");
+    }
+
+#ifdef _WIN32
+    // Windows: Check LOCALAPPDATA/yams/models (primary Windows location)
+    if (!localAppData.empty()) {
+        searchPaths.push_back(localAppData + "\\yams\\models\\" + modelName + "\\model.onnx");
+        searchPaths.push_back(localAppData + "\\yams\\models\\" + modelName + "\\" + modelName +
+                              ".onnx");
+        searchPaths.push_back(localAppData + "\\yams\\models\\" + modelName + ".onnx");
+    }
+    // Windows: Check APPDATA/yams/models (roaming profile)
+    if (!appData.empty()) {
+        searchPaths.push_back(appData + "\\yams\\models\\" + modelName + "\\model.onnx");
+        searchPaths.push_back(appData + "\\yams\\models\\" + modelName + "\\" + modelName + ".onnx");
+        searchPaths.push_back(appData + "\\yams\\models\\" + modelName + ".onnx");
+    }
+#endif
 
     // Relative paths
     searchPaths.push_back("models/" + modelName + "/model.onnx");
     searchPaths.push_back("models/" + modelName + "/" + modelName + ".onnx");
     searchPaths.push_back("models/" + modelName + ".onnx");
 
-    // System paths
+#ifdef _WIN32
+    // Windows: System paths
+    searchPaths.push_back("C:\\ProgramData\\yams\\models\\" + modelName + "\\model.onnx");
+    searchPaths.push_back("C:\\ProgramData\\yams\\models\\" + modelName + "\\" + modelName +
+                          ".onnx");
+    searchPaths.push_back("C:\\ProgramData\\yams\\models\\" + modelName + ".onnx");
+#else
+    // Unix: System paths
     searchPaths.push_back("/usr/local/share/yams/models/" + modelName + "/model.onnx");
     searchPaths.push_back("/usr/local/share/yams/models/" + modelName + "/" + modelName + ".onnx");
     searchPaths.push_back("/usr/local/share/yams/models/" + modelName + ".onnx");
+#endif
+
+    // Log search paths on first attempt for debugging
+    spdlog::info("[ONNX Plugin] Resolving model path for '{}', searching {} locations", modelName,
+                 searchPaths.size());
+#ifdef _WIN32
+    spdlog::debug("[ONNX Plugin] Windows paths: LOCALAPPDATA={}, APPDATA={}, HOME={}",
+                  localAppData, appData, homeDir);
+#endif
 
     // Direct filesystem checks - no async, no timeouts needed for local files
     for (const auto& path : searchPaths) {
@@ -1609,15 +1659,20 @@ std::string OnnxModelPool::resolveModelPath(const std::string& modelName) const 
 
         try {
             if (fs::exists(path)) {
-                spdlog::debug("Found model at: {}", path);
+                spdlog::info("[ONNX Plugin] Found model at: {}", path);
                 return path;
             }
         } catch (const std::exception& e) {
-            spdlog::debug("Error checking path {}: {}", path, e.what());
+            spdlog::debug("[ONNX Plugin] Error checking path {}: {}", path, e.what());
         }
     }
 
-    spdlog::debug("Model {} not found in any search path", modelName);
+    spdlog::warn("[ONNX Plugin] Model '{}' not found in any search path. Searched:", modelName);
+    for (const auto& path : searchPaths) {
+        if (!path.empty()) {
+            spdlog::warn("[ONNX Plugin]   - {}", path);
+        }
+    }
     // Default to models directory
     return "models/" + modelName + ".onnx";
 }

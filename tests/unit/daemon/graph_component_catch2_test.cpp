@@ -219,3 +219,171 @@ TEST_CASE("GraphComponent: Get entity stats when no entity service", "[daemon][g
     REQUIRE(stats.jobsProcessed == 0);
     REQUIRE(stats.jobsFailed == 0);
 }
+
+// =============================================================================
+// KnowledgeGraphStore Query Tests (yams-cqp)
+// =============================================================================
+
+TEST_CASE("KnowledgeGraphStore: findNodesByType with pagination", "[daemon][graph][query]") {
+    GraphComponentTestFixture fixture;
+
+    // Insert some test nodes
+    for (int i = 0; i < 25; i++) {
+        KGNode node;
+        node.nodeKey = "fn:test:" + std::to_string(i);
+        node.label = "TestFunction" + std::to_string(i);
+        node.type = "function";
+        auto r = fixture.kgStore->upsertNode(node);
+        REQUIRE(r.has_value());
+    }
+
+    SECTION("List all nodes of type") {
+        auto result = fixture.kgStore->findNodesByType("function", 100, 0);
+        REQUIRE(result.has_value());
+        REQUIRE(result.value().size() == 25);
+    }
+
+    SECTION("Pagination with limit") {
+        auto result = fixture.kgStore->findNodesByType("function", 10, 0);
+        REQUIRE(result.has_value());
+        REQUIRE(result.value().size() == 10);
+    }
+
+    SECTION("Pagination with offset") {
+        auto result = fixture.kgStore->findNodesByType("function", 10, 20);
+        REQUIRE(result.has_value());
+        REQUIRE(result.value().size() == 5);  // Only 5 remaining after offset 20
+    }
+
+    SECTION("Pagination with offset and limit") {
+        auto first = fixture.kgStore->findNodesByType("function", 5, 0);
+        auto second = fixture.kgStore->findNodesByType("function", 5, 5);
+        REQUIRE(first.has_value());
+        REQUIRE(second.has_value());
+        REQUIRE(first.value().size() == 5);
+        REQUIRE(second.value().size() == 5);
+        // Verify no overlap
+        for (const auto& n1 : first.value()) {
+            for (const auto& n2 : second.value()) {
+                REQUIRE(n1.nodeKey != n2.nodeKey);
+            }
+        }
+    }
+
+    SECTION("Empty result for unknown type") {
+        auto result = fixture.kgStore->findNodesByType("nonexistent_type", 100, 0);
+        REQUIRE(result.has_value());
+        REQUIRE(result.value().empty());
+    }
+}
+
+TEST_CASE("KnowledgeGraphStore: findIsolatedNodes", "[daemon][graph][query]") {
+    GraphComponentTestFixture fixture;
+
+    // Create test nodes: 3 functions, 1 gets called, 2 are isolated
+    KGNode fn1, fn2, fn3;
+    fn1.nodeKey = "fn:called";
+    fn1.label = "CalledFunction";
+    fn1.type = "function";
+    fn2.nodeKey = "fn:isolated1";
+    fn2.label = "IsolatedFunction1";
+    fn2.type = "function";
+    fn3.nodeKey = "fn:isolated2";
+    fn3.label = "IsolatedFunction2";
+    fn3.type = "function";
+
+    auto r1 = fixture.kgStore->upsertNode(fn1);
+    auto r2 = fixture.kgStore->upsertNode(fn2);
+    auto r3 = fixture.kgStore->upsertNode(fn3);
+    REQUIRE(r1.has_value());
+    REQUIRE(r2.has_value());
+    REQUIRE(r3.has_value());
+
+    // Create a CALLS edge to fn1 (making it not isolated)
+    KGNode caller;
+    caller.nodeKey = "fn:caller";
+    caller.label = "CallerFunction";
+    caller.type = "function";
+    auto callerResult = fixture.kgStore->upsertNode(caller);
+    REQUIRE(callerResult.has_value());
+
+    KGEdge callEdge;
+    callEdge.srcNodeId = callerResult.value();
+    callEdge.dstNodeId = r1.value();
+    callEdge.relation = "CALLS";
+    auto edgeResult = fixture.kgStore->addEdge(callEdge);
+    REQUIRE(edgeResult.has_value());
+
+    SECTION("Find isolated functions (no incoming CALLS)") {
+        auto result = fixture.kgStore->findIsolatedNodes("function", "CALLS", 100);
+        REQUIRE(result.has_value());
+        // Should find fn:isolated1, fn:isolated2, and fn:caller (which has no incoming CALLS)
+        REQUIRE(result.value().size() == 3);
+        // fn:called should NOT be in the list (it has an incoming CALLS edge)
+        for (const auto& node : result.value()) {
+            REQUIRE(node.nodeKey != "fn:called");
+        }
+    }
+
+    SECTION("Find isolated with different relation") {
+        auto result = fixture.kgStore->findIsolatedNodes("function", "IMPORTS", 100);
+        REQUIRE(result.has_value());
+        // All 4 functions should be isolated for IMPORTS (no IMPORTS edges exist)
+        REQUIRE(result.value().size() == 4);
+    }
+}
+
+TEST_CASE("KnowledgeGraphStore: getNodeTypeCounts", "[daemon][graph][query]") {
+    GraphComponentTestFixture fixture;
+
+    // Insert nodes of various types
+    for (int i = 0; i < 10; i++) {
+        KGNode node;
+        node.nodeKey = "fn:func:" + std::to_string(i);
+        node.label = "Function" + std::to_string(i);
+        node.type = "function";
+        REQUIRE(fixture.kgStore->upsertNode(node).has_value());
+    }
+    for (int i = 0; i < 5; i++) {
+        KGNode node;
+        node.nodeKey = "cls:class:" + std::to_string(i);
+        node.label = "Class" + std::to_string(i);
+        node.type = "class";
+        REQUIRE(fixture.kgStore->upsertNode(node).has_value());
+    }
+    for (int i = 0; i < 3; i++) {
+        KGNode node;
+        node.nodeKey = "file:file:" + std::to_string(i);
+        node.label = "File" + std::to_string(i);
+        node.type = "file";
+        REQUIRE(fixture.kgStore->upsertNode(node).has_value());
+    }
+
+    SECTION("Returns all types with counts") {
+        auto result = fixture.kgStore->getNodeTypeCounts();
+        REQUIRE(result.has_value());
+        REQUIRE(result.value().size() == 3);  // function, class, file
+    }
+
+    SECTION("Counts are correct and ordered by count desc") {
+        auto result = fixture.kgStore->getNodeTypeCounts();
+        REQUIRE(result.has_value());
+        const auto& counts = result.value();
+
+        // Should be ordered by count descending
+        REQUIRE(counts[0].first == "function");
+        REQUIRE(counts[0].second == 10);
+        REQUIRE(counts[1].first == "class");
+        REQUIRE(counts[1].second == 5);
+        REQUIRE(counts[2].first == "file");
+        REQUIRE(counts[2].second == 3);
+    }
+}
+
+TEST_CASE("KnowledgeGraphStore: getNodeTypeCounts empty", "[daemon][graph][query]") {
+    // Test empty result with fresh fixture (no nodes inserted)
+    GraphComponentTestFixture fixture;
+    auto result = fixture.kgStore->getNodeTypeCounts();
+    REQUIRE(result.has_value());
+    REQUIRE(result.value().empty());
+}

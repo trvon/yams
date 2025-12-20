@@ -63,13 +63,6 @@ public:
                 return v == "1" || v == "true" || v == "yes" || v == "on";
             };
 
-            if (envTruthy(std::getenv("YAMS_DISABLE_VECTORS")) ||
-                envTruthy(std::getenv("YAMS_DISABLE_VECTOR_DB"))) {
-                spdlog::debug("[VectorDB] initialization skipped: disabled via environment");
-                initialized_ = true;
-                return true;
-            }
-
             // Allow test/CI override to force in-memory vector DB
             std::string db_path = config_.database_path;
             bool force_in_memory = config_.use_in_memory;

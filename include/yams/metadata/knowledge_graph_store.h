@@ -282,6 +282,10 @@ public:
                                                           std::string_view relation,
                                                           std::size_t limit = 1000) = 0;
 
+    // Get all distinct node types with their counts, ordered by count descending.
+    // Used for node type discovery in CLI (e.g., `yams graph --list-types`).
+    virtual Result<std::vector<std::pair<std::string, std::size_t>>> getNodeTypeCounts() = 0;
+
     // -----------------------------------------------------------------------------
     // Statistics
     // -----------------------------------------------------------------------------
