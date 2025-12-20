@@ -99,6 +99,11 @@ struct MetricsSnapshot {
     std::size_t entityDropped{0};
     std::size_t entityConsumed{0};
     std::size_t entityInFlight{0};
+    // Dynamic concurrency limits (PBI-05a)
+    std::size_t postExtractionLimit{4};
+    std::size_t postKgLimit{8};
+    std::size_t postSymbolLimit{4};
+    std::size_t postEntityLimit{2};
 
     // Readiness and init progress
     std::map<std::string, bool> readinessStates; // subsystem -> ready

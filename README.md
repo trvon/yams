@@ -1,6 +1,6 @@
 <p align="center">
 <h1 align="center">YAMS — Yet Another Memory System</h1>
-<h6 align="center">Persistent memory for LLMs and apps. Content‑addressed storage with dedupe, compression, full‑text and vector search.</h6>
+<h6 align="center">Persistent memory for LLMs and apps. Content-addressed storage with dedupe, compression, full-text and vector search.</h6>
 </p>
 <p align="center">
 <img alt="license" src="https://img.shields.io/github/license/trvon/yams?style=flat-square">
@@ -18,12 +18,12 @@
 
 
 ## Features
-- SHA‑256 content‑addressed storage
-- Block‑level dedupe (Rabin)
-- Full‑text search (SQLite FTS5) + semantic search (embeddings)
-- WAL‑backed durability, high‑throughput I/O, thread‑safe
-- Portable CLI and MCP server
-- Extensible with Plugin Support
+- SHA-256 content-addressed storage with block-level dedupe (Rabin chunking)
+- Full-text search (SQLite FTS5) + semantic vector search (embeddings)
+- Symbol extraction from source code (tree-sitter: C, C++, Python, JS, TS, Rust, Go, Java, C#, PHP, Kotlin, Dart, SQL, Solidity)
+- Snapshot management with Merkle tree diffs and rename detection
+- WAL-backed durability, high-throughput I/O, thread-safe
+- Portable CLI, MCP server, and plugin architecture (ONNX, S3, PDF extraction)
 
 ## Links
 - SourceHut: https://sr.ht/~trvon/yams/
@@ -43,14 +43,18 @@ brew install trvon/yams/yams
 # Or get nightly builds for latest features
 brew install trvon/yams/yams@nightly
 
-# If linking fails due to conflicts, force link
-brew link --overwrite yams
-
 # Verify installation
 yams --version
+```
 
-# Run as a service (optional)
-brew services start yams
+### Docker
+```bash
+# Pull and run
+docker pull ghcr.io/trvon/yams:latest
+docker run --rm -v yams-data:/home/yams/.local/share/yams ghcr.io/trvon/yams:latest --version
+
+# MCP server
+docker run -i --rm -v yams-data:/home/yams/.local/share/yams ghcr.io/trvon/yams:latest serve
 ```
 
 ### Build from Source
@@ -69,97 +73,112 @@ meson install -C build/release
 
 **Windows:**
 ```pwsh
-# Quick build (MSVC + Conan + Meson)
 ./setup.ps1 Release
-
-# Build
 meson compile -C build/release
 ```
 
-**Prerequisites:**
-- Compiler: GCC 13+, Clang 16+, or MSVC 2022+ (C++20 minimum)
-- Build tools: meson, ninja-build, cmake, pkg-config, conan
-- System libs: libssl-dev, libsqlite3-dev, protobuf-compiler (Linux/macOS)
+**Prerequisites:** GCC 13+, Clang 16+, or MSVC 2022+ (C++20); meson, ninja-build, cmake, pkg-config, conan
 
-See [docs/BUILD.md](docs/BUILD.md) for detailed build instructions, compiler configuration, Conan profiles, and troubleshooting.
+See [docs/BUILD.md](docs/BUILD.md) for detailed instructions.
 
 ## Quick Start
 ```bash
-# Initialize YAMS storage in current directory
+# Initialize (interactive - prompts for grammar downloads)
 yams init .
 
-# Or specify custom location
-export YAMS_STORAGE="$HOME/.local/share/yams"
-yams init
+# Auto mode for containers/headless
+yams init --auto
 
 # Add content
-echo hello | yams add - --tags demo
+yams add ./README.md --tags docs
+yams add src/ --recursive --include="*.cpp,*.h" --tags code
 
 # Search
-yams search hello --limit 5
+yams search "config file" --limit 5
+yams grep "TODO" --include="*.cpp"
 
-# List
-yams list --format minimal --limit 1 
+# List and retrieve
+yams list --limit 20
+yams get <hash> -o ./output.bin
 ```
 
-### Symbol Extraction (Tree-sitter Grammars)
+### Symbol Extraction
 
-YAMS can extract symbols (functions, classes, etc.) from source code using tree-sitter grammars. During `yams init`, you'll be prompted to download grammars:
+YAMS extracts symbols (functions, classes, methods) from source code using tree-sitter:
 
 ```bash
-# Interactive: choose recommended, all, or specific languages
+# Interactive grammar setup
 yams init
 
-# Auto mode: downloads recommended grammars (C, C++, Python, JS, TS, Rust, Go)
+# Or auto-download recommended grammars
 yams init --auto
+
+# Manage grammars separately
+yams config grammar list
+yams config grammar download cpp python rust
 ```
 
-**Supported languages:** C, C++, Python, JavaScript, TypeScript, Rust, Go, Java, C#, PHP, Kotlin, Dart, SQL, Solidity
+**Supported:** C, C++, Python, JavaScript, TypeScript, Rust, Go, Java, C#, PHP, Kotlin, Dart, SQL, Solidity
 
-**Requirements:** git + compiler (MSVC/MinGW on Windows, gcc/clang on Unix)
+### Snapshots & Diff
 
-**Manual grammar paths:** Set environment variables like `YAMS_TS_CPP_LIB=/path/to/libtree-sitter-cpp.so`
-
-### Path-Tree Search (Experimental)
-
-Enable hierarchical index for faster prefix/path scans in `config.toml`:
-
-```toml
-[search.path_tree]
-enable = true
-mode = "preferred" # or "fallback" to keep legacy scans as backup
-```
-
-Optimizes `yams grep` with explicit path prefixes via `listPathTreeChildren` index.
-
-## MCP
 ```bash
-yams serve  # stdio transport
+# Snapshots are created automatically on add
+yams add . --recursive --include="*.cpp,*.h" --snapshot-label "v1.0"
+
+# List snapshots
+yams list --snapshots
+
+# Compare snapshots (Merkle tree diff with rename detection)
+yams diff v1.0 v1.1
+yams diff v1.0 v1.1 --include="*.cpp" --stats
 ```
 
-MCP config (example):
+## MCP Server
+```bash
+yams serve  # stdio transport (JSON-RPC)
+```
+
+**Claude Desktop config** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
 ```json
 {
-  "mcpServers": { "yams": { "command": "/usr/local/bin/yams", "args": ["serve"] } }
+  "mcpServers": {
+    "yams": {
+      "command": "yams",
+      "args": ["serve"]
+    }
+  }
 }
+```
+
+## Plugins
+
+YAMS supports plugins for embeddings (ONNX), storage (S3), and content extraction (PDF):
+
+```bash
+yams plugin list                    # List loaded plugins
+yams plugin trust add ~/.local/lib/yams/plugins
+yams plugin health                  # Check plugin status
+yams doctor plugin onnx             # Diagnose specific plugin
 ```
 
 ## Troubleshooting
 
-**Build issues:** See [docs/BUILD.md](docs/BUILD.md) for compiler setup, Conan profiles, and dependency resolution.
+```bash
+yams doctor              # Full diagnostics
+yams stats --verbose     # Storage statistics
+yams repair --all        # Repair common issues
+```
 
-**Plugin discovery:** Verify with `yams plugin list`. If empty:
-- Check trusted directories: `yams plugin trust list`
-- Add plugin path: `yams plugin trust add ~/.local/lib/yams/plugins`
-- Verify shared libs: `ldd libyams_onnx_plugin.so`
+**Build issues:** See [docs/BUILD.md](docs/BUILD.md)
 
-**Monitor:** `yams stats --verbose` and `yams doctor` for diagnostics.
+**Plugin discovery:** `yams plugin list` empty? Add trust path: `yams plugin trust add ~/.local/lib/yams/plugins`
 
 ### Cite
-```aiignore
+```bibtex
 @misc{yams,
   author = {Trevon Williams},
-  title = {yams: Content addressable storage with   excellent search },
+  title = {YAMS: Content-addressable storage with semantic search},
   year = {2025},
   publisher = {GitHub},
   url = {https://github.com/trvon/yams}

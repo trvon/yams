@@ -168,6 +168,11 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             res.requestCounts["entity_dropped"] = snap->entityDropped;
             res.requestCounts["entity_consumed"] = snap->entityConsumed;
             res.requestCounts["entity_inflight"] = snap->entityInFlight;
+            // Dynamic concurrency limits (PBI-05a)
+            res.requestCounts["post_extraction_limit"] = snap->postExtractionLimit;
+            res.requestCounts["post_kg_limit"] = snap->postKgLimit;
+            res.requestCounts["post_symbol_limit"] = snap->postSymbolLimit;
+            res.requestCounts["post_entity_limit"] = snap->postEntityLimit;
             // Surface whether the InternalEventBus is being used for post-ingest
             try {
                 res.requestCounts["post_ingest_use_bus"] =

@@ -160,6 +160,60 @@ void TuningManager::tick_once() {
     } catch (...) {
     }
 
+    // PBI-05a: PostIngestQueue dynamic concurrency scaling
+    // Scale up when there's a large backlog, scale down when idle
+    try {
+        auto* pq = sm_->getPostIngestQueue();
+        if (pq) {
+            const std::size_t queuedItems = pq->size();
+            const std::size_t currentInFlight = pq->totalInFlight();
+            const uint32_t hwThreads = TuneAdvisor::hardwareConcurrency();
+
+            // Scale extraction concurrency based on queue depth
+            // When queue is large, scale up to process faster
+            // Max is capped at 50% of hardware threads or 64, whichever is smaller
+            uint32_t extractionTarget = 4; // default
+            if (queuedItems > 1000) {
+                extractionTarget = std::min<uint32_t>(hwThreads / 2, 32);
+            } else if (queuedItems > 500) {
+                extractionTarget = std::min<uint32_t>(hwThreads / 4, 16);
+            } else if (queuedItems > 100) {
+                extractionTarget = std::min<uint32_t>(hwThreads / 8 + 4, 12);
+            } else if (queuedItems > 10) {
+                extractionTarget = 8;
+            } else if (queuedItems == 0 && currentInFlight == 0) {
+                extractionTarget = 4; // idle - use minimum
+            }
+            extractionTarget = std::max<uint32_t>(4, extractionTarget); // floor at default
+            TuneAdvisor::setPostExtractionConcurrent(extractionTarget);
+
+            // KG concurrency scales similarly but with higher limits (DB-bound)
+            uint32_t kgTarget = 8;
+            if (queuedItems > 500) {
+                kgTarget = std::min<uint32_t>(hwThreads / 2, 32);
+            } else if (queuedItems > 100) {
+                kgTarget = 16;
+            }
+            TuneAdvisor::setPostKgConcurrent(kgTarget);
+
+            // Symbol extraction - scale modestly (CPU-bound)
+            uint32_t symbolTarget = queuedItems > 100 ? std::min<uint32_t>(hwThreads / 4, 8) : 4;
+            TuneAdvisor::setPostSymbolConcurrent(symbolTarget);
+
+            // Entity extraction stays low (heavy binary analysis)
+            uint32_t entityTarget = queuedItems > 50 ? 4 : 2;
+            TuneAdvisor::setPostEntityConcurrent(entityTarget);
+
+#if defined(TRACY_ENABLE)
+            TracyPlot("post.queued", static_cast<double>(queuedItems));
+            TracyPlot("post.inflight", static_cast<double>(currentInFlight));
+            TracyPlot("post.extraction.limit", static_cast<double>(extractionTarget));
+            TracyPlot("post.kg.limit", static_cast<double>(kgTarget));
+#endif
+        }
+    } catch (...) {
+    }
+
     // Writer budget observability: ensure a non-zero budget is published
     std::size_t writerBudget = TuneAdvisor::serverWriterBudgetBytesPerTurn();
     if (writerBudget == 0)

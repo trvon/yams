@@ -670,6 +670,11 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 out.kgInFlight = pq->kgInFlight();
                 out.symbolInFlight = pq->symbolInFlight();
                 out.entityInFlight = pq->entityInFlight();
+                // Dynamic concurrency limits (PBI-05a)
+                out.postExtractionLimit = TuneAdvisor::postExtractionConcurrent();
+                out.postKgLimit = TuneAdvisor::postKgConcurrent();
+                out.postSymbolLimit = TuneAdvisor::postSymbolConcurrent();
+                out.postEntityLimit = TuneAdvisor::postEntityConcurrent();
             }
             auto& bus = InternalEventBus::instance();
             out.kgQueued = bus.kgQueued();

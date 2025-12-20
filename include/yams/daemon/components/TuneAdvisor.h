@@ -1252,6 +1252,91 @@ public:
         enableHotzoneCheckpointOverride_.store(en ? 1 : 0, std::memory_order_relaxed);
     }
 
+    // =========================================================================
+    // PBI-05a: PostIngestQueue Dynamic Concurrency Scaling
+    // =========================================================================
+
+    /// Maximum concurrent extraction tasks (default 4, max 64)
+    /// Environment: YAMS_POST_EXTRACTION_CONCURRENT
+    static uint32_t postExtractionConcurrent() {
+        uint32_t ov = postExtractionConcurrentOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_POST_EXTRACTION_CONCURRENT")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1 && v <= 64)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 4; // Default matches original kMaxConcurrent_
+    }
+    static void setPostExtractionConcurrent(uint32_t v) {
+        postExtractionConcurrentOverride_.store(std::min(v, 64u), std::memory_order_relaxed);
+    }
+
+    /// Maximum concurrent KG ingestion tasks (default 8, max 64)
+    /// Environment: YAMS_POST_KG_CONCURRENT
+    static uint32_t postKgConcurrent() {
+        uint32_t ov = postKgConcurrentOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_POST_KG_CONCURRENT")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1 && v <= 64)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 8; // Default matches original kMaxKgConcurrent_
+    }
+    static void setPostKgConcurrent(uint32_t v) {
+        postKgConcurrentOverride_.store(std::min(v, 64u), std::memory_order_relaxed);
+    }
+
+    /// Maximum concurrent symbol extraction tasks (default 4, max 32)
+    /// Environment: YAMS_POST_SYMBOL_CONCURRENT
+    static uint32_t postSymbolConcurrent() {
+        uint32_t ov = postSymbolConcurrentOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_POST_SYMBOL_CONCURRENT")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1 && v <= 32)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 4; // Default matches original kMaxSymbolConcurrent_
+    }
+    static void setPostSymbolConcurrent(uint32_t v) {
+        postSymbolConcurrentOverride_.store(std::min(v, 32u), std::memory_order_relaxed);
+    }
+
+    /// Maximum concurrent entity extraction tasks (default 2, max 16)
+    /// Entity extraction is heavy (binary analysis) so lower default
+    /// Environment: YAMS_POST_ENTITY_CONCURRENT
+    static uint32_t postEntityConcurrent() {
+        uint32_t ov = postEntityConcurrentOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_POST_ENTITY_CONCURRENT")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1 && v <= 16)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 2; // Default matches original kMaxEntityConcurrent_
+    }
+    static void setPostEntityConcurrent(uint32_t v) {
+        postEntityConcurrentOverride_.store(std::min(v, 16u), std::memory_order_relaxed);
+    }
+
 private:
     // Runtime policy storage (single process); defaults chosen to reduce CPU when busy
     static inline std::atomic<AutoEmbedPolicy> autoEmbedPolicy_{AutoEmbedPolicy::Idle};
@@ -1312,6 +1397,12 @@ private:
     static inline std::atomic<uint32_t> checkpointIntervalSecondsOverride_{0};
     static inline std::atomic<uint32_t> checkpointInsertThresholdOverride_{0};
     static inline std::atomic<int> enableHotzoneCheckpointOverride_{-1};
+
+    // PBI-05a: PostIngestQueue concurrency overrides
+    static inline std::atomic<uint32_t> postExtractionConcurrentOverride_{0};
+    static inline std::atomic<uint32_t> postKgConcurrentOverride_{0};
+    static inline std::atomic<uint32_t> postSymbolConcurrentOverride_{0};
+    static inline std::atomic<uint32_t> postEntityConcurrentOverride_{0};
 };
 
 } // namespace yams::daemon

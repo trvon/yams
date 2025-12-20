@@ -285,11 +285,15 @@ public:
                                 // Per-stage breakdown
                                 nlohmann::json stages;
                                 stages["extraction_inflight"] = getCount("extraction_inflight");
+                                stages["extraction_limit"] = getCount("post_extraction_limit");
                                 stages["kg_inflight"] = getCount("kg_inflight");
+                                stages["kg_limit"] = getCount("post_kg_limit");
                                 stages["kg_queued"] = getCount("kg_queued");
                                 stages["symbol_inflight"] = getCount("symbol_inflight");
+                                stages["symbol_limit"] = getCount("post_symbol_limit");
                                 // Entity extraction metrics (external plugins like Ghidra)
                                 stages["entity_inflight"] = getCount("entity_inflight");
+                                stages["entity_limit"] = getCount("post_entity_limit");
                                 stages["entity_queued"] = getCount("entity_queued");
                                 stages["entity_consumed"] = getCount("entity_consumed");
                                 stages["entity_dropped"] = getCount("entity_dropped");
@@ -483,28 +487,32 @@ public:
                                               << ", cap=" << pic << ", rate=" << pir
                                               << "/s, lat=" << pil << "ms"
                                               << ", proc=" << pip << ", fail=" << pif << "\n";
-                                    // Per-stage breakdown
+                                    // Per-stage breakdown with dynamic limits (PBI-05a)
                                     uint64_t ext = getU64("extraction_inflight");
+                                    uint64_t extLim = getU64("post_extraction_limit");
                                     uint64_t kgq = getU64("kg_queued");
                                     uint64_t kgc = getU64("kg_consumed");
                                     uint64_t kgi = getU64("kg_inflight");
+                                    uint64_t kgLim = getU64("post_kg_limit");
                                     uint64_t sym = getU64("symbol_inflight");
+                                    uint64_t symLim = getU64("post_symbol_limit");
                                     // Entity extraction metrics (external plugins like Ghidra)
                                     uint64_t entq = getU64("entity_queued");
                                     uint64_t entc = getU64("entity_consumed");
                                     uint64_t enti = getU64("entity_inflight");
+                                    uint64_t entLim = getU64("post_entity_limit");
                                     // kgq is cumulative queued, kgc is cumulative consumed
                                     // Pending = queued - consumed - inflight (inflight haven't been consumed yet)
                                     int64_t kgPending = static_cast<int64_t>(kgq) - static_cast<int64_t>(kgc) - static_cast<int64_t>(kgi);
                                     if (kgPending < 0) kgPending = 0;
                                     int64_t entPending = static_cast<int64_t>(entq) - static_cast<int64_t>(entc) - static_cast<int64_t>(enti);
                                     if (entPending < 0) entPending = 0;
-                                    std::cout << "      stages: extract=" << ext
-                                              << ", kg(q=" << kgPending << "/i=" << kgi << ")"
-                                              << ", symbol=" << sym;
+                                    std::cout << "      stages: extract=" << ext << "/" << extLim
+                                              << ", kg(q=" << kgPending << "/i=" << kgi << "/" << kgLim << ")"
+                                              << ", symbol=" << sym << "/" << symLim;
                                     // Only show entity stage if there's any activity
                                     if (entq > 0 || enti > 0) {
-                                        std::cout << ", entity(q=" << entPending << "/i=" << enti << ")";
+                                        std::cout << ", entity(q=" << entPending << "/i=" << enti << "/" << entLim << ")";
                                     }
                                     std::cout << "\n";
                                 }

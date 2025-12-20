@@ -25,6 +25,23 @@ using yams::extraction::util::extractDocumentText;
 
 namespace yams::daemon {
 
+// Dynamic concurrency limits from TuneAdvisor
+std::size_t PostIngestQueue::maxExtractionConcurrent() {
+    return static_cast<std::size_t>(TuneAdvisor::postExtractionConcurrent());
+}
+
+std::size_t PostIngestQueue::maxKgConcurrent() {
+    return static_cast<std::size_t>(TuneAdvisor::postKgConcurrent());
+}
+
+std::size_t PostIngestQueue::maxSymbolConcurrent() {
+    return static_cast<std::size_t>(TuneAdvisor::postSymbolConcurrent());
+}
+
+std::size_t PostIngestQueue::maxEntityConcurrent() {
+    return static_cast<std::size_t>(TuneAdvisor::postEntityConcurrent());
+}
+
 PostIngestQueue::PostIngestQueue(
     std::shared_ptr<api::IContentStore> store, std::shared_ptr<metadata::MetadataRepository> meta,
     std::vector<std::shared_ptr<extraction::IContentExtractor>> extractors,
@@ -86,7 +103,9 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
 
     while (!stop_.load()) {
         InternalEventBus::PostIngestTask task;
-        if (inFlight_.load() < kMaxConcurrent_ && channel->try_pop(task)) {
+        // Dynamic concurrency limit from TuneAdvisor
+        const std::size_t maxConcurrent = maxExtractionConcurrent();
+        if (inFlight_.load() < maxConcurrent && channel->try_pop(task)) {
             inFlight_.fetch_add(1);
             boost::asio::post(coordinator_->getExecutor(),
                               [this, hash = std::move(task.hash), mime = std::move(task.mime)]() {
@@ -371,7 +390,9 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
 
     while (!stop_.load()) {
         InternalEventBus::KgJob job;
-        if (kgInFlight_.load() < kMaxKgConcurrent_ && channel->try_pop(job)) {
+        // Dynamic concurrency limit from TuneAdvisor
+        const std::size_t maxConcurrent = maxKgConcurrent();
+        if (kgInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
             kgInFlight_.fetch_add(1);
             boost::asio::post(coordinator_->getExecutor(),
                               [this, hash = std::move(job.hash), docId = job.documentId,
@@ -401,7 +422,9 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
 
     while (!stop_.load()) {
         InternalEventBus::SymbolExtractionJob job;
-        if (symbolInFlight_.load() < kMaxSymbolConcurrent_ && channel->try_pop(job)) {
+        // Dynamic concurrency limit from TuneAdvisor
+        const std::size_t maxConcurrent = maxSymbolConcurrent();
+        if (symbolInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
             symbolInFlight_.fetch_add(1);
             boost::asio::post(
                 coordinator_->getExecutor(),
@@ -531,7 +554,9 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
 
     while (!stop_.load()) {
         InternalEventBus::EntityExtractionJob job;
-        if (entityInFlight_.load() < kMaxEntityConcurrent_ && channel->try_pop(job)) {
+        // Dynamic concurrency limit from TuneAdvisor
+        const std::size_t maxConcurrent = maxEntityConcurrent();
+        if (entityInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
             entityInFlight_.fetch_add(1);
             boost::asio::post(
                 coordinator_->getExecutor(),

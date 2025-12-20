@@ -63,6 +63,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `yams daemon status -d` shows full Post-Ingest Pipeline section
   - JSON output includes `stages` object with per-stage counts
   - Location: `include/yams/daemon/components/PostIngestQueue.h`, `src/cli/commands/status_command.cpp`, `src/cli/commands/daemon_command.cpp`
+- **PostIngestQueue dynamic concurrency scaling (PBI-05a)**: Auto-scale based on queue depth
+  - New TuneAdvisor tunables: `postExtractionConcurrent()`, `postKgConcurrent()`, `postSymbolConcurrent()`, `postEntityConcurrent()`
+  - Dynamic limits replace static constexpr values in PostIngestQueue pollers
+  - TuningManager scales concurrency based on queue depth thresholds:
+    - `>1000 queued`: extraction=hwThreads/2, kg=hwThreads/2
+    - `>500 queued`: extraction=hwThreads/4, kg=32
+    - `>100 queued`: extraction=hwThreads/8+4, kg=16
+    - `>10 queued`: extraction=8
+    - `idle`: extraction=4 (default)
+  - Status output shows limits: `stages: extract=4/4, kg(q=0/i=0/8), symbol=0/4`
+  - JSON includes `extraction_limit`, `kg_limit`, `symbol_limit`, `entity_limit`
+  - Location: `include/yams/daemon/components/TuneAdvisor.h`, `src/daemon/components/TuningManager.cpp`, `src/daemon/components/DaemonMetrics.cpp`
 - **Knowledge Graph cleanup on document deletion**: Deleting documents now cascades to KG
   - `deleteNodesForDocumentHash()`: Removes `doc:<hash>` nodes and symbol nodes with matching document_hash
   - Integrated into document deletion flow for automatic cleanup

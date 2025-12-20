@@ -72,11 +72,11 @@ public:
         return inFlight_.load() + kgInFlight_.load() + symbolInFlight_.load() + entityInFlight_.load();
     }
 
-    // Stage concurrency limits
-    static constexpr std::size_t maxExtractionConcurrent() { return kMaxConcurrent_; }
-    static constexpr std::size_t maxKgConcurrent() { return kMaxKgConcurrent_; }
-    static constexpr std::size_t maxSymbolConcurrent() { return kMaxSymbolConcurrent_; }
-    static constexpr std::size_t maxEntityConcurrent() { return kMaxEntityConcurrent_; }
+    // Stage concurrency limits (dynamic via TuneAdvisor)
+    static std::size_t maxExtractionConcurrent();
+    static std::size_t maxKgConcurrent();
+    static std::size_t maxSymbolConcurrent();
+    static std::size_t maxEntityConcurrent();
 
     void setCapacity(std::size_t cap) { capacity_ = cap > 0 ? cap : capacity_; }
 
@@ -140,10 +140,7 @@ private:
     std::atomic<double> latencyMsEma_{0.0};
     std::atomic<double> ratePerSecEma_{0.0};
     std::size_t capacity_{1000};
-    static constexpr std::size_t kMaxConcurrent_ = 4;
-    static constexpr std::size_t kMaxKgConcurrent_ = 8;
-    static constexpr std::size_t kMaxSymbolConcurrent_ = 4;
-    static constexpr std::size_t kMaxEntityConcurrent_ = 2;  // Low concurrency for heavy binary analysis
+    // Concurrency limits now dynamic via TuneAdvisor (PBI-05a)
 
     std::chrono::steady_clock::time_point lastCompleteTs_{};
     static constexpr double kAlpha_ = 0.2;

@@ -83,26 +83,42 @@ yams [OPTIONS] <command> [command-options]
 Initialize YAMS storage and configuration (interactive or non-interactive).
 
 Synopsis:
-- yams init [--non-interactive] [--force] [--no-keygen] [--print]
+- yams init [OPTIONS] [path]
 
 Options:
 - --non-interactive
   - Run without prompts, using defaults and passed flags.
+- --auto
+  - Auto-initialize with all defaults for containerized/headless environments (enables vector DB, plugins, default model; skips S3).
 - --force
   - Overwrite existing config/keys if already initialized.
 - --no-keygen
   - Skip authentication key generation.
 - --print
   - Print resulting configuration to stdout (secrets masked).
+- --enable-plugins
+  - Create and trust a local plugins directory (`~/.local/lib/yams/plugins`).
 
 Notes:
 - The storage directory can be set globally via --storage/--data-dir or YAMS_STORAGE.
 - On first run, initialization will create the storage directory, database, and configuration.
+- Interactive mode prompts for tree-sitter grammar downloads for symbol extraction.
 
 Examples:
-```
-yams init --non-interactive
-yams --storage "$HOME/.local/share/yams" init --force
+```bash
+# Interactive initialization (prompts for grammar downloads)
+yams init .
+
+# Auto mode for containers/headless (downloads recommended grammars)
+yams init --auto
+
+# Non-interactive with explicit storage
+yams --storage "$HOME/.local/share/yams" init --non-interactive
+
+# Force re-initialization
+yams init --force
+
+# Print config without secrets
 yams init --print
 ```
 
@@ -137,21 +153,38 @@ Add a document to the store from a file or stdin.
 
 Synopsis:
 - yams add <path> [options]
+- yams add <paths...> [options]
 - yams add - [options]    # read from stdin
 
 Options:
 - -n, --name <name>
   - Set the document name (especially useful for stdin input)
 - -t, --tags <tags>
-  - Comma-separated tags for the document
+  - Comma-separated tags for the document (repeatable)
 - -m, --metadata <key=value>
-  - Custom metadata key-value pairs (can be used multiple times)
+  - Custom metadata key-value pairs (repeatable)
 - --mime-type <type>
   - Override MIME type detection
-- --label <label>
+- --no-auto-mime
+  - Disable automatic MIME type detection
+- --no-embeddings
+  - Disable automatic embedding generation for added documents
+- -r, --recursive
+  - Recursively add files from directories
+- --include <patterns>
+  - File patterns to include (e.g., '*.txt,*.md')
+- --exclude <patterns>
+  - File patterns to exclude (e.g., '*.tmp,*.log')
+- -c, --collection <name>
+  - Collection name for organizing documents
+- --snapshot-id <id>
+  - Unique snapshot identifier
+- --snapshot-label <label>
   - Human-readable label for the automatic snapshot (optional)
-- --collection <name>
-  - Group snapshots into a named collection
+- --verify
+  - Verify stored content (hash + existence) after add; slower but safer
+- --global, --no-session
+  - Add to global memory (bypass active session)
 
 Description:
 - Ingests the specified file or standard input and stores it in the content-addressed store.
@@ -843,7 +876,7 @@ yams grep "\bclass\s+\w+Command\b" --color=always
 
 ## config {#cmd-config}
 
-Manage configuration.
+Manage YAMS configuration settings.
 
 Subcommands:
 - get <key>
@@ -856,14 +889,32 @@ Subcommands:
   - Validate configuration.
 - export [--format toml|json]
   - Output current configuration.
+- embeddings
+  - Manage embedding configuration (model, dimensions).
+- search
+  - Manage search configuration.
+- grammar
+  - Manage tree-sitter grammars for symbol extraction.
+- tuning
+  - Manage daemon tuning settings.
+- storage
+  - Configure storage settings.
+- migrate
+  - Migrate configuration to v2.
+- update
+  - Add newly introduced v2 keys without overwriting existing values.
+- check
+  - Check if config needs migration.
 
 Examples:
-```
+```bash
 yams config list
 yams config get core.data_dir
-yams config set core.storage_engine local
+yams config set embeddings.preferred_model all-MiniLM-L6-v2
 yams config validate
 yams config export --format json
+yams config grammar list              # List available grammars
+yams config grammar download cpp      # Download C++ grammar
 ```
 
 ---
@@ -1009,40 +1060,57 @@ yams config embeddings model all-MiniLM-L6-v2
 
 ## plugin {#cmd-plugin}
 
-Manage plugins: scanning, trust policy, load/unload, and info.
+Manage plugins: scanning, trust policy, load/unload, install, and info.
 
 Synopsis:
 - yams plugin list
 - yams plugin scan [--dir DIR] [TARGET]
 - yams plugin info <name>
-- yams plugin load <path|name> [--config FILE] [--dry-run]
+- yams plugin health
+- yams plugin load <path|name>
 - yams plugin unload <name>
 - yams plugin trust add <path> | list | remove <path>
+- yams plugin install <name|url>
+- yams plugin uninstall <name>
+- yams plugin update [name]
+- yams plugin repo [query]
+- yams plugin search <query>
 
-Description:
-- list: Show loaded plugins and basic details (name/path).
-- scan: Inspect default directories (or a given dir/target file) for plugins without initializing them; prints name/version/ABI and interfaces.
+Subcommands:
+- list: Show loaded plugins and their interfaces.
+- scan: Inspect directories for plugins without initializing; prints name/version/ABI.
 - info: Show manifest/health JSON for a loaded plugin.
-- load: Load a plugin by absolute path or name (resolved in discovery paths); respects trust policy; `--dry-run` scans only.
+- health: Show health status of loaded plugins.
+- load: Load a plugin by absolute path or name; respects trust policy.
 - unload: Unload a plugin by name.
 - trust: Manage the trust policy file `~/.config/yams/plugins_trust.txt`.
+- install: Install plugin from repository or URL.
+- uninstall: Uninstall a plugin.
+- update: Update plugins to latest version.
+- repo: Query plugin repository.
+- search: Search plugin catalog (local index.json).
+- enable/disable: Enable/disable plugins (stub).
+- verify: Verify plugin signature/hash (stub).
 
 Notes:
 - Default discovery order: `YAMS_PLUGIN_DIR` (exclusive if set), `$HOME/.local/lib/yams/plugins`, `/usr/local/lib/yams/plugins`, `/usr/lib/yams/plugins`, and `${CMAKE_INSTALL_PREFIX}/lib/yams/plugins`.
-- The daemon prefers host‑backed `model_provider_v1` when an ONNX plugin is trusted/loaded; otherwise it falls back to the legacy registry or mock/null provider (see README for env toggles).
+- The daemon prefers host-backed `model_provider_v1` when an ONNX plugin is trusted/loaded; otherwise it falls back to the legacy registry or mock/null provider.
 - Disable plugin subsystem: start the daemon with `--no-plugins`.
 
 Examples:
-```
-# discover and trust a system plugins directory
+```bash
+# Discover and trust a system plugins directory
 yams plugin scan
 yams plugin trust add /usr/local/lib/yams/plugins
 yams plugin trust list
 
-# load ONNX plugin by path (respects trust policy)
+# Load ONNX plugin by path (respects trust policy)
 yams plugin load /usr/local/lib/yams/plugins/libyams_onnx_plugin.so
 
-# inspect and unload
+# Check plugin health
+yams plugin health
+
+# Inspect and unload
 yams plugin info onnx
 yams plugin unload onnx
 ```
@@ -1054,11 +1122,35 @@ yams plugin unload onnx
 Diagnose daemon connectivity, model/provider readiness, vector DB dimensions, and plugins. Includes repair helpers.
 
 Synopsis:
-- yams doctor [--fix] [--fix-config-dims] [--recreate-vectors [--dim N]] [--stop-daemon]
+- yams doctor [OPTIONS]
 - yams doctor daemon
-- yams doctor plugin [<path|name>] [--iface <id>] [--iface-version <N>] [--no-daemon]
+- yams doctor plugin [<path|name>]
 - yams doctor plugins
+- yams doctor embeddings
 - yams doctor repair [--embeddings] [--fts5] [--graph] [--all]
+- yams doctor validate
+- yams doctor dedupe
+- yams doctor prune
+- yams doctor tuning
+
+Subcommands:
+- daemon: Check daemon socket and status
+- plugin: Check a specific plugin (.so/.wasm or by name)
+- plugins: Show plugin summary (loaded + scan)
+- embeddings: Embeddings diagnostics and actions
+- repair: Repair common issues (embeddings, FTS5, graph)
+- validate: Validate knowledge graph health
+- dedupe: Detect (and optionally remove) duplicate documents
+- prune: Remove build artifacts, logs, cache, and temporary files
+- tuning: Auto-configure [tuning] based on system baseline
+
+Options:
+- --json: Output results in JSON format
+- --fix: Fix everything (embeddings + FTS5)
+- --fix-config-dims: Align config embedding dims to target (non-interactive)
+- --recreate-vectors: Drop and recreate vector tables to target dim
+- --dim <N>: Target dimension to use with --recreate-vectors
+- --stop-daemon: Attempt to stop daemon before DB operations
 
 Highlights:
 - Summary shows daemon status, vector DB dimension vs model target, and loaded plugins.
@@ -1072,11 +1164,17 @@ Repair options:
 - --all: Run all repair operations.
 
 Examples:
-```
+```bash
 yams doctor
+yams doctor --json
 yams doctor plugin onnx
+yams doctor plugins
 yams doctor repair --graph
+yams doctor repair --all
 yams doctor --recreate-vectors --dim 768 --stop-daemon
+yams doctor dedupe --dry-run
+yams doctor prune
+yams doctor tuning
 ```
 
 ---
@@ -1086,30 +1184,40 @@ yams doctor --recreate-vectors --dim 768 --stop-daemon
 Run storage/database maintenance and (optionally) embedding generation.
 
 Synopsis:
-- yams repair [--orphans] [--chunks] [--mime] [--optimize] [--all] [--dry-run] [--force]
-- yams repair --embeddings [--include-mime <mime>] [--limit <N>]
+- yams repair [OPTIONS]
 
-Description:
+Options:
 - --orphans: Clean orphaned metadata entries
 - --chunks: Remove orphaned chunk files and reclaim space
 - --mime: Fix missing MIME types in documents
+- --fts5: Rebuild FTS5 index for documents (best-effort)
+- --embeddings: Generate missing vector embeddings
+- --checksums: Verify and repair checksums
+- --duplicates: Find and optionally merge duplicates
+- --downloads: Repair download documents (add tags/metadata, normalize names)
+- --path-tree: Rebuild path tree index for documents missing from the tree
 - --optimize: Vacuum/optimize the database
-- --all: Run all non-embedding repair operations
+- --all: Run all repair operations
 - --dry-run: Preview operations without making changes
 - --force: Skip confirmations
-- --embeddings: Generate missing embeddings for eligible documents
-- --include-mime <mime>: Opt-in additional MIME types (e.g., application/pdf) for embeddings
+- --foreground: Run embeddings repair in foreground (stream progress)
+- --include-mime <mime>: Additional MIME types to embed (e.g., application/pdf), repeatable
+- --model <name>: Embedding model to use (overrides preferred)
+- --stop-daemon: Attempt to stop daemon before vector DB operations
+- -v, --verbose: Show detailed progress
 
 Notes:
 - By default, embedding repair targets text-like MIME types only; binaries (PDFs/images) are skipped unless explicitly included with --include-mime.
 - PDF text extraction and embedding depend on build configuration (PDF support must be available).
 
 Examples:
-```
+```bash
 yams repair --all --dry-run
 yams repair --orphans --chunks --optimize --force
 yams repair --embeddings
 yams repair --embeddings --include-mime application/pdf
+yams repair --fts5 --verbose
+yams repair --path-tree
 ```
 
 ---
@@ -1163,25 +1271,36 @@ yams daemon restart
 
 ---
 
-## serve (conditional) {#cmd-serve}
+## serve {#cmd-serve}
 
-Start the MCP (Model Context Protocol) server over stdio (only when built with YAMS_BUILD_MCP_SERVER=ON).
+Start the MCP (Model Context Protocol) server over stdio.
 
 Synopsis:
-- yams serve
+- yams serve [OPTIONS]
 
 Options:
-- None. Stdio transport only.
+- --daemon-socket <path>
+  - Override daemon socket path (env: YAMS_DAEMON_SOCKET)
+- --verbose
+  - Show startup banner and enable info-level logging (default: quiet mode)
 
 Description:
 - Exposes YAMS functionality through the Model Context Protocol for AI tool integration.
-- Uses stdio transport for direct AI integration.
+- Uses stdio transport (JSON-RPC over stdin/stdout) for direct AI integration.
 - Provides search, retrieval, and document management capabilities to AI systems.
 - Graceful shutdown on SIGINT/SIGTERM signals.
+- Server runs quietly by default; use --verbose for startup banner.
 
 Examples:
-```
+```bash
+# Start MCP server (default quiet mode)
 yams serve
+
+# With verbose logging
+yams serve --verbose
+
+# With custom daemon socket
+yams serve --daemon-socket /tmp/yams.sock
 ```
 
 ---
@@ -1605,3 +1724,11 @@ YAMS-first workflow (until watch/track is available)
 - Use --json where supported to integrate with scripts and tools.
 - Specify a storage directory explicitly with --storage or via YAMS_STORAGE to keep data separate for testing vs production.
 - When available, use --help --verbose for detailed per-command help, or yams --help-all for the full reference in the terminal.
+
+---
+
+## Links
+
+- **Docs:** [yamsmemory.ai](https://yamsmemory.ai)
+- **GitHub:** [github.com/trvon/yams](https://github.com/trvon/yams)
+- **Discord:** [discord.gg/rTBmRHdTEc](https://discord.gg/rTBmRHdTEc)
