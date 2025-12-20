@@ -91,6 +91,9 @@ private:
         {"solidity", "YAMS_TS_SOL_LIB", "tree_sitter_solidity", "libtree-sitter-solidity.so"},
         {"dart", "YAMS_TS_DART_LIB", "tree_sitter_dart", "libtree-sitter-dart.so"},
         {"flutter", "YAMS_TS_DART_LIB", "tree_sitter_dart", "libtree-sitter-dart.so"},
+        {"p4", "YAMS_TS_P4_LIB", "tree_sitter_p4", "libtree-sitter-p4.so"},
+        {"p4_16", "YAMS_TS_P4_LIB", "tree_sitter_p4", "libtree-sitter-p4.so"},
+        {"p4lang", "YAMS_TS_P4_LIB", "tree_sitter_p4", "libtree-sitter-p4.so"},
     };
 
     const GrammarSpec* findSpec(std::string_view language) const;
@@ -139,6 +142,7 @@ private:
         {"sql", "DerekStride/tree-sitter-sql"},
         {"solidity", "JoranHonig/tree-sitter-solidity"},
         {"dart", "UserNobody14/tree-sitter-dart"},
+        {"p4", "prona-p4-learning-platform/tree-sitter-p4"},
     };
 };
 

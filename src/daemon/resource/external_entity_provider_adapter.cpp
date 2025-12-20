@@ -8,8 +8,17 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <chrono>
 
 namespace yams::daemon {
+
+// Dynamic batch sizing thresholds
+// Smaller binaries can use larger batches; larger binaries need smaller batches to avoid timeouts
+constexpr size_t BATCH_SIZE_TINY = 1000;   // < 1MB: fast analysis
+constexpr size_t BATCH_SIZE_SMALL = 500;   // 1-5MB: moderate
+constexpr size_t BATCH_SIZE_MEDIUM = 200;  // 5-20MB: careful
+constexpr size_t BATCH_SIZE_LARGE = 100;   // 20-50MB: slow
+constexpr size_t BATCH_SIZE_HUGE = 50;     // > 50MB: very slow
 
 using json = nlohmann::json;
 
@@ -203,15 +212,37 @@ ExternalEntityProviderAdapter::extractEntities(const std::vector<std::byte>& byt
     }
 }
 
+size_t ExternalEntityProviderAdapter::calculateBatchSize(size_t binarySize) {
+    constexpr size_t MB = 1024 * 1024;
+    if (binarySize < 1 * MB) {
+        return BATCH_SIZE_TINY;
+    } else if (binarySize < 5 * MB) {
+        return BATCH_SIZE_SMALL;
+    } else if (binarySize < 20 * MB) {
+        return BATCH_SIZE_MEDIUM;
+    } else if (binarySize < 50 * MB) {
+        return BATCH_SIZE_LARGE;
+    } else {
+        return BATCH_SIZE_HUGE;
+    }
+}
+
 Result<ExternalEntityProviderAdapter::EntityResult>
 ExternalEntityProviderAdapter::extractAllEntities(const std::vector<std::byte>& bytes,
                                                   const std::string& filePath, size_t batchSize) {
+    // Use dynamic batch sizing if not specified
+    size_t effectiveBatchSize = batchSize > 0 ? batchSize : calculateBatchSize(bytes.size());
+
     EntityResult combined;
     size_t offset = 0;
     bool firstBatch = true;
 
+    spdlog::info("ExternalEntityProviderAdapter[{}]: extractAllEntities starting "
+                 "(size={} bytes, batchSize={})",
+                 pluginName_, bytes.size(), effectiveBatchSize);
+
     while (true) {
-        auto batchResult = extractEntities(bytes, filePath, offset, batchSize);
+        auto batchResult = extractEntities(bytes, filePath, offset, effectiveBatchSize);
         if (!batchResult) {
             return batchResult.error();
         }
@@ -249,6 +280,99 @@ ExternalEntityProviderAdapter::extractAllEntities(const std::vector<std::byte>& 
         pluginName_, combined.nodes.size(), combined.edges.size(), combined.aliases.size());
 
     return combined;
+}
+
+Result<ExternalEntityProviderAdapter::ExtractionProgress>
+ExternalEntityProviderAdapter::extractEntitiesStreaming(
+    const std::vector<std::byte>& bytes, const std::string& filePath,
+    BatchCallback callback, size_t batchSize) {
+
+    // Use dynamic batch sizing if not specified
+    size_t effectiveBatchSize = batchSize > 0 ? batchSize : calculateBatchSize(bytes.size());
+
+    auto startTime = std::chrono::steady_clock::now();
+    ExtractionProgress progress;
+    progress.binarySize = bytes.size();
+
+    size_t offset = 0;
+    size_t batchNumber = 0;
+
+    spdlog::info("ExternalEntityProviderAdapter[{}]: streaming extraction starting "
+                 "(size={} bytes, batchSize={})",
+                 pluginName_, bytes.size(), effectiveBatchSize);
+
+    while (true) {
+        auto batchResult = extractEntities(bytes, filePath, offset, effectiveBatchSize);
+        if (!batchResult) {
+            spdlog::warn("ExternalEntityProviderAdapter[{}]: batch {} failed: {}",
+                         pluginName_, batchNumber, batchResult.error().message);
+            // Return progress so far - partial success is better than total failure
+            if (batchNumber > 0) {
+                spdlog::info("ExternalEntityProviderAdapter[{}]: returning partial progress "
+                             "(batches={}, nodes={}, edges={}, aliases={})",
+                             pluginName_, batchNumber, progress.nodesExtracted,
+                             progress.edgesExtracted, progress.aliasesExtracted);
+            }
+            return batchResult.error();
+        }
+
+        auto& batch = batchResult.value();
+        ++batchNumber;
+
+        // Capture pagination info before potential move
+        bool hasMore = batch.hasMore;
+        size_t nextOffset = batch.nextOffset;
+
+        // Update progress
+        progress.batchNumber = batchNumber;
+        progress.functionsProcessed = nextOffset > 0 ? nextOffset : offset + effectiveBatchSize;
+        progress.totalFunctions = batch.totalFunctions;
+        progress.nodesExtracted += batch.nodes.size();
+        progress.edgesExtracted += batch.edges.size();
+        progress.aliasesExtracted += batch.aliases.size();
+
+        auto elapsed = std::chrono::steady_clock::now() - startTime;
+        progress.elapsedSeconds = std::chrono::duration<double>(elapsed).count();
+
+        // Estimate total batches
+        if (batch.totalFunctions > 0 && effectiveBatchSize > 0) {
+            progress.totalBatchesEstimate = (batch.totalFunctions + effectiveBatchSize - 1) / effectiveBatchSize;
+        }
+
+        spdlog::info("ExternalEntityProviderAdapter[{}]: batch {}/{} complete "
+                     "(funcs={}/{}, nodes={}, edges={}, aliases={}, elapsed={:.1f}s)",
+                     pluginName_, batchNumber, progress.totalBatchesEstimate,
+                     progress.functionsProcessed, progress.totalFunctions,
+                     batch.nodes.size(), batch.edges.size(), batch.aliases.size(),
+                     progress.elapsedSeconds);
+
+        // Call the callback with this batch - it can ingest immediately
+        if (!callback(std::move(batch), progress)) {
+            spdlog::info("ExternalEntityProviderAdapter[{}]: extraction aborted by callback",
+                         pluginName_);
+            break;
+        }
+
+        if (!hasMore) {
+            break;
+        }
+
+        offset = nextOffset;
+
+        // Safety check: prevent infinite loop if nextOffset doesn't advance
+        if (offset == 0 && batchNumber > 1) {
+            spdlog::warn("ExternalEntityProviderAdapter[{}]: nextOffset=0 after batch {}, stopping",
+                         pluginName_, batchNumber);
+            break;
+        }
+    }
+
+    spdlog::info("ExternalEntityProviderAdapter[{}]: streaming extraction complete "
+                 "(batches={}, nodes={}, edges={}, aliases={}, elapsed={:.1f}s)",
+                 pluginName_, progress.batchNumber, progress.nodesExtracted,
+                 progress.edgesExtracted, progress.aliasesExtracted, progress.elapsedSeconds);
+
+    return progress;
 }
 
 bool ExternalEntityProviderAdapter::isBusy() const {

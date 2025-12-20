@@ -120,7 +120,8 @@ yams_onnx_plugin_srcs = [
   '../../src/genai/onnx_genai_adapter.cpp',
 ]
 
-plugin_cppargs = ['-DYAMS_ENABLE_ONNX_GENAI=1']
+# GenAI adapter disabled - not used
+plugin_cppargs = []
 if onnx_genai_headers_present
   plugin_cppargs += ['-DYAMS_GENAI_RUNTIME_PRESENT']
 endif

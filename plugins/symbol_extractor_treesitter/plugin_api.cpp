@@ -36,7 +36,8 @@ static bool supports_language_abi(void* /*self*/, const char* language) {
     static const std::unordered_set<std::string> supported_languages = {
         "c",          "cpp",  "c++",  "python", "rust", "go",  "javascript", "js",
         "typescript", "ts",   "java", "csharp", "c#",   "cs",  "php",        "kotlin",
-        "kt",         "perl", "pl",   "r",      "sql",  "sol", "solidity"};
+        "kt",         "perl", "pl",   "r",      "sql",  "sol", "solidity",   "dart",
+        "flutter",    "p4",   "p4_16", "p4lang"};
 
     return supported_languages.count(lang) > 0;
 }
@@ -230,7 +231,7 @@ static int get_capabilities_json_abi(void* /*self*/, char** out_json) {
     if (!out_json)
         return YAMS_PLUGIN_ERR_INVALID;
     std::string json = R"({
-      "languages": ["cpp", "c++", "c", "python", "go", "rust", "javascript", "typescript", "java", "csharp", "php", "kotlin", "perl", "r", "sql", "solidity", "sol"],
+      "languages": ["cpp", "c++", "c", "python", "go", "rust", "javascript", "typescript", "java", "csharp", "php", "kotlin", "perl", "r", "sql", "solidity", "sol", "dart", "p4"],
       "features": ["symbols", "relations", "auto_grammar_loading"],
       "version": "1.0.0"
     })";

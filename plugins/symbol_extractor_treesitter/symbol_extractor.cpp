@@ -259,26 +259,30 @@ inline constexpr LanguageConfig lang_javascript = {
     .name = "javascript",
     .aliases = {"js"},
     .alias_count = 1,
-    .class_types = makeNodeTypes("class_declaration", "class"),
+    .class_types = makeNodeTypes("class_declaration", "class", "class_static_block"),
     .field_types = makeNodeTypes("public_field_definition", "field_definition",
                                  "property_signature"),
-    .function_types = makeNodeTypes("function_declaration", "function", "arrow_function",
-                                    "method_definition"),
-    .import_types = makeNodeTypes("import_statement", "import_specifier"),
+    .function_types = makeNodeTypes("function_declaration", "function_expression", "arrow_function",
+                                    "method_definition", "generator_function",
+                                    "generator_function_declaration"),
+    .import_types = makeNodeTypes("import_statement", "import_specifier", "namespace_import",
+                                  "export_statement", "export_specifier"),
     .identifier_types = makeNodeTypes("identifier", "property_identifier"),
     .function_queries = makeQueries(
         "(function_declaration name: (identifier) @name)",
+        "(function_expression name: (identifier) @name)",
         "(method_definition name: (property_identifier) @name)",
         "(variable_declarator name: (identifier) @name value: (arrow_function))",
-        "(variable_declarator name: (identifier) @name value: (function))",
-        "(generator_function_declaration name: (identifier) @name)"),
+        "(variable_declarator name: (identifier) @name value: (function_expression))",
+        "(generator_function_declaration name: (identifier) @name)",
+        "(generator_function name: (identifier) @name)"),
     .class_queries = makeQueries(
         "(class_declaration name: (identifier) @name)",
         "(class name: (identifier) @name)"),
     .import_queries = makeQueries(
         "(import_statement source: (string) @source)",
-        "(call_expression function: (import) arguments: (arguments (string) @source))",
-        "(call_expression function: (identifier) @fn arguments: (arguments (string) @source))"),
+        "(export_statement source: (string) @source)",
+        "(call_expression function: (import) arguments: (arguments (string) @source))"),
     .call_queries = makeQueries(
         "(call_expression function: (identifier) @callee) @call",
         "(call_expression function: (member_expression property: (property_identifier) @callee)) @call"),
@@ -289,27 +293,33 @@ inline constexpr LanguageConfig lang_typescript = {
     .aliases = {"ts"},
     .alias_count = 1,
     .class_types = makeNodeTypes("class_declaration", "class", "interface_declaration",
-                                 "type_alias_declaration"),
+                                 "type_alias_declaration", "abstract_class_declaration"),
     .field_types = makeNodeTypes("public_field_definition", "field_definition",
                                  "property_signature"),
-    .function_types = makeNodeTypes("function_declaration", "function", "arrow_function",
-                                    "method_definition", "method_signature"),
-    .import_types = makeNodeTypes("import_statement", "import_specifier"),
+    .function_types = makeNodeTypes("function_declaration", "function_expression", "arrow_function",
+                                    "method_definition", "method_signature",
+                                    "abstract_method_signature", "generator_function"),
+    .import_types = makeNodeTypes("import_statement", "import_specifier", "namespace_import",
+                                  "export_statement", "import_alias"),
     .identifier_types = makeNodeTypes("identifier", "property_identifier", "type_identifier"),
     .function_queries = makeQueries(
         "(function_declaration name: (identifier) @name)",
+        "(function_expression name: (identifier) @name)",
         "(method_definition name: (property_identifier) @name)",
         "(variable_declarator name: (identifier) @name value: (arrow_function))",
-        "(variable_declarator name: (identifier) @name value: (function))",
-        "(method_signature name: (property_identifier) @name)"),
+        "(variable_declarator name: (identifier) @name value: (function_expression))",
+        "(method_signature name: (property_identifier) @name)",
+        "(abstract_method_signature name: (property_identifier) @name)"),
     .class_queries = makeQueries(
         "(class_declaration name: (identifier) @name)",
         "(class name: (identifier) @name)",
+        "(abstract_class_declaration name: (identifier) @name)",
         "(interface_declaration name: (type_identifier) @name)",
         "(type_alias_declaration name: (type_identifier) @name)",
         "(enum_declaration name: (identifier) @name)"),
     .import_queries = makeQueries(
         "(import_statement source: (string) @source)",
+        "(export_statement source: (string) @source)",
         "(call_expression function: (import) arguments: (arguments (string) @source))"),
     .call_queries = makeQueries(
         "(call_expression function: (identifier) @callee) @call",
@@ -494,12 +504,42 @@ inline constexpr LanguageConfig lang_dart = {
         "(cascade_selector (identifier) @callee) @call"),
 };
 
+// P4 (Programming Protocol-independent Packet Processors) - network data plane language
+inline constexpr LanguageConfig lang_p4 = {
+    .name = "p4",
+    .aliases = {"p4_16", "p4lang"},
+    .alias_count = 2,
+    .class_types = makeNodeTypes("headerTypeDeclaration", "structTypeDeclaration",
+                                 "controlDeclaration", "parserDeclaration"),
+    .field_types = makeNodeTypes("structField", "parameter"),
+    .function_types = makeNodeTypes("actionDeclaration", "functionDeclaration",
+                                    "externDeclaration", "methodPrototype"),
+    .import_types = makeNodeTypes("includeStatement"),
+    .identifier_types = makeNodeTypes("IDENTIFIER", "nonTypeName", "typeName"),
+    .function_queries = makeQueries(
+        "(actionDeclaration name: (IDENTIFIER) @name)",
+        "(functionDeclaration (functionPrototype name: (IDENTIFIER) @name))",
+        "(externDeclaration name: (IDENTIFIER) @name)",
+        "(methodPrototype name: (IDENTIFIER) @name)"),
+    .class_queries = makeQueries(
+        "(headerTypeDeclaration name: (IDENTIFIER) @name)",
+        "(structTypeDeclaration name: (IDENTIFIER) @name)",
+        "(controlDeclaration name: (IDENTIFIER) @name)",
+        "(parserDeclaration name: (IDENTIFIER) @name)",
+        "(tableDeclaration name: (IDENTIFIER) @name)",
+        "(typedefDeclaration name: (IDENTIFIER) @name)"),
+    .import_queries = makeQueries("(includeStatement (STRING_LITERAL) @path)"),
+    .call_queries = makeQueries(
+        "(functionCall function: (IDENTIFIER) @callee) @call",
+        "(methodCallExpression method: (IDENTIFIER) @callee) @call"),
+};
+
 // Master configuration table
-inline constexpr std::array<const LanguageConfig*, 16> language_configs = {
+inline constexpr std::array<const LanguageConfig*, 17> language_configs = {
     &lang_cpp,        &lang_c,      &lang_python,   &lang_rust,     &lang_go,
     &lang_java,       &lang_javascript, &lang_typescript, &lang_csharp,
     &lang_php,        &lang_kotlin, &lang_perl,     &lang_r,        &lang_sql,
-    &lang_solidity,   &lang_dart,
+    &lang_solidity,   &lang_dart,   &lang_p4,
 };
 
 // Lookup function - returns nullptr if language not found

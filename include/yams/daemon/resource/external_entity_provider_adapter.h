@@ -11,6 +11,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -50,18 +51,40 @@ public:
     };
 
     /**
+     * @brief Progress information for streaming extraction.
+     */
+    struct ExtractionProgress {
+        size_t batchNumber{0};
+        size_t totalBatchesEstimate{0};
+        size_t functionsProcessed{0};
+        size_t totalFunctions{0};
+        size_t nodesExtracted{0};
+        size_t edgesExtracted{0};
+        size_t aliasesExtracted{0};
+        double elapsedSeconds{0.0};
+        size_t binarySize{0};
+    };
+
+    /**
+     * @brief Callback for streaming entity extraction.
+     *
+     * Called after each batch is extracted. Return false to abort extraction.
+     */
+    using BatchCallback = std::function<bool(EntityResult batch, const ExtractionProgress& progress)>;
+
+    /**
      * @brief Construct adapter for an external plugin.
      *
      * @param host External plugin host for RPC communication
      * @param pluginName Name of the plugin to call
      * @param rpcMethod RPC method name (e.g., "ghidra.getEntities")
      * @param supportedExtensions File extensions this provider supports (e.g., ".exe", ".dll")
-     * @param timeout RPC timeout (default 10 minutes for heavy analysis)
+     * @param timeout RPC timeout per batch (default 15 minutes for heavy analysis)
      */
     ExternalEntityProviderAdapter(ExternalPluginHost* host, std::string pluginName,
                                   std::string rpcMethod,
                                   std::vector<std::string> supportedExtensions,
-                                  std::chrono::milliseconds timeout = std::chrono::minutes{10});
+                                  std::chrono::milliseconds timeout = std::chrono::minutes{15});
 
     ~ExternalEntityProviderAdapter() = default;
 
@@ -99,11 +122,35 @@ public:
      *
      * @param bytes Binary file content
      * @param filePath Path to the file (for metadata)
-     * @param batchSize Entities per batch
+     * @param batchSize Entities per batch (0 = auto-size based on binary)
      * @return EntityResult containing all entities
      */
     Result<EntityResult> extractAllEntities(const std::vector<std::byte>& bytes,
-                                            const std::string& filePath, size_t batchSize = 500);
+                                            const std::string& filePath, size_t batchSize = 0);
+
+    /**
+     * @brief Extract entities with streaming callback for per-batch processing.
+     *
+     * Calls the callback after each batch, allowing immediate KG insertion.
+     * Dynamic batch sizing based on binary size when batchSize=0.
+     *
+     * @param bytes Binary file content
+     * @param filePath Path to the file (for metadata)
+     * @param callback Called after each batch; return false to abort
+     * @param batchSize Entities per batch (0 = auto-size based on binary)
+     * @return Total extraction stats on success
+     */
+    Result<ExtractionProgress> extractEntitiesStreaming(
+        const std::vector<std::byte>& bytes, const std::string& filePath,
+        BatchCallback callback, size_t batchSize = 0);
+
+    /**
+     * @brief Calculate optimal batch size based on binary size.
+     *
+     * Smaller binaries get larger batches (faster), larger binaries get
+     * smaller batches (avoid timeouts).
+     */
+    static size_t calculateBatchSize(size_t binarySize);
 
     /// Get the plugin name
     const std::string& name() const { return pluginName_; }

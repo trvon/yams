@@ -706,8 +706,26 @@ private:
             out_names.push_back(def);
         }
 
-        auto outputs = session_->Run(Ort::RunOptions{nullptr}, in_names.data(), inputs.data(),
-                                     inputs.size(), out_names.data(), out_names.size());
+        // Wrap ONNX Run in try/catch to prevent exceptions from bubbling through ABI boundary
+        // On Windows, ORT can throw std::system_error("resource deadlock would occur") when
+        // thread pool resources are exhausted (PBI-1c1)
+        std::vector<Ort::Value> outputs;
+        try {
+            outputs = session_->Run(Ort::RunOptions{nullptr}, in_names.data(), inputs.data(),
+                                    inputs.size(), out_names.data(), out_names.size());
+        } catch (const Ort::Exception& e) {
+            fprintf(stderr, "[ONNX Plugin] Ort::Exception in Run: %s\n", e.what());
+            return Error{ErrorCode::InternalError,
+                         std::string("ONNX runtime error: ") + e.what()};
+        } catch (const std::system_error& e) {
+            fprintf(stderr, "[ONNX Plugin] std::system_error in Run: %s\n", e.what());
+            return Error{ErrorCode::InternalError,
+                         std::string("System error during ONNX inference: ") + e.what()};
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[ONNX Plugin] std::exception in Run: %s\n", e.what());
+            return Error{ErrorCode::InternalError,
+                         std::string("Exception during ONNX inference: ") + e.what()};
+        }
         if (outputs.empty())
             return Error{ErrorCode::InternalError, "ONNX session returned no outputs"};
 
@@ -1055,17 +1073,23 @@ Result<OnnxModelPool::ModelHandle> OnnxModelPool::acquireModel(const std::string
     totalRequests_++;
 
     // Check if model is already loaded
+    // IMPORTANT: Get pool pointer under lock, then release lock before calling acquire()
+    // to avoid deadlock with ResourcePool's internal locking (PBI-1c1 fix)
+    std::shared_ptr<ResourcePool<OnnxModelSession>> poolPtr;
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
         auto it = models_.find(modelName);
         if (it != models_.end() && it->second.pool) {
-            // Model is loaded, acquire from pool
             updateAccessStats(modelName);
             cacheHits_++;
-
-            return it->second.pool->acquire(timeout);
+            poolPtr = it->second.pool;
         }
+    }
+
+    // Acquire outside of lock to avoid deadlock
+    if (poolPtr) {
+        return poolPtr->acquire(timeout);
     }
 
     cacheMisses_++;
@@ -1075,12 +1099,19 @@ Result<OnnxModelPool::ModelHandle> OnnxModelPool::acquireModel(const std::string
         return result.error();
     }
 
-    // Try again after loading
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = models_.find(modelName);
-    if (it != models_.end() && it->second.pool) {
-        updateAccessStats(modelName);
-        return it->second.pool->acquire(timeout);
+    // Try again after loading - get pool pointer while holding lock
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = models_.find(modelName);
+        if (it != models_.end() && it->second.pool) {
+            updateAccessStats(modelName);
+            poolPtr = it->second.pool;
+        }
+    }
+
+    // Acquire outside of lock
+    if (poolPtr) {
+        return poolPtr->acquire(timeout);
     }
 
     return Error{ErrorCode::NotFound, "Failed to load model: " + modelName};

@@ -580,7 +580,7 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
         if (store_) {
             auto contentResult = store_->retrieveBytes(hash);
             if (contentResult) {
-                content = contentResult.value();
+                content = std::move(contentResult.value());
             } else {
                 spdlog::warn("[PostIngestQueue] Failed to load content for entity extraction: {}",
                              hash.substr(0, 12));
@@ -591,91 +591,121 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
             return;
         }
 
-        // Extract entities from binary
-        auto result = provider->extractAllEntities(content, filePath);
-        if (!result) {
-            spdlog::warn("[PostIngestQueue] Entity extraction failed for {}: {}", hash,
-                         result.error().message);
+        if (!kg_) {
+            spdlog::warn("[PostIngestQueue] No KG store for entity extraction");
             return;
         }
 
-        auto& entities = result.value();
-        spdlog::info("[PostIngestQueue] Extracted {} nodes, {} edges, {} aliases from {}",
-                     entities.nodes.size(), entities.edges.size(), entities.aliases.size(),
-                     filePath);
+        // Track cumulative nodeKey -> nodeId mappings across batches
+        // This allows edges to reference nodes from previous batches
+        std::unordered_map<std::string, std::int64_t> keyToId;
+        size_t totalNodesInserted = 0;
+        size_t totalEdgesInserted = 0;
+        size_t totalAliasesInserted = 0;
 
-        // Ingest entities into KG
-        if (kg_ && !entities.nodes.empty()) {
-            // First insert all nodes and get their IDs
-            auto nodeIds = kg_->upsertNodes(entities.nodes);
-            if (!nodeIds) {
-                spdlog::warn("[PostIngestQueue] Failed to insert entity nodes: {}",
-                             nodeIds.error().message);
-                return;
-            }
+        // Use streaming extraction with per-batch KG insertion
+        auto result = provider->extractEntitiesStreaming(
+            content, filePath,
+            [this, &keyToId, &totalNodesInserted, &totalEdgesInserted, &totalAliasesInserted,
+             &hash](ExternalEntityProviderAdapter::EntityResult batch,
+                    const ExternalEntityProviderAdapter::ExtractionProgress& progress) -> bool {
 
-            // Build nodeKey -> nodeId map for edge resolution
-            std::unordered_map<std::string, std::int64_t> keyToId;
-            for (size_t i = 0; i < entities.nodes.size() && i < nodeIds.value().size(); ++i) {
-                keyToId[entities.nodes[i].nodeKey] = nodeIds.value()[i];
-            }
-
-            // Resolve edge src/dst keys to IDs
-            std::vector<metadata::KGEdge> resolvedEdges;
-            for (auto& edge : entities.edges) {
-                // Parse _src_key and _dst_key from properties
-                try {
-                    if (!edge.properties) continue;
-                    auto props = nlohmann::json::parse(*edge.properties);
-                    std::string srcKey = props.value("_src_key", "");
-                    std::string dstKey = props.value("_dst_key", "");
-
-                    auto srcIt = keyToId.find(srcKey);
-                    auto dstIt = keyToId.find(dstKey);
-
-                    if (srcIt != keyToId.end() && dstIt != keyToId.end()) {
-                        edge.srcNodeId = srcIt->second;
-                        edge.dstNodeId = dstIt->second;
-                        // Remove temporary keys from properties
-                        props.erase("_src_key");
-                        props.erase("_dst_key");
-                        edge.properties = props.dump();
-                        resolvedEdges.push_back(std::move(edge));
-                    }
-                } catch (...) {
-                    // Skip edges we can't parse
+                if (batch.nodes.empty()) {
+                    return true; // Continue to next batch
                 }
-            }
 
-            if (!resolvedEdges.empty()) {
-                kg_->addEdgesUnique(resolvedEdges);
-            }
+                // Insert nodes and get their IDs
+                auto nodeIds = kg_->upsertNodes(batch.nodes);
+                if (!nodeIds) {
+                    spdlog::warn("[PostIngestQueue] Failed to insert batch {} nodes: {}",
+                                 progress.batchNumber, nodeIds.error().message);
+                    return true; // Continue despite error - partial success
+                }
 
-            // Resolve alias nodeIds
-            std::vector<metadata::KGAlias> resolvedAliases;
-            for (auto& alias : entities.aliases) {
-                // Parse node_key from source field
-                if (alias.source && alias.source->starts_with("_node_key:")) {
-                    std::string nodeKey = alias.source->substr(10);
-                    auto it = keyToId.find(nodeKey);
-                    if (it != keyToId.end()) {
-                        alias.nodeId = it->second;
-                        alias.source = "ghidra";
-                        resolvedAliases.push_back(std::move(alias));
+                // Update keyToId map with this batch's nodes
+                for (size_t i = 0; i < batch.nodes.size() && i < nodeIds.value().size(); ++i) {
+                    keyToId[batch.nodes[i].nodeKey] = nodeIds.value()[i];
+                }
+                totalNodesInserted += nodeIds.value().size();
+
+                // Resolve and insert edges
+                std::vector<metadata::KGEdge> resolvedEdges;
+                for (auto& edge : batch.edges) {
+                    try {
+                        if (!edge.properties) continue;
+                        auto props = nlohmann::json::parse(*edge.properties);
+                        std::string srcKey = props.value("_src_key", "");
+                        std::string dstKey = props.value("_dst_key", "");
+
+                        auto srcIt = keyToId.find(srcKey);
+                        auto dstIt = keyToId.find(dstKey);
+
+                        if (srcIt != keyToId.end() && dstIt != keyToId.end()) {
+                            edge.srcNodeId = srcIt->second;
+                            edge.dstNodeId = dstIt->second;
+                            props.erase("_src_key");
+                            props.erase("_dst_key");
+                            edge.properties = props.dump();
+                            resolvedEdges.push_back(std::move(edge));
+                        }
+                    } catch (...) {
+                        // Skip edges we can't parse
                     }
                 }
-            }
 
-            if (!resolvedAliases.empty()) {
-                kg_->addAliases(resolvedAliases);
-            }
+                if (!resolvedEdges.empty()) {
+                    kg_->addEdgesUnique(resolvedEdges);
+                    totalEdgesInserted += resolvedEdges.size();
+                }
 
-            auto duration = std::chrono::steady_clock::now() - start;
-            double ms = std::chrono::duration<double, std::milli>(duration).count();
+                // Resolve and insert aliases
+                std::vector<metadata::KGAlias> resolvedAliases;
+                for (auto& alias : batch.aliases) {
+                    if (alias.source && alias.source->starts_with("_node_key:")) {
+                        std::string nodeKey = alias.source->substr(10);
+                        auto it = keyToId.find(nodeKey);
+                        if (it != keyToId.end()) {
+                            alias.nodeId = it->second;
+                            alias.source = "ghidra";
+                            resolvedAliases.push_back(std::move(alias));
+                        }
+                    }
+                }
+
+                if (!resolvedAliases.empty()) {
+                    kg_->addAliases(resolvedAliases);
+                    totalAliasesInserted += resolvedAliases.size();
+                }
+
+                spdlog::info("[PostIngestQueue] Batch {}/{} ingested for {} "
+                             "(nodes={}, edges={}, aliases={}, elapsed={:.1f}s)",
+                             progress.batchNumber, progress.totalBatchesEstimate,
+                             hash.substr(0, 12), nodeIds.value().size(),
+                             resolvedEdges.size(), resolvedAliases.size(),
+                             progress.elapsedSeconds);
+
+                return true; // Continue to next batch
+            });
+
+        auto duration = std::chrono::steady_clock::now() - start;
+        double ms = std::chrono::duration<double, std::milli>(duration).count();
+
+        if (result) {
             spdlog::info("[PostIngestQueue] Entity extraction completed for {} in {:.2f}ms "
-                         "(nodes={}, edges={}, aliases={})",
-                         hash.substr(0, 12), ms, nodeIds.value().size(), resolvedEdges.size(),
-                         resolvedAliases.size());
+                         "(batches={}, nodes={}, edges={}, aliases={})",
+                         hash.substr(0, 12), ms, result.value().batchNumber,
+                         totalNodesInserted, totalEdgesInserted, totalAliasesInserted);
+        } else {
+            // Partial success - some batches may have been ingested
+            if (totalNodesInserted > 0) {
+                spdlog::warn("[PostIngestQueue] Entity extraction partial success for {} "
+                             "(nodes={}, edges={}, aliases={}, error={})",
+                             hash.substr(0, 12), totalNodesInserted, totalEdgesInserted,
+                             totalAliasesInserted, result.error().message);
+            } else {
+                spdlog::warn("[PostIngestQueue] Entity extraction failed for {}: {}",
+                             hash.substr(0, 12), result.error().message);
+            }
         }
 
         InternalEventBus::instance().incEntityConsumed();

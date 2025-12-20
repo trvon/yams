@@ -232,6 +232,10 @@ struct ProviderSingleton {
                                const char* options_json) -> yams_status_t {
             if (!self || !model_id)
                 return YAMS_ERR_INVALID_ARG;
+            // Wrap entire lambda body in try/catch to prevent exceptions from crossing ABI boundary.
+            // On Windows, ONNX Runtime can throw std::system_error("resource deadlock would occur")
+            // when thread pool resources are exhausted (PBI-1c1).
+            try {
             auto* c = static_cast<ProviderCtx*>(self);
             if (c->disabled)
                 return YAMS_ERR_UNSUPPORTED;
@@ -296,6 +300,19 @@ struct ProviderSingleton {
                 (void)q->try_push({std::string(model_id), r.error().message});
             }
             return YAMS_OK;
+            } catch (const std::system_error& e) {
+                fprintf(stderr, "[ONNX Plugin] load_model std::system_error: %s\n", e.what());
+                spdlog::error("[ONNX Plugin] load_model std::system_error: {}", e.what());
+                return YAMS_ERR_INTERNAL;
+            } catch (const std::exception& e) {
+                fprintf(stderr, "[ONNX Plugin] load_model exception: %s\n", e.what());
+                spdlog::error("[ONNX Plugin] load_model exception: {}", e.what());
+                return YAMS_ERR_INTERNAL;
+            } catch (...) {
+                fprintf(stderr, "[ONNX Plugin] load_model unknown exception\n");
+                spdlog::error("[ONNX Plugin] load_model unknown exception");
+                return YAMS_ERR_INTERNAL;
+            }
         };
 
         vtable.unload_model = [](void* self, const char* model_id) -> yams_status_t {
@@ -386,6 +403,10 @@ struct ProviderSingleton {
                                        size_t* out_dim) -> yams_status_t {
             if (!self || !model_id || !input || !out_vec || !out_dim)
                 return YAMS_ERR_INVALID_ARG;
+            // Wrap entire lambda body in try/catch to prevent exceptions from crossing ABI boundary.
+            // On Windows, ONNX Runtime can throw std::system_error("resource deadlock would occur")
+            // when thread pool resources are exhausted (PBI-1c1).
+            try {
             auto* c = static_cast<ProviderCtx*>(self);
             if (c->disabled) {
                 spdlog::warn("[ONNX Plugin] generate_embedding: plugin disabled");
@@ -422,6 +443,26 @@ struct ProviderSingleton {
             *out_vec = buf;
             *out_dim = n;
             return YAMS_OK;
+            } catch (const std::system_error& e) {
+                fprintf(stderr, "[ONNX Plugin] generate_embedding std::system_error: %s\n",
+                        e.what());
+                spdlog::error("[ONNX Plugin] generate_embedding std::system_error: {}", e.what());
+                *out_vec = nullptr;
+                *out_dim = 0;
+                return YAMS_ERR_INTERNAL;
+            } catch (const std::exception& e) {
+                fprintf(stderr, "[ONNX Plugin] generate_embedding exception: %s\n", e.what());
+                spdlog::error("[ONNX Plugin] generate_embedding exception: {}", e.what());
+                *out_vec = nullptr;
+                *out_dim = 0;
+                return YAMS_ERR_INTERNAL;
+            } catch (...) {
+                fprintf(stderr, "[ONNX Plugin] generate_embedding unknown exception\n");
+                spdlog::error("[ONNX Plugin] generate_embedding unknown exception");
+                *out_vec = nullptr;
+                *out_dim = 0;
+                return YAMS_ERR_INTERNAL;
+            }
         };
 
         vtable.free_embedding = [](void* /*self*/, float* vec, size_t /*dim*/) {
@@ -435,6 +476,10 @@ struct ProviderSingleton {
                                              size_t* out_dim) -> yams_status_t {
             if (!self || !model_id || !inputs || !input_lens || !out_vecs || !out_batch || !out_dim)
                 return YAMS_ERR_INVALID_ARG;
+            // Wrap entire lambda body in try/catch to prevent exceptions from crossing ABI boundary.
+            // On Windows, ONNX Runtime can throw std::system_error("resource deadlock would occur")
+            // when thread pool resources are exhausted (PBI-1c1).
+            try {
             auto* c = static_cast<ProviderCtx*>(self);
             if (c->disabled) {
                 spdlog::warn("[ONNX Plugin] generate_embedding_batch: plugin disabled");
@@ -494,6 +539,31 @@ struct ProviderSingleton {
             *out_batch = b;
             *out_dim = d;
             return YAMS_OK;
+            } catch (const std::system_error& e) {
+                // Windows thread pool exhaustion typically surfaces as EDEADLK
+                fprintf(stderr, "[ONNX Plugin] generate_embedding_batch std::system_error: %s\n",
+                        e.what());
+                spdlog::error("[ONNX Plugin] generate_embedding_batch std::system_error: {}",
+                              e.what());
+                *out_vecs = nullptr;
+                *out_batch = 0;
+                *out_dim = 0;
+                return YAMS_ERR_INTERNAL;
+            } catch (const std::exception& e) {
+                fprintf(stderr, "[ONNX Plugin] generate_embedding_batch exception: %s\n", e.what());
+                spdlog::error("[ONNX Plugin] generate_embedding_batch exception: {}", e.what());
+                *out_vecs = nullptr;
+                *out_batch = 0;
+                *out_dim = 0;
+                return YAMS_ERR_INTERNAL;
+            } catch (...) {
+                fprintf(stderr, "[ONNX Plugin] generate_embedding_batch unknown exception\n");
+                spdlog::error("[ONNX Plugin] generate_embedding_batch unknown exception");
+                *out_vecs = nullptr;
+                *out_batch = 0;
+                *out_dim = 0;
+                return YAMS_ERR_INTERNAL;
+            }
         };
 
         vtable.free_embedding_batch = [](void* /*self*/, float* vecs, size_t /*batch*/,
