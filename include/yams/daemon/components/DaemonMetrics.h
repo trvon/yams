@@ -87,13 +87,18 @@ struct MetricsSnapshot {
     std::size_t postIngestFailed{0};
     double postIngestLatencyMsEma{0.0};
     double postIngestRateSecEma{0.0};
-    // Pipeline stage metrics (extraction → KG → symbol → embedding)
+    // Pipeline stage metrics (extraction → KG → symbol → entity → embedding)
     std::size_t extractionInFlight{0};
     std::size_t kgQueued{0};
     std::size_t kgDropped{0};
     std::size_t kgConsumed{0};
     std::size_t kgInFlight{0};
     std::size_t symbolInFlight{0};
+    // Entity extraction metrics (external plugins like Ghidra)
+    std::size_t entityQueued{0};
+    std::size_t entityDropped{0};
+    std::size_t entityConsumed{0};
+    std::size_t entityInFlight{0};
 
     // Readiness and init progress
     std::map<std::string, bool> readinessStates; // subsystem -> ready

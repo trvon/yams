@@ -493,6 +493,112 @@ struct ExternalPluginHost::Impl {
         return result;
     }
 
+    /// Check if a filename has a native library extension pattern.
+    /// Handles versioned shared libraries like libfoo.so.1, libfoo.so.2.3.4
+    static bool hasNativeLibraryExtension(const std::filesystem::path& path) {
+        auto filename = path.filename().string();
+        std::transform(filename.begin(), filename.end(), filename.begin(), ::tolower);
+
+        // Direct extension check
+        auto ext = path.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        if (ext == ".so" || ext == ".dylib" || ext == ".dll") {
+            return true;
+        }
+
+        // Check for versioned .so files: libfoo.so.1, libfoo.so.2.3.4, etc.
+        // Pattern: contains ".so." followed by digits/dots
+        auto soPos = filename.find(".so.");
+        if (soPos != std::string::npos) {
+            // Verify the rest is version numbers (digits and dots)
+            auto suffix = filename.substr(soPos + 4); // after ".so."
+            bool validVersion = !suffix.empty();
+            for (char c : suffix) {
+                if (!std::isdigit(static_cast<unsigned char>(c)) && c != '.') {
+                    validVersion = false;
+                    break;
+                }
+            }
+            if (validVersion) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// Check if file is a native library by examining magic bytes.
+    /// Detects ELF, Mach-O, and PE/COFF formats.
+    static bool isNativeLibraryByMagic(const std::filesystem::path& path) {
+        std::ifstream file(path, std::ios::binary);
+        if (!file) {
+            return false;
+        }
+
+        // Read first 4 bytes for magic detection
+        unsigned char magic[4] = {0};
+        file.read(reinterpret_cast<char*>(magic), sizeof(magic));
+        if (!file || file.gcount() < 4) {
+            return false;
+        }
+
+        // ELF: 0x7F 'E' 'L' 'F'
+        if (magic[0] == 0x7F && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F') {
+            return true;
+        }
+
+        // Mach-O: Various magic numbers
+        // 32-bit: 0xFEEDFACE (big-endian) or 0xCEFAEDFE (little-endian)
+        // 64-bit: 0xFEEDFACF (big-endian) or 0xCFFAEDFE (little-endian)
+        // Universal/FAT: 0xCAFEBABE (big-endian) or 0xBEBAFECA (little-endian)
+        uint32_t magic32 = (static_cast<uint32_t>(magic[0]) << 24) |
+                           (static_cast<uint32_t>(magic[1]) << 16) |
+                           (static_cast<uint32_t>(magic[2]) << 8) |
+                           static_cast<uint32_t>(magic[3]);
+        uint32_t magic32_le = (static_cast<uint32_t>(magic[3]) << 24) |
+                              (static_cast<uint32_t>(magic[2]) << 16) |
+                              (static_cast<uint32_t>(magic[1]) << 8) |
+                              static_cast<uint32_t>(magic[0]);
+
+        if (magic32 == 0xFEEDFACE || magic32 == 0xFEEDFACF || magic32 == 0xCAFEBABE ||
+            magic32_le == 0xFEEDFACE || magic32_le == 0xFEEDFACF || magic32_le == 0xCAFEBABE) {
+            return true;
+        }
+
+        // PE/COFF (Windows DLL/EXE): Starts with 'MZ'
+        if (magic[0] == 'M' && magic[1] == 'Z') {
+            return true;
+        }
+
+        return false;
+    }
+
+    /// Comprehensive check for native shared libraries.
+    /// Uses both extension patterns and magic byte detection for robustness.
+    static bool isNativeLibrary(const std::filesystem::path& path) {
+        // Resolve symlinks to check the actual target
+        std::error_code ec;
+        auto resolvedPath = fs::canonical(path, ec);
+        if (ec) {
+            resolvedPath = path; // Fall back to original if canonical fails
+        }
+
+        // Check extension patterns first (fast path)
+        if (hasNativeLibraryExtension(resolvedPath)) {
+            return true;
+        }
+
+        // For files without obvious native extensions, check magic bytes
+        // This catches cases like versioned libraries or renamed files
+        if (isNativeLibraryByMagic(resolvedPath)) {
+            spdlog::debug("ExternalPluginHost: Detected native library by magic bytes: {}",
+                          path.string());
+            return true;
+        }
+
+        return false;
+    }
+
     static auto isExternalPluginFile(const std::filesystem::path& path) -> bool {
         // Check if it's a plugin directory with manifest
         if (isPluginDirectory(path)) {
@@ -500,6 +606,17 @@ struct ExternalPluginHost::Impl {
         }
 
         if (!fs::exists(path) || !fs::is_regular_file(path)) {
+            return false;
+        }
+
+        // Exclude native libraries - these are ABI plugins, not external plugins.
+        // Native libraries should be loaded via AbiPluginHost (dlopen), not spawned
+        // as external processes. This check uses both extension patterns and magic
+        // byte detection for robustness against edge cases like:
+        // - Versioned libraries (libfoo.so.1, libfoo.so.2.3.4)
+        // - Symlinks to native libraries
+        // - Files with non-standard extensions but native library format
+        if (isNativeLibrary(path)) {
             return false;
         }
 
@@ -521,7 +638,9 @@ struct ExternalPluginHost::Impl {
             return true;
         }
 #else
-        // On Unix, check if file is executable
+        // On Unix, check if file is executable (for compiled Go/Rust plugins, etc.)
+        // This is checked AFTER native library exclusion to prevent .so files
+        // (which have executable permissions) from being treated as external plugins.
         std::error_code ec;
         auto status = fs::status(path, ec);
         if (!ec && (status.permissions() & fs::perms::owner_exec) != fs::perms::none) {

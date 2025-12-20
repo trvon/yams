@@ -669,11 +669,16 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 out.extractionInFlight = pq->extractionInFlight();
                 out.kgInFlight = pq->kgInFlight();
                 out.symbolInFlight = pq->symbolInFlight();
+                out.entityInFlight = pq->entityInFlight();
             }
             auto& bus = InternalEventBus::instance();
             out.kgQueued = bus.kgQueued();
             out.kgDropped = bus.kgDropped();
             out.kgConsumed = bus.kgConsumed();
+            // Entity extraction metrics (from InternalEventBus counters)
+            out.entityQueued = bus.entityQueued();
+            out.entityDropped = bus.entityDropped();
+            out.entityConsumed = bus.entityConsumed();
         } else {
             out.workerThreads = std::max(1u, std::thread::hardware_concurrency());
         }

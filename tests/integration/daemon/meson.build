@@ -47,6 +47,10 @@ else
     'entity_graph_service_integration_catch2_test.cpp',
   )
 
+  ghidra_kg_entity_ingestion_srcs = files(
+    'ghidra_kg_entity_ingestion_test.cpp',
+  )
+
   dbg = (get_option('buildtype') == 'debug')
   if (get_option('enable-integration-tests') or dbg) and (get_option('enable-daemon-integration') or dbg)
     # Catch2 needs its main library
@@ -245,6 +249,25 @@ else
     test('entity_graph_integration',
       entity_graph_integration_exe,
       suite: ['integration', 'daemon', 'catch2', 'kg', 'pbi-009'],
+      env: {
+        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      },
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['--allow-running-no-tests'],
+    )
+
+    ghidra_kg_entity_ingestion_exe = executable('yams_ghidra_kg_entity_ingestion_tests_catch2',
+      ghidra_kg_entity_ingestion_srcs,
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep, test_deps],
+      cpp_args: ['-DYAMS_TESTING=1'],
+      install: false,
+    )
+
+    test('ghidra_kg_entity_ingestion',
+      ghidra_kg_entity_ingestion_exe,
+      suite: ['integration', 'daemon', 'catch2', 'kg', 'ghidra', 'pbi-3jb'],
       env: {
         'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       },

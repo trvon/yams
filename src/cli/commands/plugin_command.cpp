@@ -578,7 +578,8 @@ void PluginCommand::showPluginHealth(const std::string& name) {
             cfg.dataDir = cli_->getDataPath();
         }
         cfg.enableChunkedResponses = false;
-        cfg.requestTimeout = std::chrono::milliseconds(10000);
+        // Use shorter timeout for health check - it uses cached daemon metrics
+        cfg.requestTimeout = std::chrono::milliseconds(5000);
         auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
         if (!leaseRes) {
             std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
@@ -587,13 +588,13 @@ void PluginCommand::showPluginHealth(const std::string& name) {
         auto leaseHandle = std::move(leaseRes.value());
         auto& client = **leaseHandle;
 
-        // Get StatusResponse which has typed provider info
+        // Get StatusResponse which has typed provider info (uses cached metrics - non-blocking)
         StatusRequest sreq;
         sreq.detailed = true;
         auto sres = yams::cli::run_result<StatusResponse>(client.call(sreq),
-                                                          std::chrono::milliseconds(10000));
+                                                          std::chrono::milliseconds(5000));
         if (!sres) {
-            std::cout << "Failed to query daemon status\n";
+            std::cout << "Failed to query daemon status: " << sres.error().message << "\n";
             return;
         }
 
@@ -603,11 +604,11 @@ void PluginCommand::showPluginHealth(const std::string& name) {
             return;
         }
 
-        // Also get stats for extended plugin info (interfaces, type)
+        // Also get stats for extended plugin info (interfaces, type) - uses cached metrics
         GetStatsRequest greq;
         greq.detailed = true;
         auto gres = yams::cli::run_result<GetStatsResponse>(client.call(greq),
-                                                            std::chrono::milliseconds(10000));
+                                                            std::chrono::milliseconds(5000));
 
         // Build interface map from plugins_json
         std::map<std::string, std::vector<std::string>> ifaceMap;

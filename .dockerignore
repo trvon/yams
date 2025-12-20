@@ -1,10 +1,14 @@
 # Build artifacts
 build/
+build-debug/
 builddir/
 cmake-build-*/
 out/
 dist/
 target/
+
+# Beads task tracking (locked files cause context transfer failures)
+.beads/
 
 # CMake cache/presets (generated)
 CMakeCache.txt

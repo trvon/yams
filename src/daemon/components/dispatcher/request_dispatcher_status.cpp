@@ -163,6 +163,11 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             res.requestCounts["kg_consumed"] = snap->kgConsumed;
             res.requestCounts["kg_inflight"] = snap->kgInFlight;
             res.requestCounts["symbol_inflight"] = snap->symbolInFlight;
+            // Entity extraction metrics (external plugins like Ghidra)
+            res.requestCounts["entity_queued"] = snap->entityQueued;
+            res.requestCounts["entity_dropped"] = snap->entityDropped;
+            res.requestCounts["entity_consumed"] = snap->entityConsumed;
+            res.requestCounts["entity_inflight"] = snap->entityInFlight;
             // Surface whether the InternalEventBus is being used for post-ingest
             try {
                 res.requestCounts["post_ingest_use_bus"] =

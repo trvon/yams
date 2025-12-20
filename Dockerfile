@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.7-labs
 
 # Stage 0: base build dependencies & toolchain
-FROM ubuntu:22.04 AS deps
+# Using Ubuntu 24.04 for GCC 13+ which supports C++23 <format> header
+FROM ubuntu:24.04 AS deps
 # FROM debian:trixie-slim AS deps
 ARG DEBIAN_FRONTEND=noninteractive
 RUN set -eux; \
@@ -47,9 +48,9 @@ RUN git init 2>/dev/null || true && \
   echo "Submodule init skipped (not a git repo or no submodules)"
 
 # Use setup.sh with retry logic for Conan remote issues
+# Configure Conan to retry downloads more aggressively for transient network failures
 RUN --mount=type=cache,target=/root/.conan2 \
   set -eux; \
-  for i in 1 2 3; do \
   conan --version && \
   conan profile detect --force && \
   echo '=== Conan remotes ==='; conan remote list || true && \
@@ -57,21 +58,30 @@ RUN --mount=type=cache,target=/root/.conan2 \
   conan remote add conancenter https://center2.conan.io; \
   fi && \
   conan remote update conancenter --url https://center2.conan.io || true && \
-  conan search tree-sitter -r=conancenter || true && \
-  break || \
-  { echo "Conan setup attempt $i failed, retrying after 3s..."; sleep 3; }; \
-  done; \
+  conan config set core.net.http:timeout=120 || true && \
+  conan config set core.net.http:max_retries=10 || true && \
+  conan config set core.net.http:retry_wait=5 || true && \
   export YAMS_COMPILER=gcc; \
   export YAMS_CPPSTD=${YAMS_CPPSTD}; \
-  export YAMS_EXTRA_MESON_FLAGS="-Drequire-sqlite-vec=false -Denable-onnx=disabled -Denable-symbol-extraction=false"; \
+  export YAMS_EXTRA_MESON_FLAGS="-Drequire-sqlite-vec=false"; \
   sed -i 's/\r$//' setup.sh && chmod +x setup.sh && \
-  if ! ./setup.sh Release; then \
-  echo 'Initial setup.sh failed; attempting retry with cache clean.'; \
+  for attempt in 1 2 3; do \
+  echo "=== Build attempt $attempt ==="; \
+  if ./setup.sh Release; then \
+  break; \
+  else \
+  echo "setup.sh attempt $attempt failed"; \
+  if [ $attempt -lt 3 ]; then \
+  echo "Cleaning cache and retrying after 30s..."; \
   rm -rf /root/.conan2/p/*/metadata.json 2>/dev/null || true; \
   conan cache clean "*" || true; \
-  conan search tree-sitter/0.25.9 -r=conancenter || true; \
-  ./setup.sh Release; \
+  sleep 30; \
+  else \
+  echo "All attempts failed"; \
+  exit 1; \
   fi; \
+  fi; \
+  done; \
   meson compile -C build/release -j${BUILD_JOBS} && \
   meson install -C build/release --destdir /opt/yams
 
