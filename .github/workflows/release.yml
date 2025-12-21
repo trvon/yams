@@ -1198,19 +1198,25 @@ jobs:
           FORMULA_DIR="homebrew"
           mkdir -p "$FORMULA_DIR"
           
-          # Download macOS binaries and compute SHA256s
-          ARM64_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/yams-${VERSION}-macos-arm64.zip"
-          X86_64_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/yams-${VERSION}-macos-x86_64.zip"
+          # Compute SHA256 from local assets (already downloaded/built)
+          ARM64_FILE="assets/yams-${VERSION}-macos-arm64.zip"
+          X86_64_FILE="assets/yams-${VERSION}-macos-x86_64.zip"
           
-          echo "Downloading macOS ARM64 binary: $ARM64_URL" >&2
-          curl -Ls -o "yams-macos-arm64.zip" "$ARM64_URL"
-          SHA256_ARM64=$(shasum -a 256 "yams-macos-arm64.zip" | awk '{print $1}')
-          echo "Computed ARM64 sha256: $SHA256_ARM64" >&2
+          if [ -f "$ARM64_FILE" ]; then
+            SHA256_ARM64=$(shasum -a 256 "$ARM64_FILE" | awk '{print $1}')
+            echo "Computed ARM64 sha256: $SHA256_ARM64" >&2
+          else
+            echo "WARNING: ARM64 zip not found at $ARM64_FILE, formula may be incomplete" >&2
+            SHA256_ARM64="PLACEHOLDER_ARM64_SHA256"
+          fi
           
-          echo "Downloading macOS x86_64 binary: $X86_64_URL" >&2
-          curl -Ls -o "yams-macos-x86_64.zip" "$X86_64_URL"
-          SHA256_X86_64=$(shasum -a 256 "yams-macos-x86_64.zip" | awk '{print $1}')
-          echo "Computed x86_64 sha256: $SHA256_X86_64" >&2
+          if [ -f "$X86_64_FILE" ]; then
+            SHA256_X86_64=$(shasum -a 256 "$X86_64_FILE" | awk '{print $1}')
+            echo "Computed x86_64 sha256: $SHA256_X86_64" >&2
+          else
+            echo "WARNING: x86_64 zip not found at $X86_64_FILE, formula may be incomplete" >&2
+            SHA256_X86_64="PLACEHOLDER_X86_64_SHA256"
+          fi
           
           TEMPLATE_PATH="packaging/homebrew/yams.rb.template"
           if [ ! -f "$TEMPLATE_PATH" ]; then
@@ -1247,16 +1253,24 @@ jobs:
           set -euo pipefail
           VERSION="${{ steps.meta.outputs.version }}"
           TAP_PATH="homebrew-yams"
-          if [ ! -d "$TAP_PATH" ]; then
-            echo "Tap submodule not found at $TAP_PATH; skipping tap update" >&2
-            exit 0
-          fi
+          
+          # Check if generated formula exists first
           if [ ! -f "homebrew/yams.rb" ]; then
             echo "homebrew/yams.rb not found; skipping tap update" >&2
             exit 0
           fi
-          # Only initialize the homebrew-yams submodule, not the Ghidra plugin which needs SSH
-          git submodule update --init homebrew-yams
+          
+          # Initialize the homebrew-yams submodule (must happen before directory check)
+          git submodule update --init homebrew-yams || {
+            echo "Failed to initialize homebrew-yams submodule; skipping tap update" >&2
+            exit 0
+          }
+          
+          if [ ! -d "$TAP_PATH" ]; then
+            echo "Tap submodule not found at $TAP_PATH after init; skipping tap update" >&2
+            exit 0
+          fi
+          
           mkdir -p "$TAP_PATH/Formula"
           cp homebrew/yams.rb "$TAP_PATH/Formula/yams.rb"
           pushd "$TAP_PATH" >/dev/null
@@ -1312,19 +1326,25 @@ jobs:
           # Initialize submodule
           git submodule update --init homebrew-yams
           
-          # Download macOS binaries and compute SHA256s
-          ARM64_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/yams-${VERSION}-macos-arm64.zip"
-          X86_64_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/yams-${VERSION}-macos-x86_64.zip"
+          # Compute SHA256 from local assets (already downloaded/built)
+          ARM64_FILE="assets/yams-${VERSION}-macos-arm64.zip"
+          X86_64_FILE="assets/yams-${VERSION}-macos-x86_64.zip"
           
-          echo "Downloading macOS ARM64 binary: $ARM64_URL" >&2
-          curl -Ls -o "yams-nightly-arm64.zip" "$ARM64_URL"
-          SHA256_ARM64=$(shasum -a 256 "yams-nightly-arm64.zip" | awk '{print $1}')
-          echo "Computed ARM64 sha256: $SHA256_ARM64" >&2
+          if [ -f "$ARM64_FILE" ]; then
+            SHA256_ARM64=$(shasum -a 256 "$ARM64_FILE" | awk '{print $1}')
+            echo "Computed ARM64 sha256: $SHA256_ARM64" >&2
+          else
+            echo "WARNING: ARM64 zip not found at $ARM64_FILE, formula may be incomplete" >&2
+            SHA256_ARM64="PLACEHOLDER_ARM64_SHA256"
+          fi
           
-          echo "Downloading macOS x86_64 binary: $X86_64_URL" >&2
-          curl -Ls -o "yams-nightly-x86_64.zip" "$X86_64_URL"
-          SHA256_X86_64=$(shasum -a 256 "yams-nightly-x86_64.zip" | awk '{print $1}')
-          echo "Computed x86_64 sha256: $SHA256_X86_64" >&2
+          if [ -f "$X86_64_FILE" ]; then
+            SHA256_X86_64=$(shasum -a 256 "$X86_64_FILE" | awk '{print $1}')
+            echo "Computed x86_64 sha256: $SHA256_X86_64" >&2
+          else
+            echo "WARNING: x86_64 zip not found at $X86_64_FILE, formula may be incomplete" >&2
+            SHA256_X86_64="PLACEHOLDER_X86_64_SHA256"
+          fi
           
           # Update nightly formula
           NIGHTLY_FORMULA="$TAP_PATH/Formula/yams@nightly.rb"
