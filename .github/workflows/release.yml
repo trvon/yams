@@ -591,10 +591,9 @@ jobs:
         shell: pwsh
         run: |
           # Install Python dependencies
-          # Pin meson version to avoid version mismatch between build and install steps
-          # (each workflow step runs in a fresh shell, so we need consistent versions)
+          # Pin meson to exact version to avoid version mismatch between build and install steps
           python -m pip install --upgrade pip
-          python -m pip install conan "meson>=1.9.0,<2.0" ninja
+          python -m pip install conan "meson==1.9.1" ninja
 
           # Install WiX for MSI packaging
           dotnet tool install --global wix
@@ -743,6 +742,18 @@ jobs:
               Remove-Item -Recurse -Force $stageDir
           }
           New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
+
+          # Reconfigure if needed (handles Meson version mismatches from cached build dirs)
+          $mesonInfo = Join-Path $buildDir "meson-private\coredata.dat"
+          if (Test-Path $mesonInfo) {
+              Write-Host "Reconfiguring build directory to ensure Meson version compatibility..."
+              meson setup --reconfigure $buildDir
+              if ($LASTEXITCODE -ne 0) {
+                  Write-Warning "Reconfigure failed, attempting fresh setup..."
+                  Remove-Item -Recurse -Force $buildDir -ErrorAction SilentlyContinue
+                  meson setup $buildDir --buildtype=release
+              }
+          }
 
           # Install to stage directory
           meson install -C $buildDir --destdir $stageDir
@@ -1511,7 +1522,7 @@ jobs:
           set -euo pipefail
           VERSION="${{ steps.meta.outputs.version }}"
           TAG="${{ steps.meta.outputs.tag }}"
-            CHANNEL="${{ steps.meta.outputs.channel }}"
+          CHANNEL="${{ steps.meta.outputs.channel }}"
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           mkdir -p assets
           cd assets

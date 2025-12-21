@@ -467,9 +467,12 @@ package_all() {
   local stage_dir="$3"
   local force="${4:-0}"
 
+  # Package if: force=1, or tag build, or nightly/weekly channel
   if [[ "${force}" != "1" && "${GIT_REF:-}" != refs/tags/* ]]; then
-    echo "Skipping packaging (not a tag build): GIT_REF=${GIT_REF:-n/a}"
-    return
+    if [[ "${RELEASE_CHANNEL:-}" != "nightly" && "${RELEASE_CHANNEL:-}" != "weekly" ]]; then
+      echo "Skipping packaging (not a tag build and no release channel): GIT_REF=${GIT_REF:-n/a} RELEASE_CHANNEL=${RELEASE_CHANNEL:-n/a}"
+      return
+    fi
   fi
 
   if [[ "${build_dir}" != /* ]]; then
@@ -489,8 +492,16 @@ package_all() {
 }
 
 cleanup_apt() {
-  apt-get clean
-  rm -rf /var/lib/apt/lists/* || true
+  # Use sudo if not running as root
+  if [ "$(id -u)" -eq 0 ]; then
+    apt-get clean || true
+    rm -rf /var/lib/apt/lists/* || true
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo apt-get clean || true
+    sudo rm -rf /var/lib/apt/lists/* 2>/dev/null || true
+  else
+    echo "Skipping apt-get clean (requires root privileges)" >&2
+  fi
 }
 
 package_only_main() {
