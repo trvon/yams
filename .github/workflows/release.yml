@@ -591,8 +591,10 @@ jobs:
         shell: pwsh
         run: |
           # Install Python dependencies
+          # Pin meson version to avoid version mismatch between build and install steps
+          # (each workflow step runs in a fresh shell, so we need consistent versions)
           python -m pip install --upgrade pip
-          python -m pip install conan meson ninja
+          python -m pip install conan "meson>=1.9.0,<2.0" ninja
 
           # Install WiX for MSI packaging
           dotnet tool install --global wix

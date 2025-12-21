@@ -231,9 +231,21 @@ if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
     Write-Error 'python not found in PATH. Please install Python 3.x and retry.'
 }
 
-python -m pip install --user --upgrade pip | Out-Null
-# Install numpy as it is often required by boost build checks even if python is disabled
-python -m pip install --user conan meson ninja numpy | Out-Null
+# Check if required tools are already installed (e.g., by CI workflow)
+# Only install if missing to avoid version conflicts with globally installed packages
+$needsInstall = @()
+if (-not (Get-Command conan -ErrorAction SilentlyContinue)) { $needsInstall += 'conan' }
+if (-not (Get-Command meson -ErrorAction SilentlyContinue)) { $needsInstall += 'meson' }
+if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) { $needsInstall += 'ninja' }
+
+if ($needsInstall.Count -gt 0) {
+    Write-Host "Installing missing tools: $($needsInstall -join ', ')"
+    python -m pip install --user --upgrade pip | Out-Null
+    # Install numpy as it is often required by boost build checks even if python is disabled
+    python -m pip install --user conan meson ninja numpy | Out-Null
+} else {
+    Write-Host "Build tools already installed (conan, meson, ninja)"
+}
 
 # Make sure user-local Python scripts are on PATH
 $UserBase = python -m site --user-base

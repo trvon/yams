@@ -180,11 +180,17 @@ run_meson_build() {
     # shellcheck disable=SC2206
     meson_args=(${MESON_EXTRA_ARGS})
   fi
+  # Check if meson is already configured; use --reconfigure instead of --wipe
+  # to preserve Conan-generated files in the build directory
+  local setup_mode=""
+  if [ -f "${BUILD_DIR}/meson-private/coredata.dat" ]; then
+    setup_mode="--reconfigure"
+  fi
   meson setup "${BUILD_DIR}" \
     --prefix=/usr \
     --buildtype=release \
     --native-file "${native_file}" \
-    --wipe \
+    ${setup_mode} \
     "${meson_args[@]}"
   meson compile -C "${BUILD_DIR}"
   meson install -C "${BUILD_DIR}" --destdir "${STAGE_DIR}"
