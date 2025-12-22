@@ -2036,7 +2036,10 @@ Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& pref
         if (result && result.value()) {
             // Sync local members from PluginManager for backward compatibility
             modelProvider_ = pluginManager_->getModelProvider();
+            embeddingModelName_ = pluginManager_->getEmbeddingModelName();
             state_.readiness.modelProviderReady = (modelProvider_ != nullptr);
+            spdlog::info("[ServiceManager] Synced embeddingModelName_='{}' from PluginManager",
+                         embeddingModelName_);
         }
         return result;
     }

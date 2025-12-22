@@ -21,12 +21,14 @@
 
 #include <spdlog/spdlog.h>
 
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -61,6 +63,48 @@ inline std::string sanitize_for_terminal(std::string_view in) {
     return out;
 }
 
+// Request timeout categories for snappier UI on fast operations
+enum class TimeoutCategory { Fast, Medium, Slow };
+
+// Returns appropriate timeout category based on request type
+TimeoutCategory getTimeoutCategory(const Request& req) {
+    return std::visit(
+        [](const auto& r) -> TimeoutCategory {
+            using T = std::decay_t<decltype(r)>;
+            // Fast operations (5s) - simple round-trips
+            if constexpr (std::is_same_v<T, PingRequest> || std::is_same_v<T, StatusRequest> ||
+                          std::is_same_v<T, ShutdownRequest>) {
+                return TimeoutCategory::Fast;
+            }
+            // Slow operations (120s) - may involve embeddings/heavy processing
+            else if constexpr (std::is_same_v<T, AddDocumentRequest> ||
+                               std::is_same_v<T, GenerateEmbeddingRequest> ||
+                               std::is_same_v<T, UpdateDocumentRequest> ||
+                               std::is_same_v<T, EmbedDocumentsRequest> ||
+                               std::is_same_v<T, BatchEmbeddingRequest>) {
+                return TimeoutCategory::Slow;
+            }
+            // Medium operations (30s) - queries and moderate work
+            else {
+                return TimeoutCategory::Medium;
+            }
+        },
+        req);
+}
+
+// Get timeout milliseconds for a category
+std::chrono::milliseconds getTimeoutForCategory(TimeoutCategory cat) {
+    switch (cat) {
+    case TimeoutCategory::Fast:
+        return std::chrono::milliseconds(5000); // 5s
+    case TimeoutCategory::Medium:
+        return std::chrono::milliseconds(30000); // 30s
+    case TimeoutCategory::Slow:
+    default:
+        return std::chrono::milliseconds(120000); // 120s
+    }
+}
+
 } // namespace
 
 // Implementation class
@@ -91,13 +135,14 @@ public:
     }
 };
 
-// DaemonClient implementation
-DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_unique<Impl>(config)) {
-    if (pImpl->config_.socketPath.empty()) {
-        pImpl->config_.socketPath = yams::daemon::ConnectionFsm::resolve_socket_path_config_first();
-    }
-    // Normalize dataDir for all CLI/MCP callers: env > config.toml(core.data_dir) > XDG/HOME > cwd
-    if (pImpl->config_.dataDir.empty()) {
+// Cached data directory resolution - parsed once, reused across all DaemonClient instances
+// This avoids repeated config file I/O on every CLI command
+namespace {
+std::once_flag g_dataDirOnce;
+std::filesystem::path g_cachedDataDir;
+
+std::filesystem::path resolveDataDirCached() {
+    std::call_once(g_dataDirOnce, []() {
         namespace fs = std::filesystem;
         auto expand_tilde = [](std::string p) -> std::string {
             if (!p.empty() && p.front() == '~') {
@@ -109,92 +154,99 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_unique<
         try {
             // 1) Explicit environment override
             if (const char* envStorage = std::getenv("YAMS_STORAGE")) {
-                if (*envStorage)
-                    pImpl->config_.dataDir = fs::path(envStorage);
+                if (*envStorage) {
+                    g_cachedDataDir = fs::path(envStorage);
+                    return;
+                }
             }
-            if (pImpl->config_.dataDir.empty()) {
-                if (const char* envData = std::getenv("YAMS_DATA_DIR")) {
-                    if (*envData)
-                        pImpl->config_.dataDir = fs::path(envData);
+            if (const char* envData = std::getenv("YAMS_DATA_DIR")) {
+                if (*envData) {
+                    g_cachedDataDir = fs::path(envData);
+                    return;
                 }
             }
 
             // 2) core.data_dir from config.toml
-            if (pImpl->config_.dataDir.empty()) {
-                fs::path cfgPath;
-                if (const char* cfgEnv = std::getenv("YAMS_CONFIG"); cfgEnv && *cfgEnv) {
-                    cfgPath = fs::path(cfgEnv);
-                } else {
-                    cfgPath = yams::config::get_config_path();
-                }
+            fs::path cfgPath;
+            if (const char* cfgEnv = std::getenv("YAMS_CONFIG"); cfgEnv && *cfgEnv) {
+                cfgPath = fs::path(cfgEnv);
+            } else {
+                cfgPath = yams::config::get_config_path();
+            }
 
-                if (!cfgPath.empty() && fs::exists(cfgPath)) {
-                    std::ifstream f(cfgPath);
-                    std::string line;
-                    bool in_core = false;
-                    while (std::getline(f, line)) {
-                        // strip leading/trailing spaces
-                        auto ltrim = [](std::string& s) {
-                            s.erase(s.begin(),
-                                    std::find_if(s.begin(), s.end(), [](unsigned char ch) {
-                                        return !std::isspace(ch);
-                                    }));
-                        };
-                        auto rtrim = [](std::string& s) {
-                            s.erase(std::find_if(s.rbegin(), s.rend(),
-                                                 [](unsigned char ch) { return !std::isspace(ch); })
-                                        .base(),
-                                    s.end());
-                        };
-                        ltrim(line);
-                        rtrim(line);
-                        if (line.empty() || line[0] == '#')
-                            continue;
-                        if (line.front() == '[') {
-                            // section header like [core]
-                            in_core = (line == "[core]" || line == "[ core ]");
-                            continue;
-                        }
-                        // support both flattened and sectioned forms
-                        auto pos = line.find('=');
-                        if (pos == std::string::npos)
-                            continue;
-                        std::string key = line.substr(0, pos);
-                        std::string val = line.substr(pos + 1);
-                        ltrim(key);
-                        rtrim(key);
-                        ltrim(val);
-                        rtrim(val);
-                        if (val.size() >= 2 && ((val.front() == '"' && val.back() == '"') ||
-                                                (val.front() == '\'' && val.back() == '\''))) {
-                            val = val.substr(1, val.size() - 2);
-                        }
-                        if (key == "core.data_dir" || (in_core && key == "data_dir")) {
-                            val = expand_tilde(val);
-                            if (!val.empty()) {
-                                pImpl->config_.dataDir = fs::path(val);
-                                break;
-                            }
+            if (!cfgPath.empty() && fs::exists(cfgPath)) {
+                std::ifstream f(cfgPath);
+                std::string line;
+                bool in_core = false;
+                auto ltrim = [](std::string& s) {
+                    s.erase(s.begin(), std::find_if(s.begin(), s.end(), [](unsigned char ch) {
+                                return !std::isspace(ch);
+                            }));
+                };
+                auto rtrim = [](std::string& s) {
+                    s.erase(std::find_if(s.rbegin(), s.rend(),
+                                         [](unsigned char ch) { return !std::isspace(ch); })
+                                .base(),
+                            s.end());
+                };
+                while (std::getline(f, line)) {
+                    ltrim(line);
+                    rtrim(line);
+                    if (line.empty() || line[0] == '#')
+                        continue;
+                    if (line.front() == '[') {
+                        in_core = (line == "[core]" || line == "[ core ]");
+                        continue;
+                    }
+                    auto pos = line.find('=');
+                    if (pos == std::string::npos)
+                        continue;
+                    std::string key = line.substr(0, pos);
+                    std::string val = line.substr(pos + 1);
+                    ltrim(key);
+                    rtrim(key);
+                    ltrim(val);
+                    rtrim(val);
+                    if (val.size() >= 2 && ((val.front() == '"' && val.back() == '"') ||
+                                            (val.front() == '\'' && val.back() == '\''))) {
+                        val = val.substr(1, val.size() - 2);
+                    }
+                    if (key == "core.data_dir" || (in_core && key == "data_dir")) {
+                        val = expand_tilde(val);
+                        if (!val.empty()) {
+                            g_cachedDataDir = fs::path(val);
+                            return;
                         }
                     }
                 }
             }
 
             // 3) XDG/HOME defaults
-            if (pImpl->config_.dataDir.empty()) {
-                if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME")) {
-                    pImpl->config_.dataDir = fs::path(xdgDataHome) / "yams";
-                } else if (const char* homeEnv = std::getenv("HOME")) {
-                    pImpl->config_.dataDir = fs::path(homeEnv) / ".local" / "share" / "yams";
-                } else {
-                    pImpl->config_.dataDir = fs::current_path() / "yams_data";
-                }
+            if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME")) {
+                g_cachedDataDir = fs::path(xdgDataHome) / "yams";
+            } else if (const char* homeEnv = std::getenv("HOME")) {
+                g_cachedDataDir = fs::path(homeEnv) / ".local" / "share" / "yams";
+            } else {
+                g_cachedDataDir = fs::current_path() / "yams_data";
             }
         } catch (const std::exception& e) {
-            spdlog::debug("DaemonClient init: dataDir resolution failed: {}", e.what());
+            spdlog::debug("resolveDataDirCached: resolution failed: {}", e.what());
         } catch (...) {
-            spdlog::debug("DaemonClient init: dataDir resolution failed with unknown exception");
+            spdlog::debug("resolveDataDirCached: resolution failed with unknown exception");
         }
+    });
+    return g_cachedDataDir;
+}
+} // namespace
+
+// DaemonClient implementation
+DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_unique<Impl>(config)) {
+    if (pImpl->config_.socketPath.empty()) {
+        pImpl->config_.socketPath = yams::daemon::ConnectionFsm::resolve_socket_path_config_first();
+    }
+    // Use cached data directory resolution for snappier startup
+    if (pImpl->config_.dataDir.empty()) {
+        pImpl->config_.dataDir = resolveDataDirCached();
     }
     pImpl->refresh_transport();
 
@@ -244,12 +296,8 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_unique<
     if (auto bt = parse_ms(std::getenv("YAMS_BODY_TIMEOUT_MS"))) {
         pImpl->bodyTimeout_ = *bt;
     }
-    // If still at legacy defaults (30s/60s), raise to 120s to tolerate large inference
-    if (pImpl->headerTimeout_ == std::chrono::milliseconds(30000) &&
-        pImpl->bodyTimeout_ == std::chrono::milliseconds(60000)) {
-        pImpl->headerTimeout_ = std::chrono::milliseconds(120000);
-        pImpl->bodyTimeout_ = std::chrono::milliseconds(120000);
-    }
+    // Note: Request-type-aware timeouts are now applied per-request in sendRequest/sendRequestStreaming
+    // Fast ops (ping/status): 5s, Medium ops (search/list): 30s, Slow ops (add/embed): 120s
     spdlog::debug("DaemonClient init: resolved socket='{}'", pImpl->config_.socketPath.string());
     if (!pImpl->config_.dataDir.empty()) {
         spdlog::debug("DaemonClient init: resolved dataDir='{}'", pImpl->config_.dataDir.string());
@@ -481,8 +529,12 @@ boost::asio::awaitable<Result<StatusResponse>> DaemonClient::status() {
     req.detailed = false; // avoid heavy daemon-side scans by default
 
     // Transient-aware retry loop for early startup/socket closure races
+    // Uses exponential backoff: 25ms, 50ms, 100ms (max 175ms total vs old 750ms)
+    static constexpr int kMaxRetries = 3;
+    static constexpr std::array<int, kMaxRetries> kRetryDelaysMs = {25, 50, 100};
+
     Error lastErr{ErrorCode::NetworkError, "Uninitialized"};
-    for (int attempt = 0; attempt < 5; ++attempt) {
+    for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
         auto response = co_await sendRequest(req);
         if (response) {
             if (auto* res = std::get_if<StatusResponse>(&response.value())) {
@@ -510,7 +562,7 @@ boost::asio::awaitable<Result<StatusResponse>> DaemonClient::status() {
         }
         using namespace std::chrono_literals;
         boost::asio::steady_timer t(co_await boost::asio::this_coro::executor);
-        t.expires_after(std::chrono::milliseconds(75 * (attempt + 1)));
+        t.expires_after(std::chrono::milliseconds(kRetryDelaysMs[attempt]));
         co_await t.async_wait(boost::asio::use_awaitable);
     }
     co_return lastErr;
@@ -589,7 +641,13 @@ boost::asio::awaitable<Result<void>> DaemonClient::ping() {
 boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(const Request& req) {
     spdlog::debug("DaemonClient::sendRequest: [{}] streaming={} sock='{}'", getRequestName(req),
                   false, pImpl->config_.socketPath.string());
-    AsioTransportAdapter adapter(pImpl->transportOptions_);
+    // Use request-type-aware timeout for snappier UI on fast operations
+    auto opts = pImpl->transportOptions_;
+    auto timeout = getTimeoutForCategory(getTimeoutCategory(req));
+    opts.requestTimeout = timeout;
+    opts.headerTimeout = timeout;
+    opts.bodyTimeout = timeout;
+    AsioTransportAdapter adapter(opts);
     auto r = co_await adapter.send_request(req);
     if (!r)
         co_return r.error();
@@ -600,7 +658,13 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(Request&& req
     const auto type = getRequestName(req);
     spdlog::debug("DaemonClient::sendRequest(move): [{}] streaming={} sock='{}'", type, false,
                   pImpl->config_.socketPath.string());
-    AsioTransportAdapter adapter(pImpl->transportOptions_);
+    // Use request-type-aware timeout for snappier UI on fast operations
+    auto opts = pImpl->transportOptions_;
+    auto timeout = getTimeoutForCategory(getTimeoutCategory(req));
+    opts.requestTimeout = timeout;
+    opts.headerTimeout = timeout;
+    opts.bodyTimeout = timeout;
+    AsioTransportAdapter adapter(opts);
     auto r = co_await adapter.send_request(std::move(req));
     if (!r)
         co_return r.error();
@@ -982,7 +1046,13 @@ DaemonClient::sendRequestStreaming(const Request& req,
     auto onError = [handler](const Error& e) { handler->onError(e); };
     auto onComplete = [handler]() { handler->onComplete(); };
 
-    AsioTransportAdapter adapter(pImpl->transportOptions_);
+    // Use request-type-aware timeout for snappier UI on fast operations
+    auto opts = pImpl->transportOptions_;
+    auto timeout = getTimeoutForCategory(getTimeoutCategory(req));
+    opts.requestTimeout = timeout;
+    opts.headerTimeout = timeout;
+    opts.bodyTimeout = timeout;
+    AsioTransportAdapter adapter(opts);
     spdlog::debug("DaemonClient::sendRequestStreaming calling adapter.send_request_streaming");
     auto res = co_await adapter.send_request_streaming(req, onHeader, onChunk, onError, onComplete);
     if (!res)

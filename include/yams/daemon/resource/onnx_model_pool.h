@@ -5,11 +5,13 @@
 #include <yams/vector/embedding_generator.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <filesystem>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // Forward declaration for ONNX Runtime
@@ -219,7 +221,12 @@ private:
     ModelPoolConfig config_;
 
     // Model registry and pools
-    mutable std::mutex mutex_;
+    // Using recursive_mutex because on Windows, there appears to be an issue with
+    // std::mutex state tracking when used with condition_variable::wait() that causes
+    // EDEADLK when the same thread tries to reacquire the mutex later in the same function.
+    mutable std::recursive_mutex mutex_;
+    std::condition_variable_any loadingCv_;           // Notified when a model finishes loading
+    std::unordered_set<std::string> loadingModels_;   // Models currently being loaded
     std::unordered_map<std::string, ModelEntry> models_;
     std::unordered_map<std::string, ResolutionHints> modelHints_;
 

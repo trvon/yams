@@ -359,8 +359,17 @@ awaitable<void> SocketServer::accept_loop() {
 #endif
 
         try {
+            // Use non-blocking try_acquire with async retry to avoid blocking the accept loop
             if (connectionSlots_) {
-                connectionSlots_->acquire();
+                while (!connectionSlots_->try_acquire()) {
+                    if (!running_ || stopping_) {
+                        break;
+                    }
+                    // Async wait before retrying - doesn't block other coroutines
+                    boost::asio::steady_timer slot_timer(*coordinator_->getIOContext());
+                    slot_timer.expires_after(std::chrono::milliseconds(1));
+                    co_await slot_timer.async_wait(use_awaitable);
+                }
                 if (trace) {
                     spdlog::debug("stream-trace: acquired connection slot");
                 }

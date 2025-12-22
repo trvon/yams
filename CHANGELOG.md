@@ -19,12 +19,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.7.11] - Unreleased
 
 ### Performance
-- **IPC connection pooling**: `AsioConnectionPool::acquire()` now reuses idle connections
-  instead of creating new ones for each request, saving ~1-5ms per CLI command.
-- **Async response signaling**: Replaced 10ms polling loop with timer-based async notification.
-  Read loop now cancels a notify timer when response arrives, eliminating 0-10ms latency floor.
-- Combined IPC latency reduced from ~8-28ms to ~2-5ms per request.
+- IPC latency reduced from ~8-28ms to ~2-5ms per request:
+  - Connection pool now reuses idle connections
+  - Replaced polling loop with async timer signaling
+  - Request-type-aware timeouts (5s/30s/120s for fast/medium/slow ops)
+  - Status retry delays reduced from 750ms to 175ms
+  - Config parsing cached per-process
+  - Async semaphore for connection slots
 
 ### Fixed
 - CLI now rejects multiple top-level subcommands (e.g., `yams search graph`) and suggests
   using `--query` when a search term matches a command.
+- Fixed ONNX model loading deadlock (EDEADLK code=36) on Windows:
+  - ServiceManager now syncs `embeddingModelName_` from PluginManager during model
+    provider adoption, enabling proper startup preload paths.
+  - ONNX plugin uses single-flight pattern to prevent concurrent model loading.
+  - Changed OnnxModelPool to use `std::recursive_mutex` to work around Windows-specific
+    issue with `std::mutex`/`std::condition_variable` interaction.

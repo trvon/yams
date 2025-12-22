@@ -2,6 +2,7 @@
 #include "model_provider.h"
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <spdlog/sinks/basic_file_sink.h>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -216,7 +217,8 @@ struct ProviderCtx {
             // Map keep_model_hot to lazyLoading inverse - but always use lazy loading
             // during plugin initialization to avoid blocking daemon startup.
             // Background preloading (if configured) will happen after init completes.
-            cfg.lazyLoading = true; // Force lazy loading during plugin init
+            // Disable lazy loading to force startup checks and surface deadlocks early
+            cfg.lazyLoading = false; 
             // Build preload list if any (will be deferred until after initialization)
             if (!preloadList.empty()) {
                 cfg.preloadModels = preloadList;
@@ -273,6 +275,26 @@ struct ProviderSingleton {
     ProviderSingleton() {
         vtable.abi_version = 2; // v1.2
         vtable.self = &ctx;
+
+        // Initialize dedicated file logger for the plugin to ensure visibility
+        try {
+            namespace fs = std::filesystem;
+            fs::path logPath;
+            if (const char* local = std::getenv("LOCALAPPDATA")) {
+                logPath = fs::path(local) / "yams" / "onnx_plugin.log";
+            } else {
+                logPath = "onnx_plugin.log"; 
+            }
+            auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(logPath.string(), true);
+            auto logger = std::make_shared<spdlog::logger>("onnx_plugin", file_sink);
+            logger->set_level(spdlog::level::debug);
+            logger->flush_on(spdlog::level::info);
+            spdlog::set_default_logger(logger);
+            spdlog::info("================================================================");
+            spdlog::info("[ONNX Plugin] Logger initialized (v1.2) - writing to {}", logPath.string());
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[ONNX Plugin] Failed to init logger: %s\n", e.what());
+        }
 
         vtable.set_progress_callback = [](void* self, yams_model_load_progress_cb cb,
                                           void* user) -> yams_status_t {
@@ -604,155 +626,142 @@ struct ProviderSingleton {
                                              size_t* out_dim) -> yams_status_t {
             spdlog::info("[ONNX Plugin] generate_embedding_batch called: model={} batch={}",
                          model_id ? model_id : "(null)", batch_size);
-            if (!self || !model_id || !inputs || !input_lens || !out_vecs || !out_batch || !out_dim)
+            
+            if (!self || !model_id || !inputs || !input_lens || !out_vecs || !out_batch || !out_dim) {
+                spdlog::error("[ONNX Plugin] Invalid arguments");
                 return YAMS_ERR_INVALID_ARG;
-            // Wrap entire lambda body in try/catch to prevent exceptions from crossing ABI
-            // boundary. On Windows, ONNX Runtime can throw std::system_error("resource deadlock
-            // would occur") when thread pool resources are exhausted (PBI-1c1).
-            try {
-                auto* c = static_cast<ProviderCtx*>(self);
-                spdlog::info("[ONNX Plugin] State: disabled={} ready={} pool={}", c->disabled,
-                             c->ready, c->pool ? "valid" : "null");
-                if (c->disabled) {
-                    spdlog::warn("[ONNX Plugin] generate_embedding_batch: plugin disabled");
-                    return YAMS_ERR_UNSUPPORTED;
-                }
-                if (!c->ready) {
-                    spdlog::warn("[ONNX Plugin] generate_embedding_batch: plugin not ready");
-                    *out_vecs = nullptr;
-                    *out_batch = 0;
-                    *out_dim = 0;
-                    return YAMS_ERR_INTERNAL;
-                }
-                if (!c->pool) {
-                    spdlog::warn("[ONNX Plugin] generate_embedding_batch: pool is null");
-                    *out_vecs = nullptr;
-                    *out_batch = 0;
-                    *out_dim = 0;
-                    return YAMS_ERR_INTERNAL;
-                }
-                std::string modelIdStr(model_id);
-
-                // Check if model is in cooldown after previous failures
-                {
-                    std::lock_guard<std::mutex> lk(c->mu);
-                    if (c->isInCooldown(modelIdStr)) {
-                        auto& info = c->model_failures[modelIdStr];
-                        spdlog::debug(
-                            "[ONNX Plugin] Model '{}' in cooldown ({} failures, last: {})",
-                            model_id, info.consecutiveFailures, info.lastError);
+            }
+            
+            int retries = 3;
+            while(retries > 0) {
+                retries--;
+                try {
+                    auto* c = static_cast<ProviderCtx*>(self);
+                    if (c->disabled) {
+                        spdlog::warn("[ONNX Plugin] generate_embedding_batch: plugin disabled");
+                        return YAMS_ERR_UNSUPPORTED;
+                    }
+                    if (!c->ready) {
+                        spdlog::warn("[ONNX Plugin] generate_embedding_batch: plugin not ready");
                         *out_vecs = nullptr;
                         *out_batch = 0;
                         *out_dim = 0;
                         return YAMS_ERR_INTERNAL;
                     }
-                }
+                    if (!c->pool) {
+                        spdlog::warn("[ONNX Plugin] generate_embedding_batch: pool is null");
+                        *out_vecs = nullptr;
+                        *out_batch = 0;
+                        *out_dim = 0;
+                        return YAMS_ERR_INTERNAL;
+                    }
+                    std::string modelIdStr(model_id);
 
-                std::vector<std::string> texts;
-                texts.reserve(batch_size);
-                for (size_t i = 0; i < batch_size; ++i) {
-                    texts.emplace_back(reinterpret_cast<const char*>(inputs[i]), input_lens[i]);
-                }
-                spdlog::info("[ONNX Plugin] generate_embedding_batch: model={} batch_size={}, "
-                             "calling acquireModel...",
-                             model_id, batch_size);
-                auto h = c->pool->acquireModel(model_id, std::chrono::seconds(30));
-                spdlog::info("[ONNX Plugin] acquireModel returned: has_value={}", h.has_value());
-                if (!h) {
-                    std::string errMsg = h.error().message;
-                    spdlog::warn("[ONNX Plugin] acquireModel failed for '{}' (batch): {}", model_id,
-                                 errMsg);
-
-                    // Record failure and fire event if this is first failure
+                    // Check if model is in cooldown
                     {
                         std::lock_guard<std::mutex> lk(c->mu);
-                        c->recordFailure(modelIdStr, errMsg);
-                        auto& info = c->model_failures[modelIdStr];
-                        c->model_states[modelIdStr] = ProviderCtx::State::Failed;
+                        if (c->isInCooldown(modelIdStr)) {
+                            auto& info = c->model_failures[modelIdStr];
+                            spdlog::warn("[ONNX Plugin] Model '{}' in cooldown ({} failures)",
+                                         model_id, info.consecutiveFailures);
+                            *out_vecs = nullptr;
+                            *out_batch = 0;
+                            *out_dim = 0;
+                            return YAMS_ERR_INTERNAL;
+                        }
+                    }
 
-                        // Fire ModelLoadFailedEvent only once per failure sequence
-                        if (!info.eventFired) {
-                            info.eventFired = true;
-                            spdlog::error("[ONNX Plugin] Model '{}' load failed, firing event: {}",
-                                          model_id, errMsg);
-                            try {
-                                auto q =
-                                    yams::daemon::InternalEventBus::instance()
-                                        .get_or_create_channel<
-                                            yams::daemon::InternalEventBus::ModelLoadFailedEvent>(
-                                            "model.events", 256);
-                                (void)q->try_push({modelIdStr, errMsg});
-                            } catch (...) {
-                                spdlog::warn("[ONNX Plugin] Failed to push ModelLoadFailedEvent");
+                    std::vector<std::string> texts;
+                    texts.reserve(batch_size);
+                    for (size_t i = 0; i < batch_size; ++i) {
+                        texts.emplace_back(reinterpret_cast<const char*>(inputs[i]), input_lens[i]);
+                    }
+                    
+                    spdlog::info("[ONNX Plugin] acquiring model '{}'...", model_id);
+                    auto h = c->pool->acquireModel(model_id, std::chrono::seconds(30));
+                    if (!h) {
+                        std::string errMsg = h.error().message;
+                        spdlog::error("[ONNX Plugin] acquireModel failed for '{}': {}", model_id, errMsg);
+
+                        {
+                            std::lock_guard<std::mutex> lk(c->mu);
+                            c->recordFailure(modelIdStr, errMsg);
+                            auto& info = c->model_failures[modelIdStr];
+                            c->model_states[modelIdStr] = ProviderCtx::State::Failed;
+
+                            if (!info.eventFired) {
+                                info.eventFired = true;
+                                try {
+                                    auto q = yams::daemon::InternalEventBus::instance()
+                                            .get_or_create_channel<yams::daemon::InternalEventBus::ModelLoadFailedEvent>("model.events", 256);
+                                    (void)q->try_push({modelIdStr, errMsg});
+                                } catch (...) {}
                             }
                         }
+                        *out_vecs = nullptr;
+                        *out_batch = 0;
+                        *out_dim = 0;
+                        return YAMS_ERR_INTERNAL;
+                    }
+
+                    {
+                        std::lock_guard<std::mutex> lk(c->mu);
+                        c->clearFailure(modelIdStr);
+                        c->model_states[modelIdStr] = ProviderCtx::State::Ready;
+                    }
+
+                    auto& session = *h.value();
+                    auto r = const_cast<yams::daemon::OnnxModelSession&>(session).generateBatchEmbeddings(texts);
+                    if (!r) {
+                        spdlog::error("[ONNX Plugin] generateBatchEmbeddings failed: {}", r.error().message);
+                        return YAMS_ERR_INTERNAL;
+                    }
+                    auto& mat = r.value();
+                    if (mat.empty()) {
+                        *out_vecs = nullptr;
+                        *out_batch = 0;
+                        *out_dim = 0;
+                        return YAMS_OK;
+                    }
+                    const size_t b = mat.size();
+                    const size_t d = mat[0].size();
+                    float* buf = static_cast<float*>(std::malloc(sizeof(float) * b * d));
+                    if (!buf) return YAMS_ERR_INTERNAL;
+                    for (size_t i = 0; i < b; ++i) {
+                        std::memcpy(buf + i * d, mat[i].data(), sizeof(float) * d);
+                    }
+                    *out_vecs = buf;
+                    *out_batch = b;
+                    *out_dim = d;
+                    return YAMS_OK;
+
+                } catch (const std::system_error& e) {
+                    spdlog::error("[ONNX Plugin] system_error: {} (code={}). Retries: {}", 
+                                  e.what(), e.code().value(), retries);
+                    if (retries > 0) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                        continue;
                     }
                     *out_vecs = nullptr;
                     *out_batch = 0;
                     *out_dim = 0;
                     return YAMS_ERR_INTERNAL;
-                }
-
-                // Model acquired successfully - clear any previous failure tracking
-                {
-                    std::lock_guard<std::mutex> lk(c->mu);
-                    c->clearFailure(modelIdStr);
-                    c->model_states[modelIdStr] = ProviderCtx::State::Ready;
-                }
-
-                auto& session = *h.value();
-                auto r =
-                    const_cast<yams::daemon::OnnxModelSession&>(session).generateBatchEmbeddings(
-                        texts);
-                if (!r) {
-                    spdlog::warn("[ONNX Plugin] generateBatchEmbeddings failed for {}: {}",
-                                 model_id, r.error().message);
-                    return YAMS_ERR_INTERNAL;
-                }
-                auto& mat = r.value();
-                if (mat.empty()) {
+                } catch (const std::exception& e) {
+                    spdlog::error("[ONNX Plugin] exception: {}", e.what());
                     *out_vecs = nullptr;
                     *out_batch = 0;
                     *out_dim = 0;
-                    return YAMS_OK;
-                }
-                const size_t b = mat.size();
-                const size_t d = mat[0].size();
-                float* buf = static_cast<float*>(std::malloc(sizeof(float) * b * d));
-                if (!buf)
                     return YAMS_ERR_INTERNAL;
-                for (size_t i = 0; i < b; ++i) {
-                    std::memcpy(buf + i * d, mat[i].data(), sizeof(float) * d);
+                } catch (...) {
+                    spdlog::error("[ONNX Plugin] unknown exception");
+                    *out_vecs = nullptr;
+                    *out_batch = 0;
+                    *out_dim = 0;
+                    return YAMS_ERR_INTERNAL;
                 }
-                *out_vecs = buf;
-                *out_batch = b;
-                *out_dim = d;
-                return YAMS_OK;
-            } catch (const std::system_error& e) {
-                // Windows thread pool exhaustion typically surfaces as EDEADLK
-                fprintf(stderr, "[ONNX Plugin] generate_embedding_batch std::system_error: %s\n",
-                        e.what());
-                spdlog::error("[ONNX Plugin] generate_embedding_batch std::system_error: {}",
-                              e.what());
-                *out_vecs = nullptr;
-                *out_batch = 0;
-                *out_dim = 0;
-                return YAMS_ERR_INTERNAL;
-            } catch (const std::exception& e) {
-                fprintf(stderr, "[ONNX Plugin] generate_embedding_batch exception: %s\n", e.what());
-                spdlog::error("[ONNX Plugin] generate_embedding_batch exception: {}", e.what());
-                *out_vecs = nullptr;
-                *out_batch = 0;
-                *out_dim = 0;
-                return YAMS_ERR_INTERNAL;
-            } catch (...) {
-                fprintf(stderr, "[ONNX Plugin] generate_embedding_batch unknown exception\n");
-                spdlog::error("[ONNX Plugin] generate_embedding_batch unknown exception");
-                *out_vecs = nullptr;
-                *out_batch = 0;
-                *out_dim = 0;
-                return YAMS_ERR_INTERNAL;
-            }
+            } // end while
+
+            return YAMS_ERR_INTERNAL;
         };
 
         vtable.free_embedding_batch = [](void* /*self*/, float* vecs, size_t /*batch*/,
