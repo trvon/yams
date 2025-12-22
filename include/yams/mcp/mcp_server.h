@@ -372,6 +372,7 @@ private:
     handleRestoreCollection(const MCPRestoreCollectionRequest& req);
     boost::asio::awaitable<Result<MCPRestoreSnapshotResponse>>
     handleRestoreSnapshot(const MCPRestoreSnapshotRequest& req);
+    boost::asio::awaitable<Result<MCPRestoreResponse>> handleRestore(const MCPRestoreRequest& req);
     boost::asio::awaitable<Result<MCPListCollectionsResponse>>
     handleListCollections(const MCPListCollectionsRequest& req);
     boost::asio::awaitable<Result<MCPListSnapshotsResponse>>

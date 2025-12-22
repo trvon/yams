@@ -1029,6 +1029,51 @@ json MCPRestoreSnapshotResponse::toJson() const {
         {"files_restored", filesRestored}, {"restored_paths", restoredPaths}, {"dry_run", dryRun}};
 }
 
+// MCPRestoreRequest implementation
+MCPRestoreRequest MCPRestoreRequest::fromJson(const json& j) {
+    MCPRestoreRequest req;
+    req.collection = j.value("collection", std::string{});
+    req.snapshotId = j.value("snapshot_id", std::string{});
+    req.snapshotLabel = j.value("snapshot_label", std::string{});
+    req.outputDirectory = j.value("output_directory", std::string{});
+    req.layoutTemplate = j.value("layout_template", std::string{"{path}"});
+    req.overwrite = j.value("overwrite", false);
+    req.createDirs = j.value("create_dirs", true);
+    req.dryRun = j.value("dry_run", false);
+
+    detail::readStringArray(j, "include_patterns", req.includePatterns);
+    detail::readStringArray(j, "exclude_patterns", req.excludePatterns);
+
+    return req;
+}
+
+json MCPRestoreRequest::toJson() const {
+    return json{{"collection", collection},
+                {"snapshot_id", snapshotId},
+                {"snapshot_label", snapshotLabel},
+                {"output_directory", outputDirectory},
+                {"layout_template", layoutTemplate},
+                {"include_patterns", includePatterns},
+                {"exclude_patterns", excludePatterns},
+                {"overwrite", overwrite},
+                {"create_dirs", createDirs},
+                {"dry_run", dryRun}};
+}
+
+// MCPRestoreResponse implementation
+MCPRestoreResponse MCPRestoreResponse::fromJson(const json& j) {
+    MCPRestoreResponse resp;
+    resp.filesRestored = j.value("files_restored", size_t{0});
+    resp.dryRun = j.value("dry_run", false);
+    detail::readStringArray(j, "restored_paths", resp.restoredPaths);
+    return resp;
+}
+
+json MCPRestoreResponse::toJson() const {
+    return json{
+        {"files_restored", filesRestored}, {"restored_paths", restoredPaths}, {"dry_run", dryRun}};
+}
+
 // MCPListCollectionsRequest implementation
 MCPListCollectionsRequest MCPListCollectionsRequest::fromJson([[maybe_unused]] const json& j) {
     MCPListCollectionsRequest req;

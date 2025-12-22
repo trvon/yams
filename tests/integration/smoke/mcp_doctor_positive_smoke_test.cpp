@@ -232,8 +232,9 @@ TEST_F(MCPDocOpsFixture, DocOpsRoundTrip) {
     auto listRes = svr.callToolPublic(
         "list", json{{"name", "mcp_smoke.txt"}, {"limit", 5}, {"paths_only", true}});
     ASSERT_TRUE(listRes.is_object()) << listRes.dump();
-    // 3) get_by_name and assert content round-trip contains seed
-    auto getRes = svr.callToolPublic("get_by_name", json{{"name", "mcp_smoke.txt"}});
+    // 3) get (by name) and assert content round-trip contains seed
+    auto getRes =
+        svr.callToolPublic("get", json{{"name", "mcp_smoke.txt"}, {"include_content", true}});
     ASSERT_TRUE(getRes.is_object()) << getRes.dump();
     ASSERT_FALSE(getRes.contains("error")) << getRes.dump();
     // Result shape: either {content:[{text:...}]} or {result:{...}} depending on framing; accept
@@ -315,8 +316,7 @@ TEST_F(MCPSmokeFixture, ListDocumentsResponds) {
     ASSERT_TRUE(res.is_object()) << res.dump();
 }
 
-// Unreachable envelope checks for daemon-first doc ops: list and add; tolerant checks for
-// get_by_name.
+// Unreachable envelope checks for daemon-first doc ops: list and add; tolerant checks for get.
 TEST_F(MCPSmokeFixture, UnreachableEnvelopeUniformForDocOps) {
     using nlohmann::json;
     auto t = std::make_unique<NullTransport>();
@@ -342,9 +342,9 @@ TEST_F(MCPSmokeFixture, UnreachableEnvelopeUniformForDocOps) {
     assert_unreachable("list", json{{"limit", 1}, {"paths_only", true}});
     // add/store uses daemon-first path
     assert_unreachable("add", json{{"content", "x"}, {"name", "x.txt"}});
-    // get_by_name may not contact daemon on minimal builds; accept NotFound or dial
+    // get may not contact daemon on minimal builds; accept NotFound or dial
     {
-        auto res = svr.callToolPublic("get_by_name", json{{"name", "does-not-exist"}});
+        auto res = svr.callToolPublic("get", json{{"name", "does-not-exist"}});
         ASSERT_TRUE(res.is_object());
         ASSERT_TRUE(res.contains("error"));
         auto msg = res["error"].value("message", std::string{});
@@ -369,8 +369,8 @@ TEST_F(MCPSmokeFixture, Parity_UnreachableEnvelopeAndToolsListRespondsQuickly) {
         return yams::Error{yams::ErrorCode::NetworkError, "dial error"};
     });
 
-    // stats should return an error quickly with a useful envelope (unreachable daemon)
-    auto callRes = svr.callToolPublic("stats", json::object());
+    // status should return an error quickly with a useful envelope (unreachable daemon)
+    auto callRes = svr.callToolPublic("status", json::object());
     ASSERT_TRUE(callRes.contains("error"));
     auto msg = callRes["error"].value("message", std::string{});
     bool ok = (msg.find("YAMS_DAEMON_SOCKET") != std::string::npos ||

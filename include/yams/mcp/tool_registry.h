@@ -636,7 +636,7 @@ struct MCPUpdateMetadataRequest {
 
     std::string hash;
     std::string name;
-    // Extended selectors and options (parity with get_by_name)
+    // Extended selectors and options (parity with get-by-name use)
     std::string path;               // explicit absolute/relative path
     std::vector<std::string> names; // batch by names
     std::string pattern;            // glob-like pattern for batch
@@ -721,6 +721,34 @@ struct MCPRestoreSnapshotResponse {
     bool dryRun = false;
 
     static MCPRestoreSnapshotResponse fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPRestoreRequest {
+    using RequestType = MCPRestoreRequest;
+
+    std::string collection;
+    std::string snapshotId;
+    std::string snapshotLabel;
+    std::string outputDirectory;
+    std::string layoutTemplate = "{path}";
+    std::vector<std::string> includePatterns;
+    std::vector<std::string> excludePatterns;
+    bool overwrite = false;
+    bool createDirs = true;
+    bool dryRun = false;
+
+    static MCPRestoreRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPRestoreResponse {
+    using ResponseType = MCPRestoreResponse;
+    size_t filesRestored = 0;
+    std::vector<std::string> restoredPaths;
+    bool dryRun = false;
+
+    static MCPRestoreResponse fromJson(const json& j);
     json toJson() const;
 };
 

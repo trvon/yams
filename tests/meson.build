@@ -1462,6 +1462,30 @@ if catch2_dep.found()
     install: false,
   )
 
+  # Metadata Schema Tests (Catch2) - comprehensive schema, CRUD, FTS, migrations
+  # Migrated from GTest as part of yams-3s4 / yams-aqc
+  # --------------------------------------------------------------------------
+  catch2_metadata_schema_exe = executable('catch2_metadata_schema',
+    files('unit/metadata/metadata_schema_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # FTS5 Failure Scenarios Tests (Catch2) - FTS5 edge cases and failure modes
+  # Migrated from GTest as part of yams-3s4 / yams-aqc
+  # --------------------------------------------------------------------------
+  catch2_fts5_failure_scenarios_exe = executable('catch2_fts5_failure_scenarios',
+    files('unit/metadata/fts5_failure_scenarios_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # Core tests (minimal dependencies - no daemon)
   core_test_deps = [
     dependency('spdlog'),
@@ -1847,6 +1871,18 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'metadata', 'query_helpers'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
+  )
+
+  test('metadata_schema', catch2_metadata_schema_exe,
+    suite: ['catch2', 'unit', 'metadata', 'schema'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 300  # Comprehensive tests including performance metrics
+  )
+
+  test('fts5_failure_scenarios', catch2_fts5_failure_scenarios_exe,
+    suite: ['catch2', 'unit', 'metadata', 'fts5', 'failure'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 180  # Includes concurrent and large content tests
   )
 
   # Core tests

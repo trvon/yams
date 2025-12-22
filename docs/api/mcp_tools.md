@@ -56,7 +56,7 @@ When the prompt is file-backed, the entire Markdown content is returned as a sin
 }
 ```
 
-### search_documents
+### search
 
 Search for documents using keyword search, fuzzy matching, or hash lookup with enhanced LLM ergonomics.
 
@@ -154,7 +154,7 @@ Defaults: When options are omitted, the server runs hybrid search with fuzzy ena
 Text search:
 ```json
 {
-  "tool": "search_documents",
+  "tool": "search",
   "arguments": {
     "query": "database optimization",
     "limit": 5
@@ -165,7 +165,7 @@ Text search:
 Fuzzy search:
 ```json
 {
-  "tool": "search_documents",
+  "tool": "search",
   "arguments": {
     "query": "databse optimizaton",
     "fuzzy": true,
@@ -177,7 +177,7 @@ Fuzzy search:
 Hash search:
 ```json
 {
-  "tool": "search_documents",
+  "tool": "search",
   "arguments": {
     "query": "placeholder",
     "hash": "abcd1234ef567890"
@@ -188,14 +188,14 @@ Hash search:
 Auto-detected hash search:
 ```json
 {
-  "tool": "search_documents",
+  "tool": "search",
   "arguments": {
     "query": "abcd1234ef567890"
   }
 }
 ```
 
-### store_document
+### add
 
 Store a document with optional metadata.
 
@@ -234,7 +234,7 @@ Store a document with optional metadata.
 **Example:**
 ```json
 {
-  "tool": "store_document",
+  "tool": "add",
   "arguments": {
     "path": "/tmp/meeting-notes.txt",
     "tags": ["meeting", "project-x", "2024-01"],
@@ -246,7 +246,7 @@ Store a document with optional metadata.
 }
 ```
 
-### grep_documents
+### grep
 
 Search for regex patterns within document contents (similar to grep command).
 
@@ -342,7 +342,7 @@ Search for regex patterns within document contents (similar to grep command).
 **Example:**
 ```json
 {
-  "tool": "grep_documents",
+  "tool": "grep",
   "arguments": {
     "pattern": "function.*async",
     "paths": ["src/"],
@@ -352,7 +352,7 @@ Search for regex patterns within document contents (similar to grep command).
 }
 ```
 
-### retrieve_document
+### get
 
 Retrieve a document by its content hash with optional knowledge graph relationships.
 
@@ -403,7 +403,7 @@ Retrieve a document by its content hash with optional knowledge graph relationsh
 **Example:**
 ```json
 {
-  "tool": "retrieve_document",
+  "tool": "get",
   "arguments": {
     "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "outputPath": "/tmp/output.txt"
@@ -411,7 +411,66 @@ Retrieve a document by its content hash with optional knowledge graph relationsh
 }
 ```
 
-### update_metadata
+### graph
+
+Query the knowledge graph (matches `yams graph`).
+
+**Input Schema:**
+```json
+{
+  "type": "object",
+  "properties": {
+    "hash": { "type": "string", "description": "Document hash" },
+    "name": { "type": "string", "description": "Document name/path" },
+    "node_key": { "type": "string", "description": "Direct KG node key" },
+    "node_id": { "type": "integer", "description": "Direct KG node id" },
+    "list_types": { "type": "boolean", "description": "List available node types" },
+    "list_type": { "type": "string", "description": "List nodes by type" },
+    "isolated": { "type": "boolean", "description": "List isolated nodes" },
+    "relation": { "type": "string", "description": "Single relation filter" },
+    "relation_filters": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Relation filters"
+    },
+    "depth": { "type": "integer", "description": "Traversal depth (1-5)" },
+    "limit": { "type": "integer", "description": "Maximum results", "default": 100 },
+    "offset": { "type": "integer", "description": "Pagination offset", "default": 0 },
+    "reverse": { "type": "boolean", "description": "Traverse incoming edges" },
+    "include_node_properties": {
+      "type": "boolean",
+      "description": "Include node properties JSON"
+    },
+    "include_edge_properties": {
+      "type": "boolean",
+      "description": "Include edge properties JSON"
+    },
+    "hydrate_fully": {
+      "type": "boolean",
+      "description": "Hydrate metadata for nodes"
+    },
+    "scope_snapshot": {
+      "type": "string",
+      "description": "Restrict traversal to a snapshot id"
+    }
+  }
+}
+```
+
+**Example:**
+```json
+{
+  "tool": "graph",
+  "arguments": {
+    "name": "src/cli/commands/graph_command.cpp",
+    "depth": 2,
+    "relation": "CALLS",
+    "limit": 50
+  }
+}
+```
+
+### update
 
 Update metadata for an existing document.
 
@@ -449,7 +508,7 @@ Update metadata for an existing document.
 **Example:**
 ```json
 {
-  "tool": "update_metadata",
+  "tool": "update",
   "arguments": {
     "hash": "abc123...",
     "metadata": ["status=completed", "priority=high", "author=John Doe"],
@@ -458,7 +517,7 @@ Update metadata for an existing document.
 }
 ```
 
-### get_stats
+### status
 
 Get storage statistics with optional file type breakdown.
 
@@ -494,7 +553,7 @@ Get storage statistics with optional file type breakdown.
 **Example:**
 ```json
 {
-  "tool": "get_stats",
+  "tool": "status",
   "arguments": {
     "detailed": true
   }
@@ -503,7 +562,7 @@ Get storage statistics with optional file type breakdown.
 
 ## Enhanced Tools
 
-### list_documents
+### list
 List all documents with comprehensive filtering and sorting capabilities.
 
 **Enhanced Features:**
@@ -518,7 +577,7 @@ List all documents with comprehensive filtering and sorting capabilities.
 **Example:**
 ```json
 {
-  "tool": "list_documents",
+  "tool": "list",
   "arguments": {
     "type": "text",
     "extension": ".py",
@@ -531,17 +590,35 @@ List all documents with comprehensive filtering and sorting capabilities.
 
 ## Additional Tools
 
-### add_directory
-Index directory contents recursively. Recursive behavior defaults to true; misuse produces clear errors.
-
-### downloader.download
+### download
 Download and store an artifact by URL with checksum support. Name derives from URL basename; returns hash and stored path.
 
-### restore_collection
-Restore all documents from a named collection to the filesystem.
+### restore
+Restore documents from a collection or snapshot.
 
-### restore_snapshot
-Restore documents from a snapshot ID to the filesystem.
+**Parameters:**
+- `collection`: Collection name (optional)
+- `snapshot_id`: Snapshot ID (optional)
+- `snapshot_label`: Snapshot label (optional)
+- `output_directory`: Output directory (required)
+- `layout_template`: Layout template (default: `{path}`)
+- `include_patterns`: Only restore matching patterns
+- `exclude_patterns`: Exclude matching patterns
+- `overwrite`: Overwrite existing files (default: false)
+- `create_dirs`: Create parent directories (default: true)
+- `dry_run`: Preview without writing (default: false)
+
+**Example:**
+```json
+{
+  "tool": "restore",
+  "arguments": {
+    "collection": "docs",
+    "output_directory": "/tmp/restore",
+    "dry_run": true
+  }
+}
+```
 
 ### list_collections
 List available collections.
@@ -549,77 +626,7 @@ List available collections.
 ### list_snapshots
 List available snapshots.
 
-## Legacy Tools (Available)
+## Other Tools
 
 ### delete_by_name
 Delete documents by name, multiple names, or glob patterns.
-
-### get_by_name
-Retrieve document content by name instead of hash. If direct lookup fails, a hybrid fuzzy search is attempted and the strongest match is retrieved by hash or normalized path.
-
-### cat_document
-Display document content directly (similar to CLI cat command).
-
-## Planned Tools (Coming Soon)
-
-### store_text
-Store text content directly without creating files.
-
-### search_by_tag
-Search specifically within tagged documents.
-
-### bulk_operations
-Perform multiple operations in a single request.
-
-## Error Handling
-
-All tools return errors in a consistent format:
-
-```json
-{
-  "error": "Description of what went wrong"
-}
-```
-
-Common error codes:
-- Document not found
-- Invalid arguments
-- Storage not initialized
-- Permission denied
-- Internal server error
-
-## Best Practices
-
-1. **Use search before retrieve**: Search to find relevant documents, then retrieve specific ones
-2. **Tag consistently**: Use a standard tagging scheme for easier retrieval
-3. **Batch operations**: Group related operations when possible
-4. **Handle errors gracefully**: Always check for error responses
-5. **Use appropriate limits**: Don't request more results than needed
-
-## Integration with Claude Desktop
-
-Add to your Claude Desktop configuration:
-
-```json
-{
-  "mcpServers": {
-    "yams": {
-      "command": "yams",
-      "args": ["serve"],
-      "env": {}
-    }
-  }
-}
-```
-
-This allows Claude to directly interact with your YAMS storage for enhanced memory and context management.
-
-
-## MCP Server Transport (HTTP + SSE)
-
-- Default transport is HTTP + SSE on 127.0.0.1:8757.
-- Stdio transport is temporarily deprecated and will be revisited.
-- Initialize via POST /mcp/jsonrpc; the result includes `sessionId`.
-- Open SSE at GET /mcp/events?session=<sessionId> to receive `notifications/ready`, logs, and progress.
-- Send `initialized` via POST using the same session to trigger `ready`.
-- Change bind via env: `YAMS_MCP_HTTP_BIND=127.0.0.1:8757`.

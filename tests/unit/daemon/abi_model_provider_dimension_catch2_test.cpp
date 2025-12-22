@@ -74,13 +74,9 @@ yams_status_t mock_generate_embedding_batch(void* self, const char* model_id,
     return YAMS_OK;
 }
 
-void mock_free_embedding(void* self, float* vec, size_t dim) {
-    free(vec);
-}
+void mock_free_embedding(void* self, float* vec, size_t dim) { free(vec); }
 
-void mock_free_embedding_batch(void* self, float* vecs, size_t batch, size_t dim) {
-    free(vecs);
-}
+void mock_free_embedding_batch(void* self, float* vecs, size_t batch, size_t dim) { free(vecs); }
 
 yams_status_t mock_load_model(void* self, const char* model_id, const char* model_path,
                               const char* options) {
@@ -306,8 +302,8 @@ TEST_CASE_METHOD(AbiModelProviderDimensionFixture,
     // TODO: After enhancement, verify error includes dimension details
 }
 
-TEST_CASE_METHOD(AbiModelProviderDimensionFixture, "AbiModelProvider: dimension mismatch in batch",
-                 "[daemon]") {
+TEST_CASE_METHOD(AbiModelProviderDimensionFixture,
+                 "AbiModelProvider: dimension mismatch in batch", "[daemon]") {
     mockContext_->simulateDimensionMismatch = true;
 
     std::vector<std::string> texts = {"text1", "text2"};
@@ -360,8 +356,8 @@ TEST_CASE_METHOD(AbiModelProviderDimensionFixture, "AbiModelProvider: batch with
 // Test 6: Multiple Models with Different Dimensions
 // ============================================================================
 
-TEST_CASE_METHOD(AbiModelProviderDimensionFixture, "AbiModelProvider: switch between dimensions",
-                 "[daemon]") {
+TEST_CASE_METHOD(AbiModelProviderDimensionFixture,
+                 "AbiModelProvider: switch between dimensions", "[daemon]") {
     SECTION("384-dim model") {
         mockContext_->outputDim = 384;
         auto result384 = adapter_->generateEmbedding("text");

@@ -94,20 +94,18 @@ TEST_CASE("MCP Schema - ListTools contains all expected tools", "[mcp][schema][t
                                          "download",
                                          "session_start",
                                          "session_stop",
+                                         "session_pin",
+                                         "session_unpin",
                                          "graph",
                                          "get",
-                                         "stats",
+                                         "status",
                                          "update",
                                          "delete_by_name",
-                                         "cat",
                                          "list",
-                                         "add_directory",
-                                         "restore_collection",
-                                         "restore_snapshot",
+                                         "add",
                                          "restore",
                                          "list_collections",
-                                         "list_snapshots",
-                                         "get_by_name"};
+                                         "list_snapshots"};
 
     // Gather actual names
     std::vector<std::string> actual;
@@ -282,36 +280,16 @@ TEST_CASE("MCP Schema - ListDocuments supports filters and sorting",
 TEST_CASE("MCP Schema - GetStats supports file types breakdown", "[mcp][schema][stats][catch2]") {
     auto server = ServerUnderTest::make();
     json tools = server->testListTools();
-    auto t = findTool(tools, "stats");
+    auto t = findTool(tools, "status");
     REQUIRE(t.has_value());
 
     auto props = toolProps(*t);
     REQUIRE(props.has_value());
 
     CHECK(hasProp(*props, "detailed"));
-    CHECK(hasProp(*props, "file_types"));
 }
 
-TEST_CASE("MCP Schema - AddDirectory has expected properties", "[mcp][schema][directory][catch2]") {
-    auto server = ServerUnderTest::make();
-    json tools = server->testListTools();
-    auto t = findTool(tools, "add_directory");
-    REQUIRE(t.has_value());
-
-    auto props = toolProps(*t);
-    REQUIRE(props.has_value());
-
-    CHECK(hasProp(*props, "directory_path"));
-    CHECK(hasProp(*props, "collection"));
-    CHECK(hasProp(*props, "snapshot_id"));
-    CHECK(hasProp(*props, "snapshot_label"));
-    CHECK(hasProp(*props, "recursive"));
-    CHECK(hasProp(*props, "include_patterns"));
-    CHECK(hasProp(*props, "exclude_patterns"));
-}
-
-TEST_CASE("MCP Schema - RestoreCollection has expected properties",
-          "[mcp][schema][restore][catch2]") {
+TEST_CASE("MCP Schema - Restore has expected properties", "[mcp][schema][restore][catch2]") {
     auto server = ServerUnderTest::make();
     json tools = server->testListTools();
     auto t = findTool(tools, "restore");
@@ -321,25 +299,6 @@ TEST_CASE("MCP Schema - RestoreCollection has expected properties",
     REQUIRE(props.has_value());
 
     CHECK(hasProp(*props, "collection"));
-    CHECK(hasProp(*props, "output_directory"));
-    CHECK(hasProp(*props, "layout_template"));
-    CHECK(hasProp(*props, "include_patterns"));
-    CHECK(hasProp(*props, "exclude_patterns"));
-    CHECK(hasProp(*props, "overwrite"));
-    CHECK(hasProp(*props, "create_dirs"));
-    CHECK(hasProp(*props, "dry_run"));
-}
-
-TEST_CASE("MCP Schema - RestoreSnapshot has expected properties",
-          "[mcp][schema][snapshot][catch2]") {
-    auto server = ServerUnderTest::make();
-    json tools = server->testListTools();
-    auto t = findTool(tools, "restore_snapshot");
-    REQUIRE(t.has_value());
-
-    auto props = toolProps(*t);
-    REQUIRE(props.has_value());
-
     CHECK(hasProp(*props, "snapshot_id"));
     CHECK(hasProp(*props, "snapshot_label"));
     CHECK(hasProp(*props, "output_directory"));
@@ -354,7 +313,7 @@ TEST_CASE("MCP Schema - RestoreSnapshot has expected properties",
 TEST_CASE("MCP Schema - ListSnapshots has withLabels", "[mcp][schema][snapshots][catch2]") {
     auto server = ServerUnderTest::make();
     json tools = server->testListTools();
-    auto t = findTool(tools, "list");
+    auto t = findTool(tools, "list_snapshots");
     REQUIRE(t.has_value());
 
     auto props = toolProps(*t);

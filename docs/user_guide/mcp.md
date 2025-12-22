@@ -117,7 +117,7 @@ docker run -i --rm \
 
 The MCP server provides the following tools to AI assistants:
 
-### search_documents
+### search
 
 Search for documents using various strategies.
 
@@ -134,7 +134,7 @@ Defaults: When the client omits search options, the server runs hybrid search wi
 **Example:**
 ```json
 {
-  "tool": "search_documents",
+  "tool": "search",
   "arguments": {
     "query": "configuration management",
     "limit": 5,
@@ -143,7 +143,7 @@ Defaults: When the client omits search options, the server runs hybrid search wi
 }
 ```
 
-### grep_documents
+### grep
 
 Search using regular expressions across indexed content.
 
@@ -157,7 +157,7 @@ Search using regular expressions across indexed content.
 **Example:**
 ```json
 {
-  "tool": "grep_documents",
+  "tool": "grep",
   "arguments": {
     "pattern": "class\\s+\\w+Handler",
     "ignore_case": false,
@@ -167,7 +167,7 @@ Search using regular expressions across indexed content.
 }
 ```
 
-### store_document
+### add
 
 Store a document with metadata.
 
@@ -176,25 +176,44 @@ Store a document with metadata.
 - `tags`: Array of tags
 - `metadata`: Key-value metadata object
 
-### retrieve_document
+### get
 
 Retrieve document by hash.
 
 **Parameters:**
 - `hash` (required): Document hash
+- `name`: Document name/path (optional)
 - `outputPath`: Where to save (optional)
 - `graph`: Include related documents
 - `depth`: Graph traversal depth (1-5)
 
-### get_stats
+### graph
+
+Query the knowledge graph (matches `yams graph`).
+
+**Parameters:**
+- `hash`: Document hash (optional)
+- `name`: Document name/path (optional)
+- `node_key`: Direct KG node key (optional)
+- `node_id`: Direct KG node id (optional)
+- `list_types`: List available node types with counts
+- `list_type`: List nodes of a specific type
+- `isolated`: List isolated nodes (no incoming edges for relation)
+- `relation`: Single relation filter
+- `relation_filters`: Array of relation filters
+- `depth`: Traversal depth (1-5)
+- `limit`: Maximum results (default: 100)
+- `offset`: Pagination offset
+- `reverse`: Traverse incoming edges instead of outgoing
+
+### status
 
 Get storage statistics and analytics.
 
 **Parameters:**
 - `detailed`: Include detailed breakdown
-- `file_types`: Include file type analysis
 
-### list_documents
+### list
 
 List stored documents with filtering.
 
@@ -204,6 +223,22 @@ List stored documents with filtering.
 - `sort_by`: Sort field (name|size|created|modified)
 - `sort_order`: asc|desc
 - `recent`: Show N most recent documents
+
+### restore
+
+Restore documents from a collection or snapshot.
+
+**Parameters:**
+- `collection`: Collection name (optional)
+- `snapshot_id`: Snapshot ID (optional)
+- `snapshot_label`: Snapshot label (optional)
+- `output_directory`: Output directory (required)
+- `layout_template`: Layout template (default: `{path}`)
+- `include_patterns`: Only restore matching patterns
+- `exclude_patterns`: Exclude matching patterns
+- `overwrite`: Overwrite existing files (default: false)
+- `create_dirs`: Create parent directories (default: true)
+- `dry_run`: Preview without writing (default: false)
 
 ## Hot/Cold Modes
 
@@ -221,10 +256,9 @@ Note: paths_only typically engages hot paths where supported, and reduces respon
 
 The MCP server also exposes additional tools for batch and collection workflows. See the API reference for schemas and examples: ../api/mcp_tools.md
 
-- add_directory: Index directory contents recursively (recursive defaults to true).
-- downloader.download: Fetch artifacts by URL into CAS with checksum support.
-- restore_collection, restore_snapshot: Restore documents to the filesystem.
+- download: Fetch artifacts by URL into CAS with checksum support.
 - list_collections, list_snapshots: Enumerate collections and snapshots.
+- session_start/session_stop/session_pin/session_unpin: Session management.
 
 ## Testing the MCP Server
 
@@ -240,7 +274,7 @@ echo '{"jsonrpc":"2.0","method":"initialize","params":{"clientInfo":{"name":"tes
 echo '{"jsonrpc":"2.0","method":"tools/list","id":2}' | yams serve
 
 # Search for documents
-echo '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"search_documents","arguments":{"query":"test"}},"id":3}' | yams serve
+echo '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"search","arguments":{"query":"test"}},"id":3}' | yams serve
 ```
 
 ## Integration Examples

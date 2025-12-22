@@ -38,7 +38,7 @@ protected:
 };
 } // namespace
 
-TEST_F(LinuxSocketFixture, StatsSucceedsWithXdgRuntimeDir) {
+TEST_F(LinuxSocketFixture, StatusSucceedsWithXdgRuntimeDir) {
     ASSERT_TRUE(startDaemon());
 
     // Spin briefly to allow socket server to come up
@@ -46,8 +46,8 @@ TEST_F(LinuxSocketFixture, StatsSucceedsWithXdgRuntimeDir) {
 
     auto t = std::make_unique<NullTransport>();
     yams::mcp::MCPServer svr(std::move(t));
-    // Try yams.stats via MCP — should succeed
-    auto res = svr.callToolPublic("yams.stats", nlohmann::json{{"detailed", true}});
+    // Try status via MCP — should succeed
+    auto res = svr.callToolPublic("status", nlohmann::json{{"detailed", true}});
     // Either error is absent or structured content exists
     if (res.contains("error")) {
         ADD_FAILURE() << res.dump();

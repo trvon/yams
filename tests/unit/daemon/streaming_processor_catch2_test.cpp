@@ -3,10 +3,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <thread>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/use_future.hpp>
+#include <thread>
 
 #include <yams/daemon/ipc/request_handler.h>
 #include <yams/daemon/ipc/streaming_processor.h>

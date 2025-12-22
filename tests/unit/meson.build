@@ -210,7 +210,6 @@ unit_metadata = files(
   # All metadata tests migrated to Catch2 - see tests/meson.build
   # Remaining GTest files:
   'metadata/fts5_performance_stress_test.cpp',  # Stress test (opt-in via YAMS_RUN_STRESS_TESTS=1)
-  'metadata/metadata_schema_test.cpp',  # Large file - TODO: migrate to Catch2
 )
 
 unit_resolve = files(

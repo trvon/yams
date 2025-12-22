@@ -210,12 +210,8 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
     }
 
     // Use promise/future for thread-safe one-shot response delivery
-    // Plus a timer that gets cancelled when response arrives to avoid polling
     auto response_promise = std::make_shared<AsioConnection::response_promise_t>();
     auto response_future = response_promise->get_future();
-    auto notify_timer = std::make_shared<boost::asio::steady_timer>(
-        co_await boost::asio::this_coro::executor);
-    notify_timer->expires_at(std::chrono::steady_clock::time_point::max());
 
     co_await boost::asio::dispatch(conn->strand, use_awaitable);
     if (conn->handlers.size() >= conn->opts.maxInflight) {
@@ -224,7 +220,7 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
     }
     {
         AsioConnection::Handler h;
-        h.unary.emplace(AsioConnection::UnaryHandler{response_promise, notify_timer});
+        h.unary.emplace(AsioConnection::UnaryHandler{response_promise});
         conn->handlers.emplace(msg.requestId, std::move(h));
     }
 
@@ -254,34 +250,24 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
     // response
     conn->in_use.store(false, std::memory_order_release);
 
-    // Wait for response using async timer cancellation (no polling!)
-    // The read loop cancels notify_timer when response arrives
+    // Poll future with timeout (similar to ServiceManager pattern)
     using namespace std::chrono_literals;
-    boost::asio::steady_timer deadline_timer(co_await boost::asio::this_coro::executor);
-    deadline_timer.expires_after(opts_.requestTimeout);
+    auto deadline = std::chrono::steady_clock::now() + opts_.requestTimeout;
+    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
-    // Race between notification and deadline
-    auto wait_result = co_await (
-        notify_timer->async_wait(as_tuple(use_awaitable)) ||
-        deadline_timer.async_wait(as_tuple(use_awaitable)));
-
-    // Check if response is ready (either notified or timed out)
-    if (response_future.wait_for(0ms) == std::future_status::ready) {
-        co_return response_future.get();
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (response_future.wait_for(0ms) == std::future_status::ready) {
+            auto result = response_future.get();
+            co_return result;
+        }
+        timer.expires_after(10ms);
+        co_await timer.async_wait(use_awaitable);
     }
 
-    // If we got here via deadline (index 1), it's a timeout
-    if (wait_result.index() == 1) {
-        co_await boost::asio::dispatch(conn->strand, use_awaitable);
-        conn->handlers.erase(msg.requestId);
-        co_return Error{ErrorCode::Timeout, "Request timeout waiting for response"};
-    }
-
-    // Notify timer was cancelled but future not ready - this shouldn't happen
-    // but handle gracefully by cleaning up
+    // Timeout - clean up handler
     co_await boost::asio::dispatch(conn->strand, use_awaitable);
     conn->handlers.erase(msg.requestId);
-    co_return Error{ErrorCode::Unknown, "Response notification without ready future"};
+    co_return Error{ErrorCode::Timeout, "Request timeout waiting for response"};
 }
 
 boost::asio::awaitable<Result<void>>
@@ -319,9 +305,6 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
 
         auto done_promise = std::make_shared<AsioConnection::void_promise_t>();
         auto done_future = done_promise->get_future();
-        auto notify_timer = std::make_shared<boost::asio::steady_timer>(
-            co_await boost::asio::this_coro::executor);
-        notify_timer->expires_at(std::chrono::steady_clock::time_point::max());
 
         co_await boost::asio::dispatch(conn->strand, use_awaitable);
         if (conn->handlers.size() >= conn->opts.maxInflight) {
@@ -332,7 +315,6 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
             AsioConnection::Handler h;
             h.streaming.emplace(onHeader, onChunk, onError, onComplete);
             h.streaming->done_promise = done_promise;
-            h.streaming->notify_timer = notify_timer;
             conn->handlers.emplace(msg.requestId, std::move(h));
         }
 
@@ -351,45 +333,36 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
 
         conn->in_use.store(false, std::memory_order_release);
 
-        // Wait for completion using async timer cancellation (no polling!)
         using namespace std::chrono_literals;
-        boost::asio::steady_timer deadline_timer(co_await boost::asio::this_coro::executor);
-        deadline_timer.expires_after(opts_.requestTimeout);
+        auto deadline = std::chrono::steady_clock::now() + opts_.requestTimeout;
+        boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
-        // Race between notification and deadline
-        auto wait_result = co_await (
-            notify_timer->async_wait(as_tuple(use_awaitable)) ||
-            deadline_timer.async_wait(as_tuple(use_awaitable)));
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (done_future.wait_for(0ms) == std::future_status::ready) {
+                auto result = done_future.get();
 
-        // Check if done
-        if (done_future.wait_for(0ms) == std::future_status::ready) {
-            auto result = done_future.get();
+                if (!result && attempt < kMaxRetries) {
+                    const auto& err_msg = result.error().message;
+                    bool is_eof_error = err_msg.find("End of file") != std::string::npos ||
+                                        err_msg.find("Connection closed") != std::string::npos;
 
-            if (!result && attempt < kMaxRetries) {
-                const auto& err_msg = result.error().message;
-                bool is_eof_error = err_msg.find("End of file") != std::string::npos ||
-                                    err_msg.find("Connection closed") != std::string::npos;
-
-                if (is_eof_error) {
-                    spdlog::debug("Connection error detected, retrying with fresh connection");
-                    continue; // Retry with fresh connection
+                    if (is_eof_error) {
+                        spdlog::debug("Connection error detected, retrying with fresh connection");
+                        break;
+                    }
                 }
-            }
 
-            co_return result;
+                co_return result;
+            }
+            timer.expires_after(10ms);
+            co_await timer.async_wait(use_awaitable);
         }
 
-        // Timeout
-        if (wait_result.index() == 1) {
+        if (std::chrono::steady_clock::now() >= deadline) {
             co_await boost::asio::dispatch(conn->strand, use_awaitable);
             conn->handlers.erase(msg.requestId);
             co_return Error{ErrorCode::Timeout, "Streaming request timeout"};
         }
-
-        // Notify timer cancelled but future not ready - clean up
-        co_await boost::asio::dispatch(conn->strand, use_awaitable);
-        conn->handlers.erase(msg.requestId);
-        co_return Error{ErrorCode::Unknown, "Streaming notification without ready future"};
     }
 
     co_return Error{ErrorCode::NetworkError, "Failed after retry"};

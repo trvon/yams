@@ -1097,7 +1097,7 @@ MessageResult MCPServer::handleRequest(const json& request) {
                 std::string u =
                     "Task: summarize a single document retrieved from the knowledge store.\n"
                     "Steps:\n"
-                    "1) Retrieve by name via tools/get_by_name (latest=true) or by hash via "
+                    "1) Retrieve by name via tools/get (name=... latest=true) or by hash via "
                     "tools/get.\n"
                     "2) Produce a concise, faithful summary within " +
                     std::to_string(maxLen) +
@@ -1142,8 +1142,8 @@ MessageResult MCPServer::handleRequest(const json& request) {
                     "Requirements:\n"
                     "- Use fuzzy=true and type=hybrid (server defaults may already do this).\n"
                     "- Prefer session scoping if available; include name/path/hash/score/snippet.\n"
-                    "- Return a compact list suitable for follow-up fetches via tools/cat or "
-                    "tools/get.\n";
+                    "- Return a compact list suitable for follow-up fetches via tools/get "
+                    "(include_content=true).\n";
                 if (!query.empty()) {
                     u += "\nQuery: " + query + "\n";
                 }
@@ -1165,8 +1165,8 @@ MessageResult MCPServer::handleRequest(const json& request) {
                                 "1) tools/search with query (hybrid/fuzzy), top-" +
                                 std::to_string(k) +
                                 ".\n"
-                                "2) For each candidate, fetch content via tools/cat or tools/get "
-                                "(by hash/name).\n"
+                                "2) For each candidate, fetch content via tools/get "
+                                "(by hash/name, include_content=true).\n"
                                 "3) Synthesize a grounded summary in <= " +
                                 std::to_string(maxWords) +
                                 " words.\n"
@@ -1480,587 +1480,10 @@ json MCPServer::readResource(const std::string& uri) {
 }
 
 json MCPServer::listTools() {
-    json tools = json::array();
-
-    // Helper lambdas
-    auto makeProp = [](const std::string& type, const std::string& desc) {
-        json j;
-        j["type"] = type;
-        if (!desc.empty())
-            j["description"] = desc;
-        return j;
-    };
-
-    // search
-    {
-        json tool;
-        tool["name"] = "search";
-        tool["description"] = "Search for documents using keywords, fuzzy matching, or similarity";
-        json schema;
-        schema["type"] = "object";
-        json props = json::object();
-        props["query"] = makeProp("string", "Search query (keywords, phrases, or hash)");
-        props["limit"] = makeProp("integer", "Maximum number of results");
-        props["limit"]["default"] = 20;
-        props["fuzzy"] = makeProp("boolean", "Enable fuzzy matching");
-        props["fuzzy"]["default"] = false;
-        props["similarity"] = makeProp("number", "Minimum similarity threshold (0-1)");
-        props["similarity"]["default"] = 0.7;
-        props["hash"] =
-            makeProp("string", "Search by file hash (full or partial, minimum 8 characters)");
-        props["verbose"] = makeProp("boolean", "Enable verbose output (YAMS extension)");
-        props["verbose"]["default"] = false;
-        props["type"] =
-            makeProp("string", "Search type: keyword, semantic, hybrid (YAMS extension)");
-        props["type"]["default"] = "hybrid";
-        props["paths_only"] = makeProp("boolean", "Return only file paths (LLM-friendly)");
-        props["paths_only"]["default"] = false;
-        props["line_numbers"] = makeProp("boolean", "Include line numbers in content");
-        props["line_numbers"]["default"] = false;
-        props["after_context"] = makeProp("integer", "Lines of context after matches");
-        props["after_context"]["default"] = 0;
-        props["before_context"] = makeProp("integer", "Lines of context before matches");
-        props["before_context"]["default"] = 0;
-        props["context"] = makeProp("integer", "Lines of context around matches");
-        props["context"]["default"] = 0;
-        props["color"] = makeProp(
-            "string",
-            "Color highlighting for matches (values: always, never, auto) (YAMS extension)");
-        props["color"]["default"] = "auto";
-        props["path_pattern"] = makeProp(
-            "string",
-            "Glob-like filename/path filter (e.g., **/*.md or substring) (YAMS extension)");
-        props["path"] = makeProp(
-            "string", "Alias for path_pattern (substring or glob-like filter) (YAMS extension)");
-        props["tags"] =
-            json{{"type", "array"},
-                 {"items", json{{"type", "string"}}},
-                 {"description",
-                  "Filter by tags (presence-based, matches any by default) (YAMS extension)"}};
-        props["match_all_tags"] =
-            makeProp("boolean", "Require all specified tags to be present (YAMS extension)");
-        props["match_all_tags"]["default"] = false;
-        // Session scoping for server-managed sessions
-        props["use_session"] =
-            makeProp("boolean", "Scope search to current session when available (YAMS extension)");
-        props["use_session"]["default"] = true;
-        props["session"] =
-            makeProp("string", "Explicit session name to scope the search (YAMS extension)");
-        schema["properties"] = props;
-        schema["required"] = json::array({"query"});
-        tool["inputSchema"] = schema;
-        tools.push_back(tool);
+    if (!toolRegistry_) {
+        return json{{"tools", json::array()}};
     }
-
-    // grep
-    {
-        json tool;
-        tool["name"] = "grep";
-        tool["description"] = "Search document contents using regular expressions";
-        json schema;
-        schema["type"] = "object";
-        json props = json::object();
-        props["pattern"] = makeProp("string", "Regular expression pattern");
-        props["paths"] = json{{"type", "array"},
-                              {"items", json{{"type", "string"}}},
-                              {"description", "Specific paths to search (optional)"}};
-        props["ignore_case"] = makeProp("boolean", "Case-insensitive search");
-        props["ignore_case"]["default"] = false;
-        props["word"] = makeProp("boolean", "Match whole words only");
-        props["word"]["default"] = false;
-        props["invert"] = makeProp("boolean", "Invert match (show non-matching lines)");
-        props["invert"]["default"] = false;
-        props["line_numbers"] = makeProp("boolean", "Show line numbers");
-        props["line_numbers"]["default"] = false;
-        props["with_filename"] = makeProp("boolean", "Show filename with matches");
-        props["with_filename"]["default"] = true;
-        props["count"] = makeProp("boolean", "Count matches instead of showing them");
-        props["count"]["default"] = false;
-        props["files_with_matches"] = makeProp("boolean", "Show only filenames with matches");
-        props["files_with_matches"]["default"] = false;
-        props["files_without_match"] = makeProp("boolean", "Show only filenames without matches");
-        props["files_without_match"]["default"] = false;
-        props["after_context"] = makeProp("integer", "Lines after match (numeric; empty ignored)");
-        props["after_context"]["default"] = 0;
-        props["before_context"] =
-            makeProp("integer", "Lines before match (numeric; empty ignored)");
-        props["before_context"]["default"] = 0;
-        props["context"] = makeProp("integer", "Lines around match (numeric; empty ignored)");
-        props["context"]["default"] = 0;
-        props["max_count"] =
-            makeProp("integer", "Maximum matches per file (numeric; empty ignored)");
-        props["color"] = makeProp("string", "Color highlighting (values: always, never, auto)");
-        props["color"]["default"] = "auto";
-        // Session scoping for name and path resolution
-        props["use_session"] =
-            makeProp("boolean", "Scope grep to current session when available (YAMS extension)");
-        props["use_session"]["default"] = true;
-        props["session"] =
-            makeProp("string", "Explicit session name to scope the grep (YAMS extension)");
-        schema["properties"] = props;
-        schema["required"] = json::array({"pattern"});
-        tool["inputSchema"] = schema;
-        tools.push_back(tool);
-    }
-
-    // download
-    {
-        json tool;
-        tool["name"] = "download";
-        tool["description"] =
-            "Robust downloader: store into CAS (store-only by default) with optional export";
-        json schema;
-        schema["type"] = "object";
-        json props = json::object();
-        props["url"] = makeProp("string", "Source URL");
-        props["headers"] = json{{"type", "array"},
-                                {"items", json{{"type", "string"}}},
-                                {"description", "Custom headers"}};
-        props["checksum"] = makeProp("string", "Expected checksum '<algo>:<hex>'");
-        props["concurrency"] = makeProp("integer", "Parallel connections");
-        props["concurrency"]["default"] = 4;
-        props["chunk_size_bytes"] = makeProp("integer", "Chunk size in bytes");
-        props["chunk_size_bytes"]["default"] = 8388608;
-        props["timeout_ms"] = makeProp("integer", "Per-connection timeout (ms)");
-        props["timeout_ms"]["default"] = 60000;
-        props["resume"] = makeProp("boolean", "");
-        props["resume"]["default"] = true;
-        props["proxy"] = makeProp("string", "");
-        props["follow_redirects"] = makeProp("boolean", "");
-        props["follow_redirects"]["default"] = true;
-        props["store_only"] = makeProp("boolean", "Store file in CAS without exporting to a path");
-        props["store_only"]["default"] = true;
-        // When true (default), also ingest into YAMS and return the ingested hash
-        props["post_index"] =
-            makeProp("boolean",
-                     "After download, ingest into YAMS (daemon add) and return the ingested hash");
-        props["post_index"]["default"] = true;
-        props["export_path"] = makeProp("string", "Optional export path");
-        props["overwrite"] = makeProp("string", "Overwrite policy: never|if-different-etag|always");
-        props["overwrite"]["default"] = "never";
-        schema["properties"] = props;
-        schema["required"] = json::array({"url"});
-        tool["inputSchema"] = schema;
-        tools.push_back(tool);
-    }
-
-    // add (store single)
-    {
-        json tool;
-        tool["name"] = "add";
-        tool["description"] = "Store a document in YAMS";
-        json schema;
-        schema["type"] = "object";
-        json props = json::object();
-        props["path"] = makeProp("string", "File path to store");
-        props["content"] = makeProp("string", "Document content");
-        props["name"] = makeProp("string", "Document name/filename");
-        props["mime_type"] = makeProp("string", "MIME type of the content");
-        props["collection"] = makeProp("string", "Collection name for grouping");
-        props["tags"] = json{{"type", "array"},
-                             {"items", json{{"type", "string"}}},
-                             {"description", "Tags for the document"}};
-        props["metadata"] = makeProp("object", "Additional metadata key-value pairs");
-        schema["properties"] = props;
-        tool["inputSchema"] = schema;
-        tools.push_back(tool);
-    }
-
-    // get
-    {
-        json tool;
-        tool["name"] = "get";
-        tool["description"] = "Retrieve a document by hash or name";
-        json schema;
-        schema["type"] = "object";
-        json props = json::object();
-        props["hash"] = makeProp("string", "Document SHA-256 hash");
-        props["name"] = makeProp("string", "Document name");
-        props["outputPath"] = makeProp("string", "Output file path for retrieved content");
-        props["graph"] =
-            makeProp("boolean", "Include knowledge graph relationships (YAMS extension)");
-        props["graph"]["default"] = false;
-        props["depth"] = makeProp("integer", "Graph traversal depth (1-5) (YAMS extension)");
-        props["depth"]["default"] = 1;
-        props["include_content"] =
-            makeProp("boolean", "Include full content in graph results (YAMS extension)");
-        props["include_content"]["default"] = true;
-        schema["properties"] = props;
-        tool["inputSchema"] = schema;
-        tools.push_back(tool);
-    }
-
-    // get_by_name
-    {
-        json tool;
-        tool["name"] = "get_by_name";
-        tool["description"] = "Retrieve document content by name or path";
-        json schema;
-        schema["type"] = "object";
-        json props = json::object();
-        props["name"] = makeProp("string", "Document name (basename or subpath)");
-        props["path"] = makeProp("string", "Explicit path for exact match");
-        props["subpath"] = makeProp("boolean", "Allow suffix match when exact path not found");
-        props["subpath"]["default"] = true;
-        props["raw_content"] = makeProp("boolean", "Return raw content without text extraction");
-        props["raw_content"]["default"] = false;
-        props["extract_text"] = makeProp("boolean", "Extract text from HTML/PDF files");
-        props["extract_text"]["default"] = true;
-        props["latest"] = makeProp("boolean", "Select newest match when ambiguous");
-        props["latest"]["default"] = true;
-        props["oldest"] = makeProp("boolean", "Select oldest match when ambiguous");
-        props["oldest"]["default"] = false;
-        schema["properties"] = props;
-        tool["inputSchema"] = schema;
-        tools.push_back(tool);
-    }
-
-    // delete_by_name
-    {
-        json tool;
-        tool["name"] = "delete_by_name";
-        tool["description"] = "Delete documents by name with pattern support";
-        json schema;
-        schema["type"] = "object";
-        json props = json::object();
-        props["name"] = makeProp("string", "Document name");
-        props["names"] = json{{"type", "array"},
-                              {"items", json{{"type", "string"}}},
-                              {"description", "Multiple document names"}};
-        props["pattern"] = makeProp("string", "Glob pattern for matching names");
-        props["dry_run"] = makeProp("boolean", "Preview what would be deleted");
-        props["dry_run"]["default"] = false;
-        schema["properties"] = props;
-        tool["inputSchema"] = schema;
-        tools.push_back(tool);
-    }
-
-    // update
-    {
-        json tool;
-        tool["name"] = "update";
-        tool["description"] = "Update document metadata";
-        json schema;
-        schema["type"] = "object";
-        json props = json::object();
-        props["hash"] = makeProp("string", "Document SHA-256 hash");
-        props["name"] = makeProp("string", "Document name (alternative to hash)");
-        props["type"] = makeProp("string", "Update target discriminator (e.g., metadata, tags)");
-        props["metadata"] = makeProp("object", "Metadata key-value pairs to update");
-        props["tags"] = json{{"type", "array"},
-                             {"items", json{{"type", "string"}}},
-                             {"description", "Tags to add or update"}};
-        schema["properties"] = props;
-        tool["inputSchema"] = schema;
-        tools.push_back(tool);
-    }
-
-    // list
-    {
-        json tool;
-        tool["name"] = "list";
-        tool["description"] = "List documents with optional filtering";
-        json schema;
-        schema["type"] = "object";
-        json props = json::object();
-        props["limit"] = makeProp("integer", "Maximum number of results");
-        props["limit"]["default"] = 20;
-        props["offset"] = makeProp("integer", "Offset for pagination");
-        props["offset"]["default"] = 0;
-        props["name"] = makeProp("string", "Exact name filter (optional)");
-        props["pattern"] = makeProp("string", "Glob pattern for filtering names");
-        props["tags"] = json{{"type", "array"},
-                             {"items", json{{"type", "string"}}},
-                             {"description", "Filter by tags"}};
-        props["metadata"] = makeProp("object", "Metadata key/value filter (optional)");
-        props["type"] = makeProp("string", "Filter by file type category");
-        props["mime"] = makeProp("string", "Filter by MIME type pattern");
-        props["extension"] = makeProp("string", "Filter by file extension");
-        props["binary"] = makeProp("boolean", "Filter binary files");
-        props["text"] = makeProp("boolean", "Filter text files");
-        props["created_after"] = makeProp("string", "ISO 8601 timestamp or relative time");
-        props["created_before"] = makeProp("string", "ISO 8601 timestamp or relative time");
-        props["modified_after"] = makeProp("string", "ISO 8601 timestamp or relative time");
-        props["modified_before"] = makeProp("string", "ISO 8601 timestamp or relative time");
-        props["indexed_after"] = makeProp("string", "ISO 8601 timestamp or relative time");
-        props["indexed_before"] = makeProp("string", "ISO 8601 timestamp or relative time");
-        props["recent"] = makeProp("integer", "Get N most recent documents");
-        props["sort_by"] =
-            makeProp("string", "Sort field (values: name, size, created, modified, indexed)");
-        props["sort_by"]["default"] = "indexed";
-        props["sort_order"] = makeProp("string", "Sort order (values: asc, desc)");
-        props["sort_order"]["default"] = "desc";
-        props["with_labels"] = makeProp("boolean", "Include snapshot labels in results");
-        props["with_labels"]["default"] = false;
-        // Session scoping
-        props["session"] = makeProp("string", "Explicit session name to scope the list");
-        schema["properties"] = props;
-        tool["inputSchema"] = schema;
-        tools.push_back(tool);
-    }
-
-    // stats
-    {
-        json tool;
-        tool["name"] = "stats";
-        tool["description"] = "Get storage statistics and health status";
-        json schema;
-        schema["type"] = "object";
-        json props = json::object();
-        props["detailed"] = makeProp("boolean", "");
-        props["detailed"]["default"] = false;
-        props["file_types"] = makeProp("boolean", "Include file type breakdown");
-        props["file_types"]["default"] = false;
-        schema["properties"] = props;
-        tool["inputSchema"] = schema;
-        tools.push_back(tool);
-    }
-
-    // cat
-    {
-        json tool;
-        tool["name"] = "cat";
-        tool["description"] = "Display document content (like cat command)";
-        json schema;
-        schema["type"] = "object";
-        json props = json::object();
-        props["hash"] = makeProp("string", "Document SHA-256 hash");
-        props["name"] = makeProp("string", "Document name");
-        props["raw_content"] = makeProp("boolean", "Return raw content without text extraction");
-        props["raw_content"]["default"] = false;
-        props["extract_text"] = makeProp("boolean", "Extract text from HTML/PDF files");
-        props["extract_text"]["default"] = true;
-        props["latest"] = makeProp("boolean", "Select newest match when ambiguous");
-        props["latest"]["default"] = true;
-        props["oldest"] = makeProp("boolean", "Select oldest match when ambiguous");
-        props["oldest"]["default"] = false;
-        schema["properties"] = props;
-        tool["inputSchema"] = schema;
-        tools.push_back(tool);
-    }
-
-    // add_directory
-    {
-        json tool;
-        tool["name"] = "add_directory";
-        tool["description"] = "Add all files from a directory";
-        json schema;
-        schema["type"] = "object";
-        json props = json::object();
-        props["directory_path"] = makeProp("string", "Directory path");
-        props["recursive"] = makeProp("boolean", "Recursively add subdirectories");
-        // Align default with CLI behavior: recursive by default for directory indexing
-        props["recursive"]["default"] = true;
-        props["collection"] = makeProp("string", "Collection name for grouping");
-        props["snapshot_id"] = makeProp("string", "Snapshot ID for versioning");
-        props["snapshot_label"] = makeProp("string", "Human-readable snapshot label");
-        props["include_patterns"] = json{{"type", "array"},
-                                         {"items", json{{"type", "string"}}},
-                                         {"description", "Include patterns (e.g., *.txt)"}};
-        props["exclude_patterns"] = json{{"type", "array"},
-                                         {"items", json{{"type", "string"}}},
-                                         {"description", "Exclude patterns"}};
-        props["tags"] = json{{"type", "array"},
-                             {"items", json{{"type", "string"}}},
-                             {"description", "Tags to add to each stored document"}};
-        props["metadata"] =
-            makeProp("object", "Additional metadata key-value pairs applied to each document");
-        schema["properties"] = props;
-        schema["required"] = json::array({"directory_path"});
-        tool["inputSchema"] = schema;
-        tools.push_back(tool);
-    }
-
-    // restore_collection
-    {
-        json tool;
-        tool["name"] = "restore_collection";
-        tool["description"] = "Restore all documents from a collection";
-        json schema;
-        schema["type"] = "object";
-        json props = json::object();
-        props["collection"] = makeProp("string", "Collection name");
-        props["output_directory"] = makeProp("string", "Output directory");
-        props["layout_template"] =
-            makeProp("string", "Layout template (e.g., {collection}/{path})");
-        props["layout_template"]["default"] = "{path}";
-        props["include_patterns"] =
-            json{{"type", "array"},
-                 {"items", json{{"type", "string"}}},
-                 {"description", "Only restore files matching these patterns"}};
-        props["exclude_patterns"] = json{{"type", "array"},
-                                         {"items", json{{"type", "string"}}},
-                                         {"description", "Exclude files matching these patterns"}};
-        props["overwrite"] = makeProp("boolean", "Overwrite files if they already exist");
-        props["overwrite"]["default"] = false;
-        props["create_dirs"] = makeProp("boolean", "Create parent directories if needed");
-        props["create_dirs"]["default"] = true;
-        props["dry_run"] = makeProp("boolean", "Show what would be restored without writing files");
-        props["dry_run"]["default"] = false;
-        schema["properties"] = props;
-        schema["required"] = json::array({"collection", "output_directory"});
-        tool["inputSchema"] = schema;
-        tools.push_back(tool);
-    }
-
-    // restore_snapshot
-    {
-        json tool;
-        tool["name"] = "restore_snapshot";
-        tool["description"] = "Restore all documents from a snapshot";
-        json schema;
-        schema["type"] = "object";
-        json props = json::object();
-        props["snapshot_id"] = makeProp("string", "Snapshot ID");
-        props["snapshot_label"] = makeProp("string", "Snapshot label (alternative to snapshot_id)");
-        props["output_directory"] = makeProp("string", "Output directory");
-        props["layout_template"] = makeProp("string", "Layout template");
-        props["layout_template"]["default"] = "{path}";
-        props["include_patterns"] =
-            json{{"type", "array"},
-                 {"items", json{{"type", "string"}}},
-                 {"description", "Only restore files matching these patterns"}};
-        props["exclude_patterns"] = json{{"type", "array"},
-                                         {"items", json{{"type", "string"}}},
-                                         {"description", "Exclude files matching these patterns"}};
-        props["overwrite"] = makeProp("boolean", "Overwrite files if they already exist");
-        props["overwrite"]["default"] = false;
-        props["create_dirs"] = makeProp("boolean", "Create parent directories if needed");
-        props["create_dirs"]["default"] = true;
-        props["dry_run"] = makeProp("boolean", "Show what would be restored without writing files");
-        props["dry_run"]["default"] = false;
-        schema["properties"] = props;
-        schema["required"] = json::array({"snapshot_id", "output_directory"});
-        tool["inputSchema"] = schema;
-        tools.push_back(tool);
-    }
-
-    // restore (combined)
-    {
-        json tool;
-        tool["name"] = "restore";
-        tool["description"] = "Restore documents from a collection or snapshot";
-        json schema;
-        schema["type"] = "object";
-        json props = json::object();
-        props["collection"] = makeProp("string", "Collection name");
-        props["snapshot_id"] = makeProp("string", "Snapshot ID");
-        props["output_directory"] = makeProp("string", "Output directory");
-        props["layout_template"] =
-            makeProp("string", "Layout template (e.g., {collection}/{path})");
-        props["layout_template"]["default"] = "{path}";
-        props["include_patterns"] =
-            json{{"type", "array"},
-                 {"items", json{{"type", "string"}}},
-                 {"description", "Only restore files matching these patterns"}};
-        props["exclude_patterns"] = json{{"type", "array"},
-                                         {"items", json{{"type", "string"}}},
-                                         {"description", "Exclude files matching these patterns"}};
-        props["overwrite"] = makeProp("boolean", "Overwrite existing files");
-        props["overwrite"]["default"] = false;
-        props["create_dirs"] = makeProp("boolean", "Create parent directories if needed");
-        props["create_dirs"]["default"] = true;
-        props["dry_run"] = makeProp("boolean", "Show what would be restored without writing files");
-        props["dry_run"]["default"] = false;
-        schema["properties"] = props;
-        schema["required"] = json::array({"output_directory"});
-        tool["inputSchema"] = schema;
-        tools.push_back(tool);
-    }
-
-    // list_collections
-    {
-        json tool;
-        tool["name"] = "list_collections";
-        tool["description"] = "List available collections";
-        json schema;
-        schema["type"] = "object";
-        schema["properties"] = json::object();
-        schema["required"] = json::array();
-        tool["inputSchema"] = schema;
-        tools.push_back(tool);
-    }
-
-    // list_snapshots
-    {
-        json tool;
-        tool["name"] = "list_snapshots";
-        tool["description"] = "List available snapshots";
-        json schema;
-        schema["type"] = "object";
-        json props = json::object();
-        props["collection"] = makeProp("string", "Filter by collection");
-        props["with_labels"] = makeProp("boolean", "Include snapshot labels");
-        props["with_labels"]["default"] = true;
-        schema["properties"] = props;
-        tool["inputSchema"] = schema;
-        tools.push_back(tool);
-    }
-
-    // session_start
-    {
-        json tool;
-        tool["name"] = "session_start";
-        tool["description"] = "Start or switch to a named session for context scoping";
-        json schema;
-        schema["type"] = "object";
-        json props = json::object();
-        props["name"] = makeProp("string", "Session name");
-        schema["properties"] = props;
-        schema["required"] = json::array({"name"});
-        tool["inputSchema"] = schema;
-        tools.push_back(tool);
-    }
-
-    // session_stop
-    {
-        json tool;
-        tool["name"] = "session_stop";
-        tool["description"] = "Stop the current or specified session";
-        json schema;
-        schema["type"] = "object";
-        json props = json::object();
-        props["name"] = makeProp("string", "Optional session name (defaults to current)");
-        schema["properties"] = props;
-        tool["inputSchema"] = schema;
-        tools.push_back(tool);
-    }
-
-    // session/pin
-    {
-        json tool;
-        tool["name"] = "session_pin";
-        tool["description"] = "Pin documents by path pattern (adds 'pinned' tag and updates repo)";
-        json schema;
-        schema["type"] = "object";
-        json props = json::object();
-        props["path"] = makeProp("string", "Path glob pattern to pin");
-        props["tags"] = json{{"type", "array"},
-                             {"items", json{{"type", "string"}}},
-                             {"description", "Additional tags"}};
-        props["metadata"] = makeProp("object", "Metadata key/value pairs to add");
-        schema["properties"] = props;
-        schema["required"] = json::array({"path"});
-        tool["inputSchema"] = schema;
-        tools.push_back(tool);
-    }
-
-    // session/unpin
-    {
-        json tool;
-        tool["name"] = "session_unpin";
-        tool["description"] = "Unpin documents by path pattern (removes 'pinned' tag from repo)";
-        json schema;
-        schema["type"] = "object";
-        json props = json::object();
-        props["path"] = makeProp("string", "Path glob pattern to unpin");
-        schema["properties"] = props;
-        schema["required"] = json::array({"path"});
-        tool["inputSchema"] = schema;
-        tools.push_back(tool);
-    }
-
-    return json{{"tools", tools}};
+    return toolRegistry_->listTools();
 }
 
 json yams::mcp::MCPServer::listPrompts() {
@@ -4076,12 +3499,12 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
         co_return out;
     }
 
-    // Name-first single-target path: reuse robust name resolution from get_by_name.
+    // Name-first single-target path: reuse robust name resolution from get (name path).
     // When a single name is provided (without other selectors), resolve to a single document
     // using RetrievalService::getByNameSmart and then perform a hash-based update via daemon.
     if (req.hash.empty() && !req.name.empty() && req.path.empty() && req.pattern.empty() &&
         req.names.empty()) {
-        // Resolve name -> hash using the same strategy as handleGetByName (smart + fallback).
+        // Resolve name -> hash using the same strategy as handleGet (smart + fallback).
         // Normalize: expand leading '~' to HOME to allow user-friendly paths.
         std::string normName = req.name;
         try {
@@ -4115,7 +3538,7 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
                                       /*useSession*/ false, std::string{}, ropts, resolver);
         }
         if (!grr) {
-            // Fall back to simple basename-list matching similar to handleGetByName
+            // Fall back to simple basename-list matching similar to handleGet
             auto tryList =
                 [&](const std::string& pat) -> std::optional<yams::daemon::ListResponse> {
                 yams::app::services::ListOptions lreq;
@@ -4695,51 +4118,6 @@ void MCPServer::initializeToolRegistry() {
                {"session", {{"type", "string"}, {"description", "Session name override"}}}}}},
         "Retrieve documents from storage by hash with optional knowledge graph expansion");
 
-    toolRegistry_->registerTool<MCPGraphRequest, MCPGraphResponse>(
-        "graph", [this](const MCPGraphRequest& req) { return handleGraphQuery(req); },
-        json{{"type", "object"},
-             {"properties",
-              {{"hash", {{"type", "string"}, {"description", "Document hash"}}},
-               {"name", {{"type", "string"}, {"description", "Document name/path"}}},
-               {"node_key", {{"type", "string"}, {"description", "Direct KG node key"}}},
-               {"node_id", {{"type", "integer"}, {"description", "Direct KG node id"}}},
-               {"list_types",
-                {{"type", "boolean"}, {"description", "List available node types with counts"}}},
-               {"list_type",
-                {{"type", "string"},
-                 {"description", "List nodes of a specific type (list-by-type mode)"}}},
-               {"isolated",
-                {{"type", "boolean"},
-                 {"description", "List isolated nodes (no incoming edges for relation)"}}},
-               {"relation",
-                {{"type", "string"},
-                 {"description", "Relation filter (single, used for traversal or isolated)"}}},
-               {"relation_filters",
-                {{"type", "array"},
-                 {"items", {{"type", "string"}}},
-                 {"description", "Relation filters (array)"}}},
-               {"depth", {{"type", "integer"}, {"description", "Traversal depth (1-5)"}}},
-               {"limit",
-                {{"type", "integer"}, {"description", "Maximum results"}, {"default", 100}}},
-               {"offset",
-                {{"type", "integer"}, {"description", "Pagination offset"}, {"default", 0}}},
-               {"reverse",
-                {{"type", "boolean"},
-                 {"description", "Traverse incoming edges instead of outgoing"}}},
-               {"include_node_properties",
-                {{"type", "boolean"},
-                 {"description", "Include node properties JSON in results"}}},
-               {"include_edge_properties",
-                {{"type", "boolean"},
-                 {"description", "Include edge properties JSON in results"}}},
-               {"hydrate_fully",
-                {{"type", "boolean"},
-                 {"description", "Hydrate metadata for nodes when available"}}},
-               {"scope_snapshot",
-                {{"type", "string"},
-                 {"description", "Restrict graph traversal to a snapshot id"}}}}}},
-        "Inspect knowledge graph relationships and entities (matches CLI graph)");
-
     toolRegistry_->registerTool<MCPListDocumentsRequest, MCPListDocumentsResponse>(
         "list", [this](const MCPListDocumentsRequest& req) { return handleListDocuments(req); },
         json{{"type", "object"},
@@ -4767,20 +4145,6 @@ void MCPServer::initializeToolRegistry() {
                 {{"type", "integer"}, {"description", "Offset for pagination"}, {"default", 0}}}}}},
         "List documents with filtering by pattern, tags, type, or recency");
 
-    toolRegistry_->registerTool<MCPStatsRequest, MCPStatsResponse>(
-        "stats", [this](const MCPStatsRequest& req) { return handleGetStats(req); },
-        json{{"type", "object"},
-             {"properties",
-              {{"file_types",
-                {{"type", "boolean"},
-                 {"description", "Include file type breakdown"},
-                 {"default", false}}},
-               {"verbose",
-                {{"type", "boolean"},
-                 {"description", "Include verbose statistics"},
-                 {"default", false}}}}}},
-        "Get storage statistics including deduplication savings and file type breakdown");
-
     toolRegistry_->registerTool<MCPStatusRequest, MCPStatusResponse>(
         "status", [this](const MCPStatusRequest& req) { return handleGetStatus(req); },
         json{{"type", "object"},
@@ -4790,59 +4154,6 @@ void MCPServer::initializeToolRegistry() {
                  {"description", "Include verbose metrics"},
                  {"default", false}}}}}},
         "Get daemon status, readiness, and metrics");
-
-    toolRegistry_->registerTool<MCPDoctorRequest, MCPDoctorResponse>(
-        "doctor", [this](const MCPDoctorRequest& req) { return handleDoctor(req); },
-        json{{"type", "object"},
-             {"properties",
-              {{"verbose",
-                {{"type", "boolean"}, {"description", "Verbose output"}, {"default", true}}}}}},
-        "Diagnose daemon readiness and provide actionable suggestions");
-
-    toolRegistry_->registerTool<MCPAddDirectoryRequest, MCPAddDirectoryResponse>(
-        "add_directory",
-        [this](const MCPAddDirectoryRequest& req) { return handleAddDirectory(req); },
-        json{{"type", "object"},
-             {"properties",
-              {{"directory_path", {{"type", "string"}, {"description", "Directory path to index"}}},
-               {"collection", {{"type", "string"}, {"description", "Collection name"}}},
-               {"recursive",
-                {{"type", "boolean"}, {"description", "Index recursively"}, {"default", true}}},
-               {"include_patterns",
-                {{"type", "array"},
-                 {"items", {{"type", "string"}}},
-                 {"description", "File patterns to include"}}}}},
-             {"required", json::array({"directory_path"})}},
-        "Index all files from a directory into YAMS storage with optional filtering");
-
-    toolRegistry_->registerTool<MCPGetByNameRequest, MCPGetByNameResponse>(
-        "get_by_name", [this](const MCPGetByNameRequest& req) { return handleGetByName(req); },
-        json{{"type", "object"},
-             {"properties",
-              {{"name",
-                {{"type", "string"}, {"description", "Document name (basename or subpath)"}}},
-               {"path", {{"type", "string"}, {"description", "Explicit path for exact match"}}},
-               {"subpath",
-                {{"type", "boolean"},
-                 {"description", "Allow suffix match when exact path not found"},
-                 {"default", true}}},
-               {"raw_content",
-                {{"type", "boolean"},
-                 {"description", "Return raw content without text extraction"},
-                 {"default", false}}},
-               {"extract_text",
-                {{"type", "boolean"},
-                 {"description", "Extract text from HTML/PDF files"},
-                 {"default", true}}},
-               {"latest",
-                {{"type", "boolean"},
-                 {"description", "Select newest match when ambiguous"},
-                 {"default", true}}},
-               {"oldest",
-                {{"type", "boolean"},
-                 {"description", "Select oldest match when ambiguous"},
-                 {"default", false}}}}}},
-        "Retrieve document content by name or path");
 
     toolRegistry_->registerTool<MCPDeleteByNameRequest, MCPDeleteByNameResponse>(
         "delete_by_name",
@@ -4861,30 +4172,6 @@ void MCPServer::initializeToolRegistry() {
                 {"description", "Preview what would be deleted"},
                 {"default", false}}}}}},
         "Delete documents by name, names array, or pattern");
-
-    toolRegistry_->registerTool<MCPCatDocumentRequest, MCPCatDocumentResponse>(
-        "cat", [this](const MCPCatDocumentRequest& req) { return handleCatDocument(req); },
-        json{{"type", "object"},
-             {"properties",
-              {{"hash", {{"type", "string"}, {"description", "Document SHA-256 hash"}}},
-               {"name", {{"type", "string"}, {"description", "Document name"}}},
-               {"raw_content",
-                {{"type", "boolean"},
-                 {"description", "Return raw content without text extraction"},
-                 {"default", false}}},
-               {"extract_text",
-                {{"type", "boolean"},
-                 {"description", "Extract text from HTML/PDF files"},
-                 {"default", true}}},
-               {"latest",
-                {{"type", "boolean"},
-                 {"description", "Select newest match when ambiguous"},
-                 {"default", true}}},
-               {"oldest",
-                {{"type", "boolean"},
-                 {"description", "Select oldest match when ambiguous"},
-                 {"default", false}}}}}},
-        "Display document content by hash or name");
 
     toolRegistry_->registerTool<MCPUpdateMetadataRequest, MCPUpdateMetadataResponse>(
         "update", [this](const MCPUpdateMetadataRequest& req) { return handleUpdateMetadata(req); },
@@ -4980,43 +4267,43 @@ void MCPServer::initializeToolRegistry() {
     }
 
     // Collection/Snapshot tools (consider these as standard or extension based on use case)
-    toolRegistry_->registerTool<MCPRestoreCollectionRequest, MCPRestoreCollectionResponse>(
-        "restore_collection",
-        [this](const MCPRestoreCollectionRequest& req) { return handleRestoreCollection(req); },
+    toolRegistry_->registerTool<MCPRestoreRequest, MCPRestoreResponse>(
+        "restore", [this](const MCPRestoreRequest& req) { return handleRestore(req); },
         json{{"type", "object"},
              {"properties",
               {{"collection", {{"type", "string"}, {"description", "Collection name"}}},
+               {"snapshot_id", {{"type", "string"}, {"description", "Snapshot ID"}}},
+               {"snapshot_label",
+                {{"type", "string"}, {"description", "Snapshot label (alternative to snapshot_id)"}}},
                {"output_directory", {{"type", "string"}, {"description", "Output directory"}}},
+               {"layout_template",
+                {{"type", "string"},
+                 {"description", "Layout template (e.g., {collection}/{path})"},
+                 {"default", "{path}"}}},
+               {"include_patterns",
+                {{"type", "array"},
+                 {"items", {{"type", "string"}}},
+                 {"description", "Only restore files matching these patterns"}}},
+               {"exclude_patterns",
+                {{"type", "array"},
+                 {"items", {{"type", "string"}}},
+                 {"description", "Exclude files matching these patterns"}}},
                {"overwrite",
                 {{"type", "boolean"},
                  {"description", "Overwrite existing files"},
                  {"default", false}}},
+               {"create_dirs",
+                {{"type", "boolean"},
+                 {"description", "Create parent directories if needed"},
+                 {"default", true}}},
                {"dry_run",
                 {{"type", "boolean"},
                  {"description", "Preview without writing"},
                  {"default", false}}}}},
-             {"required", json::array({"collection", "output_directory"})}},
-        "Restore all documents from a collection");
+             {"required", json::array({"output_directory"})}},
+        "Restore documents from a collection or snapshot");
 
     if (areYamsExtensionsEnabled()) {
-        toolRegistry_->registerTool<MCPRestoreSnapshotRequest, MCPRestoreSnapshotResponse>(
-            "restore_snapshot",
-            [this](const MCPRestoreSnapshotRequest& req) { return handleRestoreSnapshot(req); },
-            json{{"type", "object"},
-                 {"properties",
-                  {{"snapshot_id", {{"type", "string"}, {"description", "Snapshot ID"}}},
-                   {"output_directory", {{"type", "string"}, {"description", "Output directory"}}},
-                   {"overwrite",
-                    {{"type", "boolean"},
-                     {"description", "Overwrite existing files"},
-                     {"default", false}}},
-                   {"dry_run",
-                    {{"type", "boolean"},
-                     {"description", "Preview without writing"},
-                     {"default", false}}}}},
-                 {"required", json::array({"snapshot_id", "output_directory"})}},
-            "Restore all documents from a snapshot");
-
         toolRegistry_->registerTool<MCPListCollectionsRequest, MCPListCollectionsResponse>(
             "list_collections",
             [this](const MCPListCollectionsRequest& req) { return handleListCollections(req); },
@@ -5533,148 +4820,6 @@ MCPServer::handleListSnapshots(const MCPListSnapshotsRequest& req) {
     MCPListSnapshotsResponse response;
     // TODO: Implement snapshot listing
     co_return response;
-}
-
-boost::asio::awaitable<Result<MCPGraphResponse>> MCPServer::handleGraphQuery(
-    const MCPGraphRequest& req) {
-    if (auto ensure = ensureDaemonClient(); !ensure) {
-        co_return ensure.error();
-    }
-
-    auto clampDepth = [](int depth) -> int {
-        if (depth < 1)
-            return 1;
-        if (depth > 5)
-            return 5;
-        return depth;
-    };
-
-    yams::daemon::GraphQueryRequest dreq;
-    dreq.documentHash = req.hash;
-    dreq.documentName = req.name;
-    dreq.nodeKey = req.nodeKey;
-    dreq.nodeId = req.nodeId;
-    dreq.listTypes = req.listTypes;
-    dreq.listByType = !req.listType.empty();
-    dreq.nodeType = req.listType;
-    dreq.isolatedMode = req.isolated;
-    dreq.isolatedRelation = req.relation;
-
-    dreq.relationFilters = req.relationFilters;
-    if (dreq.relationFilters.empty() && !req.relation.empty()) {
-        dreq.relationFilters.push_back(req.relation);
-    }
-
-    dreq.maxDepth = clampDepth(req.depth);
-    dreq.maxResults = static_cast<uint32_t>(req.limit);
-    dreq.maxResultsPerDepth = 100;
-    dreq.reverseTraversal = req.reverse;
-    dreq.offset = static_cast<uint32_t>(req.offset);
-    dreq.limit = static_cast<uint32_t>(req.limit);
-    dreq.includeNodeProperties = req.includeNodeProperties;
-    dreq.includeEdgeProperties = req.includeEdgeProperties;
-    dreq.hydrateFully = req.hydrateFully;
-    dreq.scopeToSnapshot = req.scopeSnapshot;
-
-    auto callGraph = [&](const yams::daemon::GraphQueryRequest& gr)
-        -> boost::asio::awaitable<Result<yams::daemon::GraphQueryResponse>> {
-        co_return co_await daemon_client_->call(gr);
-    };
-
-    // If name was provided and no explicit node target, try file node key first (CLI parity).
-    Result<yams::daemon::GraphQueryResponse> result(Error{ErrorCode::Unknown, "uninitialized"});
-    if (!req.name.empty() && req.nodeKey.empty() && req.nodeId < 0 && req.hash.empty() &&
-        !req.listTypes && req.listType.empty() && !req.isolated) {
-        std::filesystem::path namePath(req.name);
-        std::string fileName = namePath.filename().string();
-        if (!fileName.empty()) {
-            yams::daemon::GraphQueryRequest fileReq = dreq;
-            fileReq.nodeKey = "file:" + fileName;
-            fileReq.documentName.clear();
-            fileReq.documentHash.clear();
-            fileReq.nodeId = -1;
-            auto r = co_await callGraph(fileReq);
-            if (r) {
-                result = r;
-            } else if (r.error().code == ErrorCode::NotFound) {
-                result = co_await callGraph(dreq);
-            } else {
-                co_return r.error();
-            }
-        } else {
-            result = co_await callGraph(dreq);
-        }
-    } else {
-        if (!req.listTypes && req.listType.empty() && !req.isolated && req.nodeKey.empty() &&
-            req.nodeId < 0 && req.hash.empty() && req.name.empty()) {
-            co_return Error{ErrorCode::InvalidArgument,
-                            "hash, name, node_id, or node_key is required"};
-        }
-        result = co_await callGraph(dreq);
-    }
-
-    if (!result) {
-        co_return result.error();
-    }
-
-    const auto& resp = result.value();
-
-    auto parseProperties = [](const std::string& props) -> json {
-        if (props.empty())
-            return json();
-        try {
-            return json::parse(props);
-        } catch (...) {
-            return props;
-        }
-    };
-
-    MCPGraphResponse out;
-    out.totalNodesFound = resp.totalNodesFound;
-    out.totalEdgesTraversed = resp.totalEdgesTraversed;
-    out.truncated = resp.truncated;
-    out.maxDepthReached = resp.maxDepthReached;
-    out.queryTimeMs = resp.queryTimeMs;
-    out.kgAvailable = resp.kgAvailable;
-    out.warning = resp.warning;
-
-    json origin;
-    origin["node_id"] = resp.originNode.nodeId;
-    origin["node_key"] = resp.originNode.nodeKey;
-    origin["label"] = resp.originNode.label;
-    origin["type"] = resp.originNode.type;
-    origin["distance"] = resp.originNode.distance;
-    if (!resp.originNode.documentHash.empty())
-        origin["document_hash"] = resp.originNode.documentHash;
-    if (resp.originNode.properties.size())
-        origin["properties"] = parseProperties(resp.originNode.properties);
-    out.origin = std::move(origin);
-
-    json nodes = json::array();
-    for (const auto& node : resp.connectedNodes) {
-        json n;
-        n["node_id"] = node.nodeId;
-        n["node_key"] = node.nodeKey;
-        n["label"] = node.label;
-        n["type"] = node.type;
-        n["distance"] = node.distance;
-        if (!node.documentHash.empty())
-            n["document_hash"] = node.documentHash;
-        if (!node.properties.empty())
-            n["properties"] = parseProperties(node.properties);
-        nodes.push_back(std::move(n));
-    }
-    out.connectedNodes = std::move(nodes);
-
-    if (!resp.nodeTypeCounts.empty()) {
-        json types = json::array();
-        for (const auto& [type, count] : resp.nodeTypeCounts) {
-            types.push_back({{"type", type}, {"count", count}});
-        }
-        out.nodeTypeCounts = std::move(types);
-    }
-
-    co_return out;
 }
 
 // === Thread pool implementation for MCPServer ===

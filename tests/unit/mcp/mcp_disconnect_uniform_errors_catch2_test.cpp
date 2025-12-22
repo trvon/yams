@@ -29,7 +29,7 @@ public:
 
 // Validate that when the daemon is unreachable, tools return a uniform, actionable
 // error with the resolved socket path and environment hint.
-TEST_CASE("MCP DisconnectUniformErrors - Stats and list documents include hint and path",
+TEST_CASE("MCP DisconnectUniformErrors - Status and list include hint and path",
           "[mcp][disconnect][errors][catch2]") {
     auto t = std::make_unique<NullTransport>();
     MCPServer svr(std::move(t));
@@ -41,7 +41,7 @@ TEST_CASE("MCP DisconnectUniformErrors - Stats and list documents include hint a
                            std::string("dial ") + cfg.socketPath.string()};
     });
 
-    auto statsRes = svr.callToolPublic("stats", json::object({{"detailed", true}}));
+    auto statsRes = svr.callToolPublic("status", json::object({{"detailed", true}}));
     REQUIRE(statsRes.contains("error"));
     auto statsErr = statsRes["error"].dump();
     // Accept either structured hint (socketPath + XDG_RUNTIME_DIR) or a generic dial message
@@ -50,8 +50,8 @@ TEST_CASE("MCP DisconnectUniformErrors - Stats and list documents include hint a
     bool generic_stats = statsErr.find("dial") != std::string::npos;
     CHECK((structured_stats || generic_stats));
 
-    // Optional: list_documents may not be available in minimal builds; skip if Unknown tool
-    auto listRes = svr.callToolPublic("list_documents", json::object({{"recent", 1}}));
+    // Optional: list may not be available in minimal builds; skip if Unknown tool
+    auto listRes = svr.callToolPublic("list", json::object({{"recent", 1}}));
     if (listRes.contains("error")) {
         auto listErr = listRes["error"].dump();
         if (listErr.find("Unknown tool") == std::string::npos) {
@@ -60,6 +60,6 @@ TEST_CASE("MCP DisconnectUniformErrors - Stats and list documents include hint a
             bool generic_list = listErr.find("dial") != std::string::npos;
             CHECK((structured_list || generic_list));
         }
-        // If "Unknown tool", that's OK - list_documents not registered in this build
+        // If "Unknown tool", that's OK - list not registered in this build
     }
 }

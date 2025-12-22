@@ -223,7 +223,7 @@ TEST_CASE_METHOD(StdioTransportFixture, "StdioTransport - Complex JSON message",
         {"id", 42},
         {"method", "tools/call"},
         {"params",
-         {{"name", "search_documents"},
+         {{"name", "search"},
           {"arguments",
            {{"query", "complex search with spaces"},
             {"limit", 10},
@@ -251,6 +251,6 @@ TEST_CASE_METHOD(StdioTransportFixture, "StdioTransport - Complex JSON message",
     REQUIRE(received.contains("params"));
 
     auto params = received["params"];
-    CHECK(params["name"] == "search_documents");
+    CHECK(params["name"] == "search");
     CHECK(params.contains("arguments"));
 }

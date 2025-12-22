@@ -2,14 +2,15 @@
 // Copyright 2025 Trevon Wright
 //
 // FTS5 failure scenario tests - covers common indexing failure modes
+// Migrated to Catch2 as part of yams-3s4 / yams-aqc
 
+#include <catch2/catch_test_macros.hpp>
 #include <spdlog/spdlog.h>
 #include <chrono>
 #include <filesystem>
 #include <iomanip>
 #include <sstream>
 #include <thread>
-#include <gtest/gtest.h>
 #include <yams/metadata/metadata_repository.h>
 
 namespace {
@@ -19,13 +20,16 @@ std::string makeTestHash(int n) {
     oss << std::hex << std::setfill('0') << std::setw(64) << n;
     return oss.str();
 }
-} // namespace
 
-using namespace yams::metadata;
+struct FTS5FailureFixture {
+    std::filesystem::path testDir_;
+    std::filesystem::path dbPath_;
+    std::unique_ptr<yams::metadata::MetadataRepository> repo_;
+    bool fts5Available_ = false;
 
-class FTS5FailureTest : public ::testing::Test {
-protected:
-    void SetUp() override {
+    FTS5FailureFixture() {
+        using namespace yams::metadata;
+
         // Create temporary directories
         testDir_ = std::filesystem::temp_directory_path() / "yams_test_fts5_failure";
         std::filesystem::remove_all(testDir_);
@@ -36,46 +40,47 @@ protected:
         // Initialize repository
         repo_ = std::make_unique<MetadataRepository>();
         auto initResult = repo_->initialize(dbPath_);
-        ASSERT_TRUE(initResult) << "Failed to initialize repository: "
-                                << initResult.error().message;
+        REQUIRE(initResult);
 
         // Check FTS5 support
         auto fts5Result = repo_->hasFTS5();
-        ASSERT_TRUE(fts5Result) << "Failed to check FTS5: " << fts5Result.error().message;
-        if (!fts5Result.value()) {
-            GTEST_SKIP() << "FTS5 not available in this SQLite build";
-        }
+        REQUIRE(fts5Result);
+        fts5Available_ = fts5Result.value();
     }
 
-    void TearDown() override {
+    ~FTS5FailureFixture() {
         repo_.reset();
         std::filesystem::remove_all(testDir_);
     }
-
-    std::filesystem::path testDir_;
-    std::filesystem::path dbPath_;
-    std::unique_ptr<MetadataRepository> repo_;
 };
+} // namespace
 
-// Test: Missing document in metadata (fail_no_doc scenario)
-TEST_F(FTS5FailureTest, MissingDocumentScenario) {
+using namespace yams::metadata;
+
+TEST_CASE_METHOD(FTS5FailureFixture, "FTS5 missing document scenario", "[unit][metadata][fts5][failure]") {
+    if (!fts5Available_) {
+        SKIP("FTS5 not available in this SQLite build");
+    }
+
     // Try to index a document that doesn't exist in metadata
     auto result = repo_->indexDocumentContent(99999, "Ghost Doc", "content", "text/plain");
 
     // Should fail because document ID doesn't exist
-    EXPECT_FALSE(result) << "Expected indexing to fail for non-existent document";
+    CHECK_FALSE(result);
     if (!result) {
         // Verify error indicates missing document or constraint violation
         std::string errMsg = result.error().message;
-        EXPECT_TRUE(errMsg.find("NOT NULL") != std::string::npos ||
-                    errMsg.find("FOREIGN KEY") != std::string::npos ||
-                    errMsg.find("constraint") != std::string::npos)
-            << "Unexpected error: " << errMsg;
+        CHECK((errMsg.find("NOT NULL") != std::string::npos ||
+               errMsg.find("FOREIGN KEY") != std::string::npos ||
+               errMsg.find("constraint") != std::string::npos));
     }
 }
 
-// Test: UTF-8 encoding issues
-TEST_F(FTS5FailureTest, Utf8EncodingScenario) {
+TEST_CASE_METHOD(FTS5FailureFixture, "FTS5 UTF-8 encoding scenario", "[unit][metadata][fts5][failure][utf8]") {
+    if (!fts5Available_) {
+        SKIP("FTS5 not available in this SQLite build");
+    }
+
     // Insert a document
     DocumentInfo info;
     info.filePath = "/test/utf8_test.txt";
@@ -87,7 +92,7 @@ TEST_F(FTS5FailureTest, Utf8EncodingScenario) {
     info.indexedTime = std::chrono::system_clock::now();
 
     auto insertResult = repo_->insertDocument(info);
-    ASSERT_TRUE(insertResult) << "Failed to insert document: " << insertResult.error().message;
+    REQUIRE(insertResult);
     int64_t docId = insertResult.value();
 
     // Test with various problematic UTF-8 sequences
@@ -110,22 +115,23 @@ TEST_F(FTS5FailureTest, Utf8EncodingScenario) {
         if (!indexResult) {
             // If it fails, verify it's due to encoding issues
             std::string errMsg = indexResult.error().message;
-            EXPECT_TRUE(errMsg.find("UTF") != std::string::npos ||
-                        errMsg.find("encoding") != std::string::npos ||
-                        errMsg.find("malformed") != std::string::npos)
-                << "Test " << i << " unexpected error: " << errMsg;
+            CHECK((errMsg.find("UTF") != std::string::npos ||
+                   errMsg.find("encoding") != std::string::npos ||
+                   errMsg.find("malformed") != std::string::npos));
         }
         // If it succeeds, sanitization worked - verify we can search
         else {
             auto searchResult = repo_->searchDocumentsFts("Valid", SearchOptions{});
-            EXPECT_TRUE(searchResult)
-                << "Search failed after UTF-8 indexing: " << searchResult.error().message;
+            CHECK(searchResult);
         }
     }
 }
 
-// Test: Empty content extraction (fail_extraction scenario)
-TEST_F(FTS5FailureTest, EmptyContentScenario) {
+TEST_CASE_METHOD(FTS5FailureFixture, "FTS5 empty content scenario", "[unit][metadata][fts5][failure]") {
+    if (!fts5Available_) {
+        SKIP("FTS5 not available in this SQLite build");
+    }
+
     // Insert a document
     DocumentInfo info;
     info.filePath = "/test/empty.txt";
@@ -137,23 +143,26 @@ TEST_F(FTS5FailureTest, EmptyContentScenario) {
     info.indexedTime = std::chrono::system_clock::now();
 
     auto insertResult = repo_->insertDocument(info);
-    ASSERT_TRUE(insertResult) << "Failed to insert document: " << insertResult.error().message;
+    REQUIRE(insertResult);
     int64_t docId = insertResult.value();
 
-    // Try to index with empty content - should succeed but be searchable
-    auto indexResult = repo_->indexDocumentContent(docId, "Empty Doc", "", "text/plain");
-    EXPECT_TRUE(indexResult) << "Indexing empty content should succeed: "
-                             << indexResult.error().message;
+    SECTION("Empty content") {
+        auto indexResult = repo_->indexDocumentContent(docId, "Empty Doc", "", "text/plain");
+        CHECK(indexResult);
+    }
 
-    // Try with whitespace-only content
-    auto indexResult2 =
-        repo_->indexDocumentContent(docId, "Whitespace Doc", "   \n\t  ", "text/plain");
-    EXPECT_TRUE(indexResult2) << "Indexing whitespace content should succeed: "
-                              << indexResult2.error().message;
+    SECTION("Whitespace-only content") {
+        auto indexResult =
+            repo_->indexDocumentContent(docId, "Whitespace Doc", "   \n\t  ", "text/plain");
+        CHECK(indexResult);
+    }
 }
 
-// Test: Concurrent indexing (potential DB lock scenario)
-TEST_F(FTS5FailureTest, ConcurrentIndexingScenario) {
+TEST_CASE_METHOD(FTS5FailureFixture, "FTS5 concurrent indexing scenario", "[unit][metadata][fts5][failure][concurrent]") {
+    if (!fts5Available_) {
+        SKIP("FTS5 not available in this SQLite build");
+    }
+
     // Insert multiple documents
     std::vector<int64_t> docIds;
     for (int i = 0; i < 10; ++i) {
@@ -167,7 +176,7 @@ TEST_F(FTS5FailureTest, ConcurrentIndexingScenario) {
         info.indexedTime = std::chrono::system_clock::now();
 
         auto insertResult = repo_->insertDocument(info);
-        ASSERT_TRUE(insertResult) << "Failed to insert document " << i;
+        REQUIRE(insertResult);
         docIds.push_back(insertResult.value());
     }
 
@@ -186,9 +195,6 @@ TEST_F(FTS5FailureTest, ConcurrentIndexingScenario) {
                 ++successes;
             } else {
                 ++failures;
-                // Log the error for debugging
-                std::cerr << "Concurrent indexing failed for doc " << i << ": "
-                          << result.error().message << std::endl;
             }
         });
     }
@@ -199,13 +205,14 @@ TEST_F(FTS5FailureTest, ConcurrentIndexingScenario) {
     }
 
     // Most should succeed, but some failures are acceptable due to concurrency
-    EXPECT_GT(successes.load(), 0) << "At least some concurrent indexing should succeed";
-    std::cout << "Concurrent indexing: " << successes.load() << " successes, " << failures.load()
-              << " failures" << std::endl;
+    CHECK(successes.load() > 0);
 }
 
-// Test: Large content stress
-TEST_F(FTS5FailureTest, LargeContentScenario) {
+TEST_CASE_METHOD(FTS5FailureFixture, "FTS5 large content scenario", "[unit][metadata][fts5][failure][large]") {
+    if (!fts5Available_) {
+        SKIP("FTS5 not available in this SQLite build");
+    }
+
     // Insert a document
     DocumentInfo info;
     info.filePath = "/test/large.txt";
@@ -217,7 +224,7 @@ TEST_F(FTS5FailureTest, LargeContentScenario) {
     info.indexedTime = std::chrono::system_clock::now();
 
     auto insertResult = repo_->insertDocument(info);
-    ASSERT_TRUE(insertResult) << "Failed to insert document: " << insertResult.error().message;
+    REQUIRE(insertResult);
     int64_t docId = insertResult.value();
 
     // Generate large content (10 MB)
@@ -230,28 +237,24 @@ TEST_F(FTS5FailureTest, LargeContentScenario) {
     }
 
     // Index large content
-    auto startTime = std::chrono::steady_clock::now();
     auto indexResult = repo_->indexDocumentContent(docId, "Large Doc", largeContent, "text/plain");
-    auto endTime = std::chrono::steady_clock::now();
-
-    EXPECT_TRUE(indexResult) << "Indexing large content failed: " << indexResult.error().message;
+    CHECK(indexResult);
 
     if (indexResult) {
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
-        std::cout << "Indexed " << (largeContent.size() / (1024 * 1024)) << " MB in "
-                  << duration.count() << " ms" << std::endl;
-
         // Verify we can search it
         auto searchResult = repo_->searchDocumentsFts("Lorem", SearchOptions{});
-        EXPECT_TRUE(searchResult) << "Search failed: " << searchResult.error().message;
+        CHECK(searchResult);
         if (searchResult) {
-            EXPECT_GT(searchResult.value().results.size(), 0) << "Should find matches";
+            CHECK(searchResult.value().results.size() > 0);
         }
     }
 }
 
-// Test: Duplicate rowid scenario
-TEST_F(FTS5FailureTest, DuplicateRowidScenario) {
+TEST_CASE_METHOD(FTS5FailureFixture, "FTS5 duplicate rowid scenario", "[unit][metadata][fts5][failure]") {
+    if (!fts5Available_) {
+        SKIP("FTS5 not available in this SQLite build");
+    }
+
     // Insert a document
     DocumentInfo info;
     info.filePath = "/test/dup.txt";
@@ -263,19 +266,19 @@ TEST_F(FTS5FailureTest, DuplicateRowidScenario) {
     info.indexedTime = std::chrono::system_clock::now();
 
     auto insertResult = repo_->insertDocument(info);
-    ASSERT_TRUE(insertResult);
+    REQUIRE(insertResult);
     int64_t docId = insertResult.value();
 
     // Index once
     auto result1 = repo_->indexDocumentContent(docId, "First", "content v1", "text/plain");
-    EXPECT_TRUE(result1) << "First indexing failed: " << result1.error().message;
+    CHECK(result1);
 
     // Index again with different content (should replace)
     auto result2 = repo_->indexDocumentContent(docId, "Second", "content v2", "text/plain");
-    EXPECT_TRUE(result2) << "Second indexing failed: " << result2.error().message;
+    CHECK(result2);
 
     // Verify only one entry exists (search for v2)
     auto searchResult = repo_->searchDocumentsFts("v2", SearchOptions{});
-    ASSERT_TRUE(searchResult);
-    EXPECT_EQ(searchResult.value().results.size(), 1) << "Should have exactly one result";
+    REQUIRE(searchResult);
+    CHECK(searchResult.value().results.size() == 1);
 }
