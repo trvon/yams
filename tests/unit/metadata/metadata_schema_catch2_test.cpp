@@ -280,7 +280,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Metadata operations", "[unit][metadata]
         auto scoreResult = repo_->getMetadata(docId, "score");
         REQUIRE(scoreResult.has_value());
         REQUIRE(scoreResult.value().has_value());
-        CHECK(scoreResult.value().value().asDouble() == 4.5);
+        CHECK(scoreResult.value().value().asReal() == 4.5);
     }
 
     SECTION("Set and get bool metadata") {
@@ -290,7 +290,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Metadata operations", "[unit][metadata]
         auto publishedResult = repo_->getMetadata(docId, "published");
         REQUIRE(publishedResult.has_value());
         REQUIRE(publishedResult.value().has_value());
-        CHECK(publishedResult.value().value().asBool() == true);
+        CHECK(publishedResult.value().value().asBoolean() == true);
     }
 
     SECTION("Get all metadata") {

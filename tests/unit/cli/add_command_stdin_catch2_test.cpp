@@ -18,6 +18,7 @@
 #define getpid _getpid
 #else
 #include <sys/wait.h>
+#include <unistd.h>
 #endif
 
 namespace fs = std::filesystem;

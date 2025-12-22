@@ -290,7 +290,7 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
 
     SECTION("Process single task successfully") {
         auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
-                                                       nullptr, &coordinator, 8);
+                                                       nullptr, &coordinator, nullptr, 8);
         queue->start(); // Start the channel poller
 
         PostIngestQueue::Task task{
@@ -322,7 +322,7 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
 
     SECTION("Queue shutdown drains pending tasks") {
         auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
-                                                       nullptr, &coordinator, 8);
+                                                       nullptr, &coordinator, nullptr, 8);
         queue->start(); // Start the channel poller
 
         PostIngestQueue::Task task{
@@ -366,7 +366,7 @@ TEST_CASE("PostIngestQueue: InternalEventBus integration and stress",
         const std::string payload = "hello world";
 
         auto pq = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
-                                                    nullptr, &coordinator, 4096);
+                                                    nullptr, &coordinator, nullptr, 4096);
         pq->start(); // Start the channel poller
 
         // Spawn producers that publish into the InternalEventBus channel

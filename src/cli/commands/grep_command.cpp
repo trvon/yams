@@ -509,7 +509,7 @@ public:
                         }
 
                         if (files.empty()) {
-                            std::cout << "(no results)" << std::endl;
+                            std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
                             printLiteralTextHint();
                         } else {
                             for (const auto& file : files) {
@@ -517,10 +517,15 @@ public:
                                 auto itS = semOnlyConf.find(file);
                                 if ((itR == hasRegex.end() || !itR->second) &&
                                     itS != semOnlyConf.end()) {
-                                    std::cout << "[S:" << std::fixed << std::setprecision(2)
-                                              << itS->second << "] " << file << std::endl;
+                                    // Semantic-only match: show confidence in cyan
+                                    std::cout << ui::colorize(
+                                                     "[S:" +
+                                                     std::to_string(itS->second).substr(0, 4) + "]",
+                                                     ui::Ansi::CYAN)
+                                              << " " << ui::colorize(file, ui::Ansi::MAGENTA)
+                                              << std::endl;
                                 } else {
-                                    std::cout << file << std::endl;
+                                    std::cout << ui::colorize(file, ui::Ansi::MAGENTA) << std::endl;
                                 }
                             }
                         }
@@ -549,51 +554,62 @@ public:
                         }
 
                         if (fileCounts.empty() && semanticOnly.empty()) {
-                            std::cout << "(no results)" << std::endl;
+                            std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
                             printLiteralTextHint();
                         } else {
                             for (const auto& [file, count] : fileCounts) {
                                 if (showFilename_ || fileCounts.size() > 1) {
-                                    std::cout << file << ":";
+                                    std::cout << ui::colorize(file, ui::Ansi::MAGENTA) << ":";
                                 }
-                                std::cout << count << std::endl;
+                                std::cout << ui::colorize(std::to_string(count), ui::Ansi::GREEN)
+                                          << std::endl;
                             }
                             if (!semanticOnly.empty()) {
-                                std::cout << "Semantic suggestions:" << std::endl;
+                                std::cout << ui::colorize("\nSemantic suggestions:",
+                                                          ui::Ansi::DIM)
+                                          << std::endl;
                                 for (const auto& [file, conf] : semanticOnly) {
-                                    std::cout << "[S:" << std::fixed << std::setprecision(2) << conf
-                                              << "] " << file << std::endl;
+                                    std::cout << ui::colorize(
+                                                     "[S:" +
+                                                     std::to_string(conf).substr(0, 4) + "]",
+                                                     ui::Ansi::CYAN)
+                                              << " " << ui::colorize(file, ui::Ansi::MAGENTA)
+                                              << std::endl;
                                 }
                             }
                         }
                     } else {
                         if (resp.matches.empty()) {
-                            std::cout << "(no results)" << std::endl;
+                            std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
                             printLiteralTextHint();
                             return Result<void>();
                         }
 
                         // Check if minimal mode is enabled
                         if (minimalMode_) {
-                            // Traditional grep output
+                            // Traditional grep output with colors
                             for (const auto& match : resp.matches) {
                                 if (showFilename_ || resp.matches.size() > 1) {
-                                    std::cout << match.file << ":";
+                                    std::cout << ui::colorize(match.file, ui::Ansi::MAGENTA) << ":";
                                 }
                                 if (showLineNumbers_) {
-                                    std::cout << match.lineNumber << ":";
+                                    std::cout << ui::colorize(std::to_string(match.lineNumber),
+                                                              ui::Ansi::CYAN)
+                                              << ":";
                                 }
                                 std::cout << sanitizeForDisplay(match.line) << std::endl;
 
                                 for (const auto& ctx : match.contextBefore) {
-                                    std::cout << "  " << sanitizeForDisplay(ctx) << std::endl;
+                                    std::cout << ui::colorize("  ", ui::Ansi::DIM)
+                                              << sanitizeForDisplay(ctx) << std::endl;
                                 }
                                 for (const auto& ctx : match.contextAfter) {
-                                    std::cout << "  " << sanitizeForDisplay(ctx) << std::endl;
+                                    std::cout << ui::colorize("  ", ui::Ansi::DIM)
+                                              << sanitizeForDisplay(ctx) << std::endl;
                                 }
                             }
                         } else {
-                            // LLM-friendly rich output (default)
+                            // Rich colorized output (default)
                             size_t regexCount = 0, semanticCount = 0;
                             std::map<std::string, std::vector<const daemon::GrepMatch*>> fileGroups;
 
@@ -607,18 +623,6 @@ public:
                                 }
                             }
 
-                            // Print header with summary
-                            std::cout << "=== Results for \"" << pattern_ << "\" in "
-                                      << fileGroups.size() << " file"
-                                      << (fileGroups.size() != 1 ? "s" : "") << " (";
-                            if (regexCount > 0)
-                                std::cout << regexCount << " regex";
-                            if (regexCount > 0 && semanticCount > 0)
-                                std::cout << ", ";
-                            if (semanticCount > 0)
-                                std::cout << semanticCount << " semantic";
-                            std::cout << ") ===" << std::endl << std::endl;
-
                             // Print results grouped by file
                             for (const auto& [filename, matches] : fileGroups) {
                                 // Get file extension for language hint
@@ -628,15 +632,10 @@ public:
                                     ext = filename.substr(dotPos + 1);
                                 }
 
-                                // File header with metadata
-                                std::cout << "File: " << filename;
-                                if (!ext.empty()) {
-                                    std::cout << " (" << ext << ")";
-                                }
-                                std::cout << std::endl;
-                                std::cout << "   Matches: " << matches.size();
+                                // File header in magenta
+                                std::cout << ui::colorize(filename, ui::Ansi::MAGENTA);
 
-                                // Count match types for this file
+                                // Match count with type breakdown
                                 size_t fileRegex = 0, fileSemantic = 0;
                                 for (const auto* m : matches) {
                                     if (m->matchType == "semantic")
@@ -644,54 +643,81 @@ public:
                                     else
                                         fileRegex++;
                                 }
-                                if (fileRegex > 0 || fileSemantic > 0) {
-                                    std::cout << " (";
-                                    if (fileRegex > 0)
-                                        std::cout << fileRegex << " regex";
-                                    if (fileRegex > 0 && fileSemantic > 0)
-                                        std::cout << ", ";
-                                    if (fileSemantic > 0)
-                                        std::cout << fileSemantic << " semantic";
-                                    std::cout << ")";
+
+                                std::string countInfo = " (" + std::to_string(matches.size()) +
+                                                        " match" +
+                                                        (matches.size() != 1 ? "es" : "");
+                                if (fileRegex > 0 && fileSemantic > 0) {
+                                    countInfo += ": " + std::to_string(fileRegex) + " regex, " +
+                                                 std::to_string(fileSemantic) + " semantic";
                                 }
-                                std::cout << std::endl << std::endl;
+                                countInfo += ")";
+                                std::cout << ui::colorize(countInfo, ui::Ansi::DIM);
+
+                                if (!ext.empty()) {
+                                    std::cout << ui::colorize(" [" + ext + "]", ui::Ansi::DIM);
+                                }
+                                std::cout << std::endl;
 
                                 // Print matches for this file
                                 for (const auto* match : matches) {
-                                    std::cout << "   Line " << std::setw(4) << match->lineNumber
-                                              << ": ";
+                                    // Line number in cyan
+                                    std::cout << "  "
+                                              << ui::colorize(
+                                                     std::to_string(match->lineNumber) + ":",
+                                                     ui::Ansi::CYAN)
+                                              << " ";
 
-                                    // Match type indicator
+                                    // Match type indicator with appropriate color
                                     if (match->matchType == "semantic") {
-                                        std::cout << "[Semantic:" << std::fixed
-                                                  << std::setprecision(2) << match->confidence
-                                                  << "] ";
+                                        const char* confColor = ui::Ansi::DIM;
+                                        if (match->confidence >= 0.8)
+                                            confColor = ui::Ansi::GREEN;
+                                        else if (match->confidence >= 0.5)
+                                            confColor = ui::Ansi::YELLOW;
+                                        std::cout << ui::colorize(
+                                                         "[S:" +
+                                                             std::to_string(match->confidence)
+                                                                 .substr(0, 4) +
+                                                             "]",
+                                                         confColor)
+                                                  << " ";
                                     } else if (match->matchType == "hybrid") {
-                                        std::cout << "[Hybrid] ";
+                                        std::cout << ui::colorize("[H]", ui::Ansi::YELLOW) << " ";
                                     } else if (semanticCount > 0) {
-                                        std::cout << "[Regex] ";
+                                        std::cout << ui::colorize("[R]", ui::Ansi::GREEN) << " ";
                                     }
 
                                     std::cout << sanitizeForDisplay(match->line) << std::endl;
 
-                                    // Context lines
+                                    // Context lines in dim
                                     for (const auto& ctx : match->contextBefore) {
-                                        std::cout << "          " << sanitizeForDisplay(ctx)
+                                        std::cout << ui::colorize("       ", ui::Ansi::DIM)
+                                                  << ui::colorize(sanitizeForDisplay(ctx),
+                                                                  ui::Ansi::DIM)
                                                   << std::endl;
                                     }
                                     for (const auto& ctx : match->contextAfter) {
-                                        std::cout << "          " << sanitizeForDisplay(ctx)
+                                        std::cout << ui::colorize("       ", ui::Ansi::DIM)
+                                                  << ui::colorize(sanitizeForDisplay(ctx),
+                                                                  ui::Ansi::DIM)
                                                   << std::endl;
                                     }
                                 }
                                 std::cout << std::endl;
                             }
 
-                            // Final summary
-                            std::cout << "[Total: " << resp.matches.size() << " match"
-                                      << (resp.matches.size() != 1 ? "es" : "") << " across "
-                                      << fileGroups.size() << " file"
-                                      << (fileGroups.size() != 1 ? "s" : "") << "]" << std::endl;
+                            // Final summary in dim
+                            std::string summary = std::to_string(resp.matches.size()) + " match" +
+                                                  (resp.matches.size() != 1 ? "es" : "") +
+                                                  " across " + std::to_string(fileGroups.size()) +
+                                                  " file" +
+                                                  (fileGroups.size() != 1 ? "s" : "");
+                            if (regexCount > 0 && semanticCount > 0) {
+                                summary += " (" + std::to_string(regexCount) + " regex, " +
+                                           std::to_string(semanticCount) + " semantic)";
+                            }
+                            std::cout << ui::colorize(summary, ui::Ansi::DIM) << std::endl;
                         }
                     }
 
@@ -1156,16 +1182,18 @@ private:
             }
 
             if (files.empty()) {
-                std::cout << "(no results)" << std::endl;
+                std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
                 printLiteralTextHint();
             } else {
                 for (const auto& file : files) {
                     auto itc = semOnlyConf.find(file);
                     if (itc != semOnlyConf.end()) {
-                        std::cout << "[S:" << std::fixed << std::setprecision(2) << itc->second
-                                  << "] " << file << std::endl;
+                        std::cout << ui::colorize(
+                                         "[S:" + std::to_string(itc->second).substr(0, 4) + "]",
+                                         ui::Ansi::CYAN)
+                                  << " " << ui::colorize(file, ui::Ansi::MAGENTA) << std::endl;
                     } else {
-                        std::cout << file << std::endl;
+                        std::cout << ui::colorize(file, ui::Ansi::MAGENTA) << std::endl;
                     }
                 }
             }
@@ -1173,14 +1201,15 @@ private:
             // Output counts
             for (const auto& [filePath, matches] : allRegexMatches) {
                 if (showFilename_) {
-                    std::cout << filePath << ":";
+                    std::cout << ui::colorize(filePath, ui::Ansi::MAGENTA) << ":";
                 }
-                std::cout << matches.size() << std::endl;
+                std::cout << ui::colorize(std::to_string(matches.size()), ui::Ansi::GREEN)
+                          << std::endl;
             }
         } else if (filesWithoutMatch_) {
             // Handle files-without-match option
             for (const auto& file : nonMatchingFiles) {
-                std::cout << file << std::endl;
+                std::cout << ui::colorize(file, ui::Ansi::MAGENTA) << std::endl;
             }
         } else {
             // Hybrid output mode - show both regex and semantic results
@@ -1189,7 +1218,7 @@ private:
 
             if (hasRegexMatches) {
                 if (hasSemanticResults) {
-                    std::cout << "=== Text Matches ===" << std::endl;
+                    std::cout << ui::colorize("=== Text Matches ===", ui::Ansi::DIM) << std::endl;
                     std::cout << std::endl;
                 }
 
@@ -1218,7 +1247,7 @@ private:
                                 limitedMatches.resize(maxCount_);
                             }
 
-                            printMatches(filePath, content, limitedMatches);
+                            printMatchesColorized(filePath, content, limitedMatches);
                         }
                     }
                     fileCount++;
@@ -1229,11 +1258,12 @@ private:
                 if (hasRegexMatches) {
                     std::cout << std::endl;
                 }
-                std::cout << "=== Semantic Matches ===" << std::endl;
+                std::cout << ui::colorize("=== Semantic Matches ===", ui::Ansi::DIM) << std::endl;
                 std::cout << std::endl;
 
                 // Show semantic results
-                for (size_t i = 0; i < semanticResults.size() && i < semanticLimit_; i++) {
+                size_t shown = 0;
+                for (size_t i = 0; i < semanticResults.size() && shown < semanticLimit_; i++) {
                     const auto& result = semanticResults[i];
 
                     // Get path from document
@@ -1244,30 +1274,49 @@ private:
                         continue;
                     }
 
-                    std::cout << (i + 1) << ". ";
-                    // Use fileName as title
-                    if (!result.document.fileName.empty()) {
-                        std::cout << result.document.fileName;
-                    } else {
-                        std::cout << result.document.id;
-                    }
+                    // File path in magenta
+                    std::cout << ui::colorize(path, ui::Ansi::MAGENTA);
 
-                    if (!path.empty()) {
-                        std::cout << " (" << path << ")";
-                    }
-                    std::cout << std::endl;
+                    // Score with color based on confidence
+                    const char* scoreColor = ui::Ansi::DIM;
+                    if (result.score >= 0.8)
+                        scoreColor = ui::Ansi::GREEN;
+                    else if (result.score >= 0.5)
+                        scoreColor = ui::Ansi::YELLOW;
+                    std::cout << " "
+                              << ui::colorize(
+                                     "[S:" + std::to_string(result.score).substr(0, 4) + "]",
+                                     scoreColor)
+                              << std::endl;
 
                     // Show snippet if available
                     if (!result.snippet.empty()) {
                         std::string snippet = truncateSnippet(result.snippet, 200);
-                        std::cout << "   " << snippet << std::endl;
+                        std::cout << ui::colorize("  1:", ui::Ansi::CYAN) << " " << snippet
+                                  << std::endl;
                     }
                     std::cout << std::endl;
+                    shown++;
                 }
             }
 
             if (!hasRegexMatches && !hasSemanticResults) {
-                std::cout << "No matches found for pattern: " << pattern_ << std::endl;
+                std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
+                printLiteralTextHint();
+            } else {
+                // Summary line
+                size_t totalMatches = 0;
+                for (const auto& [_, m] : allRegexMatches) {
+                    totalMatches += m.size();
+                }
+                std::string summary = std::to_string(totalMatches) + " match" +
+                                      (totalMatches != 1 ? "es" : "") + " in " +
+                                      std::to_string(allRegexMatches.size()) + " file" +
+                                      (allRegexMatches.size() != 1 ? "s" : "");
+                if (hasSemanticResults) {
+                    summary += " + " + std::to_string(semanticResults.size()) + " semantic";
+                }
+                std::cout << ui::colorize(summary, ui::Ansi::DIM) << std::endl;
             }
 
             return Result<void>();
@@ -1406,6 +1455,91 @@ private:
                 }
             }
         }
+    }
+
+    void printMatchesColorized(const std::string& filename, const std::string& content,
+                               const std::vector<Match>& matches) {
+        // Split content into lines for context printing
+        std::vector<std::string> lines;
+        std::istringstream stream(content);
+        std::string line;
+        while (std::getline(stream, line)) {
+            lines.push_back(line);
+        }
+
+        // File header in magenta with match count
+        std::cout << ui::colorize(filename, ui::Ansi::MAGENTA);
+        std::cout << ui::colorize(" (" + std::to_string(matches.size()) + " match" +
+                                      (matches.size() != 1 ? "es" : "") + ")",
+                                  ui::Ansi::DIM);
+
+        // Get file extension for language hint
+        std::string ext;
+        auto dotPos = filename.rfind('.');
+        if (dotPos != std::string::npos) {
+            ext = filename.substr(dotPos + 1);
+            std::cout << ui::colorize(" [" + ext + "]", ui::Ansi::DIM);
+        }
+        std::cout << std::endl;
+
+        // Track which lines we've already printed (for context overlap)
+        std::set<size_t> printedLines;
+
+        for (const auto& match : matches) {
+            // Calculate context range
+            size_t startLine =
+                (match.lineNumber > beforeContext_) ? match.lineNumber - beforeContext_ : 1;
+            size_t endLine = std::min(match.lineNumber + afterContext_, lines.size());
+
+            // Print separator if needed
+            if (!printedLines.empty() && startLine > *printedLines.rbegin() + 1) {
+                std::cout << ui::colorize("  ...", ui::Ansi::DIM) << std::endl;
+            }
+
+            // Print context and match
+            for (size_t i = startLine; i <= endLine; ++i) {
+                if (printedLines.count(i) > 0) {
+                    continue; // Already printed this line
+                }
+                printedLines.insert(i);
+
+                if (i - 1 >= lines.size()) {
+                    continue;
+                }
+
+                // Line number in cyan
+                std::cout << "  " << ui::colorize(std::to_string(i) + ":", ui::Ansi::CYAN) << " ";
+
+                // Print the line - context lines in dim, match lines normal with highlight
+                if (i == match.lineNumber && !invertMatch_) {
+                    // Highlight the match within the line
+                    const std::string& lineText = lines[i - 1];
+                    if (match.columnStart < lineText.size()) {
+                        std::cout << lineText.substr(0, match.columnStart);
+                        if (ui::colors_enabled()) {
+                            std::cout << ui::Ansi::RED;
+                        }
+                        size_t matchLen = (match.columnEnd > match.columnStart)
+                                              ? match.columnEnd - match.columnStart
+                                              : 0;
+                        std::cout << lineText.substr(match.columnStart, matchLen);
+                        if (ui::colors_enabled()) {
+                            std::cout << ui::Ansi::RESET;
+                        }
+                        if (match.columnEnd < lineText.size()) {
+                            std::cout << lineText.substr(match.columnEnd);
+                        }
+                        std::cout << std::endl;
+                    } else {
+                        std::cout << lineText << std::endl;
+                    }
+                } else {
+                    // Context line in dim
+                    std::cout << ui::colorize(lines[i - 1], ui::Ansi::DIM) << std::endl;
+                }
+            }
+        }
+        std::cout << std::endl;
     }
 
     std::vector<std::string> splitPatterns(const std::vector<std::string>& patterns) {

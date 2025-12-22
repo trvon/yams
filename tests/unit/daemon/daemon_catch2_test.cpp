@@ -31,6 +31,8 @@ using pid_t = int;
 static int setenv(const char* name, const char* value, int overwrite) {
     return _putenv_s(name, value);
 }
+#else
+#include <unistd.h>
 #endif
 
 namespace fs = std::filesystem;

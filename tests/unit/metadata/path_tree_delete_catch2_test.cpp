@@ -8,6 +8,7 @@
 #include <memory>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/metadata_repository.h>

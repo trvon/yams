@@ -4808,6 +4808,50 @@ yams::mcp::MCPServer::handleRestoreSnapshot(const yams::mcp::MCPRestoreSnapshotR
     co_return Error{ErrorCode::NotImplemented, "Restore snapshot not yet implemented"};
 }
 
+boost::asio::awaitable<yams::Result<yams::mcp::MCPRestoreResponse>>
+yams::mcp::MCPServer::handleRestore(const yams::mcp::MCPRestoreRequest& req) {
+    // Delegate to collection or snapshot restore based on which fields are populated
+    if (!req.snapshotId.empty() || !req.snapshotLabel.empty()) {
+        MCPRestoreSnapshotRequest snapReq;
+        snapReq.snapshotId = req.snapshotId;
+        snapReq.snapshotLabel = req.snapshotLabel;
+        snapReq.outputDirectory = req.outputDirectory;
+        snapReq.overwrite = req.overwrite;
+        snapReq.createDirs = req.createDirs;
+        snapReq.dryRun = req.dryRun;
+        auto result = co_await handleRestoreSnapshot(snapReq);
+        if (!result) {
+            co_return Error{result.error().code, result.error().message};
+        }
+        MCPRestoreResponse response;
+        response.filesRestored = result.value().filesRestored;
+        response.restoredPaths = result.value().restoredPaths;
+        response.dryRun = result.value().dryRun;
+        co_return response;
+    } else if (!req.collection.empty()) {
+        MCPRestoreCollectionRequest colReq;
+        colReq.collection = req.collection;
+        colReq.outputDirectory = req.outputDirectory;
+        colReq.layoutTemplate = req.layoutTemplate;
+        colReq.includePatterns = req.includePatterns;
+        colReq.excludePatterns = req.excludePatterns;
+        colReq.overwrite = req.overwrite;
+        colReq.createDirs = req.createDirs;
+        colReq.dryRun = req.dryRun;
+        auto result = co_await handleRestoreCollection(colReq);
+        if (!result) {
+            co_return Error{result.error().code, result.error().message};
+        }
+        MCPRestoreResponse response;
+        response.filesRestored = result.value().filesRestored;
+        response.restoredPaths = result.value().restoredPaths;
+        response.dryRun = result.value().dryRun;
+        co_return response;
+    }
+    co_return Error{ErrorCode::InvalidArgument,
+                    "Either collection or snapshotId/snapshotLabel must be provided"};
+}
+
 boost::asio::awaitable<Result<MCPListCollectionsResponse>>
 MCPServer::handleListCollections(const MCPListCollectionsRequest& req) {
     MCPListCollectionsResponse response;

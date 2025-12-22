@@ -11,6 +11,7 @@
 #include <iomanip>
 #include <sstream>
 #include <thread>
+#include <yams/metadata/connection_pool.h>
 #include <yams/metadata/metadata_repository.h>
 
 namespace {
@@ -24,6 +25,7 @@ std::string makeTestHash(int n) {
 struct FTS5FailureFixture {
     std::filesystem::path testDir_;
     std::filesystem::path dbPath_;
+    std::unique_ptr<yams::metadata::ConnectionPool> pool_;
     std::unique_ptr<yams::metadata::MetadataRepository> repo_;
     bool fts5Available_ = false;
 
@@ -37,19 +39,25 @@ struct FTS5FailureFixture {
 
         dbPath_ = testDir_ / "test.db";
 
-        // Initialize repository
-        repo_ = std::make_unique<MetadataRepository>();
-        auto initResult = repo_->initialize(dbPath_);
-        REQUIRE(initResult);
+        // Initialize connection pool and repository
+        ConnectionPoolConfig config;
+        config.minConnections = 1;
+        config.maxConnections = 2;
 
-        // Check FTS5 support
-        auto fts5Result = repo_->hasFTS5();
-        REQUIRE(fts5Result);
-        fts5Available_ = fts5Result.value();
+        pool_ = std::make_unique<ConnectionPool>(dbPath_.string(), config);
+        auto initResult = pool_->initialize();
+        REQUIRE(initResult.has_value());
+
+        repo_ = std::make_unique<MetadataRepository>(*pool_);
+
+        // Assume FTS5 is available - tests will fail naturally if not
+        fts5Available_ = true;
     }
 
     ~FTS5FailureFixture() {
         repo_.reset();
+        pool_->shutdown();
+        pool_.reset();
         std::filesystem::remove_all(testDir_);
     }
 };
@@ -89,7 +97,7 @@ TEST_CASE_METHOD(FTS5FailureFixture, "FTS5 UTF-8 encoding scenario", "[unit][met
     info.fileSize = 100;
     info.sha256Hash = "hash_utf8_content";
     info.mimeType = "text/plain";
-    info.indexedTime = std::chrono::system_clock::now();
+    info.indexedTime = std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
 
     auto insertResult = repo_->insertDocument(info);
     REQUIRE(insertResult);
@@ -121,7 +129,7 @@ TEST_CASE_METHOD(FTS5FailureFixture, "FTS5 UTF-8 encoding scenario", "[unit][met
         }
         // If it succeeds, sanitization worked - verify we can search
         else {
-            auto searchResult = repo_->searchDocumentsFts("Valid", SearchOptions{});
+            auto searchResult = repo_->search("Valid");
             CHECK(searchResult);
         }
     }
@@ -140,7 +148,7 @@ TEST_CASE_METHOD(FTS5FailureFixture, "FTS5 empty content scenario", "[unit][meta
     info.fileSize = 0;
     info.sha256Hash = "hash_empty";
     info.mimeType = "text/plain";
-    info.indexedTime = std::chrono::system_clock::now();
+    info.indexedTime = std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
 
     auto insertResult = repo_->insertDocument(info);
     REQUIRE(insertResult);
@@ -171,9 +179,9 @@ TEST_CASE_METHOD(FTS5FailureFixture, "FTS5 concurrent indexing scenario", "[unit
         info.fileName = "concurrent_" + std::to_string(i) + ".txt";
         info.fileExtension = "txt";
         info.fileSize = 100;
-        info.sha256Hash = common::sha256("content_" + std::to_string(i));
+        info.sha256Hash = makeTestHash(i);
         info.mimeType = "text/plain";
-        info.indexedTime = std::chrono::system_clock::now();
+        info.indexedTime = std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
 
         auto insertResult = repo_->insertDocument(info);
         REQUIRE(insertResult);
@@ -221,7 +229,7 @@ TEST_CASE_METHOD(FTS5FailureFixture, "FTS5 large content scenario", "[unit][meta
     info.fileSize = 10000000;
     info.sha256Hash = "hash_large_content";
     info.mimeType = "text/plain";
-    info.indexedTime = std::chrono::system_clock::now();
+    info.indexedTime = std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
 
     auto insertResult = repo_->insertDocument(info);
     REQUIRE(insertResult);
@@ -242,7 +250,7 @@ TEST_CASE_METHOD(FTS5FailureFixture, "FTS5 large content scenario", "[unit][meta
 
     if (indexResult) {
         // Verify we can search it
-        auto searchResult = repo_->searchDocumentsFts("Lorem", SearchOptions{});
+        auto searchResult = repo_->search("Lorem");
         CHECK(searchResult);
         if (searchResult) {
             CHECK(searchResult.value().results.size() > 0);
@@ -263,7 +271,7 @@ TEST_CASE_METHOD(FTS5FailureFixture, "FTS5 duplicate rowid scenario", "[unit][me
     info.fileSize = 100;
     info.sha256Hash = "hash_dup_content";
     info.mimeType = "text/plain";
-    info.indexedTime = std::chrono::system_clock::now();
+    info.indexedTime = std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
 
     auto insertResult = repo_->insertDocument(info);
     REQUIRE(insertResult);
@@ -278,7 +286,7 @@ TEST_CASE_METHOD(FTS5FailureFixture, "FTS5 duplicate rowid scenario", "[unit][me
     CHECK(result2);
 
     // Verify only one entry exists (search for v2)
-    auto searchResult = repo_->searchDocumentsFts("v2", SearchOptions{});
+    auto searchResult = repo_->search("v2");
     REQUIRE(searchResult);
     CHECK(searchResult.value().results.size() == 1);
 }

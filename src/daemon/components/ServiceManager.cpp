@@ -1400,7 +1400,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         auto qcap = static_cast<std::size_t>(TA::postIngestQueueMax());
         postIngest_ = std::make_unique<PostIngestQueue>(
             contentStore_, metadataRepo_, contentExtractors_, kgStore_, graphComponent_,
-            workCoordinator_.get(), qcap);
+            workCoordinator_.get(), nullptr, qcap);
         postIngest_->start();
 
         try {
@@ -2683,6 +2683,20 @@ void ServiceManager::__test_setModelProviderDegraded(bool degraded, const std::s
         }
     } catch (...) {
     }
+}
+
+void ServiceManager::enqueuePostIngest(const std::string& hash, const std::string& mime) {
+    if (!postIngest_) {
+        return;
+    }
+    PostIngestQueue::Task task{
+        hash,
+        mime,
+        "",  // session
+        std::chrono::steady_clock::now(),
+        PostIngestQueue::Task::Stage::Metadata
+    };
+    postIngest_->tryEnqueue(std::move(task));
 }
 
 } // namespace yams::daemon
