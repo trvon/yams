@@ -94,6 +94,7 @@ TEST_CASE("MCP Schema - ListTools contains all expected tools", "[mcp][schema][t
                                          "download",
                                          "session_start",
                                          "session_stop",
+                                         "graph",
                                          "get",
                                          "stats",
                                          "update",
@@ -205,6 +206,30 @@ TEST_CASE("MCP Schema - RetrieveDocument has graph params", "[mcp][schema][retri
     CHECK(hasProp(*props, "graph"));
     CHECK(hasProp(*props, "depth"));
     CHECK(hasProp(*props, "include_content"));
+}
+
+TEST_CASE("MCP Schema - Graph tool has CLI parity params", "[mcp][schema][graph][catch2]") {
+    auto server = ServerUnderTest::make();
+    json tools = server->testListTools();
+    auto t = findTool(tools, "graph");
+    REQUIRE(t.has_value());
+
+    auto props = toolProps(*t);
+    REQUIRE(props.has_value());
+
+    CHECK(hasProp(*props, "hash"));
+    CHECK(hasProp(*props, "name"));
+    CHECK(hasProp(*props, "node_key"));
+    CHECK(hasProp(*props, "node_id"));
+    CHECK(hasProp(*props, "list_types"));
+    CHECK(hasProp(*props, "list_type"));
+    CHECK(hasProp(*props, "isolated"));
+    CHECK(hasProp(*props, "relation"));
+    CHECK(hasProp(*props, "relation_filters"));
+    CHECK(hasProp(*props, "depth"));
+    CHECK(hasProp(*props, "limit"));
+    CHECK(hasProp(*props, "offset"));
+    CHECK(hasProp(*props, "reverse"));
 }
 
 TEST_CASE("MCP Schema - UpdateMetadata supports name or hash and multiple pairs",

@@ -47,9 +47,10 @@ PostIngestQueue::PostIngestQueue(
     std::vector<std::shared_ptr<extraction::IContentExtractor>> extractors,
     std::shared_ptr<metadata::KnowledgeGraphStore> kg,
     std::shared_ptr<GraphComponent> graphComponent, WorkCoordinator* coordinator,
-    std::size_t capacity)
+    WorkCoordinator* entityCoordinator, std::size_t capacity)
     : store_(std::move(store)), meta_(std::move(meta)), extractors_(std::move(extractors)),
       kg_(std::move(kg)), graphComponent_(std::move(graphComponent)), coordinator_(coordinator),
+      entityCoordinator_(entityCoordinator),
       capacity_(capacity ? capacity : 1000) {
     spdlog::info("[PostIngestQueue] Created (parallel processing via WorkCoordinator)");
 }
@@ -68,7 +69,9 @@ void PostIngestQueue::start() {
         spdlog::info("[PostIngestQueue] Spawning symbolPoller coroutine...");
         boost::asio::co_spawn(coordinator_->getExecutor(), symbolPoller(), boost::asio::detached);
         spdlog::info("[PostIngestQueue] Spawning entityPoller coroutine...");
-        boost::asio::co_spawn(coordinator_->getExecutor(), entityPoller(), boost::asio::detached);
+        auto entityExec = entityCoordinator_ ? entityCoordinator_->getExecutor()
+                                             : coordinator_->getExecutor();
+        boost::asio::co_spawn(entityExec, entityPoller(), boost::asio::detached);
 
         constexpr int maxWaitMs = 100;
         for (int i = 0; i < maxWaitMs && (!started_.load() || !kgStarted_.load() ||
@@ -90,10 +93,20 @@ void PostIngestQueue::stop() {
     spdlog::info("[PostIngestQueue] Stop requested");
 }
 
+std::size_t PostIngestQueue::resolveChannelCapacity() const {
+    std::size_t cap = capacity_;
+    if (cap == 0) {
+        cap = static_cast<std::size_t>(TuneAdvisor::postIngestQueueMax());
+    }
+    if (cap == 0) {
+        cap = 1;
+    }
+    return cap;
+}
+
 boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
     spdlog::info("[PostIngestQueue] channelPoller coroutine STARTED");
-    const std::size_t channelCapacity =
-        std::max<std::size_t>(65536, TuneAdvisor::postIngestQueueMax());
+    const std::size_t channelCapacity = resolveChannelCapacity();
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
             "post_ingest", channelCapacity);
@@ -104,20 +117,33 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
 
     started_.store(true);
 
+    auto idleDelay = std::chrono::milliseconds(1);
+    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10);
+
     while (!stop_.load()) {
+        bool didWork = false;
         InternalEventBus::PostIngestTask task;
         // Dynamic concurrency limit from TuneAdvisor
         const std::size_t maxConcurrent = maxExtractionConcurrent();
-        if (inFlight_.load() < maxConcurrent && channel->try_pop(task)) {
+        while (inFlight_.load() < maxConcurrent && channel->try_pop(task)) {
+            didWork = true;
             inFlight_.fetch_add(1);
             boost::asio::post(coordinator_->getExecutor(),
                               [this, hash = std::move(task.hash), mime = std::move(task.mime)]() {
                                   processTask(hash, mime);
                                   inFlight_.fetch_sub(1);
                               });
-        } else {
-            timer.expires_after(std::chrono::milliseconds(50));
-            co_await timer.async_wait(boost::asio::use_awaitable);
+        }
+
+        if (didWork) {
+            idleDelay = std::chrono::milliseconds(1);
+            continue;
+        }
+
+        timer.expires_after(idleDelay);
+        co_await timer.async_wait(boost::asio::use_awaitable);
+        if (idleDelay < kMaxIdleDelay) {
+            idleDelay *= 2;
         }
     }
 
@@ -125,8 +151,7 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
 }
 
 void PostIngestQueue::enqueue(Task t) {
-    const std::size_t channelCapacity =
-        std::max<std::size_t>(65536, TuneAdvisor::postIngestQueueMax());
+    const std::size_t channelCapacity = resolveChannelCapacity();
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
             "post_ingest", channelCapacity);
@@ -152,8 +177,7 @@ void PostIngestQueue::enqueue(Task t) {
 }
 
 bool PostIngestQueue::tryEnqueue(const Task& t) {
-    const std::size_t channelCapacity =
-        std::max<std::size_t>(65536, TuneAdvisor::postIngestQueueMax());
+    const std::size_t channelCapacity = resolveChannelCapacity();
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
             "post_ingest", channelCapacity);
@@ -166,8 +190,7 @@ bool PostIngestQueue::tryEnqueue(const Task& t) {
 }
 
 bool PostIngestQueue::tryEnqueue(Task&& t) {
-    const std::size_t channelCapacity =
-        std::max<std::size_t>(65536, TuneAdvisor::postIngestQueueMax());
+    const std::size_t channelCapacity = resolveChannelCapacity();
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
             "post_ingest", channelCapacity);
@@ -180,8 +203,7 @@ bool PostIngestQueue::tryEnqueue(Task&& t) {
 }
 
 std::size_t PostIngestQueue::size() const {
-    const std::size_t channelCapacity =
-        std::max<std::size_t>(65536, TuneAdvisor::postIngestQueueMax());
+    const std::size_t channelCapacity = resolveChannelCapacity();
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
             "post_ingest", channelCapacity);
@@ -394,11 +416,16 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
 
     kgStarted_.store(true);
 
+    auto idleDelay = std::chrono::milliseconds(1);
+    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10);
+
     while (!stop_.load()) {
+        bool didWork = false;
         InternalEventBus::KgJob job;
         // Dynamic concurrency limit from TuneAdvisor
         const std::size_t maxConcurrent = maxKgConcurrent();
-        if (kgInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
+        while (kgInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
+            didWork = true;
             kgInFlight_.fetch_add(1);
             boost::asio::post(coordinator_->getExecutor(),
                               [this, hash = std::move(job.hash), docId = job.documentId,
@@ -406,9 +433,17 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
                                   processKnowledgeGraphStage(hash, docId, filePath, tags);
                                   kgInFlight_.fetch_sub(1);
                               });
-        } else {
-            timer.expires_after(std::chrono::milliseconds(25));
-            co_await timer.async_wait(boost::asio::use_awaitable);
+        }
+
+        if (didWork) {
+            idleDelay = std::chrono::milliseconds(1);
+            continue;
+        }
+
+        timer.expires_after(idleDelay);
+        co_await timer.async_wait(boost::asio::use_awaitable);
+        if (idleDelay < kMaxIdleDelay) {
+            idleDelay *= 2;
         }
     }
 
@@ -426,11 +461,16 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
     symbolStarted_.store(true);
     spdlog::info("[PostIngestQueue] Symbol extraction poller started");
 
+    auto idleDelay = std::chrono::milliseconds(1);
+    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10);
+
     while (!stop_.load()) {
+        bool didWork = false;
         InternalEventBus::SymbolExtractionJob job;
         // Dynamic concurrency limit from TuneAdvisor
         const std::size_t maxConcurrent = maxSymbolConcurrent();
-        if (symbolInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
+        while (symbolInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
+            didWork = true;
             symbolInFlight_.fetch_add(1);
             boost::asio::post(coordinator_->getExecutor(),
                               [this, hash = std::move(job.hash), docId = job.documentId,
@@ -439,9 +479,17 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
                                   processSymbolExtractionStage(hash, docId, filePath, language);
                                   symbolInFlight_.fetch_sub(1);
                               });
-        } else {
-            timer.expires_after(std::chrono::milliseconds(25));
-            co_await timer.async_wait(boost::asio::use_awaitable);
+        }
+
+        if (didWork) {
+            idleDelay = std::chrono::milliseconds(1);
+            continue;
+        }
+
+        timer.expires_after(idleDelay);
+        co_await timer.async_wait(boost::asio::use_awaitable);
+        if (idleDelay < kMaxIdleDelay) {
+            idleDelay *= 2;
         }
     }
 
@@ -561,22 +609,37 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
     entityStarted_.store(true);
     spdlog::info("[PostIngestQueue] Entity extraction poller started");
 
+    auto idleDelay = std::chrono::milliseconds(1);
+    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10);
+
     while (!stop_.load()) {
+        bool didWork = false;
         InternalEventBus::EntityExtractionJob job;
         // Dynamic concurrency limit from TuneAdvisor
         const std::size_t maxConcurrent = maxEntityConcurrent();
-        if (entityInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
+        while (entityInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
+            didWork = true;
             entityInFlight_.fetch_add(1);
-            boost::asio::post(coordinator_->getExecutor(),
+            auto entityExec = entityCoordinator_ ? entityCoordinator_->getExecutor()
+                                                 : coordinator_->getExecutor();
+            boost::asio::post(entityExec,
                               [this, hash = std::move(job.hash), docId = job.documentId,
                                filePath = std::move(job.filePath),
                                extension = std::move(job.extension)]() {
                                   processEntityExtractionStage(hash, docId, filePath, extension);
                                   entityInFlight_.fetch_sub(1);
                               });
-        } else {
-            timer.expires_after(std::chrono::milliseconds(50));
-            co_await timer.async_wait(boost::asio::use_awaitable);
+        }
+
+        if (didWork) {
+            idleDelay = std::chrono::milliseconds(1);
+            continue;
+        }
+
+        timer.expires_after(idleDelay);
+        co_await timer.async_wait(boost::asio::use_awaitable);
+        if (idleDelay < kMaxIdleDelay) {
+            idleDelay *= 2;
         }
     }
 

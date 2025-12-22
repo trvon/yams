@@ -376,6 +376,7 @@ private:
     handleListCollections(const MCPListCollectionsRequest& req);
     boost::asio::awaitable<Result<MCPListSnapshotsResponse>>
     handleListSnapshots(const MCPListSnapshotsRequest& req);
+    boost::asio::awaitable<Result<MCPGraphResponse>> handleGraphQuery(const MCPGraphRequest& req);
 
     // Session start/stop (simplified surface)
     boost::asio::awaitable<Result<MCPSessionStartResponse>>

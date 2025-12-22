@@ -1086,4 +1086,90 @@ json MCPListSnapshotsResponse::toJson() const {
     return json{{"snapshots", snapshots}};
 }
 
+// MCPGraphRequest implementation
+MCPGraphRequest MCPGraphRequest::fromJson(const json& j) {
+    MCPGraphRequest req;
+    req.hash = j.value("hash", std::string{});
+    req.name = j.value("name", std::string{});
+    req.nodeKey = j.value("node_key", std::string{});
+    req.nodeId = static_cast<int64_t>(parse_int_tolerant(j, "node_id", -1));
+
+    req.listTypes = j.value("list_types", false);
+    req.listType = j.value("list_type", std::string{});
+    req.isolated = j.value("isolated", false);
+
+    detail::readStringArray(j, "relation_filters", req.relationFilters);
+    req.relation = j.value("relation", std::string{});
+
+    req.depth = parse_int_tolerant(j, "depth", 1);
+    req.limit = parse_size_tolerant(j, "limit", 100);
+    req.offset = parse_size_tolerant(j, "offset", 0);
+    req.reverse = j.value("reverse", false);
+
+    req.includeNodeProperties = j.value("include_node_properties", false);
+    req.includeEdgeProperties = j.value("include_edge_properties", false);
+    req.hydrateFully = j.value("hydrate_fully", true);
+
+    req.scopeSnapshot = j.value("scope_snapshot", std::string{});
+
+    return req;
+}
+
+json MCPGraphRequest::toJson() const {
+    return json{{"hash", hash},
+                {"name", name},
+                {"node_key", nodeKey},
+                {"node_id", nodeId},
+                {"list_types", listTypes},
+                {"list_type", listType},
+                {"isolated", isolated},
+                {"relation_filters", relationFilters},
+                {"relation", relation},
+                {"depth", depth},
+                {"limit", limit},
+                {"offset", offset},
+                {"reverse", reverse},
+                {"include_node_properties", includeNodeProperties},
+                {"include_edge_properties", includeEdgeProperties},
+                {"hydrate_fully", hydrateFully},
+                {"scope_snapshot", scopeSnapshot}};
+}
+
+// MCPGraphResponse implementation
+MCPGraphResponse MCPGraphResponse::fromJson(const json& j) {
+    MCPGraphResponse resp;
+    if (j.contains("origin"))
+        resp.origin = j["origin"];
+    if (j.contains("connected_nodes"))
+        resp.connectedNodes = j["connected_nodes"];
+    if (j.contains("node_type_counts"))
+        resp.nodeTypeCounts = j["node_type_counts"];
+
+    resp.totalNodesFound = j.value("total_nodes_found", uint64_t{0});
+    resp.totalEdgesTraversed = j.value("total_edges_traversed", uint64_t{0});
+    resp.truncated = j.value("truncated", false);
+    resp.maxDepthReached = j.value("max_depth_reached", 0);
+    resp.queryTimeMs = j.value("query_time_ms", int64_t{0});
+    resp.kgAvailable = j.value("kg_available", true);
+    resp.warning = j.value("warning", std::string{});
+    return resp;
+}
+
+json MCPGraphResponse::toJson() const {
+    json j;
+    j["origin"] = origin;
+    j["connected_nodes"] = connectedNodes;
+    if (!nodeTypeCounts.is_null() && !nodeTypeCounts.empty())
+        j["node_type_counts"] = nodeTypeCounts;
+    j["total_nodes_found"] = totalNodesFound;
+    j["total_edges_traversed"] = totalEdgesTraversed;
+    j["truncated"] = truncated;
+    j["max_depth_reached"] = maxDepthReached;
+    j["query_time_ms"] = queryTimeMs;
+    j["kg_available"] = kgAvailable;
+    if (!warning.empty())
+        j["warning"] = warning;
+    return j;
+}
+
 } // namespace yams::mcp

@@ -249,21 +249,38 @@ private:
 
         // Human-readable output
         if (deduplicated.empty()) {
-            std::cout << "(no results)" << std::endl;
+            std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
             return Result<void>();
         }
 
         if (!groupVersions_) {
-            // Simple flat output
+            // Flat output
             for (const auto& item : deduplicated) {
+                // File path in magenta
+                std::string displayPath;
                 if (!item.path.empty())
-                    std::cout << item.path;
+                    displayPath = item.path;
                 else if (!item.title.empty())
-                    std::cout << item.title;
+                    displayPath = item.title;
                 else
-                    std::cout << item.id;
+                    displayPath = item.id;
+
+                std::cout << ui::colorize(displayPath, ui::Ansi::MAGENTA);
+
+                // Score in green/yellow/dim based on relevance
+                const char* scoreColor = ui::Ansi::DIM;
+                if (item.score >= 0.8)
+                    scoreColor = ui::Ansi::GREEN;
+                else if (item.score >= 0.5)
+                    scoreColor = ui::Ansi::YELLOW;
+                std::cout << " " << ui::colorize("[" + std::to_string(item.score).substr(0, 4) + "]",
+                                                  scoreColor);
+                std::cout << "\n";
+
+                // Snippet with line-number-style prefix
                 if (!item.snippet.empty()) {
-                    std::cout << "\n    " << truncateSnippet(item.snippet, 200);
+                    std::string snippet = truncateSnippet(item.snippet, 200);
+                    std::cout << ui::colorize("  1:", ui::Ansi::DIM) << " " << snippet << "\n";
                 }
                 std::cout << "\n";
             }
@@ -328,7 +345,7 @@ private:
                 output["groups"] = groupsArr;
                 std::cout << output.dump(2) << std::endl;
             } else {
-                // Human-readable grouped output
+                // Grouped output
                 for (auto& [path, vec] : groups) {
                     std::stable_sort(vec.begin(), vec.end(), [&](const auto& a, const auto& b) {
                         if (versionsSort_ == "path")
@@ -338,9 +355,16 @@ private:
                         return a.score > b.score;
                     });
                     const auto& best = vec.front();
-                    std::cout << path;
-                    if (vec.size() > 1)
-                        std::cout << "  (" << vec.size() << " versions)";
+
+                    // File path in magenta
+                    std::cout << ui::colorize(path, ui::Ansi::MAGENTA);
+
+                    // Version count in dim
+                    if (vec.size() > 1) {
+                        std::cout << " "
+                                  << ui::colorize("(" + std::to_string(vec.size()) + " versions)",
+                                                  ui::Ansi::DIM);
+                    }
                     std::cout << "\n";
 
                     std::size_t cap = (versionsMode_ == "all") ? versionsTopk_ : 1;
@@ -351,39 +375,54 @@ private:
                             hash8 = v.hash.substr(0, 8);
 
                         if (vec.size() > 1 || versionsMode_ == "all") {
-                            std::cout
-                                << "  - "
-                                << (hash8.empty() ? std::string("[--------]") : ("[" + hash8 + "]"))
-                                << "  " << v.score;
+                            // Hash in cyan, score colored by relevance
+                            std::string hashDisplay =
+                                hash8.empty() ? "[--------]" : ("[" + hash8 + "]");
+                            const char* scoreColor = ui::Ansi::DIM;
+                            if (v.score >= 0.8)
+                                scoreColor = ui::Ansi::GREEN;
+                            else if (v.score >= 0.5)
+                                scoreColor = ui::Ansi::YELLOW;
+
+                            std::cout << "  " << ui::colorize(hashDisplay, ui::Ansi::CYAN) << " "
+                                      << ui::colorize(std::to_string(v.score).substr(0, 4),
+                                                      scoreColor);
                             if (!v.title.empty() && v.title != path)
                                 std::cout << "  " << v.title;
                             std::cout << "\n";
                         }
 
+                        // Snippet with line-number-style prefix
                         if (!v.snippet.empty()) {
                             std::string snippet = truncateSnippet(v.snippet, 200);
-                            std::cout << (vec.size() > 1 ? "      " : "    ") << snippet << "\n";
+                            std::string linePrefix =
+                                vec.size() > 1 ? ui::colorize("     1:", ui::Ansi::DIM)
+                                               : ui::colorize("  1:", ui::Ansi::DIM);
+                            std::cout << linePrefix << " " << snippet << "\n";
                         }
 
                         if (showTools_ && !hash8.empty() && i == 0) {
-                            std::string indent = vec.size() > 1 ? "      " : "    ";
-                            std::cout << indent << "tools: yams get --hash " << v.hash
-                                      << " | yams cat --hash " << v.hash;
-                            if (resolvedLocalFilePath_.has_value()) {
-                                std::cout << " | yams diff --hash " << v.hash << " "
-                                          << *resolvedLocalFilePath_;
-                            }
+                            std::string indent = vec.size() > 1 ? "       " : "     ";
+                            std::cout << ui::colorize(
+                                indent + "yams cat --hash " + v.hash, ui::Ansi::DIM);
                             std::cout << "\n";
                         }
                     }
                     if (versionsMode_ == "all" && vec.size() > cap) {
-                        std::cout << "    (+" << (vec.size() - cap) << " more)\n";
+                        std::cout << ui::colorize(
+                            "    (+" + std::to_string(vec.size() - cap) + " more)", ui::Ansi::DIM)
+                                  << "\n";
                     }
+                    std::cout << "\n";
                 }
             }
         }
 
-        std::cout << "Found " << deduplicated.size() << " results in " << ctx.elapsedMs << "ms"
+        // Summary
+        std::cout << ui::colorize(std::to_string(deduplicated.size()) + " result" +
+                                      (deduplicated.size() != 1 ? "s" : "") + " (" +
+                                      std::to_string(ctx.elapsedMs) + "ms)",
+                                  ui::Ansi::DIM)
                   << std::endl;
         return Result<void>();
     }
@@ -903,7 +942,7 @@ public:
             dreq.fuzzy = fuzzySearch_; // honor explicit CLI flag; fallback logic will retry
             dreq.literalText = literalText_;
             dreq.similarity = (minSimilarity_ > 0.0f) ? static_cast<double>(minSimilarity_) : 0.7;
-            dreq.pathsOnly = pathsOnly_;
+            dreq.pathsOnly = false;  // Always fetch full results; pathsOnly is a CLI display option
             dreq.searchType = searchType_;
             dreq.jsonOutput = jsonOutput_;
             dreq.showHash = showHash_;
@@ -1310,7 +1349,7 @@ public:
         dreq.fuzzy = fuzzySearch_;
         dreq.literalText = literalText_;
         dreq.similarity = (minSimilarity_ > 0.0f) ? static_cast<double>(minSimilarity_) : 0.7;
-        dreq.pathsOnly = pathsOnly_;
+        dreq.pathsOnly = false;  // Always fetch full results; pathsOnly is a CLI display option
         dreq.searchType = searchType_;
         dreq.jsonOutput = jsonOutput_;
         dreq.showHash = showHash_;

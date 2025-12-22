@@ -736,11 +736,6 @@ void DaemonClient::StreamingSearchHandler::onHeaderReceived(const Response& head
 
             results_.push_back(result);
             count_++;
-
-            // Print result immediately if progressive output is enabled
-            if (pathsOnly_) {
-                std::cout << result.path << '\n';
-            }
         }
     } else if (auto* errRes = std::get_if<ErrorResponse>(&headerResponse)) {
         // Store error
@@ -799,19 +794,6 @@ bool DaemonClient::StreamingSearchHandler::onChunkReceived(const Response& chunk
 
             results_.push_back(result);
             count_++;
-
-            // Print result immediately if progressive output is enabled
-            if (pathsOnly_) {
-                const std::string* p = &result.path;
-                auto it = result.metadata.find("path");
-                if ((p->empty()) && it != result.metadata.end()) {
-                    std::cout << it->second << '\n';
-                } else if (!p->empty()) {
-                    std::cout << *p << '\n';
-                } else if (!result.id.empty()) {
-                    std::cout << result.id << '\n';
-                }
-            }
         }
     } else if (auto* errRes = std::get_if<ErrorResponse>(&chunkResponse)) {
         // Store error
@@ -861,13 +843,11 @@ void DaemonClient::StreamingSearchHandler::onError(const Error& error) {
 
 void DaemonClient::StreamingSearchHandler::onComplete() {
     // Final processing when all chunks have been received
-    if (!error_ && !pathsOnly_) {
+    // Note: All output rendering is handled by the CLI layer (search_command.cpp)
+    // to avoid duplicate output and ensure consistent formatting
+    if (!error_) {
         spdlog::debug("Search complete: found {} results (of {} total) in {}ms", count_,
                       totalCount_, elapsed_.count());
-    }
-    if (!error_ && pathsOnly_ && count_ == 0) {
-        // Explicitly indicate no results for paths-only output
-        std::cout << "(no results)\n";
     }
 }
 

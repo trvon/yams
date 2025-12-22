@@ -46,7 +46,7 @@ public:
                     std::vector<std::shared_ptr<extraction::IContentExtractor>> extractors,
                     std::shared_ptr<metadata::KnowledgeGraphStore> kg,
                     std::shared_ptr<GraphComponent> graphComponent, WorkCoordinator* coordinator,
-                    std::size_t capacity = 1000);
+                    WorkCoordinator* entityCoordinator, std::size_t capacity = 1000);
     ~PostIngestQueue();
 
     void start();
@@ -119,6 +119,7 @@ private:
                                  const std::string& filePath, const std::string& extension);
     void processEntityExtractionStage(const std::string& hash, int64_t docId,
                                       const std::string& filePath, const std::string& extension);
+    std::size_t resolveChannelCapacity() const;
 
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::MetadataRepository> meta_;
@@ -126,6 +127,7 @@ private:
     std::shared_ptr<metadata::KnowledgeGraphStore> kg_;
     std::shared_ptr<GraphComponent> graphComponent_;
     WorkCoordinator* coordinator_;
+    WorkCoordinator* entityCoordinator_;
 
     std::atomic<bool> stop_{false};
     std::atomic<bool> started_{false};

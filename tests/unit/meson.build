@@ -207,33 +207,10 @@ unit_mcp = files(
 )
 
 unit_metadata = files(
-  # Migrated to Catch2 - see tests/meson.build (catch2_metadata_unit_exe)
-  # 'metadata/concepts_compile_test.cpp',
-  # 'metadata/database_statement_time_test.cpp',
-  # 'metadata/query_helpers_test.cpp',
-  # 'metadata/sql_build_select_test.cpp',
-  # 'metadata/metadata_value_variant_test.cpp',
-
-  # Migrated to Catch2 - see tests/meson.build (catch2_connection_pool_exe)
-  # 'metadata/connection_pool_maintenance_smoke_test.cpp',
-  # 'metadata/connection_pool_waiting_guard_test.cpp',
-
-  # 'metadata/database_test.cpp',  # Migrated to Catch2 (database_catch2_test.cpp)
-  'metadata/fts_queryspec_integration_test.cpp',
-  'metadata/fts5_performance_stress_test.cpp',
-  # 'metadata/fts5_test.cpp',  # Migrated to Catch2 (fts5_catch2_test.cpp)
-  'metadata/fuzzy_index_prioritization_test.cpp',
-  'metadata/kg_store_alias_and_entities_test.cpp',
-  # 'metadata/kg_store_test.cpp',  # Migrated to Catch2 (kg_store_catch2_test.cpp)
-  'metadata/metadata_repository_cache_test.cpp',
-  'metadata/metadata_repository_test.cpp',
-  'metadata/metadata_schema_test.cpp',
-  'metadata/path_tree_delete_test.cpp',
-  'metadata/query_helpers_integration_test.cpp',
-  'metadata/session_isolation_test.cpp',
-  'metadata/tags_queryspec_integration_test.cpp',
-  'metadata/tree_builder_test.cpp',
-  'metadata/tree_differ_test.cpp',
+  # All metadata tests migrated to Catch2 - see tests/meson.build
+  # Remaining GTest files:
+  'metadata/fts5_performance_stress_test.cpp',  # Stress test (opt-in via YAMS_RUN_STRESS_TESTS=1)
+  'metadata/metadata_schema_test.cpp',  # Large file - TODO: migrate to Catch2
 )
 
 unit_resolve = files(

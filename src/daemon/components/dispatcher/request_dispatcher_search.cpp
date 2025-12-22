@@ -75,6 +75,9 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
         response.totalCount = serviceResp.total;
         response.elapsed = std::chrono::milliseconds(serviceResp.executionTimeMs);
 
+        // Note: pathsOnly is now a CLI-only display option, not sent to daemon.
+        // The search service always returns full results.
+
         // Enforce limit on results (defense-in-depth)
         const size_t limit = req.limit > 0 ? req.limit : serviceResp.results.size();
         size_t count = 0;

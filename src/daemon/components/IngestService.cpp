@@ -98,10 +98,23 @@ static void processTask(ServiceManager* sm, const InternalEventBus::StoreDocumen
             const auto& serviceResp = result.value();
 
             if (sm && sm->getPostIngestQueue()) {
+                constexpr std::size_t kBatchSize = 50;
+                std::vector<std::string> batch;
+                batch.reserve(kBatchSize);
                 for (const auto& r : serviceResp.results) {
-                    if (r.success && !r.hash.empty()) {
-                        sm->enqueuePostIngest(r.hash, std::string());
+                    if (!r.success || r.hash.empty()) {
+                        continue;
                     }
+                    batch.push_back(r.hash);
+                    if (batch.size() >= kBatchSize) {
+                        for (const auto& h : batch) {
+                            sm->enqueuePostIngest(h, std::string());
+                        }
+                        batch.clear();
+                    }
+                }
+                for (const auto& h : batch) {
+                    sm->enqueuePostIngest(h, std::string());
                 }
             }
         }

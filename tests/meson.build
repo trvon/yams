@@ -1330,6 +1330,138 @@ if catch2_dep.found()
     install: false,
   )
 
+  # Tree Builder Tests (Catch2) - tree node operations and directory tree building
+  # Migrated from GTest as part of yams-3s4 / yams-aqc
+  # --------------------------------------------------------------------------
+  catch2_tree_builder_exe = executable('catch2_tree_builder',
+    files('unit/metadata/tree_builder_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # Tree Differ Tests (Catch2) - tree diffing operations
+  # Migrated from GTest as part of yams-3s4 / yams-aqc
+  # --------------------------------------------------------------------------
+  catch2_tree_differ_exe = executable('catch2_tree_differ',
+    files('unit/metadata/tree_differ_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # Path Tree Delete Tests (Catch2) - path tree removal operations
+  # Migrated from GTest as part of yams-3s4 / yams-aqc
+  # --------------------------------------------------------------------------
+  catch2_path_tree_delete_exe = executable('catch2_path_tree_delete',
+    files('unit/metadata/path_tree_delete_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # Session Isolation Tests (Catch2) - session-isolated memory operations
+  # Migrated from GTest as part of yams-3s4 / yams-aqc
+  # --------------------------------------------------------------------------
+  catch2_session_isolation_exe = executable('catch2_session_isolation',
+    files('unit/metadata/session_isolation_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # Metadata Repository Tests (Catch2) - repository operations
+  # Migrated from GTest as part of yams-3s4 / yams-aqc
+  # --------------------------------------------------------------------------
+  catch2_metadata_repository_exe = executable('catch2_metadata_repository',
+    files('unit/metadata/metadata_repository_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # Metadata Repository Cache Tests (Catch2) - cache operations
+  # Migrated from GTest as part of yams-3s4 / yams-aqc
+  # --------------------------------------------------------------------------
+  catch2_metadata_repository_cache_exe = executable('catch2_metadata_repository_cache',
+    files('unit/metadata/metadata_repository_cache_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # Fuzzy Index Prioritization Tests (Catch2) - fuzzy index scoring
+  # Migrated from GTest as part of yams-3s4 / yams-aqc
+  # --------------------------------------------------------------------------
+  catch2_fuzzy_index_prioritization_exe = executable('catch2_fuzzy_index_prioritization',
+    files('unit/metadata/fuzzy_index_prioritization_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # KG Store Alias and Entities Tests (Catch2) - KG alias and entity operations
+  # Migrated from GTest as part of yams-3s4 / yams-aqc
+  # --------------------------------------------------------------------------
+  catch2_kg_store_alias_entities_exe = executable('catch2_kg_store_alias_entities',
+    files('unit/metadata/kg_store_alias_and_entities_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # FTS Query Spec Integration Tests (Catch2) - FTS search integration
+  # Migrated from GTest as part of yams-3s4 / yams-aqc
+  # --------------------------------------------------------------------------
+  catch2_fts_queryspec_integration_exe = executable('catch2_fts_queryspec_integration',
+    files('unit/metadata/fts_queryspec_integration_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # Tags Query Spec Integration Tests (Catch2) - tags query integration
+  # Migrated from GTest as part of yams-3s4 / yams-aqc
+  # --------------------------------------------------------------------------
+  catch2_tags_queryspec_integration_exe = executable('catch2_tags_queryspec_integration',
+    files('unit/metadata/tags_queryspec_integration_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # Query Helpers Integration Tests (Catch2) - query helper integration
+  # Migrated from GTest as part of yams-3s4 / yams-aqc
+  # --------------------------------------------------------------------------
+  catch2_query_helpers_integration_exe = executable('catch2_query_helpers_integration',
+    files('unit/metadata/query_helpers_integration_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # Core tests (minimal dependencies - no daemon)
   core_test_deps = [
     dependency('spdlog'),
@@ -1647,6 +1779,72 @@ if catch2_dep.found()
 
   test('fts5', catch2_fts5_exe,
     suite: ['catch2', 'unit', 'metadata', 'fts5'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('tree_builder', catch2_tree_builder_exe,
+    suite: ['catch2', 'unit', 'metadata', 'tree_builder'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
+  test('tree_differ', catch2_tree_differ_exe,
+    suite: ['catch2', 'unit', 'metadata', 'tree_differ'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
+  test('path_tree_delete', catch2_path_tree_delete_exe,
+    suite: ['catch2', 'unit', 'metadata', 'path_tree'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
+  test('session_isolation', catch2_session_isolation_exe,
+    suite: ['catch2', 'unit', 'metadata', 'session'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
+  test('metadata_repository', catch2_metadata_repository_exe,
+    suite: ['catch2', 'unit', 'metadata', 'repository'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 180
+  )
+
+  test('metadata_repository_cache', catch2_metadata_repository_cache_exe,
+    suite: ['catch2', 'unit', 'metadata', 'cache'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('fuzzy_index_prioritization', catch2_fuzzy_index_prioritization_exe,
+    suite: ['catch2', 'unit', 'metadata', 'fuzzy'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('kg_store_alias_entities', catch2_kg_store_alias_entities_exe,
+    suite: ['catch2', 'unit', 'metadata', 'kg'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
+  test('fts_queryspec_integration', catch2_fts_queryspec_integration_exe,
+    suite: ['catch2', 'unit', 'metadata', 'fts'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('tags_queryspec_integration', catch2_tags_queryspec_integration_exe,
+    suite: ['catch2', 'unit', 'metadata', 'tags'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('query_helpers_integration', catch2_query_helpers_integration_exe,
+    suite: ['catch2', 'unit', 'metadata', 'query_helpers'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )

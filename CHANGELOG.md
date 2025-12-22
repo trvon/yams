@@ -26,13 +26,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Status retry delays reduced from 750ms to 175ms
   - Config parsing cached per-process
   - Async semaphore for connection slots
+- Post-ingest throughput improvements:
+  - Dedicated worker pool for binary entity extraction to avoid starving metadata/KG work
+  - Post-ingest pollers drain queues with adaptive backoff instead of fixed 25-50ms sleeps
+  - Queue capacity honors configured post-ingest limits
+  - Post-ingest enqueue avoids long blocking backoff when queue is full
+  - Directory ingest batches post-ingest enqueues to reduce per-file overhead
 
 ### Fixed
 - CLI now rejects multiple top-level subcommands (e.g., `yams search graph`) and suggests
   using `--query` when a search term matches a command.
+- Fixed `--paths-only` search returning no results: `pathsOnly` is now a CLI-only
+  display option rather than being sent to the daemon, which was causing the search
+  service to return paths in a different field that the daemon didn't read.
 - Fixed ONNX model loading deadlock (EDEADLK code=36) on Windows:
   - ServiceManager now syncs `embeddingModelName_` from PluginManager during model
     provider adoption, enabling proper startup preload paths.
   - ONNX plugin uses single-flight pattern to prevent concurrent model loading.
   - Changed OnnxModelPool to use `std::recursive_mutex` to work around Windows-specific
     issue with `std::mutex`/`std::condition_variable` interaction.
+
+### Added
+- MCP `graph` tool for knowledge graph queries (parity with CLI `yams graph`).

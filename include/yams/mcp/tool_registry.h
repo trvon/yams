@@ -759,6 +759,59 @@ struct MCPListSnapshotsResponse {
     json toJson() const;
 };
 
+struct MCPGraphRequest {
+    using RequestType = MCPGraphRequest;
+
+    // Target selection (match CLI graph)
+    std::string hash;
+    std::string name;
+    std::string nodeKey;
+    int64_t nodeId{-1};
+
+    // Modes
+    bool listTypes{false};
+    std::string listType;
+    bool isolated{false};
+
+    // Traversal options
+    std::vector<std::string> relationFilters;
+    std::string relation;
+    int depth{1};
+    size_t limit{100};
+    size_t offset{0};
+    bool reverse{false};
+
+    // Output control
+    bool includeNodeProperties{false};
+    bool includeEdgeProperties{false};
+    bool hydrateFully{true};
+
+    // Snapshot scoping
+    std::string scopeSnapshot;
+
+    static MCPGraphRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPGraphResponse {
+    using ResponseType = MCPGraphResponse;
+
+    json origin;
+    json connectedNodes;
+    json nodeTypeCounts;
+
+    uint64_t totalNodesFound{0};
+    uint64_t totalEdgesTraversed{0};
+    bool truncated{false};
+    int maxDepthReached{0};
+    int64_t queryTimeMs{0};
+    bool kgAvailable{true};
+    std::string warning;
+
+    static MCPGraphResponse fromJson(const json& j);
+    json toJson() const;
+};
+
 // Session start/stop (simplified)
 struct MCPSessionStartRequest {
     using RequestType = MCPSessionStartRequest;

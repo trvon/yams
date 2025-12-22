@@ -2,7 +2,6 @@
 #include "model_provider.h"
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
-#include <spdlog/sinks/basic_file_sink.h>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -276,25 +275,8 @@ struct ProviderSingleton {
         vtable.abi_version = 2; // v1.2
         vtable.self = &ctx;
 
-        // Initialize dedicated file logger for the plugin to ensure visibility
-        try {
-            namespace fs = std::filesystem;
-            fs::path logPath;
-            if (const char* local = std::getenv("LOCALAPPDATA")) {
-                logPath = fs::path(local) / "yams" / "onnx_plugin.log";
-            } else {
-                logPath = "onnx_plugin.log"; 
-            }
-            auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(logPath.string(), true);
-            auto logger = std::make_shared<spdlog::logger>("onnx_plugin", file_sink);
-            logger->set_level(spdlog::level::debug);
-            logger->flush_on(spdlog::level::info);
-            spdlog::set_default_logger(logger);
-            spdlog::info("================================================================");
-            spdlog::info("[ONNX Plugin] Logger initialized (v1.2) - writing to {}", logPath.string());
-        } catch (const std::exception& e) {
-            fprintf(stderr, "[ONNX Plugin] Failed to init logger: %s\n", e.what());
-        }
+        // Use daemon's default logger - no separate file needed
+        spdlog::debug("[ONNX Plugin] Initialized (v1.2) - using daemon logger");
 
         vtable.set_progress_callback = [](void* self, yams_model_load_progress_cb cb,
                                           void* user) -> yams_status_t {

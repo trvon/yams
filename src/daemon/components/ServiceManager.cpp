@@ -259,6 +259,20 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
         spdlog::info("[ServiceManager] WorkCoordinator created with {} worker threads",
                      workCoordinator_->getWorkerCount());
 
+        // Dedicated pool for entity extraction to avoid starving core indexing work.
+        std::size_t entityThreads = 1;
+        try {
+            entityThreads = static_cast<std::size_t>(TuneAdvisor::postEntityConcurrent());
+        } catch (...) {
+        }
+        if (entityThreads < 1) {
+            entityThreads = 1;
+        }
+        entityWorkCoordinator_ = std::make_unique<WorkCoordinator>();
+        entityWorkCoordinator_->start(entityThreads);
+        spdlog::info("[ServiceManager] Entity WorkCoordinator created with {} worker threads",
+                     entityWorkCoordinator_->getWorkerCount());
+
         // Initialize strands for logical separation
         spdlog::debug("[ServiceManager] Creating strands...");
         auto executor = workCoordinator_->getExecutor();
@@ -719,6 +733,10 @@ void ServiceManager::shutdown() {
         workCoordinator_->stop();
         spdlog::info("[ServiceManager] Phase 4: WorkCoordinator stop() called");
     }
+    if (entityWorkCoordinator_) {
+        entityWorkCoordinator_->stop();
+        spdlog::info("[ServiceManager] Phase 4: Entity WorkCoordinator stop() called");
+    }
 
     // Phase 4.5: Now wait for session watcher to complete (timer is cancelled by io_context stop)
     spdlog::info("[ServiceManager] Phase 4.5: Waiting for session watcher to complete");
@@ -750,6 +768,15 @@ void ServiceManager::shutdown() {
             spdlog::info("[ServiceManager] Phase 5: WorkCoordinator threads joined");
         } catch (const std::exception& e) {
             spdlog::warn("[ServiceManager] Phase 5: WorkCoordinator join failed: {}", e.what());
+        }
+    }
+    if (entityWorkCoordinator_) {
+        try {
+            entityWorkCoordinator_->join();
+            spdlog::info("[ServiceManager] Phase 5: Entity WorkCoordinator threads joined");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 5: Entity WorkCoordinator join failed: {}",
+                         e.what());
         }
     }
 
@@ -914,6 +941,8 @@ void ServiceManager::shutdown() {
 
     spdlog::info("[ServiceManager] Phase 8.5: Releasing WorkCoordinator");
     workCoordinator_.reset(); // WorkCoordinator destructor will join threads
+    spdlog::info("[ServiceManager] Phase 8.6: Releasing Entity WorkCoordinator");
+    entityWorkCoordinator_.reset();
 
 #ifdef __APPLE__
     malloc_zone_pressure_relief(nullptr, 0);
@@ -1402,16 +1431,13 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         } catch (...) {
         }
         auto qcap = static_cast<std::size_t>(TA::postIngestQueueMax());
+        if (config_.tuning.postIngestCapacity > 0) {
+            qcap = static_cast<std::size_t>(config_.tuning.postIngestCapacity);
+        }
         postIngest_ = std::make_unique<PostIngestQueue>(
             contentStore_, metadataRepo_, contentExtractors_, kgStore_, graphComponent_,
-            workCoordinator_.get(), qcap);
+            workCoordinator_.get(), entityWorkCoordinator_.get(), qcap);
         postIngest_->start();
-
-        try {
-            if (config_.tuning.postIngestCapacity > 0)
-                postIngest_->setCapacity(config_.tuning.postIngestCapacity);
-        } catch (...) {
-        }
 
         // Wire PostIngestQueue to PluginManager so entity providers can be synced
         if (pluginManager_) {
@@ -2399,6 +2425,50 @@ bool ServiceManager::applySearchConcurrencyTarget(std::size_t target) {
     } catch (...) {
         return false;
     }
+}
+
+void ServiceManager::enqueuePostIngest(const std::string& hash, const std::string& mime) {
+    bool routedViaBus = false;
+    if (yams::daemon::TuneAdvisor::useInternalBusForPostIngest()) {
+        yams::daemon::InternalEventBus::PostIngestTask t{hash, mime};
+        static std::shared_ptr<yams::daemon::SpscQueue<yams::daemon::InternalEventBus::PostIngestTask>>
+            q = yams::daemon::InternalEventBus::instance()
+                    .get_or_create_channel<yams::daemon::InternalEventBus::PostIngestTask>(
+                        "post_ingest", 4096);
+        if (q && q->try_push(std::move(t))) {
+            yams::daemon::InternalEventBus::instance().incPostQueued();
+            routedViaBus = true;
+        } else {
+            yams::daemon::InternalEventBus::instance().incPostDropped();
+        }
+    }
+    if (routedViaBus)
+        return;
+
+    if (!postIngest_) {
+        spdlog::warn("PostIngestQueue not available - document {} will not be indexed. "
+                     "Async initialization may not be complete.",
+                     hash);
+        return;
+    }
+
+    PostIngestQueue::Task t{hash, mime, /*session*/ "", {},
+                            PostIngestQueue::Task::Stage::Metadata};
+    if (postIngest_->tryEnqueue(std::move(t))) {
+        return;
+    }
+
+    constexpr int maxRetries = 3;
+    for (int i = 0; i < maxRetries; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        PostIngestQueue::Task retry{hash, mime, /*session*/ "", {},
+                                    PostIngestQueue::Task::Stage::Metadata};
+        if (postIngest_->tryEnqueue(std::move(retry))) {
+            return;
+        }
+    }
+
+    spdlog::warn("[ServiceManager] Post-ingest queue full; dropping hash {}", hash);
 }
 
 // (Namespace yams::daemon remains open for subsequent member definitions)

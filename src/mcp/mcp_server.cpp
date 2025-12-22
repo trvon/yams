@@ -4695,6 +4695,51 @@ void MCPServer::initializeToolRegistry() {
                {"session", {{"type", "string"}, {"description", "Session name override"}}}}}},
         "Retrieve documents from storage by hash with optional knowledge graph expansion");
 
+    toolRegistry_->registerTool<MCPGraphRequest, MCPGraphResponse>(
+        "graph", [this](const MCPGraphRequest& req) { return handleGraphQuery(req); },
+        json{{"type", "object"},
+             {"properties",
+              {{"hash", {{"type", "string"}, {"description", "Document hash"}}},
+               {"name", {{"type", "string"}, {"description", "Document name/path"}}},
+               {"node_key", {{"type", "string"}, {"description", "Direct KG node key"}}},
+               {"node_id", {{"type", "integer"}, {"description", "Direct KG node id"}}},
+               {"list_types",
+                {{"type", "boolean"}, {"description", "List available node types with counts"}}},
+               {"list_type",
+                {{"type", "string"},
+                 {"description", "List nodes of a specific type (list-by-type mode)"}}},
+               {"isolated",
+                {{"type", "boolean"},
+                 {"description", "List isolated nodes (no incoming edges for relation)"}}},
+               {"relation",
+                {{"type", "string"},
+                 {"description", "Relation filter (single, used for traversal or isolated)"}}},
+               {"relation_filters",
+                {{"type", "array"},
+                 {"items", {{"type", "string"}}},
+                 {"description", "Relation filters (array)"}}},
+               {"depth", {{"type", "integer"}, {"description", "Traversal depth (1-5)"}}},
+               {"limit",
+                {{"type", "integer"}, {"description", "Maximum results"}, {"default", 100}}},
+               {"offset",
+                {{"type", "integer"}, {"description", "Pagination offset"}, {"default", 0}}},
+               {"reverse",
+                {{"type", "boolean"},
+                 {"description", "Traverse incoming edges instead of outgoing"}}},
+               {"include_node_properties",
+                {{"type", "boolean"},
+                 {"description", "Include node properties JSON in results"}}},
+               {"include_edge_properties",
+                {{"type", "boolean"},
+                 {"description", "Include edge properties JSON in results"}}},
+               {"hydrate_fully",
+                {{"type", "boolean"},
+                 {"description", "Hydrate metadata for nodes when available"}}},
+               {"scope_snapshot",
+                {{"type", "string"},
+                 {"description", "Restrict graph traversal to a snapshot id"}}}}}},
+        "Inspect knowledge graph relationships and entities (matches CLI graph)");
+
     toolRegistry_->registerTool<MCPListDocumentsRequest, MCPListDocumentsResponse>(
         "list", [this](const MCPListDocumentsRequest& req) { return handleListDocuments(req); },
         json{{"type", "object"},
@@ -5488,6 +5533,148 @@ MCPServer::handleListSnapshots(const MCPListSnapshotsRequest& req) {
     MCPListSnapshotsResponse response;
     // TODO: Implement snapshot listing
     co_return response;
+}
+
+boost::asio::awaitable<Result<MCPGraphResponse>> MCPServer::handleGraphQuery(
+    const MCPGraphRequest& req) {
+    if (auto ensure = ensureDaemonClient(); !ensure) {
+        co_return ensure.error();
+    }
+
+    auto clampDepth = [](int depth) -> int {
+        if (depth < 1)
+            return 1;
+        if (depth > 5)
+            return 5;
+        return depth;
+    };
+
+    yams::daemon::GraphQueryRequest dreq;
+    dreq.documentHash = req.hash;
+    dreq.documentName = req.name;
+    dreq.nodeKey = req.nodeKey;
+    dreq.nodeId = req.nodeId;
+    dreq.listTypes = req.listTypes;
+    dreq.listByType = !req.listType.empty();
+    dreq.nodeType = req.listType;
+    dreq.isolatedMode = req.isolated;
+    dreq.isolatedRelation = req.relation;
+
+    dreq.relationFilters = req.relationFilters;
+    if (dreq.relationFilters.empty() && !req.relation.empty()) {
+        dreq.relationFilters.push_back(req.relation);
+    }
+
+    dreq.maxDepth = clampDepth(req.depth);
+    dreq.maxResults = static_cast<uint32_t>(req.limit);
+    dreq.maxResultsPerDepth = 100;
+    dreq.reverseTraversal = req.reverse;
+    dreq.offset = static_cast<uint32_t>(req.offset);
+    dreq.limit = static_cast<uint32_t>(req.limit);
+    dreq.includeNodeProperties = req.includeNodeProperties;
+    dreq.includeEdgeProperties = req.includeEdgeProperties;
+    dreq.hydrateFully = req.hydrateFully;
+    dreq.scopeToSnapshot = req.scopeSnapshot;
+
+    auto callGraph = [&](const yams::daemon::GraphQueryRequest& gr)
+        -> boost::asio::awaitable<Result<yams::daemon::GraphQueryResponse>> {
+        co_return co_await daemon_client_->call(gr);
+    };
+
+    // If name was provided and no explicit node target, try file node key first (CLI parity).
+    Result<yams::daemon::GraphQueryResponse> result(Error{ErrorCode::Unknown, "uninitialized"});
+    if (!req.name.empty() && req.nodeKey.empty() && req.nodeId < 0 && req.hash.empty() &&
+        !req.listTypes && req.listType.empty() && !req.isolated) {
+        std::filesystem::path namePath(req.name);
+        std::string fileName = namePath.filename().string();
+        if (!fileName.empty()) {
+            yams::daemon::GraphQueryRequest fileReq = dreq;
+            fileReq.nodeKey = "file:" + fileName;
+            fileReq.documentName.clear();
+            fileReq.documentHash.clear();
+            fileReq.nodeId = -1;
+            auto r = co_await callGraph(fileReq);
+            if (r) {
+                result = r;
+            } else if (r.error().code == ErrorCode::NotFound) {
+                result = co_await callGraph(dreq);
+            } else {
+                co_return r.error();
+            }
+        } else {
+            result = co_await callGraph(dreq);
+        }
+    } else {
+        if (!req.listTypes && req.listType.empty() && !req.isolated && req.nodeKey.empty() &&
+            req.nodeId < 0 && req.hash.empty() && req.name.empty()) {
+            co_return Error{ErrorCode::InvalidArgument,
+                            "hash, name, node_id, or node_key is required"};
+        }
+        result = co_await callGraph(dreq);
+    }
+
+    if (!result) {
+        co_return result.error();
+    }
+
+    const auto& resp = result.value();
+
+    auto parseProperties = [](const std::string& props) -> json {
+        if (props.empty())
+            return json();
+        try {
+            return json::parse(props);
+        } catch (...) {
+            return props;
+        }
+    };
+
+    MCPGraphResponse out;
+    out.totalNodesFound = resp.totalNodesFound;
+    out.totalEdgesTraversed = resp.totalEdgesTraversed;
+    out.truncated = resp.truncated;
+    out.maxDepthReached = resp.maxDepthReached;
+    out.queryTimeMs = resp.queryTimeMs;
+    out.kgAvailable = resp.kgAvailable;
+    out.warning = resp.warning;
+
+    json origin;
+    origin["node_id"] = resp.originNode.nodeId;
+    origin["node_key"] = resp.originNode.nodeKey;
+    origin["label"] = resp.originNode.label;
+    origin["type"] = resp.originNode.type;
+    origin["distance"] = resp.originNode.distance;
+    if (!resp.originNode.documentHash.empty())
+        origin["document_hash"] = resp.originNode.documentHash;
+    if (resp.originNode.properties.size())
+        origin["properties"] = parseProperties(resp.originNode.properties);
+    out.origin = std::move(origin);
+
+    json nodes = json::array();
+    for (const auto& node : resp.connectedNodes) {
+        json n;
+        n["node_id"] = node.nodeId;
+        n["node_key"] = node.nodeKey;
+        n["label"] = node.label;
+        n["type"] = node.type;
+        n["distance"] = node.distance;
+        if (!node.documentHash.empty())
+            n["document_hash"] = node.documentHash;
+        if (!node.properties.empty())
+            n["properties"] = parseProperties(node.properties);
+        nodes.push_back(std::move(n));
+    }
+    out.connectedNodes = std::move(nodes);
+
+    if (!resp.nodeTypeCounts.empty()) {
+        json types = json::array();
+        for (const auto& [type, count] : resp.nodeTypeCounts) {
+            types.push_back({{"type", type}, {"count", count}});
+        }
+        out.nodeTypeCounts = std::move(types);
+    }
+
+    co_return out;
 }
 
 // === Thread pool implementation for MCPServer ===

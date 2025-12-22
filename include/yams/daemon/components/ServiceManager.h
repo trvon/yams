@@ -207,36 +207,7 @@ public:
                 ingestActive_.load(std::memory_order_relaxed),
                 ingestWorkerTarget_.load(std::memory_order_relaxed)};
     }
-    void enqueuePostIngest(const std::string& hash, const std::string& mime) {
-        bool routedViaBus = false;
-        if (yams::daemon::TuneAdvisor::useInternalBusForPostIngest()) {
-            yams::daemon::InternalEventBus::PostIngestTask t{hash, mime};
-            static std::shared_ptr<
-                yams::daemon::SpscQueue<yams::daemon::InternalEventBus::PostIngestTask>>
-                q = yams::daemon::InternalEventBus::instance()
-                        .get_or_create_channel<yams::daemon::InternalEventBus::PostIngestTask>(
-                            "post_ingest", 4096);
-            if (q && q->try_push(std::move(t))) {
-                yams::daemon::InternalEventBus::instance().incPostQueued();
-                routedViaBus = true;
-            } else {
-                yams::daemon::InternalEventBus::instance().incPostDropped();
-            }
-        }
-        if (routedViaBus)
-            return;
-        // Direct blocking enqueue for predictable latency and throughput
-        if (postIngest_) {
-            PostIngestQueue::Task t{
-                hash, mime, /*session*/ "", {}, PostIngestQueue::Task::Stage::Metadata};
-            postIngest_->enqueue(std::move(t));
-        } else {
-            // Warn if PostIngestQueue is not yet initialized (async init not complete)
-            spdlog::warn("PostIngestQueue not available - document {} will not be indexed. "
-                         "Async initialization may not be complete.",
-                         hash);
-        }
-    }
+    void enqueuePostIngest(const std::string& hash, const std::string& mime);
     // Phase 2.4: Delegate to SearchEngineManager
     SearchEngineSnapshot getSearchEngineFsmSnapshot() const {
         return searchEngineManager_.getSnapshot();
@@ -566,6 +537,7 @@ private:
     // 2. WorkCoordinator (destructs after cancellation) - owns io_context + worker threads
     //    Replaces ioContext_, workGuard_, workers_ (extracted for reusability and testability)
     std::unique_ptr<WorkCoordinator> workCoordinator_;
+    std::unique_ptr<WorkCoordinator> entityWorkCoordinator_;
 
     // 3. Execution domains for logical separation (lightweight strands) - optional for lazy init
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> initStrand_;
