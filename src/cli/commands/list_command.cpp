@@ -806,16 +806,7 @@ private:
         bool hasContent = false;
 
         std::string getFormattedSize() const {
-            auto size = static_cast<size_t>(info.fileSize);
-            if (size < 1024) {
-                return std::to_string(size) + " B";
-            } else if (size < 1024 * 1024) {
-                return std::to_string(size / 1024) + " KB";
-            } else if (size < 1024 * 1024 * 1024) {
-                return yamsfmt::format("{:.1f} MB", size / (1024.0 * 1024.0));
-            } else {
-                return yamsfmt::format("{:.1f} GB", size / (1024.0 * 1024.0 * 1024.0));
-            }
+            return ui::format_bytes(static_cast<uint64_t>(info.fileSize));
         }
 
         std::string getFormattedDate() const {
@@ -1164,11 +1155,11 @@ private:
 
         // Output grouped results with colored headers
         std::cout << "Documents grouped by change type (window: " << changeWindow_ << ")\n";
-        std::cout << "═══════════════════════════════════════════════\n\n";
+        std::cout << ui::horizontal_rule(47, '=') << "\n\n";
 
         if (!addedDocs.empty()) {
             std::cout << "[+] ADDED (" << addedDocs.size() << " documents)\n";
-            std::cout << "────────────────────────────────────────\n";
+            std::cout << ui::horizontal_rule(40) << "\n";
             for (const auto& doc : addedDocs) {
                 std::string fileType = getFileTypeIndicator(doc);
                 std::cout << "  + " << doc.info.fileName << " " << fileType << " ("
@@ -1179,7 +1170,7 @@ private:
 
         if (!modifiedDocs.empty()) {
             std::cout << "[M] MODIFIED (" << modifiedDocs.size() << " documents)\n";
-            std::cout << "────────────────────────────────────────\n";
+            std::cout << ui::horizontal_rule(40) << "\n";
             for (const auto& doc : modifiedDocs) {
                 std::string fileType = getFileTypeIndicator(doc);
                 std::cout << "  M " << doc.info.fileName << " " << fileType << " ("
@@ -1190,7 +1181,7 @@ private:
 
         if (!deletedDocs.empty()) {
             std::cout << "[D] DELETED (" << deletedDocs.size() << " documents)\n";
-            std::cout << "────────────────────────────────────────\n";
+            std::cout << ui::horizontal_rule(40) << "\n";
             for (const auto& doc : deletedDocs) {
                 std::string fileType = getFileTypeIndicator(doc);
                 std::cout << "  D " << doc.info.fileName << " " << fileType << " ("

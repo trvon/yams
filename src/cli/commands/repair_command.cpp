@@ -17,6 +17,7 @@
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/progress_indicator.h>
+#include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/metadata/metadata_repository.h>
@@ -150,9 +151,7 @@ public:
                 // mergeDuplicates_ = true;  // Not implemented yet
             }
 
-            std::cout << "═══════════════════════════════════════════════════════════\n";
-            std::cout << "                    YAMS Storage Repair                    \n";
-            std::cout << "═══════════════════════════════════════════════════════════\n\n";
+            std::cout << ui::title_banner("YAMS Storage Repair") << "\n\n";
 
             // Surface the effective data directory so operators can verify the storage path
             try {
@@ -258,7 +257,7 @@ public:
                 std::cout << "\n✓ Repair operations completed successfully\n";
             }
 
-            std::cout << "═══════════════════════════════════════════════════════════\n";
+            std::cout << ui::horizontal_rule(60, '=') << "\n";
 
             return Result<void>();
 
@@ -806,7 +805,7 @@ private:
             }
         }
 
-        std::cout << "  Space to reclaim: " << formatSize(bytesToReclaim) << " from "
+        std::cout << "  Space to reclaim: " << ui::format_bytes(bytesToReclaim) << " from "
                   << orphanedChunks.size() << " files\n";
 
         if (!dryRun_) {
@@ -872,12 +871,12 @@ private:
 
             if (deleted > 0) {
                 std::cout << "  ✓ Deleted " << deleted << " chunk files\n";
-                std::cout << "  ✓ Reclaimed " << formatSize(bytesReclaimed) << "\n";
+                std::cout << "  ✓ Reclaimed " << ui::format_bytes(bytesReclaimed) << "\n";
             }
 
         } else {
             std::cout << "  [DRY RUN] Would delete " << orphanedChunks.size() << " chunk files\n";
-            std::cout << "  [DRY RUN] Would reclaim " << formatSize(bytesToReclaim) << "\n";
+            std::cout << "  [DRY RUN] Would reclaim " << ui::format_bytes(bytesToReclaim) << "\n";
         }
 
         sqlite3_close(db);
@@ -896,7 +895,7 @@ private:
         }
 
         uint64_t oldSize = fs::file_size(dbPath);
-        std::cout << "  Current database size: " << formatSize(oldSize) << "\n";
+        std::cout << "  Current database size: " << ui::format_bytes(oldSize) << "\n";
 
         if (!dryRun_) {
             sqlite3* db;
@@ -920,9 +919,9 @@ private:
                 uint64_t saved = oldSize > newSize ? oldSize - newSize : 0;
 
                 std::cout << "  ✓ Database optimized\n";
-                std::cout << "  New size: " << formatSize(newSize) << "\n";
+                std::cout << "  New size: " << ui::format_bytes(newSize) << "\n";
                 if (saved > 0) {
-                    std::cout << "  Space reclaimed: " << formatSize(saved) << "\n";
+                    std::cout << "  Space reclaimed: " << ui::format_bytes(saved) << "\n";
                 }
             } else {
                 std::string error = errMsg ? errMsg : "Unknown error";
@@ -932,7 +931,7 @@ private:
             }
         } else {
             std::cout << "  [DRY RUN] Would optimize database\n";
-            std::cout << "  [DRY RUN] Current size: " << formatSize(oldSize) << "\n";
+            std::cout << "  [DRY RUN] Current size: " << ui::format_bytes(oldSize) << "\n";
         }
 
         return Result<void>();
@@ -941,8 +940,7 @@ private:
     Result<void>
     generateMissingEmbeddings([[maybe_unused]] std::shared_ptr<api::IContentStore> store,
                               std::shared_ptr<metadata::IMetadataRepository> metadataRepo) {
-        std::cout << "Generating Missing Embeddings\n";
-        std::cout << "─────────────────────────────\n";
+        std::cout << ui::section_header("Generating Missing Embeddings") << "\n";
 
         // Ensure vector DB schema dimension matches target before generating
         // Determine target dimension: config > env > generator > heuristic
@@ -1340,25 +1338,6 @@ private:
 
         std::cout << "\n";
         return Result<void>();
-    }
-
-    std::string formatSize(uint64_t bytes) const {
-        const char* units[] = {"B", "KB", "MB", "GB", "TB"};
-        int unitIndex = 0;
-        auto size = static_cast<double>(bytes);
-
-        while (size >= 1024 && unitIndex < 4) {
-            size /= 1024;
-            unitIndex++;
-        }
-
-        std::ostringstream oss;
-        if (unitIndex == 0) {
-            oss << bytes << " B";
-        } else {
-            oss << std::fixed << std::setprecision(2) << size << " " << units[unitIndex];
-        }
-        return oss.str();
     }
 };
 

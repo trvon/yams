@@ -6,6 +6,7 @@
 #include <iostream>
 #include <regex>
 #include <yams/cli/command.h>
+#include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/common/pattern_utils.h>
 

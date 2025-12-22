@@ -11,6 +11,7 @@
 #include <fmt/core.h>
 
 #include <yams/cli/command.h>
+#include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/core/types.h>
 #include <yams/metadata/connection_pool.h>

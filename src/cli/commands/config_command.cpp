@@ -7,6 +7,7 @@
 #include <map>
 #include <sstream>
 #include <yams/cli/command.h>
+#include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
@@ -384,7 +385,7 @@ private:
             if (!result)
                 return result;
 
-            std::cout << "✓ Updated " << key << " = " << value << " in " << getConfigPath() << "\n";
+            std::cout << ui::status_ok("Updated " + key + " = " + value + " in " + getConfigPath().string()) << "\n";
             return Result<void>();
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string(e.what())};
@@ -440,7 +441,7 @@ private:
             if (!result)
                 return result;
 
-            std::cout << "✓ " << (enabled ? enableMsg : disableMsg) << "\n";
+            std::cout << ui::status_ok(enabled ? enableMsg : disableMsg) << "\n";
             return Result<void>();
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string(e.what())};
@@ -571,7 +572,7 @@ private:
             auto res = writeConfigValue(key_, value_);
             if (!res)
                 return res;
-            std::cout << "✓ Updated " << key_ << " = " << value_ << " in " << configPath << "\n";
+            std::cout << ui::status_ok("Updated " + key_ + " = " + value_ + " in " + configPath.string()) << "\n";
             return Result<void>();
 
         } catch (const std::exception& e) {
@@ -590,7 +591,7 @@ private:
             auto config = parseSimpleToml(configPath);
 
             std::cout << "Current configuration:\n";
-            std::cout << "─────────────────────\n";
+            std::cout << ui::horizontal_rule(21) << "\n";
 
             for (const auto& [key, value] : config) {
                 std::cout << std::left << std::setw(30) << key << " = " << value << "\n";
@@ -628,7 +629,7 @@ private:
             validateCompressionConfig(config, errors);
 
             if (errors.empty()) {
-                std::cout << "✓ Configuration is valid\n";
+                std::cout << ui::status_ok("Configuration is valid") << "\n";
                 std::cout << "  Config file: " << configPath << "\n";
 
                 // Show compression settings if present
@@ -646,7 +647,7 @@ private:
                     }
                 }
             } else {
-                std::cerr << "✗ Configuration validation failed:\n";
+                std::cerr << ui::status_error("Configuration validation failed:") << "\n";
                 for (const auto& error : errors) {
                     std::cerr << "  - " << error << "\n";
                 }
@@ -815,7 +816,7 @@ private:
             if (!result)
                 return result;
 
-            std::cout << "✓ Set tuning.profile = " << normalized << "\n";
+            std::cout << ui::status_ok("Set tuning.profile = " + normalized) << "\n";
             std::cout << "  Presets: efficient | balanced | aggressive\n";
             std::cout << "  Changes apply the next time the daemon reloads its tuning config.\n";
             return Result<void>();
@@ -843,8 +844,7 @@ private:
             const auto threadsMin = getValue("tuning.post_ingest_threads", "(auto)");
             const auto poolCooldown = getValue("tuning.pool_cooldown_ms", "500");
 
-            std::cout << "Tuning Configuration\n";
-            std::cout << "====================\n\n";
+            std::cout << ui::section_header("Tuning Configuration") << "\n";
             std::cout << "Profile: " << profile << "\n";
             std::cout << "Post-ingest worker cap: " << threadsMin << "\n";
             std::cout << "Post-ingest queue max: " << queueMax << "\n";
@@ -894,7 +894,7 @@ private:
         try {
             auto models = getAvailableModels();
             if (models.empty()) {
-                std::cout << "⚠ No embedding models found.\n";
+                std::cout << ui::status_warning("No embedding models found.") << "\n";
                 std::cout << "Download a model first: yams model download nomic-embed-text-v1.5\n";
                 std::cout << "  (or use --hf nomic-ai/nomic-embed-text-v1.5)\n";
                 return Error{ErrorCode::NotFound, "No embedding models available"};
@@ -908,7 +908,7 @@ private:
             if (!result)
                 return result;
 
-            std::cout << "✓ Automatic embedding generation enabled\n";
+            std::cout << ui::status_ok("Automatic embedding generation enabled") << "\n";
             std::cout << "  Model: " << models[0] << "\n";
             std::cout << "  Batch size: 16\n";
             std::cout << "  Processing delay: 1000ms\n\n";
@@ -934,12 +934,11 @@ private:
             auto config = parseSimpleToml(configPath);
             auto models = getAvailableModels();
 
-            std::cout << "Embedding Configuration Status\n";
-            std::cout << "==============================\n\n";
+            std::cout << ui::section_header("Embedding Configuration Status") << "\n";
 
             // Auto-generation status
             bool autoEnabled = config["embeddings.auto_generate"] == "true";
-            std::cout << "Auto-generation: " << (autoEnabled ? "✓ Enabled" : "✗ Disabled") << "\n";
+            std::cout << "Auto-generation: " << (autoEnabled ? ui::status_ok("Enabled") : ui::status_error("Disabled")) << "\n";
 
             // Available models
             std::cout << "Available models: ";
@@ -981,7 +980,7 @@ private:
 
             // Check if the requested model is available
             if (std::ranges::find(models, embeddingModel_) == models.end()) {
-                std::cout << "✗ Model '" << embeddingModel_ << "' not found\n";
+                std::cout << ui::status_error("Model '" + embeddingModel_ + "' not found") << "\n";
                 std::cout << "\nAvailable models:\n";
                 for (const auto& model : models) {
                     std::cout << "  - " << model << "\n";
@@ -996,7 +995,7 @@ private:
             if (!result)
                 return result;
 
-            std::cout << "✓ Preferred embedding model set to: " << embeddingModel_ << "\n";
+            std::cout << ui::status_ok("Preferred embedding model set to: " + embeddingModel_) << "\n";
 
             return Result<void>();
 
@@ -1046,7 +1045,7 @@ private:
             if (!result)
                 return result;
 
-            std::cout << "✓ " << description << "\n";
+            std::cout << ui::status_ok(description) << "\n";
             return Result<void>();
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string(e.what())};
@@ -1075,7 +1074,7 @@ private:
         if (!result)
             return result;
 
-        std::cout << "✓ Path-tree traversal enabled\n";
+        std::cout << ui::status_ok("Path-tree traversal enabled") << "\n";
         std::cout << "  Mode: " << mode << "\n";
         if (mode == "fallback") {
             std::cout << "  Baseline scans remain as a safety net when tree nodes are missing.\n";
@@ -1105,7 +1104,7 @@ private:
             if (!result)
                 return result;
 
-            std::cout << "✓ Path-tree mode set to: " << mode << "\n";
+            std::cout << ui::status_ok("Path-tree mode set to: " + mode) << "\n";
             if (mode == "fallback") {
                 std::cout
                     << "  Baseline scans will still be used when tree coverage is incomplete.\n";
@@ -1146,11 +1145,10 @@ private:
                 mode = normalizePathTreeMode(it->second, mode);
             }
 
-            std::cout << "Path-tree traversal configuration\n";
-            std::cout << "---------------------------------\n";
+            std::cout << ui::section_header("Path-tree traversal configuration") << "\n";
             std::cout << "Config file: " << configPath
                       << (hasConfig ? "" : " (not found, showing defaults)") << "\n";
-            std::cout << "Enabled    : " << (enabled ? "✓ yes" : "✗ no") << "\n";
+            std::cout << "Enabled    : " << (enabled ? ui::status_ok("yes") : ui::status_error("no")) << "\n";
             std::cout << "Mode       : " << mode << "\n";
 
             if (!enabled) {
@@ -1223,7 +1221,7 @@ private:
             }
 
             if (!needsResult.value()) {
-                std::cout << "✓ Configuration is already at version 2\n";
+                std::cout << ui::status_ok("Configuration is already at version 2") << "\n";
                 // Still perform additive update of any newly introduced v2 keys
                 auto added = migrator.updateV2SchemaAdditive(configPath, !noBackup_, false);
                 if (!added) {
@@ -1256,7 +1254,7 @@ private:
                 return Error{migrateResult.error()};
             }
 
-            std::cout << "✓ Successfully migrated configuration to v2\n";
+            std::cout << ui::status_ok("Successfully migrated configuration to v2") << "\n";
             std::cout << "  Config file: " << configPath << "\n";
 
             if (!noBackup_) {
@@ -1266,10 +1264,10 @@ private:
             // Validate new config
             auto validateResult = migrator.validateV2Config(configPath);
             if (!validateResult) {
-                std::cout << "⚠ Warning: Config validation failed: "
+                std::cout << ui::status_warning("Config validation failed: ")
                           << validateResult.error().message << "\n";
             } else {
-                std::cout << "✓ Configuration validated successfully\n";
+                std::cout << ui::status_ok("Configuration validated successfully") << "\n";
             }
 
             std::cout << "\nNew features available in v2:\n";
@@ -1294,17 +1292,16 @@ private:
             config::ConfigMigrator migrator;
 
             if (!fs::exists(configPath)) {
-                std::cout << "✗ No configuration file found at: " << configPath << "\n";
+                std::cout << ui::status_error("No configuration file found at: " + configPath.string()) << "\n";
                 std::cout << "  Run 'yams config migrate' to create a v2 config\n";
                 return Error{ErrorCode::FileNotFound, "Config file not found"};
             }
 
             auto versionResult = migrator.getConfigVersion(configPath);
             if (!versionResult) {
-                std::cout << "⚠ Cannot determine config version; attempting additive update for v2 "
-                             "keys\n";
+                std::cout << ui::status_warning("Cannot determine config version; attempting additive update for v2 keys") << "\n";
             } else if (versionResult.value().major < 2) {
-                std::cout << "⚠ Config is v1; run 'yams config migrate' first\n";
+                std::cout << ui::status_warning("Config is v1; run 'yams config migrate' first") << "\n";
                 return Error{ErrorCode::InvalidData, "Config is not v2"};
             }
 
@@ -1317,13 +1314,13 @@ private:
                 if (dryRun_) {
                     std::cout << "No changes (up-to-date)\n";
                 } else {
-                    std::cout << "✓ Configuration already has all known v2 keys\n";
+                    std::cout << ui::status_ok("Configuration already has all known v2 keys") << "\n";
                 }
             } else {
                 if (dryRun_) {
                     std::cout << "Would add " << added.value().size() << " key(s):\n";
                 } else {
-                    std::cout << "✓ Added " << added.value().size() << " key(s):\n";
+                    std::cout << ui::status_ok("Added " + std::to_string(added.value().size()) + " key(s):") << "\n";
                 }
                 for (const auto& k : added.value()) {
                     std::cout << "  - " << k << "\n";
@@ -1346,7 +1343,7 @@ private:
             config::ConfigMigrator migrator;
 
             if (!fs::exists(configPath)) {
-                std::cout << "✗ No configuration file found at: " << configPath << "\n";
+                std::cout << ui::status_error("No configuration file found at: " + configPath.string()) << "\n";
                 std::cout << "  Run 'yams config migrate' to create a v2 config\n";
                 return Result<void>();
             }
@@ -1354,7 +1351,7 @@ private:
             // Get current version
             auto versionResult = migrator.getConfigVersion(configPath);
             if (!versionResult) {
-                std::cout << "⚠ Cannot determine config version\n";
+                std::cout << ui::status_warning("Cannot determine config version") << "\n";
                 std::cout << "  Assuming v1 configuration\n";
                 std::cout << "  Run 'yams config migrate' to upgrade to v2\n";
                 return Result<void>();
@@ -1371,7 +1368,7 @@ private:
             }
 
             if (needsResult.value()) {
-                std::cout << "\n⚠ Migration needed!\n";
+                std::cout << "\n" << ui::status_warning("Migration needed!") << "\n";
                 std::cout << "  Your configuration is at version " << version.toString() << "\n";
                 std::cout << "  Run 'yams config migrate' to upgrade to v2\n";
                 std::cout << "\nVersion 2 adds support for:\n";
@@ -1381,15 +1378,15 @@ private:
                 std::cout << "  • Experimental BERT NER features\n";
                 std::cout << "  • Smart chunking strategies\n";
             } else {
-                std::cout << "\n✓ Configuration is up to date\n";
+                std::cout << "\n" << ui::status_ok("Configuration is up to date") << "\n";
 
                 // Validate current config
                 auto validateResult = migrator.validateV2Config(configPath);
                 if (!validateResult) {
-                    std::cout << "⚠ Warning: Config validation issues found:\n";
+                    std::cout << ui::status_warning("Config validation issues found:") << "\n";
                     std::cout << "  " << validateResult.error().message << "\n";
                 } else {
-                    std::cout << "✓ Configuration is valid\n";
+                    std::cout << ui::status_ok("Configuration is valid") << "\n";
                 }
             }
 
@@ -1465,8 +1462,7 @@ private:
         try {
             auto grammarPath = getGrammarPath();
 
-            std::cout << "Tree-sitter Grammar Status\n";
-            std::cout << "==========================\n\n";
+            std::cout << ui::section_header("Tree-sitter Grammar Status") << "\n";
             std::cout << "Installation path: " << grammarPath << "\n\n";
 
             // Supported languages
@@ -1484,7 +1480,7 @@ private:
                 fs::path libPath = grammarPath / lib;
                 bool installed = fs::exists(libPath);
                 std::cout << "  " << std::left << std::setw(15) << lang
-                          << (installed ? "✓ installed" : "✗ not installed") << "\n";
+                          << (installed ? ui::status_ok("installed") : ui::status_error("not installed")) << "\n";
             }
 
             std::cout << "\nCommands:\n";
@@ -1510,7 +1506,7 @@ private:
                 {"java", "tree-sitter/tree-sitter-java"}};
 
             if (grammarRepos.find(grammarLanguage_) == grammarRepos.end()) {
-                std::cout << "✗ Unsupported language: " << grammarLanguage_ << "\n";
+                std::cout << ui::status_error("Unsupported language: " + grammarLanguage_) << "\n";
                 std::cout << "Supported: cpp, python, rust, go, javascript, typescript, java\n";
                 return Error{ErrorCode::InvalidArgument, "Unsupported language"};
             }
@@ -1539,7 +1535,7 @@ private:
             std::cout << "   export YAMS_TS_" << grammarLanguage_ << "_LIB=/path/to/libtree-sitter-"
                       << grammarLanguage_ << ".so\n\n";
 
-            std::cout << "⚠ Note: Automatic downloads will be added in a future update.\n";
+            std::cout << ui::status_warning("Note: Automatic downloads will be added in a future update.") << "\n";
             std::cout << "For now, follow the manual steps above or use system packages.\n";
 
             return Result<void>();
@@ -1565,7 +1561,7 @@ private:
             if (!result) {
                 return result;
             }
-            std::cout << "✓ Automatic grammar downloads enabled\n";
+            std::cout << ui::status_ok("Automatic grammar downloads enabled") << "\n";
             std::cout << "Grammars will be downloaded automatically when needed.\n";
             return Result<void>();
         } catch (const std::exception& e) {
@@ -1580,7 +1576,7 @@ private:
             if (!result) {
                 return result;
             }
-            std::cout << "✓ Automatic grammar downloads disabled\n";
+            std::cout << ui::status_ok("Automatic grammar downloads disabled") << "\n";
             std::cout << "You can manually download grammars using: yams config grammar download "
                          "<language>\n";
             return Result<void>();

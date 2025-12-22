@@ -9,6 +9,7 @@
 #include <boost/asio/detached.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/core/types.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -976,7 +977,7 @@ void PluginCommand::installPlugin() {
         const auto& r = result.value();
         std::cout << "\nInstalled: " << r.pluginName << " v" << r.version << "\n";
         std::cout << "  Path: " << r.installedPath.string() << "\n";
-        std::cout << "  Size: " << (r.sizeBytes / 1024) << " KB\n";
+        std::cout << "  Size: " << ui::format_bytes(r.sizeBytes) << "\n";
         std::cout << "  Checksum: " << r.checksum << "\n";
         if (r.wasUpgrade) {
             std::cout << "  Upgraded from: v" << r.previousVersion << "\n";
@@ -1146,7 +1147,7 @@ void PluginCommand::repoShowInfo() {
             std::cout << "  Architecture: " << info.arch << "\n";
         std::cout << "  ABI Version: " << info.abiVersion << "\n";
         if (info.sizeBytes > 0)
-            std::cout << "  Size: " << (info.sizeBytes / 1024) << " KB\n";
+            std::cout << "  Size: " << ui::format_bytes(info.sizeBytes) << "\n";
         if (!info.checksum.empty())
             std::cout << "  Checksum: " << info.checksum << "\n";
         if (!info.downloadUrl.empty())

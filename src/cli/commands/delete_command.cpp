@@ -13,6 +13,7 @@
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/progress_indicator.h>
+#include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -367,7 +368,7 @@ private:
                                      : "Delete " + std::to_string(toDelete.size()) + " documents";
 
             if (totalSize > 0) {
-                prompt += " (total size: " + formatSize(totalSize) + ")";
+                prompt += " (total size: " + ui::format_bytes(totalSize) + ")";
             }
             prompt += "? (y/N): ";
 
@@ -495,7 +496,7 @@ private:
             std::cout << "\nStorage statistics:\n";
             std::cout << "  Total objects: " << stats.totalObjects << "\n";
             std::cout << "  Unique blocks: " << stats.uniqueBlocks << "\n";
-            std::cout << "  Storage size: " << formatSize(stats.totalBytes) << "\n";
+            std::cout << "  Storage size: " << ui::format_bytes(stats.totalBytes) << "\n";
         }
 
         return failCount > 0 && successCount == 0
@@ -703,25 +704,6 @@ private:
         }
 
         return results;
-    }
-
-    std::string formatSize(uint64_t bytes) {
-        const char* units[] = {"B", "KB", "MB", "GB", "TB"};
-        int unitIndex = 0;
-        auto size = static_cast<double>(bytes);
-
-        while (size >= 1024 && unitIndex < 4) {
-            size /= 1024;
-            unitIndex++;
-        }
-
-        std::ostringstream oss;
-        if (unitIndex == 0) {
-            oss << bytes << " B";
-        } else {
-            oss << std::fixed << std::setprecision(2) << size << " " << units[unitIndex];
-        }
-        return oss.str();
     }
 }; // End of DeleteCommand class
 

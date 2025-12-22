@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <iostream>
 #include <yams/cli/command.h>
+#include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 
 namespace yams::cli {
@@ -27,9 +28,7 @@ public:
 
         cmd->callback([this]() {
             // Phase 2 implementation
-            std::cout << "\n╔══════════════════════════════════════════════╗\n";
-            std::cout << "║          YAMS Uninstall - Phase 2           ║\n";
-            std::cout << "╚══════════════════════════════════════════════╝\n\n";
+            std::cout << "\n" << ui::title_banner("YAMS Uninstall - Phase 2") << "\n\n";
 
             std::cout << "Status: Coming in Phase 2\n\n";
 

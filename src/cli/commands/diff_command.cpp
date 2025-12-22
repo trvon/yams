@@ -3,6 +3,7 @@
 #include <yams/api/content_store.h>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/tree_differ.h>

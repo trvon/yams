@@ -393,6 +393,13 @@ tasks:
         fi
       fi
 
+      # Ensure artifacts listed in manifest exist (SourceHut fails if any are missing).
+      for f in yams.deb yams.rpm meson-logs.tar.gz testlog.txt meson-log.txt compile_commands.json; do
+        if [ ! -f "${ART_DIR}/${f}" ]; then
+          echo "Not produced in this build." > "${ART_DIR}/${f}"
+        fi
+      done
+
       echo "collect_artifacts completed successfully"
       exit 0
 

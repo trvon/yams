@@ -1001,7 +1001,7 @@ private:
             (void)downloadFile(url, outputDir / localName, filename);
         }
 
-        std::cout << "✓ Model downloaded successfully\n";
+        std::cout << ui::status_ok("Model downloaded successfully") << "\n";
         return Result<void>{};
     }
 

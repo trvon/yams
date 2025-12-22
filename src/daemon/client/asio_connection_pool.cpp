@@ -212,6 +212,31 @@ void AsioConnectionPool::cleanup_stale_connections() {
 }
 
 awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::acquire() {
+    // Fast path: try to reuse an existing idle connection
+    {
+        std::lock_guard<std::mutex> lk(mutex_);
+        cleanup_stale_connections();
+
+        for (auto& weak : connection_pool_) {
+            if (auto conn = weak.lock()) {
+                // Check if connection is alive and not currently in use
+                if (conn->alive.load(std::memory_order_acquire) &&
+                    !conn->in_use.exchange(true, std::memory_order_acq_rel)) {
+                    // Verify socket is still open
+                    if (conn->socket && conn->socket->is_open()) {
+                        spdlog::debug("Connection pool: reusing existing connection");
+                        co_return conn;
+                    }
+                    // Socket closed, mark as dead and continue searching
+                    conn->alive.store(false, std::memory_order_release);
+                    conn->in_use.store(false, std::memory_order_release);
+                }
+            }
+        }
+    }
+
+    // Slow path: create new connection
+    spdlog::debug("Connection pool: creating new connection");
     co_return co_await create_connection();
 }
 
@@ -248,7 +273,8 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
         co_return nullptr;
     }
     conn->socket = std::move(socket_res.value());
-    conn->alive = true;
+    conn->alive.store(true, std::memory_order_release);
+    conn->in_use.store(true, std::memory_order_release); // Mark as in-use for caller
     try {
         if (conn->socket && conn->socket->is_open()) {
             boost::asio::socket_base::send_buffer_size send_sz(64 * 1024);
@@ -315,6 +341,11 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                                     } catch (const std::future_error&) {
                                         // Promise already satisfied, ignore
                                     }
+                                    // Cancel timer to wake up waiter
+                                    if (h.unary->notify_timer) {
+                                        boost::system::error_code ec;
+                                        h.unary->notify_timer->cancel(ec);
+                                    }
                                 }
                                 if (h.streaming) {
                                     h.streaming->onError(e);
@@ -322,6 +353,11 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                                         h.streaming->done_promise->set_value(Result<void>(e));
                                     } catch (const std::future_error&) {
                                         // Promise already satisfied, ignore
+                                    }
+                                    // Cancel timer to wake up waiter
+                                    if (h.streaming->notify_timer) {
+                                        boost::system::error_code ec;
+                                        h.streaming->notify_timer->cancel(ec);
                                     }
                                 }
                             }
@@ -357,6 +393,11 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                                         } catch (const std::future_error&) {
                                             // Promise already satisfied, ignore
                                         }
+                                        // Cancel timer to wake up waiter
+                                        if (h.unary->notify_timer) {
+                                            boost::system::error_code ec;
+                                            h.unary->notify_timer->cancel(ec);
+                                        }
                                     }
                                     if (h.streaming) {
                                         h.streaming->onError(e);
@@ -364,6 +405,11 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                                             h.streaming->done_promise->set_value(Result<void>(e));
                                         } catch (const std::future_error&) {
                                             // Promise already satisfied, ignore
+                                        }
+                                        // Cancel timer to wake up waiter
+                                        if (h.streaming->notify_timer) {
+                                            boost::system::error_code ec;
+                                            h.streaming->notify_timer->cancel(ec);
                                         }
                                     }
                                 }
@@ -394,6 +440,11 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                                     } catch (const std::future_error&) {
                                         // Promise already satisfied, ignore
                                     }
+                                    // Cancel timer to wake up waiter
+                                    if (h.unary->notify_timer) {
+                                        boost::system::error_code ec;
+                                        h.unary->notify_timer->cancel(ec);
+                                    }
                                 }
                                 if (h.streaming) {
                                     h.streaming->onError(e);
@@ -401,6 +452,11 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                                         h.streaming->done_promise->set_value(Result<void>(e));
                                     } catch (const std::future_error&) {
                                         // Promise already satisfied, ignore
+                                    }
+                                    // Cancel timer to wake up waiter
+                                    if (h.streaming->notify_timer) {
+                                        boost::system::error_code ec;
+                                        h.streaming->notify_timer->cancel(ec);
                                     }
                                 }
                             }
@@ -458,6 +514,11 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                             } catch (const std::future_error&) {
                                 // Promise already satisfied, ignore
                             }
+                            // Cancel the notify timer to wake up the waiter immediately
+                            if (handlerPtr->unary->notify_timer) {
+                                boost::system::error_code ec;
+                                handlerPtr->unary->notify_timer->cancel(ec);
+                            }
                             conn->handlers.erase(reqId);
                         } else if (handlerPtr->streaming) {
                             handlerPtr->streaming->onHeader(r);
@@ -466,6 +527,11 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                                 handlerPtr->streaming->done_promise->set_value(Result<void>());
                             } catch (const std::future_error&) {
                                 // Promise already satisfied, ignore
+                            }
+                            // Cancel timer to wake up waiter
+                            if (handlerPtr->streaming->notify_timer) {
+                                boost::system::error_code ec;
+                                handlerPtr->streaming->notify_timer->cancel(ec);
                             }
                             conn->handlers.erase(reqId);
                             conn->streaming_started.store(false, std::memory_order_relaxed);
@@ -486,6 +552,11 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                                     handlerPtr->streaming->done_promise->set_value(Result<void>());
                                 } catch (const std::future_error&) {
                                     // Promise already satisfied, ignore
+                                }
+                                // Cancel timer to wake up waiter
+                                if (handlerPtr->streaming->notify_timer) {
+                                    boost::system::error_code ec;
+                                    handlerPtr->streaming->notify_timer->cancel(ec);
                                 }
                                 conn->handlers.erase(reqId);
                                 conn->streaming_started.store(false, std::memory_order_relaxed);

@@ -1,6 +1,7 @@
 #include <spdlog/spdlog.h>
 #include <iostream>
 #include <yams/cli/command.h>
+#include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 
 namespace yams::cli {

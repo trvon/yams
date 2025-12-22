@@ -23,6 +23,7 @@
 #include <sys/stat.h>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_migration.h>
 #include <yams/daemon/client/daemon_client.h>

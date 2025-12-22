@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <iostream>
 #include <yams/cli/command.h>
+#include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 
 namespace yams::cli {
@@ -54,9 +55,7 @@ public:
 
 private:
     void showStorageMigration() {
-        std::cout << "\n╔══════════════════════════════════════════════╗\n";
-        std::cout << "║       YAMS Storage Migration - Phase 2      ║\n";
-        std::cout << "╚══════════════════════════════════════════════╝\n\n";
+        std::cout << "\n" << ui::title_banner("YAMS Storage Migration - Phase 2") << "\n\n";
 
         std::cout << "Status: Coming in Phase 2\n\n";
 
@@ -82,9 +81,7 @@ private:
     }
 
     void showConfigMigration() {
-        std::cout << "\n╔══════════════════════════════════════════════╗\n";
-        std::cout << "║       YAMS Config Migration - Phase 2       ║\n";
-        std::cout << "╚══════════════════════════════════════════════╝\n\n";
+        std::cout << "\n" << ui::title_banner("YAMS Config Migration - Phase 2") << "\n\n";
 
         std::cout << "Status: Coming in Phase 2\n\n";
 
@@ -104,9 +101,7 @@ private:
     }
 
     void showExport() {
-        std::cout << "\n╔══════════════════════════════════════════════╗\n";
-        std::cout << "║         YAMS Export - Phase 2               ║\n";
-        std::cout << "╚══════════════════════════════════════════════╝\n\n";
+        std::cout << "\n" << ui::title_banner("YAMS Export - Phase 2") << "\n\n";
 
         std::cout << "Status: Coming in Phase 2\n\n";
 
@@ -134,9 +129,7 @@ private:
     }
 
     void showImport() {
-        std::cout << "\n╔══════════════════════════════════════════════╗\n";
-        std::cout << "║         YAMS Import - Phase 2               ║\n";
-        std::cout << "╚══════════════════════════════════════════════╝\n\n";
+        std::cout << "\n" << ui::title_banner("YAMS Import - Phase 2") << "\n\n";
 
         std::cout << "Status: Coming in Phase 2\n\n";
 

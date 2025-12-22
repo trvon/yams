@@ -338,6 +338,39 @@ int YamsCLI::run(int argc, char* argv[]) {
             app_->parse(argc, argv);
         }
 
+        // Disallow multiple top-level subcommands (e.g., "yams search graph"),
+        // which can accidentally treat query terms as commands.
+        {
+            std::vector<std::string> active;
+            for (const auto* sub : app_->get_subcommands()) {
+                if (sub && sub->count() > 0) {
+                    active.push_back(sub->get_name());
+                }
+            }
+            if (active.size() > 1) {
+                std::cerr << "[FAIL] Multiple subcommands detected: ";
+                for (size_t i = 0; i < active.size(); ++i) {
+                    if (i)
+                        std::cerr << ", ";
+                    std::cerr << active[i];
+                }
+                std::cerr << "\n";
+                auto isSearch = std::find(active.begin(), active.end(), "search") != active.end();
+                if (isSearch) {
+                    for (const auto& name : active) {
+                        if (name != "search") {
+                            std::cerr << "Hint: If '" << name
+                                      << "' is your search term, use --query (e.g., "
+                                         "`yams search --query "
+                                      << name << "`).\n";
+                            break;
+                        }
+                    }
+                }
+                return 1;
+            }
+        }
+
         // Apply log level after parsing flags (avoid CLI11 Option::callback dependency)
         // Precedence: env YAMS_LOG_LEVEL > --verbose > build-type default
         auto parseLevel = [](const std::string& s) -> std::optional<spdlog::level::level_enum> {

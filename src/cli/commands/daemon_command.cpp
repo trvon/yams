@@ -1130,7 +1130,7 @@ private:
                     << "  • Check failed - set YAMS_DAEMON_SOCKET=/tmp/yams-daemon-$(id -u).sock\n";
             }
         } else {
-            std::cout << "\n✓ All checks passed\n";
+            std::cout << "\n" << ui::status_ok("All checks passed") << "\n";
         }
     }
 

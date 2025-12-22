@@ -14,6 +14,7 @@
 #include <thread>
 #include <yams/api/content_metadata.h>
 #include <yams/cli/command.h>
+#include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/metadata/document_metadata.h>
@@ -793,23 +794,10 @@ private:
         } else {
             std::cout << "Added document: " << result.hash.substr(0, 16) << "..." << std::endl;
             if (cli_->getVerbose()) {
-                std::cout << "  Bytes stored: " << formatSize(result.bytesStored) << std::endl;
-                std::cout << "  Bytes deduped: " << formatSize(result.bytesDeduped) << std::endl;
+                std::cout << "  Bytes stored: " << ui::format_bytes(result.bytesStored) << std::endl;
+                std::cout << "  Bytes deduped: " << ui::format_bytes(result.bytesDeduped) << std::endl;
             }
         }
-    }
-
-    std::string formatSize(uint64_t bytes) const {
-        const char* units[] = {"B", "KB", "MB", "GB", "TB"};
-        int unitIndex = 0;
-        auto size = static_cast<double>(bytes);
-        while (size >= 1024 && unitIndex < 4) {
-            size /= 1024;
-            unitIndex++;
-        }
-        std::ostringstream oss;
-        oss << std::fixed << std::setprecision(2) << size << " " << units[unitIndex];
-        return oss.str();
     }
 
     // Member variables

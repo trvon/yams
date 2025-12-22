@@ -2,6 +2,7 @@
 #include <iostream>
 #include <sstream>
 #include <yams/cli/completion_command.h>
+#include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 
 namespace yams::cli {

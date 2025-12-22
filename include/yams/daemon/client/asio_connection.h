@@ -14,6 +14,7 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
 
 #include <yams/core/types.h>
@@ -70,6 +71,7 @@ struct AsioConnection {
 
     struct UnaryHandler {
         std::shared_ptr<response_promise_t> promise;
+        std::shared_ptr<boost::asio::steady_timer> notify_timer; // Cancelled when response arrives
     };
     struct StreamingHandler {
         using HeaderCallback = std::function<void(const Response&)>;
@@ -82,6 +84,7 @@ struct AsioConnection {
         ErrorCallback onError;
         CompleteCallback onComplete;
         std::shared_ptr<void_promise_t> done_promise;
+        std::shared_ptr<boost::asio::steady_timer> notify_timer; // Cancelled when done
 
         StreamingHandler() = default;
         StreamingHandler(HeaderCallback h, ChunkCallback c, ErrorCallback e, CompleteCallback comp)

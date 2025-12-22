@@ -14,6 +14,7 @@
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/time_parser.h>
+#include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/compression/compression_header.h>
 #include <yams/compression/compressor_interface.h>

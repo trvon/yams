@@ -18,6 +18,7 @@
 #include <vector>
 #include <yams/cli/command.h>
 #include <yams/cli/session_store.h>
+#include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
@@ -1282,21 +1283,21 @@ private:
     };
 
     void printHighlightedLine(const std::string& line, const Match& match) {
-        // ANSI color codes
-        const char* RED = "\033[31m";
-        const char* RESET = "\033[0m";
-
         if (match.columnStart >= line.size()) {
             std::cout << line << std::endl;
             return;
         }
 
         std::cout << line.substr(0, match.columnStart);
-        std::cout << RED;
+        if (ui::colors_enabled()) {
+            std::cout << ui::Ansi::RED;
+        }
         if (match.columnEnd > match.columnStart) {
             std::cout << line.substr(match.columnStart, match.columnEnd - match.columnStart);
         }
-        std::cout << RESET;
+        if (ui::colors_enabled()) {
+            std::cout << ui::Ansi::RESET;
+        }
         if (match.columnEnd < line.size()) {
             std::cout << line.substr(match.columnEnd);
         }

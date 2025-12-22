@@ -3,6 +3,7 @@
 #include <iostream>
 #include <sstream>
 #include <yams/cli/commands/update_command.h>
+#include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/metadata/query_helpers.h>
 // Daemon client API for daemon-first update
