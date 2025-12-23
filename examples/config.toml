@@ -222,6 +222,16 @@ log_level = "info"
 # Prefer centralized tuning (TuningManager); set to true only if you need legacy in-loop tuner
 # use_legacy_tuner = false
 
+[daemon.graph_prune]
+# Enable graph prune for snapshot-scoped version nodes
+enabled = false
+# Keep latest N snapshot versions per canonical node
+keep_latest = 3
+# How often to run prune
+interval_minutes = 60
+# Initial delay after startup
+initial_delay_minutes = 10
+
 # Centralized tuning knobs (advanced): defaults are safe; uncomment to override
 [tuning]
 # Default tuning preset applied by the daemon. Options: "efficient", "balanced", "aggressive".
@@ -713,4 +723,3 @@ enable = true
 # Optional: override grammar .so paths per language
 # grammar_paths.cpp = "/usr/lib/libtree-sitter-cpp.so"
 # grammar_paths.python = "/usr/lib/libtree-sitter-python.so"
-

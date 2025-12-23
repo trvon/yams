@@ -50,8 +50,7 @@ PostIngestQueue::PostIngestQueue(
     WorkCoordinator* entityCoordinator, std::size_t capacity)
     : store_(std::move(store)), meta_(std::move(meta)), extractors_(std::move(extractors)),
       kg_(std::move(kg)), graphComponent_(std::move(graphComponent)), coordinator_(coordinator),
-      entityCoordinator_(entityCoordinator),
-      capacity_(capacity ? capacity : 1000) {
+      entityCoordinator_(entityCoordinator), capacity_(capacity ? capacity : 1000) {
     spdlog::info("[PostIngestQueue] Created (parallel processing via WorkCoordinator)");
 }
 
@@ -69,8 +68,8 @@ void PostIngestQueue::start() {
         spdlog::info("[PostIngestQueue] Spawning symbolPoller coroutine...");
         boost::asio::co_spawn(coordinator_->getExecutor(), symbolPoller(), boost::asio::detached);
         spdlog::info("[PostIngestQueue] Spawning entityPoller coroutine...");
-        auto entityExec = entityCoordinator_ ? entityCoordinator_->getExecutor()
-                                             : coordinator_->getExecutor();
+        auto entityExec =
+            entityCoordinator_ ? entityCoordinator_->getExecutor() : coordinator_->getExecutor();
         boost::asio::co_spawn(entityExec, entityPoller(), boost::asio::detached);
 
         constexpr int maxWaitMs = 100;
@@ -622,13 +621,12 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
             entityInFlight_.fetch_add(1);
             auto entityExec = entityCoordinator_ ? entityCoordinator_->getExecutor()
                                                  : coordinator_->getExecutor();
-            boost::asio::post(entityExec,
-                              [this, hash = std::move(job.hash), docId = job.documentId,
-                               filePath = std::move(job.filePath),
-                               extension = std::move(job.extension)]() {
-                                  processEntityExtractionStage(hash, docId, filePath, extension);
-                                  entityInFlight_.fetch_sub(1);
-                              });
+            boost::asio::post(entityExec, [this, hash = std::move(job.hash), docId = job.documentId,
+                                           filePath = std::move(job.filePath),
+                                           extension = std::move(job.extension)]() {
+                processEntityExtractionStage(hash, docId, filePath, extension);
+                entityInFlight_.fetch_sub(1);
+            });
         }
 
         if (didWork) {
@@ -695,34 +693,115 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
 
         // Track cumulative nodeKey -> nodeId mappings across batches
         // This allows edges to reference nodes from previous batches
-        std::unordered_map<std::string, std::int64_t> keyToId;
+        std::unordered_map<std::string, std::int64_t> canonicalKeyToId;
+        std::unordered_map<std::string, std::int64_t> versionKeyToId;
         size_t totalNodesInserted = 0;
         size_t totalEdgesInserted = 0;
         size_t totalAliasesInserted = 0;
+        const std::string snapshotId = hash;
 
         // Use streaming extraction with per-batch KG insertion
         auto result = provider->extractEntitiesStreaming(
             content, filePath,
-            [this, &keyToId, &totalNodesInserted, &totalEdgesInserted, &totalAliasesInserted,
-             &hash](ExternalEntityProviderAdapter::EntityResult batch,
-                    const ExternalEntityProviderAdapter::ExtractionProgress& progress) -> bool {
+            [this, &canonicalKeyToId, &versionKeyToId, &totalNodesInserted, &totalEdgesInserted,
+             &totalAliasesInserted, &hash, &snapshotId,
+             &filePath](ExternalEntityProviderAdapter::EntityResult batch,
+                        const ExternalEntityProviderAdapter::ExtractionProgress& progress) -> bool {
                 if (batch.nodes.empty()) {
                     return true; // Continue to next batch
                 }
 
-                // Insert nodes and get their IDs
-                auto nodeIds = kg_->upsertNodes(batch.nodes);
-                if (!nodeIds) {
+                const bool hasSnapshot = !snapshotId.empty();
+                std::vector<metadata::KGNode> canonicalNodes;
+                std::vector<metadata::KGNode> versionNodes;
+                canonicalNodes.reserve(batch.nodes.size());
+                versionNodes.reserve(batch.nodes.size());
+
+                for (const auto& node : batch.nodes) {
+                    canonicalNodes.push_back(node);
+
+                    metadata::KGNode versionNode = node;
+                    if (hasSnapshot) {
+                        std::string baseKey = node.nodeKey;
+                        versionNode.nodeKey = baseKey + "@snap:" + snapshotId;
+                        std::string baseType = node.type.has_value() ? node.type.value() : "entity";
+                        versionNode.type = baseType + "_version";
+
+                        nlohmann::json props = nlohmann::json::object();
+                        if (node.properties.has_value()) {
+                            try {
+                                props = nlohmann::json::parse(node.properties.value());
+                            } catch (...) {
+                                props = nlohmann::json::object();
+                            }
+                        }
+                        props["snapshot_id"] = snapshotId;
+                        props["document_hash"] = snapshotId;
+                        props["file_path"] = filePath;
+                        props["canonical_key"] = baseKey;
+                        versionNode.properties = props.dump();
+                    }
+                    if (hasSnapshot) {
+                        versionNodes.push_back(std::move(versionNode));
+                    }
+                }
+
+                // Insert canonical nodes and get their IDs
+                auto canonicalIds = kg_->upsertNodes(canonicalNodes);
+                if (!canonicalIds) {
                     spdlog::warn("[PostIngestQueue] Failed to insert batch {} nodes: {}",
-                                 progress.batchNumber, nodeIds.error().message);
+                                 progress.batchNumber, canonicalIds.error().message);
                     return true; // Continue despite error - partial success
                 }
 
-                // Update keyToId map with this batch's nodes
-                for (size_t i = 0; i < batch.nodes.size() && i < nodeIds.value().size(); ++i) {
-                    keyToId[batch.nodes[i].nodeKey] = nodeIds.value()[i];
+                // Update key maps with this batch's nodes
+                for (size_t i = 0; i < canonicalNodes.size() && i < canonicalIds.value().size();
+                     ++i) {
+                    canonicalKeyToId[canonicalNodes[i].nodeKey] = canonicalIds.value()[i];
                 }
-                totalNodesInserted += nodeIds.value().size();
+                if (hasSnapshot) {
+                    // Insert version nodes and get their IDs
+                    auto versionIds = kg_->upsertNodes(versionNodes);
+                    if (!versionIds) {
+                        spdlog::warn(
+                            "[PostIngestQueue] Failed to insert batch {} version nodes: {}",
+                            progress.batchNumber, versionIds.error().message);
+                        return true; // Continue despite error - partial success
+                    }
+                    for (size_t i = 0; i < versionNodes.size() && i < versionIds.value().size();
+                         ++i) {
+                        versionKeyToId[canonicalNodes[i].nodeKey] = versionIds.value()[i];
+                    }
+                    totalNodesInserted += versionIds.value().size();
+
+                    // Link canonical to version nodes
+                    std::vector<metadata::KGEdge> observedEdges;
+                    observedEdges.reserve(versionNodes.size());
+                    for (size_t i = 0;
+                         i < canonicalNodes.size() && i < canonicalIds.value().size() &&
+                         i < versionIds.value().size();
+                         ++i) {
+                        metadata::KGEdge edge;
+                        edge.srcNodeId = canonicalIds.value()[i];
+                        edge.dstNodeId = versionIds.value()[i];
+                        edge.relation = "observed_as";
+                        edge.weight = 1.0f;
+                        nlohmann::json props;
+                        props["snapshot_id"] = snapshotId;
+                        props["document_hash"] = snapshotId;
+                        edge.properties = props.dump();
+                        observedEdges.push_back(std::move(edge));
+                    }
+                    if (!observedEdges.empty()) {
+                        kg_->addEdgesUnique(observedEdges);
+                    }
+                } else {
+                    for (size_t i = 0; i < canonicalNodes.size() && i < canonicalIds.value().size();
+                         ++i) {
+                        versionKeyToId[canonicalNodes[i].nodeKey] = canonicalIds.value()[i];
+                    }
+                    totalNodesInserted += canonicalIds.value().size();
+                }
 
                 // Resolve and insert edges
                 std::vector<metadata::KGEdge> resolvedEdges;
@@ -734,10 +813,10 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                         std::string srcKey = props.value("_src_key", "");
                         std::string dstKey = props.value("_dst_key", "");
 
-                        auto srcIt = keyToId.find(srcKey);
-                        auto dstIt = keyToId.find(dstKey);
+                        auto srcIt = versionKeyToId.find(srcKey);
+                        auto dstIt = versionKeyToId.find(dstKey);
 
-                        if (srcIt != keyToId.end() && dstIt != keyToId.end()) {
+                        if (srcIt != versionKeyToId.end() && dstIt != versionKeyToId.end()) {
                             edge.srcNodeId = srcIt->second;
                             edge.dstNodeId = dstIt->second;
                             props.erase("_src_key");
@@ -760,8 +839,8 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                 for (auto& alias : batch.aliases) {
                     if (alias.source && alias.source->starts_with("_node_key:")) {
                         std::string nodeKey = alias.source->substr(10);
-                        auto it = keyToId.find(nodeKey);
-                        if (it != keyToId.end()) {
+                        auto it = canonicalKeyToId.find(nodeKey);
+                        if (it != canonicalKeyToId.end()) {
                             alias.nodeId = it->second;
                             alias.source = "ghidra";
                             resolvedAliases.push_back(std::move(alias));
@@ -774,10 +853,12 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                     totalAliasesInserted += resolvedAliases.size();
                 }
 
+                const size_t batchNodesInserted =
+                    hasSnapshot ? versionNodes.size() : canonicalNodes.size();
                 spdlog::info("[PostIngestQueue] Batch {}/{} ingested for {} "
                              "(nodes={}, edges={}, aliases={}, elapsed={:.1f}s)",
                              progress.batchNumber, progress.totalBatchesEstimate,
-                             hash.substr(0, 12), nodeIds.value().size(), resolvedEdges.size(),
+                             hash.substr(0, 12), batchNodesInserted, resolvedEdges.size(),
                              resolvedAliases.size(), progress.elapsedSeconds);
 
                 return true; // Continue to next batch

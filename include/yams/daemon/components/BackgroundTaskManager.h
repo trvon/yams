@@ -155,6 +155,13 @@ private:
      */
     void launchStorageGcTask();
 
+    /**
+     * @brief Launches the Graph prune periodic task.
+     *
+     * When enabled via config, prunes older version nodes to keep recent history.
+     */
+    void launchGraphPruneTask();
+
     Dependencies deps_;                ///< Dependency injection container
     std::atomic<bool> running_{false}; ///< Tracks whether tasks are active
 

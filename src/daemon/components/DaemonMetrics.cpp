@@ -825,6 +825,12 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
     } catch (...) {
     }
 
+    // Ensure readinessStates["vector_db"] reflects the final vectorDbReady after healing.
+    try {
+        out.readinessStates["vector_db"] = out.vectorDbReady;
+    } catch (...) {
+    }
+
     // Centralized service states
     try {
         if (services_) {

@@ -9,13 +9,18 @@
 #include <spdlog/spdlog.h>
 #include <type_traits>
 #include <utility>
+#include <boost/asio/associated_executor.hpp>
+#include <boost/asio/async_result.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
+#include <boost/asio/post.hpp>
+#include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/core/types.h>
 #include <yams/daemon/components/init_utils.hpp>
 #include <yams/daemon/components/PluginHostFsm.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
@@ -30,15 +35,63 @@ namespace yams::daemon::dispatch {
 const std::vector<std::filesystem::path>& defaultAbiPluginDirs() noexcept;
 const std::vector<std::filesystem::path>& defaultExternalPluginDirs() noexcept;
 
+/**
+ * @brief Offload a synchronous function to the WorkCoordinator's thread pool.
+ *
+ * This coroutine dispatches the provided callable to the WorkCoordinator's
+ * executor, suspending the caller until the work completes on a worker thread.
+ * This prevents blocking the IPC connection strand with heavy database
+ * operations like list queries and snippet hydration.
+ *
+ * Uses boost::asio::async_initiate (non-experimental) to properly integrate
+ * with the async operation model, posting completion back to the caller's executor.
+ *
+ * @tparam Fn Callable type that returns the result
+ * @param sm ServiceManager providing access to WorkCoordinator
+ * @param fn The synchronous function to execute on a worker thread
+ * @return awaitable yielding the result of fn()
+ */
 template <typename Fn>
 inline boost::asio::awaitable<std::remove_cvref_t<std::invoke_result_t<Fn&>>>
 offload_to_worker(ServiceManager* sm, Fn&& fn) {
     using RawResult = std::invoke_result_t<Fn&>;
     using ResultType = std::remove_cvref_t<RawResult>;
     static_assert(!std::is_void_v<ResultType>, "offload_to_worker requires non-void result type");
-    // WorkerPool removed - execute directly
-    (void)sm;
-    co_return fn();
+
+    // Get WorkCoordinator from ServiceManager
+    WorkCoordinator* coordinator = sm ? sm->getWorkCoordinator() : nullptr;
+    if (!coordinator) {
+        // Fallback to synchronous execution if no coordinator available
+        spdlog::debug("offload_to_worker: no WorkCoordinator, executing synchronously");
+        co_return fn();
+    }
+
+    // Use async_initiate to create a proper async operation without experimental features.
+    // This posts work to the WorkCoordinator, then posts completion back to caller's executor.
+    auto work_executor = coordinator->getExecutor();
+
+    co_return co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
+                                                   void(std::exception_ptr, ResultType)>(
+        [work_executor](auto handler, auto f) mutable {
+            // Post work to the worker thread pool
+            boost::asio::post(
+                work_executor, [handler = std::move(handler), f = std::move(f)]() mutable {
+                    std::exception_ptr ep;
+                    ResultType result{};
+                    try {
+                        result = f();
+                    } catch (...) {
+                        ep = std::current_exception();
+                    }
+                    // Post completion back to the handler's associated executor
+                    auto completion_executor = boost::asio::get_associated_executor(handler);
+                    boost::asio::post(completion_executor, [handler = std::move(handler), ep,
+                                                            result = std::move(result)]() mutable {
+                        std::move(handler)(ep, std::move(result));
+                    });
+                });
+        },
+        boost::asio::use_awaitable, std::forward<Fn>(fn));
 }
 
 inline yams::Result<std::shared_ptr<IModelProvider>> check_provider_ready(ServiceManager* sm) {

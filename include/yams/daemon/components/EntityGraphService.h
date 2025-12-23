@@ -105,21 +105,27 @@ private:
         std::optional<std::int64_t> documentNodeId;
         std::optional<std::int64_t> fileNodeId;
         std::optional<std::int64_t> directoryNodeId;
+        std::optional<std::int64_t> pathNodeId;
+    };
+
+    struct SymbolNodeBatch {
+        std::vector<std::int64_t> canonicalNodeIds;
+        std::vector<std::int64_t> versionNodeIds;
+        std::vector<std::string> symbolKeys;
     };
 
     yams::Result<ContextNodes>
     resolveContextNodes(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
                         const Job& job, std::optional<std::int64_t>& documentDbId);
 
-    yams::Result<std::vector<std::int64_t>>
+    yams::Result<SymbolNodeBatch>
     createSymbolNodes(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
-                      const Job& job, const yams_symbol_extraction_result_v1* result,
-                      std::vector<std::string>& outSymbolKeys);
+                      const Job& job, const yams_symbol_extraction_result_v1* result);
 
-    yams::Result<void> createSymbolEdges(
-        const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg, const Job& job,
-        const yams_symbol_extraction_result_v1* result, const ContextNodes& contextNodes,
-        const std::vector<std::int64_t>& symbolNodeIds, const std::vector<std::string>& symbolKeys);
+    yams::Result<void>
+    createSymbolEdges(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
+                      const Job& job, const yams_symbol_extraction_result_v1* result,
+                      const ContextNodes& contextNodes, const SymbolNodeBatch& nodes);
 
     yams::Result<void>
     createDocEntities(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,

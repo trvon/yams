@@ -132,9 +132,8 @@ bool EntityGraphService::populateKnowledgeGraph(
     spdlog::info("EntityGraphService: received {} symbols, {} relations from {}",
                  result->symbol_count, result->relation_count, job.filePath);
 
-    // Clean up stale edges from previous extraction of this file
-    // This prevents accumulating old relationships when code is updated
-    if (!job.filePath.empty()) {
+    // Avoid removing historical edges when we have snapshot-scoped nodes.
+    if (job.documentHash.empty() && !job.filePath.empty()) {
         auto cleanupResult = kg->deleteEdgesForSourceFile(job.filePath);
         if (cleanupResult) {
             if (cleanupResult.value() > 0) {
@@ -154,23 +153,23 @@ bool EntityGraphService::populateKnowledgeGraph(
         }
         auto& contextNodes = contextNodesRes.value();
 
-        std::vector<std::string> symbolKeys;
-        auto symbolNodeIdsRes = createSymbolNodes(kg, job, result, symbolKeys);
-        if (!symbolNodeIdsRes) {
+        auto symbolNodesRes = createSymbolNodes(kg, job, result);
+        if (!symbolNodesRes) {
             spdlog::warn("EntityGraphService: failed to create symbol nodes: {}",
-                         symbolNodeIdsRes.error().message);
+                         symbolNodesRes.error().message);
             return false;
         }
-        auto& symbolNodeIds = symbolNodeIdsRes.value();
+        auto& symbolNodes = symbolNodesRes.value();
 
-        auto edgesRes = createSymbolEdges(kg, job, result, contextNodes, symbolNodeIds, symbolKeys);
+        auto edgesRes = createSymbolEdges(kg, job, result, contextNodes, symbolNodes);
         if (!edgesRes) {
             spdlog::warn("EntityGraphService: failed to create symbol edges: {}",
                          edgesRes.error().message);
             // Non-fatal, continue to doc entities
         }
 
-        auto docEntitiesRes = createDocEntities(kg, documentDbId, result, symbolNodeIds);
+        auto docEntitiesRes =
+            createDocEntities(kg, documentDbId, result, symbolNodes.versionNodeIds);
         if (!docEntitiesRes) {
             spdlog::warn("EntityGraphService: failed to create doc entities: {}",
                          docEntitiesRes.error().message);
@@ -233,6 +232,18 @@ yams::Result<EntityGraphService::ContextNodes> EntityGraphService::resolveContex
         }
     }
 
+    if (!job.filePath.empty() && !job.documentHash.empty()) {
+        yams::metadata::PathNodeDescriptor descriptor;
+        descriptor.snapshotId = job.documentHash;
+        descriptor.path = job.filePath;
+        descriptor.rootTreeHash = "";
+        descriptor.isDirectory = false;
+        auto pathNodeRes = kg->ensurePathNode(descriptor);
+        if (pathNodeRes.has_value()) {
+            contextNodes.pathNodeId = pathNodeRes.value();
+        }
+    }
+
     if (contextNodes.fileNodeId.has_value() && contextNodes.documentNodeId.has_value()) {
         yams::metadata::KGEdge fileDocEdge;
         fileDocEdge.srcNodeId = contextNodes.fileNodeId.value();
@@ -277,70 +288,109 @@ yams::Result<EntityGraphService::ContextNodes> EntityGraphService::resolveContex
     return contextNodes;
 }
 
-yams::Result<std::vector<std::int64_t>> EntityGraphService::createSymbolNodes(
+yams::Result<EntityGraphService::SymbolNodeBatch> EntityGraphService::createSymbolNodes(
     const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg, const Job& job,
-    const yams_symbol_extraction_result_v1* result, std::vector<std::string>& outSymbolKeys) {
+    const yams_symbol_extraction_result_v1* result) {
     std::vector<yams::metadata::KGNode> symbolNodes;
+    std::vector<yams::metadata::KGNode> versionNodes;
     symbolNodes.reserve(result->symbol_count);
-    outSymbolKeys.reserve(result->symbol_count);
+    versionNodes.reserve(result->symbol_count);
+
+    SymbolNodeBatch batch;
+    batch.symbolKeys.reserve(result->symbol_count);
 
     auto now = std::chrono::system_clock::now().time_since_epoch().count();
+    const bool hasSnapshot = !job.documentHash.empty();
 
     for (size_t i = 0; i < result->symbol_count; ++i) {
         const auto& sym = result->symbols[i];
 
-        yams::metadata::KGNode node;
+        yams::metadata::KGNode canonicalNode;
         std::string qualName = sym.qualified_name ? std::string(sym.qualified_name)
                                                   : (sym.name ? std::string(sym.name) : "");
         std::string kind = sym.kind ? std::string(sym.kind) : "symbol";
-        node.nodeKey = kind + ":" + qualName + "@" + job.filePath;
-        node.label = sym.name ? std::string(sym.name) : qualName;
-        node.type = kind;
+        std::string canonicalKey = kind + ":" + qualName + "@" + job.filePath;
+        canonicalNode.nodeKey = canonicalKey;
+        canonicalNode.label = sym.name ? std::string(sym.name) : qualName;
+        canonicalNode.type = kind;
 
-        nlohmann::json props;
-        props["qualified_name"] = qualName;
-        props["simple_name"] = sym.name ? std::string(sym.name) : "";
-        props["file_path"] = sym.file_path ? std::string(sym.file_path) : job.filePath;
-        props["language"] = job.language;
-        props["start_line"] = sym.start_line;
-        props["end_line"] = sym.end_line;
-        props["start_offset"] = sym.start_offset;
-        props["end_offset"] = sym.end_offset;
-        props["last_seen"] = now;
+        nlohmann::json canonicalProps;
+        canonicalProps["qualified_name"] = qualName;
+        canonicalProps["simple_name"] = sym.name ? std::string(sym.name) : "";
+        canonicalProps["file_path"] = sym.file_path ? std::string(sym.file_path) : job.filePath;
+        canonicalProps["language"] = job.language;
+        canonicalNode.properties = canonicalProps.dump();
 
-        if (sym.return_type)
-            props["return_type"] = std::string(sym.return_type);
-        if (sym.documentation)
-            props["documentation"] = std::string(sym.documentation);
-        if (sym.parameters && sym.parameter_count > 0) {
-            nlohmann::json params = nlohmann::json::array();
-            for (size_t p = 0; p < sym.parameter_count; ++p) {
-                if (sym.parameters[p])
-                    params.push_back(std::string(sym.parameters[p]));
-            }
-            props["parameters"] = params;
-        }
-        if (!job.documentHash.empty()) {
+        symbolNodes.push_back(std::move(canonicalNode));
+        batch.symbolKeys.push_back(qualName);
+
+        if (hasSnapshot) {
+            yams::metadata::KGNode versionNode;
+            versionNode.nodeKey = canonicalKey + "@snap:" + job.documentHash;
+            versionNode.label = sym.name ? std::string(sym.name) : qualName;
+            versionNode.type = kind + "_version";
+
+            nlohmann::json props;
+            props["qualified_name"] = qualName;
+            props["simple_name"] = sym.name ? std::string(sym.name) : "";
+            props["file_path"] = sym.file_path ? std::string(sym.file_path) : job.filePath;
+            props["language"] = job.language;
+            props["start_line"] = sym.start_line;
+            props["end_line"] = sym.end_line;
+            props["start_offset"] = sym.start_offset;
+            props["end_offset"] = sym.end_offset;
+            props["last_seen"] = now;
+            props["snapshot_id"] = job.documentHash;
             props["document_hash"] = job.documentHash;
-        }
+            props["canonical_key"] = canonicalKey;
+            props["kind"] = kind;
 
-        node.properties = props.dump();
-        symbolNodes.push_back(std::move(node));
-        outSymbolKeys.push_back(qualName);
+            if (sym.return_type)
+                props["return_type"] = std::string(sym.return_type);
+            if (sym.documentation)
+                props["documentation"] = std::string(sym.documentation);
+            if (sym.parameters && sym.parameter_count > 0) {
+                nlohmann::json params = nlohmann::json::array();
+                for (size_t p = 0; p < sym.parameter_count; ++p) {
+                    if (sym.parameters[p])
+                        params.push_back(std::string(sym.parameters[p]));
+                }
+                props["parameters"] = params;
+            }
+
+            versionNode.properties = props.dump();
+            versionNodes.push_back(std::move(versionNode));
+        }
     }
 
-    return kg->upsertNodes(symbolNodes);
+    auto canonicalIdsRes = kg->upsertNodes(symbolNodes);
+    if (!canonicalIdsRes) {
+        return canonicalIdsRes.error();
+    }
+
+    batch.canonicalNodeIds = canonicalIdsRes.value();
+    if (hasSnapshot) {
+        auto versionIdsRes = kg->upsertNodes(versionNodes);
+        if (!versionIdsRes) {
+            return versionIdsRes.error();
+        }
+        batch.versionNodeIds = versionIdsRes.value();
+    } else {
+        batch.versionNodeIds = batch.canonicalNodeIds;
+    }
+
+    return batch;
 }
 
 yams::Result<void> EntityGraphService::createSymbolEdges(
     const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg, const Job& job,
     const yams_symbol_extraction_result_v1* result, const ContextNodes& contextNodes,
-    const std::vector<std::int64_t>& symbolNodeIds, const std::vector<std::string>& symbolKeys) {
+    const SymbolNodeBatch& nodes) {
     // Aliases
     std::vector<yams::metadata::KGAlias> aliases;
     for (size_t i = 0; i < result->symbol_count; ++i) {
         const auto& sym = result->symbols[i];
-        std::int64_t nodeId = symbolNodeIds[i];
+        std::int64_t nodeId = nodes.canonicalNodeIds[i];
 
         if (sym.name) {
             yams::metadata::KGAlias alias;
@@ -381,12 +431,14 @@ yams::Result<void> EntityGraphService::createSymbolEdges(
 
     // Context Edges
     std::vector<yams::metadata::KGEdge> contextEdges;
-    for (size_t i = 0; i < symbolNodeIds.size(); ++i) {
-        std::int64_t symNodeId = symbolNodeIds[i];
+    for (size_t i = 0; i < nodes.versionNodeIds.size(); ++i) {
+        std::int64_t symNodeId = nodes.versionNodeIds[i];
         if (contextNodes.documentNodeId.has_value()) {
             nlohmann::json edgeProps;
             edgeProps["line_start"] = result->symbols[i].start_line;
             edgeProps["line_end"] = result->symbols[i].end_line;
+            if (!job.documentHash.empty())
+                edgeProps["snapshot_id"] = job.documentHash;
             yams::metadata::KGEdge edge;
             edge.srcNodeId = symNodeId;
             edge.dstNodeId = contextNodes.documentNodeId.value();
@@ -395,7 +447,14 @@ yams::Result<void> EntityGraphService::createSymbolEdges(
             edge.properties = edgeProps.dump();
             contextEdges.push_back(edge);
         }
-        if (contextNodes.fileNodeId.has_value()) {
+        if (contextNodes.pathNodeId.has_value()) {
+            yams::metadata::KGEdge edge;
+            edge.srcNodeId = symNodeId;
+            edge.dstNodeId = contextNodes.pathNodeId.value();
+            edge.relation = "located_in";
+            edge.weight = 1.0f;
+            contextEdges.push_back(edge);
+        } else if (contextNodes.fileNodeId.has_value()) {
             yams::metadata::KGEdge edge;
             edge.srcNodeId = symNodeId;
             edge.dstNodeId = contextNodes.fileNodeId.value();
@@ -416,11 +475,30 @@ yams::Result<void> EntityGraphService::createSymbolEdges(
         kg->addEdgesUnique(contextEdges);
     }
 
+    // Canonical -> version edges for snapshot tracking
+    if (!job.documentHash.empty()) {
+        std::vector<yams::metadata::KGEdge> versionEdges;
+        versionEdges.reserve(nodes.canonicalNodeIds.size());
+        for (size_t i = 0; i < nodes.canonicalNodeIds.size(); ++i) {
+            yams::metadata::KGEdge edge;
+            edge.srcNodeId = nodes.canonicalNodeIds[i];
+            edge.dstNodeId = nodes.versionNodeIds[i];
+            edge.relation = "observed_as";
+            edge.weight = 1.0f;
+            nlohmann::json props;
+            props["snapshot_id"] = job.documentHash;
+            props["document_hash"] = job.documentHash;
+            edge.properties = props.dump();
+            versionEdges.push_back(edge);
+        }
+        kg->addEdgesUnique(versionEdges);
+    }
+
     // Symbol-to-symbol Edges
     if (result->relation_count > 0) {
         std::unordered_map<std::string, std::int64_t> qualNameToId;
-        for (size_t i = 0; i < symbolKeys.size(); ++i) {
-            qualNameToId[symbolKeys[i]] = symbolNodeIds[i];
+        for (size_t i = 0; i < nodes.symbolKeys.size(); ++i) {
+            qualNameToId[nodes.symbolKeys[i]] = nodes.versionNodeIds[i];
         }
 
         std::vector<yams::metadata::KGEdge> symbolEdges;
@@ -434,6 +512,22 @@ yams::Result<void> EntityGraphService::createSymbolEdges(
             auto aliasRes = kg->resolveAliasExact(key, 1);
             if (aliasRes.has_value() && !aliasRes.value().empty())
                 return aliasRes.value()[0].nodeId;
+            return std::nullopt;
+        };
+
+        auto resolveOrCreatePathNode = [&](const std::string& path) -> std::optional<std::int64_t> {
+            if (job.documentHash.empty()) {
+                return std::nullopt;
+            }
+            yams::metadata::PathNodeDescriptor descriptor;
+            descriptor.snapshotId = job.documentHash;
+            descriptor.path = path;
+            descriptor.rootTreeHash = "";
+            descriptor.isDirectory = false;
+            auto nodeRes = kg->ensurePathNode(descriptor);
+            if (nodeRes.has_value()) {
+                return nodeRes.value();
+            }
             return std::nullopt;
         };
 
@@ -478,8 +572,16 @@ yams::Result<void> EntityGraphService::createSymbolEdges(
             if (kind == "includes") {
                 // For includes: src is the source file, dst is the included file/module
                 // Use the current file node as source
-                srcNodeIdOpt = contextNodes.fileNodeId;
-                dstNodeIdOpt = resolveOrCreateFileNode(dst);
+                if (contextNodes.pathNodeId.has_value()) {
+                    srcNodeIdOpt = contextNodes.pathNodeId;
+                } else {
+                    srcNodeIdOpt = contextNodes.fileNodeId;
+                }
+                if (auto pathNode = resolveOrCreatePathNode(dst)) {
+                    dstNodeIdOpt = pathNode;
+                } else {
+                    dstNodeIdOpt = resolveOrCreateFileNode(dst);
+                }
             } else {
                 // For calls, inherits, implements: resolve as symbols
                 srcNodeIdOpt = resolveSymbolNodeId(src);
@@ -489,6 +591,8 @@ yams::Result<void> EntityGraphService::createSymbolEdges(
             if (srcNodeIdOpt && dstNodeIdOpt) {
                 nlohmann::json relProps;
                 relProps["source_file"] = job.filePath;
+                if (!job.documentHash.empty())
+                    relProps["snapshot_id"] = job.documentHash;
                 relProps["timestamp"] = now;
                 yams::metadata::KGEdge edge;
                 edge.srcNodeId = *srcNodeIdOpt;

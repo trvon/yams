@@ -9,6 +9,7 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/integrity/repair_manager.h>
+#include <yams/metadata/knowledge_graph_store.h>
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -74,6 +75,7 @@ void BackgroundTaskManager::start() {
         launchPathTreeRepairTask();
         launchCheckpointTask();
         launchStorageGcTask();
+        launchGraphPruneTask();
         spdlog::info("[BackgroundTaskManager] Background tasks launched successfully");
     } catch (const std::exception& e) {
         spdlog::error("[BackgroundTaskManager] Failed to launch background tasks: {}", e.what());
@@ -518,6 +520,60 @@ void BackgroundTaskManager::launchStorageGcTask() {
                 }
             }
             spdlog::debug("[StorageGC] Task stopped");
+            co_return;
+        },
+        boost::asio::detached);
+}
+
+void BackgroundTaskManager::launchGraphPruneTask() {
+    auto self = deps_.serviceManager.lock();
+    if (!self) {
+        throw std::runtime_error(
+            "BackgroundTaskManager: ServiceManager weak_ptr expired in launchGraphPruneTask");
+    }
+
+    const auto& cfg = self->getConfig().graphPrune;
+    if (!cfg.enabled) {
+        spdlog::debug("[BackgroundTaskManager] Graph prune disabled, skipping task");
+        return;
+    }
+
+    auto exec = deps_.executor;
+    auto stopFlag = stopRequested_;
+    const auto interval = cfg.interval;
+    const auto initialDelay = cfg.initialDelay;
+    const auto keepLatest = cfg.keepLatestPerCanonical;
+
+    spdlog::debug("[BackgroundTaskManager] Launching GraphPrune task");
+    boost::asio::co_spawn(
+        exec,
+        [self, stopFlag, interval, initialDelay, keepLatest]() -> boost::asio::awaitable<void> {
+            using namespace std::chrono_literals;
+            auto executor = co_await boost::asio::this_coro::executor;
+            boost::asio::steady_timer timer(executor);
+
+            if (initialDelay.count() > 0) {
+                timer.expires_after(initialDelay);
+                co_await timer.async_wait(boost::asio::use_awaitable);
+            }
+
+            while (!stopFlag->load(std::memory_order_acquire)) {
+                auto kg = self->getKgStore();
+                if (kg) {
+                    yams::metadata::GraphVersionPruneConfig pruneCfg;
+                    pruneCfg.keepLatestPerCanonical = keepLatest;
+                    auto res = kg->pruneVersionNodes(pruneCfg);
+                    if (!res) {
+                        spdlog::warn("[GraphPrune] prune failed: {}", res.error().message);
+                    } else if (res.value() > 0) {
+                        spdlog::info("[GraphPrune] pruned {} version nodes", res.value());
+                    }
+                }
+
+                timer.expires_after(interval);
+                co_await timer.async_wait(boost::asio::use_awaitable);
+            }
+
             co_return;
         },
         boost::asio::detached);

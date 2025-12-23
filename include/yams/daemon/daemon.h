@@ -65,6 +65,13 @@ struct DaemonConfig {
     // Path to loaded config file for reloads
     std::filesystem::path configFilePath;
 
+    struct GraphPrunePolicy {
+        bool enabled{false};
+        std::size_t keepLatestPerCanonical{3};
+        std::chrono::minutes interval{60};
+        std::chrono::minutes initialDelay{10};
+    } graphPrune;
+
     // Forward decls for GTEST-only accessors are below guarded by YAMS_TESTING
     struct DownloadPolicy {
         bool enable{false};                               // feature gate

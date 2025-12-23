@@ -358,7 +358,11 @@ boost::asio::awaitable<Response> RequestDispatcher::handleListRequest(const List
                 serviceReq.pattern = req.namePattern;
             }
 
-            auto result = docService->list(serviceReq);
+            // Offload heavy database query to worker thread to avoid blocking IPC strand
+            auto result = co_await yams::daemon::dispatch::offload_to_worker(
+                serviceManager_, [docService, serviceReq = std::move(serviceReq)]() mutable {
+                    return docService->list(serviceReq);
+                });
             if (!result) {
                 co_return ErrorResponse{result.error().code, result.error().message};
             }

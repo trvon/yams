@@ -1206,6 +1206,23 @@ Result<void> MetadataRepository::indexDocumentContent(int64_t documentId, const 
             return {};
         }
 
+        // Verify document exists before indexing (FTS5 doesn't enforce foreign keys)
+        auto checkStmt = db.prepare("SELECT COUNT(*) FROM documents WHERE id = ?");
+        if (!checkStmt)
+            return checkStmt.error();
+        Statement checkS = std::move(checkStmt).value();
+        auto checkBind = checkS.bind(1, documentId);
+        if (!checkBind)
+            return checkBind.error();
+        auto checkStep = checkS.step();
+        if (!checkStep)
+            return checkStep.error();
+        if (checkS.getInt(0) == 0) {
+            return Error{ErrorCode::NotFound,
+                         "Document ID " + std::to_string(documentId) +
+                             " not found - cannot index content for non-existent document"};
+        }
+
         // Delete existing entry first (FTS5 doesn't support ON CONFLICT well)
         auto deleteResult =
             db.execute("DELETE FROM documents_fts WHERE rowid = " + std::to_string(documentId));

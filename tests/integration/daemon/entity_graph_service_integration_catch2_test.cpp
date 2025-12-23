@@ -113,6 +113,10 @@ public:
         return hash;
     }
 
+    std::string buildFilePath(const std::string& filename) const {
+        return (testDir_ / filename).string();
+    }
+
     // Get KG store for direct queries
     std::shared_ptr<KnowledgeGraphStore> getKgStore() { return serviceManager_->getKgStore(); }
 
@@ -220,6 +224,87 @@ TEST_CASE("EntityGraphService: Symbol extraction creates KG nodes",
         std::string cppCode = R"(
 int add(int a, int b) {
     return a + b;
+}
+
+TEST_CASE("EntityGraphService: Snapshot version nodes and pruning",
+          "[integration][daemon][kg][pbi-009][versioning]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
+    EntityGraphIntegrationFixture fixture;
+
+    if (!fixture.supportsCpp()) {
+        SKIP("C++ grammar not available");
+    }
+
+    auto kg = fixture.getKgStore();
+    REQUIRE(kg != nullptr);
+
+    const std::string filename = "versioned_symbols.cpp";
+    const std::string filePath = fixture.buildFilePath(filename);
+
+    std::string cppCodeV1 = "int foo() { return 1; }";
+    std::string cppCodeV2 = "int foo() { return 2; }";
+
+    auto hashV1 = fixture.storeContent(filename, cppCodeV1);
+    REQUIRE(fixture.submitAndWaitForExtraction(hashV1, filePath, cppCodeV1, "cpp", 3000));
+
+    // Ensure the second version has a later timestamp
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    auto hashV2 = fixture.storeContent(filename, cppCodeV2);
+    REQUIRE(fixture.submitAndWaitForExtraction(hashV2, filePath, cppCodeV2, "cpp", 3000));
+
+    // Find canonical key for foo in this file
+    auto funcNodesResult = kg->findNodesByType("function", 200, 0);
+    REQUIRE(funcNodesResult.has_value());
+
+    std::optional<std::string> canonicalKey;
+    for (const auto& node : funcNodesResult.value()) {
+        if (node.nodeKey.find(std::string("@") + filePath) == std::string::npos) {
+            continue;
+        }
+        if (node.label.has_value() && node.label.value() == "foo") {
+            canonicalKey = node.nodeKey;
+            break;
+        }
+        if (node.nodeKey.find("foo") != std::string::npos) {
+            canonicalKey = node.nodeKey;
+            break;
+        }
+    }
+    REQUIRE(canonicalKey.has_value());
+
+    const std::string versionKeyV1 = canonicalKey.value() + "@snap:" + hashV1;
+    const std::string versionKeyV2 = canonicalKey.value() + "@snap:" + hashV2;
+
+    auto v1Node = kg->getNodeByKey(versionKeyV1);
+    REQUIRE(v1Node.has_value());
+    CHECK(v1Node.value().has_value());
+
+    auto v2Node = kg->getNodeByKey(versionKeyV2);
+    REQUIRE(v2Node.has_value());
+    CHECK(v2Node.value().has_value());
+
+    // Prune to keep only the latest version for this canonical node
+    yams::metadata::GraphVersionPruneConfig pruneCfg;
+    pruneCfg.keepLatestPerCanonical = 1;
+    auto pruneResult = kg->pruneVersionNodes(pruneCfg);
+    REQUIRE(pruneResult.has_value());
+
+    auto v1After = kg->getNodeByKey(versionKeyV1);
+    REQUIRE(v1After.has_value());
+    CHECK(!v1After.value().has_value());
+
+    auto v2After = kg->getNodeByKey(versionKeyV2);
+    REQUIRE(v2After.has_value());
+    CHECK(v2After.value().has_value());
+
+    // Ensure observed_as edges are now at most 1 for this canonical node
+    auto canonicalNodeRes = kg->getNodeByKey(canonicalKey.value());
+    REQUIRE(canonicalNodeRes.has_value());
+    REQUIRE(canonicalNodeRes.value().has_value());
+    auto edgesRes = kg->getEdgesFrom(canonicalNodeRes.value()->id, "observed_as", 10, 0);
+    REQUIRE(edgesRes.has_value());
+    CHECK(edgesRes.value().size() <= 1);
 }
 
 int multiply(int x, int y) {

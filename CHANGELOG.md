@@ -48,3 +48,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - MCP `graph` tool for knowledge graph queries (parity with CLI `yams graph`).
+- Snapshot-scoped graph version nodes with canonical roots and `observed_as` edges.
+- Graph prune policy (configurable `daemon.graph_prune`) to keep latest snapshot versions.
+- Integration coverage for snapshot versioning + pruning in EntityGraphService tests.

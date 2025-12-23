@@ -310,6 +310,35 @@ int main(int argc, char* argv[]) {
                 config.enableModelProvider = config.autoLoadPlugins;
             }
 
+            // [daemon.graph_prune] section: graph version pruning policy
+            if (tomlConfig.find("daemon.graph_prune") != tomlConfig.end()) {
+                const auto& pruneSection = tomlConfig.at("daemon.graph_prune");
+                if (auto it = pruneSection.find("enabled"); it != pruneSection.end()) {
+                    config.graphPrune.enabled = (it->second == "true");
+                }
+                if (auto it = pruneSection.find("keep_latest"); it != pruneSection.end()) {
+                    try {
+                        config.graphPrune.keepLatestPerCanonical =
+                            static_cast<size_t>(std::stoul(it->second));
+                    } catch (...) {
+                    }
+                }
+                if (auto it = pruneSection.find("interval_minutes"); it != pruneSection.end()) {
+                    try {
+                        config.graphPrune.interval = std::chrono::minutes{std::stol(it->second)};
+                    } catch (...) {
+                    }
+                }
+                if (auto it = pruneSection.find("initial_delay_minutes");
+                    it != pruneSection.end()) {
+                    try {
+                        config.graphPrune.initialDelay =
+                            std::chrono::minutes{std::stol(it->second)};
+                    } catch (...) {
+                    }
+                }
+            }
+
             // [plugins] section: trust list for ABI and external plugins
             if (tomlConfig.find("plugins") != tomlConfig.end()) {
                 const auto& pluginsSection = tomlConfig.at("plugins");

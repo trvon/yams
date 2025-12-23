@@ -353,6 +353,14 @@ struct ConfigV2 {
         int connect_timeout_ms = 1000;
         int request_timeout_ms = 5000;
 
+        // Graph prune policy (snapshot version retention)
+        struct GraphPrune {
+            bool enabled = false;
+            size_t keep_latest = 3;
+            int interval_minutes = 60;
+            int initial_delay_minutes = 10;
+        } graph_prune;
+
         // Model management
         struct Models {
             size_t max_loaded_models = 3; // Max models in memory

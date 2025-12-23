@@ -1551,6 +1551,38 @@ public:
     }
 
     // Maintenance
+    Result<std::int64_t> pruneVersionNodes(const GraphVersionPruneConfig& cfg) override {
+        if (cfg.keepLatestPerCanonical == 0) {
+            return 0;
+        }
+        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+            auto stmtR = db.prepare(R"(
+                WITH ranked AS (
+                    SELECT id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY json_extract(properties, '$.canonical_key')
+                               ORDER BY COALESCE(updated_time, created_time, 0) DESC, id DESC
+                           ) AS rn
+                    FROM kg_nodes
+                    WHERE json_extract(properties, '$.snapshot_id') IS NOT NULL
+                      AND json_extract(properties, '$.canonical_key') IS NOT NULL
+                )
+                DELETE FROM kg_nodes
+                WHERE id IN (SELECT id FROM ranked WHERE rn > ?)
+            )");
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+            auto br = stmt.bind(1, static_cast<std::int64_t>(cfg.keepLatestPerCanonical));
+            if (!br)
+                return br.error();
+            auto execR = stmt.execute();
+            if (!execR)
+                return execR.error();
+            return db.changes();
+        });
+    }
+
     Result<void> optimize() override {
         auto res = pool_->withConnection(
             [](Database& db) -> Result<void> { return db.execute("PRAGMA optimize"); });

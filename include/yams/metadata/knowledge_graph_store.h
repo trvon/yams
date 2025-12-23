@@ -109,6 +109,10 @@ struct KGNodeStats {
     std::optional<std::int64_t> lastComputed;  // Unix seconds
 };
 
+struct GraphVersionPruneConfig {
+    std::size_t keepLatestPerCanonical = 3;
+};
+
 struct PathNodeDescriptor {
     std::string snapshotId;
     std::string path; // Normalized path within snapshot
@@ -313,6 +317,10 @@ public:
     // -----------------------------------------------------------------------------
     // Maintenance / Utilities
     // -----------------------------------------------------------------------------
+
+    // Prune versioned nodes (nodes with properties.snapshot_id) to keep only the
+    // latest N versions per canonical key. Returns number of nodes deleted.
+    virtual Result<std::int64_t> pruneVersionNodes(const GraphVersionPruneConfig& cfg) = 0;
 
     // Optimize internal indexes/tables if applicable
     virtual Result<void> optimize() = 0;
