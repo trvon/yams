@@ -1212,6 +1212,32 @@ TEST_CASE("Filter - Multiple tags", "[search][filter][tags]") {
     REQUIRE(resp.results.size() > 0);
 }
 
+TEST_CASE("Filter - Tag mismatch excludes results", "[search][filter][tags][hybrid]") {
+    SKIP_HYBRID_ON_WINDOWS();
+    SearchServiceFixture fixture;
+
+    app::services::SearchRequest req;
+    req.query = "SearchEngine"; // present in tagged code corpus
+    req.tags = {"code"};
+    req.matchAllTags = true;
+    req.limit = 5;
+
+    auto tagged = fixture.executeSearch(req);
+    REQUIRE_FALSE(tagged.results.empty());
+    for (const auto& result : tagged.results) {
+        const bool in_expected_corpus =
+            result.path.find("search_engine.cpp") != std::string::npos ||
+            result.path.find("test_search.cpp") != std::string::npos ||
+            result.path.find("pipeline.cpp") != std::string::npos;
+        REQUIRE(in_expected_corpus);
+    }
+
+    req.tags = {"binary"}; // mismatch: should filter everything out
+    auto mismatched = fixture.executeSearch(req);
+    REQUIRE(mismatched.results.empty());
+    REQUIRE(mismatched.total == 0);
+}
+
 TEST_CASE("Filter - Combined path and tags", "[search][filter][combined]") {
     SKIP_HYBRID_ON_WINDOWS();
     SearchServiceFixture fixture;

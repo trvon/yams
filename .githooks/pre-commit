@@ -1,27 +1,33 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Find staged C/C++ files
-files=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(c|cc|cpp|cxx|h|hh|hpp)$' || true)
-if [ -z "$files" ]; then
+# Determine repository root
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+FORMAT_SCRIPT="$REPO_ROOT/scripts/format-code.sh"
+
+# Collect staged C/C++ files (only these will be formatted)
+files=()
+while IFS= read -r line; do
+  [[ -n "$line" ]] && files+=("$line")
+done < <(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(c|cc|cpp|cxx|h|hh|hpp)$' || true)
+if [[ ${#files[@]} -eq 0 ]]; then
   exit 0
 fi
 
-# Run clang-format check
-fail=0
-for f in $files; do
-  if [ -f "$f" ]; then
-    clang-format --dry-run --Werror "$f" || fail=1
-  fi
-done
-if [ "$fail" -ne 0 ]; then
-  echo "clang-format check failed. Run 'clang-format -i <files>' or use your IDE formatter." >&2
+# Format staged files and restage them
+printf '%s\n' "${files[@]}" | "$FORMAT_SCRIPT" --serial --stdin-files
+git add -- "${files[@]}"
+
+# Verify formatting matches expectations
+if ! printf '%s\n' "${files[@]}" | "$FORMAT_SCRIPT" --check --serial --stdin-files; then
+  echo "clang-format check failed. Run 'scripts/format-code.sh --git' to fix formatting." >&2
   exit 1
 fi
 
 # Optional clang-tidy (set YAMS_LINT_TIDY=1)
 if [ "${YAMS_LINT_TIDY:-}" = "1" ]; then
-  for f in $files; do
+  for f in "${files[@]}"; do
     if [ -f "$f" ]; then
       clang-tidy "$f" --quiet || true
     fi

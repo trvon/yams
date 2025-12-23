@@ -574,6 +574,29 @@ public:
     static void setIpcTimeoutMs(uint32_t ms) {
         ipcTimeoutMsOverride_.store(ms, std::memory_order_relaxed);
     }
+
+    // Timeout for streaming chunk production (ms). When nonzero, a streaming
+    // response will be failed with a Timeout error if next_chunk() exceeds this
+    // limit. Default 30000ms; env: YAMS_STREAM_CHUNK_TIMEOUT_MS. Range clamp
+    // [1000, 600000].
+    static uint32_t streamChunkTimeoutMs() {
+        uint32_t ov = streamChunkTimeoutMsOverride_.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+        uint32_t def = 30000;
+        if (const char* s = std::getenv("YAMS_STREAM_CHUNK_TIMEOUT_MS")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1000 && v <= 600000)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return def;
+    }
+    static void setStreamChunkTimeoutMs(uint32_t ms) {
+        streamChunkTimeoutMsOverride_.store(ms, std::memory_order_relaxed);
+    }
     static uint32_t mcpWorkerThreads() { return mcpWorkerThreads_.load(std::memory_order_relaxed); }
     static void setMcpWorkerThreads(uint32_t n) {
         mcpWorkerThreads_.store(n, std::memory_order_relaxed);
@@ -1390,6 +1413,7 @@ private:
     static inline std::atomic<uint32_t> ioThreadCountOverride_{0};
     static inline std::atomic<int> enablePriorityQueueOverride_{-1};
     static inline std::atomic<uint32_t> maxIdleTimeoutsOverride_{0};
+    static inline std::atomic<uint32_t> streamChunkTimeoutMsOverride_{0};
     static inline std::atomic<uint32_t> requestQueueDepth_{0};
     static inline std::atomic<bool> requestQueueBackpressure_{false};
 

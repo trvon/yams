@@ -17,10 +17,32 @@ DRY_RUN=false
 GIT_ONLY=false
 PARALLEL=true
 VERBOSE=false
+READ_FROM_STDIN=false
 
 # Script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# clang-format invocation settings
+CLANG_FORMAT_ARGS=("--style=file")
+DISABLE_INCLUDE_SORT=false
+case "${OSTYPE:-}" in
+    msys*|cygwin*|win32*|mingw*)
+        DISABLE_INCLUDE_SORT=true
+        CLANG_FORMAT_ARGS+=("--sort-includes=0")
+        ;;
+esac
+CLANG_FORMAT_ARGS_STRING="${CLANG_FORMAT_ARGS[*]}"
+export CLANG_FORMAT_ARGS_STRING
+
+run_clang_format() {
+    if [[ -n "${CLANG_FORMAT_ARGS_STRING:-}" ]]; then
+        # shellcheck disable=SC2086
+        clang-format ${CLANG_FORMAT_ARGS_STRING} "$@"
+    else
+        clang-format "$@"
+    fi
+}
 
 # Function to print colored output
 print_color() {
@@ -39,6 +61,7 @@ Options:
     -d, --dry-run    Show which files would be changed without modifying them
     -g, --git        Only format files changed in git (staged and unstaged)
     -s, --serial     Run formatting serially instead of in parallel
+        --stdin-files Read newline-separated file list from stdin
     -v, --verbose    Show detailed output
     -h, --help       Show this help message
 
@@ -81,6 +104,10 @@ while [[ $# -gt 0 ]]; do
             VERBOSE=true
             shift
             ;;
+        --stdin-files)
+            READ_FROM_STDIN=true
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -112,8 +139,18 @@ fi
 # Change to project root
 cd "$PROJECT_ROOT"
 
+if [[ "$DISABLE_INCLUDE_SORT" == true ]]; then
+    print_color "$YELLOW" "Detected Windows environment; preserving include order (disabling clang-format include sorting)"
+fi
+
 # Get list of files to format
-if [[ "$GIT_ONLY" == true ]]; then
+FILE_ARRAY=()
+if [[ "$READ_FROM_STDIN" == true ]]; then
+    print_color "$BLUE" "Reading file list from stdin..."
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && FILE_ARRAY+=("$line")
+    done
+elif [[ "$GIT_ONLY" == true ]]; then
     # Get list of modified files (staged and unstaged)
     print_color "$BLUE" "Getting list of git-modified files..."
     
@@ -140,7 +177,6 @@ else
     print_color "$BLUE" "Finding all C++ source files..."
     
     # Use find with exclusions (portable method)
-    FILE_ARRAY=()
     while IFS= read -r line; do
         FILE_ARRAY+=("$line")
     done < <(find . \
@@ -176,7 +212,7 @@ format_file() {
     
     if [[ "$mode" == "check" ]]; then
         # Check if file needs formatting
-        if ! clang-format --dry-run --Werror "$file" &>/dev/null; then
+        if ! run_clang_format --dry-run --Werror "$file" &>/dev/null; then
             if [[ "$verbose" == true ]]; then
                 print_color "$YELLOW" "Needs formatting: $file"
             fi
@@ -192,7 +228,7 @@ format_file() {
         if [[ "$dry_run" == true ]]; then
             # Show diff without applying
             local diff
-            diff=$(clang-format "$file" | diff -u "$file" - || true)
+            diff=$(run_clang_format "$file" | diff -u "$file" - || true)
             if [[ -n "$diff" ]]; then
                 print_color "$YELLOW" "Would change: $file"
                 if [[ "$verbose" == true ]]; then
@@ -207,7 +243,7 @@ format_file() {
             fi
         else
             # Actually format the file
-            clang-format -i "$file"
+            run_clang_format -i "$file"
             if [[ "$verbose" == true ]]; then
                 print_color "$GREEN" "Formatted: $file"
             fi
@@ -217,7 +253,7 @@ format_file() {
 }
 
 # Export function for parallel execution
-export -f format_file print_color
+export -f format_file print_color run_clang_format
 export RED GREEN YELLOW BLUE NC
 
 # Process files

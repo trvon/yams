@@ -3940,6 +3940,114 @@ MCPServer::handleSessionUnpin(const MCPSessionUnpinRequest& req) {
     co_return out;
 }
 
+boost::asio::awaitable<Result<MCPGraphResponse>>
+MCPServer::handleGraphQuery(const MCPGraphRequest& req) {
+    if (auto ensure = ensureDaemonClient(); !ensure) {
+        co_return ensure.error();
+    }
+
+    // Build daemon GraphQueryRequest from MCPGraphRequest
+    yams::daemon::GraphQueryRequest dreq;
+    dreq.documentHash = req.hash;
+    dreq.documentName = req.name;
+    dreq.nodeKey = req.nodeKey;
+    dreq.nodeId = req.nodeId;
+
+    // Mode flags
+    dreq.listTypes = req.listTypes;
+    dreq.listByType = !req.listType.empty();
+    dreq.nodeType = req.listType;
+    dreq.isolatedMode = req.isolated;
+    if (!req.relationFilters.empty()) {
+        dreq.isolatedRelation = req.relationFilters.front();
+    }
+
+    // Traversal options
+    dreq.relationFilters = req.relationFilters;
+    if (!req.relation.empty() && dreq.relationFilters.empty()) {
+        dreq.relationFilters.push_back(req.relation);
+    }
+    dreq.maxDepth = req.depth;
+    dreq.limit = static_cast<uint32_t>(req.limit);
+    dreq.offset = static_cast<uint32_t>(req.offset);
+    dreq.reverseTraversal = req.reverse;
+
+    // Output control
+    dreq.includeNodeProperties = req.includeNodeProperties;
+    dreq.includeEdgeProperties = req.includeEdgeProperties;
+    dreq.hydrateFully = req.hydrateFully;
+
+    // Snapshot scoping
+    dreq.scopeToSnapshot = req.scopeSnapshot;
+
+    // Send the request
+    auto res = co_await daemon_client_->call<yams::daemon::GraphQueryRequest>(dreq);
+    if (!res) {
+        co_return res.error();
+    }
+
+    const auto& resp = res.value();
+
+    // Build MCP response
+    MCPGraphResponse out;
+
+    // Convert origin node to JSON
+    out.origin = json::object();
+    out.origin["nodeId"] = resp.originNode.nodeId;
+    out.origin["type"] = resp.originNode.type;
+    out.origin["nodeKey"] = resp.originNode.nodeKey;
+    out.origin["documentHash"] = resp.originNode.documentHash;
+    out.origin["documentPath"] = resp.originNode.documentPath;
+    if (!resp.originNode.label.empty()) {
+        out.origin["label"] = resp.originNode.label;
+    }
+    if (!resp.originNode.snapshotId.empty()) {
+        out.origin["snapshotId"] = resp.originNode.snapshotId;
+    }
+    if (!resp.originNode.properties.empty()) {
+        out.origin["properties"] = json::parse(resp.originNode.properties, nullptr, false);
+    }
+
+    // Convert connected nodes to JSON array
+    out.connectedNodes = json::array();
+    for (const auto& node : resp.connectedNodes) {
+        json jnode;
+        jnode["nodeId"] = node.nodeId;
+        jnode["type"] = node.type;
+        jnode["nodeKey"] = node.nodeKey;
+        jnode["documentHash"] = node.documentHash;
+        jnode["documentPath"] = node.documentPath;
+        jnode["distance"] = node.distance;
+        if (!node.label.empty()) {
+            jnode["label"] = node.label;
+        }
+        if (!node.snapshotId.empty()) {
+            jnode["snapshotId"] = node.snapshotId;
+        }
+        if (!node.properties.empty()) {
+            jnode["properties"] = json::parse(node.properties, nullptr, false);
+        }
+        out.connectedNodes.push_back(std::move(jnode));
+    }
+
+    // Convert node type counts
+    out.nodeTypeCounts = json::object();
+    for (const auto& [type, count] : resp.nodeTypeCounts) {
+        out.nodeTypeCounts[type] = count;
+    }
+
+    // Copy statistics
+    out.totalNodesFound = resp.totalNodesFound;
+    out.totalEdgesTraversed = resp.totalEdgesTraversed;
+    out.truncated = resp.truncated;
+    out.maxDepthReached = resp.maxDepthReached;
+    out.queryTimeMs = resp.queryTimeMs;
+    out.kgAvailable = resp.kgAvailable;
+    out.warning = resp.warning;
+
+    co_return out;
+}
+
 void MCPServer::initializeToolRegistry() {
     toolRegistry_ = std::make_unique<ToolRegistry>();
 
@@ -4274,7 +4382,8 @@ void MCPServer::initializeToolRegistry() {
               {{"collection", {{"type", "string"}, {"description", "Collection name"}}},
                {"snapshot_id", {{"type", "string"}, {"description", "Snapshot ID"}}},
                {"snapshot_label",
-                {{"type", "string"}, {"description", "Snapshot label (alternative to snapshot_id)"}}},
+                {{"type", "string"},
+                 {"description", "Snapshot label (alternative to snapshot_id)"}}},
                {"output_directory", {{"type", "string"}, {"description", "Output directory"}}},
                {"layout_template",
                 {{"type", "string"},
@@ -4320,6 +4429,52 @@ void MCPServer::initializeToolRegistry() {
                      {"description", "Include snapshot labels"},
                      {"default", true}}}}}},
             "List available snapshots");
+
+        toolRegistry_->registerTool<MCPGraphRequest, MCPGraphResponse>(
+            "graph", [this](const MCPGraphRequest& req) { return handleGraphQuery(req); },
+            json{{"type", "object"},
+                 {"properties",
+                  {{"hash", {{"type", "string"}, {"description", "Document hash to query from"}}},
+                   {"name", {{"type", "string"}, {"description", "Document name to query from"}}},
+                   {"node_key",
+                    {{"type", "string"},
+                     {"description", "Direct node key lookup (e.g., fn:abc:0x1000)"}}},
+                   {"node_id", {{"type", "integer"}, {"description", "Direct node ID lookup"}}},
+                   {"list_types",
+                    {{"type", "boolean"},
+                     {"description", "List available node types with counts"},
+                     {"default", false}}},
+                   {"list_type",
+                    {{"type", "string"},
+                     {"description", "List nodes of specific type (e.g., binary.function)"}}},
+                   {"isolated",
+                    {{"type", "boolean"},
+                     {"description", "Find isolated nodes (no incoming edges)"},
+                     {"default", false}}},
+                   {"relation",
+                    {{"type", "string"},
+                     {"description", "Filter by relation type (e.g., calls, imports)"}}},
+                   {"depth",
+                    {{"type", "integer"},
+                     {"description", "BFS traversal depth (1-5)"},
+                     {"default", 1},
+                     {"minimum", 1},
+                     {"maximum", 5}}},
+                   {"limit",
+                    {{"type", "integer"}, {"description", "Maximum results"}, {"default", 100}}},
+                   {"offset",
+                    {{"type", "integer"}, {"description", "Pagination offset"}, {"default", 0}}},
+                   {"reverse",
+                    {{"type", "boolean"},
+                     {"description", "Traverse incoming edges instead of outgoing"},
+                     {"default", false}}},
+                   {"include_properties",
+                    {{"type", "boolean"},
+                     {"description", "Include node and edge properties"},
+                     {"default", false}}},
+                   {"scope_snapshot",
+                    {{"type", "string"}, {"description", "Scope results to specific snapshot"}}}}}},
+            "Query the knowledge graph to explore relationships between documents and entities");
     }
 }
 

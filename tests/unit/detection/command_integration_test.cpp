@@ -1,4 +1,6 @@
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
@@ -77,7 +79,23 @@ TEST_CASE_METHOD(CommandIntegrationFixture, "findMagicNumbersFile respects searc
     auto localMagic =
         dir.createDataFile("data/magic_numbers.json", R"({"version":"1.0","patterns":[]})");
     auto foundPath = YamsCLI::findMagicNumbersFile();
+#if defined(__APPLE__)
+    // macOS: /var is a symlink to /private/var, so canonicalize both paths
+    std::error_code ec;
+    auto canonicalFound = fs::canonical(foundPath, ec);
+    auto canonicalLocal = fs::canonical(localMagic, ec);
+    CHECK(canonicalFound == canonicalLocal);
+#elif defined(_WIN32)
+    // Windows: case-insensitive path comparison
+    auto foundStr = foundPath.string();
+    auto localStr = localMagic.string();
+    std::transform(foundStr.begin(), foundStr.end(), foundStr.begin(), ::tolower);
+    std::transform(localStr.begin(), localStr.end(), localStr.begin(), ::tolower);
+    CHECK(foundStr == localStr);
+#else
+    // Linux: direct comparison
     CHECK(foundPath == localMagic);
+#endif
 }
 
 TEST_CASE_METHOD(CommandIntegrationFixture, "detector initializes from CLI config",

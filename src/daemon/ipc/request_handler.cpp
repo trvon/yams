@@ -16,6 +16,7 @@
 #include <array>
 #include <chrono>
 #include <span>
+#include <string>
 #include <tuple>
 #include <utility>
 #include <boost/asio/awaitable.hpp>
@@ -1821,7 +1822,33 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                 co_return Error{ErrorCode::OperationCancelled, "Request canceled"};
             }
         }
-        auto chunk_result = co_await processor->next_chunk();
+        RequestProcessor::ResponseChunk chunk_result{};
+        if (config_.stream_chunk_timeout.count() > 0) {
+            using namespace boost::asio::experimental::awaitable_operators;
+            boost::asio::steady_timer chunk_timer(co_await boost::asio::this_coro::executor);
+            chunk_timer.expires_after(config_.stream_chunk_timeout);
+
+            auto chunk_or_timeout =
+                co_await (processor->next_chunk() ||
+                          chunk_timer.async_wait(
+                              boost::asio::experimental::as_tuple(boost::asio::use_awaitable)));
+
+            if (chunk_or_timeout.index() == 1) {
+                // next_chunk() exceeded timeout; emit a terminal timeout chunk to unblock client
+                const auto timeout_ms = config_.stream_chunk_timeout.count();
+                ErrorResponse err{ErrorCode::Timeout, "Streaming chunk timed out after " +
+                                                          std::to_string(timeout_ms) + " ms"};
+                chunk_result = RequestProcessor::ResponseChunk{.data = Response{std::move(err)},
+                                                               .is_last_chunk = true};
+                last_chunk_received = true;
+                spdlog::warn("stream_chunks: next_chunk() timed out after {} ms (request_id={})",
+                             timeout_ms, request_id);
+            } else {
+                chunk_result = std::get<0>(std::move(chunk_or_timeout));
+            }
+        } else {
+            chunk_result = co_await processor->next_chunk();
+        }
         spdlog::debug("stream_chunks processor->next_chunk() returned req_id={} last={}",
                       request_id, chunk_result.is_last_chunk);
         last_chunk_received = chunk_result.is_last_chunk;

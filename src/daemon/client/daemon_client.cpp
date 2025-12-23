@@ -76,12 +76,13 @@ TimeoutCategory getTimeoutCategory(const Request& req) {
                           std::is_same_v<T, ShutdownRequest>) {
                 return TimeoutCategory::Fast;
             }
-            // Slow operations (120s) - may involve embeddings/heavy processing
+            // Slow operations (120s) - heavy or maintenance work
             else if constexpr (std::is_same_v<T, AddDocumentRequest> ||
                                std::is_same_v<T, GenerateEmbeddingRequest> ||
                                std::is_same_v<T, UpdateDocumentRequest> ||
                                std::is_same_v<T, EmbedDocumentsRequest> ||
-                               std::is_same_v<T, BatchEmbeddingRequest>) {
+                               std::is_same_v<T, BatchEmbeddingRequest> ||
+                               std::is_same_v<T, PruneRequest>) {
                 return TimeoutCategory::Slow;
             }
             // Medium operations (30s) - queries and moderate work
@@ -92,16 +93,21 @@ TimeoutCategory getTimeoutCategory(const Request& req) {
         req);
 }
 
+// Requests that should use fresh, single-use connections (avoid pooled reuse)
+bool requires_single_use_connection(const Request& req) {
+    return std::holds_alternative<PruneRequest>(req);
+}
+
 // Get timeout milliseconds for a category
 std::chrono::milliseconds getTimeoutForCategory(TimeoutCategory cat) {
     switch (cat) {
-    case TimeoutCategory::Fast:
-        return std::chrono::milliseconds(5000); // 5s
-    case TimeoutCategory::Medium:
-        return std::chrono::milliseconds(30000); // 30s
-    case TimeoutCategory::Slow:
-    default:
-        return std::chrono::milliseconds(120000); // 120s
+        case TimeoutCategory::Fast:
+            return std::chrono::milliseconds(5000); // 5s
+        case TimeoutCategory::Medium:
+            return std::chrono::milliseconds(30000); // 30s
+        case TimeoutCategory::Slow:
+        default:
+            return std::chrono::milliseconds(120000); // 120s
     }
 }
 
@@ -296,8 +302,9 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_unique<
     if (auto bt = parse_ms(std::getenv("YAMS_BODY_TIMEOUT_MS"))) {
         pImpl->bodyTimeout_ = *bt;
     }
-    // Note: Request-type-aware timeouts are now applied per-request in sendRequest/sendRequestStreaming
-    // Fast ops (ping/status): 5s, Medium ops (search/list): 30s, Slow ops (add/embed): 120s
+    // Note: Request-type-aware timeouts are now applied per-request in
+    // sendRequest/sendRequestStreaming Fast ops (ping/status): 5s, Medium ops (search/list): 30s,
+    // Slow ops (add/embed): 120s
     spdlog::debug("DaemonClient init: resolved socket='{}'", pImpl->config_.socketPath.string());
     if (!pImpl->config_.dataDir.empty()) {
         spdlog::debug("DaemonClient init: resolved dataDir='{}'", pImpl->config_.dataDir.string());
@@ -641,12 +648,20 @@ boost::asio::awaitable<Result<void>> DaemonClient::ping() {
 boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(const Request& req) {
     spdlog::debug("DaemonClient::sendRequest: [{}] streaming={} sock='{}'", getRequestName(req),
                   false, pImpl->config_.socketPath.string());
-    // Use request-type-aware timeout for snappier UI on fast operations
+    // Use request-type-aware timeout without shortening configured limits
     auto opts = pImpl->transportOptions_;
     auto timeout = getTimeoutForCategory(getTimeoutCategory(req));
-    opts.requestTimeout = timeout;
-    opts.headerTimeout = timeout;
-    opts.bodyTimeout = timeout;
+    opts.requestTimeout = std::max(opts.requestTimeout, timeout);
+    opts.headerTimeout = std::max(opts.headerTimeout, timeout);
+    opts.bodyTimeout = std::max(opts.bodyTimeout, timeout);
+    // Prune and other long maintenance ops get fresh sockets to avoid stale pooled fds
+    if (requires_single_use_connection(req)) {
+        opts.poolEnabled = false;
+    }
+    // Force single-use connection for long maintenance ops (e.g., prune)
+    if (requires_single_use_connection(req)) {
+        opts.poolEnabled = false;
+    }
     AsioTransportAdapter adapter(opts);
     auto r = co_await adapter.send_request(req);
     if (!r)
@@ -658,12 +673,15 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(Request&& req
     const auto type = getRequestName(req);
     spdlog::debug("DaemonClient::sendRequest(move): [{}] streaming={} sock='{}'", type, false,
                   pImpl->config_.socketPath.string());
-    // Use request-type-aware timeout for snappier UI on fast operations
+    // Use request-type-aware timeout without shortening configured limits
     auto opts = pImpl->transportOptions_;
     auto timeout = getTimeoutForCategory(getTimeoutCategory(req));
-    opts.requestTimeout = timeout;
-    opts.headerTimeout = timeout;
-    opts.bodyTimeout = timeout;
+    opts.requestTimeout = std::max(opts.requestTimeout, timeout);
+    opts.headerTimeout = std::max(opts.headerTimeout, timeout);
+    opts.bodyTimeout = std::max(opts.bodyTimeout, timeout);
+    if (requires_single_use_connection(req)) {
+        opts.poolEnabled = false;
+    }
     AsioTransportAdapter adapter(opts);
     auto r = co_await adapter.send_request(std::move(req));
     if (!r)
@@ -1026,12 +1044,14 @@ DaemonClient::sendRequestStreaming(const Request& req,
     auto onError = [handler](const Error& e) { handler->onError(e); };
     auto onComplete = [handler]() { handler->onComplete(); };
 
-    // Use request-type-aware timeout for snappier UI on fast operations
+    // Use request-type-aware timeout without shortening configured limits
     auto opts = pImpl->transportOptions_;
     auto timeout = getTimeoutForCategory(getTimeoutCategory(req));
-    opts.requestTimeout = timeout;
-    opts.headerTimeout = timeout;
-    opts.bodyTimeout = timeout;
+    opts.requestTimeout = std::max(opts.requestTimeout, timeout);
+    opts.headerTimeout = std::max(opts.headerTimeout, timeout);
+    opts.bodyTimeout = std::max(opts.bodyTimeout, timeout);
+    // Streaming commands always use a fresh socket to avoid stale pooled fds
+    opts.poolEnabled = false;
     AsioTransportAdapter adapter(opts);
     spdlog::debug("DaemonClient::sendRequestStreaming calling adapter.send_request_streaming");
     auto res = co_await adapter.send_request_streaming(req, onHeader, onChunk, onError, onComplete);

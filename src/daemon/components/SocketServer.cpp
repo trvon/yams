@@ -684,6 +684,11 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
         }
         handlerConfig.read_timeout = timeoutSeconds;
         handlerConfig.write_timeout = timeoutSeconds;
+        auto streamChunkTimeoutMs = TuneAdvisor::streamChunkTimeoutMs();
+        if (streamChunkTimeoutMs == 0 && connectionTimeout.count() > 0) {
+            streamChunkTimeoutMs = static_cast<uint32_t>(connectionTimeout.count());
+        }
+        handlerConfig.stream_chunk_timeout = std::chrono::milliseconds(streamChunkTimeoutMs);
         handlerConfig.max_inflight_per_connection = TuneAdvisor::serverMaxInflightPerConn();
         if (handlerConfig.writer_budget_bytes_per_turn == 0) {
             handlerConfig.writer_budget_bytes_per_turn =

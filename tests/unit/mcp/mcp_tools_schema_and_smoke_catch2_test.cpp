@@ -89,23 +89,10 @@ TEST_CASE("MCP Schema - ListTools contains all expected tools", "[mcp][schema][t
     REQUIRE(result["tools"].is_array());
 
     // Expected set of core tools per CHANGELOG and implementation
-    std::vector<std::string> expected = {"search",
-                                         "grep",
-                                         "download",
-                                         "session_start",
-                                         "session_stop",
-                                         "session_pin",
-                                         "session_unpin",
-                                         "graph",
-                                         "get",
-                                         "status",
-                                         "update",
-                                         "delete_by_name",
-                                         "list",
-                                         "add",
-                                         "restore",
-                                         "list_collections",
-                                         "list_snapshots"};
+    std::vector<std::string> expected = {
+        "search",        "grep",  "download", "session_start",    "session_stop",  "session_pin",
+        "session_unpin", "graph", "get",      "status",           "update",        "delete_by_name",
+        "list",          "add",   "restore",  "list_collections", "list_snapshots"};
 
     // Gather actual names
     std::vector<std::string> actual;
@@ -131,27 +118,22 @@ TEST_CASE("MCP Schema - SearchDocuments has ergonomic and context params",
     auto props = toolProps(*t);
     REQUIRE(props.has_value());
 
-    // Required fields and ergonomics
+    // Required fields and core search ergonomics
     CHECK(hasProp(*props, "query"));
     CHECK(hasProp(*props, "limit"));
     CHECK(hasProp(*props, "fuzzy"));
     CHECK(hasProp(*props, "similarity"));
-    CHECK(hasProp(*props, "hash"));
     CHECK(hasProp(*props, "type"));
 
-    // LLM ergonomics / output shaping + session scoping
+    // Output shaping
     CHECK(hasProp(*props, "paths_only"));
-    CHECK(hasProp(*props, "use_session"));
-    CHECK(hasProp(*props, "session"));
 
-    // Contextual display options
-    CHECK(hasProp(*props, "line_numbers"));
-    CHECK(hasProp(*props, "after_context"));
-    CHECK(hasProp(*props, "before_context"));
-    CHECK(hasProp(*props, "context"));
+    // Path filtering
+    CHECK(hasProp(*props, "path_pattern"));
+    CHECK(hasProp(*props, "include_patterns"));
 
-    // Color control
-    CHECK(hasProp(*props, "color"));
+    // Tag filtering (YAMS extension)
+    CHECK(hasProp(*props, "tags"));
 }
 
 TEST_CASE("MCP Schema - GrepDocuments has expected grep options", "[mcp][schema][grep][catch2]") {
@@ -163,34 +145,24 @@ TEST_CASE("MCP Schema - GrepDocuments has expected grep options", "[mcp][schema]
     auto props = toolProps(*t);
     REQUIRE(props.has_value());
 
+    // Required pattern field
     CHECK(hasProp(*props, "pattern"));
-    CHECK(hasProp(*props, "paths"));
 
-    // Context
-    CHECK(hasProp(*props, "after_context"));
-    CHECK(hasProp(*props, "before_context"));
-    CHECK(hasProp(*props, "context"));
+    // Path targeting
+    CHECK(hasProp(*props, "name"));
+    CHECK(hasProp(*props, "paths"));
+    CHECK(hasProp(*props, "include_patterns"));
+    CHECK(hasProp(*props, "subpath"));
 
     // Pattern options
     CHECK(hasProp(*props, "ignore_case"));
-    CHECK(hasProp(*props, "word"));
-    CHECK(hasProp(*props, "invert"));
 
-    // Output modes
+    // Output options
     CHECK(hasProp(*props, "line_numbers"));
-    CHECK(hasProp(*props, "with_filename"));
-    CHECK(hasProp(*props, "count"));
-    CHECK(hasProp(*props, "files_with_matches"));
-    CHECK(hasProp(*props, "files_without_match"));
-
-    // Color and max count + session scoping
-    CHECK(hasProp(*props, "color"));
-    CHECK(hasProp(*props, "max_count"));
-    CHECK(hasProp(*props, "use_session"));
-    CHECK(hasProp(*props, "session"));
+    CHECK(hasProp(*props, "context"));
 }
 
-TEST_CASE("MCP Schema - RetrieveDocument has graph params", "[mcp][schema][retrieve][catch2]") {
+TEST_CASE("MCP Schema - RetrieveDocument has expected params", "[mcp][schema][retrieve][catch2]") {
     auto server = ServerUnderTest::make();
     json tools = server->testListTools();
     auto t = findTool(tools, "get");
@@ -199,11 +171,17 @@ TEST_CASE("MCP Schema - RetrieveDocument has graph params", "[mcp][schema][retri
     auto props = toolProps(*t);
     REQUIRE(props.has_value());
 
+    // Target identification
     CHECK(hasProp(*props, "hash"));
-    CHECK(hasProp(*props, "outputPath"));
-    CHECK(hasProp(*props, "graph"));
-    CHECK(hasProp(*props, "depth"));
+    CHECK(hasProp(*props, "name"));
+
+    // Output options
+    CHECK(hasProp(*props, "output_path"));
     CHECK(hasProp(*props, "include_content"));
+
+    // Session scoping
+    CHECK(hasProp(*props, "use_session"));
+    CHECK(hasProp(*props, "session"));
 }
 
 TEST_CASE("MCP Schema - Graph tool has CLI parity params", "[mcp][schema][graph][catch2]") {
@@ -215,19 +193,27 @@ TEST_CASE("MCP Schema - Graph tool has CLI parity params", "[mcp][schema][graph]
     auto props = toolProps(*t);
     REQUIRE(props.has_value());
 
+    // Target selection
     CHECK(hasProp(*props, "hash"));
     CHECK(hasProp(*props, "name"));
     CHECK(hasProp(*props, "node_key"));
     CHECK(hasProp(*props, "node_id"));
+
+    // Mode selection
     CHECK(hasProp(*props, "list_types"));
     CHECK(hasProp(*props, "list_type"));
     CHECK(hasProp(*props, "isolated"));
+
+    // Traversal options
     CHECK(hasProp(*props, "relation"));
-    CHECK(hasProp(*props, "relation_filters"));
     CHECK(hasProp(*props, "depth"));
     CHECK(hasProp(*props, "limit"));
     CHECK(hasProp(*props, "offset"));
     CHECK(hasProp(*props, "reverse"));
+
+    // Output control
+    CHECK(hasProp(*props, "include_properties"));
+    CHECK(hasProp(*props, "scope_snapshot"));
 }
 
 TEST_CASE("MCP Schema - UpdateMetadata supports name or hash and multiple pairs",
@@ -240,8 +226,20 @@ TEST_CASE("MCP Schema - UpdateMetadata supports name or hash and multiple pairs"
     auto props = toolProps(*t);
     REQUIRE(props.has_value());
 
+    // Target selection
     CHECK(hasProp(*props, "hash"));
-    CHECK(hasProp(*props, "type"));
+    CHECK(hasProp(*props, "name"));
+    CHECK(hasProp(*props, "path"));
+    CHECK(hasProp(*props, "names"));
+    CHECK(hasProp(*props, "pattern"));
+
+    // Disambiguation
+    CHECK(hasProp(*props, "latest"));
+    CHECK(hasProp(*props, "oldest"));
+
+    // Update data
+    CHECK(hasProp(*props, "metadata"));
+    CHECK(hasProp(*props, "tags"));
 }
 
 TEST_CASE("MCP Schema - ListDocuments supports filters and sorting",
@@ -254,27 +252,21 @@ TEST_CASE("MCP Schema - ListDocuments supports filters and sorting",
     auto props = toolProps(*t);
     REQUIRE(props.has_value());
 
-    // Filtering
-    CHECK(hasProp(*props, "limit"));
+    // Filtering and targeting
     CHECK(hasProp(*props, "pattern"));
-    CHECK(hasProp(*props, "tags"));
-    CHECK(hasProp(*props, "type"));
-    CHECK(hasProp(*props, "mime"));
-    CHECK(hasProp(*props, "extension"));
-    CHECK(hasProp(*props, "binary"));
-    CHECK(hasProp(*props, "text"));
-
-    // Time filters
-    CHECK(hasProp(*props, "created_after"));
-    CHECK(hasProp(*props, "created_before"));
-    CHECK(hasProp(*props, "modified_after"));
-    CHECK(hasProp(*props, "modified_before"));
-    CHECK(hasProp(*props, "indexed_after"));
-    CHECK(hasProp(*props, "indexed_before"));
-
-    // Recency and sorting
     CHECK(hasProp(*props, "name"));
-    CHECK(hasProp(*props, "metadata"));
+    CHECK(hasProp(*props, "tags"));
+
+    // Recency
+    CHECK(hasProp(*props, "recent"));
+
+    // Output control
+    CHECK(hasProp(*props, "paths_only"));
+    CHECK(hasProp(*props, "include_diff"));
+
+    // Pagination
+    CHECK(hasProp(*props, "limit"));
+    CHECK(hasProp(*props, "offset"));
 }
 
 TEST_CASE("MCP Schema - GetStats supports file types breakdown", "[mcp][schema][stats][catch2]") {

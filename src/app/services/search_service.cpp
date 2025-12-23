@@ -1159,6 +1159,9 @@ private:
         yams::search::SearchParams params;
         params.limit = req.limit;
         params.offset = 0;
+        // Propagate tag filters to the search engine (used for candidate gathering/ranking)
+        params.tags = req.tags;
+        params.matchAllTags = req.matchAllTags;
 
         // Apply scope filters
         if (!scope.ext.empty()) {
@@ -1187,6 +1190,32 @@ private:
         const auto& engineResponse = searchRes.value();
         const auto& vec = engineResponse.results;
 
+        // Enforce tag filters (hybrid path previously ignored tags)
+        std::optional<std::unordered_set<int64_t>> tagDocIds;
+        if (!req.tags.empty()) {
+            auto docsResult = ctx_.metadataRepo->findDocumentsByTags(req.tags, req.matchAllTags);
+            if (!docsResult) {
+                return docsResult.error();
+            }
+            std::unordered_set<int64_t> ids;
+            const auto& docsVec = docsResult.value();
+            ids.reserve(docsVec.size());
+            for (const auto& doc : docsVec) {
+                ids.insert(doc.id);
+            }
+            tagDocIds = std::move(ids);
+        }
+
+        // Always build a filtered candidate list so limits respect tag filtering
+        std::vector<const metadata::SearchResult*> candidates;
+        candidates.reserve(vec.size());
+        for (const auto& r : vec) {
+            if (tagDocIds && tagDocIds->count(r.document.id) == 0) {
+                continue;
+            }
+            candidates.push_back(&r);
+        }
+
         if (vec.size() > static_cast<size_t>(kMaxSearchResults)) {
             spdlog::warn("Search returned {} results, truncating to {} to prevent crash",
                          vec.size(), kMaxSearchResults);
@@ -1209,12 +1238,12 @@ private:
         }
 
         if (req.pathsOnly) {
-            const size_t effectiveLimit = req.limit > 0 ? req.limit : vec.size();
-            for (const auto& r : vec) {
+            const size_t effectiveLimit = req.limit > 0 ? req.limit : candidates.size();
+            for (const auto* r : candidates) {
                 if (resp.paths.size() >= effectiveLimit)
                     break;
-                if (!r.document.filePath.empty()) {
-                    resp.paths.push_back(r.document.filePath);
+                if (!r->document.filePath.empty()) {
+                    resp.paths.push_back(r->document.filePath);
                 }
             }
             resp.total = resp.paths.size();
@@ -1226,7 +1255,7 @@ private:
             // Also enforce req.limit to honor user's requested limit
             constexpr size_t kMaxProcessableResults = 10000;
             const size_t effectiveLimit = req.limit > 0 ? req.limit : kMaxProcessableResults;
-            const size_t n = std::min({vec.size(), kMaxProcessableResults, effectiveLimit});
+            const size_t n = std::min({candidates.size(), kMaxProcessableResults, effectiveLimit});
 
             // Cap worker count to avoid thread explosion
             constexpr size_t kMaxWorkers = 16;
@@ -1239,7 +1268,7 @@ private:
                     const size_t i = next.fetch_add(1);
                     if (i >= n)
                         break;
-                    const auto& r = vec[i];
+                    const auto& r = *candidates[i];
                     SearchItem it;
                     it.id = static_cast<int64_t>(i + 1);
                     it.title = r.document.fileName; // Use fileName since DocumentInfo has no title

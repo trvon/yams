@@ -14,6 +14,7 @@
 #include <thread>
 #include <yams/api/content_metadata.h>
 #include <yams/cli/command.h>
+#include <yams/cli/progress_indicator.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/detection/file_type_detector.h>
@@ -423,7 +424,12 @@ public:
                     }
                 }
 
-                // Process directories
+                // Process directories with a lightweight spinner
+                std::optional<ProgressIndicator> dirSpinner;
+                if (!groupedPaths.empty()) {
+                    dirSpinner.emplace(ProgressIndicator::Style::Spinner, true);
+                    dirSpinner->start("Processing directories (this may take a while)");
+                }
                 for (const auto& [dir, files] : groupedPaths) {
                     if (dir.string() == "-") {
                         hasStdin = true;
@@ -477,6 +483,10 @@ public:
                                      result.error().message);
                         failed++;
                     }
+                }
+
+                if (dirSpinner) {
+                    dirSpinner->stop();
                 }
 
                 // If there were any non-stdin paths processed, report summary here
@@ -794,8 +804,10 @@ private:
         } else {
             std::cout << "Added document: " << result.hash.substr(0, 16) << "..." << std::endl;
             if (cli_->getVerbose()) {
-                std::cout << "  Bytes stored: " << ui::format_bytes(result.bytesStored) << std::endl;
-                std::cout << "  Bytes deduped: " << ui::format_bytes(result.bytesDeduped) << std::endl;
+                std::cout << "  Bytes stored: " << ui::format_bytes(result.bytesStored)
+                          << std::endl;
+                std::cout << "  Bytes deduped: " << ui::format_bytes(result.bytesDeduped)
+                          << std::endl;
             }
         }
     }
