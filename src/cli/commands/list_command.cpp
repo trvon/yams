@@ -26,6 +26,7 @@ namespace yamsfmt = fmt;
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <unordered_map>
@@ -295,6 +296,9 @@ public:
                         metadata::MetadataValue metaVal;
                         metaVal.value = value;
                         doc.metadata[key] = metaVal;
+                    }
+                    if (showTags_) {
+                        mergeTagsIntoMetadata(e.tags, doc.metadata);
                     }
 
                     documents.push_back(doc);
@@ -747,6 +751,9 @@ private:
                         doc.metadata[key] = metaVal;
                     }
                 }
+                if (showTags_) {
+                    mergeTagsIntoMetadata(docEntry.tags, doc.metadata);
+                }
 
                 // Handle content snippet
                 if (docEntry.snippet) {
@@ -873,89 +880,133 @@ private:
         }
     };
 
+    static void
+    mergeTagsIntoMetadata(const std::vector<std::string>& tags,
+                          std::unordered_map<std::string, metadata::MetadataValue>& metadata) {
+        if (tags.empty())
+            return;
+
+        for (const auto& tag : tags) {
+            if (tag.empty())
+                continue;
+            std::string key = tag.starts_with("tag:") ? tag : ("tag:" + tag);
+            if (metadata.find(key) != metadata.end())
+                continue;
+            metadata::MetadataValue metaVal;
+            metaVal.value = tag;
+            metadata.emplace(std::move(key), std::move(metaVal));
+        }
+    }
+
     void outputTable(const std::vector<EnhancedDocumentInfo>& documents) {
         if (documents.empty()) {
-            std::cout << "No documents found.\n";
+            std::cout << ui::colorize("No documents found.", ui::Ansi::DIM) << "\n";
             return;
         }
 
-        // Calculate column widths based on options
-        size_t nameWidth = 24;
-        size_t typeWidth = 8;
-        size_t sizeWidth = 8;
-        size_t snippetWidth = showSnippets_ && !noSnippets_ ? 36 : 0;
-        size_t tagsWidth = showTags_ ? 12 : 0;
+        struct ColumnSpec {
+            std::string header;
+            size_t width;
+            size_t min_width;
+            bool align_right;
+        };
+
+        constexpr int kGap = 2;
         bool isVerbose = verbose_ || cli_->getVerbose();
-        size_t dateWidth = isVerbose ? 19 : 12;
+        std::vector<ColumnSpec> columns;
+        columns.reserve(6);
+        columns.push_back({"NAME", 24, 12, false});
+        columns.push_back({"TYPE", 8, 6, false});
+        columns.push_back({"SIZE", 8, 6, true});
+        size_t snippetIndex = std::numeric_limits<size_t>::max();
+        if (showSnippets_ && !noSnippets_) {
+            snippetIndex = columns.size();
+            columns.push_back({"SNIPPET", 36, 12, false});
+        }
+        size_t tagsIndex = std::numeric_limits<size_t>::max();
+        if (showTags_) {
+            tagsIndex = columns.size();
+            columns.push_back({"TAGS", 12, 8, false});
+        }
+        columns.push_back(
+            {isVerbose ? "INDEXED" : "WHEN", isVerbose ? 19u : 12u, isVerbose ? 16u : 8u, false});
+
+        size_t totalWidth = 0;
+        for (const auto& col : columns) {
+            totalWidth += col.width;
+        }
+        if (!columns.empty()) {
+            totalWidth += static_cast<size_t>(kGap) * (columns.size() - 1);
+        }
+
+        const int termWidth = ui::terminal_width();
+        auto reduceColumn = [&](size_t idx) {
+            if (idx >= columns.size())
+                return;
+            if (totalWidth <= static_cast<size_t>(termWidth))
+                return;
+            auto& col = columns[idx];
+            if (col.width <= col.min_width)
+                return;
+            size_t over = totalWidth - static_cast<size_t>(termWidth);
+            size_t reducible = col.width - col.min_width;
+            size_t delta = std::min(over, reducible);
+            col.width -= delta;
+            totalWidth -= delta;
+        };
+
+        reduceColumn(snippetIndex);
+        reduceColumn(0); // name
+        reduceColumn(tagsIndex);
+        reduceColumn(1);                  // type
+        reduceColumn(2);                  // size
+        reduceColumn(columns.size() - 1); // date
 
         // Header
-        std::cout << std::left;
-        std::cout << std::setw(static_cast<int>(nameWidth)) << "NAME" << "  ";
-        std::cout << std::setw(static_cast<int>(typeWidth)) << "TYPE" << "  ";
-        std::cout << std::setw(static_cast<int>(sizeWidth)) << "SIZE" << "  ";
-
-        if (snippetWidth > 0) {
-            std::cout << std::setw(static_cast<int>(snippetWidth)) << "SNIPPET" << "  ";
+        for (size_t i = 0; i < columns.size(); ++i) {
+            if (i > 0)
+                std::cout << std::string(kGap, ' ');
+            std::cout << ui::pad_right(columns[i].header, columns[i].width);
         }
-
-        if (tagsWidth > 0) {
-            std::cout << std::setw(static_cast<int>(tagsWidth)) << "TAGS" << "  ";
-        }
-
-        std::cout << std::setw(static_cast<int>(dateWidth)) << (isVerbose ? "INDEXED" : "WHEN")
-                  << "\n";
+        std::cout << "\n";
 
         // Separator
-        std::cout << std::string(nameWidth, '-') << "  ";
-        std::cout << std::string(typeWidth, '-') << "  ";
-        std::cout << std::string(sizeWidth, '-') << "  ";
-
-        if (snippetWidth > 0) {
-            std::cout << std::string(snippetWidth, '-') << "  ";
+        for (size_t i = 0; i < columns.size(); ++i) {
+            if (i > 0)
+                std::cout << std::string(kGap, ' ');
+            std::cout << ui::repeat('-', columns[i].width);
         }
-
-        if (tagsWidth > 0) {
-            std::cout << std::string(tagsWidth, '-') << "  ";
-        }
-
-        std::cout << std::string(dateWidth, '-') << "\n";
+        std::cout << "\n";
 
         // Rows
         for (const auto& doc : documents) {
-            std::string nameDisplay = doc.info.fileName;
-            if (nameDisplay.length() > nameWidth) {
-                nameDisplay = nameDisplay.substr(0, nameWidth - 3) + "...";
-            }
-
-            std::string typeDisplay = doc.getFileType();
-            if (typeDisplay.length() > typeWidth) {
-                typeDisplay = typeDisplay.substr(0, typeWidth - 1);
-            }
-
-            std::cout << std::setw(static_cast<int>(nameWidth)) << nameDisplay << "  ";
-            std::cout << std::setw(static_cast<int>(typeWidth)) << typeDisplay << "  ";
-            std::cout << std::setw(static_cast<int>(sizeWidth)) << doc.getFormattedSize() << "  ";
-
-            if (snippetWidth > 0) {
+            std::vector<std::string> cells;
+            cells.reserve(columns.size());
+            cells.push_back(doc.info.fileName);
+            cells.push_back(doc.getFileType());
+            cells.push_back(doc.getFormattedSize());
+            if (snippetIndex != std::numeric_limits<size_t>::max()) {
                 std::string snippetDisplay = doc.contentSnippet;
-                if (snippetDisplay.length() > snippetWidth) {
-                    snippetDisplay = snippetDisplay.substr(0, snippetWidth - 3) + "...";
-                }
-                // Replace newlines with spaces for display
                 std::replace(snippetDisplay.begin(), snippetDisplay.end(), '\n', ' ');
-                std::cout << std::setw(static_cast<int>(snippetWidth)) << snippetDisplay << "  ";
+                cells.push_back(snippetDisplay);
             }
+            if (tagsIndex != std::numeric_limits<size_t>::max()) {
+                cells.push_back(doc.getTags());
+            }
+            cells.push_back(isVerbose ? doc.getFormattedDate() : doc.getRelativeTime());
 
-            if (tagsWidth > 0) {
-                std::string tagsDisplay = doc.getTags();
-                if (tagsDisplay.length() > tagsWidth) {
-                    tagsDisplay = tagsDisplay.substr(0, tagsWidth - 1);
+            for (size_t i = 0; i < columns.size(); ++i) {
+                if (i > 0)
+                    std::cout << std::string(kGap, ' ');
+                std::string cell = i < cells.size() ? cells[i] : "";
+                cell = ui::truncate_to_width(cell, columns[i].width);
+                if (columns[i].align_right) {
+                    std::cout << ui::pad_left(cell, columns[i].width);
+                } else {
+                    std::cout << ui::pad_right(cell, columns[i].width);
                 }
-                std::cout << std::setw(static_cast<int>(tagsWidth)) << tagsDisplay << "  ";
             }
-
-            std::cout << std::setw(static_cast<int>(dateWidth))
-                      << (isVerbose ? doc.getFormattedDate() : doc.getRelativeTime()) << "\n";
+            std::cout << "\n";
 
             if (isVerbose) {
                 std::cout << "    Hash: " << doc.info.sha256Hash << "\n";
@@ -980,7 +1031,8 @@ private:
             }
         }
 
-        std::cout << "\nTotal: " << documents.size() << " document(s)\n";
+        std::string total = "Total: " + std::to_string(documents.size()) + " document(s)";
+        std::cout << "\n" << ui::colorize(total, ui::Ansi::DIM) << "\n";
     }
 
     // Attempt to show a simple line diff between local file content and indexed content
@@ -1153,50 +1205,41 @@ private:
             }
         }
 
-        // Output grouped results with colored headers
-        std::cout << "Documents grouped by change type (window: " << changeWindow_ << ")\n";
-        std::cout << ui::horizontal_rule(47, '=') << "\n\n";
+        std::cout << ui::section_header("Documents grouped by change type") << "\n";
+        std::cout << ui::colorize("Window: " + changeWindow_, ui::Ansi::DIM) << "\n\n";
 
-        if (!addedDocs.empty()) {
-            std::cout << "[+] ADDED (" << addedDocs.size() << " documents)\n";
-            std::cout << ui::horizontal_rule(40) << "\n";
-            for (const auto& doc : addedDocs) {
+        auto renderGroup = [&](const char* label, const char* marker, const char* color,
+                               const std::vector<EnhancedDocumentInfo>& group) {
+            if (group.empty())
+                return;
+            std::string header = std::string(marker) + " " + label + " (" +
+                                 std::to_string(group.size()) + " documents)";
+            std::cout << ui::colorize(header, color) << "\n";
+            std::cout << ui::horizontal_rule() << "\n";
+            for (const auto& doc : group) {
                 std::string fileType = getFileTypeIndicator(doc);
-                std::cout << "  + " << doc.info.fileName << " " << fileType << " ("
+                std::string prefix = "  " + ui::colorize(marker, color);
+                std::cout << prefix << " " << doc.info.fileName << " " << fileType << " ("
                           << doc.getFormattedSize() << ", " << doc.getRelativeTime() << ")\n";
             }
             std::cout << "\n";
-        }
+        };
 
-        if (!modifiedDocs.empty()) {
-            std::cout << "[M] MODIFIED (" << modifiedDocs.size() << " documents)\n";
-            std::cout << ui::horizontal_rule(40) << "\n";
-            for (const auto& doc : modifiedDocs) {
-                std::string fileType = getFileTypeIndicator(doc);
-                std::cout << "  M " << doc.info.fileName << " " << fileType << " ("
-                          << doc.getFormattedSize() << ", " << doc.getRelativeTime() << ")\n";
-            }
-            std::cout << "\n";
-        }
-
-        if (!deletedDocs.empty()) {
-            std::cout << "[D] DELETED (" << deletedDocs.size() << " documents)\n";
-            std::cout << ui::horizontal_rule(40) << "\n";
-            for (const auto& doc : deletedDocs) {
-                std::string fileType = getFileTypeIndicator(doc);
-                std::cout << "  D " << doc.info.fileName << " " << fileType << " ("
-                          << doc.getFormattedSize() << ", " << doc.getRelativeTime() << ")\n";
-            }
-            std::cout << "\n";
-        }
+        renderGroup("[+]", "ADDED", ui::Ansi::GREEN, addedDocs);
+        renderGroup("[M]", "MODIFIED", ui::Ansi::YELLOW, modifiedDocs);
+        renderGroup("[D]", "DELETED", ui::Ansi::RED, deletedDocs);
 
         if (addedDocs.empty() && modifiedDocs.empty() && deletedDocs.empty()) {
-            std::cout << "No recent changes found in the specified time window.\n";
+            std::cout << ui::colorize("No recent changes found in the specified time window.",
+                                      ui::Ansi::DIM)
+                      << "\n";
         }
 
-        std::cout << "Total: " << documents.size() << " document(s) (" << addedDocs.size()
-                  << " added, " << modifiedDocs.size() << " modified, " << deletedDocs.size()
-                  << " deleted)\n";
+        std::string total = "Total: " + std::to_string(documents.size()) + " document(s) (" +
+                            std::to_string(addedDocs.size()) + " added, " +
+                            std::to_string(modifiedDocs.size()) + " modified, " +
+                            std::to_string(deletedDocs.size()) + " deleted)";
+        std::cout << ui::colorize(total, ui::Ansi::DIM) << "\n";
     }
 
     void outputJson(const std::vector<EnhancedDocumentInfo>& documents) {

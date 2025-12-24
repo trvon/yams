@@ -218,28 +218,24 @@ StreamingRequestProcessor::process_streaming_impl(Request request) {
             spdlog::debug("StreamingRequestProcessor: defer Search for deterministic paging");
             mode_ = Mode::Search;
             pending_request_.emplace(std::make_unique<Request>(std::move(request)));
-            std::fprintf(stdout, "[DEBUG] SRP defer Search -> streaming\n");
             co_return std::nullopt;
         }
         if (std::holds_alternative<ListRequest>(req_copy)) {
-            spdlog::debug("StreamingRequestProcessor: defer List for deterministic paging");
+            spdlog::info("[SRP] process_streaming: deferring ListRequest to streaming mode");
             mode_ = Mode::List;
             pending_request_.emplace(std::make_unique<Request>(std::move(request)));
-            std::fprintf(stdout, "[DEBUG] SRP defer List -> streaming\n");
             co_return std::nullopt;
         }
         if (std::holds_alternative<GrepRequest>(req_copy)) {
             spdlog::debug("StreamingRequestProcessor: defer Grep for deterministic paging");
             mode_ = Mode::Grep;
             pending_request_.emplace(std::make_unique<Request>(std::move(request)));
-            std::fprintf(stdout, "[DEBUG] SRP defer Grep -> streaming\n");
             co_return std::nullopt;
         }
         if (std::holds_alternative<AddDocumentRequest>(req_copy)) {
             spdlog::debug("StreamingRequestProcessor: defer AddDocument for header-first");
             // Mode None: single final chunk after heartbeat
             pending_request_.emplace(std::make_unique<Request>(std::move(request)));
-            std::fprintf(stdout, "[DEBUG] SRP defer AddDocument -> streaming\n");
             co_return std::nullopt;
         }
         // Fallback: defer GenerateEmbedding / LoadModel to provide typed start events.
@@ -247,7 +243,6 @@ StreamingRequestProcessor::process_streaming_impl(Request request) {
             std::holds_alternative<LoadModelRequest>(req_copy)) {
             spdlog::debug("StreamingRequestProcessor: defer single-step embedding/model load");
             pending_request_.emplace(std::make_unique<Request>(std::move(request)));
-            std::fprintf(stdout, "[DEBUG] SRP defer SingleStep -> streaming\n");
             co_return std::nullopt;
         }
 
@@ -329,6 +324,7 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                     co_return ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
                 }
                 case MessageType::ListRequest: {
+                    spdlog::info("[SRP] next_chunk: sending List heartbeat");
                     ListResponse r;
                     r.totalCount = 0;
                     co_return ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
@@ -448,13 +444,17 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                     co_return ResponseChunk{.data = std::move(r), .is_last_chunk = true};
                 }
             } else if (mode_ == Mode::List && !list_.has_value()) {
+                spdlog::info("[SRP] next_chunk: calling delegate_->process() for ListRequest");
                 auto r = co_await delegate_->process(**pending_request_);
+                spdlog::info("[SRP] next_chunk: delegate_->process() returned for List");
                 if (auto* l = std::get_if<ListResponse>(&r)) {
+                    spdlog::info("[SRP] next_chunk: List got {} items", l->items.size());
                     list_ = ListState{};
                     list_->items = std::move(l->items);
                     list_->totalCount = l->totalCount;
                     list_->pos = 0;
                 } else {
+                    spdlog::info("[SRP] next_chunk: List got non-ListResponse, resetting");
                     reset_state();
                     co_return ResponseChunk{.data = std::move(r), .is_last_chunk = true};
                 }

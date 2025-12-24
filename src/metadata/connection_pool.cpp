@@ -295,38 +295,41 @@ ConnectionPool::Stats ConnectionPool::getStats() const {
 }
 
 Result<void> ConnectionPool::healthCheck() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    size_t needed = 0;
+    uint64_t gen = 0;
 
-    std::queue<std::unique_ptr<PooledConnection>> valid;
-
-    while (!available_.empty()) {
-        auto conn = std::move(available_.front());
-        available_.pop();
-
-        if (isConnectionValid(**conn)) {
-            valid.push(std::move(conn));
-        } else {
-            totalConnections_--;
-            spdlog::warn("Removed invalid connection from pool");
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        size_t current = available_.size() + activeConnections_;
+        if (current < config_.minConnections && totalConnections_ < config_.maxConnections) {
+            needed = std::min(config_.minConnections - current,
+                              config_.maxConnections - totalConnections_);
         }
+        gen = currentGeneration_.load();
     }
 
-    available_ = std::move(valid);
+    if (needed == 0) {
+        return {};
+    }
 
-    // Ensure minimum connections
-    while (available_.size() + activeConnections_ < config_.minConnections &&
-           totalConnections_ < config_.maxConnections) {
+    std::vector<std::unique_ptr<Database>> newConns;
+    newConns.reserve(needed);
+    for (size_t i = 0; i < needed; ++i) {
         auto connResult = createConnection();
         if (!connResult) {
-            return connResult.error();
+            break;
         }
+        newConns.push_back(std::move(connResult).value());
+    }
 
-        auto pooledConn = std::make_unique<PooledConnection>(
-            std::move(connResult).value(),
-            [this](PooledConnection* conn) { returnConnection(conn); }, currentGeneration_.load());
-
-        available_.push(std::move(pooledConn));
-        totalConnections_++;
+    if (!newConns.empty()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto& db : newConns) {
+            auto pooledConn = std::make_unique<PooledConnection>(
+                std::move(db), [this](PooledConnection* conn) { returnConnection(conn); }, gen);
+            available_.push(std::move(pooledConn));
+            totalConnections_++;
+        }
     }
 
     return {};
@@ -342,7 +345,6 @@ void ConnectionPool::pruneIdleConnections() {
     std::queue<std::unique_ptr<PooledConnection>> keep;
     auto now = std::chrono::steady_clock::now();
     size_t prunedIdle = 0;
-    size_t prunedInvalid = 0;
     size_t prunedAge = 0;
 
     while (!available_.empty()) {
@@ -352,25 +354,18 @@ void ConnectionPool::pruneIdleConnections() {
         auto age = now - conn->createdAt();
         auto idleTime = now - conn->lastAccessed();
 
-        // Always keep minimum connections, but validate them and check age
         if (keep.size() + activeConnections_ < config_.minConnections) {
-            // Even for minimum connections, prune if too old
             if (age >= config_.maxConnectionAge) {
                 totalConnections_--;
                 prunedAge++;
                 spdlog::debug("Pruned aged connection (age: {}s)",
                               std::chrono::duration_cast<std::chrono::seconds>(age).count());
-            } else if (isConnectionValid(**conn)) {
-                keep.push(std::move(conn));
             } else {
-                totalConnections_--;
-                prunedInvalid++;
-                spdlog::debug("Pruned invalid connection during maintenance");
+                keep.push(std::move(conn));
             }
             continue;
         }
 
-        // For connections above minimum, check idle time and age
         if (age >= config_.maxConnectionAge) {
             totalConnections_--;
             prunedAge++;
@@ -382,22 +377,14 @@ void ConnectionPool::pruneIdleConnections() {
             spdlog::debug("Pruned idle connection (idle: {}s)",
                           std::chrono::duration_cast<std::chrono::seconds>(idleTime).count());
         } else {
-            // Validate before keeping
-            if (isConnectionValid(**conn)) {
-                keep.push(std::move(conn));
-            } else {
-                totalConnections_--;
-                prunedInvalid++;
-                spdlog::debug("Pruned invalid connection during maintenance");
-            }
+            keep.push(std::move(conn));
         }
     }
 
     available_ = std::move(keep);
 
-    if (prunedIdle > 0 || prunedInvalid > 0 || prunedAge > 0) {
-        spdlog::info("Connection pool pruned {} idle, {} invalid, {} aged connections", prunedIdle,
-                     prunedInvalid, prunedAge);
+    if (prunedIdle > 0 || prunedAge > 0) {
+        spdlog::info("Connection pool pruned {} idle, {} aged connections", prunedIdle, prunedAge);
     }
 }
 
@@ -570,9 +557,7 @@ bool ConnectionPool::isConnectionValid(const Database& db) const {
         return false;
     }
 
-    // Try a simple query with write operation to detect stale connections
     try {
-        // First verify we can read
         auto stmtResult = const_cast<Database&>(db).prepare("SELECT 1");
         if (!stmtResult)
             return false;
@@ -582,8 +567,6 @@ bool ConnectionPool::isConnectionValid(const Database& db) const {
         if (!result.has_value())
             return false;
 
-        // Also verify we can write (detects locked/stale connections)
-        // Use a temp table to avoid affecting the schema
         auto writeTest = const_cast<Database&>(db).execute(
             "CREATE TEMP TABLE IF NOT EXISTS __pool_health_check (id INTEGER)");
         if (!writeTest)

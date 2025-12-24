@@ -54,6 +54,8 @@ TEST_CASE("HybridSearch - Windows ONNX Runtime API too old", "[hybrid][windows][
 
 #include <yams/app/services/services.hpp>
 
+#include <spdlog/spdlog.h>
+
 #include "common/fixture_manager.h"
 
 #include <algorithm>
@@ -157,6 +159,9 @@ public:
         auto storeResult = docService_->store(storeReq);
         REQUIRE(storeResult);
 
+        // Index the content into FTS5 for keyword search
+        indexDocumentForSearch(storeResult.value().hash, filename, content);
+
         return storeResult.value().hash;
     }
 
@@ -172,6 +177,9 @@ public:
         storeReq.path = fixture.path.string();
         auto storeResult = docService_->store(storeReq);
         REQUIRE(storeResult);
+
+        // Index the content into FTS5 for keyword search
+        indexDocumentForSearch(storeResult.value().hash, filename, content);
 
         return storeResult.value().hash;
     }
@@ -302,6 +310,25 @@ private:
 
     void populateTestCorpus();
 
+    // Helper: Index document content into FTS5 for keyword search
+    void indexDocumentForSearch(const std::string& hash, const std::string& title,
+                                const std::string& content) {
+        auto docResult = metadataRepo_->getDocumentByHash(hash);
+        if (!docResult || !docResult.value().has_value()) {
+            // Document not found in metadata - this can happen if store didn't add to metadata
+            return;
+        }
+        auto docInfo = docResult.value().value();
+        auto indexResult = metadataRepo_->indexDocumentContent(
+            docInfo.id, title, content, docInfo.mimeType.empty() ? "text/plain" : docInfo.mimeType);
+        if (!indexResult) {
+            spdlog::warn("Failed to index document content for FTS5: {}",
+                         indexResult.error().message);
+        }
+        // Also update fuzzy index
+        (void)metadataRepo_->updateFuzzyIndex(docInfo.id);
+    }
+
     void cleanupServices() {
         searchService_.reset();
         docService_.reset();
@@ -365,7 +392,7 @@ class SearchEngine {
     hashDoc3_ = createDocument("README.md", R"(
 # YAMS - Yet Another Metadata Store
 
-YAMS is a content-addressed storage system with search capabilities.
+YAMS is a content addressable storage system with search capabilities.
 
 ## Features
 - Hybrid search (keyword + semantic)
@@ -898,14 +925,14 @@ TEST_CASE("KeywordSearch - CamelCase lowercase match", "[search][keyword][camelc
     REQUIRE(resp.results.size() >= 0);
 }
 
-TEST_CASE("KeywordSearch - snake_case token boundaries", "[search][keyword][snakecase]") {
+TEST_CASE("KeywordSearch - snake_case as single token", "[search][keyword][snakecase]") {
     SKIP_HYBRID_ON_WINDOWS();
     SearchServiceFixture fixture;
 
-    // snake_case: FTS5 treats underscores as token boundaries
-    // Query "user" should match "process_user_input"
+    // FTS5 is configured with tokenchars='_-' so snake_case identifiers are single tokens
+    // Query "process_user_input" should match the exact identifier
     app::services::SearchRequest req;
-    req.query = "user";
+    req.query = "process_user_input";
     req.type = "keyword";
     req.limit = 20;
 
@@ -921,18 +948,19 @@ TEST_CASE("KeywordSearch - snake_case token boundaries", "[search][keyword][snak
     REQUIRE(foundSnakeCaseFile);
 }
 
-TEST_CASE("KeywordSearch - Hyphenated token boundaries", "[search][keyword][tokenization]") {
+TEST_CASE("KeywordSearch - Hyphenated as single token", "[search][keyword][tokenization]") {
     SKIP_HYBRID_ON_WINDOWS();
     SearchServiceFixture fixture;
 
-    // Test hyphen as token boundary - need to create document inline
+    // FTS5 is configured with tokenchars='_-' so hyphenated terms are single tokens
     auto hashHyphen = fixture.createDocument(
         "config-parser.md",
         "The config-parser module handles command-line arguments and configuration files.",
         {"docs", "config"});
 
+    // Query for the exact hyphenated term
     app::services::SearchRequest req;
-    req.query = "config";
+    req.query = "config-parser";
     req.type = "keyword";
     req.limit = 20;
 

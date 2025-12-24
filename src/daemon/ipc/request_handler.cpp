@@ -582,10 +582,8 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                                 } cleanup{self, req_id};
 
                                 try {
-                                    spdlog::debug(
-                                        "handle_streaming_request spawn req_id={} type={} "
-                                        "expects={}",
-                                        req_id, static_cast<int>(getMessageType(req)), expects);
+                                    spdlog::info("[MUX_SPAWN] req_id={} type={} expects={}", req_id,
+                                                 static_cast<int>(getMessageType(req)), expects);
                                     auto r = co_await self->handle_streaming_request(
                                         *sock, req, req_id, nullptr, expects);
                                     if (!r) {
@@ -1025,10 +1023,11 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
         } else {
             // Default behavior: attempt streaming (processor may return std::nullopt to indicate
             // chunked mode) so header is emitted early and progress can be delivered.
-            spdlog::debug("handle_streaming_request: calling process_streaming for request_id={}, "
-                          "client_expects_streaming={}, request_type={}",
-                          request_id, client_expects_streaming, request.index());
+            spdlog::info("[HSR] req_id={} taking STREAMING path (type={})", request_id,
+                         request.index());
             response_opt = co_await proc->process_streaming(request);
+            spdlog::info("[HSR] req_id={} process_streaming returned has_value={}", request_id,
+                         response_opt.has_value());
         }
 
         spdlog::debug(
@@ -1038,13 +1037,9 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
             // No response means we should use the streaming interface
             // Force streaming for stream-capable requests to guarantee header-first behavior
             bool can_stream = can_stream_request(request);
-            spdlog::debug(
-                "handle_streaming_request: response_opt is empty, can_stream={} (request_id={})",
-                can_stream, request_id);
+            spdlog::info("[HSR] req_id={} streaming mode: can_stream={}", request_id, can_stream);
             if (proc && can_stream) {
-                spdlog::debug("handle_streaming_request: entering streaming mode (request_id={}, "
-                              "client_expects={})",
-                              request_id, client_expects_streaming);
+                spdlog::info("[HSR] req_id={} entering stream_chunks", request_id);
                 // Inform FSM we are transitioning to write header for streaming
                 if (fsm) {
                     ConnectionFsm::FrameInfo finfo{};
@@ -1451,13 +1446,17 @@ RequestHandler::write_header(boost::asio::local::stream_protocol::socket& socket
     }
     if (config_.enable_multiplexing) {
         // Frame and enqueue for fair writer
+        spdlog::info("[WRITE_HDR] req_id={} multiplexed path, framing header", request_id);
         std::vector<uint8_t> frame;
         frame.reserve(MessageFramer::HEADER_SIZE + 1024);
         auto framed = framer_.frame_message_header_into(response_msg, frame);
         if (!framed)
             co_return framed.error();
+        spdlog::info("[WRITE_HDR] req_id={} enqueueing frame ({} bytes)", request_id, frame.size());
         auto enq = co_await enqueue_frame(request_id, std::move(frame), false, fsm);
         if (!enq) {
+            spdlog::warn("[WRITE_HDR] req_id={} enqueue failed: {}", request_id,
+                         enq.error().message);
             if (enq.error().code == ErrorCode::RateLimited ||
                 enq.error().code == ErrorCode::ResourceExhausted) {
                 co_return co_await write_error_immediate(socket, request_id, enq.error().code,
@@ -1465,8 +1464,12 @@ RequestHandler::write_header(boost::asio::local::stream_protocol::socket& socket
             }
             co_return enq.error();
         }
+        spdlog::info("[WRITE_HDR] req_id={} enqueue returned should_start={}", request_id,
+                     enq.value());
         if (enq.value()) {
+            spdlog::info("[WRITE_HDR] req_id={} starting writer_drain", request_id);
             co_await writer_drain(socket, fsm);
+            spdlog::info("[WRITE_HDR] req_id={} writer_drain completed", request_id);
         }
         co_return Result<void>{};
     } else {
@@ -1491,14 +1494,19 @@ RequestHandler::write_chunk(boost::asio::local::stream_protocol::socket& socket,
     response_msg.timestamp = std::chrono::steady_clock::now();
     response_msg.payload = std::move(response);
     if (config_.enable_multiplexing) {
+        spdlog::info("[WRITE_CHUNK] req_id={} last={} multiplexed path", request_id, last_chunk);
         std::vector<uint8_t> frame;
         frame.reserve(MessageFramer::HEADER_SIZE + config_.chunk_size + 1024);
         auto framed = framer_.frame_message_chunk_into(response_msg, frame, last_chunk);
         if (!framed)
             co_return framed.error();
         // Skip dispatch to avoid deadlock (matching write_header pattern)
+        spdlog::info("[WRITE_CHUNK] req_id={} enqueueing frame ({} bytes)", request_id,
+                     frame.size());
         auto enq = co_await enqueue_frame(request_id, std::move(frame), last_chunk, fsm);
         if (!enq) {
+            spdlog::warn("[WRITE_CHUNK] req_id={} enqueue failed: {}", request_id,
+                         enq.error().message);
             if (enq.error().code == ErrorCode::RateLimited ||
                 enq.error().code == ErrorCode::ResourceExhausted) {
                 co_return co_await write_error_immediate(socket, request_id, enq.error().code,
@@ -1506,8 +1514,12 @@ RequestHandler::write_chunk(boost::asio::local::stream_protocol::socket& socket,
             }
             co_return enq.error();
         }
+        spdlog::info("[WRITE_CHUNK] req_id={} enqueue returned should_start={}", request_id,
+                     enq.value());
         if (enq.value()) {
+            spdlog::info("[WRITE_CHUNK] req_id={} starting writer_drain", request_id);
             co_await writer_drain(socket, fsm);
+            spdlog::info("[WRITE_CHUNK] req_id={} writer_drain completed", request_id);
         }
         co_return Result<void>{};
     } else {
@@ -1795,11 +1807,14 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
         }
     }
     // Send header frame
+    spdlog::info("[STREAM] req_id={} about to write_header", request_id);
     auto header_result = co_await write_header(socket, headerResponse, request_id, true, fsm);
     if (!header_result) {
+        spdlog::warn("[STREAM] req_id={} write_header failed: {}", request_id,
+                     header_result.error().message);
         co_return header_result.error();
     }
-    spdlog::debug("stream_chunks: sent header-only frame (request_id={})", request_id);
+    spdlog::info("[STREAM] req_id={} header written successfully", request_id);
     if (fsm) {
         // Move FSM from WritingHeader -> StreamingChunks
         fsm->on_stream_next(false);
@@ -1813,8 +1828,7 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
     StreamMetricsRegistry::instance().incStreams(1);
 
     while (!last_chunk_received) {
-        spdlog::debug("stream_chunks: preparing chunk #{} (request_id={})", chunk_count + 1,
-                      request_id);
+        spdlog::info("[STREAM] req_id={} preparing chunk #{}", request_id, chunk_count + 1);
         {
             std::lock_guard<std::mutex> lk(ctx_mtx_);
             auto it = contexts_.find(request_id);
@@ -1823,8 +1837,12 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
             }
         }
         RequestProcessor::ResponseChunk chunk_result{};
+        spdlog::info("[STREAM] req_id={} chunk #{} stream_chunk_timeout={}ms", request_id,
+                     chunk_count + 1, config_.stream_chunk_timeout.count());
         if (config_.stream_chunk_timeout.count() > 0) {
             using namespace boost::asio::experimental::awaitable_operators;
+            spdlog::info("[STREAM] req_id={} using timeout path, about to co_await next_chunk",
+                         request_id);
             boost::asio::steady_timer chunk_timer(co_await boost::asio::this_coro::executor);
             chunk_timer.expires_after(config_.stream_chunk_timeout);
 
@@ -1832,6 +1850,8 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                 co_await (processor->next_chunk() ||
                           chunk_timer.async_wait(
                               boost::asio::experimental::as_tuple(boost::asio::use_awaitable)));
+            spdlog::info("[STREAM] req_id={} co_await returned, index={}", request_id,
+                         chunk_or_timeout.index());
 
             if (chunk_or_timeout.index() == 1) {
                 // next_chunk() exceeded timeout; emit a terminal timeout chunk to unblock client
@@ -1847,7 +1867,10 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                 chunk_result = std::get<0>(std::move(chunk_or_timeout));
             }
         } else {
+            spdlog::info("[STREAM] req_id={} no timeout path, about to co_await next_chunk",
+                         request_id);
             chunk_result = co_await processor->next_chunk();
+            spdlog::info("[STREAM] req_id={} no timeout path returned", request_id);
         }
         spdlog::debug("stream_chunks processor->next_chunk() returned req_id={} last={}",
                       request_id, chunk_result.is_last_chunk);
