@@ -18,6 +18,7 @@
 
 #include <atomic>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -28,6 +29,7 @@
 #include <vector>
 
 #ifndef _WIN32
+#include <poll.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -135,6 +137,30 @@ async_read_exact(AsioConnection::socket_t& socket, size_t size, std::chrono::mil
     co_return buffer;
 }
 
+bool socket_looks_healthy(AsioConnection::socket_t& socket) {
+#ifndef _WIN32
+    int fd = socket.native_handle();
+    pollfd pfd{};
+    pfd.fd = fd;
+    pfd.events = POLLIN | POLLERR | POLLHUP | POLLNVAL;
+    pfd.revents = 0;
+    int res = ::poll(&pfd, 1, 0);
+    if (res < 0) {
+        if (errno == EINTR) {
+            return true;
+        }
+        return false;
+    }
+    if (res == 0) {
+        return true;
+    }
+    if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+        return false;
+    }
+#endif
+    return true;
+}
+
 } // namespace
 
 namespace {
@@ -222,8 +248,17 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::acquire() {
                 // Check if connection is alive and not currently in use
                 if (conn->alive.load(std::memory_order_acquire) &&
                     !conn->in_use.exchange(true, std::memory_order_acq_rel)) {
+                    if (conn->read_loop_future.valid()) {
+                        if (conn->read_loop_future.wait_for(std::chrono::milliseconds(0)) ==
+                            std::future_status::ready) {
+                            conn->alive.store(false, std::memory_order_release);
+                            conn->in_use.store(false, std::memory_order_release);
+                            continue;
+                        }
+                    }
                     // Verify socket is still open
-                    if (conn->socket && conn->socket->is_open()) {
+                    if (conn->socket && conn->socket->is_open() &&
+                        socket_looks_healthy(*conn->socket)) {
                         spdlog::debug("Connection pool: reusing existing connection");
                         co_return conn;
                     }

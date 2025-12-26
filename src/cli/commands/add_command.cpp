@@ -1,6 +1,7 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <fstream>
@@ -8,6 +9,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <regex>
 #include <sstream>
@@ -37,6 +39,13 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/system_executor.hpp>
+#ifndef _WIN32
+#include <unistd.h>
+#else
+#include <io.h>
+#define isatty _isatty
+#define STDOUT_FILENO 1
+#endif
 
 namespace yams::cli {
 
@@ -61,6 +70,117 @@ bool hasUnsupportedControlChars(std::string_view sv) {
         return std::iscntrl(ch) && ch != '\n' && ch != '\r' && ch != '\t';
     });
 }
+
+bool isStdoutTty() {
+    return isatty(STDOUT_FILENO) != 0;
+}
+
+class SpinnerThread {
+public:
+    SpinnerThread() = default;
+    ~SpinnerThread() { shutdown(); }
+    SpinnerThread(const SpinnerThread&) = delete;
+    SpinnerThread& operator=(const SpinnerThread&) = delete;
+
+    void start(const std::string& message, bool showCount, size_t current = 0, size_t total = 0) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        message_ = message;
+        showCount_ = showCount;
+        current_ = current;
+        total_ = total;
+        if (!spinner_) {
+            spinner_.emplace(ProgressIndicator::Style::Spinner, true);
+        }
+        spinner_->setShowCount(showCount_);
+        spinner_->start(message_);
+        spinner_->update(current_, total_);
+        ensureThread();
+    }
+
+    void setMessage(const std::string& message) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        message_ = message;
+        if (spinner_) {
+            spinner_->setMessage(message_);
+        }
+    }
+
+    void setShowCount(bool showCount) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        showCount_ = showCount;
+        if (spinner_) {
+            spinner_->setShowCount(showCount_);
+        }
+    }
+
+    void setCounts(size_t current, size_t total) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        current_ = current;
+        total_ = total;
+        if (spinner_) {
+            spinner_->update(current_, total_);
+        }
+    }
+
+    void pause() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (spinner_) {
+            spinner_->stop();
+        }
+    }
+
+    void resume() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!spinner_) {
+            return;
+        }
+        spinner_->setShowCount(showCount_);
+        spinner_->start(message_);
+        spinner_->update(current_, total_);
+        ensureThread();
+    }
+
+    bool enabled() const { return spinner_.has_value(); }
+
+private:
+    void ensureThread() {
+        if (running_) {
+            return;
+        }
+        running_ = true;
+        worker_ = std::thread([this]() {
+            while (running_) {
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (spinner_ && spinner_->isActive()) {
+                        spinner_->update(current_, total_);
+                    }
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        });
+    }
+
+    void shutdown() {
+        running_ = false;
+        if (worker_.joinable()) {
+            worker_.join();
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (spinner_) {
+            spinner_->stop();
+        }
+    }
+
+    mutable std::mutex mutex_;
+    std::optional<ProgressIndicator> spinner_;
+    std::thread worker_;
+    std::atomic<bool> running_{false};
+    std::string message_;
+    bool showCount_ = false;
+    size_t current_ = 0;
+    size_t total_ = 0;
+};
 
 constexpr std::size_t kMaxPatternLength = 512;
 constexpr std::size_t kMaxTagLength = 128;
@@ -185,7 +305,7 @@ public:
                         "Initial backoff between retries (ms); doubles each attempt")
             ->default_val(250);
         cmd->add_option("--daemon-ready-timeout-ms", daemonReadyTimeoutMs_,
-                        "Max time to wait for daemon readiness (ms)")
+                        "Max time to wait for daemon readiness (ms, 0 to skip)")
             ->default_val(10000);
 
         // Collection and snapshot options
@@ -238,6 +358,11 @@ public:
                     }
                 }
 
+                SpinnerThread daemonSpinner;
+                if (!cli_->getJsonOutput() && isStdoutTty()) {
+                    daemonSpinner.start("Preparing add", false);
+                }
+
                 // Get active session for session-isolated memory (PBI-082)
                 std::string activeSessionId = getActiveSessionId(cli_, bypassSession_);
 
@@ -253,18 +378,29 @@ public:
                         return Error{ErrorCode::InternalError,
                                      std::string("Failed to start daemon: ") + r.error().message};
                     }
-                    // Wait for readiness with bounded backoff (up to ~3 seconds)
-                    int waits[] = {100, 200, 400, 800, 1500};
-                    bool ready = false;
-                    for (int w : waits) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(w));
-                        if (yams::daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
-                            ready = true;
-                            break;
+                    const auto readyTimeout =
+                        std::chrono::milliseconds(std::max(0, daemonReadyTimeoutMs_));
+                    if (readyTimeout.count() > 0) {
+                        const auto deadline = std::chrono::steady_clock::now() + readyTimeout;
+                        auto sleepFor = std::chrono::milliseconds(50);
+                        bool ready = false;
+                        while (std::chrono::steady_clock::now() < deadline) {
+                            if (yams::daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
+                                ready = true;
+                                break;
+                            }
+                            auto now = std::chrono::steady_clock::now();
+                            if (now >= deadline) {
+                                break;
+                            }
+                            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                deadline - now);
+                            std::this_thread::sleep_for(std::min(sleepFor, remaining));
+                            sleepFor = std::min(sleepFor * 2, std::chrono::milliseconds(500));
                         }
-                    }
-                    if (!ready) {
-                        return Error{ErrorCode::Timeout, "Daemon did not become ready in time"};
+                        if (!ready) {
+                            return Error{ErrorCode::Timeout, "Daemon did not become ready in time"};
+                        }
                     }
                 }
 
@@ -335,9 +471,24 @@ public:
                 size_t ok = 0, failed = 0;
                 size_t totalAdded = 0, totalUpdated = 0, totalSkipped = 0;
                 bool hasStdin = false;
+                const size_t totalDaemonRequests =
+                    singleFiles.size() + groupedPaths.size() - (groupedPaths.count("-") ? 1 : 0);
+                size_t completedRequests = 0;
+                if (daemonSpinner.enabled() && totalDaemonRequests > 0) {
+                    daemonSpinner.setShowCount(true);
+                    daemonSpinner.setMessage("Adding via daemon");
+                    daemonSpinner.setCounts(0, totalDaemonRequests);
+                }
+                auto pauseProgress = [&]() { daemonSpinner.pause(); };
+                auto resumeProgress = [&]() {
+                    if (daemonSpinner.enabled() && completedRequests < totalDaemonRequests) {
+                        daemonSpinner.resume();
+                    }
+                };
 
                 auto render = [&](const yams::daemon::AddDocumentResponse& resp,
                                   const std::filesystem::path& path) -> void {
+                    pauseProgress();
                     if (resp.documentsAdded > 0 || resp.documentsUpdated > 0) {
                         std::cout << "From " << path.string() << ": added=" << resp.documentsAdded
                                   << ", updated=" << resp.documentsUpdated
@@ -363,6 +514,7 @@ public:
                             std::cout << "  Hash: " << resp.hash << std::endl;
                         }
                     }
+                    resumeProgress();
 
                     if (resp.documentsAdded > 0) {
                         if (auto appContext = cli_->getAppContext()) {
@@ -411,6 +563,7 @@ public:
 
                     yams::app::services::DocumentIngestionService ing;
                     auto result = ing.addViaDaemon(aopts);
+                    completedRequests++;
                     if (result) {
                         totalAdded += result.value().documentsAdded;
                         totalUpdated += result.value().documentsUpdated;
@@ -418,18 +571,17 @@ public:
                         render(result.value(), filePath);
                         ok++;
                     } else {
+                        pauseProgress();
                         spdlog::warn("Daemon add failed for file '{}': {}", filePath.string(),
                                      result.error().message);
+                        resumeProgress();
                         failed++;
+                    }
+                    if (daemonSpinner.enabled()) {
+                        daemonSpinner.setCounts(completedRequests, totalDaemonRequests);
                     }
                 }
 
-                // Process directories with a lightweight spinner
-                std::optional<ProgressIndicator> dirSpinner;
-                if (!groupedPaths.empty()) {
-                    dirSpinner.emplace(ProgressIndicator::Style::Spinner, true);
-                    dirSpinner->start("Processing directories (this may take a while)");
-                }
                 for (const auto& [dir, files] : groupedPaths) {
                     if (dir.string() == "-") {
                         hasStdin = true;
@@ -472,6 +624,7 @@ public:
 
                     yams::app::services::DocumentIngestionService ing;
                     auto result = ing.addViaDaemon(aopts);
+                    completedRequests++;
                     if (result) {
                         totalAdded += result.value().documentsAdded;
                         totalUpdated += result.value().documentsUpdated;
@@ -479,15 +632,17 @@ public:
                         render(result.value(), dir);
                         ok++;
                     } else {
+                        pauseProgress();
                         spdlog::warn("Daemon add failed for directory '{}': {}", dir.string(),
                                      result.error().message);
+                        resumeProgress();
                         failed++;
                     }
+                    if (daemonSpinner.enabled()) {
+                        daemonSpinner.setCounts(completedRequests, totalDaemonRequests);
+                    }
                 }
-
-                if (dirSpinner) {
-                    dirSpinner->stop();
-                }
+                daemonSpinner.pause();
 
                 // If there were any non-stdin paths processed, report summary here
                 if (ok + failed > 0) {

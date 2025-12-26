@@ -5,10 +5,9 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 
 #include <boost/asio/as_tuple.hpp>
-#include <boost/asio/bind_cancellation_slot.hpp>
-#include <boost/asio/cancellation_type.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/use_future.hpp>
@@ -16,6 +15,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <future>
 
 namespace yams::daemon {
 
@@ -69,18 +69,24 @@ void RequestQueue::stop() {
     spdlog::info("[RequestQueue] Stopping and clearing queue");
     stop_flag_->store(true, std::memory_order_release);
 
-    if (cancel_signal_) {
-        cancel_signal_->emit(boost::asio::cancellation_type::all);
-    }
-
-    if (eviction_timer_) {
-        boost::system::error_code ec;
-        eviction_timer_->cancel(ec);
-    }
-    if (aging_timer_) {
-        boost::system::error_code ec;
-        aging_timer_->cancel(ec);
-    }
+    // Post timer cancellations to the executor to avoid racing with async_wait
+    // operations running on IO threads. The post ensures cancellation happens
+    // on the same implicit strand as the timer operations.
+    std::promise<void> cancel_done;
+    auto cancel_future = cancel_done.get_future();
+    boost::asio::post(executor_, [this, done = std::move(cancel_done)]() mutable {
+        if (eviction_timer_) {
+            boost::system::error_code ec;
+            eviction_timer_->cancel(ec);
+        }
+        if (aging_timer_) {
+            boost::system::error_code ec;
+            aging_timer_->cancel(ec);
+        }
+        done.set_value();
+    });
+    // Wait for cancellation to complete before proceeding
+    cancel_future.wait();
 
     // Drain all queues and invoke callbacks with cancellation error
     {
@@ -337,14 +343,12 @@ boost::asio::awaitable<void> RequestQueue::eviction_loop() {
 
     while (!stop_flag_->load(std::memory_order_acquire)) {
         timer.expires_after(config_.eviction_interval);
-        auto [ec] = co_await timer.async_wait(boost::asio::bind_cancellation_slot(
-            cancel_signal_->slot(), boost::asio::as_tuple(boost::asio::use_awaitable)));
-        if (ec == boost::asio::error::operation_aborted &&
+        // Use as_tuple to avoid exceptions on cancellation. Timer cancellation via
+        // timer.cancel() in stop() is sufficient - no need for cancellation_slot binding
+        // which can race with emit().
+        auto [ec] = co_await timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable));
+        if (ec == boost::asio::error::operation_aborted ||
             stop_flag_->load(std::memory_order_acquire)) {
-            break;
-        }
-
-        if (stop_flag_->load(std::memory_order_acquire)) {
             break;
         }
 
@@ -405,14 +409,12 @@ boost::asio::awaitable<void> RequestQueue::aging_loop() {
 
     while (!stop_flag_->load(std::memory_order_acquire)) {
         timer.expires_after(config_.aging_interval);
-        auto [ec] = co_await timer.async_wait(boost::asio::bind_cancellation_slot(
-            cancel_signal_->slot(), boost::asio::as_tuple(boost::asio::use_awaitable)));
-        if (ec == boost::asio::error::operation_aborted &&
+        // Use as_tuple to avoid exceptions on cancellation. Timer cancellation via
+        // timer.cancel() in stop() is sufficient - no need for cancellation_slot binding
+        // which can race with emit().
+        auto [ec] = co_await timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable));
+        if (ec == boost::asio::error::operation_aborted ||
             stop_flag_->load(std::memory_order_acquire)) {
-            break;
-        }
-
-        if (stop_flag_->load(std::memory_order_acquire)) {
             break;
         }
 

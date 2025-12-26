@@ -971,6 +971,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_asio_connection_pool_exe = executable('catch2_asio_connection_pool',
+    files('unit/daemon/asio_connection_pool_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_daemon_exe = executable('catch2_daemon',
     files('unit/daemon/daemon_catch2_test.cpp'),
     include_directories: incs,
@@ -2170,6 +2179,14 @@ if catch2_dep.found()
 
   test('request_lifetime', catch2_request_lifetime_exe,
     suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30,
+    # Test skips on Windows (Unix domain sockets not supported)
+    should_fail: host_machine.system() == 'windows'
+  )
+
+  test('asio_connection_pool', catch2_asio_connection_pool_exe,
+    suite: ['catch2', 'unit', 'daemon', 'connection-pool'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 30,
     # Test skips on Windows (Unix domain sockets not supported)

@@ -121,6 +121,24 @@ YamsDaemon::~YamsDaemon() {
     if (tuningManager_) {
         tuningManager_->stop();
     }
+    {
+        std::lock_guard<std::mutex> lock(shutdownThreadMutex_);
+        if (shutdownThread_.joinable()) {
+            try {
+                shutdownThread_.join();
+            } catch (const std::exception& e) {
+                try {
+                    spdlog::warn("[YamsDaemon] shutdown thread join exception: {}", e.what());
+                } catch (...) {
+                }
+            } catch (...) {
+                try {
+                    spdlog::warn("[YamsDaemon] shutdown thread join unknown exception");
+                } catch (...) {
+                }
+            }
+        }
+    }
 }
 
 Result<size_t> YamsDaemon::autoloadPluginsNow() {
@@ -828,6 +846,14 @@ void YamsDaemon::reloadTuningConfig() {
     } catch (...) {
         spdlog::warn("[Reload] Unknown error during tuning reload");
     }
+}
+
+void YamsDaemon::spawnShutdownThread(std::function<void()> shutdownFn) {
+    std::lock_guard<std::mutex> lock(shutdownThreadMutex_);
+    if (shutdownThread_.joinable()) {
+        return;
+    }
+    shutdownThread_ = std::thread(std::move(shutdownFn));
 }
 
 } // namespace yams::daemon

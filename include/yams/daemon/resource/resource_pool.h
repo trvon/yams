@@ -11,6 +11,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <spdlog/spdlog.h>
+
 namespace yams::daemon {
 
 // ============================================================================
@@ -160,7 +162,13 @@ public:
         }
     }
 
-    ~ResourcePool() { shutdown(); }
+    ~ResourcePool() noexcept {
+        try {
+            shutdown();
+        } catch (...) {
+            // Ignore exceptions during destruction - may happen during static destruction
+        }
+    }
 
     // ========================================================================
     // Resource Acquisition
@@ -313,18 +321,30 @@ public:
     // Lifecycle
     // ========================================================================
 
-    void shutdown() {
-        std::unique_lock<std::mutex> lock(mutex_);
-        shutdown_ = true;
-
-        // Clear all resources
-        while (!available_.empty()) {
-            available_.pop();
+    void shutdown() noexcept {
+        try {
+            std::unique_lock<std::mutex> lock(mutex_);
+            if (shutdown_) {
+                return;
+            }
+            shutdown_ = true;
+            while (!available_.empty()) {
+                available_.pop();
+            }
+            inUse_.clear();
+            totalResources_ = 0;
+            cv_.notify_all();
+        } catch (const std::exception& e) {
+            try {
+                spdlog::warn("[ResourcePool] shutdown exception: {}", e.what());
+            } catch (...) {
+            }
+        } catch (...) {
+            try {
+                spdlog::warn("[ResourcePool] shutdown unknown exception");
+            } catch (...) {
+            }
         }
-        inUse_.clear();
-        totalResources_ = 0;
-
-        cv_.notify_all();
     }
 
 private:

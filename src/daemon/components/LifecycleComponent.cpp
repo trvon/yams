@@ -92,7 +92,7 @@ namespace yams {
 namespace daemon {
 
 // Initialize static member for signal handler
-LifecycleComponent* LifecycleComponent::instance_ = nullptr;
+std::atomic<LifecycleComponent*> LifecycleComponent::instance_{nullptr};
 
 LifecycleComponent::LifecycleComponent(YamsDaemon* daemon, std::filesystem::path pidFile)
     : daemon_(daemon), pidFile_(std::move(pidFile)) {}
@@ -348,7 +348,7 @@ Result<void> LifecycleComponent::removePidFile() const {
 }
 
 void LifecycleComponent::setupSignalHandlers() {
-    instance_ = this;
+    instance_.store(this, std::memory_order_release);
     std::signal(SIGTERM, &LifecycleComponent::signalHandler);
     std::signal(SIGINT, &LifecycleComponent::signalHandler);
 #ifndef _WIN32
@@ -357,19 +357,21 @@ void LifecycleComponent::setupSignalHandlers() {
 }
 
 void LifecycleComponent::cleanupSignalHandlers() {
-    if (instance_ == this) {
+    // Use compare_exchange to atomically check and clear instance_ only if it's us
+    LifecycleComponent* expected = this;
+    if (instance_.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel)) {
         std::signal(SIGTERM, SIG_DFL);
         std::signal(SIGINT, SIG_DFL);
 #ifndef _WIN32
         std::signal(SIGHUP, SIG_DFL);
 #endif
-        instance_ = nullptr;
     }
 }
 
 void LifecycleComponent::signalHandler(int signal) {
-    if (instance_) {
-        instance_->handleSignal(signal);
+    auto* inst = instance_.load(std::memory_order_acquire);
+    if (inst) {
+        inst->handleSignal(signal);
     }
 }
 

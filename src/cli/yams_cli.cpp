@@ -179,8 +179,12 @@ int YamsCLI::run(int argc, char* argv[]) {
 
         // Known subcommands (kept in sync with CommandRegistry)
         static const std::vector<std::string> kCommands = {
-            "init",  "add",       "get",     "delete", "list",  "search",     "config", "auth",
-            "stats", "uninstall", "migrate", "update", "serve", "completion", "model"};
+            "init",    "add",        "get",       "restore", "cat",    "delete",
+            "list",    "tree",       "search",    "grep",    "config", "auth",
+            "status",  "stats",      "uninstall", "migrate", "update", "download",
+            "session", "completion", "repair",    "model",   "daemon", "plugin",
+            "doctor",  "dr",         "graph",     "diff",    "serve",
+        };
 
         auto hasArg = [&](std::string_view needle) {
             for (int i = 1; i < argc; ++i) {
@@ -307,8 +311,29 @@ int YamsCLI::run(int argc, char* argv[]) {
         // Handle deprecated command aliases
         std::vector<char*> argvVec;
         bool needsAliasRewrite = false;
+        bool needsSearchQueryRewrite = false;
+        int searchQueryIndex = -1;
         static std::string repairStr = std::string("repair");
         static std::string mimeFlag = std::string("--mime");
+        static std::string queryFlag = std::string("--query");
+
+        // Fix positional search terms that collide with top-level subcommands (e.g., "daemon")
+        if (argc > 2 && argv[1] && std::string_view(argv[1]) == "search" && !hasArg("-q") &&
+            !hasArg("--query") && !hasArg("--stdin") && !hasArg("--query-file")) {
+            for (int i = 2; i < argc; ++i) {
+                if (argv[i] == nullptr)
+                    continue;
+                if (isFlag(argv[i]))
+                    continue;
+                std::string_view token = argv[i];
+                auto it = std::find(kCommands.begin(), kCommands.end(), std::string(token));
+                if (it != kCommands.end()) {
+                    needsSearchQueryRewrite = true;
+                    searchQueryIndex = i;
+                }
+                break; // Only inspect the first positional
+            }
+        }
 
         if (argc > 1 && std::string(argv[1]) == "repair-mime") {
             // Rewrite "repair-mime" to "repair --mime"
@@ -327,12 +352,22 @@ int YamsCLI::run(int argc, char* argv[]) {
             static std::string statusStr = std::string("status");
             argvVec.push_back(const_cast<char*>(statusStr.c_str()));
             argvVec.push_back(nullptr);
+        } else if (needsSearchQueryRewrite && searchQueryIndex > 0) {
+            argvVec.reserve(argc + 2);
+            for (int i = 0; i < searchQueryIndex; ++i)
+                argvVec.push_back(argv[i]);
+            argvVec.push_back(const_cast<char*>(queryFlag.c_str()));
+            for (int i = searchQueryIndex; i < argc; ++i)
+                argvVec.push_back(argv[i]);
+            argvVec.push_back(nullptr);
         }
 
         if (needsAliasRewrite) {
             app_->parse(static_cast<int>(argvVec.size() - 1), argvVec.data());
         } else if (injectDaemonStatus) {
             app_->parse(argc + 1, argvVec.data());
+        } else if (needsSearchQueryRewrite) {
+            app_->parse(static_cast<int>(argvVec.size() - 1), argvVec.data());
         } else {
             // Parse command line
             app_->parse(argc, argv);

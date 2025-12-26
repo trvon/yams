@@ -176,6 +176,15 @@ private:
 
     // Unified rendering function for search results
     Result<void> renderResults(std::vector<UnifiedItem>& items, const RenderContext& ctx) {
+        auto emitTagHint = [&]() {
+            if (!filterTags_.empty()) {
+                std::cerr
+                    << "Hint: tag filter returned no results; tags are stored as metadata keys "
+                       "'tag:<name>'. Try searching without --tags."
+                    << std::endl;
+            }
+        };
+
         // Deduplicate by path
         std::unordered_set<std::string> seenPaths;
         seenPaths.reserve(items.size());
@@ -197,6 +206,7 @@ private:
         if (pathsOnly_) {
             if (deduplicated.empty()) {
                 std::cout << "(no results)" << std::endl;
+                emitTagHint();
             } else {
                 for (const auto& item : deduplicated) {
                     std::cout << item.getDisplayPath() << std::endl;
@@ -250,6 +260,7 @@ private:
         // Human-readable output
         if (deduplicated.empty()) {
             std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
+            emitTagHint();
             return Result<void>();
         }
 
@@ -273,8 +284,9 @@ private:
                     scoreColor = ui::Ansi::GREEN;
                 else if (item.score >= 0.5)
                     scoreColor = ui::Ansi::YELLOW;
-                std::cout << " " << ui::colorize("[" + std::to_string(item.score).substr(0, 4) + "]",
-                                                  scoreColor);
+                std::cout << " "
+                          << ui::colorize("[" + std::to_string(item.score).substr(0, 4) + "]",
+                                          scoreColor);
                 std::cout << "\n";
 
                 // Snippet with line-number-style prefix
@@ -384,9 +396,9 @@ private:
                             else if (v.score >= 0.5)
                                 scoreColor = ui::Ansi::YELLOW;
 
-                            std::cout << "  " << ui::colorize(hashDisplay, ui::Ansi::CYAN) << " "
-                                      << ui::colorize(std::to_string(v.score).substr(0, 4),
-                                                      scoreColor);
+                            std::cout
+                                << "  " << ui::colorize(hashDisplay, ui::Ansi::CYAN) << " "
+                                << ui::colorize(std::to_string(v.score).substr(0, 4), scoreColor);
                             if (!v.title.empty() && v.title != path)
                                 std::cout << "  " << v.title;
                             std::cout << "\n";
@@ -395,22 +407,23 @@ private:
                         // Snippet with line-number-style prefix
                         if (!v.snippet.empty()) {
                             std::string snippet = truncateSnippet(v.snippet, 200);
-                            std::string linePrefix =
-                                vec.size() > 1 ? ui::colorize("     1:", ui::Ansi::DIM)
-                                               : ui::colorize("  1:", ui::Ansi::DIM);
+                            std::string linePrefix = vec.size() > 1
+                                                         ? ui::colorize("     1:", ui::Ansi::DIM)
+                                                         : ui::colorize("  1:", ui::Ansi::DIM);
                             std::cout << linePrefix << " " << snippet << "\n";
                         }
 
                         if (showTools_ && !hash8.empty() && i == 0) {
                             std::string indent = vec.size() > 1 ? "       " : "     ";
-                            std::cout << ui::colorize(
-                                indent + "yams cat --hash " + v.hash, ui::Ansi::DIM);
+                            std::cout << ui::colorize(indent + "yams cat --hash " + v.hash,
+                                                      ui::Ansi::DIM);
                             std::cout << "\n";
                         }
                     }
                     if (versionsMode_ == "all" && vec.size() > cap) {
-                        std::cout << ui::colorize(
-                            "    (+" + std::to_string(vec.size() - cap) + " more)", ui::Ansi::DIM)
+                        std::cout << ui::colorize("    (+" + std::to_string(vec.size() - cap) +
+                                                      " more)",
+                                                  ui::Ansi::DIM)
                                   << "\n";
                     }
                     std::cout << "\n";
@@ -942,7 +955,7 @@ public:
             dreq.fuzzy = fuzzySearch_; // honor explicit CLI flag; fallback logic will retry
             dreq.literalText = literalText_;
             dreq.similarity = (minSimilarity_ > 0.0f) ? static_cast<double>(minSimilarity_) : 0.7;
-            dreq.pathsOnly = false;  // Always fetch full results; pathsOnly is a CLI display option
+            dreq.pathsOnly = false; // Always fetch full results; pathsOnly is a CLI display option
             dreq.searchType = searchType_;
             dreq.jsonOutput = jsonOutput_;
             dreq.showHash = showHash_;
@@ -1349,7 +1362,7 @@ public:
         dreq.fuzzy = fuzzySearch_;
         dreq.literalText = literalText_;
         dreq.similarity = (minSimilarity_ > 0.0f) ? static_cast<double>(minSimilarity_) : 0.7;
-        dreq.pathsOnly = false;  // Always fetch full results; pathsOnly is a CLI display option
+        dreq.pathsOnly = false; // Always fetch full results; pathsOnly is a CLI display option
         dreq.searchType = searchType_;
         dreq.jsonOutput = jsonOutput_;
         dreq.showHash = showHash_;

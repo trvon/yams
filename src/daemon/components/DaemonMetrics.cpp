@@ -2,6 +2,7 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <boost/asio/as_tuple.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -295,15 +296,44 @@ void DaemonMetrics::startPolling() {
     if (pollingActive_.exchange(true)) {
         return; // Already running
     }
+    // Mark as not stopped before spawning the coroutine
+    {
+        std::lock_guard<std::mutex> lk(pollingMutex_);
+        pollingStopped_ = false;
+    }
     boost::asio::co_spawn(strand_, pollingLoop(), boost::asio::detached);
 }
 
 void DaemonMetrics::stopPolling() {
-    pollingActive_ = false;
+    // Check if polling was ever started
+    {
+        std::lock_guard<std::mutex> lk(pollingMutex_);
+        if (pollingStopped_) {
+            return; // Not running or already stopped
+        }
+    }
+
+    // Signal the polling loop to stop
+    pollingActive_.store(false, std::memory_order_release);
+
+    // Cancel the timer via the strand to wake up the coroutine
+    // This must be done on the strand to avoid racing with async_wait
+    boost::asio::post(strand_, [this]() {
+        if (pollingTimer_) {
+            boost::system::error_code ec;
+            pollingTimer_->cancel(ec);
+        }
+    });
+
+    // Wait for the polling loop to finish
+    std::unique_lock<std::mutex> lk(pollingMutex_);
+    pollingCv_.wait(lk, [this]() { return pollingStopped_; });
 }
 
 boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+    // Store timer pointer for cancellation from stopPolling()
+    pollingTimer_ = &timer;
     spdlog::info("DaemonMetrics: polling loop started (interval={}ms)", cacheMs_);
 
     while (pollingActive_.load(std::memory_order_relaxed)) {
@@ -516,8 +546,19 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
 
         // Sleep for cache interval using async timer
         timer.expires_after(std::chrono::milliseconds(cacheMs_));
-        co_await timer.async_wait(boost::asio::use_awaitable);
+        auto [ec] = co_await timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable));
+        // If timer was cancelled (e.g., by stopPolling), exit the loop
+        if (ec == boost::asio::error::operation_aborted) {
+            break;
+        }
     }
+    // Clear timer pointer and signal that polling has stopped
+    pollingTimer_ = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(pollingMutex_);
+        pollingStopped_ = true;
+    }
+    pollingCv_.notify_one();
     spdlog::info("DaemonMetrics: polling loop stopped");
 }
 

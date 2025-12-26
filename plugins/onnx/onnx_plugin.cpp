@@ -46,13 +46,27 @@ YAMS_PLUGIN_API const char* yams_plugin_get_manifest_json(void) {
 
 YAMS_PLUGIN_API int yams_plugin_init(const char* /*config_json*/, const void* /*host_context*/) {
     // Allow disabling the plugin without removing it from disk
+    // Check multiple env vars that indicate vectors/ONNX should be disabled
     if (const char* d = std::getenv("YAMS_ONNX_PLUGIN_DISABLE"); d && *d) {
+        g_plugin_disabled = true;
+    }
+    if (const char* d = std::getenv("YAMS_DISABLE_VECTORS"); d && *d) {
+        g_plugin_disabled = true;
+    }
+    if (const char* d = std::getenv("YAMS_USE_MOCK_PROVIDER"); d && *d) {
+        g_plugin_disabled = true;
+    }
+    if (const char* d = std::getenv("YAMS_SKIP_MODEL_LOADING"); d && *d) {
         g_plugin_disabled = true;
     }
     return YAMS_PLUGIN_OK;
 }
 
-YAMS_PLUGIN_API void yams_plugin_shutdown(void) { /* nothing to do */ }
+extern "C" void yams_onnx_shutdown_provider();
+
+YAMS_PLUGIN_API void yams_plugin_shutdown(void) {
+    yams_onnx_shutdown_provider();
+}
 
 static yams_onnx_request_v1 g_req_v1 = {
     /*abi_version*/ YAMS_IFACE_ONNX_REQUEST_V1_VERSION,
@@ -168,9 +182,15 @@ YAMS_PLUGIN_API int yams_plugin_get_interface(const char* id, uint32_t version, 
 YAMS_PLUGIN_API int yams_plugin_get_health_json(char** out_json) {
     if (!out_json)
         return YAMS_PLUGIN_ERR_INVALID;
-    const char* src = yams_onnx_get_health_json_cstr();
-    if (!src)
-        src = "{\"status\":\"unknown\"}";
+    // Don't create singleton if plugin is disabled - just return disabled status
+    const char* src;
+    if (g_plugin_disabled) {
+        src = "{\"status\":\"disabled\",\"reason\":\"disabled_by_env\"}";
+    } else {
+        src = yams_onnx_get_health_json_cstr();
+        if (!src)
+            src = "{\"status\":\"unknown\"}";
+    }
     size_t n = std::strlen(src);
     char* buf = static_cast<char*>(std::malloc(n + 1));
     if (!buf)

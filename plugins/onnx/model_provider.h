@@ -25,3 +25,7 @@ struct OnnxProviderContext {
 // Returns a singleton vtable for the ONNX provider and ensures its context is initialized.
 // The returned pointer is owned by the plugin and remains valid for the plugin lifetime.
 extern "C" yams_model_provider_v1* yams_onnx_get_model_provider();
+
+// Explicitly shutdown the model pool before static destruction.
+// Must be called from yams_plugin_shutdown() to avoid mutex issues.
+extern "C" void yams_onnx_shutdown_provider();

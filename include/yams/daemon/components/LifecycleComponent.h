@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include "IComponent.h"
@@ -54,7 +55,8 @@ private:
     std::filesystem::path pidFile_;
     int pidFileFd_ = -1; // File descriptor for the locked PID file
 
-    static LifecycleComponent* instance_; // Singleton instance for the static signal handler
+    static std::atomic<LifecycleComponent*>
+        instance_; // Singleton instance for the static signal handler
 };
 
 } // namespace yams::daemon

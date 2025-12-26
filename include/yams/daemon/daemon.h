@@ -155,6 +155,9 @@ public:
     std::thread initWaiterThread_;
     std::atomic<bool> initHandled_{false};
 
+    std::mutex shutdownThreadMutex_;
+    std::thread shutdownThread_;
+
     // Deferred repair startup control
     std::atomic<bool> repairStarted_{false};
     std::chrono::steady_clock::time_point repairIdleSince_{};
@@ -177,6 +180,8 @@ public:
     // Set a hook that will be called each iteration of runLoop() to check for signals
     // Returns true if shutdown was requested
     void setSignalCheckHook(std::function<bool()> hook) { signalCheckHook_ = std::move(hook); }
+
+    void spawnShutdownThread(std::function<void()> shutdownFn);
 };
 
 } // namespace yams::daemon

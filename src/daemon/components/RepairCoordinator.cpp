@@ -233,8 +233,6 @@ void RepairCoordinator::stop() {
     // Signal the coroutine to stop via shared state
     shutdownState_->running.store(false, std::memory_order_release);
     spdlog::debug("RepairCoordinator::stop() - signaled coroutine to stop");
-    // Clear services pointer to avoid use-after-free races during shutdown.
-    services_ = nullptr;
     queueCv_.notify_all();
     // Wait for coroutine to signal completion
     {
@@ -248,6 +246,9 @@ void RepairCoordinator::stop() {
             spdlog::debug("RepairCoordinator::stop() - coroutine finished");
         }
     }
+    // Note: We don't clear services_ here to avoid racing with the coroutine.
+    // The coroutine checks running_ before accessing services_, and running_
+    // was set to false at the start of stop().
 }
 
 bool RepairCoordinator::maintenance_allowed() const {
@@ -414,7 +415,12 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
         }
 
         // Defer initial scan to avoid blocking during startup (grace period)
-        if (pendingDocuments_.empty() && !initialScanEnqueued) {
+        bool queueEmpty;
+        {
+            std::lock_guard<std::mutex> lk(queueMutex_);
+            queueEmpty = pendingDocuments_.empty();
+        }
+        if (queueEmpty && !initialScanEnqueued) {
             if (deferTicks < minDeferTicks) {
                 ++deferTicks;
             } else if (maintenance_allowed()) {

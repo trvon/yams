@@ -217,7 +217,7 @@ struct ProviderCtx {
             // during plugin initialization to avoid blocking daemon startup.
             // Background preloading (if configured) will happen after init completes.
             // Disable lazy loading to force startup checks and surface deadlocks early
-            cfg.lazyLoading = false; 
+            cfg.lazyLoading = false;
             // Build preload list if any (will be deferred until after initialization)
             if (!preloadList.empty()) {
                 cfg.preloadModels = preloadList;
@@ -271,6 +271,56 @@ static void emit_progress(ProviderCtx* ctx, const char* model, int phase, const 
 struct ProviderSingleton {
     ProviderCtx ctx;
     yams_model_provider_v1 vtable;
+
+    std::atomic<bool> shutdownCalled{false};
+    std::atomic<bool> explicitShutdownCalled{false}; // Set by yams_onnx_shutdown_provider()
+
+    void shutdown(bool isExplicit = false) noexcept {
+        if (shutdownCalled.exchange(true)) {
+            return;
+        }
+
+        // If this is called from destructor during static destruction (not explicit),
+        // skip cleanup to avoid crashes from corrupted global state.
+        // At process exit, resources will be freed anyway.
+        if (!isExplicit && !explicitShutdownCalled.load()) {
+            return; // Skip cleanup during static destruction
+        }
+
+        if (ctx.pool) {
+            try {
+                ctx.pool->shutdown();
+            } catch (const std::exception& e) {
+                try {
+                    spdlog::warn("[ONNX] pool shutdown exception: {}", e.what());
+                } catch (...) {
+                }
+            } catch (...) {
+                try {
+                    spdlog::warn("[ONNX] pool shutdown unknown exception");
+                } catch (...) {
+                }
+            }
+            try {
+                ctx.pool.reset();
+            } catch (const std::exception& e) {
+                try {
+                    spdlog::warn("[ONNX] pool reset exception: {}", e.what());
+                } catch (...) {
+                }
+            } catch (...) {
+                try {
+                    spdlog::warn("[ONNX] pool reset unknown exception");
+                } catch (...) {
+                }
+            }
+        }
+    }
+
+    ~ProviderSingleton() noexcept {
+        shutdown(false); // Called from destructor, not explicit
+    }
+
     ProviderSingleton() {
         vtable.abi_version = 2; // v1.2
         vtable.self = &ctx;
@@ -608,14 +658,15 @@ struct ProviderSingleton {
                                              size_t* out_dim) -> yams_status_t {
             spdlog::info("[ONNX Plugin] generate_embedding_batch called: model={} batch={}",
                          model_id ? model_id : "(null)", batch_size);
-            
-            if (!self || !model_id || !inputs || !input_lens || !out_vecs || !out_batch || !out_dim) {
+
+            if (!self || !model_id || !inputs || !input_lens || !out_vecs || !out_batch ||
+                !out_dim) {
                 spdlog::error("[ONNX Plugin] Invalid arguments");
                 return YAMS_ERR_INVALID_ARG;
             }
-            
+
             int retries = 3;
-            while(retries > 0) {
+            while (retries > 0) {
                 retries--;
                 try {
                     auto* c = static_cast<ProviderCtx*>(self);
@@ -658,12 +709,13 @@ struct ProviderSingleton {
                     for (size_t i = 0; i < batch_size; ++i) {
                         texts.emplace_back(reinterpret_cast<const char*>(inputs[i]), input_lens[i]);
                     }
-                    
+
                     spdlog::info("[ONNX Plugin] acquiring model '{}'...", model_id);
                     auto h = c->pool->acquireModel(model_id, std::chrono::seconds(30));
                     if (!h) {
                         std::string errMsg = h.error().message;
-                        spdlog::error("[ONNX Plugin] acquireModel failed for '{}': {}", model_id, errMsg);
+                        spdlog::error("[ONNX Plugin] acquireModel failed for '{}': {}", model_id,
+                                      errMsg);
 
                         {
                             std::lock_guard<std::mutex> lk(c->mu);
@@ -674,10 +726,14 @@ struct ProviderSingleton {
                             if (!info.eventFired) {
                                 info.eventFired = true;
                                 try {
-                                    auto q = yams::daemon::InternalEventBus::instance()
-                                            .get_or_create_channel<yams::daemon::InternalEventBus::ModelLoadFailedEvent>("model.events", 256);
+                                    auto q =
+                                        yams::daemon::InternalEventBus::instance()
+                                            .get_or_create_channel<yams::daemon::InternalEventBus::
+                                                                       ModelLoadFailedEvent>(
+                                                "model.events", 256);
                                     (void)q->try_push({modelIdStr, errMsg});
-                                } catch (...) {}
+                                } catch (...) {
+                                }
                             }
                         }
                         *out_vecs = nullptr;
@@ -693,9 +749,11 @@ struct ProviderSingleton {
                     }
 
                     auto& session = *h.value();
-                    auto r = const_cast<yams::daemon::OnnxModelSession&>(session).generateBatchEmbeddings(texts);
+                    auto r = const_cast<yams::daemon::OnnxModelSession&>(session)
+                                 .generateBatchEmbeddings(texts);
                     if (!r) {
-                        spdlog::error("[ONNX Plugin] generateBatchEmbeddings failed: {}", r.error().message);
+                        spdlog::error("[ONNX Plugin] generateBatchEmbeddings failed: {}",
+                                      r.error().message);
                         return YAMS_ERR_INTERNAL;
                     }
                     auto& mat = r.value();
@@ -708,7 +766,8 @@ struct ProviderSingleton {
                     const size_t b = mat.size();
                     const size_t d = mat[0].size();
                     float* buf = static_cast<float*>(std::malloc(sizeof(float) * b * d));
-                    if (!buf) return YAMS_ERR_INTERNAL;
+                    if (!buf)
+                        return YAMS_ERR_INTERNAL;
                     for (size_t i = 0; i < b; ++i) {
                         std::memcpy(buf + i * d, mat[i].data(), sizeof(float) * d);
                     }
@@ -718,8 +777,8 @@ struct ProviderSingleton {
                     return YAMS_OK;
 
                 } catch (const std::system_error& e) {
-                    spdlog::error("[ONNX Plugin] system_error: {} (code={}). Retries: {}", 
-                                  e.what(), e.code().value(), retries);
+                    spdlog::error("[ONNX Plugin] system_error: {} (code={}). Retries: {}", e.what(),
+                                  e.code().value(), retries);
                     if (retries > 0) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(200));
                         continue;
@@ -937,6 +996,11 @@ static ProviderSingleton& singleton() {
 }
 
 } // namespace
+
+extern "C" void yams_onnx_shutdown_provider() {
+    singleton().explicitShutdownCalled.store(true);
+    singleton().shutdown(true);
+}
 
 extern "C" yams_model_provider_v1* yams_onnx_get_model_provider() {
     return &singleton().vtable;

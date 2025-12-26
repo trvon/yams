@@ -1448,6 +1448,18 @@ private:
 
         auto runFullTextSearch = [&](const SearchRequest& searchReq,
                                      bool allowAutoFuzzyFallback) -> Result<SearchResponse> {
+            // If docIds is set to an empty vector (from tag/path/session intersection with no
+            // matches), return empty results immediately since we're filtering to a known-empty
+            // set. Note: std::nullopt means "no filter", but empty vector means "filter to
+            // nothing".
+            if (docIds.has_value() && docIds->empty()) {
+                SearchResponse resp;
+                resp.total = 0;
+                resp.type = "full-text";
+                resp.usedHybrid = false;
+                return resp;
+            }
+
             auto r = ctx_.metadataRepo->search(processedQuery, static_cast<int>(searchReq.limit), 0,
                                                docIds);
             if (!r) {

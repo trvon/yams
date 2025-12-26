@@ -73,7 +73,6 @@ offload_to_worker(ServiceManager* sm, Fn&& fn) {
     co_return co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
                                                    void(std::exception_ptr, ResultType)>(
         [work_executor](auto handler, auto f) mutable {
-            // Post work to the worker thread pool
             boost::asio::post(
                 work_executor, [handler = std::move(handler), f = std::move(f)]() mutable {
                     std::exception_ptr ep;
@@ -83,7 +82,6 @@ offload_to_worker(ServiceManager* sm, Fn&& fn) {
                     } catch (...) {
                         ep = std::current_exception();
                     }
-                    // Post completion back to the handler's associated executor
                     auto completion_executor = boost::asio::get_associated_executor(handler);
                     boost::asio::post(completion_executor, [handler = std::move(handler), ep,
                                                             result = std::move(result)]() mutable {

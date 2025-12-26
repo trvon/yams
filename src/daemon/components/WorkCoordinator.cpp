@@ -31,13 +31,18 @@ WorkCoordinator::WorkCoordinator()
 }
 
 WorkCoordinator::~WorkCoordinator() {
-    // Ensure clean shutdown
     if (started_) {
-        spdlog::debug("[WorkCoordinator] Destructor called with active threads, stopping...");
+        try {
+            spdlog::debug("[WorkCoordinator] Destructor called with active threads, stopping...");
+        } catch (...) {
+        }
         stop();
         join();
     }
-    spdlog::debug("[WorkCoordinator] Destroyed");
+    try {
+        spdlog::debug("[WorkCoordinator] Destroyed");
+    } catch (...) {
+    }
 }
 
 void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
@@ -55,32 +60,43 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
     const std::size_t workerCount =
         numThreads.value_or(std::max<std::size_t>(1, std::thread::hardware_concurrency()));
 
-    // Spawn worker threads
     workers_.reserve(workerCount);
     try {
         for (std::size_t i = 0; i < workerCount; ++i) {
             workers_.emplace_back([this, i]() {
-                spdlog::trace("[WorkCoordinator] Worker {} starting io_context.run()", i);
+                try {
+                    spdlog::trace("[WorkCoordinator] Worker {} starting io_context.run()", i);
+                } catch (...) {
+                }
                 for (;;) {
                     try {
                         ioContext_->run();
-                        break; // Normal exit (stopped or no work)
+                        break;
                     } catch (const std::exception& e) {
-                        spdlog::error("[WorkCoordinator] Worker {} caught exception: {}", i,
-                                      e.what());
+                        try {
+                            spdlog::error("[WorkCoordinator] Worker {} exception: {}", i, e.what());
+                        } catch (...) {
+                        }
                     } catch (...) {
-                        spdlog::error("[WorkCoordinator] Worker {} caught unknown exception", i);
+                        try {
+                            spdlog::error("[WorkCoordinator] Worker {} unknown exception", i);
+                        } catch (...) {
+                        }
                     }
 
                     if (ioContext_->stopped()) {
                         break;
                     }
 
-                    spdlog::debug(
-                        "[WorkCoordinator] Worker {} restarting io_context.run() after exception",
-                        i);
+                    try {
+                        spdlog::debug("[WorkCoordinator] Worker {} restarting after exception", i);
+                    } catch (...) {
+                    }
                 }
-                spdlog::trace("[WorkCoordinator] Worker {} exited io_context.run()", i);
+                try {
+                    spdlog::trace("[WorkCoordinator] Worker {} exited io_context.run()", i);
+                } catch (...) {
+                }
             });
         }
         started_ = true;
@@ -108,35 +124,61 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
 
 void WorkCoordinator::stop() {
     if (!started_) {
-        spdlog::debug("[WorkCoordinator] stop() called but not started (no-op)");
+        try {
+            spdlog::debug("[WorkCoordinator] stop() called but not started (no-op)");
+        } catch (...) {
+        }
         return;
     }
 
-    spdlog::debug("[WorkCoordinator] Stopping (resetting work guard and stopping io_context)...");
+    try {
+        spdlog::debug("[WorkCoordinator] Stopping...");
+    } catch (...) {
+    }
     workGuard_.reset();
     ioContext_->stop();
-    spdlog::info("[WorkCoordinator] Work guard reset and io_context stopped");
+    try {
+        spdlog::info("[WorkCoordinator] Work guard reset and io_context stopped");
+    } catch (...) {
+    }
 }
 
 void WorkCoordinator::join() {
     if (workers_.empty()) {
-        spdlog::debug("[WorkCoordinator] join() called with no workers (no-op)");
+        try {
+            spdlog::debug("[WorkCoordinator] join() called with no workers (no-op)");
+        } catch (...) {
+        }
         return;
     }
 
-    spdlog::debug("[WorkCoordinator] Joining {} worker threads...", workers_.size());
+    try {
+        spdlog::debug("[WorkCoordinator] Joining {} worker threads...", workers_.size());
+    } catch (...) {
+    }
     for (auto& worker : workers_) {
         if (worker.joinable()) {
             try {
                 worker.join();
             } catch (const std::exception& e) {
-                spdlog::warn("[WorkCoordinator] Exception during worker join: {}", e.what());
+                try {
+                    spdlog::warn("[WorkCoordinator] join exception: {}", e.what());
+                } catch (...) {
+                }
+            } catch (...) {
+                try {
+                    spdlog::warn("[WorkCoordinator] join unknown exception");
+                } catch (...) {
+                }
             }
         }
     }
     workers_.clear();
     started_ = false;
-    spdlog::info("[WorkCoordinator] All workers joined");
+    try {
+        spdlog::info("[WorkCoordinator] All workers joined");
+    } catch (...) {
+    }
 }
 
 std::shared_ptr<boost::asio::io_context> WorkCoordinator::getIOContext() const noexcept {

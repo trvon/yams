@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -225,8 +226,8 @@ private:
     // std::mutex state tracking when used with condition_variable::wait() that causes
     // EDEADLK when the same thread tries to reacquire the mutex later in the same function.
     mutable std::recursive_mutex mutex_;
-    std::condition_variable_any loadingCv_;           // Notified when a model finishes loading
-    std::unordered_set<std::string> loadingModels_;   // Models currently being loaded
+    std::condition_variable_any loadingCv_;         // Notified when a model finishes loading
+    std::unordered_set<std::string> loadingModels_; // Models currently being loaded
     std::unordered_map<std::string, ModelEntry> models_;
     std::unordered_map<std::string, ResolutionHints> modelHints_;
 
@@ -241,6 +242,10 @@ private:
     std::shared_ptr<Ort::SessionOptions> sessionOptions_;
 
     bool initialized_ = false;
+    std::atomic<bool> shutdown_{false}; // Guard against double-shutdown
+
+    // Background preload thread (must be joined before destruction)
+    std::thread preloadThread_;
 };
 
 } // namespace yams::daemon

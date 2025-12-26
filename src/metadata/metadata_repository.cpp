@@ -4551,45 +4551,66 @@ MetadataRepository::findDocumentsByTags(const std::vector<std::string>& tags, bo
 
     return executeQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
-            using yams::metadata::sql::QuerySpec;
-            // Build keys as "tag:<name>"
+            // Support both legacy tag storage (key="tag", value="<name>")
+            // and normalized storage (key="tag:<name>").
+            std::unordered_set<std::string> tagSet;
+            for (const auto& t : tags) {
+                if (!t.empty())
+                    tagSet.insert(t);
+            }
+            std::vector<std::string> uniqueTags(tagSet.begin(), tagSet.end());
+            std::sort(uniqueTags.begin(), uniqueTags.end());
+            if (uniqueTags.empty()) {
+                return std::vector<DocumentInfo>();
+            }
+
             std::vector<std::string> tagKeys;
-            tagKeys.reserve(tags.size());
-            for (const auto& t : tags)
+            tagKeys.reserve(uniqueTags.size());
+            for (const auto& t : uniqueTags) {
                 tagKeys.push_back(std::string("tag:") + t);
+            }
 
             // Build IN list
-            std::string inKeys;
-            inKeys.reserve(tagKeys.size() * 4);
-            inKeys += '(';
-            for (size_t i = 0; i < tagKeys.size(); ++i) {
-                if (i)
-                    inKeys += ',';
-                inKeys += '?';
-            }
-            inKeys += ')';
+            auto buildInList = [](size_t count) {
+                std::string list;
+                list.reserve(count * 2 + 2);
+                list += '(';
+                for (size_t i = 0; i < count; ++i) {
+                    if (i)
+                        list += ',';
+                    list += '?';
+                }
+                list += ')';
+                return list;
+            };
+            std::string inKeys = buildInList(tagKeys.size());
+            std::string inTags = buildInList(uniqueTags.size());
 
-            QuerySpec spec{};
+            std::string sql;
             if (matchAll) {
-                // d.id IN (SELECT document_id FROM metadata WHERE key IN ('tag:a','tag:b') GROUP BY
-                // document_id HAVING COUNT(DISTINCT key)=N)
-                spec.table = "documents";
-                spec.columns = {"*"};
-                std::string sub = "SELECT document_id FROM metadata WHERE key IN " + inKeys +
-                                  " GROUP BY document_id HAVING COUNT(DISTINCT key) = ?";
-                spec.conditions.emplace_back("id IN (" + sub + ")");
-                spec.orderBy = std::optional<std::string>{"indexed_time DESC"};
+                // Match-all across both "tag:<name>" keys and legacy key="tag" values.
+                // Normalize to tag names via CASE so count reflects actual tags.
+                sql = "SELECT d.* FROM documents d WHERE d.id IN ("
+                      "SELECT document_id FROM metadata WHERE "
+                      "(key IN " +
+                      inKeys + " OR (key = 'tag' AND value IN " + inTags +
+                      ")) "
+                      "GROUP BY document_id "
+                      "HAVING COUNT(DISTINCT CASE "
+                      "WHEN key = 'tag' THEN value "
+                      "WHEN key LIKE 'tag:%' THEN substr(key, 5) "
+                      "END) = ?"
+                      ") ORDER BY d.indexed_time DESC";
             } else {
-                // JOIN metadata and filter by key IN ('tag:...')
-                spec.from = std::optional<std::string>{
-                    "documents d JOIN metadata m ON d.id = m.document_id"};
-                spec.table = "documents";
-                spec.columns = {"DISTINCT d.*"};
-                spec.conditions.emplace_back("m.key IN " + inKeys);
-                spec.orderBy = std::optional<std::string>{"d.indexed_time DESC"};
+                sql = "SELECT DISTINCT d.* FROM documents d "
+                      "JOIN metadata m ON d.id = m.document_id "
+                      "WHERE (m.key IN " +
+                      inKeys + " OR (m.key = 'tag' AND m.value IN " + inTags +
+                      ")) "
+                      "ORDER BY d.indexed_time DESC";
             }
 
-            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
+            auto stmtResult = db.prepare(sql);
             if (!stmtResult)
                 return stmtResult.error();
 
@@ -4601,9 +4622,15 @@ MetadataRepository::findDocumentsByTags(const std::vector<std::string>& tags, bo
                 if (!b)
                     return b.error();
             }
+            // Bind legacy tag values
+            for (const auto& t : uniqueTags) {
+                auto b = stmt.bind(paramIndex++, t);
+                if (!b)
+                    return b.error();
+            }
             // Bind N for matchAll HAVING
             if (matchAll) {
-                auto b = stmt.bind(paramIndex++, static_cast<int64_t>(tagKeys.size()));
+                auto b = stmt.bind(paramIndex++, static_cast<int64_t>(uniqueTags.size()));
                 if (!b)
                     return b.error();
             }

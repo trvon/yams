@@ -1,8 +1,10 @@
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cstdlib>
 #include <memory>
+#include <new>
 #include <string>
 #include <thread>
 
@@ -27,6 +29,12 @@ bool env_truthy(const char* value) {
     return !(normalized.empty() || normalized == "0" || normalized == "false" ||
              normalized == "off" || normalized == "no");
 }
+
+std::atomic<int> g_nifty_counter{0};
+alignas(yams::daemon::GlobalIOContext) char g_global_io_context_storage[sizeof(
+    yams::daemon::GlobalIOContext)];
+yams::daemon::GlobalIOContext* g_global_io_context_ptr = nullptr;
+
 } // namespace
 
 namespace yams {
@@ -34,11 +42,23 @@ namespace daemon {
 
 using WorkGuard = boost::asio::executor_work_guard<boost::asio::io_context::executor_type>;
 
+GlobalIOContextInitializer::GlobalIOContextInitializer() {
+    if (g_nifty_counter.fetch_add(1, std::memory_order_acq_rel) == 0) {
+        g_global_io_context_ptr = new (g_global_io_context_storage) GlobalIOContext();
+    }
+}
+
+GlobalIOContextInitializer::~GlobalIOContextInitializer() {
+    if (g_nifty_counter.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        if (g_global_io_context_ptr) {
+            g_global_io_context_ptr->~GlobalIOContext();
+            g_global_io_context_ptr = nullptr;
+        }
+    }
+}
+
 GlobalIOContext& GlobalIOContext::instance() {
-    // Meyer's singleton: Thread-safe in C++11+ (guaranteed by standard §6.7 [stmt.dcl] p4)
-    // Constructed on first call, avoiding static initialization order fiasco
-    static GlobalIOContext instance;
-    return instance;
+    return *g_global_io_context_ptr;
 }
 
 void GlobalIOContext::reset() {
@@ -60,44 +80,42 @@ void GlobalIOContext::reset() {
 void GlobalIOContext::restart() {
     std::lock_guard<std::mutex> lock(this->restart_mutex_);
 
-    // Phase 1: Signal stop and release work guard
     if (this->work_guard_) {
         this->work_guard_->reset();
         this->work_guard_.reset();
     }
 
-    // Phase 2: Stop io_context (will cause run() to return in worker threads)
     io_context_->stop();
 
-    // Phase 3: Join all worker threads with timeout protection
     for (auto& t : this->io_threads_) {
         if (t.joinable()) {
             try {
                 t.join();
-            } catch (const std::exception&) {
-                // Thread join failed - continue with cleanup
+            } catch (const std::exception& e) {
+                try {
+                    spdlog::warn("[GlobalIOContext] restart join exception: {}", e.what());
+                } catch (...) {
+                }
             } catch (...) {
-                // Unknown exception during join
+                try {
+                    spdlog::warn("[GlobalIOContext] restart join unknown exception");
+                } catch (...) {
+                }
             }
         }
     }
     this->io_threads_.clear();
 
-    // Phase 4: Allow brief settling time for any lingering async operations
-    // This is critical on macOS to prevent resource corruption across restart cycles
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    // Phase 5: Restart io_context and recreate work guard
     io_context_->restart();
     this->work_guard_ = std::make_unique<WorkGuard>(io_context_->get_executor());
 
-    // Phase 6: Calculate thread count
     unsigned int thread_count = std::thread::hardware_concurrency();
     if (thread_count == 0)
         thread_count = 4;
     thread_count = std::min(thread_count, 16u);
 
-    // Phase 7: Create new worker threads with proper error handling
     this->io_threads_.reserve(thread_count);
     std::vector<std::thread> new_threads;
     new_threads.reserve(thread_count);
@@ -108,16 +126,20 @@ void GlobalIOContext::restart() {
                 try {
                     io_context_->run();
                 } catch (const std::exception& e) {
-                    spdlog::error("GlobalIOContext worker exited with exception: {}", e.what());
+                    try {
+                        spdlog::error("GlobalIOContext worker exception: {}", e.what());
+                    } catch (...) {
+                    }
                 } catch (...) {
-                    spdlog::error("GlobalIOContext worker exited with unknown exception");
+                    try {
+                        spdlog::error("GlobalIOContext worker unknown exception");
+                    } catch (...) {
+                    }
                 }
             });
         }
-        // All threads created successfully - move them to member variable
         this->io_threads_ = std::move(new_threads);
     } catch (...) {
-        // Thread creation failed - clean up partial state
         this->io_context_->stop();
         for (auto& worker : new_threads) {
             if (worker.joinable()) {
@@ -143,17 +165,14 @@ boost::asio::io_context& GlobalIOContext::get_io_context() {
 
 void GlobalIOContext::ensure_initialized() {
     std::call_once(init_flag_, [this]() {
-        // Create io_context
         io_context_ = std::make_unique<boost::asio::io_context>();
         work_guard_ = std::make_unique<WorkGuard>(io_context_->get_executor());
 
-        // Calculate thread count
         unsigned int thread_count = std::thread::hardware_concurrency();
         if (thread_count == 0)
             thread_count = 4;
         thread_count = std::min(thread_count, 16u);
 
-        // Create worker threads
         io_threads_.reserve(thread_count);
         try {
             for (unsigned int i = 0; i < thread_count; ++i) {
@@ -161,16 +180,20 @@ void GlobalIOContext::ensure_initialized() {
                     try {
                         io_context_->run();
                     } catch (const std::exception& e) {
-                        spdlog::error("GlobalIOContext worker exited with exception: {}", e.what());
+                        try {
+                            spdlog::error("GlobalIOContext worker exception: {}", e.what());
+                        } catch (...) {
+                        }
                     } catch (...) {
-                        spdlog::error("GlobalIOContext worker exited with unknown exception");
+                        try {
+                            spdlog::error("GlobalIOContext worker unknown exception");
+                        } catch (...) {
+                        }
                     }
                 });
             }
         } catch (...) {
-            // Stop io_context first to wake any waiting threads
             io_context_->stop();
-            // Join all successfully created threads
             for (auto& worker : io_threads_) {
                 if (worker.joinable()) {
                     try {
@@ -179,7 +202,6 @@ void GlobalIOContext::ensure_initialized() {
                     }
                 }
             }
-            // Clean up
             if (work_guard_) {
                 work_guard_->reset();
                 work_guard_.reset();
@@ -190,25 +212,42 @@ void GlobalIOContext::ensure_initialized() {
     });
 }
 
-GlobalIOContext::GlobalIOContext() {
-    // Trivial constructor - actual initialization deferred to ensure_initialized()
-    // This avoids Windows static initialization order fiasco with boost::asio::io_context
-}
+GlobalIOContext::GlobalIOContext() {}
 
 GlobalIOContext::~GlobalIOContext() {
-    ConnectionRegistry::instance().closeAll();
-    AsioConnectionPool::shutdown_all(std::chrono::milliseconds(1000));
-
-    if (this->work_guard_) {
-        this->work_guard_->reset();
-        this->work_guard_.reset();
+    // Note: No spdlog calls here - spdlog may already be destroyed during static destruction.
+    // EXC_BAD_ACCESS crashes can occur if we try to log after spdlog is torn down.
+    try {
+        ConnectionRegistry::instance().closeAll();
+    } catch (...) {
     }
 
-    io_context_->stop();
+    try {
+        AsioConnectionPool::shutdown_all(std::chrono::milliseconds(1000));
+    } catch (...) {
+    }
+
+    try {
+        if (this->work_guard_) {
+            this->work_guard_->reset();
+            this->work_guard_.reset();
+        }
+    } catch (...) {
+    }
+
+    try {
+        if (io_context_) {
+            io_context_->stop();
+        }
+    } catch (...) {
+    }
 
     for (auto& t : this->io_threads_) {
         if (t.joinable()) {
-            t.join();
+            try {
+                t.join();
+            } catch (...) {
+            }
         }
     }
 }

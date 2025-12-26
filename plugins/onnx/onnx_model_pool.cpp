@@ -41,7 +41,8 @@ static Ort::Env& get_global_ort_env() {
             // Disable spinning to reduce CPU contention
             Ort::GetApi().SetGlobalSpinControl(threading_options, 0);
 
-            g_onnx_env = std::make_unique<Ort::Env>(threading_options, ORT_LOGGING_LEVEL_WARNING, "YamsDaemon");
+            g_onnx_env = std::make_unique<Ort::Env>(threading_options, ORT_LOGGING_LEVEL_WARNING,
+                                                    "YamsDaemon");
             Ort::GetApi().ReleaseThreadingOptions(threading_options);
             spdlog::info("[ONNX] Global Ort::Env initialized with custom threading options");
         } else {
@@ -66,7 +67,6 @@ static Ort::Env& get_global_ort_env() {
 #include <fstream>
 #include <future>
 #include <thread>
-
 
 namespace yams::daemon {
 
@@ -319,7 +319,8 @@ public:
                     options.SetInterOpNumThreads(1);
 
                     // Create session directly - no async wrapper needed for local file operations
-                    spdlog::info("[ONNX] Creating Ort::Session for '{}' at '{}'", modelName_, modelPath_);
+                    spdlog::info("[ONNX] Creating Ort::Session for '{}' at '{}'", modelName_,
+                                 modelPath_);
                     session_ = std::make_unique<Ort::Session>(
                         *env_, std::filesystem::path(modelPath_).c_str(), options);
                     spdlog::info("[ONNX] Ort::Session created successfully for '{}'", modelName_);
@@ -329,12 +330,14 @@ public:
                 } catch (const std::system_error& e) {
                     spdlog::warn("[ONNX] loadModel: system_error '{}' (code={}). Retries left: {}",
                                  e.what(), e.code().value(), retries);
-                    if (retries == 0) throw;
+                    if (retries == 0)
+                        throw;
                     std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 } catch (const Ort::Exception& e) {
                     spdlog::warn("[ONNX] loadModel: Ort::Exception '{}'. Retries left: {}",
                                  e.what(), retries);
-                    if (retries == 0) throw;
+                    if (retries == 0)
+                        throw;
                     std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 }
             }
@@ -417,12 +420,14 @@ public:
             return Result<void>();
 
         } catch (const Ort::Exception& e) {
-            spdlog::error("[ONNX] Failed to load '{}' (Ort::Exception): {}", modelName_.c_str(), e.what());
+            spdlog::error("[ONNX] Failed to load '{}' (Ort::Exception): {}", modelName_.c_str(),
+                          e.what());
             return Error{ErrorCode::InternalError,
                          std::string("Failed to load ONNX model: ") + e.what()};
         } catch (const std::system_error& e) {
-            spdlog::error("[ONNX] Failed to load '{}' (std::system_error): {}", modelName_.c_str(), e.what());
-             return Error{ErrorCode::InternalError,
+            spdlog::error("[ONNX] Failed to load '{}' (std::system_error): {}", modelName_.c_str(),
+                          e.what());
+            return Error{ErrorCode::InternalError,
                          std::string("Failed to load ONNX model (system error): ") + e.what()};
         }
     }
@@ -794,21 +799,26 @@ private:
                                         inputs.size(), out_names.data(), out_names.size());
                 break; // synchronous success
             } catch (const Ort::Exception& e) {
-                if(retries == 0) {
+                if (retries == 0) {
                     fprintf(stderr, "[ONNX Plugin] Ort::Exception in Run: %s\n", e.what());
-                    return Error{ErrorCode::InternalError, std::string("ONNX runtime error: ") + e.what()};
+                    return Error{ErrorCode::InternalError,
+                                 std::string("ONNX runtime error: ") + e.what()};
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
             } catch (const std::system_error& e) {
-                if(std::string(e.what()).find("resource deadlock") != std::string::npos || retries > 0) {
-                     spdlog::warn("[ONNX Plugin] Deadlock/system error caught, retrying... ({})", e.what());
-                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                     if(retries == 0) {
-                         fprintf(stderr, "[ONNX Plugin] std::system_error in Run (exhausted): %s\n", e.what());
-                         return Error{ErrorCode::InternalError,
-                                      std::string("System error during ONNX inference: ") + e.what()};
-                     }
-                     continue;
+                if (std::string(e.what()).find("resource deadlock") != std::string::npos ||
+                    retries > 0) {
+                    spdlog::warn("[ONNX Plugin] Deadlock/system error caught, retrying... ({})",
+                                 e.what());
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    if (retries == 0) {
+                        fprintf(stderr, "[ONNX Plugin] std::system_error in Run (exhausted): %s\n",
+                                e.what());
+                        return Error{ErrorCode::InternalError,
+                                     std::string("System error during ONNX inference: ") +
+                                         e.what()};
+                    }
+                    continue;
                 }
                 fprintf(stderr, "[ONNX Plugin] std::system_error in Run: %s\n", e.what());
                 return Error{ErrorCode::InternalError,
@@ -1090,7 +1100,8 @@ OnnxModelPool::OnnxModelPool(const ModelPoolConfig& config) : config_(config) {
         // Log that we're using the shared global environment
         // NOTE: We do NOT create a separate Ort::Env here - OnnxModelSession::Impl
         // uses the global get_global_ort_env() function to avoid thread pool conflicts.
-        spdlog::info("[ONNX] Pool: Using shared global Ort::Env (sessions use single-threaded execution)");
+        spdlog::info(
+            "[ONNX] Pool: Using shared global Ort::Env (sessions use single-threaded execution)");
 
         if (config.enableGPU) {
             // TODO: Add GPU provider configuration
@@ -1106,7 +1117,19 @@ OnnxModelPool::OnnxModelPool(const ModelPoolConfig& config) : config_(config) {
 }
 
 OnnxModelPool::~OnnxModelPool() {
-    shutdown();
+    try {
+        shutdown();
+    } catch (const std::exception& e) {
+        try {
+            spdlog::warn("[OnnxModelPool] destructor exception: {}", e.what());
+        } catch (...) {
+        }
+    } catch (...) {
+        try {
+            spdlog::warn("[OnnxModelPool] destructor unknown exception");
+        } catch (...) {
+        }
+    }
 }
 
 Result<void> OnnxModelPool::initialize() {
@@ -1133,14 +1156,23 @@ Result<void> OnnxModelPool::initialize() {
     // Start background preloading if configured (non-blocking)
     if (!config_.lazyLoading && !config_.preloadModels.empty()) {
         // Launch preloading in background thread to avoid blocking
-        std::thread([this]() {
+        // Store the thread so we can join it during shutdown
+        preloadThread_ = std::thread([this]() {
             spdlog::info("Starting background model preloading");
-            if (auto result = preloadModels(); !result) {
-                spdlog::warn("Failed to preload some models: {}", result.error().message);
-            } else {
-                spdlog::info("Background model preloading completed");
+            // Check shutdown flag periodically during preload
+            for (const auto& modelName : config_.preloadModels) {
+                if (shutdown_.load(std::memory_order_acquire)) {
+                    spdlog::info("Background preloading interrupted by shutdown");
+                    return;
+                }
+                auto result = loadModel(modelName);
+                if (!result) {
+                    spdlog::warn("Failed to preload model {}: {}", modelName,
+                                 result.error().message);
+                }
             }
-        }).detach();
+            spdlog::info("Background model preloading completed");
+        });
     }
 
     initialized_ = true;
@@ -1148,19 +1180,65 @@ Result<void> OnnxModelPool::initialize() {
 }
 
 void OnnxModelPool::shutdown() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (shutdown_.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
 
-    spdlog::info("Shutting down ONNX model pool");
-
-    // Shutdown all model pools
-    for (auto& [name, entry] : models_) {
-        if (entry.pool) {
-            entry.pool->shutdown();
+    if (preloadThread_.joinable()) {
+        try {
+            spdlog::info("Waiting for background preload thread to finish...");
+        } catch (...) {
+        }
+        try {
+            preloadThread_.join();
+            try {
+                spdlog::info("Background preload thread joined");
+            } catch (...) {
+            }
+        } catch (const std::exception& e) {
+            try {
+                spdlog::warn("Failed to join preload thread: {}", e.what());
+            } catch (...) {
+            }
+        } catch (...) {
         }
     }
 
-    models_.clear();
-    initialized_ = false;
+    try {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+
+        try {
+            spdlog::info("Shutting down ONNX model pool");
+        } catch (...) {
+        }
+
+        for (auto& [name, entry] : models_) {
+            if (entry.pool) {
+                try {
+                    entry.pool->shutdown();
+                } catch (const std::exception& e) {
+                    try {
+                        spdlog::warn("Failed to shutdown model pool '{}': {}", name, e.what());
+                    } catch (...) {
+                    }
+                } catch (...) {
+                }
+            }
+        }
+
+        models_.clear();
+        initialized_ = false;
+    } catch (const std::exception& e) {
+        try {
+            spdlog::warn("ONNX model pool shutdown exception: {}", e.what());
+        } catch (...) {
+        }
+    } catch (...) {
+        try {
+            spdlog::warn("ONNX model pool shutdown unknown exception");
+        } catch (...) {
+        }
+    }
 }
 
 Result<OnnxModelPool::ModelHandle> OnnxModelPool::acquireModel(const std::string& modelName,
@@ -1259,7 +1337,8 @@ Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
 
         // Check if another thread is currently loading this model
         if (loadingModels_.count(modelName) > 0) {
-            spdlog::info("[ONNX Plugin] Model '{}' is being loaded by another thread, waiting...", modelName);
+            spdlog::info("[ONNX Plugin] Model '{}' is being loaded by another thread, waiting...",
+                         modelName);
             // Wait for the other thread to finish loading
             loadingCv_.wait(lock, [this, &modelName]() {
                 // Wake up when either: model is loaded, or no longer in loading set
@@ -1276,7 +1355,8 @@ Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
                 return Result<void>();
             }
             // If not loaded and not loading, we'll try to load it ourselves
-            spdlog::warn("[ONNX Plugin] Model '{}' load failed by other thread, retrying", modelName);
+            spdlog::warn("[ONNX Plugin] Model '{}' load failed by other thread, retrying",
+                         modelName);
         }
 
         // Mark this model as being loaded by us
@@ -1369,7 +1449,8 @@ Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
             poolConfig,
             [modelPath, modelName, embConfig](const std::string&) -> Result<ModelSessionPtr> {
                 try {
-                    spdlog::info("[ONNX Plugin] Factory: creating OnnxModelSession for '{}'", modelName);
+                    spdlog::info("[ONNX Plugin] Factory: creating OnnxModelSession for '{}'",
+                                 modelName);
                     return std::make_shared<OnnxModelSession>(modelPath, modelName, embConfig);
                 } catch (const std::exception& e) {
                     spdlog::error("[ONNX Plugin] Factory: failed to create session: {}", e.what());
@@ -1385,10 +1466,12 @@ Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
     } catch (const std::system_error& e) {
         spdlog::error("[ONNX Plugin] ResourcePool construction threw system_error: {} (code={})",
                       e.what(), e.code().value());
-        return Error{ErrorCode::InternalError, std::string("ResourcePool construction failed: ") + e.what()};
+        return Error{ErrorCode::InternalError,
+                     std::string("ResourcePool construction failed: ") + e.what()};
     } catch (const std::exception& e) {
         spdlog::error("[ONNX Plugin] ResourcePool construction threw exception: {}", e.what());
-        return Error{ErrorCode::InternalError, std::string("ResourcePool construction failed: ") + e.what()};
+        return Error{ErrorCode::InternalError,
+                     std::string("ResourcePool construction failed: ") + e.what()};
     }
 
     // Now acquire lock briefly to update shared state
@@ -1429,7 +1512,8 @@ Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
     spdlog::info("Registered ONNX model: {} ({}MB) load_ms={} path={}", modelName,
                  modelSize / (1024 * 1024), ms, modelPath);
 
-    spdlog::info("[ONNX Plugin] Model '{}' registered successfully (session created on first use)", modelName);
+    spdlog::info("[ONNX Plugin] Model '{}' registered successfully (session created on first use)",
+                 modelName);
     return Result<void>();
 }
 

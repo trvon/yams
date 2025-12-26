@@ -2082,8 +2082,9 @@ Result<size_t> ServiceManager::adoptSymbolExtractorsFromHosts() {
                 }
                 auto mapSize = extMap.size();
                 postIngest_->setSymbolExtensionMap(std::move(extMap));
-                spdlog::info("[ServiceManager] Updated PostIngestQueue with {} symbol extension mappings",
-                             mapSize);
+                spdlog::info(
+                    "[ServiceManager] Updated PostIngestQueue with {} symbol extension mappings",
+                    mapSize);
             }
         }
         return result;
@@ -2287,23 +2288,16 @@ std::shared_ptr<search::SearchEngine> ServiceManager::getSearchEngineSnapshot() 
 }
 
 yams::app::services::AppContext ServiceManager::getAppContext() const {
-    spdlog::debug("[getAppContext] START");
     app::services::AppContext ctx;
     ctx.service_manager = const_cast<ServiceManager*>(this);
     ctx.store = contentStore_;
-    spdlog::debug("[getAppContext] about to call atomic_load(searchExecutor_)");
     ctx.searchExecutor = std::atomic_load(&searchExecutor_);
-    spdlog::debug("[getAppContext] about to set metadataRepo");
     ctx.metadataRepo = metadataRepo_;
-    spdlog::debug("[getAppContext] about to call getSearchEngineSnapshot()");
     ctx.searchEngine = getSearchEngineSnapshot();
     ctx.vectorDatabase = getVectorDatabase();
-    spdlog::debug("[getAppContext] getSearchEngineSnapshot() returned");
     ctx.kgStore = this->kgStore_; // PBI-043: tree diff KG integration
-    spdlog::debug("[getAppContext] about to call graphComponent_->getQueryService()");
     ctx.graphQueryService = graphComponent_ ? graphComponent_->getQueryService()
                                             : nullptr; // PBI-009: centralized graph queries
-    spdlog::debug("[getAppContext] graphComponent_->getQueryService() returned");
     ctx.contentExtractors = contentExtractors_;
 
     // Log vector capability status
@@ -2689,13 +2683,10 @@ void ServiceManager::enqueuePostIngest(const std::string& hash, const std::strin
     if (!postIngest_) {
         return;
     }
-    PostIngestQueue::Task task{
-        hash,
-        mime,
-        "",  // session
-        std::chrono::steady_clock::now(),
-        PostIngestQueue::Task::Stage::Metadata
-    };
+    PostIngestQueue::Task task{hash, mime,
+                               "", // session
+                               std::chrono::steady_clock::now(),
+                               PostIngestQueue::Task::Stage::Metadata};
     postIngest_->tryEnqueue(std::move(task));
 }
 

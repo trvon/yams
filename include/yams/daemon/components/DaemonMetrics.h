@@ -2,13 +2,17 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <shared_mutex>
 #include <string>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/post.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
 
 namespace yams::daemon {
@@ -235,6 +239,12 @@ private:
 
     // Background polling control
     std::atomic<bool> pollingActive_{false};
+    // Timer pointer for cancellation from stopPolling()
+    boost::asio::steady_timer* pollingTimer_{nullptr};
+    // Shutdown synchronization - signaled when polling loop exits
+    std::mutex pollingMutex_;
+    std::condition_variable pollingCv_;
+    bool pollingStopped_{true};
 
     // CPU utilization sampling state (Linux): deltas over /proc since last snapshot
     mutable std::uint64_t lastProcJiffies_{0};

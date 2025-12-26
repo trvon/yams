@@ -20,7 +20,10 @@ public:
         return instance().get_io_context().get_executor();
     }
 
+    static void reset();
+
 private:
+    friend class GlobalIOContextInitializer;
     GlobalIOContext();
     ~GlobalIOContext();
 
@@ -29,14 +32,18 @@ private:
         work_guard_;
     std::vector<std::thread> io_threads_;
     std::mutex restart_mutex_;
-    std::once_flag init_flag_; // For lazy initialization
+    std::once_flag init_flag_;
 
-    void ensure_initialized(); // Lazy init helper
-
+    void ensure_initialized();
     void restart();
-
-public:
-    static void reset();
 };
+
+class GlobalIOContextInitializer {
+public:
+    GlobalIOContextInitializer();
+    ~GlobalIOContextInitializer();
+};
+
+static GlobalIOContextInitializer g_global_io_context_initializer;
 
 } // namespace yams::daemon

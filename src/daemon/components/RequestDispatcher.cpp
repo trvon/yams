@@ -17,8 +17,8 @@
 #ifndef NOMINMAX
 #define NOMINMAX 1
 #endif
-#include <Windows.h>
 #include <Psapi.h>
+#include <Windows.h>
 #endif
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -377,33 +377,55 @@ boost::asio::awaitable<Response>
 RequestDispatcher::handleShutdownRequest(const ShutdownRequest& req) {
     spdlog::info("Received shutdown request (graceful={})", req.graceful);
 
-    // Detach thread to perform clean shutdown then force process exit.
-    // This prevents orphaned daemon processes (see PBI-070).
     if (daemon_) {
         bool graceful = req.graceful;
-        std::thread([d = daemon_, graceful]() {
+        bool inTestMode = std::getenv("YAMS_TESTING") != nullptr ||
+                          std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE") != nullptr;
+        daemon_->spawnShutdownThread([d = daemon_, graceful, inTestMode]() {
             try {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-                spdlog::info("Initiating daemon shutdown sequence...");
+                try {
+                    spdlog::info("Initiating daemon shutdown sequence...");
+                } catch (...) {
+                }
                 auto result = d->stop();
                 if (!result) {
-                    spdlog::error("Daemon shutdown encountered error: {}", result.error().message);
+                    try {
+                        spdlog::error("Daemon shutdown encountered error: {}",
+                                      result.error().message);
+                    } catch (...) {
+                    }
                 }
             } catch (const std::exception& e) {
-                spdlog::error("Exception during daemon shutdown: {}", e.what());
+                try {
+                    spdlog::error("Exception during daemon shutdown: {}", e.what());
+                } catch (...) {
+                }
             } catch (...) {
-                spdlog::error("Unknown exception during daemon shutdown");
+                try {
+                    spdlog::error("Unknown exception during daemon shutdown");
+                } catch (...) {
+                }
             }
 
             d->requestStop();
 
-            // Force exit after clean shutdown to prevent orphaned processes
-            spdlog::info("Daemon shutdown complete, exiting process");
-            std::exit(0);
+            if (!inTestMode) {
+                try {
+                    spdlog::info("Daemon shutdown complete, exiting process");
+                } catch (...) {
+                }
+                std::exit(0);
+            } else {
+                try {
+                    spdlog::info("Daemon shutdown complete (test mode, not exiting)");
+                } catch (...) {
+                }
+            }
 
             (void)graceful;
-        }).detach();
+        });
     }
 
     co_return SuccessResponse{"Shutdown initiated"};

@@ -1,8 +1,12 @@
 #include <yams/daemon/client/asio_connection.h>
 
+#include <boost/asio/as_tuple.hpp>
 #include <boost/asio/buffer.hpp>
 #include <boost/asio/dispatch.hpp>
+#include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/redirect_error.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/write.hpp>
 #include <boost/system/error_code.hpp>
@@ -11,7 +15,10 @@
 
 namespace yams::daemon {
 
+using boost::asio::as_tuple;
 using boost::asio::use_awaitable;
+namespace this_coro = boost::asio::this_coro;
+using namespace boost::asio::experimental::awaitable_operators;
 
 boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vector<uint8_t> frame) {
     co_await boost::asio::dispatch(strand, use_awaitable);
@@ -56,14 +63,28 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
         }
         spdlog::debug("AsioConnection::async_write_frame: writing {} frames, {} bytes total",
                       frames, batched);
-        boost::system::error_code ec;
-        auto result = co_await boost::asio::async_write(
-            *socket, buffers, boost::asio::redirect_error(use_awaitable, ec));
-        if (ec) {
-            spdlog::error("AsioConnection::async_write_frame: write error: {}", ec.message());
+        boost::asio::steady_timer timer(co_await this_coro::executor);
+        timer.expires_after(opts.requestTimeout);
+        auto write_result =
+            co_await (boost::asio::async_write(*socket, buffers, as_tuple(use_awaitable)) ||
+                      timer.async_wait(as_tuple(use_awaitable)));
+
+        if (write_result.index() == 1) {
+            spdlog::error("AsioConnection::async_write_frame: write timeout after {}ms",
+                          opts.requestTimeout.count());
             writing = false;
             alive = false;
-            co_return Error{ErrorCode::NetworkError, ec.message()};
+            boost::system::error_code close_ec;
+            socket->close(close_ec);
+            co_return Error{ErrorCode::Timeout, "Write timeout"};
+        }
+
+        auto& [write_ec, result] = std::get<0>(write_result);
+        if (write_ec) {
+            spdlog::error("AsioConnection::async_write_frame: write error: {}", write_ec.message());
+            writing = false;
+            alive = false;
+            co_return Error{ErrorCode::NetworkError, write_ec.message()};
         }
         if (result != batched) {
             spdlog::error("AsioConnection::async_write_frame: short write {} != {}", result,
