@@ -1,5 +1,6 @@
 #include <yams/app/services/document_ingestion_service.h>
 
+#include <spdlog/spdlog.h>
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
@@ -65,6 +66,10 @@ DocumentIngestionService::addViaDaemon(const AddOptions& opts) const {
     std::string lastError;
     for (int attempt = 0; attempt <= std::max(0, opts.retries); ++attempt) {
         try {
+            auto attemptStart = std::chrono::steady_clock::now();
+            spdlog::debug("[addViaDaemon] attempt={} path={} timeoutMs={}", attempt, opts.path,
+                          opts.timeoutMs);
+
             yams::daemon::ClientConfig cfg;
             if (opts.socketPath && !opts.socketPath->empty()) {
                 cfg.socketPath = *opts.socketPath;
@@ -79,20 +84,34 @@ DocumentIngestionService::addViaDaemon(const AddOptions& opts) const {
 
             std::promise<Result<yams::daemon::AddDocumentResponse>> p2;
             auto f2 = p2.get_future();
+            spdlog::debug("[addViaDaemon] spawning coroutine");
             boost::asio::co_spawn(
                 yams::daemon::GlobalIOContext::global_executor(),
                 [client, dreq, p2 = std::move(p2)]() mutable -> boost::asio::awaitable<void> {
+                    spdlog::debug("[addViaDaemon] coroutine started");
                     auto r = co_await client->streamingAddDocument(dreq);
+                    spdlog::debug("[addViaDaemon] coroutine got response");
                     p2.set_value(std::move(r));
                     co_return;
                 },
                 boost::asio::detached);
 
+            spdlog::debug("[addViaDaemon] waiting on future for {}ms", opts.timeoutMs);
             Result<yams::daemon::AddDocumentResponse> res =
                 Error{ErrorCode::Timeout, "AddDocument timed out"};
             if (f2.wait_for(std::chrono::milliseconds(std::max(1, opts.timeoutMs))) ==
                 std::future_status::ready) {
                 res = f2.get();
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now() - attemptStart)
+                                   .count();
+                spdlog::debug("[addViaDaemon] got result in {}ms", elapsed);
+            } else {
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now() - attemptStart)
+                                   .count();
+                spdlog::warn("[addViaDaemon] TIMEOUT after {}ms (expected {}ms)", elapsed,
+                             opts.timeoutMs);
             }
             if (res) {
                 // Optional strong verification for single-file adds

@@ -157,6 +157,16 @@ bool socket_looks_healthy(AsioConnection::socket_t& socket) {
     if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
         return false;
     }
+    if (pfd.revents & POLLIN) {
+        char buf;
+        ssize_t n = ::recv(fd, &buf, 1, MSG_PEEK | MSG_DONTWAIT);
+        if (n == 0) {
+            return false;
+        }
+        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            return false;
+        }
+    }
 #endif
     return true;
 }
@@ -286,13 +296,19 @@ void AsioConnectionPool::shutdown(std::chrono::milliseconds timeout) {
 
     for (auto& weak : connection_pool_) {
         if (auto conn = weak.lock()) {
-            conn->close();
+            conn->alive.store(false, std::memory_order_release);
+            try {
+                if (conn->socket) {
+                    conn->socket.release();
+                }
+            } catch (...) {
+            }
 
             if (conn->read_loop_future.valid()) {
-                auto status = conn->read_loop_future.wait_for(timeout);
-                if (status != std::future_status::ready) {
-                    spdlog::warn("Connection read loop did not complete within {}ms",
-                                 timeout.count());
+                try {
+                    auto status = conn->read_loop_future.wait_for(timeout);
+                    (void)status;
+                } catch (...) {
                 }
             }
         }

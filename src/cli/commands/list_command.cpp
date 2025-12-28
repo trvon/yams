@@ -127,9 +127,13 @@ public:
         cmd->add_option("--compare-to", compareTo_,
                         "Compare file with another snapshot (requires --snapshot-id)");
 
-        // Streaming control
-        cmd->add_flag("--streaming", enableStreaming_,
-                      "Enable streaming responses from daemon (default: off for stability)");
+        cmd->add_flag(
+            "--no-streaming",
+            [this](bool v) {
+                if (v)
+                    enableStreaming_ = false;
+            },
+            "Disable streaming responses from daemon");
 
         cmd->callback([this]() {
             // Handle snippet flag logic
@@ -347,8 +351,6 @@ public:
                     auto r = render(res.value());
                     if (!r)
                         return r;
-                    // If a concrete file path was provided, try to show a diff against indexed
-                    (void)printPathDiffIfApplicable();
                     return Result<void>();
                 }
                 spdlog::warn("list: daemon path failed ({}); using local services",
@@ -1657,8 +1659,8 @@ private:
     std::string snapshotId_;
     std::string compareTo_;
 
-    // Streaming control (disabled by default for agent/automation compatibility)
-    bool enableStreaming_ = false;
+    // Streaming configuration
+    bool enableStreaming_ = true;
 
     std::string getFileTypeIndicator(const EnhancedDocumentInfo& doc) {
         std::string indicator = "[";

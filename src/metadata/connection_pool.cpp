@@ -235,6 +235,7 @@ Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::m
 
         // PBI-079: Check if connection is from an old generation (stale)
         if (conn->generation_ < currentGen) {
+            conn->returned_ = true; // Prevent destructor deadlock
             totalConnections_--;
             spdlog::debug("[PBI-079] Discarded stale connection (gen {}, current {})",
                           conn->generation_, currentGen);
@@ -247,6 +248,7 @@ Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::m
             break;
         } else {
             // Connection is stale, discard it
+            conn->returned_ = true; // Prevent destructor deadlock
             totalConnections_--;
             spdlog::warn("Discarded stale connection on acquire (attempt {})", attempt + 1);
             conn.reset();
@@ -356,6 +358,7 @@ void ConnectionPool::pruneIdleConnections() {
 
         if (keep.size() + activeConnections_ < config_.minConnections) {
             if (age >= config_.maxConnectionAge) {
+                conn->returned_ = true; // Prevent destructor deadlock
                 totalConnections_--;
                 prunedAge++;
                 spdlog::debug("Pruned aged connection (age: {}s)",
@@ -367,11 +370,13 @@ void ConnectionPool::pruneIdleConnections() {
         }
 
         if (age >= config_.maxConnectionAge) {
+            conn->returned_ = true; // Prevent destructor deadlock
             totalConnections_--;
             prunedAge++;
             spdlog::debug("Pruned aged connection (age: {}s)",
                           std::chrono::duration_cast<std::chrono::seconds>(age).count());
         } else if (idleTime >= config_.idleTimeout) {
+            conn->returned_ = true; // Prevent destructor deadlock
             totalConnections_--;
             prunedIdle++;
             spdlog::debug("Pruned idle connection (idle: {}s)",
@@ -522,7 +527,9 @@ void ConnectionPool::returnConnection(PooledConnection* conn) {
 void ConnectionPool::refreshNext() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!available_.empty()) {
+        auto conn = std::move(available_.front());
         available_.pop();
+        conn->returned_ = true; // Prevent destructor deadlock
         totalConnections_--;
     }
 }

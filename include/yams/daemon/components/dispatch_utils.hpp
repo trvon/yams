@@ -58,36 +58,62 @@ offload_to_worker(ServiceManager* sm, Fn&& fn) {
     using ResultType = std::remove_cvref_t<RawResult>;
     static_assert(!std::is_void_v<ResultType>, "offload_to_worker requires non-void result type");
 
-    // Get WorkCoordinator from ServiceManager
     WorkCoordinator* coordinator = sm ? sm->getWorkCoordinator() : nullptr;
-    if (!coordinator) {
-        // Fallback to synchronous execution if no coordinator available
-        spdlog::debug("offload_to_worker: no WorkCoordinator, executing synchronously");
+    if (!coordinator || !coordinator->isRunning()) {
+        spdlog::debug("offload_to_worker: WorkCoordinator unavailable, sync exec");
         co_return fn();
     }
 
-    // Use async_initiate to create a proper async operation without experimental features.
-    // This posts work to the WorkCoordinator, then posts completion back to caller's executor.
     auto work_executor = coordinator->getExecutor();
+    auto ioCtx = coordinator->getIOContext();
+    if (!ioCtx || ioCtx->stopped()) {
+        spdlog::warn("offload_to_worker: io_context stopped, sync exec");
+        co_return fn();
+    }
+
+    // Use a shared_ptr to track if work has started executing
+    auto work_started = std::make_shared<std::atomic<bool>>(false);
+    auto work_done = std::make_shared<std::atomic<bool>>(false);
 
     co_return co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
                                                    void(std::exception_ptr, ResultType)>(
-        [work_executor](auto handler, auto f) mutable {
-            boost::asio::post(
-                work_executor, [handler = std::move(handler), f = std::move(f)]() mutable {
-                    std::exception_ptr ep;
-                    ResultType result{};
-                    try {
-                        result = f();
-                    } catch (...) {
-                        ep = std::current_exception();
-                    }
-                    auto completion_executor = boost::asio::get_associated_executor(handler);
-                    boost::asio::post(completion_executor, [handler = std::move(handler), ep,
-                                                            result = std::move(result)]() mutable {
-                        std::move(handler)(ep, std::move(result));
-                    });
+        [work_executor, ioCtx, work_started, work_done](auto handler, auto f) mutable {
+            if (ioCtx->stopped()) {
+                auto completion_executor = boost::asio::get_associated_executor(handler);
+                boost::asio::post(completion_executor,
+                                  [handler = std::move(handler), f = std::move(f)]() mutable {
+                                      std::exception_ptr ep;
+                                      ResultType result{};
+                                      try {
+                                          result = f();
+                                      } catch (...) {
+                                          ep = std::current_exception();
+                                      }
+                                      std::move(handler)(ep, std::move(result));
+                                  });
+                return;
+            }
+            boost::asio::post(work_executor, [handler = std::move(handler), f = std::move(f),
+                                              work_started, work_done]() mutable {
+                work_started->store(true, std::memory_order_release);
+                std::exception_ptr ep;
+                ResultType result{};
+                try {
+                    result = f();
+                } catch (const std::exception& e) {
+                    spdlog::error("offload_to_worker: exception: {}", e.what());
+                    ep = std::current_exception();
+                } catch (...) {
+                    spdlog::error("offload_to_worker: unknown exception");
+                    ep = std::current_exception();
+                }
+                work_done->store(true, std::memory_order_release);
+                auto completion_executor = boost::asio::get_associated_executor(handler);
+                boost::asio::post(completion_executor, [handler = std::move(handler), ep,
+                                                        result = std::move(result)]() mutable {
+                    std::move(handler)(ep, std::move(result));
                 });
+            });
         },
         boost::asio::use_awaitable, std::forward<Fn>(fn));
 }

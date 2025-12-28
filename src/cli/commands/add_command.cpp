@@ -244,9 +244,20 @@ sanitizeMetadata(const std::vector<std::string>& metadataRaw) {
 }
 
 // Helper to get active session ID (returns empty string if no active session or bypassed)
-std::string getActiveSessionId(YamsCLI* cli, bool bypass) {
+// Note: initContext=false avoids triggering expensive storage initialization in daemon path
+std::string getActiveSessionId(YamsCLI* cli, bool bypass, bool initContext = true) {
     if (bypass)
         return {};
+    // Check environment variable first (fast path, no storage init needed)
+    if (const char* envSession = std::getenv("YAMS_SESSION_CURRENT")) {
+        if (*envSession) {
+            return std::string(envSession);
+        }
+    }
+    // Only initialize context if explicitly requested (avoids 40+ second delay in daemon path)
+    if (!initContext) {
+        return {};
+    }
     auto appContext = cli->getAppContext();
     if (!appContext)
         return {};
@@ -296,7 +307,7 @@ public:
         // Daemon interaction robustness controls (always use daemon for file/dir)
         cmd->add_option("--daemon-timeout-ms", daemonTimeoutMs_,
                         "Per-request timeout when talking to the daemon (ms)")
-            ->default_val(30000);
+            ->default_val(5000);
         cmd->add_option("--daemon-retries", daemonRetries_,
                         "Retry attempts for transient daemon failures")
             ->default_val(3)
@@ -364,7 +375,9 @@ public:
                 }
 
                 // Get active session for session-isolated memory (PBI-082)
-                std::string activeSessionId = getActiveSessionId(cli_, bypassSession_);
+                // Use initContext=false to avoid expensive storage initialization in daemon path
+                // Session ID is read from YAMS_SESSION_CURRENT env var (set by `yams session use`)
+                std::string activeSessionId = getActiveSessionId(cli_, bypassSession_, false);
 
                 // Ensure daemon is running; auto-start if necessary
                 std::filesystem::path effectiveSocket =
@@ -515,15 +528,9 @@ public:
                         }
                     }
                     resumeProgress();
-
-                    if (resp.documentsAdded > 0) {
-                        if (auto appContext = cli_->getAppContext()) {
-                            auto searchService = app::services::makeSearchService(*appContext);
-                            if (searchService) {
-                                (void)searchService->lightIndexForHash(resp.hash);
-                            }
-                        }
-                    }
+                    // Note: Daemon handles FTS5/embedding indexing via PostIngestQueue.
+                    // No local lightIndexForHash needed - it would trigger expensive
+                    // local storage initialization (40+ seconds) for no benefit.
                 };
 
                 // Process single files first (these respect --name directly)
@@ -995,7 +1002,7 @@ private:
     bool bypassSession_ = false;
 
     // Daemon interaction controls
-    int daemonTimeoutMs_ = 30000;
+    int daemonTimeoutMs_ = 5000; // AddDocument just pushes to queue, 5s is plenty
     int daemonRetries_ = 3;
     int daemonBackoffMs_ = 250;
     int daemonReadyTimeoutMs_ = 10000;

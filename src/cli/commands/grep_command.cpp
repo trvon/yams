@@ -98,8 +98,8 @@ private:
     bool pathsOnly_ = false;
     bool literalText_ = false;
     bool regexOnly_ = false;
-    // Streaming disabled by default for agent/automation compatibility; user can opt in
-    bool enableStreaming_ = false;
+    // Streaming configuration
+    bool enableStreaming_ = true;
     size_t semanticLimit_ = 10;
     std::string filterTags_;
     bool matchAllTags_ = false;
@@ -261,9 +261,13 @@ public:
                         "Alias: stop after N matches per file (same as --max-count)")
             ->default_val(20);
 
-        // Streaming control (disabled by default for reliability)
-        cmd->add_flag("--streaming", enableStreaming_,
-                      "Enable streaming responses from daemon (off by default)");
+        cmd->add_flag(
+            "--no-streaming",
+            [this](bool v) {
+                if (v)
+                    enableStreaming_ = false;
+            },
+            "Disable streaming responses from daemon");
 
         // Output format control
         cmd->add_flag("--minimal", minimalMode_,
@@ -518,12 +522,13 @@ public:
                                 if ((itR == hasRegex.end() || !itR->second) &&
                                     itS != semOnlyConf.end()) {
                                     // Semantic-only match: show confidence in cyan
-                                    std::cout << ui::colorize(
-                                                     "[S:" +
-                                                     std::to_string(itS->second).substr(0, 4) + "]",
-                                                     ui::Ansi::CYAN)
-                                              << " " << ui::colorize(file, ui::Ansi::MAGENTA)
-                                              << std::endl;
+                                    std::cout
+                                        << ui::colorize(
+                                               "[S:" + std::to_string(itS->second).substr(0, 4) +
+                                                   "]",
+                                               ui::Ansi::CYAN)
+                                        << " " << ui::colorize(file, ui::Ansi::MAGENTA)
+                                        << std::endl;
                                 } else {
                                     std::cout << ui::colorize(file, ui::Ansi::MAGENTA) << std::endl;
                                 }
@@ -565,16 +570,15 @@ public:
                                           << std::endl;
                             }
                             if (!semanticOnly.empty()) {
-                                std::cout << ui::colorize("\nSemantic suggestions:",
-                                                          ui::Ansi::DIM)
+                                std::cout << ui::colorize("\nSemantic suggestions:", ui::Ansi::DIM)
                                           << std::endl;
                                 for (const auto& [file, conf] : semanticOnly) {
-                                    std::cout << ui::colorize(
-                                                     "[S:" +
-                                                     std::to_string(conf).substr(0, 4) + "]",
-                                                     ui::Ansi::CYAN)
-                                              << " " << ui::colorize(file, ui::Ansi::MAGENTA)
-                                              << std::endl;
+                                    std::cout
+                                        << ui::colorize("[S:" + std::to_string(conf).substr(0, 4) +
+                                                            "]",
+                                                        ui::Ansi::CYAN)
+                                        << " " << ui::colorize(file, ui::Ansi::MAGENTA)
+                                        << std::endl;
                                 }
                             }
                         }
@@ -662,11 +666,11 @@ public:
                                 // Print matches for this file
                                 for (const auto* match : matches) {
                                     // Line number in cyan
-                                    std::cout << "  "
-                                              << ui::colorize(
-                                                     std::to_string(match->lineNumber) + ":",
-                                                     ui::Ansi::CYAN)
-                                              << " ";
+                                    std::cout
+                                        << "  "
+                                        << ui::colorize(std::to_string(match->lineNumber) + ":",
+                                                        ui::Ansi::CYAN)
+                                        << " ";
 
                                     // Match type indicator with appropriate color
                                     if (match->matchType == "semantic") {
@@ -675,13 +679,13 @@ public:
                                             confColor = ui::Ansi::GREEN;
                                         else if (match->confidence >= 0.5)
                                             confColor = ui::Ansi::YELLOW;
-                                        std::cout << ui::colorize(
-                                                         "[S:" +
-                                                             std::to_string(match->confidence)
-                                                                 .substr(0, 4) +
-                                                             "]",
-                                                         confColor)
-                                                  << " ";
+                                        std::cout
+                                            << ui::colorize("[S:" +
+                                                                std::to_string(match->confidence)
+                                                                    .substr(0, 4) +
+                                                                "]",
+                                                            confColor)
+                                            << " ";
                                     } else if (match->matchType == "hybrid") {
                                         std::cout << ui::colorize("[H]", ui::Ansi::YELLOW) << " ";
                                     } else if (semanticCount > 0) {
@@ -692,16 +696,16 @@ public:
 
                                     // Context lines in dim
                                     for (const auto& ctx : match->contextBefore) {
-                                        std::cout << ui::colorize("       ", ui::Ansi::DIM)
-                                                  << ui::colorize(sanitizeForDisplay(ctx),
-                                                                  ui::Ansi::DIM)
-                                                  << std::endl;
+                                        std::cout
+                                            << ui::colorize("       ", ui::Ansi::DIM)
+                                            << ui::colorize(sanitizeForDisplay(ctx), ui::Ansi::DIM)
+                                            << std::endl;
                                     }
                                     for (const auto& ctx : match->contextAfter) {
-                                        std::cout << ui::colorize("       ", ui::Ansi::DIM)
-                                                  << ui::colorize(sanitizeForDisplay(ctx),
-                                                                  ui::Ansi::DIM)
-                                                  << std::endl;
+                                        std::cout
+                                            << ui::colorize("       ", ui::Ansi::DIM)
+                                            << ui::colorize(sanitizeForDisplay(ctx), ui::Ansi::DIM)
+                                            << std::endl;
                                     }
                                 }
                                 std::cout << std::endl;
@@ -711,8 +715,7 @@ public:
                             std::string summary = std::to_string(resp.matches.size()) + " match" +
                                                   (resp.matches.size() != 1 ? "es" : "") +
                                                   " across " + std::to_string(fileGroups.size()) +
-                                                  " file" +
-                                                  (fileGroups.size() != 1 ? "s" : "");
+                                                  " file" + (fileGroups.size() != 1 ? "s" : "");
                             if (regexCount > 0 && semanticCount > 0) {
                                 summary += " (" + std::to_string(regexCount) + " regex, " +
                                            std::to_string(semanticCount) + " semantic)";
@@ -1188,9 +1191,9 @@ private:
                 for (const auto& file : files) {
                     auto itc = semOnlyConf.find(file);
                     if (itc != semOnlyConf.end()) {
-                        std::cout << ui::colorize(
-                                         "[S:" + std::to_string(itc->second).substr(0, 4) + "]",
-                                         ui::Ansi::CYAN)
+                        std::cout << ui::colorize("[S:" + std::to_string(itc->second).substr(0, 4) +
+                                                      "]",
+                                                  ui::Ansi::CYAN)
                                   << " " << ui::colorize(file, ui::Ansi::MAGENTA) << std::endl;
                     } else {
                         std::cout << ui::colorize(file, ui::Ansi::MAGENTA) << std::endl;
@@ -1284,9 +1287,9 @@ private:
                     else if (result.score >= 0.5)
                         scoreColor = ui::Ansi::YELLOW;
                     std::cout << " "
-                              << ui::colorize(
-                                     "[S:" + std::to_string(result.score).substr(0, 4) + "]",
-                                     scoreColor)
+                              << ui::colorize("[S:" + std::to_string(result.score).substr(0, 4) +
+                                                  "]",
+                                              scoreColor)
                               << std::endl;
 
                     // Show snippet if available

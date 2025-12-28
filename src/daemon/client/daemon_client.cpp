@@ -76,9 +76,12 @@ TimeoutCategory getTimeoutCategory(const Request& req) {
                           std::is_same_v<T, ShutdownRequest>) {
                 return TimeoutCategory::Fast;
             }
+            // Fast operations - AddDocument just pushes to queue and returns immediately
+            else if constexpr (std::is_same_v<T, AddDocumentRequest>) {
+                return TimeoutCategory::Fast;
+            }
             // Slow operations (120s) - heavy or maintenance work
-            else if constexpr (std::is_same_v<T, AddDocumentRequest> ||
-                               std::is_same_v<T, GenerateEmbeddingRequest> ||
+            else if constexpr (std::is_same_v<T, GenerateEmbeddingRequest> ||
                                std::is_same_v<T, UpdateDocumentRequest> ||
                                std::is_same_v<T, EmbedDocumentsRequest> ||
                                std::is_same_v<T, BatchEmbeddingRequest> ||
@@ -1050,10 +1053,14 @@ DaemonClient::sendRequestStreaming(const Request& req,
     opts.requestTimeout = std::max(opts.requestTimeout, timeout);
     opts.headerTimeout = std::max(opts.headerTimeout, timeout);
     opts.bodyTimeout = std::max(opts.bodyTimeout, timeout);
-    // Streaming commands always use a fresh socket to avoid stale pooled fds
-    opts.poolEnabled = false;
+    // Only disable pooling for long-running maintenance ops that might outlive connections
+    if (requires_single_use_connection(req)) {
+        opts.poolEnabled = false;
+    }
     AsioTransportAdapter adapter(opts);
-    spdlog::debug("DaemonClient::sendRequestStreaming calling adapter.send_request_streaming");
+    spdlog::debug(
+        "DaemonClient::sendRequestStreaming calling adapter.send_request_streaming pool={}",
+        opts.poolEnabled);
     auto res = co_await adapter.send_request_streaming(req, onHeader, onChunk, onError, onComplete);
     if (!res)
         co_return res.error();

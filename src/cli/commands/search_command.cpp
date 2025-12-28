@@ -48,8 +48,8 @@ using yams::app::services::utils::normalizeLookupPath;
 
 class SearchCommand : public ICommand {
 private:
-    // Streaming configuration (disabled by default for reliability)
-    bool enableStreaming_ = false;
+    // Streaming configuration
+    bool enableStreaming_ = true;
     int headerTimeoutMs_ = 15000;
     int bodyTimeoutMs_ = 60000;
     int chunkSize_ = 64 * 1024;
@@ -691,8 +691,13 @@ public:
                         "Timeout for receiving response body (milliseconds)")
             ->default_val(60000);
 
-        cmd->add_flag("--streaming", enableStreaming_,
-                      "Enable streaming responses (progressive output, off by default)");
+        cmd->add_flag(
+            "--no-streaming",
+            [this](bool v) {
+                if (v)
+                    enableStreaming_ = false;
+            },
+            "Disable streaming responses from daemon");
         cmd->add_option("--chunk-size", chunkSize_,
                         "Size of chunks for streaming responses (bytes)")
             ->default_val(64 * 1024);
@@ -920,7 +925,6 @@ public:
             clientConfig.headerTimeout = std::chrono::milliseconds(headerTimeoutMs_);
             clientConfig.bodyTimeout = std::chrono::milliseconds(bodyTimeoutMs_);
             clientConfig.requestTimeout = std::chrono::milliseconds(30000);
-            // Streaming disabled by default for reliability; enable with --streaming
             clientConfig.enableChunkedResponses = enableStreaming_;
             clientConfig.progressiveOutput = true;
             clientConfig.maxChunkSize = chunkSize_;

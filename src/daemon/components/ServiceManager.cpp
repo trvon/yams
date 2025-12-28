@@ -155,7 +155,13 @@ using yams::Result;
 namespace search = yams::search;
 
 ServiceManager::PluginStatusSnapshot ServiceManager::getPluginStatusSnapshot() const {
-    std::shared_lock lk(pluginStatusMutex_);
+    // Use try_lock to avoid blocking indefinitely during plugin refresh operations
+    std::shared_lock lk(pluginStatusMutex_, std::try_to_lock);
+    if (!lk.owns_lock()) {
+        spdlog::debug(
+            "getPluginStatusSnapshot: mutex busy (refresh in progress?), returning empty");
+        return PluginStatusSnapshot{};
+    }
     return pluginStatusSnapshot_;
 }
 
@@ -2283,7 +2289,13 @@ std::function<void(bool)> ServiceManager::getWorkerJobSignal() {
 }
 
 std::shared_ptr<search::SearchEngine> ServiceManager::getSearchEngineSnapshot() const {
-    std::shared_lock lock(searchEngineMutex_); // Concurrent reads - no blocking!
+    // Use try_lock to avoid blocking indefinitely during search engine rebuilds
+    std::shared_lock lock(searchEngineMutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        spdlog::debug(
+            "getSearchEngineSnapshot: mutex busy (rebuild in progress?), returning cached");
+        return std::atomic_load(&searchEngine_);
+    }
     return searchEngine_;
 }
 

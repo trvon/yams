@@ -1002,7 +1002,7 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
         // Preflight readiness gate REMOVED: was blocking all workers on status requests!
         // RequestDispatcher already checks readiness before processing requests.
         // This preflight check caused head-of-line blocking under concurrent load.
-        bool force_unary = false;
+        bool force_unary = true;
         bool prefer_stub_stream = false;
         // Skip preflight - let RequestDispatcher handle readiness gating
         // This eliminates the blocking co_await proc->process(StatusRequest) that

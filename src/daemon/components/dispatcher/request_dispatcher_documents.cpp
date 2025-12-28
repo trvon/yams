@@ -275,154 +275,132 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetEndRequest(const Ge
 }
 
 boost::asio::awaitable<Response> RequestDispatcher::handleListRequest(const ListRequest& req) {
-    co_return co_await yams::daemon::dispatch::guard_await(
-        "list", [this, req]() -> boost::asio::awaitable<Response> {
-            // Use app services for list with full feature parity
-            auto appContext = serviceManager_->getAppContext();
-            auto docService = app::services::makeDocumentService(appContext);
+    spdlog::info("[handleListRequest] START limit={}", req.limit);
+    try {
+        spdlog::info("[handleListRequest] Getting appContext");
+        auto appContext = serviceManager_->getAppContext();
+        spdlog::info("[handleListRequest] Creating docService");
+        auto docService = app::services::makeDocumentService(appContext);
+        spdlog::info("[handleListRequest] Building serviceReq");
 
-            // Map daemon ListRequest to app::services::ListDocumentsRequest
-            // Full mapping of all protocol fields for PBI-001 compliance
-            app::services::ListDocumentsRequest serviceReq;
+        app::services::ListDocumentsRequest serviceReq;
 
-            // Basic pagination and sorting
-            serviceReq.limit = static_cast<int>(req.limit);
-            serviceReq.offset = static_cast<int>(req.offset);
-            if (req.recentCount > 0) {
-                serviceReq.recent = static_cast<int>(req.recentCount);
-            } else if (req.recent) {
-                serviceReq.recent = static_cast<int>(req.limit);
-            }
+        serviceReq.limit = static_cast<int>(req.limit);
+        serviceReq.offset = static_cast<int>(req.offset);
+        if (req.recentCount > 0) {
+            serviceReq.recent = static_cast<int>(req.recentCount);
+        } else if (req.recent) {
+            serviceReq.recent = static_cast<int>(req.limit);
+        }
 
-            // Format and display options
-            serviceReq.format = req.format;
-            serviceReq.sortBy = req.sortBy;
-            serviceReq.reverse = req.reverse;
-            serviceReq.verbose = req.verbose;
-            serviceReq.showSnippets = req.showSnippets && !req.noSnippets;
-            serviceReq.snippetLength = req.snippetLength;
-            serviceReq.showMetadata = req.showMetadata;
-            serviceReq.showTags = req.showTags;
-            serviceReq.groupBySession = req.groupBySession;
-            // Propagate paths-only hint and minimize hydration when requested
-            serviceReq.pathsOnly = req.pathsOnly;
-            if (req.pathsOnly) {
-                serviceReq.showSnippets = false;
-                serviceReq.showMetadata = false;
-                serviceReq.showTags = false;
-            }
+        serviceReq.format = req.format;
+        serviceReq.sortBy = req.sortBy;
+        serviceReq.reverse = req.reverse;
+        serviceReq.verbose = req.verbose;
+        serviceReq.showSnippets = req.showSnippets && !req.noSnippets;
+        serviceReq.snippetLength = req.snippetLength;
+        serviceReq.showMetadata = req.showMetadata;
+        serviceReq.showTags = req.showTags;
+        serviceReq.groupBySession = req.groupBySession;
+        serviceReq.pathsOnly = req.pathsOnly;
+        if (req.pathsOnly) {
+            serviceReq.showSnippets = false;
+            serviceReq.showMetadata = false;
+            serviceReq.showTags = false;
+        }
 
-            // File type filters
-            serviceReq.type = req.fileType;
-            serviceReq.mime = req.mimeType;
-            serviceReq.extension = req.extensions;
-            serviceReq.binary = req.binaryOnly;
-            serviceReq.text = req.textOnly;
+        serviceReq.type = req.fileType;
+        serviceReq.mime = req.mimeType;
+        serviceReq.extension = req.extensions;
+        serviceReq.binary = req.binaryOnly;
+        serviceReq.text = req.textOnly;
 
-            // Time filters
-            serviceReq.createdAfter = req.createdAfter;
-            serviceReq.createdBefore = req.createdBefore;
-            serviceReq.modifiedAfter = req.modifiedAfter;
-            serviceReq.modifiedBefore = req.modifiedBefore;
-            serviceReq.indexedAfter = req.indexedAfter;
-            serviceReq.indexedBefore = req.indexedBefore;
+        serviceReq.createdAfter = req.createdAfter;
+        serviceReq.createdBefore = req.createdBefore;
+        serviceReq.modifiedAfter = req.modifiedAfter;
+        serviceReq.modifiedBefore = req.modifiedBefore;
+        serviceReq.indexedAfter = req.indexedAfter;
+        serviceReq.indexedBefore = req.indexedBefore;
 
-            // Change tracking
-            serviceReq.changes = req.showChanges;
-            serviceReq.since = req.sinceTime;
-            serviceReq.diffTags = req.showDiffTags;
-            serviceReq.showDeleted = req.showDeleted;
-            serviceReq.changeWindow = req.changeWindow;
+        serviceReq.changes = req.showChanges;
+        serviceReq.since = req.sinceTime;
+        serviceReq.diffTags = req.showDiffTags;
+        serviceReq.showDeleted = req.showDeleted;
+        serviceReq.changeWindow = req.changeWindow;
 
-            // Tag filtering - combine both tag sources
-            serviceReq.tags = req.tags;
-            if (!req.filterTags.empty()) {
-                // Parse comma-separated filterTags and merge with tags vector
-                std::istringstream ss(req.filterTags);
-                std::string tag;
-                while (std::getline(ss, tag, ',')) {
-                    // Trim whitespace
-                    tag.erase(0, tag.find_first_not_of(" \t"));
-                    tag.erase(tag.find_last_not_of(" \t") + 1);
-                    if (!tag.empty()) {
-                        serviceReq.tags.push_back(tag);
-                    }
+        serviceReq.tags = req.tags;
+        if (!req.filterTags.empty()) {
+            std::istringstream ss(req.filterTags);
+            std::string tag;
+            while (std::getline(ss, tag, ',')) {
+                tag.erase(0, tag.find_first_not_of(" \t"));
+                tag.erase(tag.find_last_not_of(" \t") + 1);
+                if (!tag.empty()) {
+                    serviceReq.tags.push_back(tag);
                 }
             }
-            serviceReq.matchAllTags = req.matchAllTags;
+        }
+        serviceReq.matchAllTags = req.matchAllTags;
 
-            // Name pattern filtering
-            // For wildcard patterns used in prefix matching, don't normalize paths
-            // since we're doing string matching against stored (possibly non-canonical) paths
-            if (!req.namePattern.empty()) {
-                serviceReq.pattern = req.namePattern;
+        if (!req.namePattern.empty()) {
+            serviceReq.pattern = req.namePattern;
+        }
+
+        // Execute list synchronously - faster and more reliable than offloading
+        // The list operation is typically fast (metadata query) and doesn't need
+        // to be offloaded to a worker thread
+        auto result = docService->list(serviceReq);
+        if (!result) {
+            co_return ErrorResponse{result.error().code, result.error().message};
+        }
+
+        const auto& serviceResp = result.value();
+
+        ListResponse response;
+        response.items.reserve(serviceResp.documents.size());
+
+        for (const auto& doc : serviceResp.documents) {
+            ListEntry item;
+            item.hash = doc.hash;
+            item.path = doc.path;
+            item.name = doc.name;
+            item.fileName = doc.fileName;
+            item.size = doc.size;
+            item.mimeType = doc.mimeType;
+            item.fileType = doc.fileType;
+            item.extension = doc.extension;
+            item.created = doc.created;
+            item.modified = doc.modified;
+            item.indexed = doc.indexed;
+            if (doc.snippet) {
+                item.snippet = doc.snippet.value();
             }
-
-            // Offload heavy database query to worker thread to avoid blocking IPC strand
-            auto result = co_await yams::daemon::dispatch::offload_to_worker(
-                serviceManager_, [docService, serviceReq = std::move(serviceReq)]() mutable {
-                    return docService->list(serviceReq);
-                });
-            if (!result) {
-                co_return ErrorResponse{result.error().code, result.error().message};
+            item.tags = doc.tags;
+            for (const auto& [key, value] : doc.metadata) {
+                item.metadata[key] = value;
             }
-
-            const auto& serviceResp = result.value();
-
-            // Map app::services::ListDocumentsResponse to enhanced daemon ListResponse
-            ListResponse response;
-            response.items.reserve(serviceResp.documents.size());
-
-            for (const auto& doc : serviceResp.documents) {
-                ListEntry item;
-
-                // Basic file information
-                item.hash = doc.hash;
-                item.path = doc.path;
-                item.name = doc.name;
-                item.fileName = doc.fileName;
-                item.size = doc.size;
-
-                // File type and format information
-                item.mimeType = doc.mimeType;
-                item.fileType = doc.fileType;
-                item.extension = doc.extension;
-
-                // Timestamps
-                item.created = doc.created;
-                item.modified = doc.modified;
-                item.indexed = doc.indexed;
-
-                // Content and metadata
-                if (doc.snippet) {
-                    item.snippet = doc.snippet.value();
-                }
-                item.tags = doc.tags;
-                // Convert unordered_map to map for protocol compatibility
-                for (const auto& [key, value] : doc.metadata) {
-                    item.metadata[key] = value;
-                }
-
-                // Change tracking info
-                if (doc.changeType) {
-                    item.changeType = doc.changeType.value();
-                }
-                if (doc.changeTime) {
-                    item.changeTime = doc.changeTime.value();
-                }
-
-                // Display helpers
-                item.relevanceScore = doc.relevanceScore;
-                if (doc.matchReason) {
-                    item.matchReason = doc.matchReason.value();
-                }
-
-                response.items.push_back(std::move(item));
+            if (doc.changeType) {
+                item.changeType = doc.changeType.value();
             }
+            if (doc.changeTime) {
+                item.changeTime = doc.changeTime.value();
+            }
+            item.relevanceScore = doc.relevanceScore;
+            if (doc.matchReason) {
+                item.matchReason = doc.matchReason.value();
+            }
+            response.items.push_back(std::move(item));
+        }
 
-            response.totalCount = serviceResp.totalFound;
-            co_return response;
-        });
+        response.totalCount = serviceResp.totalFound;
+        co_return response;
+    } catch (const std::exception& e) {
+        spdlog::error("[handleListRequest] Exception: {}", e.what());
+        co_return ErrorResponse{ErrorCode::InternalError, std::string("List failed: ") + e.what()};
+    } catch (...) {
+        spdlog::error("[handleListRequest] Unknown exception");
+        co_return ErrorResponse{ErrorCode::InternalError, "List failed: unknown error"};
+    }
 }
 
 boost::asio::awaitable<Response> RequestDispatcher::handleCatRequest(const CatRequest& req) {
