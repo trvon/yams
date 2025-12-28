@@ -80,12 +80,19 @@ TEST_CASE("AsioConnectionPool: Stale connection detection after daemon restart",
         DaemonHarness harness;
         REQUIRE(harness.start());
 
+        // Clear any stale connections from harness's internal verify check
+        AsioConnectionPool::shutdown_all(100ms);
+        std::this_thread::sleep_for(50ms);
+
         std::vector<DaemonClient> clients;
         for (int i = 0; i < 3; ++i) {
             clients.push_back(createClient(harness.socketPath()));
             auto connectResult = yams::cli::run_sync(clients.back().connect(), 3s);
             REQUIRE(connectResult.has_value());
         }
+
+        // Small delay to ensure daemon's request processing loop is fully initialized
+        std::this_thread::sleep_for(100ms);
 
         GetStatsRequest statsReq;
         for (auto& client : clients) {

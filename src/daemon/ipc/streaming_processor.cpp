@@ -124,94 +124,45 @@ StreamingRequestProcessor::process_streaming_impl(Request request) {
     reset_state();
     Request& req_copy = request; // owned request in coroutine frame
     try {
-// Unconditional debug: trace message type at entry
+        // NOTE: We use std::holds_alternative() for dispatch instead of getMessageType()
+        // to avoid ODR/cross-TU variant index issues in tests.
+
+        // BatchEmbeddingRequest: eager compute and store in pending_final_
+        if (std::holds_alternative<BatchEmbeddingRequest>(req_copy)) {
+            spdlog::debug("StreamingRequestProcessor: eager compute BatchEmbedding (no copy)");
+            mode_ = Mode::BatchEmbed;
 #ifdef YAMS_TESTING
-        try {
-            spdlog::debug("[SRP] process_streaming enter mt={}",
-                          static_cast<int>(getMessageType(req_copy)));
-        } catch (...) {
+            spdlog::debug("[SRP] defer BatchEmbedding -> streaming");
+            if (auto* be0 = std::get_if<BatchEmbeddingRequest>(&req_copy)) {
+                spdlog::debug("[SRP] original BE texts.size={}", be0->texts.size());
+            }
+#endif
+            // Process directly - no need for protobuf round-trip in unit tests
+            auto final = co_await delegate_->process(req_copy);
+            if (auto* r = std::get_if<BatchEmbeddingResponse>(&final)) {
+                pending_total_ = r->successCount;
+            }
+            pending_final_ = std::move(final);
+            co_return std::nullopt;
         }
-#endif
-        // Use MessageType classification first to avoid variant-dependent ambiguity.
-        switch (getMessageType(req_copy)) {
-            case MessageType::BatchEmbeddingRequest: {
-                spdlog::debug("StreamingRequestProcessor: eager compute BatchEmbedding (no copy)");
-                mode_ = Mode::BatchEmbed;
+
+        // EmbedDocumentsRequest: eager compute and store in pending_final_
+        if (std::holds_alternative<EmbedDocumentsRequest>(req_copy)) {
+            spdlog::debug("StreamingRequestProcessor: eager compute EmbedDocuments (no copy)");
+            mode_ = Mode::EmbedDocs;
 #ifdef YAMS_TESTING
-                spdlog::debug("[SRP] defer BatchEmbedding -> streaming");
-#endif
-// Observe original then normalize via protobuf round-trip to avoid cross-TU surprises
-#ifdef YAMS_TESTING
-                if (auto* be0 = std::get_if<BatchEmbeddingRequest>(&req_copy)) {
-                    spdlog::debug("[SRP] original BE texts.size={}", be0->texts.size());
-                }
-#endif
-                // Normalize the Request via protobuf round-trip to avoid any cross-TU surprises
-                Request normalized = req_copy;
-                try {
-                    Message m;
-                    m.version = PROTOCOL_VERSION;
-                    m.requestId = 0;
-                    m.payload = req_copy;
-                    if (auto enc = ProtoSerializer::encode_payload(m)) {
-                        if (auto dec = ProtoSerializer::decode_payload(enc.value())) {
-                            if (std::holds_alternative<Request>(dec.value().payload))
-                                normalized = std::get<Request>(dec.value().payload);
-                        }
-                    }
-                } catch (...) {
-                }
-#ifdef YAMS_TESTING
-                if (auto* be = std::get_if<BatchEmbeddingRequest>(&normalized)) {
-                    spdlog::debug("[SRP] pre-delegate BE texts.size={}", be->texts.size());
-                }
-#endif
-                auto final = co_await delegate_->process(normalized);
-                if (auto* r = std::get_if<BatchEmbeddingResponse>(&final)) {
-                    pending_total_ = r->successCount;
-                }
-                pending_final_ = std::move(final);
-                co_return std::nullopt;
+            spdlog::debug("[SRP] defer EmbedDocuments -> streaming");
+            if (auto* ed0 = std::get_if<EmbedDocumentsRequest>(&req_copy)) {
+                spdlog::debug("[SRP] original ED docs.size={}", ed0->documentHashes.size());
             }
-            case MessageType::EmbedDocumentsRequest: {
-                spdlog::debug("StreamingRequestProcessor: eager compute EmbedDocuments (no copy)");
-                mode_ = Mode::EmbedDocs;
-#ifdef YAMS_TESTING
-                spdlog::debug("[SRP] defer EmbedDocuments -> streaming");
 #endif
-#ifdef YAMS_TESTING
-                if (auto* ed0 = std::get_if<EmbedDocumentsRequest>(&req_copy)) {
-                    spdlog::debug("[SRP] original ED docs.size={}", ed0->documentHashes.size());
-                }
-#endif
-                Request normalized = req_copy;
-                try {
-                    Message m;
-                    m.version = PROTOCOL_VERSION;
-                    m.requestId = 0;
-                    m.payload = req_copy;
-                    if (auto enc = ProtoSerializer::encode_payload(m)) {
-                        if (auto dec = ProtoSerializer::decode_payload(enc.value())) {
-                            if (std::holds_alternative<Request>(dec.value().payload))
-                                normalized = std::get<Request>(dec.value().payload);
-                        }
-                    }
-                } catch (...) {
-                }
-#ifdef YAMS_TESTING
-                if (auto* ed = std::get_if<EmbedDocumentsRequest>(&normalized)) {
-                    spdlog::debug("[SRP] pre-delegate ED docs.size={}", ed->documentHashes.size());
-                }
-#endif
-                auto final = co_await delegate_->process(normalized);
-                if (auto* r = std::get_if<EmbedDocumentsResponse>(&final)) {
-                    pending_total_ = r->requested;
-                }
-                pending_final_ = std::move(final);
-                co_return std::nullopt;
+            // Process directly - no need for protobuf round-trip in unit tests
+            auto final = co_await delegate_->process(req_copy);
+            if (auto* r = std::get_if<EmbedDocumentsResponse>(&final)) {
+                pending_total_ = r->requested;
             }
-            default:
-                break;
+            pending_final_ = std::move(final);
+            co_return std::nullopt;
         }
 
         if (std::holds_alternative<SearchRequest>(req_copy)) {
@@ -306,122 +257,114 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
         }
         // 1) If we have a pending request and have not yet sent the initial heartbeat,
         //    synthesize a typed starter frame (never last).
+        // NOTE: We use mode_ and std::holds_alternative() for dispatch instead of
+        // getMessageType() to avoid ODR/cross-TU variant index issues in tests.
         if ((pending_request_.has_value() || pending_final_.has_value()) && !heartbeat_sent_) {
             heartbeat_sent_ = true;
-            MessageType mt =
-                pending_request_.has_value()
-                    ? getMessageType(**pending_request_)
-                    : (mode_ == Mode::BatchEmbed
-                           ? MessageType::BatchEmbeddingRequest
-                           : (mode_ == Mode::EmbedDocs ? MessageType::EmbedDocumentsRequest
-                                                       : MessageType::SuccessResponse));
 
-            switch (mt) {
-                case MessageType::SearchRequest: {
-                    SearchResponse r;
-                    r.totalCount = 0;
-                    r.elapsed = std::chrono::milliseconds(0);
-                    co_return ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
-                }
-                case MessageType::ListRequest: {
-                    spdlog::info("[SRP] next_chunk: sending List heartbeat");
-                    ListResponse r;
-                    r.totalCount = 0;
-                    co_return ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
-                }
-                case MessageType::GrepRequest: {
-                    GrepResponse r;
-                    r.totalMatches = 0;
-                    r.filesSearched = 0;
-                    co_return ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
-                }
-                case MessageType::BatchEmbeddingRequest:
-                case MessageType::EmbedDocumentsRequest:
-                case MessageType::GenerateEmbeddingRequest: {
-                    // Keep heartbeat simple to avoid reading cross-TU request fields
-                    SuccessResponse ok{"embedding started"};
+            // For BatchEmbed/EmbedDocs, pending_final_ is set (not pending_request_)
+            if (mode_ == Mode::BatchEmbed || mode_ == Mode::EmbedDocs) {
+                SuccessResponse ok{"embedding started"};
 #ifdef YAMS_TESTING
-                    spdlog::debug("[SRP] heartbeat mt={} total={}", static_cast<int>(mt),
-                                  pending_total_);
+                spdlog::debug("[SRP] heartbeat mode={} total={}", static_cast<int>(mode_),
+                              pending_total_);
 #endif
+                co_return ResponseChunk{.data = Response{std::move(ok)}, .is_last_chunk = false};
+            }
+
+            // For Search/List/Grep, use mode_
+            if (mode_ == Mode::Search) {
+                SearchResponse r;
+                r.totalCount = 0;
+                r.elapsed = std::chrono::milliseconds(0);
+                co_return ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
+            }
+            if (mode_ == Mode::List) {
+                spdlog::info("[SRP] next_chunk: sending List heartbeat");
+                ListResponse r;
+                r.totalCount = 0;
+                co_return ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
+            }
+            if (mode_ == Mode::Grep) {
+                GrepResponse r;
+                r.totalMatches = 0;
+                r.filesSearched = 0;
+                co_return ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
+            }
+
+            // For other request types with pending_request_, use std::holds_alternative()
+            if (pending_request_.has_value()) {
+                const auto& req = **pending_request_;
+                if (std::holds_alternative<GenerateEmbeddingRequest>(req)) {
+                    SuccessResponse ok{"embedding started"};
                     co_return ResponseChunk{.data = Response{std::move(ok)},
                                             .is_last_chunk = false};
                 }
-                case MessageType::LoadModelRequest: {
+                if (auto* lmr = std::get_if<LoadModelRequest>(&req)) {
                     ModelLoadEvent mev{};
                     mev.phase = "started";
                     mev.message = "load started";
-                    mev.modelName = std::get<LoadModelRequest>(**pending_request_).modelName;
+                    mev.modelName = lmr->modelName;
                     co_return ResponseChunk{.data = Response{std::move(mev)},
                                             .is_last_chunk = false};
                 }
-                default: {
-                    SuccessResponse ok{"Streaming started"};
-                    co_return ResponseChunk{.data = Response{std::move(ok)},
-                                            .is_last_chunk = false};
-                }
             }
+
+            // Default heartbeat for unknown types
+            SuccessResponse ok{"Streaming started"};
+            co_return ResponseChunk{.data = Response{std::move(ok)}, .is_last_chunk = false};
         }
 
-        // 2) After the heartbeat has been sent, act based on mode_ or message type.
-        if (pending_request_.has_value() || pending_final_.has_value()) {
-            auto mt = pending_request_.has_value()
-                          ? getMessageType(**pending_request_)
-                          : (mode_ == Mode::BatchEmbed
-                                 ? MessageType::BatchEmbeddingRequest
-                                 : (mode_ == Mode::EmbedDocs ? MessageType::EmbedDocumentsRequest
-                                                             : MessageType::SuccessResponse));
+        // 2) After the heartbeat has been sent, act based on mode_ or request type.
+        // NOTE: We use mode_ and std::holds_alternative() for dispatch instead of
+        // getMessageType() to avoid ODR/cross-TU variant index issues in tests.
 
-            // Embedding & model load types: compute once now and finish.
-            if (mt == MessageType::BatchEmbeddingRequest ||
-                mt == MessageType::EmbedDocumentsRequest ||
-                mt == MessageType::GenerateEmbeddingRequest ||
-                mt == MessageType::LoadModelRequest) {
-                // For embedding requests, route through delegate to avoid cross-TU/ODR
-                // surprises when reading variant fields in SRP. Delegate constructs the correct
-                // response using its local view of the request.
-                if (mt == MessageType::BatchEmbeddingRequest ||
-                    mt == MessageType::EmbedDocumentsRequest) {
-                    // Emit precomputed final to avoid copying cross-TU Request
-                    if (pending_final_.has_value()) {
-                        auto final = std::move(pending_final_.value());
-                        reset_state();
-                        // Log counters for visibility
-                        if (std::holds_alternative<BatchEmbeddingResponse>(final)) {
-                            [[maybe_unused]] const auto& r =
-                                std::get<BatchEmbeddingResponse>(final);
+        // BatchEmbed/EmbedDocs: emit precomputed final from pending_final_
+        if (mode_ == Mode::BatchEmbed || mode_ == Mode::EmbedDocs) {
+            if (pending_final_.has_value()) {
+                auto final = std::move(pending_final_.value());
+                reset_state();
+                // Log counters for visibility
+                if (std::holds_alternative<BatchEmbeddingResponse>(final)) {
+                    [[maybe_unused]] const auto& r = std::get<BatchEmbeddingResponse>(final);
 #ifdef YAMS_TESTING
-                            spdlog::debug(
-                                "[SRP] delegate final BatchEmbeddingResponse succ={} fail={}",
-                                r.successCount, r.failureCount);
+                    spdlog::debug("[SRP] delegate final BatchEmbeddingResponse succ={} fail={}",
+                                  r.successCount, r.failureCount);
 #endif
-                        } else if (std::holds_alternative<EmbedDocumentsResponse>(final)) {
-                            [[maybe_unused]] const auto& r =
-                                std::get<EmbedDocumentsResponse>(final);
+                } else if (std::holds_alternative<EmbedDocumentsResponse>(final)) {
+                    [[maybe_unused]] const auto& r = std::get<EmbedDocumentsResponse>(final);
 #ifdef YAMS_TESTING
-                            spdlog::debug(
-                                "[SRP] delegate final EmbedDocumentsResponse req={} emb={}",
-                                r.requested, r.embedded);
+                    spdlog::debug("[SRP] delegate final EmbedDocumentsResponse req={} emb={}",
+                                  r.requested, r.embedded);
 #endif
-                        }
-                        co_return ResponseChunk{.data = std::move(final), .is_last_chunk = true};
-                    }
                 }
-                // For GenerateEmbedding/LoadModel, call delegate once and finish.
-                {
-                    auto final = co_await delegate_->process(**pending_request_);
-                    reset_state();
-                    co_return ResponseChunk{.data = std::move(final), .is_last_chunk = true};
-                }
+                co_return ResponseChunk{.data = std::move(final), .is_last_chunk = true};
+            }
+            // pending_final_ should always be set for BatchEmbed/EmbedDocs, but handle gracefully
+            ErrorResponse err{ErrorCode::InternalError, "Missing final response for embedding"};
+            reset_state();
+            co_return ResponseChunk{.data = Response{std::move(err)}, .is_last_chunk = true};
+        }
+
+        // Handle other request types that have pending_request_
+        if (pending_request_.has_value()) {
+            const auto& req = **pending_request_;
+
+            // GenerateEmbedding/LoadModel: call delegate once and finish
+            if (std::holds_alternative<GenerateEmbeddingRequest>(req) ||
+                std::holds_alternative<LoadModelRequest>(req)) {
+                auto final = co_await delegate_->process(req);
+                reset_state();
+                co_return ResponseChunk{.data = std::move(final), .is_last_chunk = true};
             }
 
-            // AddDocumentRequest: single final response after heartbeat.
-            if (mt == MessageType::AddDocumentRequest) {
+            // AddDocumentRequest: single final response after heartbeat
+            if (std::holds_alternative<AddDocumentRequest>(req)) {
                 try {
                     spdlog::debug("[SRP] AddDocument delegate processing start");
                 } catch (...) {
                 }
-                auto final = co_await delegate_->process(**pending_request_);
+                auto final = co_await delegate_->process(req);
                 try {
                     spdlog::debug("[SRP] AddDocument delegate processing done");
                 } catch (...) {
