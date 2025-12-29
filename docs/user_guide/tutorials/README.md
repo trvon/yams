@@ -9,7 +9,7 @@ A index of task-oriented tutorials for YAMS. Short, practical, copy-paste friend
 ## TL;DR (instant demo)
 ```bash
 # Initialize (interactive with grammar download prompts)
-yams init .
+yams init
 
 # Or auto mode (downloads recommended grammars)
 yams init --auto

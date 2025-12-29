@@ -8,6 +8,7 @@
 #include <thread>
 #include <yams/app/services/services.hpp>
 #include <yams/common/pattern_utils.h>
+#include <yams/core/magic_numbers.hpp>
 #include <yams/crypto/hasher.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -566,6 +567,7 @@ private:
             // Propagate collection and tags to each stored file
             storeReq.collection = req.collection;
             storeReq.tags = req.tags;
+            storeReq.noEmbeddings = req.noEmbeddings;
             // Set automatic snapshot ID for versioning
             storeReq.snapshotId = snapshotId;
             // Session-isolated memory (PBI-082)
@@ -676,6 +678,19 @@ private:
         // Normalize for matching
         relPath = yams::common::normalize_path(relPath);
         std::string nfile = yams::common::normalize_path(filename);
+
+        // Always ignore .git directory contents, regardless of .gitignore
+        if (relPath == ".git" || relPath.rfind(".git/", 0) == 0 ||
+            relPath.find("/.git/") != std::string::npos) {
+            return false;
+        }
+
+        // Skip known build artifacts and package deps/caches to avoid noisy indexing
+        auto pruneCategory = yams::magic::getPruneCategory(relPath);
+        if (yams::magic::matchesPruneGroup(pruneCategory, "build") ||
+            yams::magic::matchesPruneGroup(pruneCategory, "packages")) {
+            return false;
+        }
 
         // Check gitignore patterns first (if any)
         if (!gitignorePatterns.empty()) {

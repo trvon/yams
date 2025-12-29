@@ -886,6 +886,9 @@ struct AddDirectoryRequest {
     std::string sessionId;     // session to associate documents with
     bool bypassSession{false}; // skip session tagging even if session is active
 
+    // Embedding control
+    bool noEmbeddings{false}; // disable embedding generation
+
     // Gitignore handling
     bool noGitignore{false}; // when true, ignore .gitignore patterns during traversal
 };

@@ -281,6 +281,8 @@ public:
         std::unordered_map<std::string,
                            std::unordered_map<std::string, std::pair<std::uint64_t, std::uint64_t>>>
             dirFiles; // dir -> (file -> (mtime,size))
+        std::unordered_map<std::string, std::vector<std::string>> gitignorePatterns;
+        std::unordered_map<std::string, std::uint64_t> gitignoreMtime;
     };
     SessionWatchState sessionWatch_;
     yams::compat::stop_source sessionWatchStopSource_;

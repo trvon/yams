@@ -641,12 +641,12 @@ private:
     // Default to using daemon-reported physical sizes only; do not local-scan unless opted in
     bool noPhysical_ = true;
 
-    struct StatusInfo {
-        // Storage
-        bool storageHealthy = false;
-        uint64_t totalDocuments = 0;
-        uint64_t totalSize = 0;
-        std::string storagePath;
+        struct StatusInfo {
+            // Storage
+            bool storageHealthy = false;
+            uint64_t totalDocuments = 0;
+            uint64_t totalSize = 0;
+            std::string storagePath;
 
         // Configuration
         bool configMigrationNeeded = false;
@@ -663,11 +663,16 @@ private:
         bool vectorDbHealthy = false;
         std::string preferredModel;
 
-        // Worker pool (daemon)
-        uint64_t workerThreads = 0;
-        uint64_t workerActive = 0;
-        uint64_t workerQueued = 0;
-        uint64_t workerUtilPct = 0;
+            // Worker pool (daemon)
+            uint64_t workerThreads = 0;
+            uint64_t workerActive = 0;
+            uint64_t workerQueued = 0;
+            uint64_t workerUtilPct = 0;
+
+            // Session watch (daemon)
+            bool watchKnown = false;
+            bool watchEnabled = false;
+            uint64_t watchIntervalMs = 0;
 
         // Collected advice (built after gathering raw stats)
         yams::cli::RecommendationBuilder advice;
@@ -785,8 +790,18 @@ private:
                     if (itQ != s.requestCounts.end())
                         info.workerQueued = itQ->second;
                     if (info.workerThreads > 0)
-                        info.workerUtilPct =
-                            static_cast<uint64_t>((100.0 * info.workerActive) / info.workerThreads);
+                        info.workerUtilPct = static_cast<uint64_t>((100.0 * info.workerActive) /
+                                                                   info.workerThreads);
+                    auto itWatch = s.requestCounts.find("watch_enabled");
+                    if (itWatch != s.requestCounts.end()) {
+                        info.watchKnown = true;
+                        info.watchEnabled = itWatch->second > 0;
+                    }
+                    auto itWatchInterval = s.requestCounts.find("watch_interval_ms");
+                    if (itWatchInterval != s.requestCounts.end()) {
+                        info.watchKnown = true;
+                        info.watchIntervalMs = itWatchInterval->second;
+                    }
                 }
             }
         }
@@ -900,6 +915,12 @@ private:
                   << ",\n";
         std::cout << "    \"preferredModel\": \"" << info.preferredModel << "\"\n";
         std::cout << "  },\n";
+        if (info.watchKnown) {
+            std::cout << "  \"watch\": {\n";
+            std::cout << "    \"enabled\": " << (info.watchEnabled ? "true" : "false") << ",\n";
+            std::cout << "    \"intervalMs\": " << info.watchIntervalMs << "\n";
+            std::cout << "  },\n";
+        }
         std::cout << "  \"advice\": " << yams::cli::recommendationsToJson(info.advice) << "\n";
         std::cout << "}\n";
     }
@@ -992,6 +1013,17 @@ private:
             {severityLabel("Embeddings", embeddingColor, embeddingIcon), embVal.str(),
              info.preferredModel == "none" ? std::string{}
                                            : std::string{"preferred: " + info.preferredModel}});
+
+        if (info.watchKnown) {
+            std::ostringstream watchVal;
+            watchVal << (info.watchEnabled ? "Enabled" : "Disabled");
+            if (info.watchIntervalMs > 0)
+                watchVal << " · " << info.watchIntervalMs << "ms";
+            const char* watchColor = info.watchEnabled ? Ansi::GREEN : Ansi::YELLOW;
+            const char* watchIcon = info.watchEnabled ? "✓" : "⚠";
+            overview.push_back(
+                {severityLabel("Watch", watchColor, watchIcon), watchVal.str(), std::string{}});
+        }
 
         overview.push_back({severityLabel("Vector DB", vectorWarn ? Ansi::YELLOW : Ansi::GREEN,
                                           vectorWarn ? "⚠" : "✓"),

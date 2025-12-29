@@ -93,6 +93,57 @@ bool isInteractiveStream(FILE* stream) noexcept {
 #endif
 }
 
+static bool envTruthy(const char* val) {
+    if (!val || !*val)
+        return false;
+    std::string v(val);
+    std::transform(v.begin(), v.end(), v.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return v == "1" || v == "true" || v == "yes" || v == "on";
+}
+
+static std::filesystem::path findGitRoot(const std::filesystem::path& start) {
+    std::error_code ec;
+    std::filesystem::path cur = std::filesystem::absolute(start, ec);
+    if (ec)
+        cur = start;
+    while (!cur.empty()) {
+        auto candidate = cur / ".git";
+        if (std::filesystem::exists(candidate, ec)) {
+            return cur;
+        }
+        auto parent = cur.parent_path();
+        if (parent == cur)
+            break;
+        cur = parent;
+    }
+    return {};
+}
+
+static std::string sanitizeName(std::string s) {
+    if (s.empty())
+        return "project";
+    for (auto& c : s) {
+        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_')) {
+            c = '-';
+        } else {
+            c = static_cast<char>(std::tolower(c));
+        }
+    }
+    return s;
+}
+
+static std::string shortHash(const std::string& s) {
+    std::uint64_t h = 1469598103934665603ull;
+    for (unsigned char c : s) {
+        h ^= static_cast<std::uint64_t>(c);
+        h *= 1099511628211ull;
+    }
+    std::ostringstream oss;
+    oss << std::hex << std::nouppercase << (h & 0xffffffffull);
+    return oss.str();
+}
+
 // Synchronous pooled_execute is deprecated and returns NotImplemented
 // This is kept only for toolRegistry compatibility until it's migrated to async
 template <typename Manager, typename TRequest, typename Render>
@@ -3940,6 +3991,104 @@ MCPServer::handleSessionUnpin(const MCPSessionUnpinRequest& req) {
     co_return out;
 }
 
+boost::asio::awaitable<Result<MCPSessionWatchResponse>>
+MCPServer::handleSessionWatch(const MCPSessionWatchRequest& req) {
+    if (envTruthy(std::getenv("YAMS_DISABLE_PROJECT_SESSION"))) {
+        co_return Error{ErrorCode::InvalidState,
+                        "Project sessions are disabled (YAMS_DISABLE_PROJECT_SESSION=1)"};
+    }
+
+    auto sessionSvc = app::services::makeSessionService(nullptr);
+    std::error_code ec;
+    std::filesystem::path cwd = std::filesystem::current_path(ec);
+    if (ec) {
+        co_return Error{ErrorCode::InvalidArgument,
+                        "Failed to resolve current working directory"};
+    }
+
+    std::filesystem::path root;
+    if (!req.root.empty()) {
+        root = std::filesystem::path(req.root);
+    } else {
+        root = findGitRoot(cwd);
+        if (root.empty())
+            root = cwd;
+    }
+    auto absRoot = std::filesystem::absolute(root, ec);
+    if (!ec)
+        root = absRoot;
+    const std::string rootStr = root.string();
+
+    std::string targetSession;
+    if (!req.session.empty()) {
+        targetSession = req.session;
+    } else if (auto cur = sessionSvc->current(); cur && !cur->empty()) {
+        targetSession = *cur;
+    } else {
+        std::string base = root.filename().string();
+        if (base.empty())
+            base = "project";
+        targetSession = "proj-" + sanitizeName(base) + "-" + shortHash(rootStr);
+    }
+
+    bool created = false;
+    if (!sessionSvc->exists(targetSession)) {
+        if (!req.allowCreate) {
+            co_return Error{ErrorCode::NotFound, "Session not found: " + targetSession};
+        }
+        sessionSvc->init(targetSession, "auto: " + rootStr);
+        created = true;
+    }
+
+    std::optional<std::string> previousSession;
+    bool changedCurrent = false;
+    auto ensureCurrent = [&]() {
+        if (req.setCurrent) {
+            sessionSvc->use(targetSession);
+            changedCurrent = true;
+            return;
+        }
+        previousSession = sessionSvc->current();
+        if (!previousSession || *previousSession != targetSession) {
+            sessionSvc->use(targetSession);
+            changedCurrent = true;
+        }
+    };
+
+    bool selectorAdded = false;
+    if (req.addSelector) {
+        ensureCurrent();
+        auto selectors = sessionSvc->listPathSelectors(targetSession);
+        if (std::find(selectors.begin(), selectors.end(), rootStr) == selectors.end()) {
+            sessionSvc->addPathSelector(rootStr, {}, {});
+            selectorAdded = true;
+        }
+    } else if (req.setCurrent) {
+        ensureCurrent();
+    }
+
+    if (req.intervalMs > 0)
+        sessionSvc->setWatchIntervalMs(req.intervalMs, targetSession);
+    sessionSvc->enableWatch(req.enable, targetSession);
+
+    if (!req.setCurrent && changedCurrent) {
+        if (previousSession && *previousSession != targetSession) {
+            sessionSvc->use(*previousSession);
+        } else if (!previousSession) {
+            sessionSvc->close();
+        }
+    }
+
+    MCPSessionWatchResponse out;
+    out.session = targetSession;
+    out.root = rootStr;
+    out.enabled = sessionSvc->watchEnabled(targetSession);
+    out.intervalMs = sessionSvc->watchIntervalMs(targetSession);
+    out.created = created;
+    out.selectorAdded = selectorAdded;
+    co_return out;
+}
+
 boost::asio::awaitable<Result<MCPGraphResponse>>
 MCPServer::handleGraphQuery(const MCPGraphRequest& req) {
     if (auto ensure = ensureDaemonClient(); !ensure) {
@@ -4372,6 +4521,33 @@ void MCPServer::initializeToolRegistry() {
                   {{"path", {{"type", "string"}, {"description", "Path glob pattern to unpin"}}}}},
                  {"required", json::array({"path"})}},
             "Unpin documents by path pattern by removing 'pinned' tag");
+
+        // session_watch
+        toolRegistry_->registerTool<MCPSessionWatchRequest, MCPSessionWatchResponse>(
+            "watch", [this](const MCPSessionWatchRequest& req) { return handleSessionWatch(req); },
+            json{{"type", "object"},
+                 {"properties",
+                  {{"session", {{"type", "string"}, {"description", "Session name override"}}},
+                   {"root", {{"type", "string"}, {"description", "Project root to watch"}}},
+                   {"interval_ms",
+                    {{"type", "integer"}, {"description", "Polling interval (ms)"}}},
+                   {"enable",
+                    {{"type", "boolean"},
+                     {"description", "Enable watch (false disables)"},
+                     {"default", true}}},
+                   {"add_selector",
+                    {{"type", "boolean"},
+                     {"description", "Add root as a session selector"},
+                     {"default", true}}},
+                   {"set_current",
+                    {{"type", "boolean"},
+                     {"description", "Set session as current"},
+                     {"default", true}}},
+                   {"allow_create",
+                    {{"type", "boolean"},
+                     {"description", "Create session if missing"},
+                     {"default", true}}}}}},
+            "Enable or disable auto-ingest for a project session");
     }
 
     // Collection/Snapshot tools (consider these as standard or extension based on use case)

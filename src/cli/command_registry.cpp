@@ -21,6 +21,7 @@ std::unique_ptr<ICommand> createMigrateCommand();
 std::unique_ptr<ICommand> createUpdateCommand();
 std::unique_ptr<ICommand> createDownloadCommand();
 std::unique_ptr<ICommand> createSessionCommand();
+std::unique_ptr<ICommand> createWatchCommand();
 std::unique_ptr<ICommand> createCompletionCommand();
 std::unique_ptr<ICommand> createRepairCommand();
 std::unique_ptr<ICommand> createModelCommand();
@@ -54,6 +55,7 @@ void CommandRegistry::registerAllCommands(YamsCLI* cli) {
     cli->registerCommand(CommandRegistry::createUpdateCommand());
     cli->registerCommand(::yams::cli::createDownloadCommand());
     cli->registerCommand(::yams::cli::createSessionCommand());
+    cli->registerCommand(CommandRegistry::createWatchCommand());
     cli->registerCommand(CommandRegistry::createCompletionCommand());
     cli->registerCommand(CommandRegistry::createRepairCommand());
     cli->registerCommand(CommandRegistry::createModelCommand());
@@ -77,6 +79,10 @@ std::unique_ptr<ICommand> CommandRegistry::createInitCommand() {
 
 std::unique_ptr<ICommand> CommandRegistry::createSessionCommand() {
     return ::yams::cli::createSessionCommand();
+}
+
+std::unique_ptr<ICommand> CommandRegistry::createWatchCommand() {
+    return ::yams::cli::createWatchCommand();
 }
 
 std::unique_ptr<ICommand> CommandRegistry::createAddCommand() {

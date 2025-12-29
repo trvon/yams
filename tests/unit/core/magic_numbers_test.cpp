@@ -187,6 +187,32 @@ TEST_CASE("Text encoding detection", "[core][magic][text]") {
 }
 
 //=============================================================================
+// Prune Category Tests
+//=============================================================================
+
+TEST_CASE("Prune category detection", "[core][magic][prune]") {
+    SECTION("Build output directories") {
+        REQUIRE(matchesPruneGroup(getPruneCategory("build/output.o"), "build"));
+        REQUIRE(matchesPruneGroup(getPruneCategory("dist/bundle.js"), "build"));
+        REQUIRE(matchesPruneGroup(
+            getPruneCategory("cmake-build-debug/CMakeFiles/app.dir/main.obj"), "build"));
+        REQUIRE(matchesPruneGroup(getPruneCategory("target/release/app"), "build"));
+        REQUIRE(matchesPruneGroup(getPruneCategory(".next/static/chunks/app.js"), "build"));
+        REQUIRE(matchesPruneGroup(getPruneCategory("obj/Debug/app.pdb"), "build"));
+    }
+
+    SECTION("Package caches and deps") {
+        REQUIRE(matchesPruneGroup(getPruneCategory("node_modules/pkg/index.js"), "packages"));
+        REQUIRE(matchesPruneGroup(getPruneCategory(".pytest_cache/v/cache.db"), "packages"));
+        REQUIRE(matchesPruneGroup(getPruneCategory(".gradle/caches/modules.bin"), "packages"));
+    }
+
+    SECTION("Git artifacts") {
+        REQUIRE(getPruneCategory(".git/objects/aa/bb") == PruneCategory::GitArtifacts);
+    }
+}
+
+//=============================================================================
 // Pattern Structure Tests
 //=============================================================================
 

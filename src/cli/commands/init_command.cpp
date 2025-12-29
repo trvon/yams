@@ -5,6 +5,8 @@
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
 #include <yams/downloader/downloader.hpp>
+#include <yams/app/services/services.hpp>
+#include <yams/app/services/session_service.hpp>
 #include <yams/vector/vector_database.h>
 
 #include <spdlog/spdlog.h>
@@ -18,6 +20,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -165,6 +168,7 @@ public:
 
                 // Still offer grammar download even if already initialized
                 maybeSetupGrammars(dataPath);
+                maybeBootstrapProjectSession();
                 return Result<void>();
             }
 
@@ -356,6 +360,7 @@ public:
             // 7) Tree-sitter Grammar Setup (for symbol extraction)
             maybeSetupGrammars(dataPath);
 
+            maybeBootstrapProjectSession();
             spdlog::info("YAMS initialization complete.");
             spdlog::info("Config file: {}", configPath.string());
             spdlog::info("Data dir:    {}", dataPath.string());
@@ -382,6 +387,108 @@ private:
         if (!fs::exists(p)) {
             fs::create_directories(p);
         }
+    }
+
+    static bool envTruthy(const char* val) {
+        if (!val || !*val)
+            return false;
+        std::string v(val);
+        std::transform(v.begin(), v.end(), v.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return v == "1" || v == "true" || v == "yes" || v == "on";
+    }
+
+    static fs::path findGitRoot(const fs::path& start) {
+        std::error_code ec;
+        fs::path cur = fs::absolute(start, ec);
+        if (ec)
+            cur = start;
+        while (!cur.empty()) {
+            auto candidate = cur / ".git";
+            if (fs::exists(candidate, ec)) {
+                return cur;
+            }
+            auto parent = cur.parent_path();
+            if (parent == cur)
+                break;
+            cur = parent;
+        }
+        return {};
+    }
+
+    static std::string sanitizeName(std::string s) {
+        if (s.empty())
+            return "project";
+        for (auto& c : s) {
+            if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_')) {
+                c = '-';
+            } else {
+                c = static_cast<char>(std::tolower(c));
+            }
+        }
+        return s;
+    }
+
+    static std::string shortHash(const std::string& s) {
+        // FNV-1a 64-bit
+        std::uint64_t h = 1469598103934665603ull;
+        for (unsigned char c : s) {
+            h ^= static_cast<std::uint64_t>(c);
+            h *= 1099511628211ull;
+        }
+        std::ostringstream oss;
+        oss << std::hex << std::nouppercase << (h & 0xffffffffull);
+        return oss.str();
+    }
+
+    void maybeBootstrapProjectSession() {
+        if (envTruthy(std::getenv("YAMS_DISABLE_PROJECT_SESSION")))
+            return;
+        if (const char* envSession = std::getenv("YAMS_SESSION_CURRENT"); envSession && *envSession)
+            return;
+
+        std::error_code ec;
+        fs::path cwd = fs::current_path(ec);
+        if (ec)
+            return;
+
+        auto root = findGitRoot(cwd);
+        if (root.empty())
+            root = cwd;
+        auto absRoot = fs::absolute(root, ec);
+        if (!ec)
+            root = absRoot;
+
+        std::string base = root.filename().string();
+        if (base.empty())
+            base = "project";
+        std::string sessionName =
+            "proj-" + sanitizeName(base) + "-" + shortHash(root.string());
+
+        auto svc = app::services::makeSessionService(nullptr);
+        if (!svc)
+            return;
+
+        if (!svc->exists(sessionName)) {
+            svc->init(sessionName, "auto: " + root.string());
+        } else {
+            svc->use(sessionName);
+        }
+
+        // Ensure selector for project root
+        svc->use(sessionName);
+        auto selectors = svc->listPathSelectors(sessionName);
+        const std::string rootPath = root.string();
+        if (std::find(selectors.begin(), selectors.end(), rootPath) == selectors.end()) {
+            svc->addPathSelector(rootPath, {}, {});
+        }
+
+        // Enable watch by default (daemon watcher consumes this)
+        if (!svc->watchEnabled(sessionName)) {
+            svc->enableWatch(true, sessionName);
+        }
+
+        spdlog::info("Project session '{}' ready (root='{}')", sessionName, rootPath);
     }
 
     fs::path promptForDataDir(const fs::path& current) {

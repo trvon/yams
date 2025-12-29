@@ -21,6 +21,7 @@
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
+#include <yams/app/services/session_service.hpp>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
 #include <yams/version.hpp>
@@ -34,8 +35,8 @@
 #ifndef NOMINMAX
 #define NOMINMAX 1
 #endif
-#include <Psapi.h>
 #include <Windows.h>
+#include <Psapi.h>
 
 #endif
 #if defined(TRACY_ENABLE)
@@ -726,6 +727,29 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             out.entityConsumed = bus.entityConsumed();
         } else {
             out.workerThreads = std::max(1u, std::thread::hardware_concurrency());
+        }
+    } catch (...) {
+    }
+
+    // Session watch status (best-effort)
+    try {
+        if (services_) {
+            auto appCtx = services_->getAppContext();
+            auto sess = yams::app::services::makeSessionService(&appCtx);
+            if (sess) {
+                auto current = sess->current();
+                if (current && !current->empty()) {
+                    out.watchSession = *current;
+                    out.watchEnabled = sess->watchEnabled(*current);
+                    out.watchIntervalMs = sess->watchIntervalMs(*current);
+                    if (out.watchEnabled) {
+                        auto pinned = sess->getPinnedPatterns(*current);
+                        if (!pinned.empty()) {
+                            out.watchRoot = pinned.front();
+                        }
+                    }
+                }
+            }
         }
     } catch (...) {
     }

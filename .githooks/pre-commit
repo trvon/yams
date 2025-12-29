@@ -5,6 +5,7 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 FORMAT_SCRIPT="$REPO_ROOT/scripts/format-code.sh"
+FORMAT_SCRIPT_PS1="$REPO_ROOT/scripts/format-code.ps1"
 
 # Collect staged C/C++ files (only these will be formatted)
 files=()
@@ -16,13 +17,42 @@ if [[ ${#files[@]} -eq 0 ]]; then
 fi
 
 # Format staged files and restage them
-printf '%s\n' "${files[@]}" | "$FORMAT_SCRIPT" --serial --stdin-files
+if [[ "$OSTYPE" =~ ^(msys|cygwin|win32|mingw) ]]; then
+  if command -v pwsh >/dev/null 2>&1; then
+    printf '%s\n' "${files[@]}" | pwsh -NoProfile -ExecutionPolicy Bypass -File "$FORMAT_SCRIPT_PS1" -Serial -StdinFiles
+  elif command -v powershell >/dev/null 2>&1; then
+    printf '%s\n' "${files[@]}" | powershell -NoProfile -ExecutionPolicy Bypass -File "$FORMAT_SCRIPT_PS1" -Serial -StdinFiles
+  else
+    printf '%s\n' "${files[@]}" | "$FORMAT_SCRIPT" --serial --stdin-files
+  fi
+else
+  printf '%s\n' "${files[@]}" | "$FORMAT_SCRIPT" --serial --stdin-files
+fi
 git add -- "${files[@]}"
 
 # Verify formatting matches expectations
-if ! printf '%s\n' "${files[@]}" | "$FORMAT_SCRIPT" --check --serial --stdin-files; then
-  echo "clang-format check failed. Run 'scripts/format-code.sh --git' to fix formatting." >&2
-  exit 1
+if [[ "$OSTYPE" =~ ^(msys|cygwin|win32|mingw) ]]; then
+  if command -v pwsh >/dev/null 2>&1; then
+    if ! printf '%s\n' "${files[@]}" | pwsh -NoProfile -ExecutionPolicy Bypass -File "$FORMAT_SCRIPT_PS1" -Check -Serial -StdinFiles; then
+      echo "clang-format check failed. Run 'scripts/format-code.ps1 -Git' to fix formatting." >&2
+      exit 1
+    fi
+  elif command -v powershell >/dev/null 2>&1; then
+    if ! printf '%s\n' "${files[@]}" | powershell -NoProfile -ExecutionPolicy Bypass -File "$FORMAT_SCRIPT_PS1" -Check -Serial -StdinFiles; then
+      echo "clang-format check failed. Run 'scripts/format-code.ps1 -Git' to fix formatting." >&2
+      exit 1
+    fi
+  else
+    if ! printf '%s\n' "${files[@]}" | "$FORMAT_SCRIPT" --check --serial --stdin-files; then
+      echo "clang-format check failed. Run 'scripts/format-code.sh --git' to fix formatting." >&2
+      exit 1
+    fi
+  fi
+else
+  if ! printf '%s\n' "${files[@]}" | "$FORMAT_SCRIPT" --check --serial --stdin-files; then
+    echo "clang-format check failed. Run 'scripts/format-code.sh --git' to fix formatting." >&2
+    exit 1
+  fi
 fi
 
 # Optional clang-tidy (set YAMS_LINT_TIDY=1)

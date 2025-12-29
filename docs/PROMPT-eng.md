@@ -55,6 +55,10 @@ bd update $TASK$ --status in_progress --json
 
 # Check dependencies are resolved
 bd dep tree $TASK$
+
+# Ensure daemon is running, then enable auto-ingest for the repo
+yams status
+yams watch
 ```
 
 ### During Work (Discoveries)
@@ -72,8 +76,8 @@ bd dep add $TASK$ <related-id> --type related
 # Close the issue
 bd close $TASK$ --reason "Implemented: <summary>" --json
 
-# Sync beads database
-bd sync
+# Local-only mode: do not run bd sync (git-backed). If you need to flush JSONL:
+bd sync --flush-only
 ```
 
 ### Epic/Hierarchical Work
@@ -139,6 +143,11 @@ yams add <changed-files> \
 ```
 
 ### Code Search (Why YAMS > CLI tools)
+Notes:
+- If results are empty, ensure the repo is indexed (`yams add ...`) and the daemon is ready (`yams status`).
+- Scope searches to the repo with `--cwd` or `--path` when multiple projects share a storage.
+- If YAMS is not indexed yet, use `rg` to locate files, then index them.
+
 ```bash
 # Find how we implemented something before
 yams search "authentication middleware" --tags "code"
@@ -292,11 +301,12 @@ $WHAT_I_LEARNED
   --name "learnings-$TASK$.md" \
   --tags "learnings,$DOMAIN,task-$TASK$"
 
-# 4. Git commit & sync
+# 4. Git commit (local-only for Beads; no bd sync)
 git add -A
 git commit -m "$TASK$: Complete"
 git push
-bd sync
+# Optional JSONL flush:
+bd sync --flush-only
 ```
 
 ---
@@ -344,7 +354,7 @@ bd close <id> --reason "Done"        # Close issue
 bd dep add <from> <to> --type X      # Add dependency
 bd dep tree <id>                     # View dependencies
 bd list --status open                # List issues
-bd sync                              # Sync with git
+bd sync --flush-only                 # Export JSONL only (no git)
 ```
 
 ### YAMS CLI (selected commands)
@@ -352,9 +362,10 @@ bd sync                              # Sync with git
 - **search**: queries via positional args or `-q/--query`; accepts `--stdin`/`--query-file`; defaults to `--type hybrid`; fuzzy toggle `-f/--fuzzy` with `--similarity`; `--paths-only`; grouping controls (`--no-group-versions`, `--versions {latest|all}`, `--versions-topk`, `--versions-sort`, `--no-tools`, `--json-grouped`); session scope (`--session`, `--global/--no-session`); `--cwd`; streaming (`--streaming`, `--chunk-size`, header/body timeouts); literal text `-F/--literal-text`; display (`--show-hash`, `-v/--verbose`, `--json`); line/context (`-n/--line-numbers`, `-A/-B/-C`); hash search `--hash`; tag filters (`--tags`, `--match-all-tags`); include globs; file filters (`--ext`, `--mime`, `--file-type`, `--text-only`, `--binary-only`); time filters (`--created-*`, `--modified-*`, `--indexed-*`).
 - **graph**: target by positional `hash`, `--name`, `--node-key`, or `--node-id`; traversal depth `--depth 1-5`; filter relations with `--relation/-r`; list-only mode via `--list-type` (use `--isolated` to find nodes with no incoming edges); pagination `--limit/--offset`; output `--format table|json|dot` or `--json`; `--verbose` shows properties/hashes; `--prop-filter` for property text.
 - **session**: lifecycle (`start`, `use`, `ls`, `show --json`, `rm`); selectors (`add --path/--tag/--meta`, `rm-path`, `list --json`); warming (`warm --limit --snippet-len --cores --memory-gb --time-ms --aggressive`); tagging/annotation (`tags --add/--remove`, `annotate --meta`); cache (`clear`); import/export (`save`, `load --name`); emit (`emit --kind names|paths|hashes --materialized --json`); watch (`--start/--stop --interval --session`); session isolation (`create`, `open`, `close`, `status --json`); maintenance (`merge --exclude --dry-run`, `discard --confirm`, `diff --base --target --dir --type --json`). Env: `YAMS_SESSION_CURRENT` selects default.
+- **watch**: project auto-ingest bootstrap (`yams watch`, `yams watch --stop`, `yams watch --interval 2000`).
 - **doctor**: flags `--json`, `--fix`, `--fix-config-dims`, `--recreate-vectors [--dim] [--stop-daemon]`; subcommands: `daemon`, `plugin <target> [--iface --iface-version --no-daemon]`, `plugins`, `embeddings clear-degraded`, `repair` (`--embeddings|--fts5|--graph|--all`), `validate --graph`, `dedupe` (`--apply`, `--mode {path|name|hash}`, `--strategy {keep-newest|keep-oldest|keep-largest}`, `--force`, `--verbose`), `prune` (`--apply`, categories via `--category/-c`, `--extension/-e`, `--older-than`, `--larger-than`, `--smaller-than`, `-v`), `tuning [--apply]`.
 - **daemon**: manage daemon with `start` (`--socket`, `--data-dir/--storage`, `--pid-file`, `--log-level`, `--config`, `--daemon-binary`, `--foreground`, `--restart`), `stop [--force]`, `status [-d/--detailed]`, `restart`, `doctor`, `log` (`-n`, `-f`, `--level`).
-- **status / stats**: `yams status` (alias `yams stats`) with `--json`, `-v/--verbose`, `--no-physical`.
+- **status / stats**: `yams status` and `yams stats` both show quick health; supports `--json`, `-v/--verbose`, `--no-physical`.
 - **model**: manage ONNX models. Flags `--list`, `--download <name>`, `--info <name>`, `--output`, `--url`, `--force`, `--check`; subcommands mirror these plus `download` options (`--hf`, `--revision`, `--token`, `--offline`, `--apply-config`) and `provider` for daemon model status.
 - **serve**: start MCP server; default quiet; `--daemon-socket` override; `--verbose` shows banner (legacy `--quiet` is no-op).
 - **Other core commands**: `cat`, `get`, `list/ls`, `delete/rm`, `config`, `init`, `migrate`, `uninstall`, `update`, `diff`, `tree`, `grep`, `download`, `restore`, `repair`, `dr`, `completion`, `plugin` (see individual help for flags).
@@ -377,6 +388,6 @@ bd sync                              # Sync with git
 4. **Search YAMS before implementing** - Find related code and patterns first
 5. **Never track tasks in YAMS** - That's what Beads is for
 6. **Always check `bd ready`** before starting work
-7. **Always run `bd sync`** before ending a session
+7. **Do not run `bd sync` in this repo** - Beads is local-only; use `bd sync --flush-only` if you need to export JSONL
 8. **File discoveries immediately** - Use `discovered-from` dependency
 9. **Store learnings** - Future you will thank present you

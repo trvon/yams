@@ -123,41 +123,21 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
                     co_await boost::asio::post(boost::asio::use_awaitable);
                 }
                 try {
-                    // Delete filesystem file
-                    std::error_code ec;
-                    if (std::filesystem::exists(candidate.path, ec)) {
-                        if (std::filesystem::remove(candidate.path, ec)) {
+                    // Remove from metadata database only (do not delete filesystem files)
+                    auto docResult = metaRepo->getDocumentByHash(candidate.hash);
+                    if (docResult && docResult.value().has_value()) {
+                        auto delResult = metaRepo->deleteDocument(docResult.value()->id);
+                        if (delResult) {
                             deleted++;
                             bytesFreed += candidate.fileSize;
-
-                            // Delete from metadata database
-                            // Look up document by hash to get ID
-                            auto docResult = metaRepo->getDocumentByHash(candidate.hash);
-                            if (docResult && docResult.value().has_value()) {
-                                auto delResult = metaRepo->deleteDocument(docResult.value()->id);
-                                if (!delResult) {
-                                    spdlog::warn(
-                                        "Deleted file {} but failed to remove from metadata: {}",
-                                        candidate.path, delResult.error().message);
-                                }
-                            }
                         } else {
-                            spdlog::warn("Failed to delete {}: {}", candidate.path, ec.message());
+                            spdlog::warn("Failed to remove {} from metadata: {}",
+                                         candidate.path, delResult.error().message);
                             failed++;
                         }
                     } else {
-                        // File doesn't exist anymore, just remove from metadata
-                        auto docResult = metaRepo->getDocumentByHash(candidate.hash);
-                        if (docResult && docResult.value().has_value()) {
-                            auto delResult = metaRepo->deleteDocument(docResult.value()->id);
-                            if (delResult) {
-                                deleted++;
-                            } else {
-                                spdlog::warn("Failed to remove {} from metadata: {}",
-                                             candidate.path, delResult.error().message);
-                                failed++;
-                            }
-                        }
+                        // Nothing to delete in metadata (already gone)
+                        deleted++;
                     }
                 } catch (const std::exception& e) {
                     spdlog::error("Exception while pruning {}: {}", candidate.path, e.what());

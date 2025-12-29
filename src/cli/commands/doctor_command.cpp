@@ -616,6 +616,10 @@ private:
                                                const std::function<Result<void>()>& fn,
                                                int timeout_ms) {
         using namespace std::chrono;
+        if (!yams::cli::ui::stdout_is_tty()) {
+            auto r = fn();
+            return r;
+        }
         auto fut = std::async(std::launch::async, fn);
         auto start = steady_clock::now();
         const char frames[] = {'|', '/', '-', '\\'};
@@ -2306,7 +2310,7 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
     prune
         ->add_option("--category,-c", pruneCategories_,
                      "Categories to prune (comma-separated): build-artifacts, build-system, "
-                     "build (both), logs, cache, temp, coverage, ide, ide-all, "
+                     "build (both), git-artifacts, logs, cache, temp, coverage, ide, ide-all, "
                      "package-deps, package-cache, packages, all")
         ->delimiter(',');
     prune
@@ -2892,14 +2896,24 @@ void DoctorCommand::runPrune() {
 
         auto lease = std::move(leaseRes.value());
 
-        auto respRes =
-            run_result(lease->call<daemon::PruneRequest>(req), std::chrono::milliseconds(300000));
-        if (!respRes) {
-            printError("Prune request failed: " + respRes.error().message);
+        daemon::PruneResponse resp;
+        auto runPruneRequest = [&]() -> Result<void> {
+            auto respRes = run_result(lease->call<daemon::PruneRequest>(req),
+                                      std::chrono::milliseconds(300000));
+            if (!respRes)
+                return respRes.error();
+            resp = respRes.value();
+            return Result<void>();
+        };
+        auto spinnerRes = runWithSpinner("Pruning", runPruneRequest, 300000);
+        if (!spinnerRes) {
+            printError("Prune request timed out");
             return;
         }
-
-        const auto& resp = respRes.value();
+        if (!spinnerRes.value()) {
+            printError("Prune request failed: " + spinnerRes.value().error().message);
+            return;
+        }
 
         if (!resp.errorMessage.empty()) {
             printError("Prune operation failed: " + resp.errorMessage);

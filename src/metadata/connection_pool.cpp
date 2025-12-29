@@ -415,45 +415,14 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
     if (!timeoutResult) {
         return timeoutResult.error();
     }
+    db.execute("PRAGMA busy_timeout = " + std::to_string(config_.busyTimeout.count()));
 
-    // Enable WAL mode if requested (disabled in select environments)
-    // If enabling WAL fails (e.g., on restricted filesystems), log and fall back to a
-    // memory journal to improve concurrency in test environments.
-    const auto envTruthy = [](const char* value) {
-        if (!value)
-            return false;
-        std::string v(value);
-        std::transform(v.begin(), v.end(), v.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        return !(v.empty() || v == "0" || v == "false" || v == "off" || v == "no");
-    };
-
-    const bool walDisabledViaEnv = [&]() {
-        const char* keys[] = {"YAMS_DISABLE_WAL",     "YAMS_TEST_DISABLE_WAL",
-                              "YAMS_TESTING",         "YAMS_TEST_SAFE_SINGLE_INSTANCE",
-                              "YAMS_DISABLE_VECTORS", "YAMS_TEST_FAST_START"};
-        for (const char* key : keys) {
-            if (envTruthy(std::getenv(key))) {
-                spdlog::debug("WAL override active via {}", key);
-                return true;
-            }
-        }
-        return false;
-    }();
-
-    if (config_.enableWAL && !walDisabledViaEnv) {
+    // Enable WAL mode if requested.
+    if (config_.enableWAL) {
         auto walResult = db.enableWAL();
         if (!walResult) {
-            spdlog::warn("WAL enable failed: {} — continuing without WAL",
-                         walResult.error().message);
-            // Best-effort fallbacks for CI/restricted environments
-            db.execute("PRAGMA journal_mode=MEMORY");
-            db.execute("PRAGMA locking_mode=NORMAL");
+            spdlog::warn("WAL enable failed: {}", walResult.error().message);
         }
-    } else if (config_.enableWAL) {
-        spdlog::debug("Skipping WAL enablement due to environment override");
-        db.execute("PRAGMA journal_mode=MEMORY");
-        db.execute("PRAGMA locking_mode=NORMAL");
     }
 
     // Enable foreign keys if requested
@@ -467,7 +436,6 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
     // Additional pragmas for performance (more relaxed when running tests)
     if (std::getenv("YAMS_TEST_TMPDIR")) {
         db.execute("PRAGMA synchronous = OFF");
-        db.execute("PRAGMA journal_mode=MEMORY");
     } else {
         db.execute("PRAGMA synchronous = NORMAL");
     }

@@ -182,7 +182,7 @@ int YamsCLI::run(int argc, char* argv[]) {
             "init",    "add",        "get",       "restore", "cat",    "delete",
             "list",    "tree",       "search",    "grep",    "config", "auth",
             "status",  "stats",      "uninstall", "migrate", "update", "download",
-            "session", "completion", "repair",    "model",   "daemon", "plugin",
+            "session", "watch",      "completion", "repair", "model",  "daemon", "plugin",
             "doctor",  "dr",         "graph",     "diff",    "serve",
         };
 

@@ -687,10 +687,14 @@ inline PruneCategory getPruneCategory(std::string_view filename, std::string_vie
         }
     }
 
-    // Lowercase filename for pattern matching
+    // Lowercase filename for pattern matching and normalize slashes
     filenameLower.reserve(filename.size());
-    for (char c : filename)
-        filenameLower += (c >= 'A' && c <= 'Z') ? (c + 32) : c;
+    for (char c : filename) {
+        char lower = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
+        if (lower == '\\')
+            lower = '/';
+        filenameLower += lower;
+    }
 
     // === Build Objects ===
     if (extLower == "o" || extLower == "obj" || extLower == "lo" || extLower == "al" ||
@@ -731,6 +735,39 @@ inline PruneCategory getPruneCategory(std::string_view filename, std::string_vie
     if (extLower == "deb" || extLower == "rpm" || extLower == "apk" || extLower == "ipa" ||
         extLower == "pkg" || extLower == "msi") {
         return PruneCategory::Packages;
+    }
+
+    auto has_dir = [&](std::string_view dir) -> bool {
+        std::string needle = "/" + std::string(dir) + "/";
+        if (filenameLower.find(needle) != std::string::npos)
+            return true;
+        if (filenameLower.rfind(std::string(dir) + "/", 0) == 0)
+            return true;
+        return false;
+    };
+
+    // === Build Output Directories (language/tool agnostic) ===
+    if (has_dir("build") || has_dir("builddir") || has_dir("_build") || has_dir("out") ||
+        has_dir("dist") || has_dir("bin") || has_dir("obj") || has_dir("artifacts") ||
+        has_dir("storybook-static")) {
+        return PruneCategory::BuildObject;
+    }
+    if (filenameLower.find("/cmake-build-") != std::string::npos ||
+        filenameLower.rfind("cmake-build-", 0) == 0 ||
+        filenameLower.find("/bazel-") != std::string::npos ||
+        filenameLower.rfind("bazel-", 0) == 0) {
+        return PruneCategory::BuildObject;
+    }
+    if (has_dir(".next") || has_dir(".nuxt") || has_dir(".svelte-kit") ||
+        has_dir(".parcel-cache") || has_dir(".turbo") || has_dir(".vite") ||
+        has_dir(".angular") || has_dir(".webpack")) {
+        return PruneCategory::BuildObject;
+    }
+    if (has_dir("target")) {
+        return PruneCategory::BuildObject;
+    }
+    if (has_dir("blib")) {
+        return PruneCategory::BuildObject;
     }
 
     // === Git Artifacts ===
@@ -818,6 +855,24 @@ inline PruneCategory getPruneCategory(std::string_view filename, std::string_vie
         filename.find("__pycache__/") == 0) {
         return PruneCategory::PackagePythonCache;
     }
+    if (filenameLower.find("/.pytest_cache/") != std::string::npos ||
+        filenameLower.rfind(".pytest_cache/", 0) == 0 ||
+        filenameLower.find("/.mypy_cache/") != std::string::npos ||
+        filenameLower.rfind(".mypy_cache/", 0) == 0 ||
+        filenameLower.find("/.ruff_cache/") != std::string::npos ||
+        filenameLower.rfind(".ruff_cache/", 0) == 0 ||
+        filenameLower.find("/.tox/") != std::string::npos ||
+        filenameLower.rfind(".tox/", 0) == 0 ||
+        filenameLower.find("/.venv/") != std::string::npos ||
+        filenameLower.rfind(".venv/", 0) == 0 ||
+        filenameLower.find("/venv/") != std::string::npos ||
+        filenameLower.rfind("venv/", 0) == 0 ||
+        filenameLower.find("/.eggs/") != std::string::npos ||
+        filenameLower.rfind(".eggs/", 0) == 0 ||
+        filenameLower.find(".egg-info/") != std::string::npos ||
+        filenameLower.find(".dist-info/") != std::string::npos) {
+        return PruneCategory::PackagePythonCache;
+    }
     if (extLower == "pyc" || extLower == "pyo") {
         return PruneCategory::PackagePythonCache;
     }
@@ -837,7 +892,9 @@ inline PruneCategory getPruneCategory(std::string_view filename, std::string_vie
 
     // Gradle
     if (filename.find("/.gradle/caches/") != std::string_view::npos ||
-        filename.find(".gradle/caches/") == 0) {
+        filename.find(".gradle/caches/") == 0 ||
+        filenameLower.find("/.gradle/") != std::string::npos ||
+        filenameLower.rfind(".gradle/", 0) == 0) {
         return PruneCategory::PackageGradleCache;
     }
 

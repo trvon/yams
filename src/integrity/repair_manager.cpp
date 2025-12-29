@@ -146,7 +146,7 @@ RepairManager::queryCandidatesForPrune(metadata::MetadataRepository& repo,
     auto matchesCategory = [&](const metadata::DocumentInfo& doc) -> bool {
         if (config.categories.empty())
             return true;
-        auto category = magic::getPruneCategory(doc.fileName, doc.fileExtension);
+        auto category = magic::getPruneCategory(doc.filePath, doc.fileExtension);
         return std::ranges::any_of(config.categories, [category](const auto& cat) {
             return magic::matchesPruneGroup(category, cat);
         });
@@ -189,7 +189,7 @@ RepairManager::queryCandidatesForPrune(metadata::MetadataRepository& repo,
         candidate.fileSize = doc.fileSize;
         candidate.modifiedTime = doc.modifiedTime;
         candidate.category =
-            magic::getPruneCategoryName(magic::getPruneCategory(doc.fileName, doc.fileExtension));
+            magic::getPruneCategoryName(magic::getPruneCategory(doc.filePath, doc.fileExtension));
 
         candidates.push_back(std::move(candidate));
     }
@@ -203,7 +203,7 @@ bool RepairManager::matchesCategory(const metadata::DocumentInfo& doc,
     if (categories.empty())
         return true;
 
-    auto category = magic::getPruneCategory(doc.fileName, doc.fileExtension);
+    auto category = magic::getPruneCategory(doc.filePath, doc.fileExtension);
     return std::ranges::any_of(categories, [category](const auto& cat) {
         return magic::matchesPruneGroup(category, cat);
     });
@@ -266,26 +266,12 @@ Result<PruneResult> RepairManager::pruneFiles(const PruneConfig& config,
 
         // Track category stats
         auto categoryName = std::string(
-            magic::getPruneCategoryName(magic::getPruneCategory(doc.fileName, doc.fileExtension)));
+            magic::getPruneCategoryName(magic::getPruneCategory(doc.filePath, doc.fileExtension)));
         result.categoryCounts[categoryName]++;
         result.categorySizes[categoryName] += doc.fileSize;
 
         if (!config.dryRun) {
-            // Delete filesystem file
-            std::error_code ec;
-            if (std::filesystem::exists(doc.filePath, ec)) {
-                if (std::filesystem::remove(doc.filePath, ec)) {
-                    result.deletedPaths.push_back(doc.filePath);
-                } else {
-                    spdlog::warn("Failed to delete {}: {}", doc.filePath, ec.message());
-                    result.failedPaths.push_back(doc.filePath);
-                    result.filesFailed++;
-                    processed++;
-                    continue;
-                }
-            }
-
-            // Delete from metadata
+            // Delete from metadata only
             auto delResult = repo_->deleteDocument(doc.id);
             if (!delResult) {
                 spdlog::warn("Failed to delete metadata for {}: {}", doc.filePath,
@@ -296,6 +282,7 @@ Result<PruneResult> RepairManager::pruneFiles(const PruneConfig& config,
                 continue;
             }
 
+            result.deletedPaths.push_back(doc.filePath);
             result.filesDeleted++;
             result.totalBytesFreed += doc.fileSize;
         } else {

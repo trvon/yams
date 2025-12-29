@@ -6,7 +6,7 @@ Command-line interface for content-addressed storage with semantic search.
 
 ```bash
 # Initialize storage (interactive - prompts for grammar downloads)
-yams init .
+yams init
 
 # Or auto mode for containers/headless
 yams init --auto
@@ -14,6 +14,12 @@ yams init --auto
 # Or specify custom location
 export YAMS_STORAGE="$HOME/.local/share/yams"
 yams init --non-interactive
+
+# Init also bootstraps a per-project session (scoping + watch) unless
+# YAMS_DISABLE_PROJECT_SESSION=1.
+
+# Enable auto-ingest for an existing project
+yams watch
 
 # Add content
 yams add ./README.md --tags docs
@@ -53,6 +59,7 @@ yams doctor
 | `yams list` | List documents (`--snapshots`, `--format json`) |
 | `yams get` | Retrieve by hash or name |
 | `yams diff` | Compare snapshots (Merkle tree diff) |
+| `yams watch` | Enable auto-ingest for a project session |
 | `yams serve` | Start MCP server (stdio) |
 | `yams doctor` | Diagnose issues |
 | `yams repair` | Fix storage/embeddings |
@@ -89,6 +96,9 @@ yams search "query" --limit 10 --json
 # Per-project storage
 YAMS_STORAGE="$PWD/.yams" yams init --non-interactive
 YAMS_STORAGE="$PWD/.yams" yams add ./src/
+
+# Auto-ingest for the current project
+yams watch --interval 2000
 
 # Batch indexing with tags
 yams add src/ --recursive --include="*.cpp,*.hpp,*.h" --tags "code,source"

@@ -39,6 +39,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed `--paths-only` search returning no results: `pathsOnly` is now a CLI-only
   display option rather than being sent to the daemon, which was causing the search
   service to return paths in a different field that the daemon didn't read.
+- Session watch auto-ingest now always ignores `.git` contents, even when not present
+  in `.gitignore`.
+- `yams watch` now waits for the daemon to report ready before enabling auto-ingest
+  (configurable timeout).
+- Indexing skips known build artifacts and package dependency/cache paths based on
+  magic number prune categories.
+- Expanded magic-number prune patterns for build output directories and language-specific
+  caches (e.g., build/dist/target/.next/.pytest_cache).
+- Doctor prune now advertises the git-artifacts category in CLI help/docs.
+- Prune category detection now uses full file paths so git artifacts are detected.
+- Doctor prune now shows a spinner while waiting for long-running daemon operations.
 - Fixed ONNX model loading deadlock (EDEADLK code=36) on Windows:
   - ServiceManager now syncs `embeddingModelName_` from PluginManager during model
     provider adoption, enabling proper startup preload paths.

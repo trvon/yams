@@ -45,6 +45,7 @@
 #include <boost/asio/use_future.hpp>
 #include <tl/expected.hpp>
 #include <yams/api/content_store_builder.h>
+#include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/config/config_helpers.h>
@@ -1290,11 +1291,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         TuneAdvisor::setEnableParallelIngest(true);
         auto poolInit = init::record_duration(
             "db_pool", [&]() { return connectionPool_->initialize(); }, state_.initDurationsMs);
-        if (!poolInit) {
-            spdlog::warn("Connection pool init failed: {} — continuing degraded",
-                         poolInit.error().message);
-        } else {
-            auto repoRes = init::record_duration(
+            if (!poolInit) {
+                spdlog::warn("Connection pool init failed: {} — continuing degraded",
+                             poolInit.error().message);
+            } else {
+                auto repoRes = init::record_duration(
                 "metadata_repo",
                 [&]() -> yams::Result<void> {
                     metadataRepo_ =
@@ -1310,11 +1311,35 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
                     return yams::Result<void>();
                 },
-                state_.initDurationsMs);
-            if (!repoRes) {
-                spdlog::warn("Metadata repository init failed: {}", repoRes.error().message);
+                    state_.initDurationsMs);
+                if (!repoRes) {
+                    spdlog::warn("Metadata repository init failed: {}", repoRes.error().message);
+                } else {
+                    auto journalRes = connectionPool_->withConnection(
+                        [](metadata::Database& db) -> Result<std::string> {
+                            auto stmtRes = db.prepare("PRAGMA journal_mode");
+                            if (!stmtRes) {
+                                return stmtRes.error();
+                            }
+                            auto stmt = std::move(stmtRes).value();
+                            auto stepRes = stmt.step();
+                            if (!stepRes) {
+                                return stepRes.error();
+                            }
+                            if (!stepRes.value()) {
+                                return Error{ErrorCode::NotFound,
+                                             "PRAGMA journal_mode returned no rows"};
+                            }
+                            return stmt.getString(0);
+                        });
+                    if (journalRes) {
+                        spdlog::info("Metadata DB journal_mode={}", journalRes.value());
+                    } else {
+                        spdlog::warn("Failed to read Metadata DB journal_mode: {}",
+                                     journalRes.error().message);
+                    }
+                }
             }
-        }
         writeBootstrapStatusFile(config_, state_);
     }
     spdlog::info("[ServiceManager] Phase: DB Pool and Repo Initialized.");
@@ -1813,6 +1838,10 @@ boost::asio::awaitable<void> ServiceManager::co_runSessionWatcher(yams::compat::
             auto sess = yams::app::services::makeSessionService(&appCtx);
             auto current = sess->current();
             if (current && sess->watchEnabled(*current)) {
+                auto indexingService = yams::app::services::makeIndexingService(appCtx);
+                if (!indexingService) {
+                    continue;
+                }
                 auto patterns = sess->getPinnedPatterns(*current);
                 for (const auto& pat : patterns) {
                     std::error_code ec;
@@ -1821,6 +1850,7 @@ boost::asio::awaitable<void> ServiceManager::co_runSessionWatcher(yams::compat::
                         auto& dirMap = sessionWatch_.dirFiles[p.string()];
                         std::unordered_map<std::string, std::pair<std::uint64_t, std::uint64_t>>
                             cur;
+                        std::vector<std::string> changed;
                         for (auto it = std::filesystem::recursive_directory_iterator(p, ec);
                              !ec && it != std::filesystem::recursive_directory_iterator(); ++it) {
                             if (!it->is_regular_file())
@@ -1834,21 +1864,26 @@ boost::asio::awaitable<void> ServiceManager::co_runSessionWatcher(yams::compat::
                             cur[fp] = {fmt, fsz};
                             auto old = dirMap.find(fp);
                             if (old == dirMap.end() || old->second != cur[fp]) {
-                                InternalEventBus::StoreDocumentTask t;
-                                t.request.path = fp;
-                                t.request.recursive = false;
-                                t.request.noEmbeddings = true;
-                                static std::shared_ptr<
-                                    SpscQueue<InternalEventBus::StoreDocumentTask>>
-                                    q = InternalEventBus::instance()
-                                            .get_or_create_channel<
-                                                InternalEventBus::StoreDocumentTask>(
-                                                "store_document_tasks", 4096);
-                                if (q)
-                                    (void)q->try_push(std::move(t));
+                                std::error_code rel_ec;
+                                auto relPath = std::filesystem::relative(it->path(), p, rel_ec);
+                                std::string relStr = rel_ec ? it->path().filename().string()
+                                                            : relPath.generic_string();
+                                if (!relStr.empty()) {
+                                    changed.emplace_back(std::move(relStr));
+                                }
                             }
                         }
                         dirMap.swap(cur);
+                        if (!changed.empty()) {
+                            yams::app::services::AddDirectoryRequest req;
+                            req.directoryPath = p.string();
+                            req.includePatterns = std::move(changed);
+                            req.recursive = true;
+                            req.sessionId = *current;
+                            req.noEmbeddings = true;
+                            req.noGitignore = false;
+                            (void)indexingService->addDirectory(req);
+                        }
                     }
                 }
             }

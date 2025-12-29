@@ -100,6 +100,8 @@ public:
     static std::unique_ptr<ICommand> createDownloadCommand();
     // Create session command (pins + warming)
     static std::unique_ptr<ICommand> createSessionCommand();
+    // Create watch command (project auto-ingest)
+    static std::unique_ptr<ICommand> createWatchCommand();
 
     /**
      * Create serve command (MCP server)

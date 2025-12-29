@@ -63,7 +63,8 @@ yams [OPTIONS] <command> [command-options]
 ### Advanced Features
 - `model` - Download and manage ONNX embedding models
 - `plugin, plugins` - Manage plugins (list/scan/load/unload/trust)
-- `session` - Manage interactive session pins and warming
+- `session` - Manage interactive session selectors and warming
+- `watch` - Enable session-based auto-ingest for a project
 - `download` - Download artifacts and store directly into YAMS
 - `repair` - Repair and maintain storage integrity
 - `migrate` - Migrate YAMS data and configuration
@@ -83,7 +84,7 @@ yams [OPTIONS] <command> [command-options]
 Initialize YAMS storage and configuration (interactive or non-interactive).
 
 Synopsis:
-- yams init [OPTIONS] [path]
+- yams init [OPTIONS]
 
 Options:
 - --non-interactive
@@ -103,11 +104,13 @@ Notes:
 - The storage directory can be set globally via --storage/--data-dir or YAMS_STORAGE.
 - On first run, initialization will create the storage directory, database, and configuration.
 - Interactive mode prompts for tree-sitter grammar downloads for symbol extraction.
+- Init also bootstraps a per-project session (scoping + watch) unless `YAMS_DISABLE_PROJECT_SESSION=1`.
+- Use `yams watch` to enable auto-ingest for existing projects.
 
 Examples:
 ```bash
 # Interactive initialization (prompts for grammar downloads)
-yams init .
+yams init
 
 # Auto mode for containers/headless (downloads recommended grammars)
 yams init --auto
@@ -124,10 +127,59 @@ yams init --print
 
 ---
 
+## watch {#cmd-watch}
+
+Enable or disable session-based auto-ingest for a project.
+
+Synopsis:
+- yams watch [OPTIONS]
+- yams watch --stop [OPTIONS]
+
+Options:
+- --start
+  - Enable watch (default)
+- --stop
+  - Disable watch
+- --interval <ms>
+  - Set polling interval in milliseconds
+- --root <path>
+  - Project root to watch (default: git root or cwd)
+- --session <name>
+  - Session name (default: auto)
+- --no-use
+  - Do not set the session as current
+- --no-selector
+  - Do not add the project root as a session selector
+- --daemon-ready-timeout-ms <ms>
+  - Max time to wait for daemon readiness (0 to skip)
+
+Notes:
+- If the session does not exist, `yams watch` creates it and sets watch settings.
+- If no root is provided, the git root is used when available.
+- `yams watch` waits for daemon readiness by default to avoid ingesting while the daemon is still initializing.
+- Set `YAMS_DISABLE_PROJECT_SESSION=1` to disable project session automation.
+
+Examples:
+```bash
+# Enable watch for the current project (auto session)
+yams watch
+
+# Use a 5s polling interval
+yams watch --interval 5000
+
+# Disable watch
+yams watch --stop
+
+# Explicit root and session
+yams watch --root . --session my-project
+```
+
+---
+
 ## add {#cmd-add}
 
-Pre-watch code indexing (recommended)
-Use YAMS to index code updates until folder track/watch is available.
+Manual indexing (when watch is disabled)
+Use YAMS to index code updates if auto-ingest is not enabled.
 
 Examples:
 ```bash
@@ -201,7 +253,7 @@ yams add ./README.md
 # → Snapshot: 2025-10-01T14:30:00.123Z
 
 # Add with human-friendly label
-yams add . --recursive --label "Release 1.0"
+yams add . --recursive --snapshot-label "Release 1.0"
 # → Snapshot: 2025-10-01T14:30:00.456Z (label: "Release 1.0")
 
 # Organize by collection
@@ -218,13 +270,13 @@ yams add src/ --recursive --include="*.cpp,*.h" --tags "code,source"
 
 1. **Initial import (automatic snapshot):**
    ```bash
-   yams add . --recursive --include="*.cpp,*.h,*.md" --label "Initial import"
+   yams add . --recursive --include="*.cpp,*.h,*.md" --snapshot-label "Initial import"
    # → Snapshot: 2025-10-01T09:00:00.000Z
    ```
 
 2. **After making changes (automatic snapshot):**
    ```bash
-   yams add . --recursive --include="*.cpp,*.h,*.md" --label "Added new feature"
+   yams add . --recursive --include="*.cpp,*.h,*.md" --snapshot-label "Added new feature"
    # → Snapshot: 2025-10-01T14:30:00.000Z
    ```
 
@@ -692,6 +744,10 @@ Note: Default search type is hybrid. When strict/hybrid returns zero results, th
 YAMS-first code search
 Always use YAMS to search the indexed codebase (no external grep/find/rg).
 
+Notes:
+- If results are empty, ensure the repo is indexed (`yams add ...`) and the daemon is ready (`yams status`).
+- Scope searches to the repo with `--cwd` or `--path` when multiple projects share a storage.
+
 Examples:
 ```bash
 # List only file paths for efficient context
@@ -717,7 +773,7 @@ yams search --query-file - --paths-only < /tmp/query.txt
 Hints:
 - Prefer hybrid or fuzzy search for exploratory queries; narrow with exact keywords as you iterate.
 - Combine with --paths-only to feed subsequent yams get calls.
-- Session helpers (experimental): Use `yams session pin|list|unpin|warm` to manage hot data. See PROMPT docs for examples: ../PROMPT-eng.md and ../PROMPT.md
+- Session helpers (experimental): Use `yams session add|list|rm-path|warm` to manage hot data. See PROMPT docs for examples: ../PROMPT-eng.md and ../PROMPT.md
 
 Search for documents with advanced query capabilities.
 
@@ -1141,7 +1197,7 @@ Subcommands:
 - repair: Repair common issues (embeddings, FTS5, graph)
 - validate: Validate knowledge graph health
 - dedupe: Detect (and optionally remove) duplicate documents
-- prune: Remove build artifacts, logs, cache, and temporary files
+- prune: Remove build artifacts, logs, cache, temporary files, and git artifacts
 - tuning: Auto-configure [tuning] based on system baseline
 
 Options:
@@ -1407,7 +1463,7 @@ Snapshots provide point-in-time captures of your repository content. YAMS automa
 # Capture current state of source code
 yams add . --recursive \
   --include="*.cpp,*.hpp,*.h,*.md" \
-  --label "Initial release" \
+  --snapshot-label "Initial release" \
   --tags "code,release"
 
 # Snapshot created automatically: 2025-10-01T09:00:00.000Z
@@ -1425,7 +1481,7 @@ git commit -am "Added new feature"
 # Just add again - snapshot created automatically
 yams add . --recursive \
   --include="*.cpp,*.hpp,*.h,*.md" \
-  --label "Feature release" \
+  --snapshot-label "Feature release" \
   --tags "code,release"
 
 # New snapshot: 2025-10-01T14:30:00.000Z
@@ -1586,31 +1642,31 @@ yams diff v1.0 v2.0  # Compare releases
 **Restore entire snapshot:**
 ```bash
 # Restore to specific directory
-yams restore --snapshot-id=v1.0 --output-directory=./restore-v1.0
+yams restore --snapshot-id=v1.0 --output=./restore-v1.0
 
 # Preview without writing files
-yams restore --snapshot-id=v1.0 --output-directory=./test --dry-run
+yams restore --snapshot-id=v1.0 --output=./test --dry-run
 
 # Overwrite existing files
-yams restore --snapshot-id=v1.0 --output-directory=. --overwrite
+yams restore --snapshot-id=v1.0 --output=. --overwrite
 ```
 
 **Selective restoration:**
 ```bash
 # Restore only specific file types
 yams restore --snapshot-id=v1.0 \
-  --output-directory=./restore \
-  --include-patterns="*.cpp,*.h"
+  --output=./restore \
+  --include="*.cpp,*.h"
 
 # Exclude directories
 yams restore --snapshot-id=v1.0 \
-  --output-directory=./restore \
-  --exclude-patterns="build/**,third_party/**"
+  --output=./restore \
+  --exclude="build/**,third_party/**"
 ```
 
 **Restore by collection:**
 ```bash
-yams restore-collection --collection=releases --output-directory=./releases
+yams restore --collection=releases --output=./releases
 ```
 
 ### Performance Characteristics
@@ -1648,7 +1704,7 @@ This creates a natural bidirectional link between YAMS snapshots and git history
 # Automatically snapshot on every commit
 yams add . --recursive \
   --include="*.cpp,*.hpp,*.h,*.md" \
-  --label "$(git log -1 --pretty=%B | head -1)" \
+  --snapshot-label "$(git log -1 --pretty=%B | head -1)" \
   --tags "code,git,auto"
 ```
 
@@ -1659,7 +1715,7 @@ yams add . --recursive \
 TAG=$(git describe --tags --abbrev=0)
 yams add . --recursive \
   --include="*.cpp,*.hpp,*.h,*.md" \
-  --label="Git tag: $TAG" \
+  --snapshot-label="Git tag: $TAG" \
   --tags "code,git,release"
 ```
 
@@ -1669,7 +1725,7 @@ yams add . --recursive \
 # Cron: daily snapshot at midnight
 yams add . --recursive \
   --include="*.cpp,*.hpp,*.h,*.md" \
-  --label="Daily backup" \
+  --snapshot-label="Daily backup" \
   --tags "code,daily"
 # Snapshot ID is auto-generated with current timestamp
 ```
@@ -1679,9 +1735,8 @@ yams add . --recursive \
 **Missing trees:**
 ```bash
 # If diff is slow, trees may not exist
-# Rebuild trees for existing snapshots:
-yams list --snapshots  # Find snapshot IDs
-yams doctor repair --snapshots  # Rebuild missing trees (future feature)
+# Rebuild trees for existing snapshots (not yet exposed via CLI).
+# Re-run yams add to regenerate trees as needed.
 ```
 
 **Large diff output:**
@@ -1694,15 +1749,15 @@ yams diff v1.0 v2.0 --stats  # Summary only
 **Restore conflicts:**
 ```bash
 # Preview first
-yams restore --snapshot-id=v1.0 --output-directory=./test --dry-run
+yams restore --snapshot-id=v1.0 --output=./test --dry-run
 
 # Use overwrite cautiously
-yams restore --snapshot-id=v1.0 --output-directory=. --overwrite
+yams restore --snapshot-id=v1.0 --output=. --overwrite
 ```
 
 ### Best Practices
 
-1. **Use labels liberally:** Labels make snapshot timelines human-readable (`--label "Before refactor"`)
+1. **Use labels liberally:** Labels make snapshot timelines human-readable (`--snapshot-label "Before refactor"`)
 2. **Leverage automatic IDs:** No need to manually manage snapshot IDs - timestamps provide natural ordering
 3. **Exclude build artifacts:** Use `--exclude="build/**,*.o,*.so"` to reduce noise and improve performance
 4. **Tag meaningful snapshots:** Use `--tags` for filtering (e.g., `release`, `milestone`, `backup`)
@@ -1713,9 +1768,9 @@ yams restore --snapshot-id=v1.0 --output-directory=. --overwrite
 
 ## Tips
 
-YAMS-first workflow (until watch/track is available)
+YAMS-first workflow
 - Always search the codebase with YAMS (search/grep). Do not use system grep/find/rg for repository queries.
-- After editing code, re-index affected files or directories via yams add (pre-watch workflow).
+- Enable auto-ingest with `yams watch` when possible; otherwise re-index with `yams add`.
 - Use --paths-only for path lists you can pipe into further commands or editors.
 - Prefer --include with comma-separated patterns (e.g., "*.cpp,*.hpp,*.h") to bound searches and indexing.
 - Retrieve exact files for review with yams get --name <path> -o <dest>.

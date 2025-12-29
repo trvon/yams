@@ -552,6 +552,25 @@ public:
         postIngestQueueMaxOverride_.store(v, std::memory_order_relaxed);
     }
 
+    // Post-ingest batching size. Env override: YAMS_POST_INGEST_BATCH_SIZE
+    static uint32_t postIngestBatchSize() {
+        uint32_t ov = postIngestBatchSizeOverride_.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_POST_INGEST_BATCH_SIZE")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1 && v <= 256)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 8;
+    }
+    static void setPostIngestBatchSize(uint32_t v) {
+        postIngestBatchSizeOverride_.store(v, std::memory_order_relaxed);
+    }
+
     // Override store for IPC timeout (ms)
     static inline std::atomic<uint32_t> ipcTimeoutMsOverride_{0};
 
@@ -1396,6 +1415,7 @@ private:
     static inline std::atomic<uint32_t> searchConcurrencyOverride_{0};
     static inline std::atomic<unsigned> hwCached_{0};
     static inline std::atomic<uint32_t> postIngestQueueMaxOverride_{0};
+    static inline std::atomic<uint32_t> postIngestBatchSizeOverride_{0};
     static inline std::atomic<uint32_t> ioConnPerThreadOverride_{0};
     static inline std::atomic<int> enableParallelIngestOverride_{-1};
     static inline std::atomic<uint32_t> maxIngestWorkersOverride_{0};

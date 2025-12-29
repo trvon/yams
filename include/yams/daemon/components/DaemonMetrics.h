@@ -109,6 +109,12 @@ struct MetricsSnapshot {
     std::size_t postSymbolLimit{4};
     std::size_t postEntityLimit{2};
 
+    // Session watch status
+    bool watchEnabled{false};
+    uint32_t watchIntervalMs{0};
+    std::string watchSession;
+    std::string watchRoot;
+
     // Readiness and init progress
     std::map<std::string, bool> readinessStates; // subsystem -> ready
     std::map<std::string, uint8_t> initProgress; // subsystem -> 0-100

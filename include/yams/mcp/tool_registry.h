@@ -952,6 +952,82 @@ struct MCPSessionUnpinResponse {
     json toJson() const;
 };
 
+// Session watch DTOs
+struct MCPSessionWatchRequest {
+    using RequestType = MCPSessionWatchRequest;
+
+    std::string session;
+    std::string root;
+    uint32_t intervalMs = 0;
+    bool enable = true;
+    bool addSelector = true;
+    bool setCurrent = true;
+    bool allowCreate = true;
+
+    static MCPSessionWatchRequest fromJson(const json& j) {
+        MCPSessionWatchRequest r;
+        r.session = detail::jsonValueOr(j, "session", r.session);
+        r.root = detail::jsonValueOr(j, "root", r.root);
+        r.intervalMs = detail::jsonValueOr(j, "interval_ms", r.intervalMs);
+        if (r.intervalMs == 0 && j.contains("interval")) {
+            r.intervalMs = detail::jsonValueOr(j, "interval", r.intervalMs);
+        }
+        r.enable = detail::jsonValueOr(j, "enable", r.enable);
+        r.enable = detail::jsonValueOr(j, "enabled", r.enable);
+        if (j.contains("stop") && detail::jsonValueOr(j, "stop", false))
+            r.enable = false;
+        if (j.contains("disable") && detail::jsonValueOr(j, "disable", false))
+            r.enable = false;
+        r.addSelector = detail::jsonValueOr(j, "add_selector", r.addSelector);
+        if (j.contains("no_selector") && detail::jsonValueOr(j, "no_selector", false))
+            r.addSelector = false;
+        r.setCurrent = detail::jsonValueOr(j, "set_current", r.setCurrent);
+        if (j.contains("no_use") && detail::jsonValueOr(j, "no_use", false))
+            r.setCurrent = false;
+        r.allowCreate = detail::jsonValueOr(j, "allow_create", r.allowCreate);
+        return r;
+    }
+    json toJson() const {
+        return json{{"session", session},
+                    {"root", root},
+                    {"interval_ms", intervalMs},
+                    {"enable", enable},
+                    {"add_selector", addSelector},
+                    {"set_current", setCurrent},
+                    {"allow_create", allowCreate}};
+    }
+};
+
+struct MCPSessionWatchResponse {
+    using ResponseType = MCPSessionWatchResponse;
+
+    std::string session;
+    std::string root;
+    bool enabled = false;
+    uint32_t intervalMs = 0;
+    bool created = false;
+    bool selectorAdded = false;
+
+    static MCPSessionWatchResponse fromJson(const json& j) {
+        MCPSessionWatchResponse r;
+        r.session = detail::jsonValueOr(j, "session", r.session);
+        r.root = detail::jsonValueOr(j, "root", r.root);
+        r.enabled = detail::jsonValueOr(j, "enabled", r.enabled);
+        r.intervalMs = detail::jsonValueOr(j, "interval_ms", r.intervalMs);
+        r.created = detail::jsonValueOr(j, "created", r.created);
+        r.selectorAdded = detail::jsonValueOr(j, "selector_added", r.selectorAdded);
+        return r;
+    }
+    json toJson() const {
+        return json{{"session", session},
+                    {"root", root},
+                    {"enabled", enabled},
+                    {"interval_ms", intervalMs},
+                    {"created", created},
+                    {"selector_added", selectorAdded}};
+    }
+};
+
 template <ToolRequest RequestType, ToolResponse ResponseType>
 requires ToolSerializable<RequestType> && ToolSerializable<ResponseType>
 class ToolWrapper {

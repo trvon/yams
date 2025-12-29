@@ -2,12 +2,15 @@
 
 #include <atomic>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/strand.hpp>
+#include <yams/daemon/components/InternalEventBus.h>
+#include <yams/metadata/document_metadata.h>
 #include <yams/metadata/knowledge_graph_store.h>
 
 namespace yams {
@@ -103,14 +106,17 @@ private:
     boost::asio::awaitable<void> kgPoller();
     boost::asio::awaitable<void> symbolPoller();
     boost::asio::awaitable<void> entityPoller();
+    void processBatch(std::vector<InternalEventBus::PostIngestTask>&& tasks);
     void processTask(const std::string& hash, const std::string& mime);
-    void processMetadataStage(const std::string& hash, const std::string& mime);
+    void processMetadataStage(const std::string& hash, const std::string& mime,
+                              const std::optional<metadata::DocumentInfo>& info = std::nullopt);
     void processKnowledgeGraphStage(const std::string& hash, int64_t docId,
                                     const std::string& filePath,
                                     const std::vector<std::string>& tags);
     void processSymbolExtractionStage(const std::string& hash, int64_t docId,
                                       const std::string& filePath, const std::string& language);
     void processEmbeddingStage(const std::string& hash, const std::string& mime);
+    void processEmbeddingBatch(const std::vector<std::string>& hashes);
     void dispatchToKgChannel(const std::string& hash, int64_t docId, const std::string& filePath,
                              std::vector<std::string> tags);
     void dispatchToSymbolChannel(const std::string& hash, int64_t docId,

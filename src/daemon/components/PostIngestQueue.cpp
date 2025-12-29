@@ -1,6 +1,8 @@
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <spdlog/spdlog.h>
 #include <thread>
+#include <unordered_set>
 #include <boost/asio.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -122,15 +124,25 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
     while (!stop_.load()) {
         bool didWork = false;
         InternalEventBus::PostIngestTask task;
+        const std::size_t batchSize =
+            std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
+        std::vector<InternalEventBus::PostIngestTask> batch;
+        batch.reserve(batchSize);
         // Dynamic concurrency limit from TuneAdvisor
         const std::size_t maxConcurrent = maxExtractionConcurrent();
-        while (inFlight_.load() < maxConcurrent && channel->try_pop(task)) {
+        while (inFlight_.load() < maxConcurrent && batch.size() < batchSize &&
+               channel->try_pop(task)) {
             didWork = true;
             inFlight_.fetch_add(1);
+            batch.push_back(std::move(task));
+        }
+
+        if (didWork && !batch.empty()) {
+            const std::size_t batchCount = batch.size();
             boost::asio::post(coordinator_->getExecutor(),
-                              [this, hash = std::move(task.hash), mime = std::move(task.mime)]() {
-                                  processTask(hash, mime);
-                                  inFlight_.fetch_sub(1);
+                              [this, batch = std::move(batch), batchCount]() mutable {
+                                  processBatch(std::move(batch));
+                                  inFlight_.fetch_sub(batchCount);
                               });
         }
 
@@ -147,6 +159,57 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
     }
 
     spdlog::info("[PostIngestQueue] Channel poller exited");
+}
+
+void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>&& tasks) {
+    if (tasks.empty()) {
+        return;
+    }
+
+    std::unordered_map<std::string, metadata::DocumentInfo> infoMap;
+    if (meta_) {
+        std::vector<std::string> hashes;
+        hashes.reserve(tasks.size());
+        std::unordered_set<std::string> seen;
+        seen.reserve(tasks.size());
+        for (const auto& task : tasks) {
+            if (seen.insert(task.hash).second) {
+                hashes.push_back(task.hash);
+            }
+        }
+
+        if (!hashes.empty()) {
+            auto infoRes = meta_->batchGetDocumentsByHash(hashes);
+            if (infoRes) {
+                infoMap = std::move(infoRes).value();
+            } else {
+                spdlog::warn("[PostIngestQueue] batchGetDocumentsByHash failed: {}",
+                             infoRes.error().message);
+            }
+        }
+    }
+
+    std::vector<std::string> embedHashes;
+    embedHashes.reserve(tasks.size());
+
+    for (const auto& task : tasks) {
+        try {
+            auto it = infoMap.find(task.hash);
+            if (it != infoMap.end()) {
+                processMetadataStage(task.hash, task.mime, it->second);
+            } else {
+                processMetadataStage(task.hash, task.mime, std::nullopt);
+            }
+            embedHashes.push_back(task.hash);
+            processed_++;
+            InternalEventBus::instance().incPostConsumed();
+        } catch (const std::exception& e) {
+            spdlog::error("[PostIngestQueue] Failed to process {}: {}", task.hash, e.what());
+            failed_++;
+        }
+    }
+
+    processEmbeddingBatch(embedHashes);
 }
 
 void PostIngestQueue::enqueue(Task t) {
@@ -211,7 +274,7 @@ std::size_t PostIngestQueue::size() const {
 
 void PostIngestQueue::processTask(const std::string& hash, const std::string& mime) {
     try {
-        processMetadataStage(hash, mime);
+        processMetadataStage(hash, mime, std::nullopt);
         processEmbeddingStage(hash, mime);
         processed_++;
         InternalEventBus::instance().incPostConsumed();
@@ -221,7 +284,8 @@ void PostIngestQueue::processTask(const std::string& hash, const std::string& mi
     }
 }
 
-void PostIngestQueue::processMetadataStage(const std::string& hash, const std::string& mime) {
+void PostIngestQueue::processMetadataStage(const std::string& hash, const std::string& mime,
+                                           const std::optional<metadata::DocumentInfo>& infoOpt) {
     if (!store_ || !meta_) {
         spdlog::warn("[PostIngestQueue] store or metadata unavailable; dropping task {}", hash);
         return;
@@ -234,43 +298,46 @@ void PostIngestQueue::processMetadataStage(const std::string& hash, const std::s
         std::string fileName;
         std::string mimeType = mime;
         std::string extension;
+        metadata::DocumentInfo info;
 
-        auto infoRes = meta_->getDocumentByHash(hash);
-        if (infoRes && infoRes.value().has_value()) {
-            const auto& info = *infoRes.value();
-            docId = info.id;
-            if (!info.fileName.empty())
-                fileName = info.fileName;
-            if (!info.mimeType.empty())
-                mimeType = info.mimeType;
-            if (!info.fileExtension.empty())
-                extension = info.fileExtension;
+        if (infoOpt.has_value()) {
+            info = infoOpt.value();
         } else {
-            spdlog::warn(
-                "[PostIngestQueue] Metadata not found for hash {}; content may be orphaned", hash);
-            return;
+            auto infoRes = meta_->getDocumentByHash(hash);
+            if (infoRes && infoRes.value().has_value()) {
+                info = *infoRes.value();
+            } else {
+                spdlog::warn(
+                    "[PostIngestQueue] Metadata not found for hash {}; content may be orphaned",
+                    hash);
+                return;
+            }
         }
+        docId = info.id;
+        if (!info.fileName.empty())
+            fileName = info.fileName;
+        if (!info.mimeType.empty())
+            mimeType = info.mimeType;
+        if (!info.fileExtension.empty())
+            extension = info.fileExtension;
 
         auto txt = extractDocumentText(store_, hash, mimeType, extension, extractors_);
         if (!txt || txt->empty()) {
             spdlog::debug("[PostIngestQueue] no text extracted for {} (mime={})", hash, mimeType);
             if (docId >= 0) {
-                auto d = meta_->getDocument(docId);
-                if (d && d.value().has_value()) {
-                    auto updated = d.value().value();
-                    updated.contentExtracted = false;
-                    updated.extractionStatus = metadata::ExtractionStatus::Failed;
-                    auto updateRes = meta_->updateDocument(updated);
-                    if (!updateRes) {
-                        spdlog::warn(
-                            "[PostIngestQueue] Failed to mark extraction failed for {}: {}", hash,
-                            updateRes.error().message);
-                    }
+                auto updated = info;
+                updated.contentExtracted = false;
+                updated.extractionStatus = metadata::ExtractionStatus::Failed;
+                auto updateRes = meta_->updateDocument(updated);
+                if (!updateRes) {
+                    spdlog::warn(
+                        "[PostIngestQueue] Failed to mark extraction failed for {}: {}", hash,
+                        updateRes.error().message);
                 }
             }
         } else if (docId >= 0) {
             auto pr = yams::ingest::persist_content_and_index(*meta_, docId, fileName, *txt,
-                                                              mimeType, "post_ingest");
+                                                             mimeType, "post_ingest");
             if (!pr) {
                 spdlog::warn("[PostIngestQueue] persist/index failed for {}: {}", hash,
                              pr.error().message);
@@ -380,6 +447,49 @@ void PostIngestQueue::processEmbeddingStage(const std::string& hash, const std::
         }
     } catch (const std::exception& e) {
         spdlog::error("[PostIngestQueue] Embedding dispatch failed for {}: {}", hash, e.what());
+    }
+}
+
+void PostIngestQueue::processEmbeddingBatch(const std::vector<std::string>& hashes) {
+    if (hashes.empty()) {
+        return;
+    }
+
+    try {
+        auto embedChannel =
+            InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
+                "embed_jobs", 2048);
+
+        if (!embedChannel) {
+            for (std::size_t i = 0; i < hashes.size(); ++i) {
+                InternalEventBus::instance().incEmbedDropped();
+            }
+            spdlog::warn("[PostIngestQueue] Embed channel unavailable for batch of {} hashes",
+                         hashes.size());
+            return;
+        }
+
+        InternalEventBus::EmbedJob job;
+        job.hashes = hashes;
+        job.batchSize = static_cast<uint32_t>(hashes.size());
+        job.skipExisting = true;
+        job.modelName = "";
+
+        if (!embedChannel->try_push(std::move(job))) {
+            for (std::size_t i = 0; i < hashes.size(); ++i) {
+                InternalEventBus::instance().incEmbedDropped();
+            }
+            spdlog::warn("[PostIngestQueue] Embed channel full, dropping job for {} hashes",
+                         hashes.size());
+        } else {
+            for (std::size_t i = 0; i < hashes.size(); ++i) {
+                InternalEventBus::instance().incEmbedQueued();
+            }
+            spdlog::debug("[PostIngestQueue] Dispatched embedding job for {} hashes",
+                          hashes.size());
+        }
+    } catch (const std::exception& e) {
+        spdlog::error("[PostIngestQueue] Embedding batch dispatch failed: {}", e.what());
     }
 }
 

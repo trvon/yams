@@ -179,6 +179,12 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                     yams::daemon::TuneAdvisor::useInternalBusForPostIngest() ? 1 : 0;
             } catch (...) {
             }
+            // Session watch status
+            res.requestCounts["watch_enabled"] = snap->watchEnabled ? 1 : 0;
+            if (snap->watchIntervalMs > 0) {
+                res.requestCounts["watch_interval_ms"] = snap->watchIntervalMs;
+            }
+            res.readinessStates["watch_enabled"] = snap->watchEnabled;
             res.retryAfterMs = snap->retryAfterMs;
             for (const auto& [k, v] : snap->readinessStates)
                 res.readinessStates[k] = v;

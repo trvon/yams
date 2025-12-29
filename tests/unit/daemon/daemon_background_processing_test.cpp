@@ -5,6 +5,7 @@
 // correctness
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <memory>
@@ -43,6 +44,18 @@ public:
 
 private:
     bool prev_{false};
+};
+
+class PostIngestBatchGuard {
+public:
+    explicit PostIngestBatchGuard(uint32_t size) {
+        prev_ = TuneAdvisor::postIngestBatchSize();
+        TuneAdvisor::setPostIngestBatchSize(size);
+    }
+    ~PostIngestBatchGuard() { TuneAdvisor::setPostIngestBatchSize(prev_); }
+
+private:
+    uint32_t prev_{0};
 };
 
 // Unified StubContentStore (thread-safe, supports all required operations)
@@ -161,9 +174,9 @@ public:
 
     void setDocument(metadata::DocumentInfo doc) {
         std::lock_guard<std::mutex> lk(mu_);
-        document_ = std::move(doc);
-        hasDocument_ = true;
-        lastUpdated_ = document_;
+        docsByHash_[doc.sha256Hash] = doc;
+        docsById_[doc.id] = doc;
+        lastUpdated_ = doc;
     }
 
     bool contentInserted() const {
@@ -184,23 +197,26 @@ public:
     Result<std::optional<metadata::DocumentInfo>>
     getDocumentByHash(const std::string& hash) override {
         std::lock_guard<std::mutex> lk(mu_);
-        if (hasDocument_ && document_.sha256Hash == hash) {
-            return std::optional<metadata::DocumentInfo>(document_);
+        auto it = docsByHash_.find(hash);
+        if (it != docsByHash_.end()) {
+            return std::optional<metadata::DocumentInfo>(it->second);
         }
         return std::optional<metadata::DocumentInfo>(std::nullopt);
     }
 
     Result<std::optional<metadata::DocumentInfo>> getDocument(int64_t id) override {
         std::lock_guard<std::mutex> lk(mu_);
-        if (hasDocument_ && document_.id == id) {
-            return std::optional<metadata::DocumentInfo>(document_);
+        auto it = docsById_.find(id);
+        if (it != docsById_.end()) {
+            return std::optional<metadata::DocumentInfo>(it->second);
         }
         return std::optional<metadata::DocumentInfo>(std::nullopt);
     }
 
     Result<void> updateDocument(const metadata::DocumentInfo& info) override {
         std::lock_guard<std::mutex> lk(mu_);
-        document_ = info;
+        docsByHash_[info.sha256Hash] = info;
+        docsById_[info.id] = info;
         lastUpdated_ = info;
         return Result<void>();
     }
@@ -225,14 +241,35 @@ public:
         return std::vector<std::string>{};
     }
 
+    Result<std::unordered_map<std::string, metadata::DocumentInfo>>
+    batchGetDocumentsByHash(const std::vector<std::string>& hashes) override {
+        std::lock_guard<std::mutex> lk(mu_);
+        batchGetCalls_++;
+        std::unordered_map<std::string, metadata::DocumentInfo> out;
+        out.reserve(hashes.size());
+        for (const auto& hash : hashes) {
+            auto it = docsByHash_.find(hash);
+            if (it != docsByHash_.end()) {
+                out.emplace(hash, it->second);
+            }
+        }
+        return out;
+    }
+
+    std::size_t batchGetCalls() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return batchGetCalls_;
+    }
+
 private:
     mutable std::mutex mu_;
-    metadata::DocumentInfo document_{};
     metadata::DocumentInfo lastUpdated_{};
     metadata::DocumentContent lastContent_{};
     std::string indexedContent_;
-    bool hasDocument_{false};
     bool contentInserted_{false};
+    std::size_t batchGetCalls_{0};
+    std::unordered_map<std::string, metadata::DocumentInfo> docsByHash_{};
+    std::unordered_map<int64_t, metadata::DocumentInfo> docsById_{};
 };
 
 class StubExtractor : public extraction::IContentExtractor {
@@ -334,6 +371,80 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
     }
 
     // Cleanup coordinator at test end
+    coordinator.stop();
+    coordinator.join();
+}
+
+TEST_CASE("PostIngestQueue: Batch uses batched metadata lookup and embed jobs",
+          "[daemon][background][queue][batch]") {
+    BusToggleGuard busGuard(false);
+    PostIngestBatchGuard batchGuard(4);
+
+    WorkCoordinator coordinator;
+    coordinator.start(2);
+
+    auto store = std::make_shared<StubContentStore>();
+    auto metadataRepo = std::make_shared<StubMetadataRepository>();
+    auto extractor = std::make_shared<StubExtractor>();
+    std::vector<std::shared_ptr<extraction::IContentExtractor>> extractors{extractor};
+
+    const std::string payload = "hello batch";
+    std::vector<metadata::DocumentInfo> docs;
+    docs.reserve(8);
+    for (int i = 0; i < 8; ++i) {
+        metadata::DocumentInfo doc{};
+        doc.id = 200 + i;
+        doc.fileName = "doc.txt";
+        doc.fileExtension = ".txt";
+        doc.sha256Hash = "batch-" + std::to_string(i);
+        doc.mimeType = "text/plain";
+        doc.indexedTime = std::chrono::floor<std::chrono::seconds>(
+            std::chrono::system_clock::now());
+        metadataRepo->setDocument(doc);
+        store->setContent(doc.sha256Hash, payload);
+        docs.push_back(doc);
+    }
+
+    auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
+                                                   nullptr, &coordinator, nullptr, 32);
+    queue->start();
+
+    auto embedChannel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
+            "embed_jobs", 2048);
+    InternalEventBus::EmbedJob pre;
+    while (embedChannel->try_pop(pre)) {
+    }
+
+    for (const auto& doc : docs) {
+        PostIngestQueue::Task task{
+            doc.sha256Hash, doc.mimeType, "", {}, PostIngestQueue::Task::Stage::Metadata};
+        REQUIRE(queue->tryEnqueue(std::move(task)));
+    }
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (queue->processed() < docs.size() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    REQUIRE(queue->processed() == docs.size());
+    REQUIRE(metadataRepo->batchGetCalls() >= 1);
+
+    std::size_t jobCount = 0;
+    std::size_t totalHashes = 0;
+    std::size_t maxJobSize = 0;
+    InternalEventBus::EmbedJob job;
+    while (embedChannel->try_pop(job)) {
+        jobCount++;
+        totalHashes += job.hashes.size();
+        maxJobSize = std::max(maxJobSize, job.hashes.size());
+    }
+
+    REQUIRE(totalHashes == docs.size());
+    REQUIRE(maxJobSize <= 4);
+    REQUIRE(jobCount >= 2);
+
+    queue.reset();
     coordinator.stop();
     coordinator.join();
 }

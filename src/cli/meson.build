@@ -28,6 +28,7 @@ yams_cli_sources = [
   'commands/model_command.cpp',
   'commands/daemon_command.cpp',
   'commands/download_command.cpp',
+  'commands/watch_command.cpp',
   'commands/plugin_command.cpp',
   'commands/doctor_command.cpp',
   'commands/dr_command.cpp',

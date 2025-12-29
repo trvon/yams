@@ -1804,6 +1804,16 @@ private:
                     Severity statSev = failed > 0 ? Severity::Warn : Severity::Good;
                     postIngestRows.push_back({"Stats", paint(statSev, stats.str()), ""});
 
+                    uint64_t watchEnabled = findPostIngestCount("watch_enabled");
+                    uint64_t watchInterval = findPostIngestCount("watch_interval_ms");
+                    if (watchEnabled > 0 || watchInterval > 0) {
+                        std::ostringstream watchVal;
+                        watchVal << (watchEnabled > 0 ? "enabled" : "disabled");
+                        if (watchInterval > 0)
+                            watchVal << " · " << watchInterval << "ms";
+                        postIngestRows.push_back({"Watch", neutral(watchVal.str()), ""});
+                    }
+
                     // Per-stage breakdown
                     uint64_t extractInFlight = findPostIngestCount("extraction_inflight");
                     uint64_t kgQueuedTotal = findPostIngestCount("kg_queued");

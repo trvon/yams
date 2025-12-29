@@ -28,7 +28,7 @@ struct ConnectionPoolConfig {
     std::chrono::seconds idleTimeout{300};
     std::chrono::seconds maxConnectionAge{3600};
     std::chrono::seconds connectTimeout{2};
-    std::chrono::milliseconds busyTimeout{2000};
+    std::chrono::milliseconds busyTimeout{15000};
     bool enableWAL = true;
     bool enableForeignKeys = true;
 };

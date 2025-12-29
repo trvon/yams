@@ -133,7 +133,7 @@ See [BUILD.md](../BUILD.md) for detailed build instructions, compiler configurat
 ### Quick Start
 ```bash
 # Initialize YAMS storage in current directory
-yams init .
+yams init
 
 # Or specify custom location
 export YAMS_STORAGE="$HOME/.local/share/yams"

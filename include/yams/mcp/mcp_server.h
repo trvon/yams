@@ -388,6 +388,8 @@ private:
     handleSessionPin(const MCPSessionPinRequest& req);
     boost::asio::awaitable<Result<MCPSessionUnpinResponse>>
     handleSessionUnpin(const MCPSessionUnpinRequest& req);
+    boost::asio::awaitable<Result<MCPSessionWatchResponse>>
+    handleSessionWatch(const MCPSessionWatchRequest& req);
 
     // (Removed legacy JSON helper declarations – use typed async tool handlers via ToolRegistry)
 

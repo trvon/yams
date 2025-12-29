@@ -3,6 +3,7 @@
 #include <spdlog/spdlog.h>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <functional>
 #include <list>
 #include <memory>
@@ -25,6 +26,36 @@ class GraphComponent;
 }
 
 namespace yams::metadata {
+
+namespace detail {
+inline thread_local std::string_view metadata_op_tag;
+}
+
+inline bool metadata_trace_enabled() {
+    static std::atomic<int> cached{-1};
+    int v = cached.load(std::memory_order_relaxed);
+    if (v >= 0)
+        return v == 1;
+    const char* env = std::getenv("YAMS_METADATA_TRACE");
+    bool enabled = env && *env && std::string_view(env) != "0";
+    cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
+    return enabled;
+}
+
+inline std::string_view current_metadata_op() { return detail::metadata_op_tag; }
+
+class MetadataOpScope {
+public:
+    explicit MetadataOpScope(std::string_view tag) : prev_(detail::metadata_op_tag) {
+        detail::metadata_op_tag = tag;
+    }
+    ~MetadataOpScope() { detail::metadata_op_tag = prev_; }
+    MetadataOpScope(const MetadataOpScope&) = delete;
+    MetadataOpScope& operator=(const MetadataOpScope&) = delete;
+
+private:
+    std::string_view prev_;
+};
 
 // Forward declarations
 class KnowledgeGraphStore;
@@ -561,6 +592,10 @@ private:
     template <typename T> Result<T> executeQuery(std::function<Result<T>(Database&)> func) {
         auto result = pool_.withConnection(func);
         if (!result.has_value()) {
+            if (metadata_trace_enabled()) {
+                spdlog::warn("MetadataRepository::executeQuery op='{}' error: {}",
+                             current_metadata_op(), result.error().message);
+            }
             spdlog::error("MetadataRepository::executeQuery connection error: {}",
                           result.error().message);
             return Error{result.error()};

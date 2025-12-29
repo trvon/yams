@@ -888,6 +888,7 @@ private:
         req.excludePatterns = excludePatterns_;
         req.recursive = recursive_;
         req.verify = verify_;
+        req.noEmbeddings = noEmbeddings_;
 
         // Session-isolated memory (PBI-082): tag documents with active session
         req.sessionId = getActiveSessionId(cli_, bypassSession_);
