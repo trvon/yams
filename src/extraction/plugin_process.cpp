@@ -93,6 +93,7 @@ public:
     void consume_stdout(size_t bytes);
     [[nodiscard]] std::span<const std::byte> read_stderr();
     size_t write_stdin(std::span<const std::byte> data);
+    void close_stdin();
     [[nodiscard]] int64_t pid() const noexcept;
     [[nodiscard]] std::chrono::milliseconds uptime() const noexcept;
     [[nodiscard]] bool wait_for_exit(std::chrono::milliseconds timeout);
@@ -159,6 +160,22 @@ PluginProcess::Impl::Impl(PluginProcessConfig config) : config_{std::move(config
     try {
         setup_pipes();
         spawn_process();
+
+        // Brief wait to detect immediate exec failures (e.g., non-existent or non-executable file)
+        // If child exits with 127, execvp() failed
+        std::this_thread::sleep_for(std::chrono::milliseconds{50});
+        int status;
+        pid_t result = waitpid(process_id_, &status, WNOHANG);
+        if (result > 0) {
+            // Child already exited - exec likely failed
+            int code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+            exit_code_ = code;
+            state_.store(ProcessState::Failed, std::memory_order_release);
+            throw std::runtime_error("Process exited immediately with code " +
+                                     std::to_string(code) +
+                                     " (executable: " + config_.executable.string() + ")");
+        }
+
         start_io_threads();
         state_.store(ProcessState::Ready, std::memory_order_release);
     } catch (...) {
@@ -367,6 +384,16 @@ size_t PluginProcess::Impl::write_stdin(std::span<const std::byte> data) {
     }
 
     return static_cast<size_t>(written);
+}
+
+void PluginProcess::Impl::close_stdin() {
+    std::lock_guard lock{stdin_mutex_};
+
+    if (stdin_fd_ >= 0) {
+        spdlog::debug("PluginProcess: Closing stdin fd={} to signal EOF", stdin_fd_);
+        close(stdin_fd_);
+        stdin_fd_ = -1;
+    }
 }
 
 #endif // !_WIN32
@@ -660,6 +687,17 @@ size_t PluginProcess::Impl::write_stdin(std::span<const std::byte> data) {
     return static_cast<size_t>(written);
 }
 
+void PluginProcess::Impl::close_stdin() {
+    std::lock_guard lock{stdin_mutex_};
+
+    if (stdin_write_ != INVALID_HANDLE_VALUE) {
+        spdlog::debug("PluginProcess: Closing stdin to signal EOF");
+        FlushFileBuffers(stdin_write_);
+        CloseHandle(stdin_write_);
+        stdin_write_ = INVALID_HANDLE_VALUE;
+    }
+}
+
 #endif // _WIN32
 
 // ============================================================================
@@ -897,6 +935,10 @@ std::span<const std::byte> PluginProcess::read_stderr() {
 
 size_t PluginProcess::write_stdin(std::span<const std::byte> data) {
     return impl_->write_stdin(data);
+}
+
+void PluginProcess::close_stdin() {
+    impl_->close_stdin();
 }
 
 int64_t PluginProcess::pid() const noexcept {

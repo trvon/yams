@@ -21,7 +21,8 @@
 
 // Test timeout constant - tests should complete well within this
 constexpr auto TEST_TIMEOUT = std::chrono::seconds{10};
-constexpr auto PROCESS_STARTUP_WAIT = std::chrono::milliseconds{200};
+// PyInstaller executables need ~2s to unpack/start on first run
+constexpr auto PROCESS_STARTUP_WAIT = std::chrono::seconds{2};
 constexpr auto RPC_TIMEOUT = std::chrono::seconds{3};
 
 using namespace yams::extraction;
@@ -466,6 +467,10 @@ TEST_CASE("PluginProcess launcher compiled executable",
         size_t written = process.write_stdin(to_bytes(request_str));
         INFO("Wrote " << written << " bytes");
         CHECK(written == request_str.size());
+
+        // PyInstaller executables require stdin to be closed before they send a response
+        // This signals EOF to the plugin
+        process.close_stdin();
 
         // Read response with timeout
         std::string response = readStdoutWithTimeout(process, RPC_TIMEOUT);

@@ -195,6 +195,17 @@ public:
     size_t write_stdin(std::span<const std::byte> data);
 
     /**
+     * @brief Close stdin pipe to signal EOF to child process
+     *
+     * Some plugins (notably PyInstaller executables) require stdin to be closed
+     * after writing a request before they will send a response. This signals
+     * that no more input will be provided.
+     *
+     * After calling this method, write_stdin() will return 0.
+     */
+    void close_stdin();
+
+    /**
      * @brief Get process ID
      * @return Platform-specific process ID (pid_t on Unix, DWORD on Windows)
      */

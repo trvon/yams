@@ -2197,7 +2197,11 @@ if catch2_dep.found()
 
   test('daemon', catch2_daemon_exe,
     suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    env: {
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      # Disable ABI plugins to avoid TSAN+ONNX memory pressure causing SIGKILL
+      'YAMS_DISABLE_ABI_PLUGINS': '1',
+    },
     timeout: 120,
     # Test skips on Windows (Unix domain sockets not supported)
     should_fail: host_machine.system() == 'windows'
