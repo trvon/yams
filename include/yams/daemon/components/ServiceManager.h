@@ -106,6 +106,12 @@ public:
 
     void shutdown() override;
 
+    /// Reset FSM state for daemon restart (call before next start cycle)
+    void prepareForRestart() {
+        serviceFsm_.reset();
+        asyncInitStopSource_ = yams::compat::stop_source{};
+    }
+
     // Start background task coroutines (must be called after shared_ptr construction)
     void startBackgroundTasks();
 

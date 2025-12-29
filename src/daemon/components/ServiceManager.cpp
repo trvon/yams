@@ -617,34 +617,41 @@ void ServiceManager::startAsyncInit(std::promise<void>* barrierPromise,
         boost::asio::co_spawn(
             self->workCoordinator_->getExecutor(),
             [self, barrierPromise]() -> boost::asio::awaitable<void> {
+                auto localSelf = self;
+                auto localBarrierPromise = barrierPromise;
+
                 spdlog::info("Starting async resource initialization (coroutine)...");
 
-                if (barrierPromise) {
+                if (localBarrierPromise) {
                     try {
-                        barrierPromise->set_value();
+                        localBarrierPromise->set_value();
                         spdlog::debug("ServiceManager: Async init barrier signaled");
                     } catch (...) {
                     }
                 }
 
-                auto token = self->asyncInitStopSource_.get_token();
+                auto token = localSelf->asyncInitStopSource_.get_token();
 
                 try {
-                    auto result = co_await self->initializeAsyncAwaitable(token);
+                    auto result = co_await localSelf->initializeAsyncAwaitable(token);
 
                     if (!result) {
                         spdlog::error("Async resource initialization failed: {}",
                                       result.error().message);
-                        self->serviceFsm_.dispatch(
-                            InitializationFailedEvent{result.error().message});
+                        if (!token.stop_requested()) {
+                            localSelf->serviceFsm_.dispatch(
+                                InitializationFailedEvent{result.error().message});
+                        }
                     } else {
                         spdlog::info("All daemon services initialized successfully");
                     }
                 } catch (const std::exception& e) {
                     spdlog::error("Async resource initialization exception: {}", e.what());
-                    self->serviceFsm_.dispatch(InitializationFailedEvent{e.what()});
+                    if (!token.stop_requested()) {
+                        localSelf->serviceFsm_.dispatch(InitializationFailedEvent{e.what()});
+                    }
                 }
-            }(),
+            },
             boost::asio::detached);
     });
 }

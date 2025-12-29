@@ -40,54 +40,62 @@ jobs:
     steps:
       - name: Check if there are new commits since last nightly release
         id: check
-        shell: bash
-        run: |
-          # Get the latest nightly release
-          LATEST_NIGHTLY=$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "/repos/${{ github.repository }}/releases" \
-            --jq '.[] | select(.tag_name | startswith("nightly-")) | .tag_name' | head -1)
-          
-          if [ -z "$LATEST_NIGHTLY" ]; then
-            echo "No previous nightly release found, will create one"
-            echo "has_new_commits=true" >> $GITHUB_OUTPUT
-            echo "last_release_sha=none" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
-          # Get the commit SHA of the last nightly
-          LAST_SHA=$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "/repos/${{ github.repository }}/git/ref/tags/$LATEST_NIGHTLY" \
-            --jq '.object.sha' || echo "")
-          
-          echo "last_release_sha=$LAST_SHA" >> $GITHUB_OUTPUT
-          
-          # Get current main HEAD
-          CURRENT_SHA=$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "/repos/${{ github.repository }}/git/ref/heads/main" \
-            --jq '.object.sha')
-          
-          if [ "$LAST_SHA" != "$CURRENT_SHA" ]; then
-            # Count commits between last nightly and current main
-            COMMITS=$(gh api \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "/repos/${{ github.repository }}/compare/${LAST_SHA}...${CURRENT_SHA}" \
-              --jq '.total_commits' || echo "1")
-            
-            echo "has_new_commits=true" >> $GITHUB_OUTPUT
-            echo "Found $COMMITS new commit(s) since last nightly ($LATEST_NIGHTLY)"
-          else
-            echo "has_new_commits=false" >> $GITHUB_OUTPUT
-            echo "No new commits since last nightly release ($LATEST_NIGHTLY), skipping"
-          fi
-        env:
-          GH_TOKEN: ${{ github.token }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner,
+              repo,
+              per_page: 100,
+            });
+            const latest = releases.find((r) => r.tag_name?.startsWith('nightly-'));
+            if (!latest) {
+              core.info('No previous nightly release found, will create one');
+              core.setOutput('has_new_commits', 'true');
+              core.setOutput('last_release_sha', 'none');
+              return;
+            }
+
+            const tagName = latest.tag_name;
+            const tagRef = await github.rest.git.getRef({
+              owner,
+              repo,
+              ref: `tags/${tagName}`,
+            });
+            let lastSha = tagRef.data.object.sha;
+            if (tagRef.data.object.type === 'tag') {
+              const tagObj = await github.rest.git.getTag({
+                owner,
+                repo,
+                tag_sha: lastSha,
+              });
+              lastSha = tagObj.data.object.sha;
+            }
+            core.setOutput('last_release_sha', lastSha);
+
+            const headRef = await github.rest.git.getRef({
+              owner,
+              repo,
+              ref: 'heads/main',
+            });
+            const currentSha = headRef.data.object.sha;
+
+            if (lastSha !== currentSha) {
+              const compare = await github.rest.repos.compareCommits({
+                owner,
+                repo,
+                base: lastSha,
+                head: currentSha,
+              });
+              const total = compare.data.total_commits ?? 1;
+              core.setOutput('has_new_commits', 'true');
+              core.info(`Found ${total} new commit(s) since last nightly (${tagName})`);
+            } else {
+              core.setOutput('has_new_commits', 'false');
+              core.info(`No new commits since last nightly release (${tagName}), skipping`);
+            }
 
   warm:
     needs: [check-commits]
@@ -244,10 +252,11 @@ jobs:
 
       - name: Install optional system dependencies (Linux only)
         if: runner.os == 'Linux'
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
+          sudo apt-get update -o Acquire::Retries=3 || sudo apt-get update -o Acquire::Retries=3 || true
           # Add rpm / fakeroot / dpkg-dev so CPack can emit .deb and .rpm packages
           sudo apt-get install -y --no-install-recommends \
             liburing-dev \
@@ -264,7 +273,7 @@ jobs:
             ninja-build \
             clang \
             clang-tools \
-            lld
+            lld || true
           echo "Installed optional packages: liburing-dev libarchive-dev libtag1-dev libboost-all-dev ccache rpm fakeroot dpkg-dev meson cmake ninja-build clang clang-tools lld"
           # Ensure compilers are preferred
           echo "CC=clang" >> $GITHUB_ENV
