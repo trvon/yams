@@ -12,42 +12,31 @@
 #include <yams/daemon/resource/onnx_genai_adapter.h>
 #endif
 
-// Global recursive mutex for ONNX Runtime initialization - protects both env and session creation.
-// Using recursive_mutex instead of regular mutex because:
-// 1. ONNX Runtime's internal thread pool can cause "resource deadlock would occur" (EDEADLK)
-//    errors when multiple threads attempt concurrent initialization or session creation
-// 2. On some platforms/configurations, the same thread may need to re-enter the locked region
-//    (e.g., during callbacks, exception handling, or nested factory calls)
-static std::recursive_mutex g_onnx_init_mutex;
-static std::unique_ptr<Ort::Env> g_onnx_env;
+// Global ONNX Runtime environment - single instance per process, intentionally leaked.
+// Using leaking singleton pattern because ONNX Runtime's LoggingManager destructor
+// tries to lock a mutex that may be destroyed during static destruction, causing
+// "mutex lock failed: Invalid argument" crashes.
+static std::recursive_mutex* g_onnx_init_mutex = new std::recursive_mutex();
+static Ort::Env* g_onnx_env = nullptr; // Intentionally leaked to avoid static destruction crash
 static bool g_onnx_env_initialized = false;
 
-// Global ONNX Runtime environment - single instance per process
-// Uses explicit mutex instead of call_once for better control and debugging
 static Ort::Env& get_global_ort_env() {
-    std::lock_guard<std::recursive_mutex> lock(g_onnx_init_mutex);
+    std::lock_guard<std::recursive_mutex> lock(*g_onnx_init_mutex);
     if (!g_onnx_env_initialized) {
         spdlog::info("[ONNX] Initializing global Ort::Env (thread-safe, single instance)");
 
-        // Create Ort::Env with threading options to disable internal thread pool
-        // This prevents "resource deadlock would occur" errors from ONNX Runtime's
-        // internal thread management conflicting with our application threads.
         OrtThreadingOptions* threading_options = nullptr;
         Ort::GetApi().CreateThreadingOptions(&threading_options);
         if (threading_options) {
-            // Set global inter-op thread count to 1 to prevent internal parallelism
             Ort::GetApi().SetGlobalIntraOpNumThreads(threading_options, 1);
             Ort::GetApi().SetGlobalInterOpNumThreads(threading_options, 1);
-            // Disable spinning to reduce CPU contention
             Ort::GetApi().SetGlobalSpinControl(threading_options, 0);
 
-            g_onnx_env = std::make_unique<Ort::Env>(threading_options, ORT_LOGGING_LEVEL_WARNING,
-                                                    "YamsDaemon");
+            g_onnx_env = new Ort::Env(threading_options, ORT_LOGGING_LEVEL_WARNING, "YamsDaemon");
             Ort::GetApi().ReleaseThreadingOptions(threading_options);
             spdlog::info("[ONNX] Global Ort::Env initialized with custom threading options");
         } else {
-            // Fallback if threading options not available
-            g_onnx_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "YamsDaemon");
+            g_onnx_env = new Ort::Env(ORT_LOGGING_LEVEL_WARNING, "YamsDaemon");
             spdlog::info("[ONNX] Global Ort::Env initialized (default threading)");
         }
         g_onnx_env_initialized = true;

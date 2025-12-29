@@ -2120,7 +2120,9 @@ if catch2_dep.found()
   test('multiplex_client', catch2_multiplex_client_exe,
     suite: ['catch2', 'unit', 'daemon', 'multiplex', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
+    timeout: 60,
+    # All tests have [.requires_daemon] tag - hidden without daemon (Catch2 exit code 2)
+    should_fail: true
   )
 
   test('entity_graph_service', catch2_entity_graph_service_exe,
@@ -2157,8 +2159,8 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 30,
-    # Test skips on Windows (Unix domain socket dependencies)
-    should_fail: host_machine.system() == 'windows'
+    # Test has [.linux_only] tag - skips on Windows/macOS (Catch2 exit code 2)
+    should_fail: host_machine.system() != 'linux'
   )
 
   test('request_io_edge', catch2_request_io_edge_exe,
@@ -2181,8 +2183,8 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 30,
-    # Test skips on Windows (Unix domain sockets not supported)
-    should_fail: host_machine.system() == 'windows'
+    # Test has [.linux_only] tag - skips on Windows/macOS (Catch2 exit code 2)
+    should_fail: host_machine.system() != 'linux'
   )
 
   test('asio_connection_pool', catch2_asio_connection_pool_exe,

@@ -214,19 +214,7 @@ void GlobalIOContext::ensure_initialized() {
 
 GlobalIOContext::GlobalIOContext() {}
 
-GlobalIOContext::~GlobalIOContext() {
-    // Note: No spdlog calls here - spdlog may already be destroyed during static destruction.
-    // EXC_BAD_ACCESS crashes can occur if we try to log after spdlog is torn down.
-    try {
-        ConnectionRegistry::instance().closeAll();
-    } catch (...) {
-    }
-
-    try {
-        AsioConnectionPool::shutdown_all(std::chrono::milliseconds(1000));
-    } catch (...) {
-    }
-
+GlobalIOContext::~GlobalIOContext() noexcept {
     try {
         if (this->work_guard_) {
             this->work_guard_->reset();
@@ -249,6 +237,16 @@ GlobalIOContext::~GlobalIOContext() {
             } catch (...) {
             }
         }
+    }
+
+    try {
+        ConnectionRegistry::instance().closeAll();
+    } catch (...) {
+    }
+
+    try {
+        AsioConnectionPool::shutdown_all(std::chrono::milliseconds(1000));
+    } catch (...) {
     }
 }
 

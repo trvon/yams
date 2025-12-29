@@ -229,11 +229,16 @@ Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::m
     const uint64_t currentGen = currentGeneration_.load();
 
     // Try up to 3 connections from the pool before creating a new one
-    for (int attempt = 0; attempt < 3 && !available_.empty() && !foundValid; ++attempt) {
+    // Note: Validation is performed outside the lock to avoid blocking other threads
+    for (int attempt = 0; attempt < 3 && !foundValid; ++attempt) {
+        // Pop connection under lock
+        if (available_.empty()) {
+            break;
+        }
         conn = std::move(available_.front());
         available_.pop();
 
-        // PBI-079: Check if connection is from an old generation (stale)
+        // PBI-079: Check if connection is from an old generation (stale) - cheap check under lock
         if (conn->generation_ < currentGen) {
             conn->returned_ = true; // Prevent destructor deadlock
             totalConnections_--;
@@ -243,7 +248,12 @@ Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::m
             continue;
         }
 
-        if (isConnectionValid(**conn)) {
+        // Release lock before validation (SQL queries should not block pool)
+        lock.unlock();
+        bool valid = isConnectionValid(**conn);
+        lock.lock();
+
+        if (valid) {
             foundValid = true;
             break;
         } else {
@@ -481,6 +491,24 @@ void ConnectionPool::returnConnection(PooledConnection* conn) {
     if (!conn || !conn->db_)
         return;
 
+    // Perform validation outside the lock (SQL queries should not block pool)
+    // First, rollback any pending transaction
+    try {
+        conn->operator*().rollback(); // Ignore error
+    } catch (...) {
+        // If rollback fails, connection is likely stale
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!shutdown_) {
+            activeConnections_--;
+            totalConnections_--;
+        }
+        spdlog::warn("Failed to rollback transaction, discarding connection");
+        return;
+    }
+
+    // Validate outside lock
+    bool valid = isConnectionValid(**conn);
+
     std::lock_guard<std::mutex> lock(mutex_);
 
     // If we're shut down, just discard the connection
@@ -490,19 +518,8 @@ void ConnectionPool::returnConnection(PooledConnection* conn) {
         return;
     }
 
-    // Reset any pending transaction before validation
-    try {
-        conn->operator*().rollback(); // Ignore error
-    } catch (...) {
-        // If rollback fails, connection is likely stale
-        activeConnections_--;
-        totalConnections_--;
-        spdlog::warn("Failed to rollback transaction, discarding connection");
-        return;
-    }
-
     // Check if connection is still valid
-    if (!isConnectionValid(**conn)) {
+    if (!valid) {
         activeConnections_--;
         totalConnections_--;
         spdlog::warn("Returned connection is invalid, discarding");

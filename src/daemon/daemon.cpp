@@ -174,9 +174,54 @@ Result<void> YamsDaemon::start() {
 
     spdlog::info("Starting YAMS daemon...");
 
+    // Reset state for restart
+    stopRequested_.store(false, std::memory_order_release);
+    asyncInitBarrierSet_.store(false, std::memory_order_release);
+    asyncInitStartedPromise_ = std::promise<void>();
+    asyncInitStartedFuture_ = asyncInitStartedPromise_.get_future().share();
+
     // Starting -> Initializing (ensure ordering so HealthyEvent can promote to Ready)
     spdlog::info("[Startup] Phase: FSM Reset");
     lifecycleFsm_.reset();
+
+    // Recreate ServiceManager and dependent components if they were destroyed during stop()
+    if (!serviceManager_ || !serviceManager_->getWorkCoordinator()) {
+        serviceManager_ = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    } else {
+        serviceManager_->prepareForRestart();
+    }
+
+    // Recreate metrics if destroyed
+    if (!metrics_) {
+        metrics_ = std::make_unique<DaemonMetrics>(&lifecycleFsm_, &state_, serviceManager_.get(),
+                                                   serviceManager_->getWorkCoordinator());
+    }
+
+    // Recreate request dispatcher if needed (it depends on metrics)
+    if (!requestDispatcher_) {
+        requestDispatcher_ = std::make_unique<RequestDispatcher>(this, serviceManager_.get(),
+                                                                 &state_, metrics_.get());
+    }
+
+    // Recreate tuning manager if destroyed
+    if (!tuningManager_) {
+        try {
+            tuningManager_ = std::make_unique<TuningManager>(serviceManager_.get(), &state_,
+                                                             serviceManager_->getWorkCoordinator());
+            tuningManager_->setRepairControlHook([this](uint32_t tokens, uint32_t batch) {
+                try {
+                    std::lock_guard<std::mutex> lock(repairCoordinatorMutex_);
+                    if (repairCoordinator_) {
+                        repairCoordinator_->setMaintenanceTokens(tokens);
+                        repairCoordinator_->setMaxBatch(batch);
+                    }
+                } catch (...) {
+                }
+            });
+        } catch (const std::exception& e) {
+            spdlog::warn("Failed to recreate TuningManager: {}", e.what());
+        }
+    }
 
     spdlog::info("[Startup] Phase: LifecycleManager Init");
     if (auto result = lifecycleManager_->initialize(); !result) {

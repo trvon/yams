@@ -174,15 +174,17 @@ bool socket_looks_healthy(AsioConnection::socket_t& socket) {
 } // namespace
 
 namespace {
+
 std::shared_mutex& registry_mutex() {
-    static std::shared_mutex m;
-    return m;
+    static auto* m = new std::shared_mutex();
+    return *m;
 }
 
 std::unordered_map<std::string, std::shared_ptr<AsioConnectionPool>>& registry_map() {
-    static std::unordered_map<std::string, std::shared_ptr<AsioConnectionPool>> map;
-    return map;
+    static auto* map = new std::unordered_map<std::string, std::shared_ptr<AsioConnectionPool>>();
+    return *map;
 }
+
 } // namespace
 
 AsioConnectionPool::AsioConnectionPool(const TransportOptions& opts, bool shared)

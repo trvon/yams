@@ -25,7 +25,7 @@ public:
 private:
     friend class GlobalIOContextInitializer;
     GlobalIOContext();
-    ~GlobalIOContext();
+    ~GlobalIOContext() noexcept;
 
     std::unique_ptr<boost::asio::io_context> io_context_;
     std::unique_ptr<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>

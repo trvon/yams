@@ -48,100 +48,174 @@ struct ServiceManagerStoppedEvent {};
 
 class ServiceManagerFsm {
 public:
-    ServiceManagerSnapshot snapshot() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return snap_;
+    ServiceManagerSnapshot snapshot() const noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return snap_;
+        } catch (...) {
+            return snap_;
+        }
     }
 
-    // Event dispatchers
-    void dispatch(const OpeningDatabaseEvent&) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        transitionTo(ServiceManagerState::OpeningDatabase);
+    // Event dispatchers - all noexcept to prevent crashes during destruction
+    void dispatch(const OpeningDatabaseEvent&) noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            transitionTo(ServiceManagerState::OpeningDatabase);
+        } catch (...) {
+        }
     }
-    void dispatch(const DatabaseOpenedEvent&) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        transitionTo(ServiceManagerState::DatabaseReady);
+    void dispatch(const DatabaseOpenedEvent&) noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            transitionTo(ServiceManagerState::DatabaseReady);
+        } catch (...) {
+        }
     }
-    void dispatch(const MigrationStartedEvent&) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        transitionTo(ServiceManagerState::MigratingSchema);
+    void dispatch(const MigrationStartedEvent&) noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            transitionTo(ServiceManagerState::MigratingSchema);
+        } catch (...) {
+        }
     }
-    void dispatch(const MigrationCompletedEvent&) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        transitionTo(ServiceManagerState::SchemaReady);
+    void dispatch(const MigrationCompletedEvent&) noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            transitionTo(ServiceManagerState::SchemaReady);
+        } catch (...) {
+        }
     }
-    void dispatch(const VectorsInitializedEvent&) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        transitionTo(ServiceManagerState::VectorsReady);
+    void dispatch(const VectorsInitializedEvent&) noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            transitionTo(ServiceManagerState::VectorsReady);
+        } catch (...) {
+        }
     }
-    void dispatch(const SearchEngineBuildStartedEvent&) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        transitionTo(ServiceManagerState::BuildingSearchEngine);
+    void dispatch(const SearchEngineBuildStartedEvent&) noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            transitionTo(ServiceManagerState::BuildingSearchEngine);
+        } catch (...) {
+        }
     }
-    void dispatch(const SearchEngineBuiltEvent&) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        transitionTo(ServiceManagerState::Ready);
+    void dispatch(const SearchEngineBuiltEvent&) noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            transitionTo(ServiceManagerState::Ready);
+        } catch (...) {
+        }
     }
-    void dispatch(const InitializationFailedEvent& ev) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        snap_.lastError = ev.error;
-        transitionTo(ServiceManagerState::Failed);
+    void dispatch(const InitializationFailedEvent& ev) noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            snap_.lastError = ev.error;
+            transitionTo(ServiceManagerState::Failed);
+        } catch (...) {
+        }
     }
-    void dispatch(const ShutdownEvent&) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        transitionTo(ServiceManagerState::ShuttingDown);
+    void dispatch(const ShutdownEvent&) noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            transitionTo(ServiceManagerState::ShuttingDown);
+        } catch (...) {
+        }
     }
-    void dispatch(const ServiceManagerStoppedEvent&) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        transitionTo(ServiceManagerState::Stopped);
+    void dispatch(const ServiceManagerStoppedEvent&) noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            transitionTo(ServiceManagerState::Stopped);
+        } catch (...) {
+        }
     }
 
-    // Queries
-    bool canInitializeVectors() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return snap_.state == ServiceManagerState::SchemaReady;
+    // Queries - noexcept to prevent crashes during destruction
+    bool canInitializeVectors() const noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return snap_.state == ServiceManagerState::SchemaReady;
+        } catch (...) {
+            return false;
+        }
     }
-    bool canBuildSearchEngine() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return snap_.state == ServiceManagerState::VectorsReady ||
-               snap_.state == ServiceManagerState::SchemaReady;
+    bool canBuildSearchEngine() const noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return snap_.state == ServiceManagerState::VectorsReady ||
+                   snap_.state == ServiceManagerState::SchemaReady;
+        } catch (...) {
+            return false;
+        }
     }
-    bool isReady() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return snap_.state == ServiceManagerState::Ready;
+    bool isReady() const noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return snap_.state == ServiceManagerState::Ready;
+        } catch (...) {
+            return false;
+        }
     }
-    bool hasShutdown() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return snap_.state == ServiceManagerState::Stopped ||
-               snap_.state == ServiceManagerState::ShuttingDown;
+    bool hasShutdown() const noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return snap_.state == ServiceManagerState::Stopped ||
+                   snap_.state == ServiceManagerState::ShuttingDown;
+        } catch (...) {
+            return true;
+        }
     }
 
-    bool isTerminalState() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return snap_.state == ServiceManagerState::Ready ||
-               snap_.state == ServiceManagerState::Failed ||
-               snap_.state == ServiceManagerState::Stopped;
-    }
-
-    ServiceManagerSnapshot waitForTerminalState(int timeoutSeconds = 60) {
-        std::unique_lock<std::mutex> lock(mutex_);
-        auto pred = [this]() {
+    bool isTerminalState() const noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
             return snap_.state == ServiceManagerState::Ready ||
                    snap_.state == ServiceManagerState::Failed ||
                    snap_.state == ServiceManagerState::Stopped;
-        };
-        bool completed = cv_.wait_for(lock, std::chrono::seconds(timeoutSeconds), pred);
-        if (!completed) {
-            spdlog::warn(
-                "[ServiceManagerFSM] waitForTerminalState timed out after {}s, current state={}",
-                timeoutSeconds, static_cast<int>(snap_.state));
+        } catch (...) {
+            return true;
         }
-        return snap_;
     }
 
-    void cancelWait() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        cv_.notify_all();
+    ServiceManagerSnapshot waitForTerminalState(int timeoutSeconds = 60) noexcept {
+        try {
+            std::unique_lock<std::mutex> lock(mutex_);
+            auto pred = [this]() {
+                return snap_.state == ServiceManagerState::Ready ||
+                       snap_.state == ServiceManagerState::Failed ||
+                       snap_.state == ServiceManagerState::Stopped;
+            };
+            bool completed = cv_.wait_for(lock, std::chrono::seconds(timeoutSeconds), pred);
+            if (!completed) {
+                try {
+                    spdlog::warn("[ServiceManagerFSM] waitForTerminalState timed out after {}s, "
+                                 "current state={}",
+                                 timeoutSeconds, static_cast<int>(snap_.state));
+                } catch (...) {
+                }
+            }
+            return snap_;
+        } catch (...) {
+            return snap_;
+        }
+    }
+
+    void cancelWait() noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            cv_.notify_all();
+        } catch (...) {
+        }
+    }
+
+    void reset() noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            snap_.state = ServiceManagerState::Uninitialized;
+            snap_.lastError.clear();
+            snap_.lastTransition = std::chrono::steady_clock::now();
+        } catch (...) {
+        }
     }
 
 private:
