@@ -433,6 +433,7 @@ void processData() {
 
         bool foundDefinedInEdge = false;
         bool foundLocatedInEdge = false;
+        bool foundContainsEdge = false;
 
         for (const auto& funcNode : funcNodes.value()) {
             // Check edges from this function node
@@ -453,6 +454,20 @@ void processData() {
 
         // At least one type of location edge should exist
         CHECK((foundDefinedInEdge || foundLocatedInEdge));
+
+        auto fileNodeRes = kg->getNodeByKey("file:" + filePath);
+        REQUIRE(fileNodeRes.has_value());
+        REQUIRE(fileNodeRes.value().has_value());
+        auto fileEdgesRes = kg->getEdgesFrom(fileNodeRes.value()->id, std::nullopt, 100, 0);
+        if (fileEdgesRes.has_value()) {
+            for (const auto& edge : fileEdgesRes.value()) {
+                if (edge.relation == "contains") {
+                    foundContainsEdge = true;
+                    break;
+                }
+            }
+        }
+        CHECK(foundContainsEdge);
 
         spdlog::info("Symbol edges created correctly in KG");
     }

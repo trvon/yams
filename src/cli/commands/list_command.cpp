@@ -258,7 +258,18 @@ public:
                 resolvedLocalFilePath_ = resolved.isLocalFile ? resolved.absPath : std::nullopt;
             }
 
+            bool showSpinner = !cli_->getJsonOutput() && !pathsOnly_ && format_ != "json" &&
+                               format_ != "csv" && format_ != "minimal";
+            std::optional<ui::SpinnerRunner> spinner;
+            if (showSpinner) {
+                spinner.emplace();
+                spinner->start("Listing documents...");
+            }
+
             auto render = [&](const yams::daemon::ListResponse& resp) -> Result<void> {
+                if (spinner) {
+                    spinner->stop();
+                }
                 // Handle paths-only output
                 if (pathsOnly_) {
                     for (const auto& e : resp.items) {
@@ -353,11 +364,14 @@ public:
                         return r;
                     return Result<void>();
                 }
+                if (spinner) {
+                    spinner->stop();
+                }
                 spdlog::warn("list: daemon path failed ({}); using local services",
                              res.error().message);
             }
 
-            return executeWithServices();
+            return executeWithServices(&spinner);
 
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string(e.what())};
@@ -645,7 +659,7 @@ private:
         return Result<void>();
     }
 
-    Result<void> executeWithServices() {
+    Result<void> executeWithServices(std::optional<ui::SpinnerRunner>* spinner = nullptr) {
         try {
             auto ensured = cli_->ensureStorageInitialized();
             if (!ensured) {
@@ -719,10 +733,17 @@ private:
             if (!result) {
                 spdlog::warn("Service failed, falling back to filesystem scanning: {}",
                              result.error().message);
+                if (spinner && *spinner) {
+                    (*spinner)->stop();
+                }
                 return fallbackToFilesystemScanning();
             }
 
             const auto& serviceResponse = result.value();
+
+            if (spinner && *spinner) {
+                (*spinner)->stop();
+            }
 
             // Convert service response to legacy EnhancedDocumentInfo for display
             std::vector<EnhancedDocumentInfo> documents;

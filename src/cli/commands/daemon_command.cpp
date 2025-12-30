@@ -7,7 +7,6 @@
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/error_hints.h>
-#include <yams/cli/progress_indicator.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -59,11 +58,16 @@ inline int kill(pid_t pid, int sig) {
         }
         return -1;
     }
-    HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+    HANDLE hProcess = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);
     if (hProcess) {
         BOOL result = TerminateProcess(hProcess, 1);
+        if (result) {
+            (void)WaitForSingleObject(hProcess, 5000);
+            CloseHandle(hProcess);
+            return 0;
+        }
         CloseHandle(hProcess);
-        return result ? 0 : -1;
+        return -1;
     }
     return -1;
 }
@@ -333,16 +337,22 @@ private:
         // Remove socket file if it exists
         if (!socketPath.empty()) {
             std::filesystem::path sp{socketPath};
-            if (safe_exists(sp) && std::filesystem::remove(sp)) {
+            std::error_code ec;
+            if (safe_exists(sp) && std::filesystem::remove(sp, ec)) {
                 spdlog::debug("Removed stale socket file: {}", socketPath);
+            } else if (ec) {
+                spdlog::warn("Failed to remove socket file {}: {}", socketPath, ec.message());
             }
         }
 
         // Remove PID file if it exists
         if (!pidFilePath.empty()) {
             std::filesystem::path pp{pidFilePath};
-            if (safe_exists(pp) && std::filesystem::remove(pp)) {
+            std::error_code ec;
+            if (safe_exists(pp) && std::filesystem::remove(pp, ec)) {
                 spdlog::debug("Removed stale PID file: {}", pidFilePath);
+            } else if (ec) {
+                spdlog::warn("Failed to remove PID file {}: {}", pidFilePath, ec.message());
             }
         }
     }
@@ -614,7 +624,15 @@ private:
             if (!daemon::DaemonClient::isDaemonRunning(config.socketPath)) {
                 cleanupDaemonFiles(effectiveSocket, pidFile_);
             }
+            std::optional<yams::cli::ui::SpinnerRunner> spinner;
+            if (yams::cli::ui::stdout_is_tty()) {
+                spinner.emplace();
+                spinner->start("Starting daemon...");
+            }
             auto result = daemon::DaemonClient::startDaemon(config);
+            if (spinner) {
+                spinner->stop();
+            }
             if (!result) {
                 spdlog::error("Failed to start daemon: {}", result.error().message);
                 std::cerr << formatErrorWithHint(result.error().code, "Failed to start daemon: " +
@@ -641,6 +659,17 @@ private:
                            .string();
         }
 
+        std::optional<yams::cli::ui::SpinnerRunner> spinner;
+        if (yams::cli::ui::stdout_is_tty()) {
+            spinner.emplace();
+            spinner->start("Stopping daemon...");
+        }
+        auto stopSpinner = [&]() {
+            if (spinner) {
+                spinner->stop();
+            }
+        };
+
         // Check if daemon is running
         bool daemonRunning = daemon::DaemonClient::isDaemonRunning(effectiveSocket);
         if (!daemonRunning) {
@@ -652,11 +681,16 @@ private:
             } else {
                 spdlog::info("YAMS daemon is not running");
                 cleanupDaemonFiles(effectiveSocket, pidFile_);
+                stopSpinner();
                 return;
             }
         }
 
         bool stopped = false;
+        auto pidAlive = [&]() -> bool {
+            pid_t pid = readPidFromFile(pidFile_);
+            return pid > 0 && kill(pid, 0) == 0;
+        };
 
         // First try graceful shutdown via socket
         if (daemonRunning) {
@@ -674,9 +708,11 @@ private:
                 // Wait for daemon to stop
                 for (int i = 0; i < 30; i++) {
                     if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
-                        stopped = true;
-                        spdlog::info("Daemon stopped successfully");
-                        break;
+                        if (!pidAlive()) {
+                            stopped = true;
+                            spdlog::info("Daemon stopped successfully");
+                            break;
+                        }
                     }
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }
@@ -691,9 +727,11 @@ private:
                 spdlog::warn("Socket shutdown encountered: {}", shutdownResult.error().message);
                 for (int i = 0; i < 30; ++i) {
                     if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
-                        stopped = true;
-                        spdlog::info("Daemon stopped successfully");
-                        break;
+                        if (!pidAlive()) {
+                            stopped = true;
+                            spdlog::info("Daemon stopped successfully");
+                            break;
+                        }
                     }
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }
@@ -780,8 +818,10 @@ private:
         // Clean up files if daemon was stopped
         if (stopped) {
             cleanupDaemonFiles(socketPath_, pidFile_);
+            stopSpinner();
             std::cout << "[OK] YAMS daemon stopped successfully\n";
         } else {
+            stopSpinner();
             spdlog::error("Failed to stop YAMS daemon");
             std::cerr << "[FAIL] Failed to stop YAMS daemon\n";
             std::cerr << "  💡 Hint: The daemon may be unresponsive or owned by another user\n";
@@ -1247,9 +1287,17 @@ private:
         }
 
         if (!detailed_) {
+            std::optional<yams::cli::ui::SpinnerRunner> spinner;
+            if (yams::cli::ui::stdout_is_tty()) {
+                spinner.emplace();
+                spinner->start("Checking daemon status...");
+            }
             auto sres = runDaemonClient(
                 {}, [](yams::daemon::DaemonClient& client) { return client.status(); },
                 std::chrono::seconds(5));
+            if (spinner) {
+                spinner->stop();
+            }
             if (!sres) {
                 std::cout << "YAMS daemon is running\n";
                 return;
@@ -1548,6 +1596,11 @@ private:
         }
 
         // Detailed status via DaemonClient (synchronous)
+        std::optional<yams::cli::ui::SpinnerRunner> spinner;
+        if (yams::cli::ui::stdout_is_tty()) {
+            spinner.emplace();
+            spinner->start("Fetching daemon status...");
+        }
         Error lastErr{};
         for (int attempt = 0; attempt < 5; ++attempt) {
             setenv("YAMS_CLIENT_DEBUG", detailed_ ? "1" : "0", 1);
@@ -1555,6 +1608,9 @@ private:
                 {}, [](yams::daemon::DaemonClient& client) { return client.status(); },
                 std::chrono::seconds(5));
             if (statusResult) {
+                if (spinner) {
+                    spinner->stop();
+                }
                 using namespace yams::cli::ui;
                 const auto& status = statusResult.value();
 
@@ -2176,6 +2232,9 @@ private:
             lastErr = statusResult.error();
             std::this_thread::sleep_for(std::chrono::milliseconds(120 * (attempt + 1)));
         }
+        if (spinner) {
+            spinner->stop();
+        }
         spdlog::error("Failed to get daemon status: {}", lastErr.message);
         std::exit(1);
     }
@@ -2200,10 +2259,24 @@ private:
     }
 
     void restartDaemon() {
+        std::optional<yams::cli::ui::SpinnerRunner> spinner;
+        if (yams::cli::ui::stdout_is_tty()) {
+            spinner.emplace();
+            spinner->start("Restarting daemon...");
+        }
+        auto stopSpinner = [&]() {
+            if (spinner) {
+                spinner->stop();
+            }
+        };
         // Resolve socket path (do not persist unless explicitly provided)
         const std::string effectiveSocket =
             socketPath_.empty() ? daemon::DaemonClient::resolveSocketPathConfigFirst().string()
                                 : socketPath_;
+        if (pidFile_.empty()) {
+            pidFile_ = daemon::YamsDaemon::resolveSystemPath(daemon::YamsDaemon::PathType::PidFile)
+                           .string();
+        }
 
         // Stop daemon if running
         if (daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
@@ -2215,8 +2288,10 @@ private:
                 std::chrono::seconds(10));
 
             for (int i = 0; i < 10; i++) {
-                if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket))
+                if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket) &&
+                    readPidFromFile(pidFile_) <= 0) {
                     break;
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }
         }
@@ -2235,9 +2310,11 @@ private:
         auto result = daemon::DaemonClient::startDaemon(config);
         if (!result) {
             spdlog::error("Failed to start daemon: {}", result.error().message);
+            stopSpinner();
             std::exit(1);
         }
 
+        stopSpinner();
         spdlog::info("YAMS daemon restarted successfully");
     }
 

@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -69,6 +70,10 @@ public:
         cmd->add_flag("--isolated", showIsolated_,
                       "Find isolated nodes (no incoming edges for --relation type)");
 
+        // Dead-code report (scoped isolated nodes with allowlist)
+        cmd->add_flag("--dead-code-report", deadCodeReport_,
+                      "Generate dead-code report for src/** (scoped isolated nodes)");
+
         // yams-66h: List available node types with counts
         cmd->add_flag("--list-types", listTypes_, "List available node types with counts");
 
@@ -84,6 +89,10 @@ public:
             // yams-66h: Handle --list-types mode (show available node types)
             if (listTypes_) {
                 co_return co_await executeListTypes();
+            }
+
+            if (deadCodeReport_) {
+                co_return co_await executeDeadCodeReport();
             }
 
             // Handle --list-type mode (list nodes by type without traversal)
@@ -378,6 +387,182 @@ private:
                 }
                 yams::cli::ui::render_table(std::cout, table);
             }
+        }
+
+        co_return Result<void>();
+    }
+
+    struct DeadCodeTarget {
+        std::string type;
+        std::string relation;
+        std::string label;
+    };
+
+    static std::optional<std::filesystem::path> extractNodePath(const yams::daemon::GraphNode& node) {
+        if (node.nodeKey.rfind("file:", 0) == 0) {
+            return std::filesystem::path(node.nodeKey.substr(5));
+        }
+        auto at = node.nodeKey.rfind('@');
+        if (at != std::string::npos && at + 1 < node.nodeKey.size()) {
+            return std::filesystem::path(node.nodeKey.substr(at + 1));
+        }
+        if (!node.properties.empty()) {
+            try {
+                auto props = json::parse(node.properties);
+                if (props.contains("file_path")) {
+                    return std::filesystem::path(props["file_path"].get<std::string>());
+                }
+                if (props.contains("path")) {
+                    return std::filesystem::path(props["path"].get<std::string>());
+                }
+            } catch (...) {
+                return std::nullopt;
+            }
+        }
+        return std::nullopt;
+    }
+
+    static bool isUnderPath(const std::filesystem::path& candidate,
+                            const std::filesystem::path& root) {
+        std::error_code ec;
+        auto rel = std::filesystem::relative(candidate, root, ec);
+        if (ec) {
+            return false;
+        }
+        if (rel.empty()) {
+            return false;
+        }
+        auto relStr = rel.generic_string();
+        return relStr != "." && !relStr.starts_with("..");
+    }
+
+    static bool isAllowedDeadCodePath(const std::filesystem::path& relPath) {
+        auto relStr = relPath.generic_string();
+        if (!(relStr.starts_with("src/") || relStr.starts_with("include/"))) {
+            return false;
+        }
+        if (relStr.starts_with("tests/") || relStr.starts_with("benchmarks/") ||
+            relStr.starts_with("third_party/")) {
+            return false;
+        }
+        return true;
+    }
+
+    boost::asio::awaitable<Result<void>> executeDeadCodeReport() {
+        using namespace yams::daemon;
+
+        ClientConfig cfg;
+        if (cli_ && cli_->hasExplicitDataDir()) {
+            cfg.dataDir = cli_->getDataPath();
+        }
+        cfg.requestTimeout = std::chrono::milliseconds(60000);
+
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        if (!leaseRes) {
+            co_return leaseRes.error();
+        }
+        auto leaseHandle = std::move(leaseRes.value());
+        auto& client = **leaseHandle;
+
+        std::vector<DeadCodeTarget> targets = {
+            {"function", "calls", "Isolated functions (no incoming calls)"},
+            {"class", "calls", "Isolated classes (no incoming calls)"},
+            {"file", "includes", "Isolated files (no incoming includes)"},
+        };
+
+        const auto cwd = std::filesystem::current_path();
+
+        struct DeadCodeRow {
+            std::string type;
+            std::string label;
+            std::string nodeKey;
+            std::string path;
+        };
+
+        std::vector<DeadCodeRow> allRows;
+
+        for (const auto& target : targets) {
+            GraphQueryRequest req;
+            req.isolatedMode = true;
+            req.nodeType = target.type;
+            req.isolatedRelation = target.relation;
+            req.limit = static_cast<uint32_t>(limit_ > 0 ? limit_ : 1000);
+            req.includeNodeProperties = true;
+
+            auto result = co_await client.call(req);
+            if (!result) {
+                std::cerr << "Error querying isolated nodes: " << result.error().message << "\n";
+                co_return result.error();
+            }
+
+            for (const auto& node : result.value().connectedNodes) {
+                auto nodePathOpt = extractNodePath(node);
+                if (!nodePathOpt.has_value()) {
+                    continue;
+                }
+                auto nodePath = nodePathOpt.value();
+                if (nodePath.is_relative()) {
+                    nodePath = std::filesystem::absolute(nodePath);
+                }
+                if (!isUnderPath(nodePath, cwd)) {
+                    continue;
+                }
+                std::error_code ec;
+                auto rel = std::filesystem::relative(nodePath, cwd, ec);
+                if (ec) {
+                    continue;
+                }
+                if (!isAllowedDeadCodePath(rel)) {
+                    continue;
+                }
+                DeadCodeRow row;
+                row.type = target.type;
+                row.label = node.label;
+                row.nodeKey = node.nodeKey;
+                row.path = rel.generic_string();
+                allRows.push_back(std::move(row));
+            }
+        }
+
+        if (jsonOutput_ || outputFormat_ == "json") {
+            json out;
+            out["cwd"] = cwd.generic_string();
+            out["total"] = allRows.size();
+            json rows = json::array();
+            for (const auto& row : allRows) {
+                rows.push_back({{"type", row.type},
+                                {"label", row.label},
+                                {"path", row.path},
+                                {"nodeKey", row.nodeKey}});
+            }
+            out["nodes"] = rows;
+            std::cout << out.dump(2) << "\n";
+        } else {
+            std::cout << yams::cli::ui::section_header("Dead-code report") << "\n\n";
+            std::cout << yams::cli::ui::status_info(
+                             "Scoped to src/** and include/** (excluding tests/, benchmarks/, "
+                             "third_party/)")
+                      << "\n\n";
+
+            if (allRows.empty()) {
+                std::cout << yams::cli::ui::status_info("No isolated nodes found in scope")
+                          << "\n";
+                co_return Result<void>();
+            }
+
+            yams::cli::ui::Table table;
+            table.headers = {"TYPE", "LABEL", "PATH"};
+            table.has_header = true;
+            for (const auto& row : allRows) {
+                table.add_row({row.type,
+                               yams::cli::ui::truncate_to_width(row.label, 40),
+                               yams::cli::ui::truncate_to_width(row.path, 50)});
+            }
+            yams::cli::ui::render_table(std::cout, table);
+            std::cout << "\n"
+                      << yams::cli::ui::status_info("Total: " +
+                                                    yams::cli::ui::format_number(allRows.size()))
+                      << "\n";
         }
 
         co_return Result<void>();
@@ -739,6 +924,7 @@ private:
     std::string outputFormat_{"table"};
     std::string propFilter_;
     bool showIsolated_{false};
+    bool deadCodeReport_{false};
     bool listTypes_{false};
 };
 

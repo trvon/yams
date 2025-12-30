@@ -56,9 +56,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - ONNX plugin uses single-flight pattern to prevent concurrent model loading.
   - Changed OnnxModelPool to use `std::recursive_mutex` to work around Windows-specific
     issue with `std::mutex`/`std::condition_variable` interaction.
+- Download CLI now attempts daemon-first execution (when simple options are used) and falls back
+  to local services on failure, reducing lock contention.
 
 ### Added
 - MCP `graph` tool for knowledge graph queries (parity with CLI `yams graph`).
 - Snapshot-scoped graph version nodes with canonical roots and `observed_as` edges.
 - Graph prune policy (configurable `daemon.graph_prune`) to keep latest snapshot versions.
 - Integration coverage for snapshot versioning + pruning in EntityGraphService tests.
+- Graph: file/path → symbol `contains` edges to improve dead-code analysis.
+- Graph CLI: `--dead-code-report` to emit scoped isolated-node reports (src/include allowlist).
+- Download CLI: progress streaming (human/json) via DownloadService callbacks.
+- Benchmarks: ingestion throughput baseline config and repeatable workflow docs.

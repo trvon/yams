@@ -184,7 +184,6 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             if (snap->watchIntervalMs > 0) {
                 res.requestCounts["watch_interval_ms"] = snap->watchIntervalMs;
             }
-            res.readinessStates["watch_enabled"] = snap->watchEnabled;
             res.retryAfterMs = snap->retryAfterMs;
             for (const auto& [k, v] : snap->readinessStates)
                 res.readinessStates[k] = v;

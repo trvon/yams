@@ -1,0 +1,18 @@
+{
+  "dataset_path": "tests/data/ingestion",
+  "fixture_manifest": "tests/benchmarks/baseline/fixtures.json",
+  "output_metrics": "build/benchmarks/ingestion_baseline.jsonl",
+  "post_run_cleanup": true,
+  "runs": [
+    {
+      "label": "baseline-1w",
+      "workers": 1,
+      "repeat": 3,
+      "args": [
+        "--recursive",
+        "--include=*.txt,*.md,*.cpp,*.h",
+        "--exclude=**/.git/**,**/node_modules/**,**/build/**"
+      ]
+    }
+  ]
+}

@@ -10,7 +10,9 @@
 // Header-only, no external dependencies. Portable with sensible fallbacks.
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -19,10 +21,12 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #if defined(_WIN32)
 #include <io.h>
+#include <windows.h>
 #define YAMS_UI_ISATTY _isatty
 #define YAMS_UI_FILENO _fileno
 #else
@@ -82,6 +86,27 @@ inline bool stdout_is_tty() {
     // Fallback when platform API is unavailable
     return false;
 #endif
+}
+
+inline bool unicode_supported() {
+#if defined(_WIN32)
+    if (GetConsoleOutputCP() == 65001) {
+        return true;
+    }
+    if (std::getenv("WT_SESSION") != nullptr) {
+        return true;
+    }
+#endif
+    const char* lc = std::getenv("LC_ALL");
+    if (!lc || !*lc)
+        lc = std::getenv("LC_CTYPE");
+    if (!lc || !*lc)
+        lc = std::getenv("LANG");
+    if (!lc)
+        return false;
+    std::string_view v{lc};
+    return v.find("UTF-8") != std::string_view::npos || v.find("utf8") != std::string_view::npos ||
+           v.find("utf-8") != std::string_view::npos;
 }
 
 // Colors enabled if:
@@ -545,6 +570,48 @@ struct Spinner {
     static constexpr size_t FRAME_COUNT = 10;
 
     static const char* frame(size_t index) { return FRAMES[index % FRAME_COUNT]; }
+};
+
+
+class SpinnerRunner {
+public:
+    SpinnerRunner() = default;
+    ~SpinnerRunner() { stop(); }
+    SpinnerRunner(const SpinnerRunner&) = delete;
+    SpinnerRunner& operator=(const SpinnerRunner&) = delete;
+
+    void start(const std::string& message) {
+        if (!stdout_is_tty() || running_) {
+            return;
+        }
+        message_ = message;
+        running_ = true;
+        worker_ = std::thread([this]() {
+            size_t idx = 0;
+            while (running_) {
+                std::ostringstream oss;
+                oss << "\r";
+                oss << Spinner::frame(idx++) << " " << message_;
+                std::cout << oss.str() << std::flush;
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        });
+    }
+
+    void stop() {
+        running_ = false;
+        if (worker_.joinable()) {
+            worker_.join();
+        }
+        if (stdout_is_tty()) {
+            std::cout << "\r\033[K" << std::flush;
+        }
+    }
+
+private:
+    std::string message_;
+    std::thread worker_;
+    std::atomic<bool> running_{false};
 };
 
 // Bullet point helpers for lists

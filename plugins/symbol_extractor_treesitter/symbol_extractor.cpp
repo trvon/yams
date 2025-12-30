@@ -194,7 +194,7 @@ inline constexpr LanguageConfig lang_cpp = {
     .call_queries = makeQueries(
         "(call_expression function: (identifier) @callee) @call",
         "(call_expression function: (field_expression field: (field_identifier) @callee)) @call",
-        "(call_expression function: (qualified_identifier name: (identifier) @callee)) @call"),
+        "(call_expression function: (qualified_identifier) @callee) @call"),
 };
 
 inline constexpr LanguageConfig lang_c = {
@@ -1043,10 +1043,12 @@ SymbolExtractor::extractCallRelations(const ExtractionContext& ctx,
         // Find which function contains this call
         for (const auto* func : function_symbols) {
             if (call.byte_offset >= func->start_offset && call.byte_offset < func->end_offset) {
+                const std::string& caller_name =
+                    func->qualified_name.empty() ? func->name : func->qualified_name;
                 // This call is inside this function
                 // Skip self-recursive calls
-                if (call.callee_name != func->name) {
-                    call_sites[func->name].insert(call.callee_name);
+                if (call.callee_name != caller_name) {
+                    call_sites[caller_name].insert(call.callee_name);
                 }
                 break; // A call can only be in one function
             }

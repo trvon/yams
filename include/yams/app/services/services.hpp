@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <regex>
 #include <string>
@@ -831,6 +832,7 @@ struct DownloadServiceRequest {
     std::chrono::milliseconds timeout{60'000};
     downloader::RetryPolicy retry;
     downloader::RateLimit rateLimit;
+    std::function<void(const downloader::ProgressEvent&)> progressCallback;
     bool resume{true};
     std::optional<std::string> proxy;
     downloader::TlsConfig tls;

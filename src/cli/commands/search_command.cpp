@@ -174,6 +174,11 @@ private:
         std::string method{"search"};
     };
 
+    bool shouldShowSpinner() const {
+        bool jsonMode = jsonOutput_ || (cli_ && cli_->getJsonOutput());
+        return !jsonMode && !pathsOnly_;
+    }
+
     // Unified rendering function for search results
     Result<void> renderResults(std::vector<UnifiedItem>& items, const RenderContext& ctx) {
         auto emitTagHint = [&]() {
@@ -1005,7 +1010,19 @@ public:
                 dreq.sessionName = *sessionOverride_;
             }
 
+            std::shared_ptr<ui::SpinnerRunner> spinner =
+                shouldShowSpinner() ? std::make_shared<ui::SpinnerRunner>() : nullptr;
+            if (spinner) {
+                spinner->start("Searching...");
+            }
+            auto stopSpinner = [&]() {
+                if (spinner) {
+                    spinner->stop();
+                }
+            };
+
             auto render = [&](const yams::daemon::SearchResponse& resp) -> Result<void> {
+                stopSpinner();
                 // Convert daemon results to unified items
                 std::vector<UnifiedItem> items;
                 items.reserve(resp.results.size());
@@ -1022,6 +1039,7 @@ public:
                 return renderResults(items, ctx);
             };
             auto fallback = [&]() -> Result<void> {
+                stopSpinner();
                 // Use app services for local fallback
                 auto appContext = cli_->getAppContext();
                 if (!appContext) {
@@ -1401,7 +1419,19 @@ public:
         dreq.indexedAfter = indexedAfter_;
         dreq.indexedBefore = indexedBefore_;
 
+        std::shared_ptr<ui::SpinnerRunner> spinner =
+            shouldShowSpinner() ? std::make_shared<ui::SpinnerRunner>() : nullptr;
+        if (spinner) {
+            spinner->start("Searching...");
+        }
+        auto stopSpinner = [spinner]() {
+            if (spinner) {
+                spinner->stop();
+            }
+        };
+
         auto render = [&](const yams::daemon::SearchResponse& resp) -> Result<void> {
+            stopSpinner();
             // Convert daemon results to unified items
             std::vector<UnifiedItem> items;
             items.reserve(resp.results.size());
@@ -1580,6 +1610,7 @@ public:
         }
 
         // Fallback to local services via co_await
+        stopSpinner();
         if (auto appContext = cli_->getAppContext()) {
             auto searchService = app::services::makeSearchService(*appContext);
             if (searchService) {

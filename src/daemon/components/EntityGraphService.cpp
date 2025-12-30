@@ -479,6 +479,35 @@ yams::Result<void> EntityGraphService::createSymbolEdges(
         kg->addEdgesUnique(contextEdges);
     }
 
+    // File/Path containment edges: file/path -> symbol
+    std::vector<yams::metadata::KGEdge> containmentEdges;
+    containmentEdges.reserve(nodes.versionNodeIds.size());
+    std::optional<std::int64_t> containerId;
+    if (contextNodes.fileNodeId.has_value()) {
+        containerId = contextNodes.fileNodeId;
+    } else if (contextNodes.pathNodeId.has_value()) {
+        containerId = contextNodes.pathNodeId;
+    }
+    if (containerId.has_value()) {
+        for (size_t i = 0; i < nodes.versionNodeIds.size(); ++i) {
+            nlohmann::json edgeProps;
+            edgeProps["line_start"] = result->symbols[i].start_line;
+            edgeProps["line_end"] = result->symbols[i].end_line;
+            if (!job.documentHash.empty())
+                edgeProps["snapshot_id"] = job.documentHash;
+            yams::metadata::KGEdge edge;
+            edge.srcNodeId = containerId.value();
+            edge.dstNodeId = nodes.versionNodeIds[i];
+            edge.relation = "contains";
+            edge.weight = 1.0f;
+            edge.properties = edgeProps.dump();
+            containmentEdges.push_back(edge);
+        }
+    }
+    if (!containmentEdges.empty()) {
+        kg->addEdgesUnique(containmentEdges);
+    }
+
     // Canonical -> version edges for snapshot tracking
     if (!job.documentHash.empty()) {
         std::vector<yams::metadata::KGEdge> versionEdges;

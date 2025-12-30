@@ -1,10 +1,15 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <iostream>
 #include <optional>
 #include <regex>
 #include <vector>
+#include <cstdio>
+#include <map>
+#include <fmt/core.h>
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
@@ -138,6 +143,19 @@ public:
             return Error{ErrorCode::InvalidArgument, "Specify only one of <url> or --list"};
         }
 
+        // Try daemon path first if we can honor CLI options (list-style fallback behavior).
+        if (canUseDaemonDownload()) {
+            auto daemonRes = tryDaemonDownload();
+            if (daemonRes) {
+                if (daemonRes.value().has_value()) {
+                    return printDaemonResult(daemonRes.value().value());
+                }
+            } else {
+                spdlog::warn("download: daemon path failed ({}); using local services",
+                             daemonRes.error().message);
+            }
+        }
+
         // Get app context and download service
         auto appContext = cli_->getAppContext();
         if (!appContext) {
@@ -256,6 +274,83 @@ public:
             serviceReq.metadata[key] = value;
         }
 
+        if (!quiet_ && progress_ != "none") {
+            if (progress_ == "json") {
+                serviceReq.progressCallback =
+                    [](const downloader::ProgressEvent& ev) {
+                        json j;
+                        j["type"] = "progress";
+                        j["stage"] = static_cast<int>(ev.stage);
+                        j["downloaded_bytes"] = ev.downloadedBytes;
+                        if (ev.totalBytes)
+                            j["total_bytes"] = *ev.totalBytes;
+                        if (ev.percentage)
+                            j["percentage"] = *ev.percentage;
+                        std::cerr << j.dump() << "\n";
+                    };
+            } else {
+                serviceReq.progressCallback =
+                    [lastStage = downloader::ProgressStage::Resolving, lastPct = -1.0f,
+                     lastLen = std::size_t{0}](const downloader::ProgressEvent& ev) mutable {
+                        auto stageName = [](downloader::ProgressStage s) {
+                            switch (s) {
+                                case downloader::ProgressStage::Resolving:
+                                    return "resolving";
+                                case downloader::ProgressStage::Connecting:
+                                    return "connecting";
+                                case downloader::ProgressStage::Downloading:
+                                    return "downloading";
+                                case downloader::ProgressStage::Verifying:
+                                    return "verifying";
+                                case downloader::ProgressStage::Finalizing:
+                                    return "finalizing";
+                                default:
+                                    return "";
+                            }
+                        };
+                        float pct = ev.percentage.value_or(0.0f);
+                        bool stageChanged = ev.stage != lastStage;
+                        bool pctDelta = (pct - lastPct) >= 1.0f; // update every 1%
+                        if (!stageChanged && !pctDelta &&
+                            ev.stage == downloader::ProgressStage::Downloading) {
+                            return;
+                        }
+                        lastStage = ev.stage;
+                        lastPct = pct;
+
+                        std::uint64_t done = ev.downloadedBytes;
+                        std::string doneStr = ui::format_bytes(done);
+                        std::string content;
+                        if (ev.totalBytes) {
+                            double fraction = 0.0;
+                            if (*ev.totalBytes > 0) {
+                                fraction =
+                                    std::min(1.0, static_cast<double>(done) /
+                                                      static_cast<double>(*ev.totalBytes));
+                            }
+                            std::string totalStr = ui::format_bytes(*ev.totalBytes);
+                            std::string bar = ui::progress_bar(fraction, 20, true);
+                            content = fmt::format("  - {:11s} {} {}/{}",
+                                                  stageName(ev.stage), bar, doneStr, totalStr);
+                        } else {
+                            content = fmt::format("  - {:11s} {}", stageName(ev.stage), doneStr);
+                        }
+
+                        std::string out = "\r" + content;
+                        if (lastLen > content.size()) {
+                            out += std::string(lastLen - content.size(), ' ');
+                        }
+                        fmt::print(stderr, "{}", out);
+                        std::fflush(stderr);
+                        lastLen = content.size();
+                        if (ev.stage == downloader::ProgressStage::Finalizing) {
+                            fmt::print(stderr, "\n");
+                            lastLen = 0;
+                        }
+                    };
+            }
+        }
+
         // Call the download service
         auto result = downloadService->download(serviceReq);
 
@@ -316,6 +411,116 @@ public:
     }
 
 private:
+    bool canUseDaemonDownload() const {
+        if (!url_ || listPath_) {
+            return false;
+        }
+        if (!headers_.empty() || checksum_.has_value()) {
+            return false;
+        }
+        if (exportPath_ || exportDir_) {
+            return false;
+        }
+        if (noResume_ || proxy_.has_value() || tlsInsecure_ || tlsCaPath_.has_value() ||
+            noFollowRedirects_) {
+            return false;
+        }
+        if (overwritePolicy_ != "never") {
+            return false;
+        }
+        if (concurrency_ != 4 || chunkSize_ != (8ull * 1024ull * 1024ull) ||
+            timeoutMs_ != 60000 || retryAttempts_ != 5 || backoffMs_ != 500 ||
+            backoffMult_ != 2.0 || maxBackoffMs_ != 15000) {
+            return false;
+        }
+        if (rateLimitGlobalBps_ != 0 || rateLimitPerConnBps_ != 0) {
+            return false;
+        }
+        return true;
+    }
+
+    Result<std::optional<yams::daemon::DownloadResponse>> tryDaemonDownload() {
+        using namespace yams::daemon;
+
+        ClientConfig cfg;
+        if (cli_ && cli_->hasExplicitDataDir()) {
+            cfg.dataDir = cli_->getDataPath();
+        }
+        cfg.requestTimeout = std::chrono::milliseconds(60000);
+
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        if (!leaseRes) {
+            return leaseRes.error();
+        }
+        auto leaseHandle = std::move(leaseRes.value());
+        auto& client = **leaseHandle;
+
+        DownloadRequest req;
+        req.url = *url_;
+        req.tags = tags_;
+        req.metadata = serviceMetadataMap();
+        req.quiet = quiet_;
+
+        auto resp =
+            yams::cli::run_result<DownloadResponse>(client.call(req), std::chrono::seconds(30));
+        if (!resp) {
+            return resp.error();
+        }
+
+        const auto& val = resp.value();
+        if (!val.success) {
+            return Error{ErrorCode::NetworkError,
+                         val.error.empty() ? "daemon download failed" : val.error};
+        }
+        return std::optional<DownloadResponse>{val};
+    }
+
+    std::map<std::string, std::string> serviceMetadataMap() const {
+        std::map<std::string, std::string> metadata;
+        for (const auto& kv : metadataKVs_) {
+            auto pos = kv.find('=');
+            if (pos == std::string::npos || pos == 0) {
+                continue;
+            }
+            std::string key = kv.substr(0, pos);
+            std::string value = kv.substr(pos + 1);
+            auto trim = [](std::string& s) {
+                if (s.empty())
+                    return;
+                s.erase(0, s.find_first_not_of(" \t"));
+                auto p = s.find_last_not_of(" \t");
+                if (p != std::string::npos)
+                    s.erase(p + 1);
+            };
+            trim(key);
+            trim(value);
+            if (!key.empty()) {
+                metadata.emplace(std::move(key), std::move(value));
+            }
+        }
+        return metadata;
+    }
+
+    Result<void> printDaemonResult(const yams::daemon::DownloadResponse& resp) const {
+        if (jsonOutput_) {
+            json j;
+            j["success"] = resp.success;
+            j["url"] = resp.url;
+            j["hash"] = resp.hash;
+            j["stored_path"] = resp.localPath;
+            j["size_bytes"] = resp.size;
+            std::cout << j.dump(2) << std::endl;
+        } else {
+            std::cout << "Download successful!" << std::endl;
+            std::cout << "  URL: " << resp.url << std::endl;
+            std::cout << "  Content Hash: " << resp.hash << std::endl;
+            std::cout << "  Size: " << resp.size << " bytes" << std::endl;
+            std::cout << "  Stored at: " << resp.localPath << std::endl;
+            std::cout << "  Tip: yams get " << resp.hash << std::endl;
+        }
+        return Result<void>();
+    }
+
     YamsCLI* cli_{nullptr};
     std::optional<std::string> url_;
     std::optional<fs::path> listPath_;

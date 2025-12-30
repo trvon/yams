@@ -1,40 +1,12 @@
 #include <iomanip>
 #include <sstream>
 #include <yams/cli/progress_indicator.h>
+#include <yams/cli/ui_helpers.hpp>
 
 namespace yams::cli {
 
 // Define static members
-constexpr const char* ProgressIndicator::SPINNER_CHARS[];
 constexpr int ProgressIndicator::SPINNER_COUNT;
-
-namespace {
-#ifndef _WIN32
-#include <unistd.h>
-#endif
-#include <cstdlib>
-
-bool detect_tty() {
-#ifndef _WIN32
-    return isatty(STDOUT_FILENO);
-#else
-    return true;
-#endif
-}
-
-bool detect_unicode() {
-    const char* lc = std::getenv("LC_ALL");
-    if (!lc || !*lc)
-        lc = std::getenv("LC_CTYPE");
-    if (!lc || !*lc)
-        lc = std::getenv("LANG");
-    if (!lc)
-        return false;
-    std::string_view v{lc};
-    return v.find("UTF-8") != std::string_view::npos || v.find("utf8") != std::string_view::npos ||
-           v.find("utf-8") != std::string_view::npos;
-}
-} // namespace
 
 ProgressIndicator::ProgressIndicator(Style style, bool autoStart) : style_(style) {
     // Nothing else
@@ -99,8 +71,7 @@ void ProgressIndicator::render() {
     std::ostringstream oss;
     oss << "\r";
 
-    const bool isTty = detect_tty();
-    const bool unicodeOk = detect_unicode();
+    const bool isTty = ui::stdout_is_tty();
     switch (style_) {
         case Style::Spinner:
             if (!isTty) {
@@ -109,13 +80,8 @@ void ProgressIndicator::render() {
                 int dots = (spinnerIndex_ % 4) + 1;
                 for (int i = 0; i < dots; ++i)
                     oss << ".";
-            } else if (!unicodeOk) {
-                // ASCII spinner fallback
-                static const char* ascii[] = {"-", "\\", "|", "/"};
-                static constexpr int ac = 4;
-                oss << ascii[spinnerIndex_ % ac] << " " << message_;
             } else {
-                oss << SPINNER_CHARS[spinnerIndex_] << " " << message_;
+                oss << ui::Spinner::frame(static_cast<size_t>(spinnerIndex_)) << " " << message_;
             }
             if (showCount_ && current_ > 0) {
                 oss << " (" << current_;
@@ -135,7 +101,7 @@ void ProgressIndicator::render() {
                 }
             } else {
                 // Fall back to spinner for indeterminate progress
-                oss << SPINNER_CHARS[spinnerIndex_] << " " << message_;
+                oss << ui::Spinner::frame(static_cast<size_t>(spinnerIndex_)) << " " << message_;
                 if (showCount_ && current_ > 0) {
                     oss << " (" << current_ << ")";
                 }
@@ -144,24 +110,18 @@ void ProgressIndicator::render() {
 
         case Style::Bar:
             if (total_ > 0) {
-                const int barWidth = 20;
-                int filled = static_cast<int>((current_ * barWidth) / total_);
-                oss << "[";
-                for (int i = 0; i < barWidth; ++i) {
-                    if (!unicodeOk) {
-                        oss << (i < filled ? "#" : "-");
-                    } else {
-                        oss << (i < filled ? "█" : "░");
-                    }
+                const double fraction =
+                    total_ > 0 ? (static_cast<double>(current_) / static_cast<double>(total_))
+                               : 0.0;
+                if (isTty) {
+                    oss << ui::progress_bar(fraction, 20, true) << " " << message_;
+                } else {
+                    int percent = static_cast<int>((current_ * 100) / total_);
+                    oss << "[" << std::setw(3) << percent << "%] " << message_;
                 }
-                oss << "] ";
-
-                // Add percentage
-                int percent = static_cast<int>((current_ * 100) / total_);
-                oss << std::setw(3) << percent << "% " << message_;
             } else {
                 // Fall back to spinner for indeterminate progress
-                oss << SPINNER_CHARS[spinnerIndex_] << " " << message_;
+                oss << ui::Spinner::frame(static_cast<size_t>(spinnerIndex_)) << " " << message_;
                 if (showCount_ && current_ > 0) {
                     oss << " (" << current_ << ")";
                 }

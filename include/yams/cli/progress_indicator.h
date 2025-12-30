@@ -102,9 +102,6 @@ private:
 
     std::chrono::steady_clock::time_point lastUpdate_;
 
-    // Spinner characters
-    static constexpr const char* SPINNER_CHARS[] = {"⠋", "⠙", "⠹", "⠸", "⠼",
-                                                    "⠴", "⠦", "⠧", "⠇", "⠏"};
     static constexpr int SPINNER_COUNT = 10;
 };
 
