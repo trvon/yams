@@ -825,6 +825,15 @@ message NodeTypeCount {
   uint64 count = 2;
 }
 
+message GraphEdge {
+  int64 edge_id = 1;
+  int64 src_node_id = 2;
+  int64 dst_node_id = 3;
+  string relation = 4;
+  float weight = 5;
+  string properties = 6;
+}
+
 message GraphQueryResponse {
   GraphNode origin_node = 1;
   repeated GraphNode connected_nodes = 2;
@@ -836,6 +845,7 @@ message GraphQueryResponse {
   bool kg_available = 8;
   string warning = 9;
   repeated NodeTypeCount node_type_counts = 10;  // yams-66h: Node type counts for --list-types
+  repeated GraphEdge edges = 11;
 }
 
 message GraphPathHistoryRequest {

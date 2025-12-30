@@ -665,10 +665,6 @@ Result<void> YamsDaemon::stop() {
         lifecycleManager_->shutdown();
     }
 
-    if (lifecycleManager_) {
-        lifecycleManager_->shutdown();
-    }
-
     // NOTE: We do NOT reset GlobalIOContext here.
     // GlobalIOContext is a singleton that should persist for the process lifetime.
     // Resetting it after multiple daemon lifecycles causes resource corruption.

@@ -2271,6 +2271,15 @@ template <> struct ProtoBinding<GraphQueryResponse> {
             n->set_distance(node.distance);
             n->set_properties(node.properties);
         }
+        for (const auto& edge : r.edges) {
+            auto* e = o->add_edges();
+            e->set_edge_id(edge.edgeId);
+            e->set_src_node_id(edge.srcNodeId);
+            e->set_dst_node_id(edge.dstNodeId);
+            e->set_relation(edge.relation);
+            e->set_weight(edge.weight);
+            e->set_properties(edge.properties);
+        }
         o->set_total_nodes_found(r.totalNodesFound);
         o->set_total_edges_traversed(r.totalEdgesTraversed);
         o->set_truncated(r.truncated);
@@ -2313,6 +2322,17 @@ template <> struct ProtoBinding<GraphQueryResponse> {
             n.distance = node.distance();
             n.properties = node.properties();
             r.connectedNodes.push_back(std::move(n));
+        }
+        r.edges.reserve(i.edges_size());
+        for (const auto& edge : i.edges()) {
+            GraphEdge e{};
+            e.edgeId = edge.edge_id();
+            e.srcNodeId = edge.src_node_id();
+            e.dstNodeId = edge.dst_node_id();
+            e.relation = edge.relation();
+            e.weight = edge.weight();
+            e.properties = edge.properties();
+            r.edges.push_back(std::move(e));
         }
         r.totalNodesFound = i.total_nodes_found();
         r.totalEdgesTraversed = i.total_edges_traversed();

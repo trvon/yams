@@ -189,11 +189,25 @@ Result<void> LifecycleComponent::initialize() {
 
 void LifecycleComponent::shutdown() {
     cleanupSignalHandlers();
-    removePidFile();
+
+    // Close and unlock file BEFORE removal (Windows holds lock while fd is open)
     if (pidFileFd_ != -1) {
+#ifdef _WIN32
+        // Explicitly unlock on Windows before closing
+        HANDLE hFile = (HANDLE)_get_osfhandle(pidFileFd_);
+        if (hFile != INVALID_HANDLE_VALUE) {
+            OVERLAPPED overlapped = {0};
+            UnlockFileEx(hFile, 0, 1, 0, &overlapped);
+        }
+        _close(pidFileFd_);
+#else
         close(pidFileFd_);
+#endif
         pidFileFd_ = -1;
     }
+
+    // Now safe to remove the unlocked file
+    removePidFile();
 }
 
 bool LifecycleComponent::isAnotherInstanceRunning() const {

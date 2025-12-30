@@ -18,6 +18,7 @@ typedef struct yams_symbol_v1 {
     char* qualified_name; // Fully qualified name (e.g., "yams::daemon::processTask")
     char* kind;      // Symbol kind: "function", "class", "method", "variable", "macro", "typedef"
     char* file_path; // Absolute path to source file
+    char* scope;     // Enclosing scope (e.g., "yams::daemon::GraphComponent", nullable)
     uint32_t start_line;   // 1-based line number
     uint32_t end_line;     // 1-based line number
     uint32_t start_offset; // Byte offset from file start

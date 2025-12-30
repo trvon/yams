@@ -345,6 +345,24 @@ public:
         });
     }
 
+    Result<std::size_t> countNodesByType(std::string_view type) override {
+        return pool_->withConnection([&](Database& db) -> Result<std::size_t> {
+            auto stmtR = db.prepare("SELECT COUNT(1) FROM kg_nodes WHERE type = ?");
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+            auto br = stmt.bind(1, type);
+            if (!br)
+                return br.error();
+            auto step = stmt.step();
+            if (!step)
+                return step.error();
+            if (!step.value())
+                return static_cast<std::size_t>(0);
+            return static_cast<std::size_t>(stmt.getInt64(0));
+        });
+    }
+
     Result<void> deleteNodeById(std::int64_t nodeId) override {
         return pool_->withConnection([&](Database& db) -> Result<void> {
             auto stmtR = db.prepare("DELETE FROM kg_nodes WHERE id = ?");
@@ -1372,40 +1390,105 @@ public:
             if (!stepRes)
                 return stepRes.error();
 
+            std::int64_t snapshotNodeId = 0;
             if (stepRes.value()) {
-                // Node exists, return its ID
-                return stmt.getInt64(0);
+                snapshotNodeId = stmt.getInt64(0);
+            } else {
+                // Node doesn't exist, create it with properties JSON
+                auto insertStmt =
+                    db.prepare("INSERT INTO kg_nodes (node_key, label, type, created_time, properties) "
+                               "VALUES (?, ?, 'path', unixepoch(), ?)");
+                if (!insertStmt)
+                    return insertStmt.error();
+
+                auto& insert = insertStmt.value();
+
+                // Build properties JSON
+                std::string properties = "{";
+                properties += "\"snapshot_id\":\"" + descriptor.snapshotId + "\",";
+                properties += "\"path\":\"" + descriptor.path + "\",";
+                properties +=
+                    "\"is_directory\":" + std::string(descriptor.isDirectory ? "true" : "false");
+                if (!descriptor.rootTreeHash.empty()) {
+                    properties += ",\"root_tree_hash\":\"" + descriptor.rootTreeHash + "\"";
+                }
+                properties += "}";
+
+                auto insertBind = insert.bindAll(nodeKey, descriptor.path, properties);
+                if (!insertBind)
+                    return insertBind.error();
+
+                auto execRes = insert.execute();
+                if (!execRes)
+                    return execRes.error();
+
+                snapshotNodeId = db.lastInsertRowId();
             }
 
-            // Node doesn't exist, create it with properties JSON
-            auto insertStmt =
-                db.prepare("INSERT INTO kg_nodes (node_key, label, type, created_time, properties) "
-                           "VALUES (?, ?, 'path', unixepoch(), ?)");
-            if (!insertStmt)
-                return insertStmt.error();
+            // Logical path node to group snapshot path nodes.
+            std::string logicalKey = "path:logical:" + descriptor.path;
+            auto logicalSelect =
+                db.prepare("SELECT id FROM kg_nodes WHERE node_key = ? AND type = 'path'");
+            if (!logicalSelect)
+                return logicalSelect.error();
 
-            auto& insert = insertStmt.value();
+            auto& logicalStmt = logicalSelect.value();
+            auto logicalBind = logicalStmt.bindAll(logicalKey);
+            if (!logicalBind)
+                return logicalBind.error();
 
-            // Build properties JSON
-            std::string properties = "{";
-            properties += "\"snapshot_id\":\"" + descriptor.snapshotId + "\",";
-            properties += "\"path\":\"" + descriptor.path + "\",";
-            properties +=
-                "\"is_directory\":" + std::string(descriptor.isDirectory ? "true" : "false");
-            if (!descriptor.rootTreeHash.empty()) {
-                properties += ",\"root_tree_hash\":\"" + descriptor.rootTreeHash + "\"";
+            auto logicalStep = logicalStmt.step();
+            if (!logicalStep)
+                return logicalStep.error();
+
+            std::int64_t logicalNodeId = 0;
+            if (logicalStep.value()) {
+                logicalNodeId = logicalStmt.getInt64(0);
+            } else {
+                auto logicalInsert =
+                    db.prepare("INSERT INTO kg_nodes (node_key, label, type, created_time, properties) "
+                               "VALUES (?, ?, 'path', unixepoch(), ?)");
+                if (!logicalInsert)
+                    return logicalInsert.error();
+
+                auto& insert = logicalInsert.value();
+                std::string properties = "{";
+                properties += "\"path\":\"" + descriptor.path + "\",";
+                properties +=
+                    "\"is_directory\":" + std::string(descriptor.isDirectory ? "true" : "false");
+                properties += ",\"logical\":true";
+                properties += "}";
+                auto logicalInsertBind = insert.bindAll(logicalKey, descriptor.path, properties);
+                if (!logicalInsertBind)
+                    return logicalInsertBind.error();
+                auto logicalExec = insert.execute();
+                if (!logicalExec)
+                    return logicalExec.error();
+                logicalNodeId = db.lastInsertRowId();
             }
-            properties += "}";
 
-            auto insertBind = insert.bindAll(nodeKey, descriptor.path, properties);
-            if (!insertBind)
-                return insertBind.error();
+            if (logicalNodeId > 0 && snapshotNodeId > 0) {
+                auto edgeStmt = db.prepare(
+                    "INSERT INTO kg_edges (src_node_id, dst_node_id, relation, created_time, properties) "
+                    "SELECT ?, ?, 'path_version', unixepoch(), ? "
+                    "WHERE NOT EXISTS ("
+                    "  SELECT 1 FROM kg_edges WHERE src_node_id = ? AND dst_node_id = ? AND relation = 'path_version'"
+                    ")");
+                if (!edgeStmt)
+                    return edgeStmt.error();
+                std::string edgeProps =
+                    "{\"snapshot_id\":\"" + descriptor.snapshotId + "\"}";
+                auto& edge = edgeStmt.value();
+                auto edgeBind = edge.bindAll(logicalNodeId, snapshotNodeId, edgeProps, logicalNodeId,
+                                             snapshotNodeId);
+                if (!edgeBind)
+                    return edgeBind.error();
+                auto edgeExec = edge.execute();
+                if (!edgeExec)
+                    return edgeExec.error();
+            }
 
-            auto execRes = insert.execute();
-            if (!execRes)
-                return execRes.error();
-
-            return db.lastInsertRowId();
+            return snapshotNodeId;
         });
     }
 

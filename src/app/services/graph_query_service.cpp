@@ -19,15 +19,15 @@ std::vector<std::string> relationTypeToStrings(GraphRelationType type) {
         case GraphRelationType::SameContent:
             return {"same_content", "blob_version"};
         case GraphRelationType::RenamedFrom:
-            return {"renamed_from", "moved_from"};
+            return {"renamed_from", "moved_from", "renamed_to"};
         case GraphRelationType::RenamedTo:
-            return {"renamed_to", "moved_to"};
+            return {"renamed_to", "moved_to", "renamed_from"};
         case GraphRelationType::DirectoryChild:
             return {"contains", "directory_child"};
         case GraphRelationType::SymbolReference:
             return {"symbol_reference", "entity_reference"};
         case GraphRelationType::PathVersion:
-            return {"path_version", "blob_at_path"};
+            return {"has_version", "path_version", "blob_at_path"};
         default:
             return {};
     }
@@ -35,7 +35,17 @@ std::vector<std::string> relationTypeToStrings(GraphRelationType type) {
 
 // Helper: Check if an edge matches the relation filters
 bool matchesRelationFilter(const metadata::KGEdge& edge,
-                           const std::vector<GraphRelationType>& filters) {
+                           const std::vector<GraphRelationType>& filters,
+                           const std::vector<std::string>& relationNames) {
+    if (!relationNames.empty()) {
+        for (const auto& name : relationNames) {
+            if (edge.relation == name) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     if (filters.empty()) {
         return true; // No filter = all edges match
     }
@@ -326,6 +336,7 @@ private:
     // Collect neighbors and cache edges for later reuse
     void collectNeighborsWithCache(std::int64_t nodeId, int distance, int maxDepth,
                                    const std::vector<GraphRelationType>& relationFilters,
+                                   const std::vector<std::string>& relationNames,
                                    std::unordered_set<std::int64_t>& visited,
                                    std::queue<std::pair<std::int64_t, int>>& queue,
                                    EdgeCache& edgeCache, bool reverseTraversal = false) {
@@ -342,7 +353,7 @@ private:
         // Normal traversal: follow outgoing edges (A calls B -> traverse to B)
         // Reverse traversal: follow incoming edges (A calls B -> traverse to A)
         for (const auto& edge : allEdges.value()) {
-            if (!matchesRelationFilter(edge, relationFilters))
+            if (!matchesRelationFilter(edge, relationFilters, relationNames))
                 continue;
 
             std::int64_t neighborId;
@@ -368,12 +379,13 @@ private:
     // Legacy collectNeighbors for backward compatibility (without cache)
     void collectNeighbors(std::int64_t nodeId, int distance, int maxDepth,
                           const std::vector<GraphRelationType>& relationFilters,
+                          const std::vector<std::string>& relationNames,
                           std::unordered_set<std::int64_t>& visited,
                           std::queue<std::pair<std::int64_t, int>>& queue,
                           bool reverseTraversal = false) {
         EdgeCache dummyCache;
-        collectNeighborsWithCache(nodeId, distance, maxDepth, relationFilters, visited, queue,
-                                  dummyCache, reverseTraversal);
+        collectNeighborsWithCache(nodeId, distance, maxDepth, relationFilters, relationNames,
+                                  visited, queue, dummyCache, reverseTraversal);
     }
 
     Result<void> performBFSTraversal(std::int64_t originNodeId, const GraphQueryRequest& req,
@@ -394,7 +406,8 @@ private:
 
             if (distance == 0) {
                 collectNeighborsWithCache(currentNodeId, distance, req.maxDepth,
-                                          req.relationFilters, visited, queue, edgeCache,
+                                          req.relationFilters, req.relationNames, visited, queue,
+                                          edgeCache,
                                           req.reverseTraversal);
                 continue;
             }
@@ -460,7 +473,8 @@ private:
             }
 
             collectNeighborsWithCache(currentNodeId, distance, req.maxDepth, req.relationFilters,
-                                      visited, queue, edgeCache, req.reverseTraversal);
+                                      req.relationNames, visited, queue, edgeCache,
+                                      req.reverseTraversal);
 
             response.maxDepthReached = std::max(response.maxDepthReached, distance);
         }

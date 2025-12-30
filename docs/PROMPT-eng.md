@@ -20,6 +20,7 @@ argument-hint: [TASK=<issue-id>] [ACTION=<start|checkpoint|complete>]
 2. **Task-driven workflow** - Use `bd ready` to find work, `bd` to track progress
 3. **Index all code changes** - YAMS provides superior search and code/idea graph connections
 4. **Document discoveries** - File new `bd` issues for discovered work, link with `discovered-from`
+5. **No tags in this repo** - Avoid `--tags`; use labels and notes instead
 
 ### Debugging
 
@@ -103,13 +104,13 @@ YAMS is your **memory layer** - use it for code indexing, knowledge, and graph c
 
 ### What to Store in YAMS
 
-| Content Type | Example | Tags |
-|--------------|---------|------|
-| **Code Changes** | Modified/created files | `code,task-$TASK$,<component>` |
-| **External Research** | API docs, package guides | `documentation,external,<package>` |
-| **Learned Patterns** | Solutions that worked | `pattern,solution,<domain>` |
-| **Architecture Decisions** | Why we chose X over Y | `decision,architecture` |
-| **Troubleshooting** | How we fixed issue X | `troubleshooting,<area>` |
+| Content Type | Example | Notes |
+|--------------|---------|-------|
+| **Code Changes** | Modified/created files | Use labels; avoid tags |
+| **External Research** | API docs, package guides | Use labels; avoid tags |
+| **Learned Patterns** | Solutions that worked | Use labels; avoid tags |
+| **Architecture Decisions** | Why we chose X over Y | Use labels; avoid tags |
+| **Troubleshooting** | How we fixed issue X | Use labels; avoid tags |
 
 ---
 
@@ -121,13 +122,11 @@ YAMS is your **memory layer** - use it for code indexing, knowledge, and graph c
 ```bash
 # Index changed files into YAMS
 yams add src/auth/*.py \
-  --tags "code,task-$TASK$,auth,python" \
   --label "Task $TASK$: Auth implementation"
 
 # Index entire directories for major changes
 yams add src/components/ --recursive \
   --include "*.tsx,*.ts" \
-  --tags "code,task-$TASK$,frontend" \
   --label "Task $TASK$: Component updates"
 
 # Update issue notes
@@ -138,7 +137,6 @@ bd update $TASK$ --notes "Progress: <summary>"
 ```bash
 # Always index modified files
 yams add <changed-files> \
-  --tags "code,task-$TASK$,<component>" \
   --label "$TASK$: <brief-description>"
 ```
 
@@ -150,13 +148,13 @@ Notes:
 
 ```bash
 # Find how we implemented something before
-yams search "authentication middleware" --tags "code"
+yams search "authentication middleware" --cwd .
 
 # Find all code related to a feature
-yams search "task-bd-a3f8e9" --tags "code"
+yams search "task-bd-a3f8e9" --cwd .
 
 # Find code patterns across the project
-yams search "error handling retry" --tags "code,pattern"
+yams search "error handling retry" --cwd . --fuzzy
 
 # Graph connections: find related code and ideas
 yams graph "auth" --depth 2
@@ -169,10 +167,34 @@ yams search "rate limiting" --fuzzy
 ```bash
 # When code implements a pattern, link them
 yams add src/utils/retry.py \
-  --tags "code,pattern,retry,error-handling" \
   --metadata "implements=exponential-backoff,related=rate-limiting"
 
 # This creates graph edges between code and concepts
+```
+
+## Graph Dead-Code Audit
+
+Use the graph to find unreferenced symbols and isolate unused files. This workflow assumes code is indexed and the daemon is ready.
+
+```bash
+# 1. Ensure daemon is up and auto-ingest is running
+yams status
+yams watch
+
+# 2. Baseline index (adjust includes as needed)
+yams add . --recursive \
+  --include "*.c,*.cc,*.cpp,*.cxx,*.h,*.hpp,*.rs,*.go,*.py,*.ts,*.js" \
+  --exclude "build/**,node_modules/**" \
+  --label "Task $TASK$: baseline index"
+
+# 3. Inspect a file node and its relationships
+yams graph --name src/example.cpp --depth 2 --format json
+
+# 4. Use node.type from JSON to list isolated nodes of that type
+yams graph --list-type <node-type> --isolated --limit 50
+
+# 5. Visualize a suspicious node
+yams graph --node-key <node-key> --depth 2 --format dot
 ```
 
 ---
@@ -184,7 +206,6 @@ yams add src/utils/retry.py \
 # Cache external documentation
 curl -s "$DOCS_URL" | yams add - \
   --name "$PACKAGE-guide.md" \
-  --tags "documentation,external,$PACKAGE" \
   --metadata "url=$DOCS_URL,date=$(date -Iseconds)"
 
 # Store API examples
@@ -199,8 +220,7 @@ $CODE_EXAMPLE
 - $GOTCHA_1
 - $GOTCHA_2
 " | yams add - \
-  --name "$PACKAGE-patterns.md" \
-  --tags "pattern,api,$PACKAGE"
+  --name "$PACKAGE-patterns.md"
 ```
 
 ### Storing Solutions
@@ -222,8 +242,7 @@ $HOW_WE_FIXED_IT
 $SOLUTION_CODE
 \`\`\`
 " | yams add - \
-  --name "solution-$(date +%Y%m%d)-$SLUG.md" \
-  --tags "solution,pattern,$DOMAIN"
+  --name "solution-$(date +%Y%m%d)-$SLUG.md"
 ```
 
 ### Storing Decisions
@@ -246,8 +265,7 @@ $WHAT_WE_CHOSE
 ### Rationale
 $WHY
 " | yams add - \
-  --name "decision-$SLUG.md" \
-  --tags "decision,architecture,$AREA"
+  --name "decision-$SLUG.md"
 ```
 
 ---
@@ -260,8 +278,8 @@ $WHY
 bd ready --json | jq '.[0]'
 
 # 2. Search for related code and knowledge
-yams search "$FEATURE_DOMAIN" --tags "code" --limit 10
-yams search "$TECHNOLOGY patterns" --tags "pattern,solution"
+yams search "$FEATURE_DOMAIN" --cwd . --limit 10
+yams search "$TECHNOLOGY patterns" --cwd . --fuzzy
 
 # 3. Start the task
 bd update $TASK$ --status in_progress
@@ -271,13 +289,11 @@ bd update $TASK$ --status in_progress
 ```bash
 # After making changes, index the code
 yams add src/feature/*.py \
-  --tags "code,task-$TASK$,$COMPONENT" \
   --label "$TASK$: $DESCRIPTION"
 
 # Store any patterns learned
 echo "## Pattern: $WHAT_I_LEARNED" | yams add - \
-  --name "pattern-$SLUG.md" \
-  --tags "pattern,$DOMAIN"
+  --name "pattern-$SLUG.md"
 
 # Found more work? Track in Beads
 bd create "TODO: $DISCOVERED_WORK" -t task -p 2 --json
@@ -288,7 +304,6 @@ bd dep add <new-id> $TASK$ --type discovered-from
 ```bash
 # 1. Final code index
 yams add <all-changed-files> \
-  --tags "code,task-$TASK$,complete" \
   --label "$TASK$: Final implementation"
 
 # 2. Close in Beads
@@ -298,8 +313,7 @@ bd close $TASK$ --reason "Implemented" --json
 echo "## Learnings from $TASK$
 $WHAT_I_LEARNED
 " | yams add - \
-  --name "learnings-$TASK$.md" \
-  --tags "learnings,$DOMAIN,task-$TASK$"
+  --name "learnings-$TASK$.md"
 
 # 4. Git commit (local-only for Beads; no bd sync)
 git add -A
@@ -319,8 +333,8 @@ STATUS: $STATUS → $NEW_STATUS
 DEPENDENCIES: $BLOCKERS resolved? [yes/no]
 
 CODE INDEXED (YAMS):
-- src/auth/*.py → tags: code,task-$TASK$,auth
-- src/utils/helper.py → tags: code,task-$TASK$,utils
+- src/auth/*.py → label: "Task $TASK$: auth"
+- src/utils/helper.py → label: "Task $TASK$: utils"
 
 KNOWLEDGE RETRIEVED (YAMS):
 - [X] Related code patterns found
@@ -358,8 +372,8 @@ bd sync --flush-only                 # Export JSONL only (no git)
 ```
 
 ### YAMS CLI (selected commands)
-- **add**: multi-path add with daemon-first flow; supports `--name`, `--tags`, `--metadata`, `--mime-type`, `--no-auto-mime`, `--no-embeddings`, collections/snapshots (`--collection`, `--snapshot-id`, `--snapshot-label`), directory controls (`-r/--recursive`, `--include`, `--exclude`, `--verify`), session scope (`--global/--no-session`), and daemon robustness (`--daemon-timeout-ms`, `--daemon-retries`, `--daemon-backoff-ms`, `--daemon-ready-timeout-ms`). Stdin supported via `-`.
-- **search**: queries via positional args or `-q/--query`; accepts `--stdin`/`--query-file`; defaults to `--type hybrid`; fuzzy toggle `-f/--fuzzy` with `--similarity`; `--paths-only`; grouping controls (`--no-group-versions`, `--versions {latest|all}`, `--versions-topk`, `--versions-sort`, `--no-tools`, `--json-grouped`); session scope (`--session`, `--global/--no-session`); `--cwd`; streaming (`--streaming`, `--chunk-size`, header/body timeouts); literal text `-F/--literal-text`; display (`--show-hash`, `-v/--verbose`, `--json`); line/context (`-n/--line-numbers`, `-A/-B/-C`); hash search `--hash`; tag filters (`--tags`, `--match-all-tags`); include globs; file filters (`--ext`, `--mime`, `--file-type`, `--text-only`, `--binary-only`); time filters (`--created-*`, `--modified-*`, `--indexed-*`).
+- **add**: multi-path add with daemon-first flow; supports `--name`, `--tags` (unused in this repo), `--metadata`, `--mime-type`, `--no-auto-mime`, `--no-embeddings`, collections/snapshots (`--collection`, `--snapshot-id`, `--snapshot-label`), directory controls (`-r/--recursive`, `--include`, `--exclude`, `--verify`), session scope (`--global/--no-session`), and daemon robustness (`--daemon-timeout-ms`, `--daemon-retries`, `--daemon-backoff-ms`, `--daemon-ready-timeout-ms`). Stdin supported via `-`.
+- **search**: queries via positional args or `-q/--query`; accepts `--stdin`/`--query-file`; defaults to `--type hybrid`; fuzzy toggle `-f/--fuzzy` with `--similarity`; `--paths-only`; grouping controls (`--no-group-versions`, `--versions {latest|all}`, `--versions-topk`, `--versions-sort`, `--no-tools`, `--json-grouped`); session scope (`--session`, `--global/--no-session`); `--cwd`; streaming (`--streaming`, `--chunk-size`, header/body timeouts); literal text `-F/--literal-text`; display (`--show-hash`, `-v/--verbose`, `--json`); line/context (`-n/--line-numbers`, `-A/-B/-C`); hash search `--hash`; tag filters (`--tags` (unused in this repo), `--match-all-tags`); include globs; file filters (`--ext`, `--mime`, `--file-type`, `--text-only`, `--binary-only`); time filters (`--created-*`, `--modified-*`, `--indexed-*`).
 - **graph**: target by positional `hash`, `--name`, `--node-key`, or `--node-id`; traversal depth `--depth 1-5`; filter relations with `--relation/-r`; list-only mode via `--list-type` (use `--isolated` to find nodes with no incoming edges); pagination `--limit/--offset`; output `--format table|json|dot` or `--json`; `--verbose` shows properties/hashes; `--prop-filter` for property text.
 - **session**: lifecycle (`start`, `use`, `ls`, `show --json`, `rm`); selectors (`add --path/--tag/--meta`, `rm-path`, `list --json`); warming (`warm --limit --snippet-len --cores --memory-gb --time-ms --aggressive`); tagging/annotation (`tags --add/--remove`, `annotate --meta`); cache (`clear`); import/export (`save`, `load --name`); emit (`emit --kind names|paths|hashes --materialized --json`); watch (`--start/--stop --interval --session`); session isolation (`create`, `open`, `close`, `status --json`); maintenance (`merge --exclude --dry-run`, `discard --confirm`, `diff --base --target --dir --type --json`). Env: `YAMS_SESSION_CURRENT` selects default.
 - **watch**: project auto-ingest bootstrap (`yams watch`, `yams watch --stop`, `yams watch --interval 2000`).

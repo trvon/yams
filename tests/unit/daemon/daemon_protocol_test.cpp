@@ -468,6 +468,51 @@ TEST_CASE("ProtoSerializer: Response roundtrip", "[daemon][protocol][serializati
     REQUIRE(got->hash == "deadbeef");
     REQUIRE(got->size == 1234);
     REQUIRE(got->success == true);
+
+    SECTION("GraphQueryResponse includes edges") {
+        GraphQueryResponse gr;
+        gr.originNode.nodeId = 1;
+        gr.originNode.nodeKey = "file:/root/a.cpp";
+        gr.originNode.label = "a.cpp";
+        gr.originNode.type = "file";
+
+        GraphNode cn;
+        cn.nodeId = 2;
+        cn.nodeKey = "symbol:foo";
+        cn.label = "foo";
+        cn.type = "function";
+        cn.distance = 1;
+        gr.connectedNodes.push_back(cn);
+
+        GraphEdge edge;
+        edge.edgeId = 42;
+        edge.srcNodeId = 1;
+        edge.dstNodeId = 2;
+        edge.relation = "defines";
+        edge.weight = 0.9f;
+        edge.properties = "{\"source\":\"test\"}";
+        gr.edges.push_back(edge);
+
+        gr.totalNodesFound = 1;
+        gr.totalEdgesTraversed = 1;
+        gr.kgAvailable = true;
+
+        auto encGraph = ProtoSerializer::encode_payload(
+            makeMessageWith(Response{std::in_place_type<GraphQueryResponse>, gr}, 4));
+        REQUIRE(encGraph);
+
+        auto decGraph = ProtoSerializer::decode_payload(encGraph.value());
+        REQUIRE(decGraph);
+        REQUIRE(std::holds_alternative<Response>(decGraph.value().payload));
+
+        auto* gotGraph =
+            std::get_if<GraphQueryResponse>(&std::get<Response>(decGraph.value().payload));
+        REQUIRE(gotGraph != nullptr);
+        REQUIRE(gotGraph->edges.size() == 1);
+        CHECK(gotGraph->edges[0].edgeId == 42);
+        CHECK(gotGraph->edges[0].relation == "defines");
+        CHECK(gotGraph->edges[0].properties == "{\"source\":\"test\"}");
+    }
 }
 
 TEST_CASE("GrepResponse: Serialization edge cases", "[daemon][protocol][grep]") {

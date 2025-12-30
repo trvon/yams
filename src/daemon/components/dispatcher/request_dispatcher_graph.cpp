@@ -2,6 +2,7 @@
 // Copyright (c) 2025 YAMS Contributors
 
 #include <spdlog/spdlog.h>
+#include <unordered_set>
 #include <yams/app/services/graph_query_service.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -83,6 +84,7 @@ RequestDispatcher::handleGraphQueryRequest(const GraphQueryRequest& req) {
     svcReq.hydrateFully = req.includeNodeProperties;
     svcReq.includeEdgeProperties = req.includeEdgeProperties;
     svcReq.reverseTraversal = req.reverseTraversal;
+    svcReq.relationNames = req.relationFilters;
 
     auto result = graphService->query(svcReq);
     if (!result) {
@@ -106,6 +108,7 @@ RequestDispatcher::handleGraphQueryRequest(const GraphQueryRequest& req) {
     resp.originNode.distance = 0;
 
     resp.connectedNodes.reserve(svcResp.allConnectedNodes.size());
+    std::unordered_set<int64_t> seenEdges;
     for (const auto& cn : svcResp.allConnectedNodes) {
         GraphNode graphNode;
         graphNode.nodeId = cn.nodeMetadata.node.nodeId;
@@ -115,6 +118,24 @@ RequestDispatcher::handleGraphQueryRequest(const GraphQueryRequest& req) {
         graphNode.documentHash = cn.nodeMetadata.documentHash.value_or("");
         graphNode.distance = cn.distance;
         resp.connectedNodes.push_back(std::move(graphNode));
+
+        for (const auto& edge : cn.connectingEdges) {
+            if (edge.edgeId > 0) {
+                if (!seenEdges.insert(edge.edgeId).second) {
+                    continue;
+                }
+            }
+            GraphEdge graphEdge;
+            graphEdge.edgeId = edge.edgeId;
+            graphEdge.srcNodeId = edge.srcNodeId;
+            graphEdge.dstNodeId = edge.dstNodeId;
+            graphEdge.relation = edge.relation;
+            graphEdge.weight = edge.weight;
+            if (edge.properties.has_value()) {
+                graphEdge.properties = edge.properties.value();
+            }
+            resp.edges.push_back(std::move(graphEdge));
+        }
     }
 
     spdlog::debug("GraphQuery: returning {} connected nodes, totalFound={}, truncated={}",
@@ -143,7 +164,12 @@ RequestDispatcher::handleGraphQueryListByType(const GraphQueryRequest& req,
 
     GraphQueryResponse resp;
     resp.kgAvailable = true;
-    resp.totalNodesFound = nodesResult.value().size();
+    auto totalCount = kgStore->countNodesByType(req.nodeType);
+    if (!totalCount) {
+        co_return ErrorResponse{.code = totalCount.error().code,
+                                .message = totalCount.error().message};
+    }
+    resp.totalNodesFound = static_cast<uint64_t>(totalCount.value());
     resp.truncated = (nodesResult.value().size() >= req.limit);
     resp.maxDepthReached = 0; // No traversal in listByType mode
 

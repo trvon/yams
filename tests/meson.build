@@ -773,7 +773,10 @@ if catch2_dep.found()
   )
 
   catch2_daemon_graph_component_exe = executable('catch2_daemon_graph_component',
-    files('unit/daemon/graph_component_catch2_test.cpp'),
+    files(
+      'unit/daemon/graph_component_catch2_test.cpp',
+      'unit/app/services/graph_query_service_catch2_test.cpp',
+    ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -1127,6 +1130,7 @@ if catch2_dep.found()
       'unit/cli/data_dir_resolution_catch2_test.cpp',
       'unit/cli/doctor_command_catch2_test.cpp',
       'unit/cli/error_hints_catch2_test.cpp',
+      'unit/cli/graph_helpers_catch2_test.cpp',
       'unit/cli/grep_command_path_tree_catch2_test.cpp',
       'unit/cli/init_command_catch2_test.cpp',
       'unit/cli/model_command_catch2_test.cpp',

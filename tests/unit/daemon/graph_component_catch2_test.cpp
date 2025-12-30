@@ -270,6 +270,12 @@ TEST_CASE("KnowledgeGraphStore: findNodesByType with pagination", "[daemon][grap
         }
     }
 
+    SECTION("countNodesByType returns full count") {
+        auto count = fixture.kgStore->countNodesByType("function");
+        REQUIRE(count.has_value());
+        REQUIRE(count.value() == 25);
+    }
+
     SECTION("Empty result for unknown type") {
         auto result = fixture.kgStore->findNodesByType("nonexistent_type", 100, 0);
         REQUIRE(result.has_value());

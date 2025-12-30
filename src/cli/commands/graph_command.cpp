@@ -5,10 +5,12 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/graph_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -426,29 +428,29 @@ private:
 
         // If --name is provided, try to resolve it to a file node in the KG first
         if (!name_.empty()) {
-            // Extract just the filename from the path for the node key
-            std::filesystem::path namePath(name_);
-            std::string fileName = namePath.filename().string();
-            std::string fileNodeKey = "file:" + fileName;
+            auto candidates = build_graph_file_node_candidates(name_);
+            for (const auto& candidate : candidates) {
+                std::string fileNodeKey = "file:" + candidate;
 
-            GraphQueryRequest gReq;
-            gReq.nodeKey = fileNodeKey;
-            gReq.maxDepth = depth_;
-            gReq.maxResults = static_cast<uint32_t>(limit_);
-            gReq.maxResultsPerDepth = 100;
-            gReq.offset = static_cast<uint32_t>(offset_);
-            gReq.limit = static_cast<uint32_t>(limit_);
-            gReq.includeNodeProperties = verbose_;
-            gReq.includeEdgeProperties = verbose_;
+                GraphQueryRequest gReq;
+                gReq.nodeKey = fileNodeKey;
+                gReq.maxDepth = depth_;
+                gReq.maxResults = static_cast<uint32_t>(limit_);
+                gReq.maxResultsPerDepth = 100;
+                gReq.offset = static_cast<uint32_t>(offset_);
+                gReq.limit = static_cast<uint32_t>(limit_);
+                gReq.includeNodeProperties = verbose_;
+                gReq.includeEdgeProperties = verbose_;
 
-            if (!relationFilter_.empty()) {
-                gReq.relationFilters.push_back(relationFilter_);
-            }
+                if (!relationFilter_.empty()) {
+                    gReq.relationFilters.push_back(relationFilter_);
+                }
 
-            auto r = co_await client.call(gReq);
-            if (r && r.value().kgAvailable && r.value().originNode.nodeId > 0) {
-                // Found the file node, show the KG graph response
-                co_return printGraphQueryResponse(r.value());
+                auto r = co_await client.call(gReq);
+                if (r && r.value().kgAvailable && r.value().originNode.nodeId > 0) {
+                    // Found the file node, show the KG graph response
+                    co_return printGraphQueryResponse(r.value());
+                }
             }
             // Fall through to document-based lookup if file node not found
         }
@@ -514,12 +516,37 @@ private:
                 nodes.push_back(n);
             }
             out["connectedNodes"] = nodes;
+            if (!resp.edges.empty()) {
+                json edges = json::array();
+                for (const auto& edge : resp.edges) {
+                    json e;
+                    e["edgeId"] = edge.edgeId;
+                    e["srcNodeId"] = edge.srcNodeId;
+                    e["dstNodeId"] = edge.dstNodeId;
+                    e["relation"] = edge.relation;
+                    e["weight"] = edge.weight;
+                    if (!edge.properties.empty()) {
+                        try {
+                            e["properties"] = json::parse(edge.properties);
+                        } catch (...) {
+                            e["properties"] = edge.properties;
+                        }
+                    }
+                    edges.push_back(e);
+                }
+                out["edges"] = edges;
+            }
             std::cout << out.dump(2) << "\n";
         } else if (outputFormat_ == "dot") {
             // DOT format for graphviz visualization
             std::cout << "digraph G {\n";
             std::cout << "  rankdir=LR;\n";
             std::cout << "  node [shape=box];\n";
+
+            std::unordered_map<int64_t, std::string> nodeKeyById;
+            if (!resp.originNode.nodeKey.empty()) {
+                nodeKeyById[resp.originNode.nodeId] = resp.originNode.nodeKey;
+            }
 
             // Origin node
             std::cout << "  \"" << resp.originNode.nodeKey << "\" [label=\""
@@ -530,8 +557,26 @@ private:
             for (const auto& node : resp.connectedNodes) {
                 std::cout << "  \"" << node.nodeKey << "\" [label=\"" << node.label << "\\n("
                           << node.type << ")\"];\n";
-                std::cout << "  \"" << resp.originNode.nodeKey << "\" -> \"" << node.nodeKey
-                          << "\";\n";
+                if (!node.nodeKey.empty()) {
+                    nodeKeyById[node.nodeId] = node.nodeKey;
+                }
+            }
+            if (!resp.edges.empty()) {
+                for (const auto& edge : resp.edges) {
+                    auto srcIt = nodeKeyById.find(edge.srcNodeId);
+                    auto dstIt = nodeKeyById.find(edge.dstNodeId);
+                    std::string src = srcIt != nodeKeyById.end() ? srcIt->second
+                                                                 : std::to_string(edge.srcNodeId);
+                    std::string dst = dstIt != nodeKeyById.end() ? dstIt->second
+                                                                 : std::to_string(edge.dstNodeId);
+                    std::string label = edge.relation.empty() ? "" : " [label=\"" + edge.relation + "\"]";
+                    std::cout << "  \"" << src << "\" -> \"" << dst << "\"" << label << ";\n";
+                }
+            } else {
+                for (const auto& node : resp.connectedNodes) {
+                    std::cout << "  \"" << resp.originNode.nodeKey << "\" -> \"" << node.nodeKey
+                              << "\";\n";
+                }
             }
             std::cout << "}\n";
         } else {

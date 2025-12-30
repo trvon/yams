@@ -6,6 +6,7 @@ yams_cli_sources = [
   'session_store.cpp',
   'time_parser.cpp',
   'progress_indicator.cpp',
+  'graph_helpers.cpp',
   'commands/add_command.cpp',
   'commands/get_command.cpp',
   'commands/restore_command.cpp',

@@ -28,6 +28,7 @@ struct yams_symbol_extraction_result_v1;
 struct SymbolInfo {
     std::string name;
     std::string qualified_name;
+    std::string scope;
     std::string kind; // "function", "class", "struct", "method", etc.
     std::string file_path;
 

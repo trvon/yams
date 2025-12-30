@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <chrono>
+#include <filesystem>
 #include <unordered_map>
 #include <boost/asio.hpp>
 #include <yams/daemon/components/ServiceManager.h>
@@ -221,6 +222,9 @@ yams::Result<EntityGraphService::ContextNodes> EntityGraphService::resolveContex
         nlohmann::json fileProps;
         fileProps["path"] = job.filePath;
         fileProps["language"] = job.language;
+        if (!job.filePath.empty()) {
+            fileProps["basename"] = std::filesystem::path(job.filePath).filename().string();
+        }
         if (!job.documentHash.empty()) {
             fileProps["current_hash"] = job.documentHash;
         }

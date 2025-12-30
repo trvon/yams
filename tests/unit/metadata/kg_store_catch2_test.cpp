@@ -118,3 +118,25 @@ TEST_CASE("KG Store: addEdgesUnique deduplicates edges", "[unit][metadata][kg]")
         CHECK(count == 1);
     }
 }
+
+TEST_CASE("KG Store: ensurePathNode links logical path to snapshot path", "[unit][metadata][kg]") {
+    KGStoreFixture fix;
+
+    PathNodeDescriptor descriptor;
+    descriptor.snapshotId = "snap1";
+    descriptor.path = "/repo/file.cpp";
+    descriptor.rootTreeHash = "";
+    descriptor.isDirectory = false;
+
+    auto snapshotId = fix.store_->ensurePathNode(descriptor);
+    REQUIRE(snapshotId.has_value());
+
+    auto logicalNode = fix.store_->getNodeByKey("path:logical:/repo/file.cpp");
+    REQUIRE(logicalNode.has_value());
+    REQUIRE(logicalNode.value().has_value());
+
+    auto edges = fix.store_->getEdgesFrom(logicalNode.value()->id, "path_version", 10, 0);
+    REQUIRE(edges.has_value());
+    REQUIRE_FALSE(edges.value().empty());
+    CHECK(edges.value()[0].dstNodeId == snapshotId.value());
+}

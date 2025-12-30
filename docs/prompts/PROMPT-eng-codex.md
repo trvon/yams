@@ -1,6 +1,6 @@
 ---
 description: YAMS-based coding agent with persistent memory and automatic versioning
-argument-hint: TASK=<description> [TAGS=<tag1,tag2>]
+argument-hint: TASK=<description>
 ---
 
 # YAMS Agent Protocol (Simplified)
@@ -21,7 +21,6 @@ yams search "$TASK$" --fuzzy --similarity 0.7  # If exact yields nothing
 # Initial indexing (automatic snapshot created)
 yams add . --recursive \
   --include="*.cpp,*.hpp,*.h,*.py,*.ts,*.js,*.md" \
-  --tags "code,$TAGS$" \
   --label "Working on: $TASK$"
 ```
 
@@ -36,8 +35,7 @@ $2
 ## Files Modified:
 $(git diff --name-only)
 " | yams add - \
-  --name "solution-$(date +%Y%m%d-%H%M%S).md" \
-  --tags "solution,$TAGS$"
+  --name "solution-$(date +%Y%m%d-%H%M%S).md"
 ```
 
 ### 4. Track Changes
@@ -45,7 +43,6 @@ $(git diff --name-only)
 # After making edits (creates new automatic snapshot)
 yams add . --recursive \
   --include="*.cpp,*.hpp,*.h,*.py,*.ts,*.js,*.md" \
-  --tags "code,$TAGS$" \
   --label "Completed: $TASK$"
 
 # Compare with previous snapshot
@@ -76,13 +73,11 @@ yams get --name "solution-20250114.md" -o solution.md
 # Store external research
 curl -s "$URL" | yams add - \
   --name "research-$(date +%s).html" \
-  --tags "research,external" \
   --metadata "url=$URL"
 
 # Store code snippet
 cat important_function.cpp | yams add - \
-  --name "snippet-auth-validation.cpp" \
-  --tags "snippet,auth,cpp"
+  --name "snippet-auth-validation.cpp"
 ```
 
 ### Version Tracking
@@ -125,8 +120,25 @@ NEXT: [Next steps]
 1. **Search before acting** - YAMS likely has relevant context
 2. **Store as you learn** - Document solutions immediately  
 3. **Automatic versioning** - Every `add` creates a snapshot
-4. **Simple tagging** - Use consistent tags for easy retrieval
+4. **No tags in this repo** - Use labels and metadata instead
 5. **No complex patterns** - YAMS handles deduplication automatically
+
+## Graph Dead-Code Audit (Quick)
+```bash
+# Ensure daemon and watcher
+yams status
+yams watch
+
+# Baseline index (adjust includes/excludes)
+yams add . --recursive \
+  --include="*.c,*.cc,*.cpp,*.cxx,*.h,*.hpp,*.rs,*.go,*.py,*.ts,*.js" \
+  --exclude="build/**,node_modules/**" \
+  --label "Baseline index: $TASK$"
+
+# Inspect a file, then list isolated nodes of that type
+yams graph --name src/example.cpp --depth 2 --format json
+yams graph --list-type <node-type> --isolated --limit 50
+```
 
 ## Notes
 

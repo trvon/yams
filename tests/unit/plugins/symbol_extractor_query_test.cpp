@@ -102,15 +102,20 @@ TEST_CASE("Symbol extractor C++ detection", "[plugins][symbol-extractor][cpp]") 
         }
 
         size_t funcs = 0, classes = 0;
+        bool has_scope = false;
         for (size_t i = 0; i < out->symbol_count; ++i) {
             if (out->symbols[i].kind && std::strcmp(out->symbols[i].kind, "function") == 0)
                 ++funcs;
             if (out->symbols[i].kind && (std::strcmp(out->symbols[i].kind, "class") == 0 ||
                                          std::strcmp(out->symbols[i].kind, "struct") == 0))
                 ++classes;
+            if (out->symbols[i].scope && std::strlen(out->symbols[i].scope) > 0) {
+                has_scope = true;
+            }
         }
         CHECK(funcs >= 1u);
         CHECK(classes >= 1u);
+        CHECK(has_scope);
         free_result(api, out);
     }
 }

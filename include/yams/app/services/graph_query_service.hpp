@@ -96,6 +96,7 @@ struct GraphQueryRequest {
 
     // Traversal options
     std::vector<GraphRelationType> relationFilters; // Empty = all relations
+    std::vector<std::string> relationNames;         // Direct relation names (overrides filters)
     int maxDepth{1};                                // BFS depth limit (1-4)
     std::size_t maxResults{200};                    // Total result cap
     std::size_t maxResultsPerDepth{100};            // Per-depth cap

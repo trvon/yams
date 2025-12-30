@@ -9,6 +9,7 @@
 #include <set>
 #include <span>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <spdlog/spdlog.h>
@@ -79,6 +80,60 @@ struct LanguageConfig {
     QueryList import_queries;
     QueryList call_queries;
 };
+
+// Best-effort scope computation for C++ (namespace/class/struct/enum nesting).
+static std::string compute_cpp_scope(std::string_view content, TSNode node) {
+    auto extract_text = [&](TSNode n) -> std::string {
+        if (ts_node_is_null(n))
+            return "";
+        uint32_t start_byte = ts_node_start_byte(n);
+        uint32_t end_byte = ts_node_end_byte(n);
+        if (start_byte >= end_byte || end_byte > content.length())
+            return "";
+        return std::string(content.substr(start_byte, end_byte - start_byte));
+    };
+
+    std::vector<std::string> parts;
+    std::unordered_set<std::string> seen;
+
+    TSNode current = node;
+    while (!ts_node_is_null(current)) {
+        const char* type = ts_node_type(current);
+        if (!type) {
+            current = ts_node_parent(current);
+            continue;
+        }
+
+        if (std::strcmp(type, "namespace_definition") == 0 ||
+            std::strcmp(type, "class_specifier") == 0 ||
+            std::strcmp(type, "struct_specifier") == 0 ||
+            std::strcmp(type, "union_specifier") == 0 ||
+            std::strcmp(type, "enum_specifier") == 0) {
+            TSNode name_node = ts_node_child_by_field_name(current, "name", 4);
+            if (!ts_node_is_null(name_node)) {
+                std::string name = extract_text(name_node);
+                if (!name.empty() && seen.insert(name).second) {
+                    parts.push_back(std::move(name));
+                }
+            }
+        }
+
+        current = ts_node_parent(current);
+    }
+
+    if (parts.empty()) {
+        return {};
+    }
+
+    std::string scope;
+    for (auto it = parts.rbegin(); it != parts.rend(); ++it) {
+        if (!scope.empty()) {
+            scope += "::";
+        }
+        scope += *it;
+    }
+    return scope;
+}
 
 // Helper to create lists at compile time
 template <size_t N, typename... Args> constexpr auto makeList(Args... args) -> ConstList<N> {
@@ -586,7 +641,8 @@ SymbolExtractor::Result SymbolExtractor::extractSymbolsByNodeType(const Extracti
             if (!ts_node_is_null(name_node)) {
                 SymbolInfo sym;
                 sym.name = ctx.extractNodeText(name_node);
-                sym.qualified_name = sym.name;
+                sym.scope = compute_cpp_scope(ctx.content, node);
+                sym.qualified_name = sym.scope.empty() ? sym.name : sym.scope + "::" + sym.name;
                 sym.kind = std::string(symbol_kind);
                 sym.file_path = std::string(ctx.file_path);
 
@@ -821,7 +877,9 @@ bool SymbolExtractor::executeQuery(const ExtractionContext& ctx, std::string_vie
                 if (!name_text.empty()) {
                     SymbolInfo sym;
                     sym.name = std::move(name_text);
-                    sym.qualified_name = sym.name; // Simple case
+                    sym.scope = compute_cpp_scope(ctx.content, capture.node);
+                    sym.qualified_name =
+                        sym.scope.empty() ? sym.name : sym.scope + "::" + sym.name;
                     sym.kind = std::string(symbol_kind);
                     sym.file_path = std::string(ctx.file_path);
 

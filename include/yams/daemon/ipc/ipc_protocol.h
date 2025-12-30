@@ -5540,9 +5540,63 @@ struct GraphNode {
     }
 };
 
+struct GraphEdge {
+    int64_t edgeId{0};
+    int64_t srcNodeId{0};
+    int64_t dstNodeId{0};
+    std::string relation;
+    float weight{1.0f};
+    std::string properties; // JSON string for edge properties (optional)
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << edgeId << srcNodeId << dstNodeId << relation << weight << properties;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<GraphEdge> deserialize(Deserializer& deser) {
+        GraphEdge edge;
+
+        if (auto r = deser.template read<int64_t>(); r)
+            edge.edgeId = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<int64_t>(); r)
+            edge.srcNodeId = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.template read<int64_t>(); r)
+            edge.dstNodeId = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            edge.relation = std::move(r.value());
+        else
+            return r.error();
+
+        if (auto r = deser.template read<float>(); r)
+            edge.weight = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            edge.properties = std::move(r.value());
+        else
+            return r.error();
+
+        return edge;
+    }
+};
+
 struct GraphQueryResponse {
     GraphNode originNode;
     std::vector<GraphNode> connectedNodes;
+    std::vector<GraphEdge> edges;
     uint64_t totalNodesFound{0};
     uint64_t totalEdgesTraversed{0};
     bool truncated{false};
@@ -5561,6 +5615,10 @@ struct GraphQueryResponse {
         ser << static_cast<uint32_t>(connectedNodes.size());
         for (const auto& node : connectedNodes) {
             node.serialize(ser);
+        }
+        ser << static_cast<uint32_t>(edges.size());
+        for (const auto& edge : edges) {
+            edge.serialize(ser);
         }
         ser << totalNodesFound << totalEdgesTraversed << truncated << maxDepthReached << queryTimeMs
             << kgAvailable << warning;
@@ -5588,6 +5646,17 @@ struct GraphQueryResponse {
                 if (!node)
                     return node.error();
                 res.connectedNodes.push_back(std::move(node.value()));
+            }
+        } else
+            return cnt.error();
+
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            res.edges.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto edge = GraphEdge::deserialize(deser);
+                if (!edge)
+                    return edge.error();
+                res.edges.push_back(std::move(edge.value()));
             }
         } else
             return cnt.error();

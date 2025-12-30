@@ -343,6 +343,7 @@ static int extract_symbols_abi(void* /*self*/, const char* content, size_t conte
             yams_symbol_v1& dst = r->symbols[i];
             dst.name = dup_cstr(s.name);
             dst.qualified_name = dup_cstr(s.qualified_name);
+            dst.scope = dup_cstr(s.scope);
             dst.kind = dup_cstr(s.kind);
             dst.file_path = dup_cstr(s.file_path);
             dst.start_line = s.start_line;
@@ -381,6 +382,7 @@ static void free_result_abi(void* /*self*/, yams_symbol_extraction_result_v1* re
         for (size_t i = 0; i < res->symbol_count; ++i) {
             free(res->symbols[i].name);
             free(res->symbols[i].qualified_name);
+            free(res->symbols[i].scope);
             free(res->symbols[i].kind);
             free(res->symbols[i].file_path);
             if (res->symbols[i].parameters) {
