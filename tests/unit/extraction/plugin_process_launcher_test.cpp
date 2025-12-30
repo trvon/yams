@@ -23,7 +23,8 @@
 constexpr auto TEST_TIMEOUT = std::chrono::seconds{10};
 // PyInstaller executables need ~2s to unpack/start on first run
 constexpr auto PROCESS_STARTUP_WAIT = std::chrono::seconds{2};
-constexpr auto RPC_TIMEOUT = std::chrono::seconds{3};
+// PyInstaller executables may need extra time to respond after stdin is closed
+constexpr auto RPC_TIMEOUT = std::chrono::seconds{5};
 
 using namespace yams::extraction;
 using json = nlohmann::json;

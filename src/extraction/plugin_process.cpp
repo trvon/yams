@@ -159,23 +159,7 @@ PluginProcess::Impl::Impl(PluginProcessConfig config) : config_{std::move(config
 
     try {
         setup_pipes();
-        spawn_process();
-
-        // Brief wait to detect immediate exec failures (e.g., non-existent or non-executable file)
-        // If child exits with 127, execvp() failed
-        std::this_thread::sleep_for(std::chrono::milliseconds{50});
-        int status;
-        pid_t result = waitpid(process_id_, &status, WNOHANG);
-        if (result > 0) {
-            // Child already exited - exec likely failed
-            int code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
-            exit_code_ = code;
-            state_.store(ProcessState::Failed, std::memory_order_release);
-            throw std::runtime_error("Process exited immediately with code " +
-                                     std::to_string(code) +
-                                     " (executable: " + config_.executable.string() + ")");
-        }
-
+        spawn_process(); // Uses exec status pipe to detect exec failures immediately
         start_io_threads();
         state_.store(ProcessState::Ready, std::memory_order_release);
     } catch (...) {
@@ -227,13 +211,29 @@ void PluginProcess::Impl::setup_pipes() {
 }
 
 void PluginProcess::Impl::spawn_process() {
+    // Create a pipe to detect exec failures. The write end has FD_CLOEXEC set,
+    // so if exec succeeds, the pipe is automatically closed and the parent sees EOF.
+    // If exec fails, the child writes the errno to the pipe before exiting.
+    int exec_status_pipe[2];
+    if (pipe(exec_status_pipe) < 0) {
+        throw std::runtime_error("Failed to create exec status pipe: " +
+                                 std::string(strerror(errno)));
+    }
+    // Set FD_CLOEXEC on the write end - this is the key to detecting exec failures
+    fcntl(exec_status_pipe[1], F_SETFD, FD_CLOEXEC);
+
     pid_t pid = fork();
 
     if (pid < 0) {
+        close(exec_status_pipe[0]);
+        close(exec_status_pipe[1]);
         throw std::runtime_error("fork() failed: " + std::string(strerror(errno)));
     }
 
     if (pid == 0) {
+        // Child process
+        close(exec_status_pipe[0]); // Close read end in child
+
         setpgid(0, 0);
         int child_stdin = std::stoi(config_.env.at("__YAMS_STDIN_FD__"));
         int child_stdout = std::stoi(config_.env.at("__YAMS_STDOUT_FD__"));
@@ -257,6 +257,8 @@ void PluginProcess::Impl::spawn_process() {
         // Set working directory
         if (config_.workdir) {
             if (chdir(config_.workdir->c_str()) < 0) {
+                int err = errno;
+                (void)write(exec_status_pipe[1], &err, sizeof(err));
                 _exit(127);
             }
         }
@@ -277,15 +279,36 @@ void PluginProcess::Impl::spawn_process() {
         }
         argv.push_back(nullptr);
 
-        // Execute
+        // Execute - if this succeeds, exec_status_pipe[1] is closed automatically (FD_CLOEXEC)
         execvp(argv[0], argv.data());
 
-        // If exec fails
+        // If exec fails, write the error code to the pipe
+        int err = errno;
+        (void)write(exec_status_pipe[1], &err, sizeof(err));
         _exit(127);
     }
 
     // Parent process
     process_id_ = pid;
+    close(exec_status_pipe[1]); // Close write end in parent
+
+    // Read from the exec status pipe to check if exec succeeded
+    // If exec succeeded, the pipe was closed by FD_CLOEXEC and read returns 0
+    // If exec failed, we get the errno value
+    int exec_error = 0;
+    ssize_t n = read(exec_status_pipe[0], &exec_error, sizeof(exec_error));
+    close(exec_status_pipe[0]);
+
+    if (n > 0) {
+        // exec failed - reap the zombie child
+        int status;
+        waitpid(pid, &status, 0);
+        exit_code_ = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+        state_.store(ProcessState::Failed, std::memory_order_release);
+        throw std::runtime_error("exec failed: " + std::string(strerror(exec_error)) +
+                                 " (executable: " + config_.executable.string() + ")");
+    }
+    // n == 0 means EOF, exec succeeded
 
     // Close child ends of pipes
     close(std::stoi(config_.env.at("__YAMS_STDIN_FD__")));
