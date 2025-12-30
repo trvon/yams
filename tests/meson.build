@@ -1957,7 +1957,9 @@ if catch2_dep.found()
   test('plugin_process_launcher', plugin_process_launcher_exe,
     suite: ['catch2', 'unit', 'extraction', 'plugin', 'launcher'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path, 'YAMS_SOURCE_DIR': meson.project_source_root() },
-    timeout: host_machine.system() == 'windows' ? 180 : 120
+    timeout: host_machine.system() == 'windows' ? 180 : 120,
+    # PyInstaller process tests have resource contention when run in parallel
+    is_parallel: false
   )
 
   test('jsonrpc_client', jsonrpc_client_exe,
@@ -2100,7 +2102,8 @@ if catch2_dep.found()
   test('repair_coordinator', catch2_repair_coordinator_exe,
     suite: ['catch2', 'unit', 'daemon', 'repair', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
+    timeout: 60,
+    is_parallel: false
   )
 
   test('repair_scheduling_adapter', catch2_repair_scheduling_exe,
@@ -2135,22 +2138,27 @@ if catch2_dep.found()
     timeout: 30
   )
 
+  # These tests use ServiceManager/WorkCoordinator which have resource contention
+  # when run in parallel with other daemon tests - run sequentially
   test('service_manager_shutdown', catch2_service_manager_shutdown_exe,
     suite: ['catch2', 'unit', 'daemon', 'service_manager', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
+    timeout: 30,
+    is_parallel: false
   )
 
   test('service_manager_degraded', catch2_service_manager_degraded_exe,
     suite: ['catch2', 'unit', 'daemon', 'service_manager', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
+    timeout: 30,
+    is_parallel: false
   )
 
   test('repair_binary_filter', catch2_repair_binary_filter_exe,
     suite: ['catch2', 'unit', 'daemon', 'repair', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
+    timeout: 30,
+    is_parallel: false
   )
 
   test('abi_model_provider_dim', catch2_abi_model_provider_dim_exe,
@@ -2163,6 +2171,7 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 30,
+    is_parallel: false,
     # Test has [.linux_only] tag - skips on Windows/macOS (Catch2 exit code 2)
     should_fail: host_machine.system() != 'linux'
   )
@@ -2171,6 +2180,7 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 30,
+    is_parallel: false,
     # Placeholder tests - all skipped, Catch2 returns exit code 2
     should_fail: true
   )
@@ -2187,6 +2197,7 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 30,
+    is_parallel: false,
     # Test has [.linux_only] tag - skips on Windows/macOS (Catch2 exit code 2)
     should_fail: host_machine.system() != 'linux'
   )
@@ -2195,13 +2206,18 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'connection-pool'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 30,
+    is_parallel: false,
     # Test skips on Windows (Unix domain sockets not supported)
     should_fail: host_machine.system() == 'windows'
   )
 
   test('daemon', catch2_daemon_exe,
     suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    env: {
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      # Disable ABI plugins to avoid TSAN+ONNX memory pressure causing SIGKILL
+      'YAMS_DISABLE_ABI_PLUGINS': '1',
+    },
     timeout: 120,
     # Test skips on Windows (Unix domain sockets not supported)
     should_fail: host_machine.system() == 'windows'
@@ -2219,7 +2235,8 @@ if catch2_dep.found()
   test('cli_init_command', catch2_cli_init_command_exe,
     suite: ['catch2', 'unit', 'cli', 'init'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
+    timeout: 30,
+    is_parallel: false
   )
 
   test('storage_backend', catch2_storage_backend_exe,
@@ -2258,7 +2275,7 @@ if catch2_dep.found()
   test('cli_submodule', catch2_cli_submodule_exe,
     suite: ['catch2', 'unit', 'cli', 'yams-cli'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 180,
+    timeout: 300,  # Tests take ~200s
     should_fail: host_machine.system() == 'windows'
   )
 

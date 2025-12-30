@@ -93,6 +93,7 @@ public:
     void consume_stdout(size_t bytes);
     [[nodiscard]] std::span<const std::byte> read_stderr();
     size_t write_stdin(std::span<const std::byte> data);
+    void close_stdin();
     [[nodiscard]] int64_t pid() const noexcept;
     [[nodiscard]] std::chrono::milliseconds uptime() const noexcept;
     [[nodiscard]] bool wait_for_exit(std::chrono::milliseconds timeout);
@@ -158,7 +159,7 @@ PluginProcess::Impl::Impl(PluginProcessConfig config) : config_{std::move(config
 
     try {
         setup_pipes();
-        spawn_process();
+        spawn_process(); // Uses exec status pipe to detect exec failures immediately
         start_io_threads();
         state_.store(ProcessState::Ready, std::memory_order_release);
     } catch (...) {
@@ -210,13 +211,29 @@ void PluginProcess::Impl::setup_pipes() {
 }
 
 void PluginProcess::Impl::spawn_process() {
+    // Create a pipe to detect exec failures. The write end has FD_CLOEXEC set,
+    // so if exec succeeds, the pipe is automatically closed and the parent sees EOF.
+    // If exec fails, the child writes the errno to the pipe before exiting.
+    int exec_status_pipe[2];
+    if (pipe(exec_status_pipe) < 0) {
+        throw std::runtime_error("Failed to create exec status pipe: " +
+                                 std::string(strerror(errno)));
+    }
+    // Set FD_CLOEXEC on the write end - this is the key to detecting exec failures
+    fcntl(exec_status_pipe[1], F_SETFD, FD_CLOEXEC);
+
     pid_t pid = fork();
 
     if (pid < 0) {
+        close(exec_status_pipe[0]);
+        close(exec_status_pipe[1]);
         throw std::runtime_error("fork() failed: " + std::string(strerror(errno)));
     }
 
     if (pid == 0) {
+        // Child process
+        close(exec_status_pipe[0]); // Close read end in child
+
         setpgid(0, 0);
         int child_stdin = std::stoi(config_.env.at("__YAMS_STDIN_FD__"));
         int child_stdout = std::stoi(config_.env.at("__YAMS_STDOUT_FD__"));
@@ -240,6 +257,8 @@ void PluginProcess::Impl::spawn_process() {
         // Set working directory
         if (config_.workdir) {
             if (chdir(config_.workdir->c_str()) < 0) {
+                int err = errno;
+                (void)write(exec_status_pipe[1], &err, sizeof(err));
                 _exit(127);
             }
         }
@@ -260,15 +279,36 @@ void PluginProcess::Impl::spawn_process() {
         }
         argv.push_back(nullptr);
 
-        // Execute
+        // Execute - if this succeeds, exec_status_pipe[1] is closed automatically (FD_CLOEXEC)
         execvp(argv[0], argv.data());
 
-        // If exec fails
+        // If exec fails, write the error code to the pipe
+        int err = errno;
+        (void)write(exec_status_pipe[1], &err, sizeof(err));
         _exit(127);
     }
 
     // Parent process
     process_id_ = pid;
+    close(exec_status_pipe[1]); // Close write end in parent
+
+    // Read from the exec status pipe to check if exec succeeded
+    // If exec succeeded, the pipe was closed by FD_CLOEXEC and read returns 0
+    // If exec failed, we get the errno value
+    int exec_error = 0;
+    ssize_t n = read(exec_status_pipe[0], &exec_error, sizeof(exec_error));
+    close(exec_status_pipe[0]);
+
+    if (n > 0) {
+        // exec failed - reap the zombie child
+        int status;
+        waitpid(pid, &status, 0);
+        exit_code_ = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+        state_.store(ProcessState::Failed, std::memory_order_release);
+        throw std::runtime_error("exec failed: " + std::string(strerror(exec_error)) +
+                                 " (executable: " + config_.executable.string() + ")");
+    }
+    // n == 0 means EOF, exec succeeded
 
     // Close child ends of pipes
     close(std::stoi(config_.env.at("__YAMS_STDIN_FD__")));
@@ -367,6 +407,16 @@ size_t PluginProcess::Impl::write_stdin(std::span<const std::byte> data) {
     }
 
     return static_cast<size_t>(written);
+}
+
+void PluginProcess::Impl::close_stdin() {
+    std::lock_guard lock{stdin_mutex_};
+
+    if (stdin_fd_ >= 0) {
+        spdlog::debug("PluginProcess: Closing stdin fd={} to signal EOF", stdin_fd_);
+        close(stdin_fd_);
+        stdin_fd_ = -1;
+    }
 }
 
 #endif // !_WIN32
@@ -660,6 +710,17 @@ size_t PluginProcess::Impl::write_stdin(std::span<const std::byte> data) {
     return static_cast<size_t>(written);
 }
 
+void PluginProcess::Impl::close_stdin() {
+    std::lock_guard lock{stdin_mutex_};
+
+    if (stdin_write_ != INVALID_HANDLE_VALUE) {
+        spdlog::debug("PluginProcess: Closing stdin to signal EOF");
+        FlushFileBuffers(stdin_write_);
+        CloseHandle(stdin_write_);
+        stdin_write_ = INVALID_HANDLE_VALUE;
+    }
+}
+
 #endif // _WIN32
 
 // ============================================================================
@@ -897,6 +958,10 @@ std::span<const std::byte> PluginProcess::read_stderr() {
 
 size_t PluginProcess::write_stdin(std::span<const std::byte> data) {
     return impl_->write_stdin(data);
+}
+
+void PluginProcess::close_stdin() {
+    impl_->close_stdin();
 }
 
 int64_t PluginProcess::pid() const noexcept {
