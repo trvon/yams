@@ -30,9 +30,9 @@ RUN set -eux; \
     *) echo "Unsupported architecture: $ARCH"; exit 1 ;; \
   esac; \
   ZIG_VERSION="0.15.2"; \
-  curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz && \
+  curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz && \
   tar -xJf /tmp/zig.tar.xz -C /opt && \
-  mv /opt/zig-linux-${ZIG_ARCH}-${ZIG_VERSION} /opt/zig && \
+  mv /opt/zig-${ZIG_ARCH}-linux-${ZIG_VERSION} /opt/zig && \
   ln -sf /opt/zig/zig /usr/local/bin/zig && \
   rm /tmp/zig.tar.xz && \
   zig version

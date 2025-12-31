@@ -97,9 +97,9 @@ jobs:
             *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
           esac
           ZIG_VERSION="0.15.2"
-          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz
           sudo tar -xJf /tmp/zig.tar.xz -C /opt
-          sudo mv /opt/zig-linux-${ZIG_ARCH}-${ZIG_VERSION} /opt/zig
+          sudo mv /opt/zig-${ZIG_ARCH}-linux-${ZIG_VERSION} /opt/zig
           sudo ln -sf /opt/zig/zig /usr/local/bin/zig
           rm /tmp/zig.tar.xz
           zig version
@@ -134,13 +134,13 @@ jobs:
         shell: pwsh
         run: |
           $zigVersion = "0.15.2"
-          $zigUrl = "https://ziglang.org/download/${zigVersion}/zig-windows-x86_64-${zigVersion}.zip"
+          $zigUrl = "https://ziglang.org/download/${zigVersion}/zig-x86_64-windows-${zigVersion}.zip"
           $zigZip = "$env:TEMP\zig.zip"
           $zigDir = "C:\zig"
           Invoke-WebRequest -Uri $zigUrl -OutFile $zigZip
           Expand-Archive -Path $zigZip -DestinationPath $zigDir -Force
-          Move-Item "$zigDir\zig-windows-x86_64-${zigVersion}\*" $zigDir -Force
-          Remove-Item "$zigDir\zig-windows-x86_64-${zigVersion}" -Recurse -ErrorAction SilentlyContinue
+          Move-Item "$zigDir\zig-x86_64-windows-${zigVersion}\*" $zigDir -Force
+          Remove-Item "$zigDir\zig-x86_64-windows-${zigVersion}" -Recurse -ErrorAction SilentlyContinue
           $env:PATH = "$zigDir;$env:PATH"
           "$zigDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           zig version
