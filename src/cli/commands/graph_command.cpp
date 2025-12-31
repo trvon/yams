@@ -7,6 +7,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <yams/cli/command.h>
@@ -14,6 +15,8 @@
 #include <yams/cli/graph_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
+#include <yams/core/magic_numbers.hpp>
+#include <yams/metadata/metadata_repository.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 
@@ -73,6 +76,8 @@ public:
         // Dead-code report (scoped isolated nodes with allowlist)
         cmd->add_flag("--dead-code-report", deadCodeReport_,
                       "Generate dead-code report for src/** (scoped isolated nodes)");
+        cmd->add_flag("--scope-cwd", scopeToCwd_,
+                      "Scope list/isolated results to src/** and include/** under CWD");
 
         // yams-66h: List available node types with counts
         cmd->add_flag("--list-types", listTypes_, "List available node types with counts");
@@ -220,6 +225,36 @@ private:
         }
 
         const auto& resp = r.value();
+        std::vector<yams::daemon::GraphNode> nodes = resp.connectedNodes;
+        const auto cwd = std::filesystem::current_path();
+        std::optional<std::unordered_set<std::string>> scopedPaths;
+        if (scopeToCwd_) {
+            auto appCtx = cli_ ? cli_->getAppContext() : nullptr;
+            if (!appCtx || !appCtx->metadataRepo) {
+                co_return Error{ErrorCode::NotInitialized,
+                                "Path tree scoping unavailable (metadata repo not ready)"};
+            }
+            auto res = buildScopedPathSet(cwd, appCtx->metadataRepo);
+            if (!res) {
+                co_return res.error();
+            }
+            scopedPaths.emplace(std::move(res.value()));
+        }
+        if (scopeToCwd_ && scopedPaths.has_value()) {
+            std::vector<yams::daemon::GraphNode> filtered;
+            filtered.reserve(nodes.size());
+            for (const auto& node : nodes) {
+                auto nodePathOpt = extractNodePath(node);
+                if (!nodePathOpt.has_value()) {
+                    continue;
+                }
+                auto normalized = normalizePath(nodePathOpt.value(), cwd);
+                if (scopedPaths->count(normalized) > 0) {
+                    filtered.push_back(node);
+                }
+            }
+            nodes.swap(filtered);
+        }
 
         if (jsonOutput_ || outputFormat_ == "json") {
             json out;
@@ -228,9 +263,14 @@ private:
             out["offset"] = offset_;
             out["totalNodesFound"] = resp.totalNodesFound;
             out["truncated"] = resp.truncated;
+            out["scoped"] = scopeToCwd_;
+            if (scopeToCwd_) {
+                out["filteredCount"] = nodes.size();
+                out["cwd"] = cwd.generic_string();
+            }
 
-            json nodes = json::array();
-            for (const auto& node : resp.connectedNodes) {
+            json jsonNodes = json::array();
+            for (const auto& node : nodes) {
                 json n;
                 n["nodeId"] = node.nodeId;
                 n["nodeKey"] = node.nodeKey;
@@ -247,9 +287,9 @@ private:
                         n["properties"] = node.properties; // fallback to raw string
                     }
                 }
-                nodes.push_back(n);
+                jsonNodes.push_back(n);
             }
-            out["nodes"] = nodes;
+            out["nodes"] = jsonNodes;
             std::cout << out.dump(2) << "\n";
         } else {
             // Table format using ui_helpers for uniform CLI output
@@ -259,8 +299,14 @@ private:
             std::string summary = "Found " + yams::cli::ui::format_number(resp.totalNodesFound) +
                                   " node" + (resp.totalNodesFound != 1 ? "s" : "");
             std::cout << yams::cli::ui::status_info(summary) << "\n";
-            std::cout << "Showing: " << resp.connectedNodes.size() << " (offset " << offset_
-                      << ", limit " << limit_ << ")\n\n";
+            if (scopeToCwd_) {
+                std::cout << yams::cli::ui::status_info(
+                                 "Scoped to src/** and include/** via path tree (excluding tests/, "
+                                 "benchmarks/, third_party/, node_modules/, build*)")
+                          << "\n";
+            }
+            std::cout << "Showing: " << nodes.size() << " (offset " << offset_ << ", limit "
+                      << limit_ << ")\n\n";
 
             // Build table
             yams::cli::ui::Table table;
@@ -270,7 +316,7 @@ private:
             }
             table.has_header = true;
 
-            for (const auto& node : resp.connectedNodes) {
+            for (const auto& node : nodes) {
                 std::vector<std::string> row;
                 row.push_back(std::to_string(node.nodeId));
                 row.push_back(yams::cli::ui::truncate_to_width(node.label, 40));
@@ -288,7 +334,7 @@ private:
             // Properties in verbose mode (after table)
             if (verbose_) {
                 bool hasProps = false;
-                for (const auto& node : resp.connectedNodes) {
+                for (const auto& node : nodes) {
                     if (!node.properties.empty()) {
                         hasProps = true;
                         break;
@@ -297,7 +343,7 @@ private:
                 if (hasProps) {
                     std::cout << "\n"
                               << yams::cli::ui::subsection_header("Node Properties") << "\n";
-                    for (const auto& node : resp.connectedNodes) {
+                    for (const auto& node : nodes) {
                         if (!node.properties.empty()) {
                             std::cout << yams::cli::ui::bullet(node.label, 2) << "\n";
                             std::cout << yams::cli::ui::indent(node.properties, 6) << "\n";
@@ -348,24 +394,62 @@ private:
             co_return result.error();
         }
 
-        const auto& isolatedNodes = result.value().connectedNodes;
+        std::vector<yams::daemon::GraphNode> isolatedNodes = result.value().connectedNodes;
+        const auto cwd = std::filesystem::current_path();
+        std::optional<std::unordered_set<std::string>> scopedPaths;
+        if (scopeToCwd_) {
+            auto appCtx = cli_ ? cli_->getAppContext() : nullptr;
+            if (appCtx && appCtx->metadataRepo) {
+                auto res = buildScopedPathSet(cwd, appCtx->metadataRepo);
+                if (res) {
+                    scopedPaths.emplace(std::move(res.value()));
+                } else {
+                    std::cerr << yams::cli::ui::status_warning(
+                                     "Path tree scoping unavailable: " + res.error().message)
+                              << "\n";
+                }
+            } else {
+                std::cerr << yams::cli::ui::status_warning(
+                                 "Path tree scoping unavailable (metadata repo not ready)")
+                          << "\n";
+            }
+        }
+        if (scopeToCwd_ && scopedPaths.has_value()) {
+            std::vector<yams::daemon::GraphNode> filtered;
+            filtered.reserve(isolatedNodes.size());
+            for (const auto& node : isolatedNodes) {
+                auto nodePathOpt = extractNodePath(node);
+                if (!nodePathOpt.has_value()) {
+                    continue;
+                }
+                auto normalized = normalizePath(nodePathOpt.value(), cwd);
+                if (scopedPaths->count(normalized) > 0) {
+                    filtered.push_back(node);
+                }
+            }
+            isolatedNodes.swap(filtered);
+        }
 
         if (jsonOutput_ || outputFormat_ == "json") {
             json out;
             out["type"] = listNodeType_;
             out["relation"] = relation;
             out["isolatedCount"] = isolatedNodes.size();
+            out["scoped"] = scopeToCwd_;
+            if (scopeToCwd_) {
+                out["cwd"] = cwd.generic_string();
+            }
 
-            json nodes = json::array();
+            json jsonNodes = json::array();
             for (const auto& node : isolatedNodes) {
                 json n;
                 n["nodeId"] = node.nodeId;
                 n["nodeKey"] = node.nodeKey;
                 n["label"] = node.label;
                 n["type"] = node.type;
-                nodes.push_back(n);
+                jsonNodes.push_back(n);
             }
-            out["isolatedNodes"] = nodes;
+            out["isolatedNodes"] = jsonNodes;
             std::cout << out.dump(2) << "\n";
         } else {
             std::cout << yams::cli::ui::section_header("Isolated " + listNodeType_ + " nodes")
@@ -374,6 +458,12 @@ private:
                              "Found " + std::to_string(isolatedNodes.size()) + " isolated " +
                              listNodeType_ + " nodes (no incoming " + relation + " edges)")
                       << "\n\n";
+            if (scopeToCwd_) {
+                std::cout << yams::cli::ui::status_info(
+                                 "Scoped to src/** and include/** via path tree (excluding tests/, "
+                                 "benchmarks/, third_party/, node_modules/, build*)")
+                          << "\n\n";
+            }
 
             if (!isolatedNodes.empty()) {
                 yams::cli::ui::Table table;
@@ -397,6 +487,59 @@ private:
         std::string relation;
         std::string label;
     };
+
+    static std::string normalizePath(const std::filesystem::path& path,
+                                     const std::filesystem::path& cwd) {
+        std::filesystem::path normalized = path;
+        if (normalized.is_relative()) {
+            normalized = cwd / normalized;
+        }
+        normalized = normalized.lexically_normal();
+        return normalized.generic_string();
+    }
+
+    static Result<std::unordered_set<std::string>>
+    buildScopedPathSet(const std::filesystem::path& cwd,
+                       const std::shared_ptr<metadata::IMetadataRepository>& repo) {
+        if (!repo) {
+            return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
+        }
+        std::unordered_set<std::string> paths;
+        auto addPrefix = [&](std::string_view prefix) -> Result<void> {
+            auto res = repo->findDocumentsByPathTreePrefix(prefix, true, 0);
+            if (!res) {
+                return res.error();
+            }
+            for (const auto& doc : res.value()) {
+                paths.insert(normalizePath(std::filesystem::path(doc.filePath), cwd));
+            }
+            return Result<void>();
+        };
+
+        for (const auto& prefix : {"src", "include"}) {
+            auto r = addPrefix(prefix);
+            if (!r) {
+                return r.error();
+            }
+        }
+        for (auto it = paths.begin(); it != paths.end();) {
+            const auto& pathStr = *it;
+            std::string_view ext;
+            if (auto dot = pathStr.find_last_of('.'); dot != std::string::npos) {
+                ext = std::string_view(pathStr).substr(dot + 1);
+            }
+            auto cat = yams::magic::getPruneCategory(pathStr, ext);
+            if (cat == yams::magic::PruneCategory::GitArtifacts ||
+                yams::magic::matchesPruneGroup(cat, "build") ||
+                yams::magic::matchesPruneGroup(cat, "packages") ||
+                yams::magic::matchesPruneGroup(cat, "ide-all")) {
+                it = paths.erase(it);
+                continue;
+            }
+            ++it;
+        }
+        return paths;
+    }
 
     static std::optional<std::filesystem::path> extractNodePath(const yams::daemon::GraphNode& node) {
         if (node.nodeKey.rfind("file:", 0) == 0) {
@@ -422,32 +565,6 @@ private:
         return std::nullopt;
     }
 
-    static bool isUnderPath(const std::filesystem::path& candidate,
-                            const std::filesystem::path& root) {
-        std::error_code ec;
-        auto rel = std::filesystem::relative(candidate, root, ec);
-        if (ec) {
-            return false;
-        }
-        if (rel.empty()) {
-            return false;
-        }
-        auto relStr = rel.generic_string();
-        return relStr != "." && !relStr.starts_with("..");
-    }
-
-    static bool isAllowedDeadCodePath(const std::filesystem::path& relPath) {
-        auto relStr = relPath.generic_string();
-        if (!(relStr.starts_with("src/") || relStr.starts_with("include/"))) {
-            return false;
-        }
-        if (relStr.starts_with("tests/") || relStr.starts_with("benchmarks/") ||
-            relStr.starts_with("third_party/")) {
-            return false;
-        }
-        return true;
-    }
-
     boost::asio::awaitable<Result<void>> executeDeadCodeReport() {
         using namespace yams::daemon;
 
@@ -467,6 +584,7 @@ private:
         std::vector<DeadCodeTarget> targets = {
             {"function", "calls", "Isolated functions (no incoming calls)"},
             {"class", "calls", "Isolated classes (no incoming calls)"},
+            {"struct", "calls", "Isolated structs (no incoming calls)"},
             {"file", "includes", "Isolated files (no incoming includes)"},
         };
 
@@ -480,6 +598,19 @@ private:
         };
 
         std::vector<DeadCodeRow> allRows;
+        std::unordered_set<std::string> scopedPaths;
+        {
+            auto appCtx = cli_ ? cli_->getAppContext() : nullptr;
+            if (!appCtx || !appCtx->metadataRepo) {
+                co_return Error{ErrorCode::NotInitialized,
+                                "Path tree scoping unavailable (metadata repo not ready)"};
+            }
+            auto res = buildScopedPathSet(cwd, appCtx->metadataRepo);
+            if (!res) {
+                co_return res.error();
+            }
+            scopedPaths = std::move(res.value());
+        }
 
         for (const auto& target : targets) {
             GraphQueryRequest req;
@@ -500,20 +631,14 @@ private:
                 if (!nodePathOpt.has_value()) {
                     continue;
                 }
-                auto nodePath = nodePathOpt.value();
-                if (nodePath.is_relative()) {
-                    nodePath = std::filesystem::absolute(nodePath);
-                }
-                if (!isUnderPath(nodePath, cwd)) {
+                auto normalized = normalizePath(nodePathOpt.value(), cwd);
+                if (scopedPaths.find(normalized) == scopedPaths.end()) {
                     continue;
                 }
                 std::error_code ec;
-                auto rel = std::filesystem::relative(nodePath, cwd, ec);
+                auto rel = std::filesystem::relative(nodePathOpt.value(), cwd, ec);
                 if (ec) {
-                    continue;
-                }
-                if (!isAllowedDeadCodePath(rel)) {
-                    continue;
+                    rel = std::filesystem::path(normalized).lexically_relative(cwd);
                 }
                 DeadCodeRow row;
                 row.type = target.type;
@@ -540,8 +665,8 @@ private:
         } else {
             std::cout << yams::cli::ui::section_header("Dead-code report") << "\n\n";
             std::cout << yams::cli::ui::status_info(
-                             "Scoped to src/** and include/** (excluding tests/, benchmarks/, "
-                             "third_party/)")
+                             "Scoped to src/** and include/** via path tree (excluding tests/, "
+                             "benchmarks/, third_party/, node_modules/, build*)")
                       << "\n\n";
 
             if (allRows.empty()) {
@@ -926,6 +1051,7 @@ private:
     bool showIsolated_{false};
     bool deadCodeReport_{false};
     bool listTypes_{false};
+    bool scopeToCwd_{false};
 };
 
 std::unique_ptr<ICommand> createGraphCommand() {
