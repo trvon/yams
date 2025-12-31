@@ -840,6 +840,14 @@ void PluginManager::refreshStatusSnapshot() {
     statusSnapshot_ = std::move(snap);
 }
 
+void PluginManager::__test_setEmbeddingDegraded(bool degraded, const std::string& error) {
+    if (degraded) {
+        embeddingFsm_.dispatch(ProviderDegradedEvent{error.empty() ? std::string{"test"} : error});
+    } else {
+        embeddingFsm_.dispatch(ModelLoadedEvent{"", 0});
+    }
+}
+
 #ifdef YAMS_TESTING
 void PluginManager::__test_pluginLoadFailed(const std::string& error) {
     pluginHostFsm_.dispatch(PluginLoadFailedEvent{error});

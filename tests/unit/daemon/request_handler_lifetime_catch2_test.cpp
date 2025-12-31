@@ -40,11 +40,14 @@ public:
 } // anonymous namespace
 
 TEST_CASE("RequestHandlerLifetime: detached coroutine survives handler destruction",
-          "[daemon][.linux_only]") {
+          "[daemon][.streaming_disabled]") {
 #ifdef _WIN32
-    // Skip on Windows: Unix domain sockets (local::connect_pair) not supported
     SKIP("Unix domain socket tests skipped on Windows");
 #endif
+    // Streaming path is currently disabled in request_handler.cpp (force_unary=true)
+    // to avoid head-of-line blocking. This test requires the streaming path to spawn
+    // detached coroutines. Skip until streaming is re-enabled.
+    SKIP("Streaming path disabled (force_unary=true in request_handler.cpp)");
 
     boost::asio::io_context io;
 

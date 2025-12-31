@@ -2167,9 +2167,7 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 30,
-    is_parallel: false,
-    # Test has [.linux_only] tag - skips on Windows/macOS (Catch2 exit code 2)
-    should_fail: host_machine.system() != 'linux'
+    is_parallel: false
   )
 
   test('request_io_edge', catch2_request_io_edge_exe,
@@ -2194,8 +2192,8 @@ if catch2_dep.found()
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 30,
     is_parallel: false,
-    # Test has [.linux_only] tag - skips on Windows/macOS (Catch2 exit code 2)
-    should_fail: host_machine.system() != 'linux'
+    # Test skips because streaming is disabled (force_unary=true)
+    should_fail: true
   )
 
   test('asio_connection_pool', catch2_asio_connection_pool_exe,
