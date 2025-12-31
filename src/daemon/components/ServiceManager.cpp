@@ -2723,11 +2723,15 @@ void ServiceManager::clearModelProviderError() {
 void ServiceManager::__test_setModelProviderDegraded(bool degraded, const std::string& error) {
     try {
         lifecycleFsm_.setSubsystemDegraded("embeddings", degraded, error);
-        if (degraded) {
-            embeddingFsm_.dispatch(
-                ProviderDegradedEvent{error.empty() ? std::string{"test"} : error});
+        if (pluginManager_) {
+            pluginManager_->__test_setEmbeddingDegraded(degraded, error);
         } else {
-            embeddingFsm_.dispatch(ModelLoadedEvent{embeddingModelName_, 0});
+            if (degraded) {
+                embeddingFsm_.dispatch(
+                    ProviderDegradedEvent{error.empty() ? std::string{"test"} : error});
+            } else {
+                embeddingFsm_.dispatch(ModelLoadedEvent{embeddingModelName_, 0});
+            }
         }
     } catch (...) {
     }

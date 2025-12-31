@@ -10,11 +10,8 @@
 
 using namespace yams::daemon;
 
-TEST_CASE("EmbeddingProviderRecovery: degraded then recovered to ready",
-          "[daemon][.linux_only]") {
+TEST_CASE("EmbeddingProviderRecovery: degraded then recovered to ready", "[daemon]") {
 #ifdef _WIN32
-    // Skip on Windows: EmbeddingProviderFsm state machine behavior differs on Windows due to
-    // ServiceManager initialization sequences not being fully exercised without unix domain sockets
     SKIP("EmbeddingProvider FSM tests skipped on Windows - see daemon IPC plan");
 #endif
     DaemonConfig cfg; // defaults are fine; no plugins needed

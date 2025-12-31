@@ -302,6 +302,7 @@ public:
     }
 
     // --- Test Helpers ---
+    void __test_setEmbeddingDegraded(bool degraded, const std::string& error);
 #ifdef YAMS_TESTING
     void __test_setModelProvider(std::shared_ptr<IModelProvider> provider) {
         modelProvider_ = std::move(provider);
