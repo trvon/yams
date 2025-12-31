@@ -273,11 +273,31 @@ jobs:
             ninja-build \
             clang \
             clang-tools \
+            xz-utils \
             lld || true
           echo "Installed optional packages: liburing-dev libarchive-dev libtag1-dev libboost-all-dev ccache rpm fakeroot dpkg-dev meson cmake ninja-build clang clang-tools lld"
           # Ensure compilers are preferred
           echo "CC=clang" >> $GITHUB_ENV
           echo "CXX=clang++" >> $GITHUB_ENV
+
+      - name: Install Zig (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            x86_64) ZIG_ARCH="x86_64" ;;
+            aarch64) ZIG_ARCH="aarch64" ;;
+            *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+          esac
+          ZIG_VERSION="0.15.0-dev.682+dbe73ed33"
+          curl -fsSL "https://ziglang.org/builds/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz
+          sudo tar -xJf /tmp/zig.tar.xz -C /opt
+          sudo mv /opt/zig-linux-${ZIG_ARCH}-${ZIG_VERSION} /opt/zig
+          sudo ln -sf /opt/zig/zig /usr/local/bin/zig
+          rm /tmp/zig.tar.xz
+          zig version
 
       - name: Sanitize stdlib flags (macOS only)
         if: runner.os == 'macOS'
@@ -540,12 +560,13 @@ jobs:
         run: |
           set -euo pipefail
           brew update
-          brew install pkg-config cmake ninja meson ccache boost || true
+          brew install pkg-config cmake ninja meson ccache boost zig || true
           # Ensure Meson/Ninja are present even if Homebrew failed to link binaries.
           command -v meson >/dev/null 2>&1 || python3 -m pip install --user --upgrade meson
           command -v ninja >/dev/null 2>&1 || python3 -m pip install --user --upgrade 'ninja>=1.10'
           echo "meson version: $(meson --version || echo 'missing')"
           echo "ninja version: $(ninja --version || echo 'missing')"
+          echo "zig version: $(zig version || echo 'missing')"
 
       - name: Tune Conan client (parallel downloads)
         shell: bash
@@ -608,11 +629,25 @@ jobs:
           dotnet tool install --global wix
           wix extension add -g WixToolset.UI.wixext
 
+          # Install Zig for zyp PDF plugin
+          $zigVersion = "0.15.0-dev.682+dbe73ed33"
+          $zigUrl = "https://ziglang.org/builds/zig-windows-x86_64-${zigVersion}.zip"
+          $zigZip = "$env:TEMP\zig.zip"
+          $zigDir = "C:\zig"
+          Invoke-WebRequest -Uri $zigUrl -OutFile $zigZip
+          Expand-Archive -Path $zigZip -DestinationPath $zigDir -Force
+          Move-Item "$zigDir\zig-windows-x86_64-${zigVersion}\*" $zigDir -Force
+          Remove-Item "$zigDir\zig-windows-x86_64-${zigVersion}" -Recurse -ErrorAction SilentlyContinue
+          $env:PATH = "$zigDir;$env:PATH"
+          [Environment]::SetEnvironmentVariable("PATH", "$zigDir;$env:PATH", "Process")
+          "$zigDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
           # Verify tools
           conan --version
           meson --version
           ninja --version
           wix --version
+          zig version
 
       - name: Configure and Build Release (Windows)
         if: runner.os == 'Windows'

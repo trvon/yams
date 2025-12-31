@@ -481,6 +481,24 @@ if [[ -n "${YAMS_EXTRA_MESON_FLAGS:-}" ]]; then
   echo "Extra Meson flags: ${YAMS_EXTRA_MESON_FLAGS}"
 fi
 
+# Auto-enable zyp plugin if Zig 0.15.2+ is installed
+if command -v zig >/dev/null 2>&1; then
+  ZIG_VERSION=$(zig version 2>/dev/null || echo "0.0.0")
+  # Parse major.minor.patch
+  ZIG_MAJOR=$(echo "${ZIG_VERSION}" | cut -d. -f1)
+  ZIG_MINOR=$(echo "${ZIG_VERSION}" | cut -d. -f2)
+  ZIG_PATCH=$(echo "${ZIG_VERSION}" | cut -d. -f3 | cut -d- -f1)  # Handle -dev suffix
+  # Check if >= 0.15.2
+  if [[ "${ZIG_MAJOR:-0}" -gt 0 ]] || \
+     { [[ "${ZIG_MAJOR:-0}" -eq 0 ]] && [[ "${ZIG_MINOR:-0}" -gt 15 ]]; } || \
+     { [[ "${ZIG_MAJOR:-0}" -eq 0 ]] && [[ "${ZIG_MINOR:-0}" -eq 15 ]] && [[ "${ZIG_PATCH:-0}" -ge 2 ]]; }; then
+    echo "Zig ${ZIG_VERSION} detected, enabling zyp PDF plugin"
+    MESON_OPTIONS+=("-Dplugin-zyp=true")
+  else
+    echo "Zig ${ZIG_VERSION} found but requires 0.15.2+ for zyp plugin"
+  fi
+fi
+
 echo "--- Running meson setup... ---"
 if [[ -n "${PREV_CPPSTD}" ]]; then
   if [[ "${PREV_CPPSTD}" != "${MESON_CPPSTD}" ]]; then

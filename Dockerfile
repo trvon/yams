@@ -9,7 +9,7 @@ RUN set -eux; \
   for i in 1 2 3; do \
   apt-get update && \
   apt-get install -y --no-install-recommends --fix-missing \
-  build-essential git curl pkg-config ca-certificates \
+  build-essential git curl pkg-config ca-certificates xz-utils \
   libssl-dev libsqlite3-dev libsqlite3-0 protobuf-compiler libprotobuf-dev \
   libcurl4-openssl-dev \
   python3 python3-venv python3-pip \
@@ -20,6 +20,22 @@ RUN set -eux; \
   rm -rf /var/lib/apt/lists/* && break || \
   { echo "Attempt $i failed, retrying after 5s..."; sleep 5; apt-get clean; rm -rf /var/lib/apt/lists/*; }; \
   done
+
+# Install Zig 0.15.2+ for zyp PDF plugin (download from official releases)
+RUN set -eux; \
+  ARCH=$(uname -m); \
+  case "$ARCH" in \
+    x86_64) ZIG_ARCH="x86_64" ;; \
+    aarch64) ZIG_ARCH="aarch64" ;; \
+    *) echo "Unsupported architecture: $ARCH"; exit 1 ;; \
+  esac; \
+  ZIG_VERSION="0.15.0-dev.682+dbe73ed33"; \
+  curl -fsSL "https://ziglang.org/builds/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz && \
+  tar -xJf /tmp/zig.tar.xz -C /opt && \
+  mv /opt/zig-linux-${ZIG_ARCH}-${ZIG_VERSION} /opt/zig && \
+  ln -sf /opt/zig/zig /usr/local/bin/zig && \
+  rm /tmp/zig.tar.xz && \
+  zig version
 
 RUN python3 -m venv /opt/venv \
   && /opt/venv/bin/pip install --upgrade pip \

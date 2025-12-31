@@ -312,57 +312,43 @@ void PluginCommand::listPlugins() {
             cfg.dataDir = cli_->getDataPath();
         }
         cfg.enableChunkedResponses = false;
-        cfg.requestTimeout = std::chrono::milliseconds(10000);
-        cfg.autoStart = true; // start a managed daemon if not running
+        cfg.requestTimeout = std::chrono::milliseconds(5000); // Fast timeout for simple list
+        cfg.autoStart = true;
         auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
         if (!leaseRes) {
             std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
             return;
         }
         auto leaseHandle = std::move(leaseRes.value());
+        auto& client = **leaseHandle;
 
-        auto fetch_status = [leaseHandle]() -> Result<StatusResponse> {
-            auto& client = **leaseHandle;
-            yams::daemon::StatusRequest sreq;
-            sreq.detailed = true; // require typed providers/plugins info from daemon
-            return yams::cli::run_result<StatusResponse>(client.call(sreq),
-                                                         std::chrono::milliseconds(10000));
-        };
-
-        auto fetch_stats = [leaseHandle]() -> Result<GetStatsResponse> {
-            auto& client = **leaseHandle;
-            GetStatsRequest req;
-            req.detailed = true;
-            return yams::cli::run_result<GetStatsResponse>(client.call(req),
-                                                           std::chrono::milliseconds(10000));
-        };
-
-        // Try once
-        auto sres = fetch_status();
-        auto res = fetch_stats();
-        // Do not trigger scans or poll; rely on daemon-provided status/stats only
-        if (!sres && !res) {
-            std::cout << "Failed to query daemon for plugins\n";
+        // Simple case: just get status with provider list (fast path)
+        yams::daemon::StatusRequest sreq;
+        sreq.detailed = true; // Need providers list
+        auto sres = yams::cli::run_result<StatusResponse>(client.call(sreq),
+                                                          std::chrono::milliseconds(5000));
+        if (!sres) {
+            std::cout << "Failed to query daemon for plugins: " << sres.error().message << "\n";
             return;
         }
-        // If neither typed providers nor non-empty plugins_json present, fall back to direct scan
-        if ((!sres || sres.value().providers.empty()) &&
-            (!res || !res.value().additionalStats.contains("plugins_json") ||
-             res.value().additionalStats.at("plugins_json") == "[]")) {
+
+        const auto& st = sres.value();
+        if (st.providers.empty()) {
             std::cout << "Loaded plugins (0):\n";
             return;
         }
-        // Prefer typed providers if present, but merge in interface hints from plugins_json when
-        // available
-        if (sres && !sres.value().providers.empty()) {
-            const auto& st = sres.value();
-            // Optional: fetch plugins_json to enrich with interfaces
-            std::map<std::string, std::vector<std::string>> ifaceMap;
-            try {
-                auto gres = fetch_stats();
-                if (gres) {
-                    auto it = gres.value().additionalStats.find("plugins_json");
-                    if (it != gres.value().additionalStats.end()) {
+
+        // Build interface map only when verbose (requires slower GetStats call)
+        std::map<std::string, std::vector<std::string>> ifaceMap;
+        if (verboseList_) {
+            GetStatsRequest greq;
+            greq.detailed = true;
+            auto gres = yams::cli::run_result<GetStatsResponse>(client.call(greq),
+                                                                std::chrono::milliseconds(10000));
+            if (gres) {
+                auto it = gres.value().additionalStats.find("plugins_json");
+                if (it != gres.value().additionalStats.end()) {
+                    try {
                         nlohmann::json pj = nlohmann::json::parse(it->second, nullptr, false);
                         if (!pj.is_discarded()) {
                             for (const auto& rec : pj) {
@@ -378,14 +364,16 @@ void PluginCommand::listPlugins() {
                                 }
                             }
                         }
+                    } catch (...) {
                     }
                 }
-            } catch (...) {
             }
+        }
 
-            std::cout << "Loaded plugins (" << st.providers.size() << "):\n";
-            for (const auto& p : st.providers) {
-                std::cout << "  - " << p.name;
+        std::cout << "Loaded plugins (" << st.providers.size() << "):\n";
+        for (const auto& p : st.providers) {
+            std::cout << "  - " << p.name;
+            if (verboseList_) {
                 if (p.isProvider)
                     std::cout << " [provider]";
                 if (!p.ready)
@@ -405,58 +393,16 @@ void PluginCommand::listPlugins() {
                         std::cout << itf->second[i];
                     }
                 }
-                std::cout << "\n";
             }
-            // When verbose, show skipped plugin diagnostics if present
-            if (verboseList_ && !st.skippedPlugins.empty()) {
-                std::cout << "\nSkipped plugins (" << st.skippedPlugins.size() << "):\n";
-                for (const auto& sp : st.skippedPlugins) {
-                    std::cout << "  - " << sp.path << ": " << sp.reason << "\n";
-                }
-            }
-            return;
-        }
-        const auto& resp = res.value();
-        auto it = resp.additionalStats.find("plugins_json");
-        if (it == resp.additionalStats.end()) {
-            std::cout << "No plugin information available.\n"
-                         "- Ensure the daemon is running (yams daemon start)\n"
-                         "- Configure [daemon].plugin_dir in ~/.config/yams/config.toml\n"
-                         "- Place plugins there (e.g., libyams_onnx_plugin.so) and re-run 'yams "
-                         "plugins list'\n";
-            return;
-        }
-        nlohmann::json pj = nlohmann::json::parse(it->second, nullptr, false);
-        if (pj.is_discarded()) {
-            std::cout << "Invalid plugin JSON.\n";
-            return;
-        }
-        std::cout << "Loaded plugins (" << pj.size() << "):\n";
-        for (const auto& rec : pj) {
-            std::string name = rec.value("name", "");
-            std::string path = rec.value("path", "");
-            bool provider = rec.value("provider", false);
-            bool degraded = rec.value("degraded", false);
-            std::string error = rec.value("error", std::string());
-            int models = 0;
-            if (rec.contains("models_loaded")) {
-                try {
-                    models = rec["models_loaded"].get<int>();
-                } catch (...) {
-                }
-            }
-            std::cout << "  - " << name;
-            if (!path.empty())
-                std::cout << " (" << path << ")";
-            if (provider)
-                std::cout << " [provider]";
-            if (degraded)
-                std::cout << " [degraded]";
-            if (models > 0)
-                std::cout << " models=" << models;
-            if (!error.empty())
-                std::cout << " error=\"" << error << "\"";
             std::cout << "\n";
+        }
+
+        // When verbose, show skipped plugin diagnostics if present
+        if (verboseList_ && !st.skippedPlugins.empty()) {
+            std::cout << "\nSkipped plugins (" << st.skippedPlugins.size() << "):\n";
+            for (const auto& sp : st.skippedPlugins) {
+                std::cout << "  - " << sp.path << ": " << sp.reason << "\n";
+            }
         }
     } catch (const std::exception& e) {
         std::cout << "Error: " << e.what() << "\n";

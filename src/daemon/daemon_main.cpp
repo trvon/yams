@@ -81,24 +81,10 @@ void setup_fatal_handlers() {
     std::signal(SIGABRT, signal_handler);
     // Ensure SIGTERM/SIGINT terminate the daemon promptly if graceful shutdown isn't possible.
 #ifdef SIGTERM
-    std::signal(SIGTERM, [](int) {
-        // Log before exit so we can diagnose spurious signals
-        try {
-            spdlog::warn("SIGTERM received, requesting shutdown");
-        } catch (...) {
-        }
-        g_shutdown_requested.store(true, std::memory_order_relaxed);
-    });
+    std::signal(SIGTERM, [](int) { g_shutdown_requested.store(true, std::memory_order_relaxed); });
 #endif
 #ifdef SIGINT
-    std::signal(SIGINT, [](int) {
-        // Log before exit so we can diagnose spurious signals
-        try {
-            spdlog::warn("SIGINT received, requesting shutdown");
-        } catch (...) {
-        }
-        g_shutdown_requested.store(true, std::memory_order_relaxed);
-    });
+    std::signal(SIGINT, [](int) { g_shutdown_requested.store(true, std::memory_order_relaxed); });
 #endif
     // Use SIGUSR1 as on-demand plugin autoload trigger
 #ifdef SIGUSR1

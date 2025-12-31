@@ -107,8 +107,7 @@ static std::string compute_cpp_scope(std::string_view content, TSNode node) {
         if (std::strcmp(type, "namespace_definition") == 0 ||
             std::strcmp(type, "class_specifier") == 0 ||
             std::strcmp(type, "struct_specifier") == 0 ||
-            std::strcmp(type, "union_specifier") == 0 ||
-            std::strcmp(type, "enum_specifier") == 0) {
+            std::strcmp(type, "union_specifier") == 0 || std::strcmp(type, "enum_specifier") == 0) {
             TSNode name_node = ts_node_child_by_field_name(current, "name", 4);
             if (!ts_node_is_null(name_node)) {
                 std::string name = extract_text(name_node);
@@ -878,8 +877,7 @@ bool SymbolExtractor::executeQuery(const ExtractionContext& ctx, std::string_vie
                     SymbolInfo sym;
                     sym.name = std::move(name_text);
                     sym.scope = compute_cpp_scope(ctx.content, capture.node);
-                    sym.qualified_name =
-                        sym.scope.empty() ? sym.name : sym.scope + "::" + sym.name;
+                    sym.qualified_name = sym.scope.empty() ? sym.name : sym.scope + "::" + sym.name;
                     sym.kind = std::string(symbol_kind);
                     sym.file_path = std::string(ctx.file_path);
 

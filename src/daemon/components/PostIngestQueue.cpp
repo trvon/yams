@@ -322,7 +322,8 @@ void PostIngestQueue::processMetadataStage(const std::string& hash, const std::s
 
         auto txt = extractDocumentText(store_, hash, mimeType, extension, extractors_);
         if (!txt || txt->empty()) {
-            spdlog::debug("[PostIngestQueue] no text extracted for {} (mime={})", hash, mimeType);
+            spdlog::info("[PostIngestQueue] no text extracted for {} (mime={}, ext={})", hash,
+                         mimeType, extension);
             if (docId >= 0) {
                 auto updated = info;
                 updated.contentExtracted = false;
@@ -334,6 +335,8 @@ void PostIngestQueue::processMetadataStage(const std::string& hash, const std::s
                 }
             }
         } else if (docId >= 0) {
+            spdlog::info("[PostIngestQueue] Extracted {} bytes for {} (docId={})", txt->size(),
+                         hash, docId);
             auto pr = yams::ingest::persist_content_and_index(*meta_, docId, fileName, *txt,
                                                               mimeType, "post_ingest");
             if (!pr) {
@@ -342,8 +345,8 @@ void PostIngestQueue::processMetadataStage(const std::string& hash, const std::s
             } else {
                 auto duration = std::chrono::steady_clock::now() - start;
                 double ms = std::chrono::duration<double, std::milli>(duration).count();
-                spdlog::debug("[PostIngestQueue] Metadata stage completed for {} in {:.2f}ms", hash,
-                              ms);
+                spdlog::info("[PostIngestQueue] Metadata stage completed for {} in {:.2f}ms", hash,
+                             ms);
             }
         }
 

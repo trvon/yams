@@ -107,16 +107,19 @@ public:
         }
     }
 
-    // Helper: Wait for post-ingest queue to drain
+    // Helper: Wait for post-ingest queue to drain (both channel AND in-flight work)
     bool waitForQueueDrain(std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
         auto start = std::chrono::steady_clock::now();
         while (std::chrono::steady_clock::now() - start < timeout) {
             if (auto* queue = serviceManager_->getPostIngestQueue()) {
                 auto size = queue->size();
+                auto inFlight = queue->totalInFlight();
 
-                spdlog::info("PostIngestQueue status: size={}", size);
+                spdlog::info("PostIngestQueue status: size={}, inFlight={}", size, inFlight);
 
-                if (size == 0) {
+                // Must wait for BOTH channel to be empty AND all in-flight work to complete
+                if (size == 0 && inFlight == 0) {
+                    // Extra delay for FTS5 index to finalize writes
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
                     return true;
                 }
@@ -249,7 +252,9 @@ TEST_CASE("PostIngestQueue - FTS5 Indexing", "[daemon][post-ingest][fts5]") {
 
     SECTION("Stored document is searchable after post-ingest") {
         // Store a document with unique content
-        const std::string uniqueContent = "xyzzy_unique_test_content_12345";
+        // NOTE: Use spaces, not underscores! FTS5 tokenizer treats underscores as token chars
+        // (tokenchars '_-'), so "xyzzy_foo" is ONE token. Spaces create separate tokens.
+        const std::string uniqueContent = "xyzzy unique test content 12345";
         auto hash = fixture.storeDocument("searchable.txt", uniqueContent);
 
         // Enqueue for post-ingest processing
@@ -259,16 +264,13 @@ TEST_CASE("PostIngestQueue - FTS5 Indexing", "[daemon][post-ingest][fts5]") {
         bool drained = fixture.waitForQueueDrain(std::chrono::seconds(5));
         REQUIRE(drained);
 
-        // Additional wait to ensure FTS5 indexing completes
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
         // Try to search for the document
         auto appContext = fixture.serviceManager_->getAppContext();
         auto searchService = makeSearchService(appContext);
         REQUIRE(searchService);
 
         app::services::SearchRequest req;
-        req.query = "xyzzy_unique_test_content_12345"; // Fixed: match stored content
+        req.query = "xyzzy"; // Search for unique token
         req.type = "keyword";
         req.limit = 10;
         req.showHash = true; // REQUIRED: populate hash field in results

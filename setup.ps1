@@ -417,8 +417,27 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
     
     $enableModulesFlag = if ($enableModules) { 'true' } else { 'false' }
 
+    # Auto-enable zyp plugin if Zig 0.15.2+ is installed
+    $enableZyp = $false
+    if (Get-Command zig -ErrorAction SilentlyContinue) {
+        $zigVersion = (zig version 2>$null)
+        if ($zigVersion -match '^(\d+)\.(\d+)\.(\d+)') {
+            $zigMajor = [int]$matches[1]
+            $zigMinor = [int]$matches[2]
+            $zigPatch = [int]$matches[3]
+            # Check if >= 0.15.2
+            if ($zigMajor -gt 0 -or ($zigMajor -eq 0 -and $zigMinor -gt 15) -or ($zigMajor -eq 0 -and $zigMinor -eq 15 -and $zigPatch -ge 2)) {
+                Write-Host "Zig $zigVersion detected, enabling zyp PDF plugin"
+                $enableZyp = $true
+            } else {
+                Write-Host "Zig $zigVersion found but requires 0.15.2+ for zyp plugin"
+            }
+        }
+    }
+
     # Build meson command arguments as a proper array
     $mesonArgs = @('setup', $buildDir, "--buildtype=$buildTypeLower", "--prefix=$InstallPrefix", "-Denable-modules=$enableModulesFlag")
+    if ($enableZyp) { $mesonArgs += '-Dplugin-zyp=true' }
     if ($mesonToolchainArg) { $mesonArgs += $mesonToolchainArg }
     if ($mesonToolchainFile) { $mesonArgs += $mesonToolchainFile }
     $mesonArgs += $extraMesonFlags

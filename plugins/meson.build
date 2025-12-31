@@ -8,11 +8,11 @@ if get_option('plugin-onnx')
   subdir('onnx')
 endif
 
-if get_option('plugin-pdf')
-  subdir('pdf_extractor')
-endif
-
 if get_option('plugin-symbols')
   subdir('symbol_extractor_treesitter')
+endif
+
+if get_option('plugin-zyp')
+  subdir('zyp')
 endif
 

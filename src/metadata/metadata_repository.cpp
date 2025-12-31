@@ -1247,6 +1247,22 @@ Result<void> MetadataRepository::indexDocumentContent(int64_t documentId, const 
             return bindResult.error();
 
         auto execResult = stmt.execute();
+        if (execResult) {
+            // Verify by counting rows in FTS5 table
+            auto countStmt = db.prepare("SELECT COUNT(*) FROM documents_fts");
+            if (countStmt) {
+                auto cs = std::move(countStmt).value();
+                cs.step();
+                int64_t count = cs.getInt64(0);
+                spdlog::info("[FTS5 Index] Inserted rowid={} title='{}' contentLen={} (total FTS5 "
+                             "rows={})",
+                             documentId, sanitizedTitle.substr(0, 30), sanitizedContent.size(),
+                             count);
+            }
+        } else {
+            spdlog::warn("[FTS5 Index] Insert failed for rowid={}: {}", documentId,
+                         execResult.error().message);
+        }
         return execResult;
     });
 
@@ -1460,6 +1476,175 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
 
         auto start = std::chrono::high_resolution_clock::now();
 
+        // Debug: count FTS5 rows and documents table
+        auto countStmt =
+            db.prepare("SELECT rowid, title, substr(content, 1, 50) FROM documents_fts");
+        if (countStmt) {
+            auto cs = std::move(countStmt).value();
+            int count = 0;
+            while (true) {
+                auto stepRes = cs.step();
+                if (!stepRes || !stepRes.value())
+                    break;
+                spdlog::info("[FTS5 Search] FTS Row {}: rowid={} title='{}' content='{}'", count,
+                             cs.getInt64(0), cs.getString(1), cs.getString(2));
+                count++;
+            }
+            spdlog::info("[FTS5 Search] Query='{}' - total FTS5 rows={}", query.substr(0, 30),
+                         count);
+        }
+        // Also check documents table
+        auto docStmt = db.prepare("SELECT id, file_name FROM documents LIMIT 5");
+        if (docStmt) {
+            auto ds = std::move(docStmt).value();
+            spdlog::info("[FTS5 Search] Documents table:");
+            while (true) {
+                auto stepRes = ds.step();
+                if (!stepRes || !stepRes.value())
+                    break;
+                spdlog::info("[FTS5 Search] Doc: id={} name='{}'", ds.getInt64(0), ds.getString(1));
+            }
+        }
+        // Check FTS5 internal content table
+        auto contentStmt = db.prepare("SELECT * FROM documents_fts_content LIMIT 5");
+        if (contentStmt) {
+            auto ct = std::move(contentStmt).value();
+            spdlog::info("[FTS5 Search] FTS5 _content table:");
+            int ccnt = 0;
+            while (true) {
+                auto stepRes = ct.step();
+                if (!stepRes || !stepRes.value())
+                    break;
+                spdlog::info("[FTS5 Search] _content: id={} c0={} c1={}", ct.getInt64(0),
+                             ct.getString(1).substr(0, 30), ct.getString(2).substr(0, 30));
+                ccnt++;
+            }
+            spdlog::info("[FTS5 Search] FTS5 _content rows: {}", ccnt);
+        } else {
+            spdlog::warn("[FTS5 Search] No _content table (might be contentless FTS5)");
+        }
+        // Check FTS5 integrity
+        auto integrityStmt =
+            db.prepare("INSERT INTO documents_fts(documents_fts) VALUES('integrity-check')");
+        if (integrityStmt) {
+            auto is = std::move(integrityStmt).value();
+            auto execRes = is.execute();
+            if (execRes) {
+                spdlog::info("[FTS5 Search] FTS5 integrity check: PASSED");
+            } else {
+                spdlog::warn("[FTS5 Search] FTS5 integrity check FAILED: {}",
+                             execRes.error().message);
+            }
+        }
+        // Try to query the FTS5 index directly for any term
+        auto indexStmt = db.prepare("SELECT term, doc FROM documents_fts_idx LIMIT 20");
+        if (indexStmt) {
+            auto ix = std::move(indexStmt).value();
+            spdlog::info("[FTS5 Search] FTS5 _idx terms:");
+            int icnt = 0;
+            while (true) {
+                auto stepRes = ix.step();
+                if (!stepRes || !stepRes.value())
+                    break;
+                spdlog::info("[FTS5 Search] _idx: term={}", ix.getString(0).substr(0, 30));
+                icnt++;
+            }
+            spdlog::info("[FTS5 Search] FTS5 _idx rows: {}", icnt);
+        } else {
+            spdlog::warn("[FTS5 Search] Failed to query _idx: {}", indexStmt.error().message);
+        }
+        // Try full token match (tokenizer treats underscore as token char)
+        auto fullMatchStmt = db.prepare("SELECT rowid FROM documents_fts WHERE documents_fts MATCH "
+                                        "'xyzzy_unique_test_content_12345'");
+        if (fullMatchStmt) {
+            auto fm = std::move(fullMatchStmt).value();
+            int fmcnt = 0;
+            while (true) {
+                auto stepRes = fm.step();
+                if (!stepRes || !stepRes.value())
+                    break;
+                fmcnt++;
+            }
+            spdlog::info(
+                "[FTS5 Search] Full token match 'xyzzy_unique_test_content_12345' returned {} rows",
+                fmcnt);
+        }
+        // Try a simpler FTS5 query
+        auto simpleStmt =
+            db.prepare("SELECT rowid FROM documents_fts WHERE documents_fts MATCH 'xyzzy'");
+        if (simpleStmt) {
+            auto ss = std::move(simpleStmt).value();
+            spdlog::info("[FTS5 Search] Simple FTS5 query (no JOIN):");
+            int cnt = 0;
+            while (true) {
+                auto stepRes = ss.step();
+                if (!stepRes || !stepRes.value())
+                    break;
+                spdlog::info("[FTS5 Search] Simple match: rowid={}", ss.getInt64(0));
+                cnt++;
+            }
+            spdlog::info("[FTS5 Search] Simple query matched {} rows", cnt);
+        }
+        // Check FTS5 table schema
+        auto schemaStmt = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'documents_fts'");
+        if (schemaStmt) {
+            auto sc = std::move(schemaStmt).value();
+            if (auto stepRes = sc.step(); stepRes && stepRes.value()) {
+                std::string schema = sc.getString(0);
+                // Log full schema (might be long)
+                spdlog::info("[FTS5 Search] FTS5 full schema:");
+                for (size_t i = 0; i < schema.size(); i += 100) {
+                    spdlog::info("  {}", schema.substr(i, 100));
+                }
+            }
+        }
+        // Check FTS5 config
+        auto cfgStmt = db.prepare("SELECT k, v FROM documents_fts_config");
+        if (cfgStmt) {
+            auto cfg = std::move(cfgStmt).value();
+            spdlog::info("[FTS5 Search] FTS5 config:");
+            while (true) {
+                auto stepRes = cfg.step();
+                if (!stepRes || !stepRes.value())
+                    break;
+                spdlog::info("  {}={}", cfg.getString(0), cfg.getString(1));
+            }
+        }
+        // Try matching with wildcard
+        auto wildStmt =
+            db.prepare("SELECT rowid FROM documents_fts WHERE documents_fts MATCH 'xyzzy*'");
+        if (wildStmt) {
+            auto ws = std::move(wildStmt).value();
+            int wcnt = 0;
+            while (true) {
+                auto stepRes = ws.step();
+                if (!stepRes || !stepRes.value())
+                    break;
+                wcnt++;
+            }
+            spdlog::info("[FTS5 Search] Wildcard query 'xyzzy*' matched {} rows", wcnt);
+        }
+        // Try direct insert and match on same connection
+        auto testInsertRes = db.execute("INSERT OR REPLACE INTO documents_fts(rowid, content, "
+                                        "title) VALUES(9999, 'test_direct_insert', 'test')");
+        spdlog::info("[FTS5 Search] Test insert: {}",
+                     testInsertRes ? "success" : testInsertRes.error().message);
+        auto testMatchStmt = db.prepare(
+            "SELECT rowid FROM documents_fts WHERE documents_fts MATCH 'test_direct_insert'");
+        if (testMatchStmt) {
+            auto tm = std::move(testMatchStmt).value();
+            int tcnt = 0;
+            while (true) {
+                auto stepRes = tm.step();
+                if (!stepRes || !stepRes.value())
+                    break;
+                tcnt++;
+            }
+            spdlog::info("[FTS5 Search] Direct test insert MATCH returned {} rows", tcnt);
+        }
+        // Cleanup test row
+        db.execute("DELETE FROM documents_fts WHERE rowid = 9999");
+
         // First check if FTS5 is available
         auto fts5Result = db.hasFTS5();
         if (!fts5Result) {
@@ -1513,6 +1698,8 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
         spec.limit = effectiveLimit;
         spec.offset = offset;
         auto sql = yams::metadata::sql::buildSelect(spec);
+        spdlog::info("[FTS5 Search] SQL={}", sql);
+        spdlog::info("[FTS5 Search] sanitizedQuery='{}'", sanitizedQuery);
 
         bool ftsSearchSucceeded = false;
         auto stmtResult = db.prepare(sql);
@@ -1534,21 +1721,23 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
             {
                 // Try to execute the FTS5 search
                 size_t rowCount = 0;
+                spdlog::info("[FTS5 Search] Starting query execution...");
                 while (true) {
                     auto stepResult = stmt.step();
                     if (!stepResult) {
                         // FTS5 search failed - log and break to fall back to fuzzy search
-                        spdlog::debug(
-                            "FTS5 search execution failed: {}, will fall back to fuzzy search",
-                            stepResult.error().message);
+                        spdlog::warn("[FTS5 Search] Query step failed: {}",
+                                     stepResult.error().message);
                         break;
                     }
                     if (!stepResult.value()) {
+                        spdlog::info("[FTS5 Search] Query completed with {} rows", rowCount);
                         ftsSearchSucceeded = true;
                         break;
                     }
 
                     rowCount++;
+                    spdlog::info("[FTS5 Search] Found row {}", rowCount);
 
                     SearchResult result;
 

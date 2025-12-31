@@ -571,11 +571,13 @@ Result<size_t> PluginManager::adoptContentExtractors() {
         contentExtractors_.clear();
 
         // Adopt from ABI (native) plugins
+        // Use getActivePluginHost() to get the correct host (shared or owned)
         adopted +=
             adoptPluginInterfaceImpl<yams_content_extractor_v1, PluginContentExtractorAdapter,
                                      extraction::IContentExtractor>(
-                pluginHost_.get(), "content_extractor_v1", YAMS_IFACE_CONTENT_EXTRACTOR_V1_VERSION,
-                contentExtractors_, [](const yams_content_extractor_v1* table) {
+                getActivePluginHost(), "content_extractor_v1",
+                YAMS_IFACE_CONTENT_EXTRACTOR_V1_VERSION, contentExtractors_,
+                [](const yams_content_extractor_v1* table) {
                     return table->abi_version == YAMS_IFACE_CONTENT_EXTRACTOR_V1_VERSION;
                 });
 
