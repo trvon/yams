@@ -21,7 +21,7 @@ RUN set -eux; \
   { echo "Attempt $i failed, retrying after 5s..."; sleep 5; apt-get clean; rm -rf /var/lib/apt/lists/*; }; \
   done
 
-# Install Zig 0.15.2+ for zyp PDF plugin (download from official releases)
+# Install Zig 0.15.2 stable for zyp PDF plugin
 RUN set -eux; \
   ARCH=$(uname -m); \
   case "$ARCH" in \
@@ -29,8 +29,8 @@ RUN set -eux; \
     aarch64) ZIG_ARCH="aarch64" ;; \
     *) echo "Unsupported architecture: $ARCH"; exit 1 ;; \
   esac; \
-  ZIG_VERSION="0.15.0-dev.682+dbe73ed33"; \
-  curl -fsSL "https://ziglang.org/builds/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz && \
+  ZIG_VERSION="0.15.2"; \
+  curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz && \
   tar -xJf /tmp/zig.tar.xz -C /opt && \
   mv /opt/zig-linux-${ZIG_ARCH}-${ZIG_VERSION} /opt/zig && \
   ln -sf /opt/zig/zig /usr/local/bin/zig && \

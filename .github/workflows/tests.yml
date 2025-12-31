@@ -96,8 +96,8 @@ jobs:
             aarch64) ZIG_ARCH="aarch64" ;;
             *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
           esac
-          ZIG_VERSION="0.15.0-dev.682+dbe73ed33"
-          curl -fsSL "https://ziglang.org/builds/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz
+          ZIG_VERSION="0.15.2"
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz
           sudo tar -xJf /tmp/zig.tar.xz -C /opt
           sudo mv /opt/zig-linux-${ZIG_ARCH}-${ZIG_VERSION} /opt/zig
           sudo ln -sf /opt/zig/zig /usr/local/bin/zig
@@ -133,8 +133,8 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $zigVersion = "0.15.0-dev.682+dbe73ed33"
-          $zigUrl = "https://ziglang.org/builds/zig-windows-x86_64-${zigVersion}.zip"
+          $zigVersion = "0.15.2"
+          $zigUrl = "https://ziglang.org/download/${zigVersion}/zig-windows-x86_64-${zigVersion}.zip"
           $zigZip = "$env:TEMP\zig.zip"
           $zigDir = "C:\zig"
           Invoke-WebRequest -Uri $zigUrl -OutFile $zigZip
