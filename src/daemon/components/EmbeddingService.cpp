@@ -154,6 +154,12 @@ EmbeddingService::processEmbedJobWithStatus(const InternalEventBus::EmbedJob& jo
             const auto& docInfo = *docInfoRes.value();
             int64_t docId = docInfo.id;
 
+            if (job.skipExisting && vdb->hasEmbedding(hash)) {
+                spdlog::debug("EmbeddingService: skipExisting=true, already embedded: {}", hash);
+                skipped++;
+                continue;
+            }
+
             auto contentOpt = meta_->getContent(docId);
             if (!contentOpt || !contentOpt.value().has_value()) {
                 spdlog::debug("EmbeddingService: no content for document {}", hash);

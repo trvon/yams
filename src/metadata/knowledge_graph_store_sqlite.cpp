@@ -1395,9 +1395,9 @@ public:
                 snapshotNodeId = stmt.getInt64(0);
             } else {
                 // Node doesn't exist, create it with properties JSON
-                auto insertStmt =
-                    db.prepare("INSERT INTO kg_nodes (node_key, label, type, created_time, properties) "
-                               "VALUES (?, ?, 'path', unixepoch(), ?)");
+                auto insertStmt = db.prepare(
+                    "INSERT INTO kg_nodes (node_key, label, type, created_time, properties) "
+                    "VALUES (?, ?, 'path', unixepoch(), ?)");
                 if (!insertStmt)
                     return insertStmt.error();
 
@@ -1445,9 +1445,9 @@ public:
             if (logicalStep.value()) {
                 logicalNodeId = logicalStmt.getInt64(0);
             } else {
-                auto logicalInsert =
-                    db.prepare("INSERT INTO kg_nodes (node_key, label, type, created_time, properties) "
-                               "VALUES (?, ?, 'path', unixepoch(), ?)");
+                auto logicalInsert = db.prepare(
+                    "INSERT INTO kg_nodes (node_key, label, type, created_time, properties) "
+                    "VALUES (?, ?, 'path', unixepoch(), ?)");
                 if (!logicalInsert)
                     return logicalInsert.error();
 
@@ -1468,19 +1468,19 @@ public:
             }
 
             if (logicalNodeId > 0 && snapshotNodeId > 0) {
-                auto edgeStmt = db.prepare(
-                    "INSERT INTO kg_edges (src_node_id, dst_node_id, relation, created_time, properties) "
-                    "SELECT ?, ?, 'path_version', unixepoch(), ? "
-                    "WHERE NOT EXISTS ("
-                    "  SELECT 1 FROM kg_edges WHERE src_node_id = ? AND dst_node_id = ? AND relation = 'path_version'"
-                    ")");
+                auto edgeStmt = db.prepare("INSERT INTO kg_edges (src_node_id, dst_node_id, "
+                                           "relation, created_time, properties) "
+                                           "SELECT ?, ?, 'path_version', unixepoch(), ? "
+                                           "WHERE NOT EXISTS ("
+                                           "  SELECT 1 FROM kg_edges WHERE src_node_id = ? AND "
+                                           "dst_node_id = ? AND relation = 'path_version'"
+                                           ")");
                 if (!edgeStmt)
                     return edgeStmt.error();
-                std::string edgeProps =
-                    "{\"snapshot_id\":\"" + descriptor.snapshotId + "\"}";
+                std::string edgeProps = "{\"snapshot_id\":\"" + descriptor.snapshotId + "\"}";
                 auto& edge = edgeStmt.value();
-                auto edgeBind = edge.bindAll(logicalNodeId, snapshotNodeId, edgeProps, logicalNodeId,
-                                             snapshotNodeId);
+                auto edgeBind = edge.bindAll(logicalNodeId, snapshotNodeId, edgeProps,
+                                             logicalNodeId, snapshotNodeId);
                 if (!edgeBind)
                     return edgeBind.error();
                 auto edgeExec = edge.execute();

@@ -728,7 +728,12 @@ private:
                         size_t targetDim =
                             resolved.first ? resolved.first : emb->getEmbeddingDimension();
                         if (dbDim && *dbDim != targetDim) {
-                            std::cout << "  " << ui::status_error("Schema dimension mismatch (db=" + std::to_string(*dbDim) + ", target=" + std::to_string(targetDim) + ") — aborting repair.") << "\n";
+                            std::cout << "  "
+                                      << ui::status_error("Schema dimension mismatch (db=" +
+                                                          std::to_string(*dbDim) +
+                                                          ", target=" + std::to_string(targetDim) +
+                                                          ") — aborting repair.")
+                                      << "\n";
                             std::cout << "    Run: yams doctor (recreate vector tables), then yams "
                                          "repair --embeddings\n";
                             return;
@@ -741,7 +746,8 @@ private:
                         std::cout << "  Could not query missing embeddings: "
                                   << missing.error().message << "\n";
                     } else if (missing.value().empty()) {
-                        std::cout << "  " << ui::status_ok("No documents missing embeddings") << "\n";
+                        std::cout << "  " << ui::status_ok("No documents missing embeddings")
+                                  << "\n";
                     } else {
                         bool attemptedDaemon = false;
                         {
@@ -777,13 +783,33 @@ private:
                                         client.streamingEmbedDocuments(ed),
                                         std::chrono::milliseconds(overall_ms));
                                 if (er) {
-                                    std::cout << "  " << ui::status_ok("Daemon embeddings: requested=" + std::to_string(er.value().requested) + ", embedded=" + std::to_string(er.value().embedded) + ", skipped=" + std::to_string(er.value().skipped) + ", failed=" + std::to_string(er.value().failed)) << "\n";
+                                    std::cout
+                                        << "  "
+                                        << ui::status_ok(
+                                               "Daemon embeddings: requested=" +
+                                               std::to_string(er.value().requested) +
+                                               ", embedded=" + std::to_string(er.value().embedded) +
+                                               ", skipped=" + std::to_string(er.value().skipped) +
+                                               ", failed=" + std::to_string(er.value().failed))
+                                        << "\n";
                                     attemptedDaemon = true;
                                 } else {
-                                    std::cout << "  " << ui::status_warning("Daemon embeddings failed (" + er.error().message + ") — falling back to local mode. Use '--no-daemon' to skip RPC.") << "\n";
+                                    std::cout
+                                        << "  "
+                                        << ui::status_warning("Daemon embeddings failed (" +
+                                                              er.error().message +
+                                                              ") — falling back to local mode. Use "
+                                                              "'--no-daemon' to skip RPC.")
+                                        << "\n";
                                 }
                             } catch (const std::exception& ex) {
-                                std::cout << "  " << ui::status_warning(std::string("Daemon embeddings exception (") + ex.what() + ") — falling back to local mode. Use '--no-daemon' to skip RPC.") << "\n";
+                                std::cout << "  "
+                                          << ui::status_warning(
+                                                 std::string("Daemon embeddings exception (") +
+                                                 ex.what() +
+                                                 ") — falling back to local mode. Use "
+                                                 "'--no-daemon' to skip RPC.")
+                                          << "\n";
                             }
                         }
                         if (!attemptedDaemon) {
@@ -791,9 +817,20 @@ private:
                                 appCtx->store, appCtx->metadataRepo, emb, rcfg, missing.value(),
                                 nullptr, appCtx->contentExtractors);
                             if (!stats) {
-                                std::cout << "  " << ui::status_error("Embedding repair failed: " + stats.error().message) << "\n";
+                                std::cout << "  "
+                                          << ui::status_error("Embedding repair failed: " +
+                                                              stats.error().message)
+                                          << "\n";
                             } else {
-                                std::cout << "  " << ui::status_ok("Embeddings generated=" + std::to_string(stats.value().embeddingsGenerated) + ", skipped=" + std::to_string(stats.value().embeddingsSkipped) + ", failed=" + std::to_string(stats.value().failedOperations)) << "\n";
+                                std::cout << "  "
+                                          << ui::status_ok(
+                                                 "Embeddings generated=" +
+                                                 std::to_string(stats.value().embeddingsGenerated) +
+                                                 ", skipped=" +
+                                                 std::to_string(stats.value().embeddingsSkipped) +
+                                                 ", failed=" +
+                                                 std::to_string(stats.value().failedOperations))
+                                          << "\n";
                             }
                         }
                     }
@@ -856,7 +893,10 @@ private:
                     if (total > 0 && cur % 500 == 0)
                         std::cout << "  ..." << cur << "/" << total << "\n";
                 }
-                std::cout << "  " << ui::status_ok("FTS5 reindex complete: ok=" + std::to_string(ok) + ", fail=" + std::to_string(fail)) << "\n";
+                std::cout << "  "
+                          << ui::status_ok("FTS5 reindex complete: ok=" + std::to_string(ok) +
+                                           ", fail=" + std::to_string(fail))
+                          << "\n";
             }
         } catch (const std::exception& e) {
             std::cout << "Doctor repair error: " << e.what() << "\n";
@@ -952,7 +992,9 @@ private:
                             int ver = sqlite3_column_int(st, 0);
                             const unsigned char* n = sqlite3_column_text(st, 1);
                             const unsigned char* e = sqlite3_column_text(st, 2);
-                            std::cout << ui::status_error("version=" + std::to_string(ver) + ", name='" + (n ? (const char*)n : "?") + "'");
+                            std::cout
+                                << ui::status_error("version=" + std::to_string(ver) + ", name='" +
+                                                    (n ? (const char*)n : "?") + "'");
                             if (e && *e)
                                 std::cout << ", error=\"" << (const char*)e << "\"";
                             std::cout << "\n";
@@ -968,9 +1010,9 @@ private:
                             std::cout << "-------------------\n";
                             haveFail = true;
                         }
-                        std::cout
-                            << ui::status_warning("Found leftover 'documents_fts_new' — an FTS migration likely failed mid-way.")
-                            << "\n";
+                        std::cout << ui::status_warning("Found leftover 'documents_fts_new' — an "
+                                                        "FTS migration likely failed mid-way.")
+                                  << "\n";
                         std::cout << "  Run: yams repair --fts5\n";
                     }
                     if (haveFail) {
@@ -2460,7 +2502,8 @@ Result<void> DoctorCommand::applyTuningBaseline(bool apply) {
                 if (!r)
                     return r;
             }
-            std::cout << ui::status_ok("Applied tuning baseline to [tuning] in config.toml") << "\n";
+            std::cout << ui::status_ok("Applied tuning baseline to [tuning] in config.toml")
+                      << "\n";
         } else {
             std::cout << "Use 'yams doctor tuning --apply' to write these values.\n";
         }

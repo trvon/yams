@@ -3,10 +3,10 @@
  * @brief Comprehensive Catch2 tests for metadata schema, CRUD operations, FTS, and migrations
  */
 
-#include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <catch2/catch_test_macros.hpp>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/metadata_repository.h>
@@ -83,7 +83,8 @@ struct MetadataSchemaFixture {
 
 } // namespace
 
-TEST_CASE_METHOD(MetadataSchemaFixture, "Document CRUD operations", "[unit][metadata][schema][crud]") {
+TEST_CASE_METHOD(MetadataSchemaFixture, "Document CRUD operations",
+                 "[unit][metadata][schema][crud]") {
     SECTION("Create document") {
         auto doc = createTestDocument("test.txt");
         auto insertResult = repo_->insertDocument(doc);
@@ -160,7 +161,8 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Document CRUD operations", "[unit][meta
     }
 }
 
-TEST_CASE_METHOD(MetadataSchemaFixture, "Content CRUD operations", "[unit][metadata][schema][content]") {
+TEST_CASE_METHOD(MetadataSchemaFixture, "Content CRUD operations",
+                 "[unit][metadata][schema][content]") {
     auto doc = createTestDocument("content_test.txt");
     auto docResult = repo_->insertDocument(doc);
     REQUIRE(docResult.has_value());
@@ -245,7 +247,8 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Content CRUD operations", "[unit][metad
     }
 }
 
-TEST_CASE_METHOD(MetadataSchemaFixture, "Metadata operations", "[unit][metadata][schema][metadata]") {
+TEST_CASE_METHOD(MetadataSchemaFixture, "Metadata operations",
+                 "[unit][metadata][schema][metadata]") {
     auto doc = createTestDocument("meta_test.txt");
     auto docResult = repo_->insertDocument(doc);
     REQUIRE(docResult.has_value());
@@ -335,7 +338,8 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Metadata operations", "[unit][metadata]
     }
 }
 
-TEST_CASE_METHOD(MetadataSchemaFixture, "Relationship operations", "[unit][metadata][schema][relationship]") {
+TEST_CASE_METHOD(MetadataSchemaFixture, "Relationship operations",
+                 "[unit][metadata][schema][relationship]") {
     auto parent = createTestDocument("parent.txt");
     auto parentResult = repo_->insertDocument(parent);
     REQUIRE(parentResult.has_value());
@@ -356,7 +360,8 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Relationship operations", "[unit][metad
         rel1.parentId = parentId;
         rel1.childId = child1Id;
         rel1.relationshipType = RelationshipType::Contains;
-        rel1.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+        rel1.createdTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
 
         auto rel1Result = repo_->insertRelationship(rel1);
         REQUIRE(rel1Result.has_value());
@@ -365,7 +370,8 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Relationship operations", "[unit][metad
         rel2.parentId = parentId;
         rel2.childId = child2Id;
         rel2.relationshipType = RelationshipType::Contains;
-        rel2.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+        rel2.createdTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
 
         auto rel2Result = repo_->insertRelationship(rel2);
         REQUIRE(rel2Result.has_value());
@@ -398,7 +404,8 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Relationship operations", "[unit][metad
         rel.parentId = parentId;
         rel.childId = child1Id;
         rel.relationshipType = RelationshipType::Contains;
-        rel.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+        rel.createdTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
 
         auto relResult = repo_->insertRelationship(rel);
         REQUIRE(relResult.has_value());
@@ -487,11 +494,13 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Full text search", "[unit][metadata][sc
     }
 }
 
-TEST_CASE_METHOD(MetadataSchemaFixture, "Search history", "[unit][metadata][schema][search-history]") {
+TEST_CASE_METHOD(MetadataSchemaFixture, "Search history",
+                 "[unit][metadata][schema][search-history]") {
     SECTION("Insert and retrieve search history") {
         SearchHistoryEntry entry1;
         entry1.query = "test query";
-        entry1.queryTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+        entry1.queryTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
         entry1.resultsCount = 5;
         entry1.executionTimeMs = 25;
         entry1.userContext = "user123";
@@ -522,7 +531,8 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Search history", "[unit][metadata][sche
     }
 }
 
-TEST_CASE_METHOD(MetadataSchemaFixture, "Saved queries", "[unit][metadata][schema][saved-queries]") {
+TEST_CASE_METHOD(MetadataSchemaFixture, "Saved queries",
+                 "[unit][metadata][schema][saved-queries]") {
     SavedQuery query1;
     query1.name = "My Search";
     query1.query = "C++ programming";
@@ -551,7 +561,8 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Saved queries", "[unit][metadata][schem
         auto retrieved = getResult.value().value();
 
         retrieved.useCount = 5;
-        retrieved.lastUsed = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+        retrieved.lastUsed =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
         auto updateResult = repo_->updateSavedQuery(retrieved);
         REQUIRE(updateResult.has_value());
     }
@@ -696,7 +707,8 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Cascading deletes", "[unit][metadata][s
     CHECK(relResult.value().size() == 0);
 }
 
-TEST_CASE_METHOD(MetadataSchemaFixture, "Query builder", "[unit][metadata][schema][query-builder]") {
+TEST_CASE_METHOD(MetadataSchemaFixture, "Query builder",
+                 "[unit][metadata][schema][query-builder]") {
     std::vector<DocumentInfo> docs = {
         createTestDocument("doc1.txt"), createTestDocument("doc2.pdf"),
         createTestDocument("doc3.txt"), createTestDocument("doc4.doc")};
@@ -732,7 +744,8 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Query builder", "[unit][metadata][schem
     CHECK(params[0] == ".txt");
 }
 
-TEST_CASE_METHOD(MetadataSchemaFixture, "Unique constraints", "[unit][metadata][schema][constraints]") {
+TEST_CASE_METHOD(MetadataSchemaFixture, "Unique constraints",
+                 "[unit][metadata][schema][constraints]") {
     SECTION("Unique SHA256 hash constraint") {
         auto doc1 = createTestDocument("unique1.txt");
         doc1.sha256Hash = "unique_hash_123";
@@ -769,7 +782,8 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Unique constraints", "[unit][metadata][
     }
 }
 
-TEST_CASE_METHOD(MetadataSchemaFixture, "Extraction status handling", "[unit][metadata][schema][extraction]") {
+TEST_CASE_METHOD(MetadataSchemaFixture, "Extraction status handling",
+                 "[unit][metadata][schema][extraction]") {
     std::vector<ExtractionStatus> statuses = {ExtractionStatus::Pending, ExtractionStatus::Success,
                                               ExtractionStatus::Failed, ExtractionStatus::Skipped};
 
@@ -800,7 +814,8 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Extraction status handling", "[unit][me
     }
 }
 
-TEST_CASE_METHOD(MetadataSchemaFixture, "Performance metrics", "[unit][metadata][schema][performance]") {
+TEST_CASE_METHOD(MetadataSchemaFixture, "Performance metrics",
+                 "[unit][metadata][schema][performance]") {
     const int numDocs = 1000;
     auto start = std::chrono::high_resolution_clock::now();
 
@@ -833,7 +848,8 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Performance metrics", "[unit][metadata]
     CHECK(queryTime.count() < 100);
 }
 
-TEST_CASE_METHOD(MetadataSchemaFixture, "Migration version 16 hash", "[unit][metadata][schema][migration]") {
+TEST_CASE_METHOD(MetadataSchemaFixture, "Migration version 16 hash",
+                 "[unit][metadata][schema][migration]") {
     auto result = pool_->withConnection([](Database& db) -> Result<void> {
         MigrationManager mm(db);
         auto initResult = mm.initialize();
@@ -856,7 +872,8 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Migration version 16 hash", "[unit][met
     REQUIRE(result.has_value());
 }
 
-TEST_CASE_METHOD(MetadataSchemaFixture, "Symbol metadata schema", "[unit][metadata][schema][symbol]") {
+TEST_CASE_METHOD(MetadataSchemaFixture, "Symbol metadata schema",
+                 "[unit][metadata][schema][symbol]") {
     auto result = pool_->withConnection([](Database& db) -> Result<void> {
         // Check table exists
         auto stmt = db.prepare(
@@ -908,7 +925,8 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Symbol metadata schema", "[unit][metada
     REQUIRE(result.has_value());
 }
 
-TEST_CASE_METHOD(MetadataSchemaFixture, "Symbol metadata insert and query", "[unit][metadata][schema][symbol]") {
+TEST_CASE_METHOD(MetadataSchemaFixture, "Symbol metadata insert and query",
+                 "[unit][metadata][schema][symbol]") {
     // Create a test document first to satisfy FK constraint
     auto doc = createTestDocument("test_symbol.cpp");
     doc.sha256Hash = "test_hash_for_symbol";
@@ -973,7 +991,8 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Symbol metadata insert and query", "[un
 
     SECTION("Query by symbol name") {
         auto nameQuery = pool_->withConnection([](Database& db) -> Result<std::string> {
-            auto stmt = db.prepare("SELECT qualified_name FROM symbol_metadata WHERE symbol_name=?");
+            auto stmt =
+                db.prepare("SELECT qualified_name FROM symbol_metadata WHERE symbol_name=?");
             if (!stmt)
                 return stmt.error();
             if (auto r = stmt.value().bind(1, "myFunction"); !r)
@@ -1029,7 +1048,8 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Symbol metadata insert and query", "[un
     }
 }
 
-TEST_CASE_METHOD(MetadataSchemaFixture, "Symbol metadata foreign key constraint", "[unit][metadata][schema][symbol][fk]") {
+TEST_CASE_METHOD(MetadataSchemaFixture, "Symbol metadata foreign key constraint",
+                 "[unit][metadata][schema][symbol][fk]") {
     // Try to insert symbol with non-existent document hash (should fail)
     auto result = pool_->withConnection([](Database& db) -> Result<void> {
         auto stmt = db.prepare(R"(
@@ -1063,7 +1083,8 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Symbol metadata foreign key constraint"
     CHECK(result.error().message.find("constraint") != std::string::npos);
 }
 
-TEST_CASE_METHOD(MetadataSchemaFixture, "Repair status handling", "[unit][metadata][schema][repair]") {
+TEST_CASE_METHOD(MetadataSchemaFixture, "Repair status handling",
+                 "[unit][metadata][schema][repair]") {
     std::vector<RepairStatus> statuses = {RepairStatus::Pending, RepairStatus::Processing,
                                           RepairStatus::Completed, RepairStatus::Failed,
                                           RepairStatus::Skipped};
@@ -1117,7 +1138,8 @@ TEST_CASE("Repair status string conversion", "[unit][metadata][schema][repair]")
     }
 }
 
-TEST_CASE_METHOD(MetadataSchemaFixture, "Migration version 21 repair tracking", "[unit][metadata][schema][migration]") {
+TEST_CASE_METHOD(MetadataSchemaFixture, "Migration version 21 repair tracking",
+                 "[unit][metadata][schema][migration]") {
     auto result = pool_->withConnection([](Database& db) -> Result<void> {
         MigrationManager mm(db);
         auto initResult = mm.initialize();

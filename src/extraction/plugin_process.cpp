@@ -779,7 +779,9 @@ void PluginProcess::Impl::stop_io_threads() {
 void PluginProcess::Impl::read_stdout_loop() {
     std::array<std::byte, 4096> buffer;
 
-    while (is_alive()) {
+    // Keep reading until EOF or error, not just while process is alive.
+    // Data written to pipe before process exit is still readable.
+    while (true) {
 #ifdef _WIN32
         // Check handle validity before blocking ReadFile call
         if (stdout_read_ == INVALID_HANDLE_VALUE) {
@@ -789,30 +791,53 @@ void PluginProcess::Impl::read_stdout_loop() {
         if (ReadFile(stdout_read_, buffer.data(), static_cast<DWORD>(buffer.size()), &bytes_read,
                      nullptr) &&
             bytes_read > 0) {
-#else
-        ssize_t bytes_read = read(stdout_fd_, buffer.data(), buffer.size());
-        if (bytes_read > 0) {
-#endif
             std::lock_guard lock{stdout_mutex_};
             stdout_buffer_.insert(stdout_buffer_.end(), buffer.begin(),
                                   buffer.begin() + bytes_read);
         } else {
             // ReadFile failed or returned 0 bytes - could be handle closed or process terminated
-#ifdef _WIN32
             // If handle was closed to unblock us, exit the loop
             if (GetLastError() == ERROR_INVALID_HANDLE || stdout_read_ == INVALID_HANDLE_VALUE) {
                 break;
             }
-#endif
+            // EOF or broken pipe - process has exited and no more data
+            if (bytes_read == 0) {
+                break;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds{10});
         }
+#else
+        ssize_t bytes_read = read(stdout_fd_, buffer.data(), buffer.size());
+        if (bytes_read > 0) {
+            std::lock_guard lock{stdout_mutex_};
+            stdout_buffer_.insert(stdout_buffer_.end(), buffer.begin(),
+                                  buffer.begin() + bytes_read);
+        } else if (bytes_read == 0) {
+            // EOF - pipe closed by writer (process exited)
+            break;
+        } else {
+            // Error - check if it's a real error or just interrupted
+            if (errno == EINTR) {
+                continue; // Retry on interrupt
+            }
+            // EAGAIN/EWOULDBLOCK shouldn't happen on blocking fd, but handle anyway
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{10});
+                continue;
+            }
+            // Real error (EBADF, etc.) - exit loop
+            break;
+        }
+#endif
     }
 }
 
 void PluginProcess::Impl::read_stderr_loop() {
     std::array<std::byte, 4096> buffer;
 
-    while (is_alive()) {
+    // Keep reading until EOF or error, not just while process is alive.
+    // Data written to pipe before process exit is still readable.
+    while (true) {
 #ifdef _WIN32
         // Check handle validity before blocking ReadFile call
         if (stderr_read_ == INVALID_HANDLE_VALUE) {
@@ -822,10 +847,6 @@ void PluginProcess::Impl::read_stderr_loop() {
         if (ReadFile(stderr_read_, buffer.data(), static_cast<DWORD>(buffer.size()), &bytes_read,
                      nullptr) &&
             bytes_read > 0) {
-#else
-        ssize_t bytes_read = read(stderr_fd_, buffer.data(), buffer.size());
-        if (bytes_read > 0) {
-#endif
             std::lock_guard lock{stderr_mutex_};
             stderr_buffer_.insert(stderr_buffer_.end(), buffer.begin(),
                                   buffer.begin() + bytes_read);
@@ -836,14 +857,44 @@ void PluginProcess::Impl::read_stderr_loop() {
             spdlog::debug("Plugin stderr: {}", msg);
         } else {
             // ReadFile failed or returned 0 bytes - could be handle closed or process terminated
-#ifdef _WIN32
             // If handle was closed to unblock us, exit the loop
             if (GetLastError() == ERROR_INVALID_HANDLE || stderr_read_ == INVALID_HANDLE_VALUE) {
                 break;
             }
-#endif
+            // EOF or broken pipe - process has exited and no more data
+            if (bytes_read == 0) {
+                break;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds{10});
         }
+#else
+        ssize_t bytes_read = read(stderr_fd_, buffer.data(), buffer.size());
+        if (bytes_read > 0) {
+            std::lock_guard lock{stderr_mutex_};
+            stderr_buffer_.insert(stderr_buffer_.end(), buffer.begin(),
+                                  buffer.begin() + bytes_read);
+
+            // Log stderr output
+            std::string_view msg = span_to_string_view(
+                std::span<const std::byte>(buffer.data(), static_cast<size_t>(bytes_read)));
+            spdlog::debug("Plugin stderr: {}", msg);
+        } else if (bytes_read == 0) {
+            // EOF - pipe closed by writer (process exited)
+            break;
+        } else {
+            // Error - check if it's a real error or just interrupted
+            if (errno == EINTR) {
+                continue; // Retry on interrupt
+            }
+            // EAGAIN/EWOULDBLOCK shouldn't happen on blocking fd, but handle anyway
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{10});
+                continue;
+            }
+            // Real error (EBADF, etc.) - exit loop
+            break;
+        }
+#endif
     }
 }
 

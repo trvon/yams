@@ -42,7 +42,9 @@ inline bool metadata_trace_enabled() {
     return enabled;
 }
 
-inline std::string_view current_metadata_op() { return detail::metadata_op_tag; }
+inline std::string_view current_metadata_op() {
+    return detail::metadata_op_tag;
+}
 
 class MetadataOpScope {
 public:

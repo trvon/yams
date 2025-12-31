@@ -315,7 +315,10 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_unique<
 }
 
 DaemonClient::~DaemonClient() {
-    if (pImpl && pImpl->pool_) {
+    // Only shut down non-shared pools. Shared pools (from the registry) may be
+    // in use by other clients and will be cleaned up by shutdown_all() or when
+    // the io_context is reset.
+    if (pImpl && pImpl->pool_ && !pImpl->pool_->is_shared()) {
         pImpl->pool_->shutdown();
     }
 }
@@ -443,8 +446,8 @@ boost::asio::awaitable<Result<void>> DaemonClient::connect() {
 }
 
 void DaemonClient::disconnect() {
-    // Shutdown the connection pool and mark as explicitly disconnected
-    if (pImpl->pool_) {
+    // Only shut down non-shared pools. Shared pools may be in use by other clients.
+    if (pImpl->pool_ && !pImpl->pool_->is_shared()) {
         pImpl->pool_->shutdown();
     }
     pImpl->explicitly_disconnected_ = true;

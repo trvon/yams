@@ -7,6 +7,7 @@
 #include <boost/asio/detached.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <yams/app/services/session_service.hpp>
 #include <yams/compression/compression_monitor.h>
 #include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
@@ -21,7 +22,6 @@
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
-#include <yams/app/services/session_service.hpp>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
 #include <yams/version.hpp>
@@ -35,8 +35,8 @@
 #ifndef NOMINMAX
 #define NOMINMAX 1
 #endif
-#include <Windows.h>
 #include <Psapi.h>
+#include <Windows.h>
 
 #endif
 #if defined(TRACY_ENABLE)

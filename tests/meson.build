@@ -2027,7 +2027,7 @@ if catch2_dep.found()
   if host_machine.system() != 'windows'
     test('ghidra_plugin_communication', ghidra_plugin_exe,
       suite: ['catch2', 'integration', 'plugin', 'ghidra'],
-      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path, 'YAMS_SOURCE_DIR': meson.project_source_root() },
       timeout: 30
     )
   endif

@@ -148,6 +148,7 @@ public:
         // Restart command
         auto* restart = daemon->add_subcommand("restart", "Restart the YAMS daemon");
         restart->add_option("--socket", socketPath_, "Socket path for daemon communication");
+        restart->add_flag("--force", force_, "Force stop (kill -9)");
 
         restart->callback([this]() { restartDaemon(); });
 
@@ -2259,45 +2260,13 @@ private:
     }
 
     void restartDaemon() {
-        std::optional<yams::cli::ui::SpinnerRunner> spinner;
-        if (yams::cli::ui::stdout_is_tty()) {
-            spinner.emplace();
-            spinner->start("Restarting daemon...");
-        }
-        auto stopSpinner = [&]() {
-            if (spinner) {
-                spinner->stop();
-            }
-        };
-        // Resolve socket path (do not persist unless explicitly provided)
         const std::string effectiveSocket =
             socketPath_.empty() ? daemon::DaemonClient::resolveSocketPathConfigFirst().string()
                                 : socketPath_;
-        if (pidFile_.empty()) {
-            pidFile_ = daemon::YamsDaemon::resolveSystemPath(daemon::YamsDaemon::PathType::PidFile)
-                           .string();
-        }
-
-        // Stop daemon if running
-        if (daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
-            spdlog::info("Stopping YAMS daemon...");
-            yams::daemon::ClientConfig cfg;
-            cfg.socketPath = effectiveSocket;
-            (void)runDaemonClient(
-                cfg, [](yams::daemon::DaemonClient& client) { return client.shutdown(true); },
-                std::chrono::seconds(10));
-
-            for (int i = 0; i < 10; i++) {
-                if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket) &&
-                    readPidFromFile(pidFile_) <= 0) {
-                    break;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            }
-        }
+        stopDaemon();
 
         // Start daemon
-        spdlog::info("Starting YAMS daemon...");
+        std::cout << "[INFO] Starting YAMS daemon...\n";
 
         daemon::ClientConfig config;
         if (!socketPath_.empty())
@@ -2310,12 +2279,23 @@ private:
         auto result = daemon::DaemonClient::startDaemon(config);
         if (!result) {
             spdlog::error("Failed to start daemon: {}", result.error().message);
-            stopSpinner();
             std::exit(1);
         }
 
-        stopSpinner();
-        spdlog::info("YAMS daemon restarted successfully");
+        bool running = false;
+        for (int i = 0; i < 20; ++i) {
+            if (daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
+                running = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+        if (running) {
+            std::cout << "[OK] YAMS daemon restarted successfully\n";
+        } else {
+            std::cout << "[WARN] Daemon started but not responding yet. "
+                         "Run 'yams daemon status -d' to check readiness.\n";
+        }
     }
 
     void showLog() {

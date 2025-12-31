@@ -194,8 +194,8 @@ TEST_CASE("Prune category detection", "[core][magic][prune]") {
     SECTION("Build output directories") {
         REQUIRE(matchesPruneGroup(getPruneCategory("build/output.o"), "build"));
         REQUIRE(matchesPruneGroup(getPruneCategory("dist/bundle.js"), "build"));
-        REQUIRE(matchesPruneGroup(
-            getPruneCategory("cmake-build-debug/CMakeFiles/app.dir/main.obj"), "build"));
+        REQUIRE(matchesPruneGroup(getPruneCategory("cmake-build-debug/CMakeFiles/app.dir/main.obj"),
+                                  "build"));
         REQUIRE(matchesPruneGroup(getPruneCategory("target/release/app"), "build"));
         REQUIRE(matchesPruneGroup(getPruneCategory(".next/static/chunks/app.js"), "build"));
         REQUIRE(matchesPruneGroup(getPruneCategory("obj/Debug/app.pdb"), "build"));

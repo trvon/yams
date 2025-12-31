@@ -988,12 +988,9 @@ struct MCPSessionWatchRequest {
         return r;
     }
     json toJson() const {
-        return json{{"session", session},
-                    {"root", root},
-                    {"interval_ms", intervalMs},
-                    {"enable", enable},
-                    {"add_selector", addSelector},
-                    {"set_current", setCurrent},
+        return json{{"session", session},          {"root", root},
+                    {"interval_ms", intervalMs},   {"enable", enable},
+                    {"add_selector", addSelector}, {"set_current", setCurrent},
                     {"allow_create", allowCreate}};
     }
 };
@@ -1019,12 +1016,9 @@ struct MCPSessionWatchResponse {
         return r;
     }
     json toJson() const {
-        return json{{"session", session},
-                    {"root", root},
-                    {"enabled", enabled},
-                    {"interval_ms", intervalMs},
-                    {"created", created},
-                    {"selector_added", selectorAdded}};
+        return json{{"session", session}, {"root", root},
+                    {"enabled", enabled}, {"interval_ms", intervalMs},
+                    {"created", created}, {"selector_added", selectorAdded}};
     }
 };
 

@@ -55,7 +55,8 @@ DocumentInfo make_doc(const std::string& path, const std::string& hash,
 
 } // namespace
 
-TEST_CASE("QueryHelpersIntegration: query documents by pattern basic", "[unit][metadata][query_helpers]") {
+TEST_CASE("QueryHelpersIntegration: query documents by pattern basic",
+          "[unit][metadata][query_helpers]") {
     auto dbPath = make_temp_db();
     ConnectionPoolConfig cfg;
     cfg.enableWAL = false;

@@ -11,6 +11,7 @@
 #include <array>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
@@ -154,13 +155,28 @@ bool sendRequest(PluginProcess& proc, const nlohmann::json& request, nlohmann::j
     }
 }
 
+// Get the repository root directory - uses YAMS_SOURCE_DIR if available
+fs::path getRepoRoot() {
+    // Try environment variable first (set by meson)
+    const char* source_dir = std::getenv("YAMS_SOURCE_DIR");
+    if (source_dir) {
+        return fs::path(source_dir);
+    }
+
+    // Fall back to absolute path from __FILE__
+    // __FILE__ = tests/integration/ghidra_plugin_communication_test.cpp
+    // We want the repo root (3 levels up)
+    fs::path file_path = fs::absolute(fs::path(__FILE__));
+    return file_path.parent_path().parent_path().parent_path();
+}
+
 } // anonymous namespace
 
 TEST_CASE("Ghidra plugin - Spawn and handshake", "[integration][ghidra][plugin]") {
     // Find plugin and SDK paths
-    auto repoRoot = fs::path(__FILE__).parent_path().parent_path().parent_path();
+    auto repoRoot = getRepoRoot();
     auto pluginPath = repoRoot / "plugins" / "yams-ghidra-plugin" / "plugin.py";
-    auto sdkPath = repoRoot / "external" / "yams_sdk";
+    auto sdkPath = repoRoot / "external" / "yams-sdk";
 
     REQUIRE(fs::exists(pluginPath));
     REQUIRE(fs::exists(sdkPath));
@@ -179,9 +195,9 @@ TEST_CASE("Ghidra plugin - Spawn and handshake", "[integration][ghidra][plugin]"
 
         REQUIRE(response.contains("result"));
         REQUIRE(response["result"]["name"] == "yams_ghidra");
-        REQUIRE(response["result"]["version"] == "0.0.1");
+        REQUIRE(response["result"]["version"] == "0.1.0");
         REQUIRE(response["result"]["interfaces"].is_array());
-        REQUIRE(response["result"]["interfaces"][0] == "ghidra_analysis_v1");
+        REQUIRE(response["result"]["interfaces"][0] == "content_extractor_v1");
     }
 
     SECTION("Health check before init") {
@@ -194,11 +210,13 @@ TEST_CASE("Ghidra plugin - Spawn and handshake", "[integration][ghidra][plugin]"
         REQUIRE(sendRequest(proc, request, response));
 
         REQUIRE(response.contains("result"));
-        REQUIRE(response["result"]["status"] == "ok");
+        // Status is "degraded" when pyghidra is not available, "ok" when it is
+        auto status = response["result"]["status"].get<std::string>();
+        REQUIRE((status == "ok" || status == "degraded"));
         REQUIRE(response["result"]["started"] == false);
     }
 
-    SECTION("Init without Ghidra fails gracefully") {
+    SECTION("Plugin initialization") {
         nlohmann::json request = {{"jsonrpc", "2.0"},
                                   {"id", 3},
                                   {"method", "plugin.init"},
@@ -207,18 +225,16 @@ TEST_CASE("Ghidra plugin - Spawn and handshake", "[integration][ghidra][plugin]"
         nlohmann::json response;
         REQUIRE(sendRequest(proc, request, response));
 
-        // Should return error since pyghidra not installed
-        REQUIRE(response.contains("error"));
-        REQUIRE(response["error"]["code"] == -32603);
-        REQUIRE(response["error"]["message"].get<std::string>().find("pyghidra") !=
-                std::string::npos);
+        // Plugin should initialize (may or may not require pyghidra installed)
+        REQUIRE(response.contains("result"));
+        REQUIRE(response["result"]["status"] == "initialized");
     }
 }
 
 TEST_CASE("Ghidra plugin - Process lifecycle", "[integration][ghidra][plugin]") {
-    auto repoRoot = fs::path(__FILE__).parent_path().parent_path().parent_path();
+    auto repoRoot = getRepoRoot();
     auto pluginPath = repoRoot / "plugins" / "yams-ghidra-plugin" / "plugin.py";
-    auto sdkPath = repoRoot / "external" / "yams_sdk";
+    auto sdkPath = repoRoot / "external" / "yams-sdk";
 
     SECTION("Multiple requests on same process") {
         PluginProcess proc;
@@ -251,9 +267,9 @@ TEST_CASE("Ghidra plugin - Process lifecycle", "[integration][ghidra][plugin]") 
 }
 
 TEST_CASE("Ghidra plugin - Error handling", "[integration][ghidra][plugin]") {
-    auto repoRoot = fs::path(__FILE__).parent_path().parent_path().parent_path();
+    auto repoRoot = getRepoRoot();
     auto pluginPath = repoRoot / "plugins" / "yams-ghidra-plugin" / "plugin.py";
-    auto sdkPath = repoRoot / "external" / "yams_sdk";
+    auto sdkPath = repoRoot / "external" / "yams-sdk";
 
     PluginProcess proc;
     REQUIRE(spawnPlugin(proc, pluginPath, sdkPath));

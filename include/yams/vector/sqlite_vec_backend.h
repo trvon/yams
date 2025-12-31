@@ -15,6 +15,11 @@ namespace yams::vector {
  */
 class SqliteVecBackend : public IVectorBackend {
 public:
+    struct OrphanCleanupStats {
+        std::size_t metadata_removed = 0;
+        std::size_t embeddings_removed = 0;
+        std::size_t metadata_backfilled = 0;
+    };
     SqliteVecBackend();
     ~SqliteVecBackend() override;
 
@@ -63,6 +68,10 @@ public:
     std::optional<size_t> getStoredEmbeddingDimension() const;
     // Drop vector and metadata tables (safe when reinitializing an empty DB/schema).
     Result<void> dropTables();
+    // Ensure doc_metadata has embedding_rowid column populated and indexed.
+    Result<void> ensureEmbeddingRowIdColumn();
+    // Remove orphaned metadata/embedding rows (rowid mismatches).
+    Result<OrphanCleanupStats> cleanupOrphanRows();
 
     // Explicitly ensure sqlite-vec module is loaded (doctor can call separately)
     Result<void> ensureVecLoaded();

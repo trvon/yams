@@ -33,14 +33,20 @@ public:
         clientCfg.socketPath = harness_.socketPath();
         clientCfg.connectTimeout = 5s;
         clientCfg.autoStart = false;
+        spdlog::info("[HybridSearchFixture] Creating DaemonClient for socket: {}",
+                     clientCfg.socketPath.string());
         client_ = std::make_unique<DaemonClient>(clientCfg);
 
         // Connect to daemon
+        spdlog::info("[HybridSearchFixture] Calling client_->connect()...");
         auto connectResult = cli::run_sync(client_->connect(), 5s);
         if (!connectResult) {
+            spdlog::error("[HybridSearchFixture] connect() failed: {}",
+                          connectResult.error().message);
             throw std::runtime_error("Failed to connect to daemon: " +
                                      connectResult.error().message);
         }
+        spdlog::info("[HybridSearchFixture] connect() succeeded");
 
         // Verify daemon is ready (search infrastructure available)
         auto statusResult = cli::run_sync(client_->status(), 5s);

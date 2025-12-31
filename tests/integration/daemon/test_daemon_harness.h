@@ -12,6 +12,9 @@
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/daemon.h>
 
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/local/stream_protocol.hpp>
+
 // Windows daemon IPC tests are currently unstable due to socket shutdown race conditions
 // The daemon's connection handler coroutines crash during cleanup when sockets are forcibly closed
 // See: docs/developer/windows-daemon-ipc-plan.md
@@ -119,16 +122,17 @@ public:
         }
 
         // Verify socket connectivity as final sanity check
-        auto client = yams::daemon::DaemonClient(
-            yams::daemon::ClientConfig{.socketPath = sock_,
-                                       .connectTimeout = std::chrono::milliseconds(500),
-                                       .autoStart = false});
-        auto connectResult = yams::cli::run_sync(client.connect(), std::chrono::milliseconds(300));
-        if (connectResult) {
-            spdlog::info("[DaemonHarness] Socket connection verified, daemon fully ready");
+        // Use simple socket connection instead of DaemonClient to avoid polluting
+        // the shared connection pool (DaemonClient destructor shuts down shared pools)
+        spdlog::info("[DaemonHarness] Verifying socket connectivity at: {}", sock_.string());
+        bool socketOk = verifySocketConnectivity(sock_, std::chrono::milliseconds(500));
+        if (socketOk) {
+            spdlog::info("[DaemonHarness] Socket connection verified, daemon fully ready at: {}",
+                         sock_.string());
             return true;
         } else {
-            spdlog::error("[DaemonHarness] Daemon Ready but socket connection failed");
+            spdlog::error("[DaemonHarness] Daemon Ready but socket connection failed at: {}",
+                          sock_.string());
             return false;
         }
     }
@@ -254,6 +258,34 @@ private:
         for (int i = 0; i < 8; ++i)
             out.push_back(cs[dist(rng)]);
         return out;
+    }
+
+    // Simple socket connectivity check that doesn't use the shared connection pool
+    // This avoids DaemonClient's destructor from shutting down the pool before
+    // the actual test fixture's client can use it
+    static bool verifySocketConnectivity(const std::filesystem::path& socketPath,
+                                         std::chrono::milliseconds timeout) {
+        auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            try {
+                // Create fresh socket for each attempt (can't reuse after failed connect)
+                boost::asio::io_context io;
+                boost::asio::local::stream_protocol::socket sock(io);
+                boost::system::error_code ec;
+
+                sock.connect(boost::asio::local::stream_protocol::endpoint(socketPath.string()),
+                             ec);
+                if (!ec) {
+                    sock.close();
+                    return true;
+                }
+            } catch (const std::exception& e) {
+                spdlog::debug("[DaemonHarness] Socket verification attempt failed: {}", e.what());
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        spdlog::error("[DaemonHarness] Socket verification timed out after {}ms", timeout.count());
+        return false;
     }
     void cleanup() {
         namespace fs = std::filesystem;

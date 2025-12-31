@@ -179,11 +179,11 @@ int YamsCLI::run(int argc, char* argv[]) {
 
         // Known subcommands (kept in sync with CommandRegistry)
         static const std::vector<std::string> kCommands = {
-            "init",    "add",        "get",       "restore", "cat",    "delete",
-            "list",    "tree",       "search",    "grep",    "config", "auth",
-            "status",  "stats",      "uninstall", "migrate", "update", "download",
-            "session", "watch",      "completion", "repair", "model",  "daemon", "plugin",
-            "doctor",  "dr",         "graph",     "diff",    "serve",
+            "init",    "add",    "get",        "restore", "cat",    "delete",
+            "list",    "tree",   "search",     "grep",    "config", "auth",
+            "status",  "stats",  "uninstall",  "migrate", "update", "download",
+            "session", "watch",  "completion", "repair",  "model",  "daemon",
+            "plugin",  "doctor", "dr",         "graph",   "diff",   "serve",
         };
 
         auto hasArg = [&](std::string_view needle) {

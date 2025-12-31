@@ -1,3 +1,5 @@
+#include <yams/app/services/services.hpp>
+#include <yams/app/services/session_service.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/prompt_util.h>
 #include <yams/cli/ui_helpers.hpp>
@@ -5,8 +7,6 @@
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
 #include <yams/downloader/downloader.hpp>
-#include <yams/app/services/services.hpp>
-#include <yams/app/services/session_service.hpp>
 #include <yams/vector/vector_database.h>
 
 #include <spdlog/spdlog.h>
@@ -19,8 +19,8 @@
 
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <cctype>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -462,8 +462,7 @@ private:
         std::string base = root.filename().string();
         if (base.empty())
             base = "project";
-        std::string sessionName =
-            "proj-" + sanitizeName(base) + "-" + shortHash(root.string());
+        std::string sessionName = "proj-" + sanitizeName(base) + "-" + shortHash(root.string());
 
         auto svc = app::services::makeSessionService(nullptr);
         if (!svc)

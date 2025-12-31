@@ -139,6 +139,10 @@ public:
                 // Tables exist; verify stored dimension vs configured and optionally self-heal.
                 try {
                     if (auto* sqliteBackend = dynamic_cast<SqliteVecBackend*>(backend_.get())) {
+                        if (auto er = sqliteBackend->ensureEmbeddingRowIdColumn(); !er) {
+                            spdlog::warn("Vector DB embedding_rowid migration failed: {}",
+                                         er.error().message);
+                        }
                         auto storedDimOpt = sqliteBackend->getStoredEmbeddingDimension();
                         if (storedDimOpt && *storedDimOpt != config_.embedding_dim) {
                             // Check sentinel to decide whether to suppress warning and adopt stored
@@ -539,6 +543,31 @@ public:
         return result && result.value();
     }
 
+    Result<VectorDatabase::OrphanCleanupStats> cleanupOrphanRows() {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!initialized_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        auto* sqliteBackend = dynamic_cast<SqliteVecBackend*>(backend_.get());
+        if (!sqliteBackend) {
+            return Error{ErrorCode::InvalidState, "Orphan cleanup not supported by backend"};
+        }
+
+        auto res = sqliteBackend->cleanupOrphanRows();
+        if (!res) {
+            setError("Orphan cleanup failed: " + res.error().message);
+            return res.error();
+        }
+
+        VectorDatabase::OrphanCleanupStats stats;
+        stats.metadata_removed = res.value().metadata_removed;
+        stats.embeddings_removed = res.value().embeddings_removed;
+        stats.metadata_backfilled = res.value().metadata_backfilled;
+        return stats;
+    }
+
     bool buildIndex() {
         std::lock_guard<std::mutex> lock(mutex_);
 
@@ -757,6 +786,10 @@ VectorDatabase::getVectorsByDocument(const std::string& document_hash) const {
 
 bool VectorDatabase::hasEmbedding(const std::string& document_hash) const {
     return pImpl->hasEmbedding(document_hash);
+}
+
+Result<VectorDatabase::OrphanCleanupStats> VectorDatabase::cleanupOrphanRows() {
+    return pImpl->cleanupOrphanRows();
 }
 
 bool VectorDatabase::buildIndex() {

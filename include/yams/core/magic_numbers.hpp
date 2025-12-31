@@ -759,8 +759,8 @@ inline PruneCategory getPruneCategory(std::string_view filename, std::string_vie
         return PruneCategory::BuildObject;
     }
     if (has_dir(".next") || has_dir(".nuxt") || has_dir(".svelte-kit") ||
-        has_dir(".parcel-cache") || has_dir(".turbo") || has_dir(".vite") ||
-        has_dir(".angular") || has_dir(".webpack")) {
+        has_dir(".parcel-cache") || has_dir(".turbo") || has_dir(".vite") || has_dir(".angular") ||
+        has_dir(".webpack")) {
         return PruneCategory::BuildObject;
     }
     if (has_dir("target")) {
@@ -861,12 +861,10 @@ inline PruneCategory getPruneCategory(std::string_view filename, std::string_vie
         filenameLower.rfind(".mypy_cache/", 0) == 0 ||
         filenameLower.find("/.ruff_cache/") != std::string::npos ||
         filenameLower.rfind(".ruff_cache/", 0) == 0 ||
-        filenameLower.find("/.tox/") != std::string::npos ||
-        filenameLower.rfind(".tox/", 0) == 0 ||
+        filenameLower.find("/.tox/") != std::string::npos || filenameLower.rfind(".tox/", 0) == 0 ||
         filenameLower.find("/.venv/") != std::string::npos ||
         filenameLower.rfind(".venv/", 0) == 0 ||
-        filenameLower.find("/venv/") != std::string::npos ||
-        filenameLower.rfind("venv/", 0) == 0 ||
+        filenameLower.find("/venv/") != std::string::npos || filenameLower.rfind("venv/", 0) == 0 ||
         filenameLower.find("/.eggs/") != std::string::npos ||
         filenameLower.rfind(".eggs/", 0) == 0 ||
         filenameLower.find(".egg-info/") != std::string::npos ||

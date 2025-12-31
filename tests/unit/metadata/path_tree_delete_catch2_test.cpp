@@ -7,8 +7,8 @@
 #include <filesystem>
 #include <memory>
 
-#include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
+#include <catch2/catch_test_macros.hpp>
 
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/metadata_repository.h>
@@ -199,9 +199,9 @@ TEST_CASE("PathTreeDelete: remove document recalculates centroid", "[unit][metad
 TEST_CASE("PathTreeDelete: remove nonexistent document succeeds", "[unit][metadata][path_tree]") {
     PathTreeDeleteFixture fix;
 
-    auto docInfo =
-        fix.makeDocumentWithPath("/nonexistent/file.txt",
-                             "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE");
+    auto docInfo = fix.makeDocumentWithPath(
+        "/nonexistent/file.txt",
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE");
     auto docInsert = fix.repository_->insertDocument(docInfo);
     REQUIRE(docInsert.has_value());
     docInfo.id = docInsert.value();

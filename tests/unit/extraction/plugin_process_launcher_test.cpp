@@ -20,11 +20,11 @@
 #include <thread>
 
 // Test timeout constant - tests should complete well within this
-constexpr auto TEST_TIMEOUT = std::chrono::seconds{10};
-// PyInstaller executables need ~2s to unpack/start on first run
-constexpr auto PROCESS_STARTUP_WAIT = std::chrono::seconds{2};
+constexpr auto TEST_TIMEOUT = std::chrono::seconds{15};
+// PyInstaller executables need ~3s to unpack/start on first run (can be slower on CI)
+constexpr auto PROCESS_STARTUP_WAIT = std::chrono::seconds{3};
 // PyInstaller executables may need extra time to respond after stdin is closed
-constexpr auto RPC_TIMEOUT = std::chrono::seconds{5};
+constexpr auto RPC_TIMEOUT = std::chrono::seconds{8};
 
 using namespace yams::extraction;
 using json = nlohmann::json;
@@ -109,12 +109,9 @@ std::string readStdoutWithTimeout(PluginProcess& process,
                                   std::chrono::milliseconds timeout = RPC_TIMEOUT) {
     auto start = std::chrono::steady_clock::now();
     size_t lastSize = 0;
+    bool processWasAlive = true;
 
     while (std::chrono::steady_clock::now() - start < timeout) {
-        if (!process.is_alive()) {
-            // Process died, return whatever we have
-            break;
-        }
         auto data = process.read_stdout();
         if (data.size() > lastSize) {
             lastSize = data.size();
@@ -123,6 +120,26 @@ std::string readStdoutWithTimeout(PluginProcess& process,
             if (content.find('\n') != std::string_view::npos) {
                 return std::string{content};
             }
+        }
+
+        // If process just died, give IO thread time to drain the pipe
+        if (!process.is_alive()) {
+            if (processWasAlive) {
+                // Process just died - wait a bit for IO thread to finish reading
+                processWasAlive = false;
+                std::this_thread::sleep_for(std::chrono::milliseconds{100});
+                continue;
+            }
+            // Process was already dead and we've waited - check one more time
+            data = process.read_stdout();
+            if (data.size() > lastSize) {
+                std::string_view content{reinterpret_cast<const char*>(data.data()), data.size()};
+                if (content.find('\n') != std::string_view::npos) {
+                    return std::string{content};
+                }
+            }
+            // No more data coming, return what we have
+            break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds{10});
     }

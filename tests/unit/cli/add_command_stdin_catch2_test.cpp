@@ -17,8 +17,8 @@
 #define WEXITSTATUS(x) (x)
 #define getpid _getpid
 #else
-#include <sys/wait.h>
 #include <unistd.h>
+#include <sys/wait.h>
 #endif
 
 namespace fs = std::filesystem;

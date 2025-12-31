@@ -16,9 +16,9 @@
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/core/magic_numbers.hpp>
-#include <yams/metadata/metadata_repository.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/metadata/metadata_repository.h>
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -404,8 +404,8 @@ private:
                 if (res) {
                     scopedPaths.emplace(std::move(res.value()));
                 } else {
-                    std::cerr << yams::cli::ui::status_warning(
-                                     "Path tree scoping unavailable: " + res.error().message)
+                    std::cerr << yams::cli::ui::status_warning("Path tree scoping unavailable: " +
+                                                               res.error().message)
                               << "\n";
                 }
             } else {
@@ -541,7 +541,8 @@ private:
         return paths;
     }
 
-    static std::optional<std::filesystem::path> extractNodePath(const yams::daemon::GraphNode& node) {
+    static std::optional<std::filesystem::path>
+    extractNodePath(const yams::daemon::GraphNode& node) {
         if (node.nodeKey.rfind("file:", 0) == 0) {
             return std::filesystem::path(node.nodeKey.substr(5));
         }
@@ -670,8 +671,7 @@ private:
                       << "\n\n";
 
             if (allRows.empty()) {
-                std::cout << yams::cli::ui::status_info("No isolated nodes found in scope")
-                          << "\n";
+                std::cout << yams::cli::ui::status_info("No isolated nodes found in scope") << "\n";
                 co_return Result<void>();
             }
 
@@ -679,8 +679,7 @@ private:
             table.headers = {"TYPE", "LABEL", "PATH"};
             table.has_header = true;
             for (const auto& row : allRows) {
-                table.add_row({row.type,
-                               yams::cli::ui::truncate_to_width(row.label, 40),
+                table.add_row({row.type, yams::cli::ui::truncate_to_width(row.label, 40),
                                yams::cli::ui::truncate_to_width(row.path, 50)});
             }
             yams::cli::ui::render_table(std::cout, table);
@@ -875,11 +874,12 @@ private:
                 for (const auto& edge : resp.edges) {
                     auto srcIt = nodeKeyById.find(edge.srcNodeId);
                     auto dstIt = nodeKeyById.find(edge.dstNodeId);
-                    std::string src = srcIt != nodeKeyById.end() ? srcIt->second
-                                                                 : std::to_string(edge.srcNodeId);
-                    std::string dst = dstIt != nodeKeyById.end() ? dstIt->second
-                                                                 : std::to_string(edge.dstNodeId);
-                    std::string label = edge.relation.empty() ? "" : " [label=\"" + edge.relation + "\"]";
+                    std::string src =
+                        srcIt != nodeKeyById.end() ? srcIt->second : std::to_string(edge.srcNodeId);
+                    std::string dst =
+                        dstIt != nodeKeyById.end() ? dstIt->second : std::to_string(edge.dstNodeId);
+                    std::string label =
+                        edge.relation.empty() ? "" : " [label=\"" + edge.relation + "\"]";
                     std::cout << "  \"" << src << "\" -> \"" << dst << "\"" << label << ";\n";
                 }
             } else {

@@ -4002,8 +4002,7 @@ MCPServer::handleSessionWatch(const MCPSessionWatchRequest& req) {
     std::error_code ec;
     std::filesystem::path cwd = std::filesystem::current_path(ec);
     if (ec) {
-        co_return Error{ErrorCode::InvalidArgument,
-                        "Failed to resolve current working directory"};
+        co_return Error{ErrorCode::InvalidArgument, "Failed to resolve current working directory"};
     }
 
     std::filesystem::path root;
@@ -4529,8 +4528,7 @@ void MCPServer::initializeToolRegistry() {
                  {"properties",
                   {{"session", {{"type", "string"}, {"description", "Session name override"}}},
                    {"root", {{"type", "string"}, {"description", "Project root to watch"}}},
-                   {"interval_ms",
-                    {{"type", "integer"}, {"description", "Polling interval (ms)"}}},
+                   {"interval_ms", {{"type", "integer"}, {"description", "Polling interval (ms)"}}},
                    {"enable",
                     {{"type", "boolean"},
                      {"description", "Enable watch (false disables)"},

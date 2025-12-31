@@ -18,7 +18,9 @@
 static int setenv(const char* name, const char* value, int overwrite) {
     return _putenv_s(name, value);
 }
-static void unsetenv(const char* name) { _putenv_s(name, ""); }
+static void unsetenv(const char* name) {
+    _putenv_s(name, "");
+}
 #endif
 
 namespace yams::daemon::test {

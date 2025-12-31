@@ -11,7 +11,9 @@ using namespace yams::metadata;
 
 namespace {
 
-TreeNode createEmptyTree() { return TreeNode(); }
+TreeNode createEmptyTree() {
+    return TreeNode();
+}
 
 TreeNode createSimpleTree() {
     TreeNode tree;
@@ -148,7 +150,8 @@ TEST_CASE("TreeDiffer: file modified", "[unit][metadata][tree_differ]") {
     CHECK(change.newHash == "0000000000000000000000000000000000000000000000000000000000000011");
 }
 
-TEST_CASE("TreeDiffer: file renamed with rename detection enabled", "[unit][metadata][tree_differ]") {
+TEST_CASE("TreeDiffer: file renamed with rename detection enabled",
+          "[unit][metadata][tree_differ]") {
     TreeDiffer differ;
     TreeNode base = createSimpleTree();
     TreeNode target;
@@ -179,7 +182,8 @@ TEST_CASE("TreeDiffer: file renamed with rename detection enabled", "[unit][meta
     CHECK(change.newHash == "0000000000000000000000000000000000000000000000000000000000000001");
 }
 
-TEST_CASE("TreeDiffer: rename detection disabled shows delete+add", "[unit][metadata][tree_differ]") {
+TEST_CASE("TreeDiffer: rename detection disabled shows delete+add",
+          "[unit][metadata][tree_differ]") {
     TreeDiffer differ;
     TreeNode base = createSimpleTree();
     TreeNode target;

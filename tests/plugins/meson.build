@@ -27,3 +27,21 @@ plugin_exe = executable('yams_plugin_tests', plugin_tests,
 )
 
 test('plugins', plugin_exe, env: {'YAMS_AUTO_DOWNLOAD_GRAMMARS':'1','YAMS_SKIP_MODEL_LOADING':'1'})
+
+# zyp (Zig YAMS PDF) plugin tests
+if get_option('plugin-zyp')
+  zyp_plugin_path = join_paths(plugin_build_dir, 'plugins/zyp/yams_zyp' + plugin_ext)
+
+  zyp_test_exe = executable('yams_zyp_tests',
+    files('zyp/zyp_plugin_test.cpp', '../test_main.cpp'),
+    include_directories: incs,
+    dependencies: [gtest_dep] + test_deps,
+    cpp_args: ['-DZYP_PLUGIN_PATH="' + zyp_plugin_path + '"'],
+    install: false,
+  )
+
+  test('zyp_plugin', zyp_test_exe,
+    env: {'YAMS_SKIP_MODEL_LOADING': '1'},
+    timeout: 60,
+  )
+endif

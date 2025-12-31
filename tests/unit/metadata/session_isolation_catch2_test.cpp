@@ -153,7 +153,8 @@ TEST_CASE("SessionIsolation: count documents by session ID", "[unit][metadata][s
     CHECK(countNone.value() == 0);
 }
 
-TEST_CASE("SessionIsolation: remove session ID from documents (merge)", "[unit][metadata][session]") {
+TEST_CASE("SessionIsolation: remove session ID from documents (merge)",
+          "[unit][metadata][session]") {
     SessionIsolationFixture fix;
 
     fix.addDocumentWithSession("/merge/f1.txt", "hashmerge111111111111111111111", "merge-session");
@@ -176,7 +177,8 @@ TEST_CASE("SessionIsolation: remove session ID from documents (merge)", "[unit][
     CHECK(countKeep.value() == 1);
 }
 
-TEST_CASE("SessionIsolation: delete documents by session ID (discard)", "[unit][metadata][session]") {
+TEST_CASE("SessionIsolation: delete documents by session ID (discard)",
+          "[unit][metadata][session]") {
     SessionIsolationFixture fix;
 
     auto id1 = fix.addDocumentWithSession("/discard/f1.txt", "hashdiscard1111111111111111111",
@@ -209,10 +211,12 @@ TEST_CASE("SessionIsolation: delete documents by session ID (discard)", "[unit][
     CHECK(countSafe.value() == 1);
 }
 
-TEST_CASE("SessionIsolation: session documents visible only to session", "[unit][metadata][session]") {
+TEST_CASE("SessionIsolation: session documents visible only to session",
+          "[unit][metadata][session]") {
     SessionIsolationFixture fix;
 
-    fix.addDocumentWithSession("/session/code.cpp", "hashsession11111111111111111111", "dev-session");
+    fix.addDocumentWithSession("/session/code.cpp", "hashsession11111111111111111111",
+                               "dev-session");
     fix.addDocumentWithSession("/global/readme.md", "hashglobal111111111111111111111", "");
 
     auto sessionDocs = fix.repository_->findDocumentsBySessionId("dev-session");

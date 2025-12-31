@@ -1,6 +1,6 @@
 #include <nlohmann/json.hpp>
-#include <algorithm>
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <thread>
 #include <unordered_set>
 #include <boost/asio.hpp>
@@ -124,8 +124,7 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
     while (!stop_.load()) {
         bool didWork = false;
         InternalEventBus::PostIngestTask task;
-        const std::size_t batchSize =
-            std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
+        const std::size_t batchSize = std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
         std::vector<InternalEventBus::PostIngestTask> batch;
         batch.reserve(batchSize);
         // Dynamic concurrency limit from TuneAdvisor
@@ -330,14 +329,13 @@ void PostIngestQueue::processMetadataStage(const std::string& hash, const std::s
                 updated.extractionStatus = metadata::ExtractionStatus::Failed;
                 auto updateRes = meta_->updateDocument(updated);
                 if (!updateRes) {
-                    spdlog::warn(
-                        "[PostIngestQueue] Failed to mark extraction failed for {}: {}", hash,
-                        updateRes.error().message);
+                    spdlog::warn("[PostIngestQueue] Failed to mark extraction failed for {}: {}",
+                                 hash, updateRes.error().message);
                 }
             }
         } else if (docId >= 0) {
             auto pr = yams::ingest::persist_content_and_index(*meta_, docId, fileName, *txt,
-                                                             mimeType, "post_ingest");
+                                                              mimeType, "post_ingest");
             if (!pr) {
                 spdlog::warn("[PostIngestQueue] persist/index failed for {}: {}", hash,
                              pr.error().message);

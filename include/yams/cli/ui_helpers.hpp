@@ -572,7 +572,6 @@ struct Spinner {
     static const char* frame(size_t index) { return FRAMES[index % FRAME_COUNT]; }
 };
 
-
 class SpinnerRunner {
 public:
     SpinnerRunner() = default;

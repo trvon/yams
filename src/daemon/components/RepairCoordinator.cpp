@@ -356,6 +356,7 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
     });
 
     bool initialScanEnqueued = false;
+    bool vectorCleanupDone = false;
     // Defer initial scan to avoid blocking during startup
     int deferTicks = 0;
     const int minDeferTicks = 50; // ~5 seconds at 100ms/tick
@@ -412,6 +413,30 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
             } catch (const std::exception& e) {
                 spdlog::error("Prune job {} exception: {}", pruneJob.requestId, e.what());
             }
+        }
+
+        if (!vectorCleanupDone && maintenance_allowed()) {
+            try {
+                auto vectorDb = services_ ? services_->getVectorDatabase() : nullptr;
+                if (vectorDb) {
+                    auto cleanup = vectorDb->cleanupOrphanRows();
+                    if (cleanup) {
+                        spdlog::info(
+                            "RepairCoordinator: cleaned vector orphans (metadata_removed={}, "
+                            "embeddings_removed={}, metadata_backfilled={})",
+                            cleanup.value().metadata_removed, cleanup.value().embeddings_removed,
+                            cleanup.value().metadata_backfilled);
+                    } else {
+                        spdlog::warn("RepairCoordinator: vector orphan cleanup failed: {}",
+                                     cleanup.error().message);
+                    }
+                }
+            } catch (const std::exception& e) {
+                spdlog::warn("RepairCoordinator: vector orphan cleanup exception: {}", e.what());
+            } catch (...) {
+                spdlog::warn("RepairCoordinator: vector orphan cleanup exception (unknown)");
+            }
+            vectorCleanupDone = true;
         }
 
         // Defer initial scan to avoid blocking during startup (grace period)

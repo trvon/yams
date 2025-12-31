@@ -75,9 +75,8 @@ public:
             downloaderReq.overwrite = req.overwrite;
 
             // Set up callbacks
-            auto progressCb = req.progressCallback
-                                  ? req.progressCallback
-                                  : [](const downloader::ProgressEvent&) {};
+            auto progressCb = req.progressCallback ? req.progressCallback
+                                                   : [](const downloader::ProgressEvent&) {};
             auto shouldCancel = []() { return false; };
             auto logCb = [](std::string_view) { /* ignore for now */ };
 

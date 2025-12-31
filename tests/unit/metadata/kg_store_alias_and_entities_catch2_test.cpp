@@ -61,7 +61,8 @@ struct KGStoreAliasAndEntitiesFixture {
 
 } // namespace
 
-TEST_CASE("KGStoreAliasAndEntities: alias exact and fuzzy resolution and removal", "[unit][metadata][kg]") {
+TEST_CASE("KGStoreAliasAndEntities: alias exact and fuzzy resolution and removal",
+          "[unit][metadata][kg]") {
     KGStoreAliasAndEntitiesFixture fix;
 
     // Create a node and a couple of aliases
@@ -103,7 +104,8 @@ TEST_CASE("KGStoreAliasAndEntities: alias exact and fuzzy resolution and removal
     }
 }
 
-TEST_CASE("KGStoreAliasAndEntities: neighbors and doc entities round trip", "[unit][metadata][kg]") {
+TEST_CASE("KGStoreAliasAndEntities: neighbors and doc entities round trip",
+          "[unit][metadata][kg]") {
     KGStoreAliasAndEntitiesFixture fix;
 
     // Two nodes with an edge

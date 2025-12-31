@@ -205,8 +205,8 @@ TEST_CASE("TreeNode: compute hash", "[unit][metadata][tree_builder]") {
     node.addEntry(entry);
 
     std::string hash = node.computeHash();
-    CHECK(hash.size() == 64);              // SHA-256 hex = 64 chars
-    CHECK(hash != std::string(64, '0'));   // Should not be all zeros
+    CHECK(hash.size() == 64);            // SHA-256 hex = 64 chars
+    CHECK(hash != std::string(64, '0')); // Should not be all zeros
 }
 
 TEST_CASE("TreeNode: compute hash is cached", "[unit][metadata][tree_builder]") {
@@ -339,7 +339,8 @@ TEST_CASE("TreeBuilder: build from directory with single file", "[unit][metadata
     CHECK_FALSE(tree.entries()[0].isDirectory);
 }
 
-TEST_CASE("TreeBuilder: build from directory with multiple files", "[unit][metadata][tree_builder]") {
+TEST_CASE("TreeBuilder: build from directory with multiple files",
+          "[unit][metadata][tree_builder]") {
     TreeBuilderFixture fix;
     fix.createFile(fix.tempDir_ / "file1.txt", "content1");
     fix.createFile(fix.tempDir_ / "file2.txt", "content2");
@@ -363,7 +364,8 @@ TEST_CASE("TreeBuilder: build from directory with multiple files", "[unit][metad
     CHECK(tree.entries()[2].name == "file3.txt");
 }
 
-TEST_CASE("TreeBuilder: build from directory with subdirectories", "[unit][metadata][tree_builder]") {
+TEST_CASE("TreeBuilder: build from directory with subdirectories",
+          "[unit][metadata][tree_builder]") {
     TreeBuilderFixture fix;
     fix.createFile(fix.tempDir_ / "root.txt", "root");
     fix.createFile(fix.tempDir_ / "subdir1" / "file1.txt", "content1");

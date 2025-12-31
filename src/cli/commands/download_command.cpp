@@ -2,13 +2,13 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <filesystem>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <regex>
 #include <vector>
-#include <cstdio>
-#include <map>
 #include <fmt/core.h>
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
@@ -276,18 +276,17 @@ public:
 
         if (!quiet_ && progress_ != "none") {
             if (progress_ == "json") {
-                serviceReq.progressCallback =
-                    [](const downloader::ProgressEvent& ev) {
-                        json j;
-                        j["type"] = "progress";
-                        j["stage"] = static_cast<int>(ev.stage);
-                        j["downloaded_bytes"] = ev.downloadedBytes;
-                        if (ev.totalBytes)
-                            j["total_bytes"] = *ev.totalBytes;
-                        if (ev.percentage)
-                            j["percentage"] = *ev.percentage;
-                        std::cerr << j.dump() << "\n";
-                    };
+                serviceReq.progressCallback = [](const downloader::ProgressEvent& ev) {
+                    json j;
+                    j["type"] = "progress";
+                    j["stage"] = static_cast<int>(ev.stage);
+                    j["downloaded_bytes"] = ev.downloadedBytes;
+                    if (ev.totalBytes)
+                        j["total_bytes"] = *ev.totalBytes;
+                    if (ev.percentage)
+                        j["percentage"] = *ev.percentage;
+                    std::cerr << j.dump() << "\n";
+                };
             } else {
                 serviceReq.progressCallback =
                     [lastStage = downloader::ProgressStage::Resolving, lastPct = -1.0f,
@@ -324,14 +323,13 @@ public:
                         if (ev.totalBytes) {
                             double fraction = 0.0;
                             if (*ev.totalBytes > 0) {
-                                fraction =
-                                    std::min(1.0, static_cast<double>(done) /
-                                                      static_cast<double>(*ev.totalBytes));
+                                fraction = std::min(1.0, static_cast<double>(done) /
+                                                             static_cast<double>(*ev.totalBytes));
                             }
                             std::string totalStr = ui::format_bytes(*ev.totalBytes);
                             std::string bar = ui::progress_bar(fraction, 20, true);
-                            content = fmt::format("  - {:11s} {} {}/{}",
-                                                  stageName(ev.stage), bar, doneStr, totalStr);
+                            content = fmt::format("  - {:11s} {} {}/{}", stageName(ev.stage), bar,
+                                                  doneStr, totalStr);
                         } else {
                             content = fmt::format("  - {:11s} {}", stageName(ev.stage), doneStr);
                         }
@@ -428,9 +426,9 @@ private:
         if (overwritePolicy_ != "never") {
             return false;
         }
-        if (concurrency_ != 4 || chunkSize_ != (8ull * 1024ull * 1024ull) ||
-            timeoutMs_ != 60000 || retryAttempts_ != 5 || backoffMs_ != 500 ||
-            backoffMult_ != 2.0 || maxBackoffMs_ != 15000) {
+        if (concurrency_ != 4 || chunkSize_ != (8ull * 1024ull * 1024ull) || timeoutMs_ != 60000 ||
+            retryAttempts_ != 5 || backoffMs_ != 500 || backoffMult_ != 2.0 ||
+            maxBackoffMs_ != 15000) {
             return false;
         }
         if (rateLimitGlobalBps_ != 0 || rateLimitPerConnBps_ != 0) {

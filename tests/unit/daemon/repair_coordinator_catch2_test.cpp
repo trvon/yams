@@ -189,8 +189,7 @@ TEST_CASE("RepairCoordinator ignores events when not running", "[daemon][repair]
     REQUIRE(state.stats.repairQueueDepth.load() == 0u);
 }
 
-TEST_CASE("RepairCoordinator stats tracking updates queue depth",
-          "[daemon][repair][coordinator]") {
+TEST_CASE("RepairCoordinator stats tracking updates queue depth", "[daemon][repair][coordinator]") {
     StateComponent state;
     auto activeFn = []() -> size_t { return 0; };
 

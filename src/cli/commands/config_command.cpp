@@ -385,7 +385,9 @@ private:
             if (!result)
                 return result;
 
-            std::cout << ui::status_ok("Updated " + key + " = " + value + " in " + getConfigPath().string()) << "\n";
+            std::cout << ui::status_ok("Updated " + key + " = " + value + " in " +
+                                       getConfigPath().string())
+                      << "\n";
             return Result<void>();
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string(e.what())};
@@ -572,7 +574,9 @@ private:
             auto res = writeConfigValue(key_, value_);
             if (!res)
                 return res;
-            std::cout << ui::status_ok("Updated " + key_ + " = " + value_ + " in " + configPath.string()) << "\n";
+            std::cout << ui::status_ok("Updated " + key_ + " = " + value_ + " in " +
+                                       configPath.string())
+                      << "\n";
             return Result<void>();
 
         } catch (const std::exception& e) {
@@ -938,7 +942,9 @@ private:
 
             // Auto-generation status
             bool autoEnabled = config["embeddings.auto_generate"] == "true";
-            std::cout << "Auto-generation: " << (autoEnabled ? ui::status_ok("Enabled") : ui::status_error("Disabled")) << "\n";
+            std::cout << "Auto-generation: "
+                      << (autoEnabled ? ui::status_ok("Enabled") : ui::status_error("Disabled"))
+                      << "\n";
 
             // Available models
             std::cout << "Available models: ";
@@ -995,7 +1001,8 @@ private:
             if (!result)
                 return result;
 
-            std::cout << ui::status_ok("Preferred embedding model set to: " + embeddingModel_) << "\n";
+            std::cout << ui::status_ok("Preferred embedding model set to: " + embeddingModel_)
+                      << "\n";
 
             return Result<void>();
 
@@ -1148,7 +1155,8 @@ private:
             std::cout << ui::section_header("Path-tree traversal configuration") << "\n";
             std::cout << "Config file: " << configPath
                       << (hasConfig ? "" : " (not found, showing defaults)") << "\n";
-            std::cout << "Enabled    : " << (enabled ? ui::status_ok("yes") : ui::status_error("no")) << "\n";
+            std::cout << "Enabled    : "
+                      << (enabled ? ui::status_ok("yes") : ui::status_error("no")) << "\n";
             std::cout << "Mode       : " << mode << "\n";
 
             if (!enabled) {
@@ -1292,16 +1300,21 @@ private:
             config::ConfigMigrator migrator;
 
             if (!fs::exists(configPath)) {
-                std::cout << ui::status_error("No configuration file found at: " + configPath.string()) << "\n";
+                std::cout << ui::status_error("No configuration file found at: " +
+                                              configPath.string())
+                          << "\n";
                 std::cout << "  Run 'yams config migrate' to create a v2 config\n";
                 return Error{ErrorCode::FileNotFound, "Config file not found"};
             }
 
             auto versionResult = migrator.getConfigVersion(configPath);
             if (!versionResult) {
-                std::cout << ui::status_warning("Cannot determine config version; attempting additive update for v2 keys") << "\n";
+                std::cout << ui::status_warning("Cannot determine config version; attempting "
+                                                "additive update for v2 keys")
+                          << "\n";
             } else if (versionResult.value().major < 2) {
-                std::cout << ui::status_warning("Config is v1; run 'yams config migrate' first") << "\n";
+                std::cout << ui::status_warning("Config is v1; run 'yams config migrate' first")
+                          << "\n";
                 return Error{ErrorCode::InvalidData, "Config is not v2"};
             }
 
@@ -1314,13 +1327,16 @@ private:
                 if (dryRun_) {
                     std::cout << "No changes (up-to-date)\n";
                 } else {
-                    std::cout << ui::status_ok("Configuration already has all known v2 keys") << "\n";
+                    std::cout << ui::status_ok("Configuration already has all known v2 keys")
+                              << "\n";
                 }
             } else {
                 if (dryRun_) {
                     std::cout << "Would add " << added.value().size() << " key(s):\n";
                 } else {
-                    std::cout << ui::status_ok("Added " + std::to_string(added.value().size()) + " key(s):") << "\n";
+                    std::cout << ui::status_ok("Added " + std::to_string(added.value().size()) +
+                                               " key(s):")
+                              << "\n";
                 }
                 for (const auto& k : added.value()) {
                     std::cout << "  - " << k << "\n";
@@ -1343,7 +1359,9 @@ private:
             config::ConfigMigrator migrator;
 
             if (!fs::exists(configPath)) {
-                std::cout << ui::status_error("No configuration file found at: " + configPath.string()) << "\n";
+                std::cout << ui::status_error("No configuration file found at: " +
+                                              configPath.string())
+                          << "\n";
                 std::cout << "  Run 'yams config migrate' to create a v2 config\n";
                 return Result<void>();
             }
@@ -1480,7 +1498,9 @@ private:
                 fs::path libPath = grammarPath / lib;
                 bool installed = fs::exists(libPath);
                 std::cout << "  " << std::left << std::setw(15) << lang
-                          << (installed ? ui::status_ok("installed") : ui::status_error("not installed")) << "\n";
+                          << (installed ? ui::status_ok("installed")
+                                        : ui::status_error("not installed"))
+                          << "\n";
             }
 
             std::cout << "\nCommands:\n";
@@ -1535,7 +1555,9 @@ private:
             std::cout << "   export YAMS_TS_" << grammarLanguage_ << "_LIB=/path/to/libtree-sitter-"
                       << grammarLanguage_ << ".so\n\n";
 
-            std::cout << ui::status_warning("Note: Automatic downloads will be added in a future update.") << "\n";
+            std::cout << ui::status_warning(
+                             "Note: Automatic downloads will be added in a future update.")
+                      << "\n";
             std::cout << "For now, follow the manual steps above or use system packages.\n";
 
             return Result<void>();

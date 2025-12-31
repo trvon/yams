@@ -24,6 +24,9 @@ public:
     void shutdown(std::chrono::milliseconds timeout = std::chrono::milliseconds{2000});
     boost::asio::awaitable<void> ensure_read_loop_started(std::shared_ptr<AsioConnection> conn);
 
+    // Returns true if this pool is shared (from the registry) vs single-use
+    bool is_shared() const { return shared_; }
+
     AsioConnectionPool(const TransportOptions& opts, bool shared);
 
 private:

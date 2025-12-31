@@ -407,8 +407,7 @@ private:
             if (distance == 0) {
                 collectNeighborsWithCache(currentNodeId, distance, req.maxDepth,
                                           req.relationFilters, req.relationNames, visited, queue,
-                                          edgeCache,
-                                          req.reverseTraversal);
+                                          edgeCache, req.reverseTraversal);
                 continue;
             }
 

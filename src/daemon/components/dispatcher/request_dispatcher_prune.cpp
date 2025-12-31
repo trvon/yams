@@ -131,8 +131,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
                             deleted++;
                             bytesFreed += candidate.fileSize;
                         } else {
-                            spdlog::warn("Failed to remove {} from metadata: {}",
-                                         candidate.path, delResult.error().message);
+                            spdlog::warn("Failed to remove {} from metadata: {}", candidate.path,
+                                         delResult.error().message);
                             failed++;
                         }
                     } else {

@@ -1298,11 +1298,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         TuneAdvisor::setEnableParallelIngest(true);
         auto poolInit = init::record_duration(
             "db_pool", [&]() { return connectionPool_->initialize(); }, state_.initDurationsMs);
-            if (!poolInit) {
-                spdlog::warn("Connection pool init failed: {} — continuing degraded",
-                             poolInit.error().message);
-            } else {
-                auto repoRes = init::record_duration(
+        if (!poolInit) {
+            spdlog::warn("Connection pool init failed: {} — continuing degraded",
+                         poolInit.error().message);
+        } else {
+            auto repoRes = init::record_duration(
                 "metadata_repo",
                 [&]() -> yams::Result<void> {
                     metadataRepo_ =
@@ -1318,35 +1318,35 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
                     return yams::Result<void>();
                 },
-                    state_.initDurationsMs);
-                if (!repoRes) {
-                    spdlog::warn("Metadata repository init failed: {}", repoRes.error().message);
+                state_.initDurationsMs);
+            if (!repoRes) {
+                spdlog::warn("Metadata repository init failed: {}", repoRes.error().message);
+            } else {
+                auto journalRes = connectionPool_->withConnection(
+                    [](metadata::Database& db) -> Result<std::string> {
+                        auto stmtRes = db.prepare("PRAGMA journal_mode");
+                        if (!stmtRes) {
+                            return stmtRes.error();
+                        }
+                        auto stmt = std::move(stmtRes).value();
+                        auto stepRes = stmt.step();
+                        if (!stepRes) {
+                            return stepRes.error();
+                        }
+                        if (!stepRes.value()) {
+                            return Error{ErrorCode::NotFound,
+                                         "PRAGMA journal_mode returned no rows"};
+                        }
+                        return stmt.getString(0);
+                    });
+                if (journalRes) {
+                    spdlog::info("Metadata DB journal_mode={}", journalRes.value());
                 } else {
-                    auto journalRes = connectionPool_->withConnection(
-                        [](metadata::Database& db) -> Result<std::string> {
-                            auto stmtRes = db.prepare("PRAGMA journal_mode");
-                            if (!stmtRes) {
-                                return stmtRes.error();
-                            }
-                            auto stmt = std::move(stmtRes).value();
-                            auto stepRes = stmt.step();
-                            if (!stepRes) {
-                                return stepRes.error();
-                            }
-                            if (!stepRes.value()) {
-                                return Error{ErrorCode::NotFound,
-                                             "PRAGMA journal_mode returned no rows"};
-                            }
-                            return stmt.getString(0);
-                        });
-                    if (journalRes) {
-                        spdlog::info("Metadata DB journal_mode={}", journalRes.value());
-                    } else {
-                        spdlog::warn("Failed to read Metadata DB journal_mode: {}",
-                                     journalRes.error().message);
-                    }
+                    spdlog::warn("Failed to read Metadata DB journal_mode: {}",
+                                 journalRes.error().message);
                 }
             }
+        }
         writeBootstrapStatusFile(config_, state_);
     }
     spdlog::info("[ServiceManager] Phase: DB Pool and Repo Initialized.");

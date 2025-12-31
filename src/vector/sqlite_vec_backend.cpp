@@ -22,6 +22,28 @@ extern "C" {
 namespace yams::vector {
 
 namespace {
+bool columnExists(sqlite3* db, const char* table, const char* column) {
+    if (!db || !table || !column)
+        return false;
+    std::string sql = "PRAGMA table_info(" + std::string(table) + ")";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        return false;
+    }
+    bool found = false;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const unsigned char* name = sqlite3_column_text(stmt, 1);
+        if (name && std::string(reinterpret_cast<const char*>(name)) == column) {
+            found = true;
+            break;
+        }
+    }
+    sqlite3_finalize(stmt);
+    return found;
+}
+} // namespace
+
+namespace {
 inline int stepWithRetry(sqlite3_stmt* stmt, int max_attempts = 20) {
     int attempt = 0;
     while (true) {
@@ -308,6 +330,7 @@ Result<void> SqliteVecBackend::createTables(size_t embedding_dim) {
     std::string metadata_sql = R"(
         CREATE TABLE IF NOT EXISTS doc_metadata (
             rowid INTEGER PRIMARY KEY,
+            embedding_rowid INTEGER UNIQUE,
             document_hash TEXT NOT NULL,
             chunk_id TEXT UNIQUE NOT NULL,
             chunk_text TEXT,
@@ -340,6 +363,12 @@ Result<void> SqliteVecBackend::createTables(size_t embedding_dim) {
         "CREATE INDEX IF NOT EXISTS idx_doc_metadata_chunk_id ON doc_metadata(chunk_id)");
     if (!index_result) {
         spdlog::warn("Failed to create chunk_id index: {}", index_result.error().message);
+    }
+
+    index_result = executeSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_doc_metadata_embedding_rowid "
+                              "ON doc_metadata(embedding_rowid)");
+    if (!index_result) {
+        spdlog::warn("Failed to create embedding_rowid index: {}", index_result.error().message);
     }
 
     // 4. Test that both tables are accessible
@@ -477,6 +506,98 @@ Result<void> SqliteVecBackend::dropTables() {
     return Result<void>();
 }
 
+Result<void> SqliteVecBackend::ensureEmbeddingRowIdColumn() {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!initialized_) {
+        return Error{ErrorCode::NotInitialized, "Backend not initialized"};
+    }
+
+    if (!columnExists(db_, "doc_metadata", "embedding_rowid")) {
+        auto alter = executeSQL("ALTER TABLE doc_metadata ADD COLUMN embedding_rowid INTEGER");
+        if (!alter) {
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to add embedding_rowid column: " + alter.error().message};
+        }
+    }
+
+    auto backfill =
+        executeSQL("UPDATE doc_metadata SET embedding_rowid = rowid WHERE embedding_rowid IS NULL");
+    if (!backfill) {
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to backfill embedding_rowid: " + backfill.error().message};
+    }
+
+    auto index = executeSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_doc_metadata_embedding_rowid "
+                            "ON doc_metadata(embedding_rowid)");
+    if (!index) {
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to create embedding_rowid index: " + index.error().message};
+    }
+
+    return Result<void>();
+}
+
+Result<SqliteVecBackend::OrphanCleanupStats> SqliteVecBackend::cleanupOrphanRows() {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!initialized_) {
+        return Error{ErrorCode::NotInitialized, "Backend not initialized"};
+    }
+
+    if (!columnExists(db_, "doc_metadata", "embedding_rowid")) {
+        auto alter = executeSQL("ALTER TABLE doc_metadata ADD COLUMN embedding_rowid INTEGER");
+        if (!alter) {
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to add embedding_rowid column: " + alter.error().message};
+        }
+    }
+
+    OrphanCleanupStats stats{};
+    auto backfill =
+        executeSQL("UPDATE doc_metadata SET embedding_rowid = rowid WHERE embedding_rowid IS NULL");
+    if (!backfill) {
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to backfill embedding_rowid: " + backfill.error().message};
+    }
+    stats.metadata_backfilled = static_cast<std::size_t>(sqlite3_changes(db_));
+
+    auto tx = executeSQL("BEGIN IMMEDIATE TRANSACTION");
+    if (!tx) {
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to begin cleanup transaction: " + tx.error().message};
+    }
+
+    auto pruneMeta = executeSQL("DELETE FROM doc_metadata "
+                                "WHERE embedding_rowid IS NULL "
+                                "OR embedding_rowid NOT IN (SELECT rowid FROM doc_embeddings)");
+    if (!pruneMeta) {
+        executeSQL("ROLLBACK");
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to prune orphan metadata: " + pruneMeta.error().message};
+    }
+    stats.metadata_removed = static_cast<std::size_t>(sqlite3_changes(db_));
+
+    auto pruneEmb = executeSQL("DELETE FROM doc_embeddings "
+                               "WHERE rowid NOT IN (SELECT embedding_rowid FROM doc_metadata WHERE "
+                               "embedding_rowid IS NOT NULL)");
+    if (!pruneEmb) {
+        executeSQL("ROLLBACK");
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to prune orphan embeddings: " + pruneEmb.error().message};
+    }
+    stats.embeddings_removed = static_cast<std::size_t>(sqlite3_changes(db_));
+
+    auto commit = executeSQL("COMMIT");
+    if (!commit) {
+        executeSQL("ROLLBACK");
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to commit cleanup transaction: " + commit.error().message};
+    }
+
+    return stats;
+}
+
 Result<void> SqliteVecBackend::insertVector(const VectorRecord& record) {
     YAMS_ZONE_SCOPED_N("SqliteVecBackend::insertVector");
     YAMS_PLOT("VectorInsert", static_cast<int64_t>(1));
@@ -501,17 +622,21 @@ Result<void> SqliteVecBackend::insertVectorInternal(const VectorRecord& record,
         return vr;
 
     // Check if chunk_id already exists (for upsert behavior)
-    const char* check_sql = "SELECT rowid FROM doc_metadata WHERE chunk_id = ?";
+    const char* check_sql = "SELECT rowid, embedding_rowid FROM doc_metadata WHERE chunk_id = ?";
     sqlite3_stmt* check_stmt;
-    sqlite3_int64 existing_rowid = -1;
+    sqlite3_int64 existing_meta_rowid = -1;
+    sqlite3_int64 existing_embed_rowid = -1;
 
     if (sqlite3_prepare_v2(db_, check_sql, -1, &check_stmt, nullptr) == SQLITE_OK) {
         sqlite3_bind_text(check_stmt, 1, record.chunk_id.c_str(), -1, SQLITE_TRANSIENT);
 
         if (sqlite3_step(check_stmt) == SQLITE_ROW) {
-            existing_rowid = sqlite3_column_int64(check_stmt, 0);
-            spdlog::debug("Chunk {} already exists with rowid {}, will update", record.chunk_id,
-                          existing_rowid);
+            existing_meta_rowid = sqlite3_column_int64(check_stmt, 0);
+            if (sqlite3_column_type(check_stmt, 1) != SQLITE_NULL) {
+                existing_embed_rowid = sqlite3_column_int64(check_stmt, 1);
+            }
+            spdlog::debug("Chunk {} already exists with metadata_rowid {} embedding_rowid {}",
+                          record.chunk_id, existing_meta_rowid, existing_embed_rowid);
         }
         sqlite3_finalize(check_stmt);
     }
@@ -528,9 +653,15 @@ Result<void> SqliteVecBackend::insertVectorInternal(const VectorRecord& record,
     try {
         sqlite3_int64 vector_rowid;
 
-        if (existing_rowid != -1) {
+        if (existing_meta_rowid != -1) {
             // Update existing record
-            vector_rowid = existing_rowid;
+            if (existing_embed_rowid == -1) {
+                if (manage_transaction)
+                    executeSQL("ROLLBACK");
+                return Error{ErrorCode::DatabaseError,
+                             "Missing embedding_rowid for chunk_id: " + record.chunk_id};
+            }
+            vector_rowid = existing_embed_rowid;
 
             // Update vector in virtual table (sqlite-vec expects JSON format)
             std::stringstream vec_json;
@@ -570,7 +701,7 @@ Result<void> SqliteVecBackend::insertVectorInternal(const VectorRecord& record,
             // Update metadata
             const char* update_metadata_sql = R"(
                 UPDATE doc_metadata 
-                SET document_hash = ?, chunk_text = ?, model_id = ?, metadata = ?
+                SET document_hash = ?, chunk_text = ?, model_id = ?, metadata = ?, embedding_rowid = ?
                 WHERE rowid = ?
             )";
             sqlite3_stmt* metadata_stmt;
@@ -602,6 +733,7 @@ Result<void> SqliteVecBackend::insertVectorInternal(const VectorRecord& record,
             }
             sqlite3_bind_text(metadata_stmt, 4, metadata_json.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_int64(metadata_stmt, 5, vector_rowid);
+            sqlite3_bind_int64(metadata_stmt, 6, existing_meta_rowid);
 
             rc = stepWithRetry(metadata_stmt);
             sqlite3_finalize(metadata_stmt);
@@ -665,9 +797,9 @@ Result<void> SqliteVecBackend::insertVectorInternal(const VectorRecord& record,
             // Get the rowid of the inserted vector
             vector_rowid = sqlite3_last_insert_rowid(db_);
 
-            // 2. Insert metadata into regular table with the same rowid
+            // 2. Insert metadata into regular table with embedding_rowid reference
             const char* metadata_sql = R"(
-                INSERT INTO doc_metadata (rowid, document_hash, chunk_id, chunk_text, model_id, metadata)
+                INSERT INTO doc_metadata (embedding_rowid, document_hash, chunk_id, chunk_text, model_id, metadata)
                 VALUES (?, ?, ?, ?, ?, ?)
             )";
 
@@ -841,7 +973,8 @@ Result<void> SqliteVecBackend::updateVector(const std::string& chunk_id,
 
     try {
         // First, get the rowid for this chunk_id
-        const char* get_rowid_sql = "SELECT rowid FROM doc_metadata WHERE chunk_id = ?";
+        const char* get_rowid_sql =
+            "SELECT rowid, embedding_rowid FROM doc_metadata WHERE chunk_id = ?";
         sqlite3_stmt* rowid_stmt;
 
         if (sqlite3_prepare_v2(db_, get_rowid_sql, -1, &rowid_stmt, nullptr) != SQLITE_OK) {
@@ -852,13 +985,17 @@ Result<void> SqliteVecBackend::updateVector(const std::string& chunk_id,
 
         sqlite3_bind_text(rowid_stmt, 1, chunk_id.c_str(), -1, SQLITE_TRANSIENT);
 
-        sqlite3_int64 rowid = -1;
+        sqlite3_int64 meta_rowid = -1;
+        sqlite3_int64 embedding_rowid = -1;
         if (sqlite3_step(rowid_stmt) == SQLITE_ROW) {
-            rowid = sqlite3_column_int64(rowid_stmt, 0);
+            meta_rowid = sqlite3_column_int64(rowid_stmt, 0);
+            if (sqlite3_column_type(rowid_stmt, 1) != SQLITE_NULL) {
+                embedding_rowid = sqlite3_column_int64(rowid_stmt, 1);
+            }
         }
         sqlite3_finalize(rowid_stmt);
 
-        if (rowid == -1) {
+        if (meta_rowid == -1 || embedding_rowid == -1) {
             executeSQL("ROLLBACK");
             return Error{ErrorCode::NotFound, "Vector not found with chunk_id: " + chunk_id};
         }
@@ -883,7 +1020,7 @@ Result<void> SqliteVecBackend::updateVector(const std::string& chunk_id,
         }
 
         sqlite3_bind_text(vector_stmt, 1, vec_json.str().c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int64(vector_stmt, 2, rowid);
+        sqlite3_bind_int64(vector_stmt, 2, embedding_rowid);
 
         int rc = stepWithRetry(vector_stmt);
         sqlite3_finalize(vector_stmt);
@@ -895,7 +1032,8 @@ Result<void> SqliteVecBackend::updateVector(const std::string& chunk_id,
 
         // Update the metadata
         const char* metadata_sql = "UPDATE doc_metadata SET document_hash = ?, chunk_text = ?, "
-                                   "model_id = ?, metadata = ? WHERE rowid = ?";
+                                   "model_id = ?, metadata = ?, "
+                                   "embedding_rowid = ? WHERE rowid = ?";
         sqlite3_stmt* metadata_stmt;
 
         if (sqlite3_prepare_v2(db_, metadata_sql, -1, &metadata_stmt, nullptr) != SQLITE_OK) {
@@ -922,7 +1060,8 @@ Result<void> SqliteVecBackend::updateVector(const std::string& chunk_id,
             metadata_json += "}";
         }
         sqlite3_bind_text(metadata_stmt, 4, metadata_json.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int64(metadata_stmt, 5, rowid);
+        sqlite3_bind_int64(metadata_stmt, 5, embedding_rowid);
+        sqlite3_bind_int64(metadata_stmt, 6, meta_rowid);
 
         rc = stepWithRetry(metadata_stmt);
         sqlite3_finalize(metadata_stmt);
@@ -967,7 +1106,8 @@ Result<void> SqliteVecBackend::deleteVector(const std::string& chunk_id) {
 
     try {
         // First, get the rowid for this chunk_id
-        const char* get_rowid_sql = "SELECT rowid FROM doc_metadata WHERE chunk_id = ?";
+        const char* get_rowid_sql =
+            "SELECT rowid, embedding_rowid FROM doc_metadata WHERE chunk_id = ?";
         sqlite3_stmt* rowid_stmt;
 
         if (sqlite3_prepare_v2(db_, get_rowid_sql, -1, &rowid_stmt, nullptr) != SQLITE_OK) {
@@ -978,13 +1118,17 @@ Result<void> SqliteVecBackend::deleteVector(const std::string& chunk_id) {
 
         sqlite3_bind_text(rowid_stmt, 1, chunk_id.c_str(), -1, SQLITE_TRANSIENT);
 
-        sqlite3_int64 rowid = -1;
+        sqlite3_int64 meta_rowid = -1;
+        sqlite3_int64 embedding_rowid = -1;
         if (sqlite3_step(rowid_stmt) == SQLITE_ROW) {
-            rowid = sqlite3_column_int64(rowid_stmt, 0);
+            meta_rowid = sqlite3_column_int64(rowid_stmt, 0);
+            if (sqlite3_column_type(rowid_stmt, 1) != SQLITE_NULL) {
+                embedding_rowid = sqlite3_column_int64(rowid_stmt, 1);
+            }
         }
         sqlite3_finalize(rowid_stmt);
 
-        if (rowid == -1) {
+        if (meta_rowid == -1 || embedding_rowid == -1) {
             executeSQL("ROLLBACK");
             return Error{ErrorCode::NotFound, "Vector not found with chunk_id: " + chunk_id};
         }
@@ -999,7 +1143,7 @@ Result<void> SqliteVecBackend::deleteVector(const std::string& chunk_id) {
                          "Failed to prepare metadata delete: " + getLastError()};
         }
 
-        sqlite3_bind_int64(metadata_stmt, 1, rowid);
+        sqlite3_bind_int64(metadata_stmt, 1, meta_rowid);
 
         int rc = stepWithRetry(metadata_stmt);
         sqlite3_finalize(metadata_stmt);
@@ -1019,7 +1163,7 @@ Result<void> SqliteVecBackend::deleteVector(const std::string& chunk_id) {
                          "Failed to prepare vector delete: " + getLastError()};
         }
 
-        sqlite3_bind_int64(vector_stmt, 1, rowid);
+        sqlite3_bind_int64(vector_stmt, 1, embedding_rowid);
 
         rc = stepWithRetry(vector_stmt);
         sqlite3_finalize(vector_stmt);
@@ -1064,7 +1208,8 @@ Result<void> SqliteVecBackend::deleteVectorsByDocument(const std::string& docume
 
     try {
         // Get all rowids for this document
-        const char* get_rowids_sql = "SELECT rowid FROM doc_metadata WHERE document_hash = ?";
+        const char* get_rowids_sql = "SELECT embedding_rowid FROM doc_metadata "
+                                     "WHERE document_hash = ? AND embedding_rowid IS NOT NULL";
         sqlite3_stmt* rowids_stmt;
 
         if (sqlite3_prepare_v2(db_, get_rowids_sql, -1, &rowids_stmt, nullptr) != SQLITE_OK) {
@@ -1075,9 +1220,9 @@ Result<void> SqliteVecBackend::deleteVectorsByDocument(const std::string& docume
 
         sqlite3_bind_text(rowids_stmt, 1, document_hash.c_str(), -1, SQLITE_TRANSIENT);
 
-        std::vector<sqlite3_int64> rowids;
+        std::vector<sqlite3_int64> embedding_rowids;
         while (sqlite3_step(rowids_stmt) == SQLITE_ROW) {
-            rowids.push_back(sqlite3_column_int64(rowids_stmt, 0));
+            embedding_rowids.push_back(sqlite3_column_int64(rowids_stmt, 0));
         }
         sqlite3_finalize(rowids_stmt);
 
@@ -1101,9 +1246,9 @@ Result<void> SqliteVecBackend::deleteVectorsByDocument(const std::string& docume
             return Error{ErrorCode::DatabaseError, "Failed to delete metadata: " + getLastError()};
         }
 
-        // Delete from vector table for each rowid
+        // Delete from vector table for each embedding_rowid
         const char* vector_sql = "DELETE FROM doc_embeddings WHERE rowid = ?";
-        for (auto rowid : rowids) {
+        for (auto rowid : embedding_rowids) {
             sqlite3_stmt* vector_stmt;
 
             if (sqlite3_prepare_v2(db_, vector_sql, -1, &vector_stmt, nullptr) != SQLITE_OK) {
@@ -1168,7 +1313,7 @@ SqliteVecBackend::searchSimilar(const std::vector<float>& query_embedding, size_
     std::stringstream sql;
     sql << "SELECT m.chunk_id, m.document_hash, m.chunk_text, m.model_id, m.metadata, "
         << "vec_distance_cosine(e.embedding, ?) as distance " << "FROM doc_embeddings e "
-        << "JOIN doc_metadata m ON e.rowid = m.rowid ";
+        << "JOIN doc_metadata m ON e.rowid = m.embedding_rowid ";
 
     // Build WHERE clause for filters
     std::vector<std::string> where_clauses;
@@ -1266,9 +1411,10 @@ Result<std::optional<VectorRecord>> SqliteVecBackend::getVector(const std::strin
     }
 
     // Query the metadata table (not the vector table)
-    const char* sql =
-        "SELECT m.document_hash, m.chunk_text, m.model_id, m.metadata, m.rowid, e.embedding "
-        "FROM doc_metadata m JOIN doc_embeddings e ON e.rowid = m.rowid WHERE m.chunk_id = ?";
+    const char* sql = "SELECT m.document_hash, m.chunk_text, m.model_id, m.metadata, "
+                      "m.embedding_rowid, e.embedding "
+                      "FROM doc_metadata m JOIN doc_embeddings e ON e.rowid = m.embedding_rowid "
+                      "WHERE m.chunk_id = ?";
 
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
@@ -1372,7 +1518,7 @@ SqliteVecBackend::getVectorsByDocument(const std::string& document_hash) {
     // Query both metadata and embeddings tables
     const char* sql = "SELECT m.chunk_id, m.chunk_text, m.model_id, m.metadata, e.embedding "
                       "FROM doc_metadata m "
-                      "JOIN doc_embeddings e ON e.rowid = m.rowid "
+                      "JOIN doc_embeddings e ON e.rowid = m.embedding_rowid "
                       "WHERE m.document_hash = ? ORDER BY m.rowid";
 
     spdlog::info("getVectorsByDocument SQL: {}", sql);
@@ -1486,7 +1632,9 @@ Result<bool> SqliteVecBackend::hasEmbedding(const std::string& document_hash) {
     }
 
     // Query the metadata table since it has the document_hash
-    const char* sql = "SELECT COUNT(*) FROM doc_metadata WHERE document_hash = ?";
+    const char* sql = "SELECT COUNT(*) FROM doc_metadata m "
+                      "JOIN doc_embeddings e ON e.rowid = m.embedding_rowid "
+                      "WHERE m.document_hash = ?";
 
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
@@ -1514,7 +1662,7 @@ Result<size_t> SqliteVecBackend::getVectorCount() {
     }
 
     // Count from metadata table since it has unique chunk_ids
-    const char* sql = "SELECT COUNT(*) FROM doc_metadata";
+    const char* sql = "SELECT COUNT(*) FROM doc_metadata WHERE embedding_rowid IS NOT NULL";
 
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
@@ -1542,7 +1690,7 @@ Result<VectorDatabase::DatabaseStats> SqliteVecBackend::getStats() {
     VectorDatabase::DatabaseStats stats;
 
     // Get total vectors from metadata table (avoiding separate lock acquisition)
-    const char* count_sql = "SELECT COUNT(*) FROM doc_metadata";
+    const char* count_sql = "SELECT COUNT(*) FROM doc_metadata WHERE embedding_rowid IS NOT NULL";
     sqlite3_stmt* count_stmt;
 
     if (sqlite3_prepare_v2(db_, count_sql, -1, &count_stmt, nullptr) == SQLITE_OK) {
@@ -1553,7 +1701,8 @@ Result<VectorDatabase::DatabaseStats> SqliteVecBackend::getStats() {
     }
 
     // Get unique documents count (from metadata table which has document_hash)
-    const char* sql = "SELECT COUNT(DISTINCT document_hash) FROM doc_metadata";
+    const char* sql = "SELECT COUNT(DISTINCT m.document_hash) FROM doc_metadata m "
+                      "JOIN doc_embeddings e ON e.rowid = m.embedding_rowid";
     sqlite3_stmt* stmt;
 
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {

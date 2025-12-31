@@ -8,8 +8,8 @@
 #include <thread>
 #include <vector>
 
-#include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
+#include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <yams/common/utf8_utils.h>
@@ -187,7 +187,8 @@ TEST_CASE("MetadataRepository: update document", "[unit][metadata][repository]")
     CHECK(updatedDoc.fileSize == 4096);
 }
 
-TEST_CASE("MetadataRepository: query documents handles exact prefix and suffix", "[unit][metadata][repository]") {
+TEST_CASE("MetadataRepository: query documents handles exact prefix and suffix",
+          "[unit][metadata][repository]") {
     MetadataRepositoryFixture fix;
 
     auto docA = makeDocumentWithPath(
@@ -394,7 +395,8 @@ TEST_CASE("MetadataRepository: search functionality", "[unit][metadata][reposito
     CHECK(results.results.size() > 0);
 }
 
-TEST_CASE("MetadataRepository: fuzzy search returns content matches", "[unit][metadata][repository]") {
+TEST_CASE("MetadataRepository: fuzzy search returns content matches",
+          "[unit][metadata][repository]") {
     MetadataRepositoryFixture fix;
 
     auto doc = makeDocumentWithPath(
@@ -529,7 +531,8 @@ TEST_CASE("MetadataRepository: counts and modified since", "[unit][metadata][rep
     CHECK(foundRecent);
 }
 
-TEST_CASE("MetadataRepository: path tree upsert creates nodes and counts", "[unit][metadata][repository]") {
+TEST_CASE("MetadataRepository: path tree upsert creates nodes and counts",
+          "[unit][metadata][repository]") {
     MetadataRepositoryFixture fix;
 
     auto docInfo = makeDocumentWithPath(
@@ -562,7 +565,8 @@ TEST_CASE("MetadataRepository: path tree upsert creates nodes and counts", "[uni
     CHECK(fullLookup.value()->fullPath == "/src/example.txt");
 }
 
-TEST_CASE("MetadataRepository: path tree centroid accumulates embeddings", "[unit][metadata][repository]") {
+TEST_CASE("MetadataRepository: path tree centroid accumulates embeddings",
+          "[unit][metadata][repository]") {
     MetadataRepositoryFixture fix;
 
     auto docInfo = makeDocumentWithPath(
@@ -587,7 +591,8 @@ TEST_CASE("MetadataRepository: path tree centroid accumulates embeddings", "[uni
     CHECK(node.value()->centroidWeight == 1);
 }
 
-TEST_CASE("MetadataRepository: remove path tree decrements counts and deletes empty nodes", "[unit][metadata][repository]") {
+TEST_CASE("MetadataRepository: remove path tree decrements counts and deletes empty nodes",
+          "[unit][metadata][repository]") {
     MetadataRepositoryFixture fix;
 
     auto docInfo =
@@ -627,7 +632,8 @@ TEST_CASE("MetadataRepository: remove path tree decrements counts and deletes em
     CHECK_FALSE(afterRemoveLib.value().has_value());
 }
 
-TEST_CASE("MetadataRepository: remove path tree recalculates centroid", "[unit][metadata][repository]") {
+TEST_CASE("MetadataRepository: remove path tree recalculates centroid",
+          "[unit][metadata][repository]") {
     MetadataRepositoryFixture fix;
 
     auto doc1 = makeDocumentWithPath(

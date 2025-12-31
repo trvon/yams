@@ -1,8 +1,8 @@
+#include <yams/app/services/services.hpp>
+#include <yams/app/services/session_service.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/yams_cli.h>
-#include <yams/app/services/services.hpp>
-#include <yams/app/services/session_service.hpp>
 #include <yams/daemon/client/daemon_client.h>
 
 #include <spdlog/spdlog.h>
@@ -181,8 +181,7 @@ public:
                     cfg.dataDir = cli_->getDataPath();
                 }
                 yams::daemon::DaemonClient client(cfg);
-                const auto timeout =
-                    std::chrono::milliseconds(std::max(0, daemonReadyTimeoutMs_));
+                const auto timeout = std::chrono::milliseconds(std::max(0, daemonReadyTimeoutMs_));
                 const auto deadline = std::chrono::steady_clock::now() + timeout;
                 auto sleepFor = std::chrono::milliseconds(100);
                 while (std::chrono::steady_clock::now() < deadline) {
@@ -193,8 +192,7 @@ public:
                     }
                     auto now = std::chrono::steady_clock::now();
                     if (now >= deadline) {
-                        return Error{ErrorCode::Timeout,
-                                     "Daemon did not become ready in time"};
+                        return Error{ErrorCode::Timeout, "Daemon did not become ready in time"};
                     }
                     auto remaining =
                         std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);

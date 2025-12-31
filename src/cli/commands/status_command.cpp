@@ -641,12 +641,12 @@ private:
     // Default to using daemon-reported physical sizes only; do not local-scan unless opted in
     bool noPhysical_ = true;
 
-        struct StatusInfo {
-            // Storage
-            bool storageHealthy = false;
-            uint64_t totalDocuments = 0;
-            uint64_t totalSize = 0;
-            std::string storagePath;
+    struct StatusInfo {
+        // Storage
+        bool storageHealthy = false;
+        uint64_t totalDocuments = 0;
+        uint64_t totalSize = 0;
+        std::string storagePath;
 
         // Configuration
         bool configMigrationNeeded = false;
@@ -663,16 +663,16 @@ private:
         bool vectorDbHealthy = false;
         std::string preferredModel;
 
-            // Worker pool (daemon)
-            uint64_t workerThreads = 0;
-            uint64_t workerActive = 0;
-            uint64_t workerQueued = 0;
-            uint64_t workerUtilPct = 0;
+        // Worker pool (daemon)
+        uint64_t workerThreads = 0;
+        uint64_t workerActive = 0;
+        uint64_t workerQueued = 0;
+        uint64_t workerUtilPct = 0;
 
-            // Session watch (daemon)
-            bool watchKnown = false;
-            bool watchEnabled = false;
-            uint64_t watchIntervalMs = 0;
+        // Session watch (daemon)
+        bool watchKnown = false;
+        bool watchEnabled = false;
+        uint64_t watchIntervalMs = 0;
 
         // Collected advice (built after gathering raw stats)
         yams::cli::RecommendationBuilder advice;
@@ -790,8 +790,8 @@ private:
                     if (itQ != s.requestCounts.end())
                         info.workerQueued = itQ->second;
                     if (info.workerThreads > 0)
-                        info.workerUtilPct = static_cast<uint64_t>((100.0 * info.workerActive) /
-                                                                   info.workerThreads);
+                        info.workerUtilPct =
+                            static_cast<uint64_t>((100.0 * info.workerActive) / info.workerThreads);
                     auto itWatch = s.requestCounts.find("watch_enabled");
                     if (itWatch != s.requestCounts.end()) {
                         info.watchKnown = true;

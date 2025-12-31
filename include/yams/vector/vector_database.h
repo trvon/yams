@@ -153,6 +153,14 @@ public:
 
     DatabaseStats getStats() const;
 
+    struct OrphanCleanupStats {
+        size_t metadata_removed = 0;
+        size_t embeddings_removed = 0;
+        size_t metadata_backfilled = 0;
+    };
+
+    Result<OrphanCleanupStats> cleanupOrphanRows();
+
     // Embedding lifecycle operations
     Result<void> updateEmbeddings(const std::vector<VectorRecord>& records);
     Result<std::vector<std::string>> getStaleEmbeddings(const std::string& model_id,

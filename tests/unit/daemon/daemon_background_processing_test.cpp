@@ -4,8 +4,8 @@
 // concurrency Covers: queue lifecycle, async processing, bus integration, stress testing, MPMC
 // correctness
 
-#include <atomic>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <memory>
@@ -327,7 +327,7 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
 
     SECTION("Process single task successfully") {
         auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
-                                                       nullptr, &coordinator, nullptr, 8);
+                                                       nullptr, &coordinator, nullptr, 32);
         queue->start(); // Start the channel poller
 
         PostIngestQueue::Task task{
@@ -359,7 +359,7 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
 
     SECTION("Queue shutdown drains pending tasks") {
         auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
-                                                       nullptr, &coordinator, nullptr, 8);
+                                                       nullptr, &coordinator, nullptr, 32);
         queue->start(); // Start the channel poller
 
         PostIngestQueue::Task task{
@@ -398,23 +398,31 @@ TEST_CASE("PostIngestQueue: Batch uses batched metadata lookup and embed jobs",
         doc.fileExtension = ".txt";
         doc.sha256Hash = "batch-" + std::to_string(i);
         doc.mimeType = "text/plain";
-        doc.indexedTime = std::chrono::floor<std::chrono::seconds>(
-            std::chrono::system_clock::now());
+        doc.indexedTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
         metadataRepo->setDocument(doc);
         store->setContent(doc.sha256Hash, payload);
         docs.push_back(doc);
     }
 
-    auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
-                                                   nullptr, &coordinator, nullptr, 32);
-    queue->start();
+    // Drain any leftover items from previous tests (singleton channels)
+    auto postIngestChannel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
+            "post_ingest", 32);
+    InternalEventBus::PostIngestTask drain;
+    while (postIngestChannel->try_pop(drain)) {
+    }
 
     auto embedChannel =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
-            "embed_jobs", 2048);
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>("embed_jobs",
+                                                                                       2048);
     InternalEventBus::EmbedJob pre;
     while (embedChannel->try_pop(pre)) {
     }
+
+    auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
+                                                   nullptr, &coordinator, nullptr, 32);
+    queue->start();
 
     for (const auto& doc : docs) {
         PostIngestQueue::Task task{
