@@ -21,7 +21,7 @@ class KnowledgeGraphStore;
 
 namespace yams::daemon {
 
-class StateComponent;
+struct StateComponent;
 
 /**
  * @brief Manages metadata database lifecycle.

@@ -20,6 +20,7 @@ if host_machine.system() == 'darwin'
   zyp_link_args = ['-fno-sanitize=thread']
 elif host_machine.system() == 'windows'
   zpdf_lib_name = 'zpdf.dll'
+  zpdf_import_lib_name = 'zpdf.lib'
   zyp_install_rpath = ''  # Windows doesn't use rpath
   zyp_link_args = ['/NODEFAULTLIB:libcmt']  # Avoid linker conflicts
 else
@@ -34,6 +35,14 @@ endif
 zpdf_src_dir = meson.current_source_dir() / 'zpdf'
 zpdf_lib_src = zpdf_src_dir / 'zig-out' / 'lib' / zpdf_lib_name
 zpdf_build_dir = meson.current_build_dir()
+if host_machine.system() == 'windows'
+  zpdf_import_lib_src = zpdf_src_dir / 'zig-out' / 'lib' / zpdf_import_lib_name
+endif
+fs = import('fs')
+if not fs.exists(zpdf_src_dir / 'build.zig')
+  warning('zpdf source not found (missing build.zig), skipping zyp plugin build.')
+  subdir_done()
+endif
 
 # Platform-specific build command
 if host_machine.system() == 'windows'
@@ -41,15 +50,17 @@ if host_machine.system() == 'windows'
   zpdf_lib = custom_target('zpdf_shared',
     command: [
       'powershell', '-NoProfile', '-Command',
-      'Push-Location "@0@"; & "@1@" build -Doptimize=ReleaseFast; Copy-Item "@2@" "@3@\\@4@"; Pop-Location'.format(
+      'Push-Location "@0@"; & "@1@" build -Doptimize=ReleaseFast; Copy-Item "@2@" "@3@\\@4@"; Copy-Item "@5@" "@3@\\@6@"; Pop-Location'.format(
         zpdf_src_dir,
         zig.full_path(),
         zpdf_lib_src,
         zpdf_build_dir,
-        zpdf_lib_name
+        zpdf_lib_name,
+        zpdf_import_lib_src,
+        zpdf_import_lib_name
       )
     ],
-    output: [zpdf_lib_name],
+    output: [zpdf_lib_name, zpdf_import_lib_name],
     build_by_default: true,
     console: true,
   )
@@ -79,6 +90,12 @@ zpdf_dep = declare_dependency(
   sources: [zpdf_lib],  # This creates the build dependency
 )
 
+# Compiler-specific flags for this plugin.
+zyp_cpp_args = []
+if meson.get_compiler('cpp').get_id() != 'msvc'
+  zyp_cpp_args = ['-std=c++20', '-fno-sanitize=thread']
+endif
+
 # Plugin sources
 zyp_sources = files(
   'zyp_plugin.cpp',
@@ -94,7 +111,7 @@ zyp_plugin = shared_module('yams_zyp',
     include_directories('.'),
   ],
   dependencies: [zpdf_dep],
-  cpp_args: ['-std=c++20', '-fno-sanitize=thread'],
+  cpp_args: zyp_cpp_args,
   link_args: zyp_link_args,
   # build_rpath ensures the plugin can find libzpdf during build/test
   build_rpath: zpdf_build_dir,

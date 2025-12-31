@@ -25,13 +25,8 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # clang-format invocation settings
 CLANG_FORMAT_ARGS=("--style=file")
-DISABLE_INCLUDE_SORT=false
-case "${OSTYPE:-}" in
-    msys*|cygwin*|win32*|mingw*)
-        DISABLE_INCLUDE_SORT=true
-        CLANG_FORMAT_ARGS+=("--sort-includes=0")
-        ;;
-esac
+DISABLE_INCLUDE_SORT=true
+CLANG_FORMAT_ARGS+=("--sort-includes=0")
 CLANG_FORMAT_ARGS_STRING="${CLANG_FORMAT_ARGS[*]}"
 export CLANG_FORMAT_ARGS_STRING
 
@@ -140,7 +135,7 @@ fi
 cd "$PROJECT_ROOT"
 
 if [[ "$DISABLE_INCLUDE_SORT" == true ]]; then
-    print_color "$YELLOW" "Detected Windows environment; preserving include order (disabling clang-format include sorting)"
+    print_color "$YELLOW" "Preserving include order (disabling clang-format include sorting)"
 fi
 
 # Get list of files to format

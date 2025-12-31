@@ -14,6 +14,20 @@ namespace yams::zyp {
 
 namespace {
 
+const uint8_t* findBytes(const uint8_t* haystack, size_t haystackLen, const uint8_t* needle,
+                         size_t needleLen) {
+    if (needleLen == 0 || haystackLen < needleLen) {
+        return nullptr;
+    }
+
+    const auto* haystackEnd = haystack + haystackLen;
+    auto it = std::search(haystack, haystackEnd, needle, needle + needleLen);
+    if (it == haystackEnd) {
+        return nullptr;
+    }
+    return it;
+}
+
 /**
  * Find a byte sequence in data, searching backwards from the end.
  */
@@ -296,7 +310,8 @@ std::optional<PdfMetadata> extractMetadata(std::span<const uint8_t> data) {
 
     // Find /Info reference in trailer
     const auto* p = trailer;
-    const auto* infoRef = static_cast<const uint8_t*>(memmem(p, end - p, "/Info", 5));
+    const auto* infoRef = findBytes(p, static_cast<size_t>(end - p),
+                                    reinterpret_cast<const uint8_t*>("/Info"), 5);
 
     if (!infoRef) {
         return std::nullopt;
@@ -325,7 +340,8 @@ std::optional<PdfMetadata> extractMetadata(std::span<const uint8_t> data) {
     p += 2; // Skip "<<"
 
     // Find dictionary end
-    const auto* dictEnd = static_cast<const uint8_t*>(memmem(p, end - p, ">>", 2));
+    const auto* dictEnd =
+        findBytes(p, static_cast<size_t>(end - p), reinterpret_cast<const uint8_t*>(">>"), 2);
     if (!dictEnd) {
         dictEnd = end;
     }

@@ -37,7 +37,7 @@ class DaemonLifecycleFsm;
 class ExternalPluginHost;
 class IModelProvider;
 class PostIngestQueue;
-class StateComponent;
+struct StateComponent;
 struct DaemonConfig;
 struct ExternalPluginHostConfig;
 

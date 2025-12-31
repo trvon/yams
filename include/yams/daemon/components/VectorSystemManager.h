@@ -19,7 +19,7 @@ class VectorIndexManager;
 
 namespace yams::daemon {
 
-class StateComponent;
+struct StateComponent;
 class ServiceManagerFsm;
 class IModelProvider;
 
