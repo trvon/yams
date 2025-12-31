@@ -1439,7 +1439,9 @@ std::string sanitizeFTS5Query(const std::string& query) {
 Result<SearchResults>
 MetadataRepository::search(const std::string& query, int limit, int offset,
                            const std::optional<std::vector<int64_t>>& docIds) {
+    spdlog::info("[MetadataRepo] search() called with query='{}' limit={}", query, limit);
     return executeQuery<SearchResults>([&](Database& db) -> Result<SearchResults> {
+        spdlog::info("[MetadataRepo] executeQuery lambda entered");
         SearchResults results;
         results.query = query;
 

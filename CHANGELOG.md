@@ -58,6 +58,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     issue with `std::mutex`/`std::condition_variable` interaction.
 - Download CLI now attempts daemon-first execution (when simple options are used) and falls back
   to local services on failure, reducing lock contention.
+- Streaming responses now use a 30-second chunk timeout by default to prevent hangs when
+  processing stalls. Previously disabled (0ms default).
+- Streaming backpressure: when queue overflows, the producer loop now stops immediately
+  instead of continuing to generate chunks that can't be sent.
 
 ### Added
 - MCP `graph` tool for knowledge graph queries (parity with CLI `yams graph`).
@@ -68,3 +72,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Graph CLI: `--dead-code-report` to emit scoped isolated-node reports (src/include allowlist).
 - Download CLI: progress streaming (human/json) via DownloadService callbacks.
 - Benchmarks: ingestion throughput baseline config and repeatable workflow docs.
+- Symbol-aware search ranking: symbol definitions now rank higher than usages in search
+  results. Configurable via `YAMS_SYMBOL_WEIGHT` env var (default 0.15).

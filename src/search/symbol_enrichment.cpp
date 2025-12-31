@@ -50,6 +50,8 @@ bool SymbolEnricher::enrichResult(SearchResultItem& result, const std::string& q
 
         std::unordered_set<std::int64_t> seenNodes;
         float maxRelevance = 0.0f;
+        bool hasDefinition = false;
+        float bestDefinitionScore = 1.0f;
 
         for (const auto& entity : entitiesRes.value()) {
             if (!entity.nodeId || seenNodes.count(entity.nodeId.value())) {
@@ -62,7 +64,6 @@ bool SymbolEnricher::enrichResult(SearchResultItem& result, const std::string& q
                 continue;
             }
 
-            // Check if symbol name matches query
             bool matches = false;
             if (!query_text.empty()) {
                 std::string lowerQuery = query_text;
@@ -77,11 +78,21 @@ bool SymbolEnricher::enrichResult(SearchResultItem& result, const std::string& q
             if (matches) {
                 maxRelevance = std::max(maxRelevance, entity.confidence.value_or(0.5f));
 
-                // Determine match type from offset
-                if (entity.startOffset && entity.endOffset) {
-                    // Check if this is a definition (heuristic: first occurrence)
+                // PBI-074: Check KG edges to determine if this is a definition
+                bool isDefinition = false;
+                auto inEdges = kg_store_->getEdgesTo(entity.nodeId.value(), "defines", 10, 0);
+                if (inEdges.has_value() && !inEdges.value().empty()) {
+                    isDefinition = true;
+                } else if (entity.startOffset && entity.endOffset) {
+                    // Fallback: check if symbol has offset (likely definition)
+                    isDefinition = true;
+                }
+
+                if (isDefinition) {
+                    hasDefinition = true;
+                    bestDefinitionScore = std::max(bestDefinitionScore, 1.5f);
                     ctx.matchType = "definition";
-                } else {
+                } else if (ctx.matchType.empty()) {
                     ctx.matchType = "usage";
                 }
             }
@@ -94,6 +105,7 @@ bool SymbolEnricher::enrichResult(SearchResultItem& result, const std::string& q
         }
 
         ctx.symbolScore = maxRelevance;
+        ctx.definitionScore = bestDefinitionScore;
         ctx.isSymbolQuery = !query_text.empty() && maxRelevance > 0.3f;
 
         result.symbolContext = std::move(ctx);

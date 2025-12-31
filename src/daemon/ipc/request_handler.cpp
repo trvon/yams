@@ -1509,8 +1509,14 @@ RequestHandler::write_chunk(boost::asio::local::stream_protocol::socket& socket,
                          enq.error().message);
             if (enq.error().code == ErrorCode::RateLimited ||
                 enq.error().code == ErrorCode::ResourceExhausted) {
-                co_return co_await write_error_immediate(socket, request_id, enq.error().code,
-                                                         enq.error().message, fsm);
+                // Write error to client, then propagate backpressure error to stop producer
+                auto immediate_res = co_await write_error_immediate(
+                    socket, request_id, enq.error().code, enq.error().message, fsm);
+                if (!immediate_res) {
+                    co_return immediate_res.error();
+                }
+                // Even if write succeeded, propagate original error to stop streaming loop
+                co_return enq.error();
             }
             co_return enq.error();
         }

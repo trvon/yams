@@ -273,7 +273,8 @@ TEST_CASE("PostIngestQueue - FTS5 Indexing", "[daemon][post-ingest][fts5]") {
         req.query = "xyzzy"; // Search for unique token
         req.type = "keyword";
         req.limit = 10;
-        req.showHash = true; // REQUIRED: populate hash field in results
+        req.showHash = true;     // REQUIRED: populate hash field in results
+        req.globalSearch = true; // Bypass session isolation for test
 
         // Run search using async helper
         boost::asio::io_context ioc;
@@ -309,7 +310,10 @@ TEST_CASE("PostIngestQueue - Synchronous Indexing", "[daemon][post-ingest][sync]
         auto* queue = fixture.serviceManager_->getPostIngestQueue();
         REQUIRE(queue != nullptr);
 
-        auto hash = fixture.storeDocument("sync_test.txt", "Sync content");
+        auto hash = fixture.storeDocument("sync_test.txt", "Sync content for async test");
+
+        // Enqueue for post-ingest processing
+        fixture.serviceManager_->enqueuePostIngest(hash, "text/plain");
 
         REQUIRE(fixture.waitForQueueDrain(std::chrono::seconds(5)));
 
@@ -321,6 +325,7 @@ TEST_CASE("PostIngestQueue - Synchronous Indexing", "[daemon][post-ingest][sync]
         req.query = "Sync";
         req.type = "keyword";
         req.limit = 10;
+        req.globalSearch = true; // Bypass session isolation for test
 
         boost::asio::io_context ioc;
         auto fut = boost::asio::co_spawn(ioc, searchService->search(req), boost::asio::use_future);

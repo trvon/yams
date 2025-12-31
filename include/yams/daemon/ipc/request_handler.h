@@ -76,9 +76,10 @@ public:
         size_t chunk_size = 512 * 1024;   // Default chunk size (512KB, increased)
         size_t header_flush_delay_ms = 0; // Time to wait before flushing header (0 = immediate)
         size_t chunk_flush_delay_ms = 0;  // Time to wait before flushing chunks (0 = immediate)
-        std::chrono::seconds write_timeout{30};            // Timeout for write operations
-        std::chrono::seconds read_timeout{30};             // Timeout for read operations
-        std::chrono::milliseconds stream_chunk_timeout{0}; // Timeout for next_chunk() (0=disabled)
+        std::chrono::seconds write_timeout{30}; // Timeout for write operations
+        std::chrono::seconds read_timeout{30};  // Timeout for read operations
+        std::chrono::milliseconds stream_chunk_timeout{
+            30000};                        // Timeout for next_chunk() (30s default)
         bool auto_detect_streaming = true; // Auto-detect requests that benefit from streaming
         bool force_streaming = false;      // Force streaming for all responses
         size_t streaming_threshold = 1024 * 1024; // Size threshold for auto-streaming (1MB)

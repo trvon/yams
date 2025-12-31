@@ -15,6 +15,7 @@
 #endif
 #include <yams/plugins/search_provider_v1.h>
 #include <yams/search/query_qualifiers.hpp>
+#include <yams/search/symbol_enrichment.h>
 
 #include <algorithm>
 #include <atomic>
@@ -373,6 +374,20 @@ public:
         } catch (...) {
             // Ignore config errors; keep enhancements disabled.
             enhancedCfg_ = {};
+        }
+
+        // PBI-074: Initialize symbol enricher for ranking boost
+        if (ctx_.kgStore) {
+            symbolEnricher_ = std::make_shared<yams::search::SymbolEnricher>(ctx_.kgStore);
+        }
+
+        // Symbol weight configurable via env var (default 0.15 = 15% boost)
+        if (const char* w = std::getenv("YAMS_SYMBOL_WEIGHT")) {
+            try {
+                symbolWeight_ = std::stof(w);
+                symbolWeight_ = std::max(0.0f, std::min(1.0f, symbolWeight_));
+            } catch (...) {
+            }
         }
     }
 
@@ -749,6 +764,8 @@ private:
     EnhancedConfig enhancedCfg_{}; // off by default
     EnhancedSearchExecutor enhanced_{};
     std::shared_ptr<yams::search::HotzoneManager> hotzones_{};
+    std::shared_ptr<yams::search::SymbolEnricher> symbolEnricher_{};
+    float symbolWeight_{0.15f};
 
     std::string resolveSearchType(const SearchRequest& req, bool* forcedHybridFallback) const {
         if (forcedHybridFallback)
@@ -1263,7 +1280,8 @@ private:
 
             std::atomic<size_t> next{0};
             std::vector<std::optional<SearchItem>> slots(n);
-            auto worker = [&]() {
+            const std::string& queryText = req.query;
+            auto worker = [&, this]() {
                 while (true) {
                     const size_t i = next.fetch_add(1);
                     if (i >= n)
@@ -1271,13 +1289,28 @@ private:
                     const auto& r = *candidates[i];
                     SearchItem it;
                     it.id = static_cast<int64_t>(i + 1);
-                    it.title = r.document.fileName; // Use fileName since DocumentInfo has no title
+                    it.title = r.document.fileName;
                     it.path = r.document.filePath;
                     it.score = r.score;
                     if (!r.snippet.empty())
                         it.snippet = r.snippet;
-                    // Note: New SearchEngine provides unified score, not component scores
-                    // verbose mode component scores are not available in the new engine
+
+                    // PBI-074: Apply symbol ranking boost
+                    if (symbolEnricher_ && symbolWeight_ > 0.0f) {
+                        yams::search::SearchResultItem enrichItem;
+                        enrichItem.path = r.document.filePath;
+                        enrichItem.metadata["sha256_hash"] = r.document.sha256Hash;
+                        if (symbolEnricher_->enrichResult(enrichItem, queryText)) {
+                            if (enrichItem.symbolContext &&
+                                enrichItem.symbolContext->isSymbolQuery) {
+                                float boost =
+                                    1.0f + (symbolWeight_ * enrichItem.symbolContext->symbolScore);
+                                boost *= enrichItem.symbolContext->definitionScore;
+                                it.score *= boost;
+                            }
+                        }
+                    }
+
                     slots[i] = std::move(it);
                 }
             };
@@ -1291,6 +1324,13 @@ private:
             for (size_t i = 0; i < n; ++i)
                 if (slots[i].has_value())
                     resp.results.push_back(std::move(*slots[i]));
+
+            // PBI-074: Re-sort after symbol boost applied
+            if (symbolEnricher_ && symbolWeight_ > 0.0f) {
+                std::sort(
+                    resp.results.begin(), resp.results.end(),
+                    [](const SearchItem& a, const SearchItem& b) { return a.score > b.score; });
+            }
         }
 
         resp.total = resp.results.size();

@@ -50,6 +50,7 @@ struct SymbolContext {
     std::vector<SymbolInfo> symbols; // Symbols found in this result
     std::string matchType;           // "definition", "usage", "comment", "import"
     float symbolScore = 0.0f;        // Symbol-based relevance score [0,1]
+    float definitionScore = 1.0f;    // PBI-074: 1.5+ for definitions, 1.0 for usages
     bool isSymbolQuery = false;      // Whether query was detected as symbol search
 };
 
