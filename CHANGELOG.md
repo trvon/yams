@@ -62,6 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   processing stalls. Previously disabled (0ms default).
 - Streaming backpressure: when queue overflows, the producer loop now stops immediately
   instead of continuing to generate chunks that can't be sent.
+- Add command now returns immediately for file paths instead of blocking on hash computation.
+  Hash is computed asynchronously during ingestion.
 
 ### Added
 - MCP `graph` tool for knowledge graph queries (parity with CLI `yams graph`).
@@ -74,3 +76,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Benchmarks: ingestion throughput baseline config and repeatable workflow docs.
 - Symbol-aware search ranking: symbol definitions now rank higher than usages in search
   results. Configurable via `YAMS_SYMBOL_WEIGHT` env var (default 0.15).
+- Zig language support in symbol extractor plugin: functions, structs/enums/unions,
+  fields, imports, and call expressions are now extracted from .zig files.

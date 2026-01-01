@@ -566,11 +566,31 @@ inline constexpr LanguageConfig lang_p4 = {
                                 "(methodCallExpression method: (IDENTIFIER) @callee) @call"),
 };
 
+// Zig - systems programming language with comptime and safety features
+inline constexpr LanguageConfig lang_zig = {
+    .name = "zig",
+    .aliases = {},
+    .alias_count = 0,
+    .class_types = makeNodeTypes("container_decl", "container_decl_auto"),
+    .field_types = makeNodeTypes("container_field", "container_field_init"),
+    .function_types = makeNodeTypes("fn_decl", "extern_fn_decl"),
+    .import_types = makeNodeTypes("builtin_call_expr"),
+    .identifier_types = makeNodeTypes("identifier", "field_access"),
+    .function_queries = makeQueries("(fn_decl (fn_proto name: (identifier) @name))",
+                                    "(extern_fn_decl (fn_proto name: (identifier) @name))"),
+    .class_queries = makeQueries("(var_decl (identifier) @name (container_decl))",
+                                 "(var_decl (identifier) @name (container_decl_auto))"),
+    .import_queries = makeQueries("(builtin_call_expr (identifier) @builtin "
+                                  "(call_args (string_literal) @path)) @call"),
+    .call_queries = makeQueries("(call_expr (identifier) @callee) @call",
+                                "(call_expr (field_access (identifier) @callee)) @call"),
+};
+
 // Master configuration table
-inline constexpr std::array<const LanguageConfig*, 17> language_configs = {
+inline constexpr std::array<const LanguageConfig*, 18> language_configs = {
     &lang_cpp,        &lang_c,          &lang_python,   &lang_rust, &lang_go,     &lang_java,
     &lang_javascript, &lang_typescript, &lang_csharp,   &lang_php,  &lang_kotlin, &lang_perl,
-    &lang_r,          &lang_sql,        &lang_solidity, &lang_dart, &lang_p4,
+    &lang_r,          &lang_sql,        &lang_solidity, &lang_dart, &lang_p4,     &lang_zig,
 };
 
 // Lookup function - returns nullptr if language not found

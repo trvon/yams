@@ -544,29 +544,28 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                 response.documentsAdded = isDir ? 0 : 1;
                 response.message = "Request accepted for asynchronous processing.";
 
-                if (!isDir) {
+                // For in-memory content, compute hash inline (small/fast).
+                // For file paths, skip blocking I/O - hash is computed by async processor.
+                if (!isDir && !req.content.empty()) {
                     try {
-                        std::unique_ptr<yams::crypto::IContentHasher> hasher;
-                        hasher = yams::crypto::createSHA256Hasher();
-                        if (!req.content.empty()) {
-                            hasher->init();
-                            auto data = std::span<const std::byte>(
-                                reinterpret_cast<const std::byte*>(req.content.data()),
-                                req.content.size());
-                            hasher->update(data);
-                            response.hash = hasher->finalize();
-                            response.size = req.content.size();
-                        } else if (!req.path.empty()) {
-                            std::error_code ec;
-                            if (std::filesystem::is_regular_file(req.path, ec) && !ec) {
-                                response.hash = hasher->hashFile(req.path);
-                                response.size =
-                                    static_cast<size_t>(std::filesystem::file_size(req.path, ec));
-                                if (ec)
-                                    response.size = 0;
-                            }
-                        }
+                        auto hasher = yams::crypto::createSHA256Hasher();
+                        hasher->init();
+                        auto data = std::span<const std::byte>(
+                            reinterpret_cast<const std::byte*>(req.content.data()),
+                            req.content.size());
+                        hasher->update(data);
+                        response.hash = hasher->finalize();
+                        response.size = req.content.size();
                     } catch (...) {
+                    }
+                } else if (!isDir && !req.path.empty()) {
+                    // Return file size but skip blocking hash computation
+                    std::error_code ec;
+                    if (std::filesystem::is_regular_file(req.path, ec) && !ec) {
+                        response.size =
+                            static_cast<size_t>(std::filesystem::file_size(req.path, ec));
+                        if (ec)
+                            response.size = 0;
                     }
                 }
                 co_return response;

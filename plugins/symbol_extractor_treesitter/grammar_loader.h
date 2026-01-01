@@ -94,6 +94,7 @@ private:
         {"p4", "YAMS_TS_P4_LIB", "tree_sitter_p4", "libtree-sitter-p4.so"},
         {"p4_16", "YAMS_TS_P4_LIB", "tree_sitter_p4", "libtree-sitter-p4.so"},
         {"p4lang", "YAMS_TS_P4_LIB", "tree_sitter_p4", "libtree-sitter-p4.so"},
+        {"zig", "YAMS_TS_ZIG_LIB", "tree_sitter_zig", "libtree-sitter-zig.so"},
     };
 
     const GrammarSpec* findSpec(std::string_view language) const;
@@ -143,6 +144,7 @@ private:
         {"solidity", "JoranHonig/tree-sitter-solidity"},
         {"dart", "UserNobody14/tree-sitter-dart"},
         {"p4", "prona-p4-learning-platform/tree-sitter-p4"},
+        {"zig", "maxxnino/tree-sitter-zig"},
     };
 };
 
