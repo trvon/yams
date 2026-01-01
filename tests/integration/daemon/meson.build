@@ -73,12 +73,13 @@ else
       env: {
         'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
         'YAMS_DISABLE_VECTORS': '1',
+        'TSAN_OPTIONS': _test_tsan_options,
       },
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
       args: ['--allow-running-no-tests'],
     )
-    
+
     daemon_shutdown_exe = executable('yams_daemon_shutdown_tests_catch2',
       daemon_shutdown_srcs,
       include_directories: incs,
@@ -93,6 +94,7 @@ else
       env: {
         'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
         'YAMS_DISABLE_VECTORS': '1',
+        'TSAN_OPTIONS': _test_tsan_options,
       },
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
@@ -113,6 +115,7 @@ else
       env: {
         'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
         'YAMS_DISABLE_VECTORS': '1',
+        'TSAN_OPTIONS': _test_tsan_options,
       },
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
@@ -133,6 +136,7 @@ else
       env: {
         'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
         'YAMS_DISABLE_VECTORS': '1',
+        'TSAN_OPTIONS': _test_tsan_options,
       },
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
@@ -153,6 +157,7 @@ else
       env: {
         'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
         'YAMS_DISABLE_VECTORS': '1',
+        'TSAN_OPTIONS': _test_tsan_options,
       },
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
@@ -173,6 +178,7 @@ else
       env: {
         'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
         'YAMS_DISABLE_VECTORS': '1',
+        'TSAN_OPTIONS': _test_tsan_options,
       },
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
@@ -193,6 +199,7 @@ else
       env: {
         'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
         'YAMS_DISABLE_VECTORS': '1',
+        'TSAN_OPTIONS': _test_tsan_options,
       },
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
@@ -213,6 +220,7 @@ else
       env: {
         'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
         'YAMS_DISABLE_VECTORS': '1',
+        'TSAN_OPTIONS': _test_tsan_options,
       },
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
@@ -233,6 +241,7 @@ else
       env: {
         'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
         'YAMS_DISABLE_VECTORS': '1',
+        'TSAN_OPTIONS': _test_tsan_options,
       },
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
@@ -251,6 +260,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'kg', 'pbi-009'],
       env: {
         'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+        'TSAN_OPTIONS': _test_tsan_options,
       },
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
@@ -270,6 +280,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'kg', 'ghidra', 'pbi-3jb'],
       env: {
         'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+        'TSAN_OPTIONS': _test_tsan_options,
       },
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),

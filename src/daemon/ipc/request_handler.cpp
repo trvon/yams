@@ -19,12 +19,14 @@
 #include <string>
 #include <tuple>
 #include <utility>
+#include <boost/asio/as_tuple.hpp>
+#include <boost/asio/associated_executor.hpp>
+#include <boost/asio/async_result.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/experimental/as_tuple.hpp>
-#include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/read.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -335,24 +337,55 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                 continue;
             }
 
-            using namespace boost::asio::experimental::awaitable_operators;
             // Inactivity-based timeout for reads: reset timer every awaited read
-            boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
-            timer.expires_after(config_.read_timeout);
+            // Race read against timeout using async_initiate (no experimental APIs)
+            auto executor = co_await boost::asio::this_coro::executor;
+            using ReadResult = std::tuple<boost::system::error_code, std::size_t>;
+            using RaceResult = std::variant<ReadResult, bool>; // ReadResult or timedOut
 
-            // Race the read against the timer
-            auto read_or_timeout = co_await (
-                boost::asio::async_read(
-                    *sock, boost::asio::buffer(buf), boost::asio::transfer_at_least(1),
-                    boost::asio::experimental::as_tuple(boost::asio::use_awaitable)) ||
-                timer.async_wait(boost::asio::experimental::as_tuple(boost::asio::use_awaitable)));
+            auto read_or_timeout =
+                co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
+                                                     void(std::exception_ptr, RaceResult)>(
+                    [sock, &buf, executor, timeout = config_.read_timeout](auto handler) mutable {
+                        auto completed = std::make_shared<std::atomic<bool>>(false);
+                        auto timer = std::make_shared<boost::asio::steady_timer>(executor);
+                        timer->expires_after(timeout);
+
+                        using HandlerT = std::decay_t<decltype(handler)>;
+                        auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
+                        auto completion_exec =
+                            boost::asio::get_associated_executor(*handlerPtr, executor);
+
+                        timer->async_wait([completed, handlerPtr, completion_exec](
+                                              const boost::system::error_code& ec) mutable {
+                            if (ec == boost::asio::error::operation_aborted)
+                                return;
+                            if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                                boost::asio::post(completion_exec, [h = std::move(
+                                                                        *handlerPtr)]() mutable {
+                                    std::move(h)(nullptr, RaceResult(std::in_place_index<1>, true));
+                                });
+                            }
+                        });
+
+                        boost::asio::async_read(
+                            *sock, boost::asio::buffer(buf), boost::asio::transfer_at_least(1),
+                            [timer, completed, handlerPtr, completion_exec](
+                                const boost::system::error_code& ec, std::size_t bytes) mutable {
+                                if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                                    timer->cancel();
+                                    boost::asio::post(completion_exec, [h = std::move(*handlerPtr),
+                                                                        ec, bytes]() mutable {
+                                        std::move(h)(nullptr, RaceResult(std::in_place_index<0>,
+                                                                         ReadResult{ec, bytes}));
+                                    });
+                                }
+                            });
+                    },
+                    boost::asio::use_awaitable);
 
             size_t bytes_read = 0;
             if (read_or_timeout.index() == 1) {
-                const auto [timer_ec] = std::get<1>(read_or_timeout);
-                if (timer_ec && timer_ec != boost::asio::error::operation_aborted) {
-                    spdlog::debug("Read timer cancelled with error: {}", timer_ec.message());
-                }
                 // Idle persistent connection; keep connection open and continue.
                 // IMPORTANT: Do not signal FSM on idle timeouts. The FSM's on_timeout()
                 // is reserved for operation deadlines (header/payload/write). Calling it
@@ -1223,14 +1256,48 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
             if (config_.graceful_half_close) {
                 boost::system::error_code ig;
                 socket.shutdown(boost::asio::socket_base::shutdown_send, ig);
-                using namespace boost::asio::experimental::awaitable_operators;
-                boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
-                timer.expires_after(config_.graceful_drain_timeout);
+                // Race drain read against timeout using async_initiate (no experimental APIs)
+                auto executor = co_await boost::asio::this_coro::executor;
                 std::array<uint8_t, 256> tmp{};
-                co_await (boost::asio::async_read(socket, boost::asio::buffer(tmp),
-                                                  boost::asio::transfer_at_least(1),
-                                                  boost::asio::use_awaitable) ||
-                          timer.async_wait(boost::asio::use_awaitable));
+                co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
+                                                     void(std::exception_ptr, bool)>(
+                    [&socket, &tmp, executor,
+                     timeout = config_.graceful_drain_timeout](auto handler) mutable {
+                        auto completed = std::make_shared<std::atomic<bool>>(false);
+                        auto timer = std::make_shared<boost::asio::steady_timer>(executor);
+                        timer->expires_after(timeout);
+
+                        using HandlerT = std::decay_t<decltype(handler)>;
+                        auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
+                        auto completion_exec =
+                            boost::asio::get_associated_executor(*handlerPtr, executor);
+
+                        timer->async_wait([completed, handlerPtr, completion_exec](
+                                              const boost::system::error_code& ec) mutable {
+                            if (ec == boost::asio::error::operation_aborted)
+                                return;
+                            if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                                boost::asio::post(completion_exec,
+                                                  [h = std::move(*handlerPtr)]() mutable {
+                                                      std::move(h)(nullptr, true);
+                                                  });
+                            }
+                        });
+
+                        boost::asio::async_read(
+                            socket, boost::asio::buffer(tmp), boost::asio::transfer_at_least(1),
+                            [timer, completed, handlerPtr, completion_exec](
+                                const boost::system::error_code&, std::size_t) mutable {
+                                if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                                    timer->cancel();
+                                    boost::asio::post(completion_exec,
+                                                      [h = std::move(*handlerPtr)]() mutable {
+                                                          std::move(h)(nullptr, false);
+                                                      });
+                                }
+                            });
+                    },
+                    boost::asio::use_awaitable);
                 // Close regardless after drain/timeout
                 socket.close();
                 spdlog::debug("graceful half-close complete (request_id={} fd={})", request_id,
@@ -1360,20 +1427,56 @@ RequestHandler::write_header_frame(boost::asio::local::stream_protocol::socket& 
     // Backpressure accounting and write the header frame with timeout
     if (fsm)
         fsm->on_write_queued(frame_ref.size());
-    using namespace boost::asio::experimental::awaitable_operators;
-    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
-    timer.expires_after(config_.write_timeout);
+    // Race write against timeout using async_initiate (no experimental APIs)
+    auto executor = co_await boost::asio::this_coro::executor;
+    using WriteResult = std::tuple<boost::system::error_code, std::size_t>;
+    using RaceResult = std::variant<WriteResult, bool>;
+
     auto write_or_timeout =
-        co_await (boost::asio::async_write(socket, boost::asio::buffer(frame_ref),
-                                           boost::asio::use_awaitable) ||
-                  timer.async_wait(boost::asio::use_awaitable));
+        co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
+                                             void(std::exception_ptr, RaceResult)>(
+            [&socket, &frame_ref, executor, timeout = config_.write_timeout](auto handler) mutable {
+                auto completed = std::make_shared<std::atomic<bool>>(false);
+                auto timer = std::make_shared<boost::asio::steady_timer>(executor);
+                timer->expires_after(timeout);
+
+                using HandlerT = std::decay_t<decltype(handler)>;
+                auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
+                auto completion_exec = boost::asio::get_associated_executor(*handlerPtr, executor);
+
+                timer->async_wait([completed, handlerPtr,
+                                   completion_exec](const boost::system::error_code& ec) mutable {
+                    if (ec == boost::asio::error::operation_aborted)
+                        return;
+                    if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                        boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
+                            std::move(h)(nullptr, RaceResult(std::in_place_index<1>, true));
+                        });
+                    }
+                });
+
+                boost::asio::async_write(
+                    socket, boost::asio::buffer(frame_ref),
+                    [timer, completed, handlerPtr, completion_exec](
+                        const boost::system::error_code& ec, std::size_t bytes) mutable {
+                        if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                            timer->cancel();
+                            boost::asio::post(
+                                completion_exec, [h = std::move(*handlerPtr), ec, bytes]() mutable {
+                                    std::move(h)(nullptr, RaceResult(std::in_place_index<0>,
+                                                                     WriteResult{ec, bytes}));
+                                });
+                        }
+                    });
+            },
+            boost::asio::use_awaitable);
 
     if (write_or_timeout.index() == 1) {
         const std::string msg = "Write timeout (header)";
         spdlog::debug("{}", msg);
         co_return Error{ErrorCode::Timeout, msg};
     }
-    boost::system::error_code ec;
+    auto& [ec, bytes_written] = std::get<0>(write_or_timeout);
     if (ec) {
         const auto& msg = ec.message();
         if (msg.find("Connection reset by peer") != std::string::npos ||
@@ -1846,16 +1949,61 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
         spdlog::info("[STREAM] req_id={} chunk #{} stream_chunk_timeout={}ms", request_id,
                      chunk_count + 1, config_.stream_chunk_timeout.count());
         if (config_.stream_chunk_timeout.count() > 0) {
-            using namespace boost::asio::experimental::awaitable_operators;
+            // Race next_chunk() against timeout using async_initiate (no experimental APIs)
             spdlog::info("[STREAM] req_id={} using timeout path, about to co_await next_chunk",
                          request_id);
-            boost::asio::steady_timer chunk_timer(co_await boost::asio::this_coro::executor);
-            chunk_timer.expires_after(config_.stream_chunk_timeout);
+            auto executor = co_await boost::asio::this_coro::executor;
+            using ChunkResult = RequestProcessor::ResponseChunk;
+            using RaceResult = std::variant<ChunkResult, bool>; // ChunkResult or timedOut
 
             auto chunk_or_timeout =
-                co_await (processor->next_chunk() ||
-                          chunk_timer.async_wait(
-                              boost::asio::experimental::as_tuple(boost::asio::use_awaitable)));
+                co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
+                                                     void(std::exception_ptr, RaceResult)>(
+                    [processor, executor,
+                     timeout = config_.stream_chunk_timeout](auto handler) mutable {
+                        auto completed = std::make_shared<std::atomic<bool>>(false);
+                        auto timer = std::make_shared<boost::asio::steady_timer>(executor);
+                        timer->expires_after(timeout);
+
+                        using HandlerT = std::decay_t<decltype(handler)>;
+                        auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
+                        auto completion_exec =
+                            boost::asio::get_associated_executor(*handlerPtr, executor);
+
+                        // Set up timeout
+                        timer->async_wait([completed, handlerPtr, completion_exec](
+                                              const boost::system::error_code& ec) mutable {
+                            if (ec == boost::asio::error::operation_aborted)
+                                return;
+                            if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                                boost::asio::post(completion_exec, [h = std::move(
+                                                                        *handlerPtr)]() mutable {
+                                    std::move(h)(nullptr, RaceResult(std::in_place_index<1>, true));
+                                });
+                            }
+                        });
+
+                        // Spawn the awaitable work
+                        boost::asio::co_spawn(
+                            executor,
+                            [processor, timer, completed, handlerPtr,
+                             completion_exec]() mutable -> boost::asio::awaitable<void> {
+                                ChunkResult result = co_await processor->next_chunk();
+
+                                if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                                    timer->cancel();
+                                    boost::asio::post(
+                                        completion_exec, [h = std::move(*handlerPtr),
+                                                          r = std::move(result)]() mutable {
+                                            std::move(h)(nullptr, RaceResult(std::in_place_index<0>,
+                                                                             std::move(r)));
+                                        });
+                                }
+                            },
+                            boost::asio::detached);
+                    },
+                    boost::asio::use_awaitable);
+
             spdlog::info("[STREAM] req_id={} co_await returned, index={}", request_id,
                          chunk_or_timeout.index());
 
@@ -1976,14 +2124,48 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
         if (config_.graceful_half_close) {
             boost::system::error_code ig;
             socket.shutdown(boost::asio::socket_base::shutdown_send, ig);
-            using namespace boost::asio::experimental::awaitable_operators;
-            boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
-            timer.expires_after(config_.graceful_drain_timeout);
+            // Race drain read against timeout using async_initiate (no experimental APIs)
+            auto executor = co_await boost::asio::this_coro::executor;
             std::array<uint8_t, 256> tmp{};
-            co_await (boost::asio::async_read(socket, boost::asio::buffer(tmp),
-                                              boost::asio::transfer_at_least(1),
-                                              boost::asio::use_awaitable) ||
-                      timer.async_wait(boost::asio::use_awaitable));
+            co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
+                                                 void(std::exception_ptr, bool)>(
+                [&socket, &tmp, executor,
+                 timeout = config_.graceful_drain_timeout](auto handler) mutable {
+                    auto completed = std::make_shared<std::atomic<bool>>(false);
+                    auto timer = std::make_shared<boost::asio::steady_timer>(executor);
+                    timer->expires_after(timeout);
+
+                    using HandlerT = std::decay_t<decltype(handler)>;
+                    auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
+                    auto completion_exec =
+                        boost::asio::get_associated_executor(*handlerPtr, executor);
+
+                    timer->async_wait([completed, handlerPtr, completion_exec](
+                                          const boost::system::error_code& ec) mutable {
+                        if (ec == boost::asio::error::operation_aborted)
+                            return;
+                        if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                            boost::asio::post(completion_exec,
+                                              [h = std::move(*handlerPtr)]() mutable {
+                                                  std::move(h)(nullptr, true);
+                                              });
+                        }
+                    });
+
+                    boost::asio::async_read(
+                        socket, boost::asio::buffer(tmp), boost::asio::transfer_at_least(1),
+                        [timer, completed, handlerPtr,
+                         completion_exec](const boost::system::error_code&, std::size_t) mutable {
+                            if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                                timer->cancel();
+                                boost::asio::post(completion_exec,
+                                                  [h = std::move(*handlerPtr)]() mutable {
+                                                      std::move(h)(nullptr, false);
+                                                  });
+                            }
+                        });
+                },
+                boost::asio::use_awaitable);
             socket.close();
             spdlog::debug("graceful half-close complete (streaming) (request_id={} fd={})",
                           request_id, sock_fd);

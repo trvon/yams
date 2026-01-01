@@ -33,6 +33,11 @@ if not catch2_main_dep.found()
   catch2_main_dep = catch2_dep
 endif
 
+# TSAN suppressions file for tests (if TSAN is enabled)
+# Must be defined early before subdirs are included
+_tsan_suppressions_file = meson.project_source_root() / 'tsan.suppressions'
+_test_tsan_options = 'suppressions=' + _tsan_suppressions_file
+
 # Normalize CLI11 discovery across environments (pkg-config -> Conan/CMake)
 # (touch) reconfigure to drop/accept test file changes [2]
 fs = import('fs')

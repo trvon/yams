@@ -64,6 +64,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of continuing to generate chunks that can't be sent.
 - Add command now returns immediately for file paths instead of blocking on hash computation.
   Hash is computed asynchronously during ingestion.
+- Replaced experimental boost::asio channel APIs with stable `async_initiate` pattern in
+  DatabaseManager, ServiceManager, SearchEngineManager, and init_utils. This addresses
+  TSAN data races in experimental channel implementations.
+- Replaced experimental `awaitable_operators` (operator||) with stable `async_initiate`
+  pattern in request_handler, SocketServer, daemon client files (asio_connection,
+  asio_transport, asio_connection_pool, daemon_client). Completes removal of all
+  experimental boost::asio APIs.
+- Fixed `experimental::as_tuple` → stable `as_tuple` in request_handler.
 
 ### Added
 - MCP `graph` tool for knowledge graph queries (parity with CLI `yams graph`).

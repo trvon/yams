@@ -33,11 +33,11 @@
 #endif
 
 #include <boost/asio/as_tuple.hpp>
+#include <boost/asio/associated_executor.hpp>
+#include <boost/asio/async_result.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/experimental/awaitable_operators.hpp>
-#include <boost/asio/experimental/channel.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -1912,76 +1912,75 @@ boost::asio::awaitable<bool> ServiceManager::co_openDatabase(const std::filesyst
                                                              yams::compat::stop_token token) {
     auto ex = co_await boost::asio::this_coro::executor;
 
-    // Use pure awaitable pattern with timeout timer (no futures!)
-    boost::asio::steady_timer timeout_timer(ex);
-    timeout_timer.expires_after(std::chrono::milliseconds(timeout_ms));
-
     try {
-        using ResultPtr = std::shared_ptr<Result<void>>;
-        using Channel = boost::asio::experimental::basic_channel<
-            boost::asio::any_io_executor, boost::asio::experimental::channel_traits<std::mutex>,
-            void(std::exception_ptr, ResultPtr)>;
-        auto resultChannel = std::make_shared<Channel>(ex, 2);
+        // Use async_initiate pattern with timeout racing (no experimental APIs)
+        co_return co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
+                                                       void(std::exception_ptr, bool)>(
+            [this, dbPath, ex, timeout_ms](auto handler) mutable {
+                // Shared state for race coordination
+                auto completed = std::make_shared<std::atomic<bool>>(false);
+                auto timer = std::make_shared<boost::asio::steady_timer>(ex);
+                timer->expires_after(std::chrono::milliseconds(timeout_ms));
 
-        boost::asio::co_spawn(
-            ex,
-            [this, dbPath, resultChannel]() -> boost::asio::awaitable<void> {
-                std::exception_ptr opException;
-                ResultPtr opResult;
-                try {
-                    auto r = database_->open(dbPath.string(), metadata::ConnectionMode::Create);
-                    opResult = std::make_shared<Result<void>>(std::move(r));
-                } catch (...) {
-                    opException = std::current_exception();
-                }
-                resultChannel->try_send(opException, std::move(opResult));
-                co_return;
+                // Capture handler in shared_ptr for safe sharing between timer and work
+                using HandlerT = std::decay_t<decltype(handler)>;
+                auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
+                auto completion_exec = boost::asio::get_associated_executor(*handlerPtr, ex);
+
+                // Set up timeout
+                timer->async_wait([completed, handlerPtr, completion_exec,
+                                   timeout_ms](const boost::system::error_code& ec) mutable {
+                    if (ec)
+                        return; // Timer cancelled
+                    if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                        // Timeout won
+                        spdlog::warn(
+                            "Database open timed out after {} ms — continuing in degraded mode",
+                            timeout_ms);
+                        boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
+                            std::move(h)(nullptr, false);
+                        });
+                    }
+                });
+
+                // Post blocking work to executor
+                boost::asio::post(ex, [this, dbPath, timer, completed, handlerPtr,
+                                       completion_exec]() mutable {
+                    bool success = false;
+                    std::exception_ptr ep;
+                    try {
+                        auto r = database_->open(dbPath.string(), metadata::ConnectionMode::Create);
+                        success = static_cast<bool>(r);
+                        if (!success) {
+                            spdlog::warn("Database open failed: {} — continuing in degraded mode",
+                                         r.error().message);
+                        } else {
+                            state_.readiness.databaseReady = true;
+                            spdlog::info("Database opened successfully");
+                        }
+                    } catch (const std::exception& e) {
+                        spdlog::warn(
+                            "Database open threw exception: {} — continuing in degraded mode",
+                            e.what());
+                        ep = std::current_exception();
+                    } catch (...) {
+                        spdlog::warn("Database open failed (unknown exception) — continuing in "
+                                     "degraded mode");
+                        ep = std::current_exception();
+                    }
+
+                    if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                        // Work won
+                        timer->cancel();
+                        boost::asio::post(completion_exec,
+                                          [h = std::move(*handlerPtr), ep, success]() mutable {
+                                              std::move(h)(ep, success);
+                                          });
+                    }
+                });
             },
-            boost::asio::detached);
+            boost::asio::use_awaitable);
 
-        using namespace boost::asio::experimental::awaitable_operators;
-
-        auto race = co_await (
-            resultChannel->async_receive(boost::asio::as_tuple(boost::asio::use_awaitable)) ||
-            timeout_timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable)));
-
-        if (race.index() == 1) {
-            spdlog::warn("Database open timed out after {} ms — continuing in degraded mode",
-                         timeout_ms);
-            resultChannel->close();
-            co_return false;
-        }
-
-        timeout_timer.cancel();
-
-        const auto channelTuple = std::get<0>(race);
-        auto opException = std::get<0>(channelTuple);
-        auto opResult = std::get<1>(channelTuple);
-
-        if (opException) {
-            try {
-                std::rethrow_exception(opException);
-            } catch (const std::exception& e) {
-                spdlog::warn("Database open threw exception: {} — continuing in degraded mode",
-                             e.what());
-            }
-            co_return false;
-        }
-
-        if (!opResult) {
-            spdlog::warn("Database open failed: unknown error — continuing in degraded mode");
-            co_return false;
-        }
-
-        if (*opResult) {
-            state_.readiness.databaseReady = true;
-            spdlog::info("Database opened successfully");
-            co_return true;
-        }
-
-        spdlog::warn("Database open failed: {} — continuing in degraded mode",
-                     opResult->error().message);
-        co_return false;
     } catch (const std::exception& e) {
         spdlog::warn("Database open failed (exception): {} — continuing in degraded mode",
                      e.what());
@@ -1995,75 +1994,79 @@ boost::asio::awaitable<bool> ServiceManager::co_openDatabase(const std::filesyst
 boost::asio::awaitable<bool> ServiceManager::co_migrateDatabase(int timeout_ms,
                                                                 yams::compat::stop_token token) {
     auto ex = co_await boost::asio::this_coro::executor;
-    metadata::MigrationManager mm(*database_);
-    auto initResult = mm.initialize();
+
+    // Create migration manager on heap so it survives async operations
+    auto mm = std::make_shared<metadata::MigrationManager>(*database_);
+    auto initResult = mm->initialize();
     if (!initResult) {
         spdlog::error("[ServiceManager] Failed to initialize migration system: {}",
                       initResult.error().message);
         co_return false;
     }
-    mm.registerMigrations(metadata::YamsMetadataMigrations::getAllMigrations());
-
-    // Use pure awaitable pattern with timeout timer (no futures!)
-    boost::asio::steady_timer timeout_timer(ex);
-    timeout_timer.expires_after(std::chrono::milliseconds(timeout_ms));
+    mm->registerMigrations(metadata::YamsMetadataMigrations::getAllMigrations());
 
     try {
-        using ResultPtr = std::shared_ptr<Result<void>>;
-        using Channel = boost::asio::experimental::basic_channel<
-            boost::asio::any_io_executor, boost::asio::experimental::channel_traits<std::mutex>,
-            void(std::exception_ptr, ResultPtr)>;
-        auto resultChannel = std::make_shared<Channel>(ex, 2);
+        // Use async_initiate pattern with timeout racing (no experimental APIs)
+        co_return co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
+                                                       void(std::exception_ptr, bool)>(
+            [mm, ex, timeout_ms](auto handler) mutable {
+                // Shared state for race coordination
+                auto completed = std::make_shared<std::atomic<bool>>(false);
+                auto timer = std::make_shared<boost::asio::steady_timer>(ex);
+                timer->expires_after(std::chrono::milliseconds(timeout_ms));
 
-        boost::asio::co_spawn(
-            ex,
-            [&mm, resultChannel]() -> boost::asio::awaitable<void> {
-                std::exception_ptr opException;
-                ResultPtr opResult;
-                try {
-                    auto r = mm.migrate();
-                    opResult = std::make_shared<Result<void>>(std::move(r));
-                } catch (...) {
-                    opException = std::current_exception();
-                }
-                resultChannel->try_send(opException, std::move(opResult));
-                co_return;
+                // Capture handler in shared_ptr for safe sharing between timer and work
+                using HandlerT = std::decay_t<decltype(handler)>;
+                auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
+                auto completion_exec = boost::asio::get_associated_executor(*handlerPtr, ex);
+
+                // Set up timeout
+                timer->async_wait([completed, handlerPtr, completion_exec,
+                                   timeout_ms](const boost::system::error_code& ec) mutable {
+                    if (ec)
+                        return; // Timer cancelled
+                    if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                        // Timeout won
+                        spdlog::warn("Database migration timed out after {} ms", timeout_ms);
+                        boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
+                            std::move(h)(nullptr, false);
+                        });
+                    }
+                });
+
+                // Post blocking work to executor
+                boost::asio::post(
+                    ex, [mm, timer, completed, handlerPtr, completion_exec]() mutable {
+                        bool success = false;
+                        std::exception_ptr ep;
+                        try {
+                            auto r = mm->migrate();
+                            success = static_cast<bool>(r);
+                            if (!success) {
+                                spdlog::warn("Database migration failed: {}", r.error().message);
+                            } else {
+                                spdlog::info("Database migrations completed");
+                            }
+                        } catch (const std::exception& e) {
+                            spdlog::warn("Database migration threw exception: {}", e.what());
+                            ep = std::current_exception();
+                        } catch (...) {
+                            spdlog::warn("Database migration failed (unknown exception)");
+                            ep = std::current_exception();
+                        }
+
+                        if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                            // Work won
+                            timer->cancel();
+                            boost::asio::post(completion_exec,
+                                              [h = std::move(*handlerPtr), ep, success]() mutable {
+                                                  std::move(h)(ep, success);
+                                              });
+                        }
+                    });
             },
-            boost::asio::detached);
+            boost::asio::use_awaitable);
 
-        using namespace boost::asio::experimental::awaitable_operators;
-
-        auto race = co_await (
-            resultChannel->async_receive(boost::asio::as_tuple(boost::asio::use_awaitable)) ||
-            timeout_timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable)));
-
-        if (race.index() == 1) {
-            spdlog::warn("Database migration timed out after {} ms", timeout_ms);
-            resultChannel->close();
-            co_return false;
-        }
-
-        timeout_timer.cancel();
-
-        const auto channelTuple = std::get<0>(race);
-        auto opException = std::get<0>(channelTuple);
-        auto opResult = std::get<1>(channelTuple);
-
-        if (opException) {
-            try {
-                std::rethrow_exception(opException);
-            } catch (const std::exception& e) {
-                spdlog::warn("Database migration threw exception: {}", e.what());
-            }
-            co_return false;
-        }
-
-        if (!opResult) {
-            spdlog::warn("Database migration failed before producing a result");
-            co_return false;
-        }
-
-        co_return static_cast<bool>(*opResult);
     } catch (const std::exception& e) {
         spdlog::warn("Database migration failed (exception): {}", e.what());
         co_return false;

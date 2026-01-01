@@ -11,10 +11,12 @@
 #include <yams/config/config_helpers.h>
 
 #include <boost/asio/as_tuple.hpp>
+#include <boost/asio/associated_executor.hpp>
+#include <boost/asio/async_result.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/use_future.hpp>
@@ -249,7 +251,7 @@ std::filesystem::path resolveDataDirCached() {
 } // namespace
 
 // DaemonClient implementation
-DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_unique<Impl>(config)) {
+DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_shared<Impl>(config)) {
     if (pImpl->config_.socketPath.empty()) {
         pImpl->config_.socketPath = yams::daemon::ConnectionFsm::resolve_socket_path_config_first();
     }
@@ -362,11 +364,13 @@ static bool pingDaemonSync(const std::filesystem::path& socketPath) {
 }
 
 boost::asio::awaitable<Result<void>> DaemonClient::connect() {
+    // Capture shared_ptr to extend Impl lifetime across co_await suspension points
+    auto impl = pImpl;
     // Async variant using adapter's connect helper and timers; avoids blocking sleeps
     // If daemon is not reachable and autoStart is disabled, surface a failure.
-    const auto socketPath = pImpl->config_.socketPath.empty()
+    const auto socketPath = impl->config_.socketPath.empty()
                                 ? DaemonClient::resolveSocketPathConfigFirst()
-                                : pImpl->config_.socketPath;
+                                : impl->config_.socketPath;
     if (socketPath.empty()) {
         co_return Error{ErrorCode::NetworkError, "Socket path not resolved"};
     }
@@ -375,23 +379,59 @@ boost::asio::awaitable<Result<void>> DaemonClient::connect() {
     using boost::asio::steady_timer;
     using boost::asio::use_awaitable;
     using boost::asio::this_coro::executor;
-    using boost::asio::experimental::awaitable_operators::operator||;
 
     auto try_connect =
         [&](std::chrono::milliseconds timeout) -> boost::asio::awaitable<Result<void>> {
         auto ex = co_await boost::asio::this_coro::executor;
         boost::asio::local::stream_protocol::socket sock(ex);
         boost::asio::local::stream_protocol::endpoint ep(socketPath.string());
-        steady_timer t(ex);
-        t.expires_after(timeout);
         try {
-            auto which = co_await (sock.async_connect(ep, boost::asio::as_tuple(use_awaitable)) ||
-                                   t.async_wait(boost::asio::as_tuple(use_awaitable)));
-            if (which.index() == 1) {
+            // Race connect against timeout using async_initiate (no experimental APIs)
+            using ConnectResult = std::tuple<boost::system::error_code>;
+            using RaceResult = std::variant<ConnectResult, bool>;
+
+            auto connect_result = co_await boost::asio::async_initiate<
+                decltype(use_awaitable), void(std::exception_ptr, RaceResult)>(
+                [&sock, &ep, ex, timeout](auto handler) mutable {
+                    auto completed = std::make_shared<std::atomic<bool>>(false);
+                    auto timer = std::make_shared<boost::asio::steady_timer>(ex);
+                    timer->expires_after(timeout);
+
+                    using HandlerT = std::decay_t<decltype(handler)>;
+                    auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
+                    auto completion_exec = boost::asio::get_associated_executor(*handlerPtr, ex);
+
+                    timer->async_wait([completed, handlerPtr, completion_exec](
+                                          const boost::system::error_code& ec) mutable {
+                        if (ec == boost::asio::error::operation_aborted)
+                            return;
+                        if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                            boost::asio::post(
+                                completion_exec, [h = std::move(*handlerPtr)]() mutable {
+                                    std::move(h)(nullptr, RaceResult(std::in_place_index<1>, true));
+                                });
+                        }
+                    });
+
+                    sock.async_connect(ep, [timer, completed, handlerPtr, completion_exec](
+                                               const boost::system::error_code& ec) mutable {
+                        if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                            timer->cancel();
+                            boost::asio::post(completion_exec, [h = std::move(*handlerPtr),
+                                                                ec]() mutable {
+                                std::move(h)(nullptr,
+                                             RaceResult(std::in_place_index<0>, ConnectResult{ec}));
+                            });
+                        }
+                    });
+                },
+                use_awaitable);
+
+            if (connect_result.index() == 1) {
                 co_return Error{ErrorCode::Timeout, "Connection timeout"};
             }
 
-            auto& [ec] = std::get<0>(which);
+            auto& [ec] = std::get<0>(connect_result);
             if (ec) {
                 co_return Error{ErrorCode::NetworkError, ec.message()};
             }
@@ -405,21 +445,21 @@ boost::asio::awaitable<Result<void>> DaemonClient::connect() {
     };
 
     {
-        auto r = co_await try_connect(pImpl->config_.connectTimeout);
+        auto r = co_await try_connect(impl->config_.connectTimeout);
         if (r) {
-            if (!pImpl->config_.enableCircuitBreaker)
-                pImpl->breaker_.recordSuccess();
+            if (!impl->config_.enableCircuitBreaker)
+                impl->breaker_.recordSuccess();
             // Clear explicitly disconnected flag on successful connection
-            pImpl->explicitly_disconnected_ = false;
+            impl->explicitly_disconnected_ = false;
             co_return Result<void>();
         }
-        if (!pImpl->config_.autoStart) {
+        if (!impl->config_.autoStart) {
             co_return r.error();
         }
     }
 
     // Auto-start path
-    if (auto result = startDaemon(pImpl->config_); !result) {
+    if (auto result = startDaemon(impl->config_); !result) {
         spdlog::warn("Failed to auto-start daemon: {}",
                      sanitize_for_terminal(result.error().message));
         spdlog::info("Please manually start the daemon with: yams daemon start");
@@ -430,11 +470,11 @@ boost::asio::awaitable<Result<void>> DaemonClient::connect() {
     const int maxRetries = 10;
     const auto baseDelay = std::chrono::milliseconds(100);
     for (int i = 0; i < maxRetries; ++i) {
-        auto r = co_await try_connect(pImpl->config_.connectTimeout);
+        auto r = co_await try_connect(impl->config_.connectTimeout);
         if (r) {
             spdlog::debug("Daemon started successfully after {} retries", i + 1);
             // Clear explicitly disconnected flag on successful connection
-            pImpl->explicitly_disconnected_ = false;
+            impl->explicitly_disconnected_ = false;
             co_return Result<void>();
         }
         steady_timer t(co_await boost::asio::this_coro::executor);
@@ -652,10 +692,12 @@ boost::asio::awaitable<Result<void>> DaemonClient::ping() {
 }
 
 boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(const Request& req) {
+    // Capture shared_ptr to extend Impl lifetime across co_await suspension points
+    auto impl = pImpl;
     spdlog::debug("DaemonClient::sendRequest: [{}] streaming={} sock='{}'", getRequestName(req),
-                  false, pImpl->config_.socketPath.string());
+                  false, impl->config_.socketPath.string());
     // Use request-type-aware timeout without shortening configured limits
-    auto opts = pImpl->transportOptions_;
+    auto opts = impl->transportOptions_;
     auto timeout = getTimeoutForCategory(getTimeoutCategory(req));
     opts.requestTimeout = std::max(opts.requestTimeout, timeout);
     opts.headerTimeout = std::max(opts.headerTimeout, timeout);
@@ -676,11 +718,13 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(const Request
 }
 
 boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(Request&& req) {
+    // Capture shared_ptr to extend Impl lifetime across co_await suspension points
+    auto impl = pImpl;
     const auto type = getRequestName(req);
     spdlog::debug("DaemonClient::sendRequest(move): [{}] streaming={} sock='{}'", type, false,
-                  pImpl->config_.socketPath.string());
+                  impl->config_.socketPath.string());
     // Use request-type-aware timeout without shortening configured limits
-    auto opts = pImpl->transportOptions_;
+    auto opts = impl->transportOptions_;
     auto timeout = getTimeoutForCategory(getTimeoutCategory(req));
     opts.requestTimeout = std::max(opts.requestTimeout, timeout);
     opts.headerTimeout = std::max(opts.headerTimeout, timeout);
@@ -1017,8 +1061,10 @@ boost::asio::awaitable<Result<GrepResponse>> DaemonClient::streamingGrep(const G
 boost::asio::awaitable<Result<void>>
 DaemonClient::sendRequestStreaming(const Request& req,
                                    std::shared_ptr<ChunkedResponseHandler> handler) {
+    // Capture shared_ptr to extend Impl lifetime across co_await suspension points
+    auto impl = pImpl;
     spdlog::debug("DaemonClient::sendRequestStreaming: [{}] streaming={} sock='{}'",
-                  getRequestName(req), true, pImpl->config_.socketPath.string());
+                  getRequestName(req), true, impl->config_.socketPath.string());
     // Skip the legacy connect() call when using AsioTransportAdapter
     // The adapter creates its own connection, and calling connect() here
     // causes a double connection issue where the POSIX socket immediately EOFs
@@ -1051,7 +1097,7 @@ DaemonClient::sendRequestStreaming(const Request& req,
     auto onComplete = [handler]() { handler->onComplete(); };
 
     // Use request-type-aware timeout without shortening configured limits
-    auto opts = pImpl->transportOptions_;
+    auto opts = impl->transportOptions_;
     auto timeout = getTimeoutForCategory(getTimeoutCategory(req));
     opts.requestTimeout = std::max(opts.requestTimeout, timeout);
     opts.headerTimeout = std::max(opts.headerTimeout, timeout);

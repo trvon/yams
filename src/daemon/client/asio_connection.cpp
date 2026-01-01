@@ -1,9 +1,11 @@
 #include <yams/daemon/client/asio_connection.h>
 
 #include <boost/asio/as_tuple.hpp>
+#include <boost/asio/associated_executor.hpp>
+#include <boost/asio/async_result.hpp>
 #include <boost/asio/buffer.hpp>
 #include <boost/asio/dispatch.hpp>
-#include <boost/asio/experimental/awaitable_operators.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
@@ -18,7 +20,6 @@ namespace yams::daemon {
 using boost::asio::as_tuple;
 using boost::asio::use_awaitable;
 namespace this_coro = boost::asio::this_coro;
-using namespace boost::asio::experimental::awaitable_operators;
 
 boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vector<uint8_t> frame) {
     co_await boost::asio::dispatch(strand, use_awaitable);
@@ -63,11 +64,53 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
         }
         spdlog::debug("AsioConnection::async_write_frame: writing {} frames, {} bytes total",
                       frames, batched);
-        boost::asio::steady_timer timer(co_await this_coro::executor);
-        timer.expires_after(opts.requestTimeout);
-        auto write_result =
-            co_await (boost::asio::async_write(*socket, buffers, as_tuple(use_awaitable)) ||
-                      timer.async_wait(as_tuple(use_awaitable)));
+
+        // Race write against timeout using async_initiate (no experimental APIs)
+        auto executor = co_await this_coro::executor;
+        auto timeout = opts.requestTimeout;
+
+        using WriteResult = std::tuple<boost::system::error_code, std::size_t>;
+        using RaceResult = std::variant<WriteResult, bool>; // WriteResult or timedOut
+
+        auto write_result = co_await boost::asio::async_initiate<
+            decltype(use_awaitable), void(std::exception_ptr, RaceResult)>(
+            [this, &buffers, executor, timeout](auto handler) mutable {
+                auto completed = std::make_shared<std::atomic<bool>>(false);
+                auto timer = std::make_shared<boost::asio::steady_timer>(executor);
+                timer->expires_after(timeout);
+
+                using HandlerT = std::decay_t<decltype(handler)>;
+                auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
+                auto completion_exec = boost::asio::get_associated_executor(*handlerPtr, executor);
+
+                // Timer handler
+                timer->async_wait([completed, handlerPtr,
+                                   completion_exec](const boost::system::error_code& ec) mutable {
+                    if (ec == boost::asio::error::operation_aborted)
+                        return;
+                    if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                        boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
+                            std::move(h)(nullptr, RaceResult(std::in_place_index<1>, true));
+                        });
+                    }
+                });
+
+                // Write handler
+                boost::asio::async_write(
+                    *socket, buffers,
+                    [timer, completed, handlerPtr, completion_exec](
+                        const boost::system::error_code& ec, std::size_t bytes) mutable {
+                        if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                            timer->cancel();
+                            boost::asio::post(
+                                completion_exec, [h = std::move(*handlerPtr), ec, bytes]() mutable {
+                                    std::move(h)(nullptr, RaceResult(std::in_place_index<0>,
+                                                                     WriteResult{ec, bytes}));
+                                });
+                        }
+                    });
+            },
+            use_awaitable);
 
         if (write_result.index() == 1) {
             spdlog::error("AsioConnection::async_write_frame: write timeout after {}ms",

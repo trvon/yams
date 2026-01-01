@@ -376,7 +376,7 @@ public:
 private:
     // Internal implementation
     class Impl;
-    std::unique_ptr<Impl> pImpl;
+    std::shared_ptr<Impl> pImpl;
     ClientConfig config_;
 
     // Generic request sending

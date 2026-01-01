@@ -62,6 +62,11 @@ GlobalIOContext& GlobalIOContext::instance() {
 }
 
 void GlobalIOContext::reset() {
+    // Guard against static destruction
+    if (is_destroyed()) {
+        return;
+    }
+
     static constexpr std::array<const char*, 2> kSkipKeys = {
         "YAMS_TESTING",
         "YAMS_TEST_SAFE_SINGLE_INSTANCE",
@@ -78,7 +83,17 @@ void GlobalIOContext::reset() {
 }
 
 void GlobalIOContext::restart() {
+    // Guard against static destruction - mutex may already be destroyed
+    if (destroyed_.load(std::memory_order_acquire)) {
+        return;
+    }
+
     std::lock_guard<std::mutex> lock(this->restart_mutex_);
+
+    // Double-check after acquiring lock (destructor might have started)
+    if (destroyed_.load(std::memory_order_acquire)) {
+        return;
+    }
 
     if (this->work_guard_) {
         this->work_guard_->reset();
@@ -214,7 +229,17 @@ void GlobalIOContext::ensure_initialized() {
 
 GlobalIOContext::GlobalIOContext() {}
 
+bool GlobalIOContext::is_destroyed() noexcept {
+    if (!g_global_io_context_ptr) {
+        return true;
+    }
+    return g_global_io_context_ptr->destroyed_.load(std::memory_order_acquire);
+}
+
 GlobalIOContext::~GlobalIOContext() noexcept {
+    // Mark as destroyed FIRST to prevent restart() from trying to lock mutex
+    destroyed_.store(true, std::memory_order_release);
+
     try {
         if (this->work_guard_) {
             this->work_guard_->reset();

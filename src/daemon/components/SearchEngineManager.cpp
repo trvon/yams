@@ -8,11 +8,10 @@
 
 #include <spdlog/spdlog.h>
 #include <boost/asio/as_tuple.hpp>
+#include <boost/asio/associated_executor.hpp>
+#include <boost/asio/async_result.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/experimental/awaitable_operators.hpp>
-#include <boost/asio/experimental/channel.hpp>
-#include <boost/asio/experimental/concurrent_channel.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
@@ -68,8 +67,6 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                                  std::shared_ptr<yams::vector::EmbeddingGenerator> embeddingGen,
                                  const std::string& reason, int timeoutMs,
                                  boost::asio::any_io_executor workerExecutor) {
-    using namespace boost::asio::experimental::awaitable_operators;
-
     auto ex = co_await boost::asio::this_coro::executor;
 
     // Enable vector search only when a manager is provided; otherwise build a text-only engine
@@ -113,113 +110,99 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
     }
 
     using RetT = Result<std::shared_ptr<yams::search::SearchEngine>>;
-    boost::asio::experimental::concurrent_channel<
-        boost::asio::any_io_executor, void(boost::system::error_code, std::shared_ptr<RetT>)>
-        ch(ex, 1);
 
-    // Post build work to worker executor (blocking operations)
-    try {
-        boost::asio::post(workerExecutor, [builder, opts, &ch]() mutable {
-            try {
-                auto r = builder->buildEmbedded(opts);
-                ch.try_send(boost::system::error_code{}, std::make_shared<RetT>(std::move(r)));
-            } catch (...) {
-                ch.try_send(
-                    boost::asio::error::make_error_code(boost::asio::error::operation_aborted),
-                    std::make_shared<RetT>(
-                        Error{ErrorCode::InternalError, "Engine build exception"}));
-            }
-        });
-    } catch (...) {
-        // Fallback to synchronous build
-        auto r = builder->buildEmbedded(opts);
-        if (r) {
-            const auto& newEngine = r.value();
-            {
-                std::unique_lock lock(engineMutex_);
-                engine_ = newEngine;
-            }
-            try {
-                SearchEngineRebuildCompletedEvent ev;
-                ev.vectorEnabled = vectorEnabled;
-                ev.durationMs = 0;
-                fsm_.dispatch(ev);
-                refreshSnapshot();
-            } catch (...) {
-            }
-            spdlog::info("[SearchEngineManager] Build completed synchronously (fallback)");
-            co_return Result<std::shared_ptr<yams::search::SearchEngine>>(newEngine);
-        }
-        spdlog::warn("[SearchEngineManager] Build failed synchronously (fallback)");
-        try {
-            SearchEngineRebuildFailedEvent ev;
-            ev.error = "sync_build_failed";
-            fsm_.dispatch(ev);
-        } catch (...) {
-        }
-        co_return Result<std::shared_ptr<yams::search::SearchEngine>>(
-            Error{ErrorCode::InternalError, "sync_build_failed"});
-    }
+    // Use async_initiate pattern with timeout racing (no experimental APIs)
+    co_return co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
+                                                   void(std::exception_ptr, RetT)>(
+        [this, builder, opts, workerExecutor, ex, timeoutMs, vectorEnabled](auto handler) mutable {
+            // Shared state for race coordination
+            auto completed = std::make_shared<std::atomic<bool>>(false);
+            auto timer = std::make_shared<boost::asio::steady_timer>(ex);
+            timer->expires_after(std::chrono::milliseconds(timeoutMs));
 
-    // Wait with timeout
-    boost::asio::steady_timer timer(ex);
-    timer.expires_after(std::chrono::milliseconds(timeoutMs));
+            // Capture handler in shared_ptr for safe sharing between timer and work
+            using HandlerT = std::decay_t<decltype(handler)>;
+            auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
+            auto completion_exec = boost::asio::get_associated_executor(*handlerPtr, ex);
 
-    auto which = co_await (ch.async_receive(boost::asio::as_tuple(boost::asio::use_awaitable)) ||
-                           timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable)));
+            // Set up timeout
+            timer->async_wait([this, completed, handlerPtr, completion_exec,
+                               timeoutMs](const boost::system::error_code& ec) mutable {
+                if (ec)
+                    return; // Timer cancelled
+                if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                    // Timeout won
+                    spdlog::warn("[SearchEngineManager] Build timeout after {}ms", timeoutMs);
+                    try {
+                        SearchEngineRebuildFailedEvent ev;
+                        ev.error = "build_timeout";
+                        fsm_.dispatch(ev);
+                    } catch (...) {
+                    }
+                    boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
+                        std::move(h)(nullptr,
+                                     RetT(Error{ErrorCode::InternalError, "build_timeout"}));
+                    });
+                }
+            });
 
-    // Timeout case
-    if (which.index() == 1) {
-        spdlog::warn("[SearchEngineManager] Build timeout after {}ms", timeoutMs);
-        try {
-            SearchEngineRebuildFailedEvent ev;
-            ev.error = "build_timeout";
-            fsm_.dispatch(ev);
-        } catch (...) {
-        }
-        co_return Result<std::shared_ptr<yams::search::SearchEngine>>(
-            Error{ErrorCode::InternalError, "build_timeout"});
-    }
+            // Post build work to worker executor (blocking operations)
+            boost::asio::post(workerExecutor, [this, builder, opts, timer, completed, handlerPtr,
+                                               completion_exec, vectorEnabled]() mutable {
+                RetT result(Error{ErrorCode::InternalError, "unknown_error"});
+                try {
+                    auto r = builder->buildEmbedded(opts);
+                    if (r) {
+                        auto newEngine = r.value();
+                        {
+                            std::unique_lock lock(engineMutex_);
+                            engine_ = newEngine;
+                        }
+                        result = RetT(newEngine);
+                    } else {
+                        result = RetT(Error{ErrorCode::InternalError, r.error().message});
+                    }
+                } catch (const std::exception& e) {
+                    result = RetT(Error{ErrorCode::InternalError, e.what()});
+                } catch (...) {
+                    result = RetT(Error{ErrorCode::InternalError, "Engine build exception"});
+                }
 
-    // Extract result from channel
-    auto tup = std::move(std::get<0>(which));
-    auto ec = std::get<0>(tup);
-    auto resultOpt = std::get<1>(tup);
+                if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                    // Work won
+                    timer->cancel();
 
-    if (ec || !resultOpt || !resultOpt->has_value()) {
-        std::string errMsg = "unknown_error";
-        if (resultOpt && !resultOpt->has_value())
-            errMsg = resultOpt->error().message;
+                    // Update FSM based on result
+                    if (result.has_value()) {
+                        try {
+                            SearchEngineRebuildCompletedEvent ev;
+                            ev.vectorEnabled = vectorEnabled;
+                            ev.durationMs = 0;
+                            fsm_.dispatch(ev);
+                            refreshSnapshot();
+                        } catch (...) {
+                        }
+                        spdlog::info("[SearchEngineManager] Build completed: vector={}",
+                                     vectorEnabled);
+                    } else {
+                        try {
+                            SearchEngineRebuildFailedEvent ev;
+                            ev.error = result.error().message;
+                            fsm_.dispatch(ev);
+                        } catch (...) {
+                        }
+                        spdlog::error("[SearchEngineManager] Build failed: {}",
+                                      result.error().message);
+                    }
 
-        spdlog::error("[SearchEngineManager] Build failed: {}", errMsg);
-        try {
-            SearchEngineRebuildFailedEvent ev;
-            ev.error = errMsg;
-            fsm_.dispatch(ev);
-        } catch (...) {
-        }
-        co_return Result<std::shared_ptr<yams::search::SearchEngine>>(
-            Error{ErrorCode::InternalError, errMsg});
-    }
-
-    // Success: store engine and update FSM
-    auto newEngine = resultOpt->value();
-    {
-        std::unique_lock lock(engineMutex_);
-        engine_ = newEngine;
-    }
-
-    try {
-        SearchEngineRebuildCompletedEvent ev;
-        ev.vectorEnabled = vectorEnabled;
-        ev.durationMs = 0; // TODO: track actual duration
-        fsm_.dispatch(ev);
-        refreshSnapshot();
-    } catch (...) {
-    }
-
-    spdlog::info("[SearchEngineManager] Build completed: vector={}", vectorEnabled);
-    co_return Result<std::shared_ptr<yams::search::SearchEngine>>(newEngine);
+                    boost::asio::post(completion_exec, [h = std::move(*handlerPtr),
+                                                        r = std::move(result)]() mutable {
+                        std::move(h)(nullptr, std::move(r));
+                    });
+                }
+            });
+        },
+        boost::asio::use_awaitable);
 }
 
 } // namespace yams::daemon

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -22,6 +23,9 @@ public:
 
     static void reset();
 
+    /// Returns true if the singleton is being/has been destroyed (static destruction in progress)
+    static bool is_destroyed() noexcept;
+
 private:
     friend class GlobalIOContextInitializer;
     GlobalIOContext();
@@ -33,6 +37,7 @@ private:
     std::vector<std::thread> io_threads_;
     std::mutex restart_mutex_;
     std::once_flag init_flag_;
+    std::atomic<bool> destroyed_{false};
 
     void ensure_initialized();
     void restart();

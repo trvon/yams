@@ -12,10 +12,15 @@
 
 #include <yams/core/types.h>
 
+#include <boost/asio/associated_executor.hpp>
+#include <boost/asio/async_result.hpp>
 #include <boost/asio/awaitable.hpp>
-#include <boost/asio/experimental/awaitable_operators.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
+#include <boost/asio/use_awaitable.hpp>
 
 namespace yams::daemon::init {
 
@@ -152,17 +157,56 @@ boost::asio::awaitable<T> await_step(const std::string& name, Fn&& fn) {
 
 // await_with_timeout: runs an awaitable that returns yams::Result<T> with a timeout.
 // Fn must return boost::asio::awaitable<yams::Result<T>>.
+// Uses async_initiate pattern to avoid experimental awaitable_operators.
 template <typename T, typename Fn>
 boost::asio::awaitable<yams::Result<T>> await_with_timeout(Fn&& fn, int timeout_ms) {
-    using namespace boost::asio::experimental::awaitable_operators;
     auto ex = co_await boost::asio::this_coro::executor;
-    boost::asio::steady_timer timer(ex);
-    timer.expires_after(std::chrono::milliseconds(timeout_ms));
-    auto which = co_await (fn() || timer.async_wait(boost::asio::use_awaitable));
-    if (which.index() == 1) {
-        co_return yams::Error{yams::ErrorCode::Timeout, "timeout"};
-    }
-    co_return std::move(std::get<0>(which));
+
+    co_return co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
+                                                   void(std::exception_ptr, yams::Result<T>)>(
+        [ex, timeout_ms](auto handler, auto f) mutable {
+            // Shared state for race coordination
+            auto completed = std::make_shared<std::atomic<bool>>(false);
+            auto timer = std::make_shared<boost::asio::steady_timer>(ex);
+            timer->expires_after(std::chrono::milliseconds(timeout_ms));
+
+            // Capture handler in shared_ptr for safe sharing between timer and work
+            using HandlerT = std::decay_t<decltype(handler)>;
+            auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
+            auto completion_exec = boost::asio::get_associated_executor(*handlerPtr, ex);
+
+            // Set up timeout
+            timer->async_wait([completed, handlerPtr,
+                               completion_exec](const boost::system::error_code& ec) mutable {
+                if (ec)
+                    return; // Timer cancelled
+                if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                    // Timeout won
+                    boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
+                        std::move(h)(nullptr, yams::Error{yams::ErrorCode::Timeout, "timeout"});
+                    });
+                }
+            });
+
+            // Spawn the awaitable work
+            boost::asio::co_spawn(
+                ex,
+                [f = std::move(f), timer, completed, handlerPtr,
+                 completion_exec]() mutable -> boost::asio::awaitable<void> {
+                    yams::Result<T> result = co_await f();
+
+                    if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                        // Work won
+                        timer->cancel();
+                        boost::asio::post(completion_exec, [h = std::move(*handlerPtr),
+                                                            r = std::move(result)]() mutable {
+                            std::move(h)(nullptr, std::move(r));
+                        });
+                    }
+                },
+                boost::asio::detached);
+        },
+        boost::asio::use_awaitable, std::forward<Fn>(fn));
 }
 
 // await_with_retry: runs an awaitable fn up to attempts with backoff between attempts.

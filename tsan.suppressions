@@ -20,3 +20,10 @@ race:any_executor.hpp
 # loop (tracked upstream for Boost.Asio kqueue).
 race:boost::asio::detail::conditionally_enabled_mutex
 race:kqueue_reactor.ipp
+
+# Boost.Asio reactive socket service - race in socket descriptor registration
+# when sockets are constructed/moved across threads. The reactor's internal
+# fd_set_ tracking has a data race in reactive_socket_service_base::construct().
+# This is a known boost::asio internal issue.
+race:boost::asio::detail::reactive_socket_service_base::construct
+race:reactive_socket_service_base.ipp

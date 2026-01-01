@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -27,7 +28,11 @@ public:
     // Returns true if this pool is shared (from the registry) vs single-use
     bool is_shared() const { return shared_; }
 
+    // Returns true if the pool is being/has been shut down
+    bool is_shutdown() const { return shutdown_.load(std::memory_order_acquire); }
+
     AsioConnectionPool(const TransportOptions& opts, bool shared);
+    ~AsioConnectionPool();
 
 private:
     boost::asio::awaitable<std::shared_ptr<AsioConnection>> create_connection();
@@ -35,6 +40,7 @@ private:
 
     TransportOptions opts_;
     bool shared_{true};
+    std::atomic<bool> shutdown_{false};
     std::mutex mutex_;
 
     // Pool of available connections (not just one!)

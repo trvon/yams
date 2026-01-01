@@ -5,9 +5,11 @@
 #include <yams/daemon/ipc/message_framing.h>
 
 #include <boost/asio/as_tuple.hpp>
+#include <boost/asio/associated_executor.hpp>
+#include <boost/asio/async_result.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/experimental/awaitable_operators.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/read.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
@@ -64,7 +66,6 @@ using boost::asio::use_awaitable;
 namespace this_coro = boost::asio::this_coro;
 using boost::asio::as_tuple;
 using boost::asio::use_future;
-using namespace boost::asio::experimental::awaitable_operators;
 
 namespace {
 
@@ -79,18 +80,52 @@ async_connect_with_timeout(const TransportOptions& opts) {
         }
         return false;
     }();
-    auto ex = co_await this_coro::executor;
-    auto socket = std::make_unique<AsioConnection::socket_t>(ex);
+    auto executor = co_await this_coro::executor;
+    auto socket = std::make_unique<AsioConnection::socket_t>(executor);
     boost::asio::local::stream_protocol::endpoint endpoint(opts.socketPath.string());
 
     if (trace) {
         spdlog::info("stream-trace: async_connect socket='{}'", opts.socketPath.string());
     }
 
-    boost::asio::steady_timer timer(ex);
-    timer.expires_after(opts.requestTimeout);
-    auto connect_result = co_await (socket->async_connect(endpoint, as_tuple(use_awaitable)) ||
-                                    timer.async_wait(as_tuple(use_awaitable)));
+    // Race connect against timeout using async_initiate (no experimental APIs)
+    using ConnectResult = std::tuple<boost::system::error_code>;
+    using RaceResult = std::variant<ConnectResult, bool>;
+
+    auto connect_result = co_await boost::asio::async_initiate<
+        decltype(use_awaitable), void(std::exception_ptr, RaceResult)>(
+        [&socket, &endpoint, executor, timeout = opts.requestTimeout](auto handler) mutable {
+            auto completed = std::make_shared<std::atomic<bool>>(false);
+            auto timer = std::make_shared<boost::asio::steady_timer>(executor);
+            timer->expires_after(timeout);
+
+            using HandlerT = std::decay_t<decltype(handler)>;
+            auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
+            auto completion_exec = boost::asio::get_associated_executor(*handlerPtr, executor);
+
+            timer->async_wait([completed, handlerPtr,
+                               completion_exec](const boost::system::error_code& ec) mutable {
+                if (ec == boost::asio::error::operation_aborted)
+                    return;
+                if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                    boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
+                        std::move(h)(nullptr, RaceResult(std::in_place_index<1>, true));
+                    });
+                }
+            });
+
+            socket->async_connect(endpoint, [timer, completed, handlerPtr, completion_exec](
+                                                const boost::system::error_code& ec) mutable {
+                if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                    timer->cancel();
+                    boost::asio::post(completion_exec, [h = std::move(*handlerPtr), ec]() mutable {
+                        std::move(h)(nullptr,
+                                     RaceResult(std::in_place_index<0>, ConnectResult{ec}));
+                    });
+                }
+            });
+        },
+        use_awaitable);
 
     if (connect_result.index() == 1) {
         socket->close();
@@ -119,11 +154,49 @@ async_connect_with_timeout(const TransportOptions& opts) {
 awaitable<Result<std::vector<uint8_t>>>
 async_read_exact(AsioConnection::socket_t& socket, size_t size, std::chrono::milliseconds timeout) {
     std::vector<uint8_t> buffer(size);
-    boost::asio::steady_timer timer(co_await this_coro::executor);
-    timer.expires_after(timeout);
-    auto read_result = co_await (
-        boost::asio::async_read(socket, boost::asio::buffer(buffer), as_tuple(use_awaitable)) ||
-        timer.async_wait(as_tuple(use_awaitable)));
+    auto executor = co_await this_coro::executor;
+
+    // Race read against timeout using async_initiate (no experimental APIs)
+    using ReadResult = std::tuple<boost::system::error_code, std::size_t>;
+    using RaceResult = std::variant<ReadResult, bool>;
+
+    auto read_result = co_await boost::asio::async_initiate<decltype(use_awaitable),
+                                                            void(std::exception_ptr, RaceResult)>(
+        [&socket, &buffer, executor, timeout](auto handler) mutable {
+            auto completed = std::make_shared<std::atomic<bool>>(false);
+            auto timer = std::make_shared<boost::asio::steady_timer>(executor);
+            timer->expires_after(timeout);
+
+            using HandlerT = std::decay_t<decltype(handler)>;
+            auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
+            auto completion_exec = boost::asio::get_associated_executor(*handlerPtr, executor);
+
+            timer->async_wait([completed, handlerPtr,
+                               completion_exec](const boost::system::error_code& ec) mutable {
+                if (ec == boost::asio::error::operation_aborted)
+                    return;
+                if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                    boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
+                        std::move(h)(nullptr, RaceResult(std::in_place_index<1>, true));
+                    });
+                }
+            });
+
+            boost::asio::async_read(
+                socket, boost::asio::buffer(buffer),
+                [timer, completed, handlerPtr, completion_exec](const boost::system::error_code& ec,
+                                                                std::size_t bytes) mutable {
+                    if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                        timer->cancel();
+                        boost::asio::post(completion_exec, [h = std::move(*handlerPtr), ec,
+                                                            bytes]() mutable {
+                            std::move(h)(nullptr,
+                                         RaceResult(std::in_place_index<0>, ReadResult{ec, bytes}));
+                        });
+                    }
+                });
+        },
+        use_awaitable);
 
     if (read_result.index() == 1) {
         co_return Error{ErrorCode::Timeout, "Read timeout"};
@@ -190,6 +263,15 @@ std::unordered_map<std::string, std::shared_ptr<AsioConnectionPool>>& registry_m
 AsioConnectionPool::AsioConnectionPool(const TransportOptions& opts, bool shared)
     : opts_(opts), shared_(shared) {}
 
+AsioConnectionPool::~AsioConnectionPool() {
+    // Mark as shutdown to prevent any concurrent access during destruction
+    shutdown_.store(true, std::memory_order_release);
+    // Note: We don't lock mutex_ here because:
+    // 1. If another thread is holding the mutex, they'll see shutdown_ flag
+    // 2. Locking during destruction can cause deadlocks if destructor is called
+    //    while another thread is waiting for the mutex
+}
+
 std::shared_ptr<AsioConnectionPool>
 AsioConnectionPool::get_or_create(const TransportOptions& opts) {
     if (!opts.poolEnabled) {
@@ -250,6 +332,11 @@ void AsioConnectionPool::cleanup_stale_connections() {
 }
 
 awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::acquire() {
+    // Check if pool is being shut down
+    if (shutdown_.load(std::memory_order_acquire)) {
+        co_return nullptr;
+    }
+
     // Fast path: try to reuse an existing idle connection
     {
         std::lock_guard<std::mutex> lk(mutex_);
@@ -294,6 +381,12 @@ void AsioConnectionPool::release(const std::shared_ptr<AsioConnection>& conn) {
 }
 
 void AsioConnectionPool::shutdown(std::chrono::milliseconds timeout) {
+    // Mark as shutdown first, preventing new operations
+    if (shutdown_.exchange(true, std::memory_order_acq_rel)) {
+        // Already shut down, skip
+        return;
+    }
+
     std::lock_guard<std::mutex> lk(mutex_);
 
     for (auto& weak : connection_pool_) {
