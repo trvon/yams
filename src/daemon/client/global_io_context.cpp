@@ -240,6 +240,19 @@ GlobalIOContext::~GlobalIOContext() noexcept {
     // Mark as destroyed FIRST to prevent restart() from trying to lock mutex
     destroyed_.store(true, std::memory_order_release);
 
+    // IMPORTANT: Close connections BEFORE stopping io_context
+    // Socket destructors need the reactor to properly deregister
+    try {
+        ConnectionRegistry::instance().closeAll();
+    } catch (...) {
+    }
+
+    try {
+        AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
+    } catch (...) {
+    }
+
+    // Now safe to stop the io_context
     try {
         if (this->work_guard_) {
             this->work_guard_->reset();
@@ -262,16 +275,6 @@ GlobalIOContext::~GlobalIOContext() noexcept {
             } catch (...) {
             }
         }
-    }
-
-    try {
-        ConnectionRegistry::instance().closeAll();
-    } catch (...) {
-    }
-
-    try {
-        AsioConnectionPool::shutdown_all(std::chrono::milliseconds(1000));
-    } catch (...) {
     }
 }
 

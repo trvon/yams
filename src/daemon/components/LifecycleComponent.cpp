@@ -363,23 +363,11 @@ Result<void> LifecycleComponent::removePidFile() const {
 
 void LifecycleComponent::setupSignalHandlers() {
     instance_.store(this, std::memory_order_release);
-    std::signal(SIGTERM, &LifecycleComponent::signalHandler);
-    std::signal(SIGINT, &LifecycleComponent::signalHandler);
-#ifndef _WIN32
-    std::signal(SIGHUP, &LifecycleComponent::signalHandler);
-#endif
 }
 
 void LifecycleComponent::cleanupSignalHandlers() {
-    // Use compare_exchange to atomically check and clear instance_ only if it's us
     LifecycleComponent* expected = this;
-    if (instance_.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel)) {
-        std::signal(SIGTERM, SIG_DFL);
-        std::signal(SIGINT, SIG_DFL);
-#ifndef _WIN32
-        std::signal(SIGHUP, SIG_DFL);
-#endif
-    }
+    instance_.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel);
 }
 
 void LifecycleComponent::signalHandler(int signal) {

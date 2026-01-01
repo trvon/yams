@@ -47,7 +47,12 @@ struct AsioConnection {
           strand(o.executor ? *o.executor
                             : GlobalIOContext::instance().get_io_context().get_executor()) {}
 
-    ~AsioConnection() { alive.store(false, std::memory_order_release); }
+    ~AsioConnection() {
+        alive.store(false, std::memory_order_release);
+        if (socket) {
+            (void)socket.release();
+        }
+    }
 
     void close() {
         alive.store(false, std::memory_order_release);

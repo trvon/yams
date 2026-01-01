@@ -55,7 +55,13 @@ void ConnectionRegistry::closeAll() {
     for (auto& weak : connections_) {
         if (auto conn = weak.lock()) {
             conn->alive.store(false, std::memory_order_release);
-            conn->socket.release();
+            // Cancel and close socket - this deregisters from reactor while it's still valid
+            // Don't destroy the socket here; let the io_context process cancellation handlers
+            if (conn->socket && conn->socket->is_open()) {
+                boost::system::error_code ec;
+                conn->socket->cancel(ec);
+                conn->socket->close(ec);
+            }
         }
     }
     connections_.clear();
@@ -393,8 +399,11 @@ void AsioConnectionPool::shutdown(std::chrono::milliseconds timeout) {
         if (auto conn = weak.lock()) {
             conn->alive.store(false, std::memory_order_release);
             try {
-                if (conn->socket) {
-                    conn->socket.release();
+                // Cancel and close socket - this deregisters from reactor while it's still valid
+                if (conn->socket && conn->socket->is_open()) {
+                    boost::system::error_code ec;
+                    conn->socket->cancel(ec);
+                    conn->socket->close(ec);
                 }
             } catch (...) {
             }

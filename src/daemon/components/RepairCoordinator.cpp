@@ -35,6 +35,18 @@
 namespace yams::daemon {
 
 namespace {
+
+// Check if vector operations are disabled via environment variables
+bool vectorsDisabledByEnv() {
+    if (const char* env = std::getenv("YAMS_DISABLE_VECTORS"); env && *env) {
+        return true;
+    }
+    if (const char* env = std::getenv("YAMS_DISABLE_VECTOR_DB"); env && *env) {
+        return true;
+    }
+    return false;
+}
+
 // Shared thread pool for all RepairCoordinator instances
 // Uses 2 threads: one for coordination, one for DB queries
 // Static singleton - threads are detached and cleaned up by OS at exit
@@ -416,26 +428,33 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
         }
 
         if (!vectorCleanupDone && maintenance_allowed()) {
-            try {
-                auto vectorDb = services_ ? services_->getVectorDatabase() : nullptr;
-                if (vectorDb) {
-                    auto cleanup = vectorDb->cleanupOrphanRows();
-                    if (cleanup) {
-                        spdlog::info(
-                            "RepairCoordinator: cleaned vector orphans (metadata_removed={}, "
-                            "embeddings_removed={}, metadata_backfilled={})",
-                            cleanup.value().metadata_removed, cleanup.value().embeddings_removed,
-                            cleanup.value().metadata_backfilled);
-                    } else {
-                        spdlog::warn("RepairCoordinator: vector orphan cleanup failed: {}",
-                                     cleanup.error().message);
+            // Skip vector cleanup if vectors are disabled via environment
+            if (vectorsDisabledByEnv()) {
+                spdlog::debug("RepairCoordinator: skipping vector cleanup (vectors disabled)");
+                vectorCleanupDone = true;
+            } else
+                try {
+                    auto vectorDb = services_ ? services_->getVectorDatabase() : nullptr;
+                    if (vectorDb) {
+                        auto cleanup = vectorDb->cleanupOrphanRows();
+                        if (cleanup) {
+                            spdlog::info(
+                                "RepairCoordinator: cleaned vector orphans (metadata_removed={}, "
+                                "embeddings_removed={}, metadata_backfilled={})",
+                                cleanup.value().metadata_removed,
+                                cleanup.value().embeddings_removed,
+                                cleanup.value().metadata_backfilled);
+                        } else {
+                            spdlog::warn("RepairCoordinator: vector orphan cleanup failed: {}",
+                                         cleanup.error().message);
+                        }
                     }
+                } catch (const std::exception& e) {
+                    spdlog::warn("RepairCoordinator: vector orphan cleanup exception: {}",
+                                 e.what());
+                } catch (...) {
+                    spdlog::warn("RepairCoordinator: vector orphan cleanup exception (unknown)");
                 }
-            } catch (const std::exception& e) {
-                spdlog::warn("RepairCoordinator: vector orphan cleanup exception: {}", e.what());
-            } catch (...) {
-                spdlog::warn("RepairCoordinator: vector orphan cleanup exception (unknown)");
-            }
             vectorCleanupDone = true;
         }
 
@@ -458,10 +477,16 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                     [this]() -> boost::asio::awaitable<void> {
                         try {
                             auto meta = services_ ? services_->getMetadataRepo() : nullptr;
-                            auto vectorDb = services_ ? services_->getVectorDatabase() : nullptr;
-                            if (!meta || !vectorDb) {
+                            if (!meta) {
                                 co_return;
                             }
+
+                            // Check vector availability (skip if disabled)
+                            const bool vectorsDisabled = vectorsDisabledByEnv();
+                            auto vectorDb =
+                                vectorsDisabled
+                                    ? nullptr
+                                    : (services_ ? services_->getVectorDatabase() : nullptr);
 
                             // Query in batches to avoid locking DB for too long
                             const size_t batchSize = 1000;
@@ -495,8 +520,10 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                                         }
 
                                         // Check if document needs repair
+                                        // (skip embedding check if vectors disabled)
                                         const bool missingEmb =
-                                            !vectorDb->hasEmbedding(d.sha256Hash);
+                                            vectorDb ? !vectorDb->hasEmbedding(d.sha256Hash)
+                                                     : false;
                                         const bool missingFts =
                                             (!d.contentExtracted) ||
                                             (d.extractionStatus !=
@@ -587,21 +614,24 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
         }
 
         // Detect documents missing embeddings (vector repair)
+        // Skip if vectors are disabled via environment
         std::vector<std::string> missingEmbeddings;
-        auto vectorDb = services_ ? services_->getVectorDatabase() : nullptr;
-        if (vectorDb) {
-            for (const auto& hash : batch) {
-                if (!vectorDb->hasEmbedding(hash))
-                    missingEmbeddings.push_back(hash);
-            }
+        if (!vectorsDisabledByEnv()) {
+            auto vectorDb = services_ ? services_->getVectorDatabase() : nullptr;
+            if (vectorDb) {
+                for (const auto& hash : batch) {
+                    if (!vectorDb->hasEmbedding(hash))
+                        missingEmbeddings.push_back(hash);
+                }
 
-            // Check if model provider is available for embedding generation
-            if (!missingEmbeddings.empty()) {
-                auto provider = services_ ? services_->getModelProvider() : nullptr;
-                if (provider && provider->isAvailable()) {
-                    spdlog::debug(
-                        "RepairCoordinator: {} docs need embeddings, model provider ready",
-                        missingEmbeddings.size());
+                // Check if model provider is available for embedding generation
+                if (!missingEmbeddings.empty()) {
+                    auto provider = services_ ? services_->getModelProvider() : nullptr;
+                    if (provider && provider->isAvailable()) {
+                        spdlog::debug(
+                            "RepairCoordinator: {} docs need embeddings, model provider ready",
+                            missingEmbeddings.size());
+                    }
                 }
             }
         }

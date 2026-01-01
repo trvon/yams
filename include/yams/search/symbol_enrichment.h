@@ -7,6 +7,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace yams::search {
@@ -43,6 +44,22 @@ public:
      * @return SymbolInfo if node is a symbol, nullopt otherwise
      */
     std::optional<SymbolInfo> extractSymbolInfo(std::int64_t node_id);
+
+    /**
+     * Extract symbol info from a pre-fetched node (avoids additional query).
+     * Used by batch processing path.
+     */
+    std::optional<SymbolInfo> extractSymbolInfoFromNode(const yams::metadata::KGNode& node);
+
+    /**
+     * Batch extract symbol info for multiple node IDs using single query.
+     * Much more efficient than calling extractSymbolInfo() N times.
+     *
+     * @param node_ids Vector of node IDs to fetch
+     * @return Map from node_id to SymbolInfo for valid symbol nodes
+     */
+    std::unordered_map<std::int64_t, SymbolInfo>
+    extractSymbolInfoBatch(const std::vector<std::int64_t>& node_ids);
 
 private:
     std::shared_ptr<yams::metadata::KnowledgeGraphStore> kg_store_;
