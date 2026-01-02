@@ -451,6 +451,12 @@ boost::asio::awaitable<Result<void>> DaemonClient::connect() {
                 impl->breaker_.recordSuccess();
             // Clear explicitly disconnected flag on successful connection
             impl->explicitly_disconnected_ = false;
+            // Refresh transport to get a fresh pool in case the old one was shut down
+            // This handles reconnection after daemon restart
+            if (impl->pool_ && impl->pool_->is_shutdown()) {
+                spdlog::debug("[DaemonClient::connect] pool was shutdown, refreshing transport");
+                impl->refresh_transport();
+            }
             co_return Result<void>();
         }
         if (!impl->config_.autoStart) {

@@ -6,6 +6,7 @@
 // - Section headers and title banners
 // - Progress bar rendering
 // - Visible-width-safe truncation and padding
+// - Batch operation helpers (log level scoping, stats aggregation)
 //
 // Header-only, no external dependencies. Portable with sensible fallbacks.
 
@@ -24,6 +25,8 @@
 #include <string_view>
 #include <thread>
 #include <vector>
+
+#include <spdlog/spdlog.h>
 
 #if defined(_WIN32)
 #include <io.h>
@@ -913,5 +916,91 @@ inline std::string center_text(std::string_view text, int width = -1) {
     int padding = (width - text_width) / 2;
     return repeat(' ', static_cast<size_t>(padding)) + std::string(text);
 }
+
+// ============================================================================
+// Batch operation helpers
+// ============================================================================
+
+/**
+ * RAII helper to temporarily change spdlog log level during batch operations.
+ * Useful for suppressing transient errors (e.g., "database is locked") during
+ * operations that retry internally.
+ *
+ * Usage:
+ *   {
+ *       ScopedLogLevel quiet(spdlog::level::warn);  // Suppress info/debug
+ *       // ... batch operation with retries ...
+ *   }  // Original level restored
+ */
+class ScopedLogLevel {
+public:
+    explicit ScopedLogLevel(spdlog::level::level_enum level) : prev_level_(spdlog::get_level()) {
+        spdlog::set_level(level);
+    }
+
+    ~ScopedLogLevel() { spdlog::set_level(prev_level_); }
+
+    // Non-copyable, non-movable
+    ScopedLogLevel(const ScopedLogLevel&) = delete;
+    ScopedLogLevel& operator=(const ScopedLogLevel&) = delete;
+    ScopedLogLevel(ScopedLogLevel&&) = delete;
+    ScopedLogLevel& operator=(ScopedLogLevel&&) = delete;
+
+private:
+    spdlog::level::level_enum prev_level_;
+};
+
+/**
+ * Statistics tracker for batch operations with transient failures.
+ * Aggregates retry/failure counts to show summary at end instead of
+ * logging each individual failure.
+ */
+struct BatchOperationStats {
+    std::atomic<size_t> total{0};
+    std::atomic<size_t> succeeded{0};
+    std::atomic<size_t> failed{0};
+    std::atomic<size_t> transient_retries{0}; // database locked, etc.
+    std::atomic<size_t> skipped{0};
+
+    void reset() {
+        total = 0;
+        succeeded = 0;
+        failed = 0;
+        transient_retries = 0;
+        skipped = 0;
+    }
+
+    // Format a summary string for display
+    std::string summary() const {
+        std::ostringstream oss;
+        oss << "ok=" << succeeded.load();
+        if (failed > 0) {
+            oss << ", failed=" << failed.load();
+        }
+        if (transient_retries > 0) {
+            oss << ", retries=" << transient_retries.load();
+        }
+        if (skipped > 0) {
+            oss << ", skipped=" << skipped.load();
+        }
+        return oss.str();
+    }
+
+    // Format with color coding
+    std::string summary_colored() const {
+        std::string result = colorize("ok=" + std::to_string(succeeded.load()), Ansi::GREEN);
+        if (failed > 0) {
+            result += ", " + colorize("failed=" + std::to_string(failed.load()), Ansi::RED);
+        }
+        if (transient_retries > 0) {
+            result += ", " +
+                      colorize("retries=" + std::to_string(transient_retries.load()), Ansi::YELLOW);
+        }
+        if (skipped > 0) {
+            result += ", " + colorize("skipped=" + std::to_string(skipped.load()), Ansi::DIM);
+        }
+        return result;
+    }
+};
 
 } // namespace yams::cli::ui

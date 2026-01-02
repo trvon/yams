@@ -1141,6 +1141,7 @@ if catch2_dep.found()
       'unit/cli/model_command_catch2_test.cpp',
       'unit/cli/prompt_util_catch2_test.cpp',
       'unit/cli/recommendation_util_catch2_test.cpp',
+      'unit/cli/repair_command_catch2_test.cpp',
       'unit/cli/session_command_catch2_test.cpp',
       'unit/cli/stream_heuristics_catch2_test.cpp',
       'unit/cli/update_command_catch2_test.cpp',

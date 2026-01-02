@@ -163,3 +163,83 @@ TEST_CASE("DoctorCommand - prune help displays without errors", "[cli][doctor][c
                     lowerOutput.find("failed") != std::string::npos;
     CHECK_FALSE(hasError);
 }
+
+TEST_CASE("DoctorCommand - dedupe help displays correctly", "[cli][doctor][catch2]") {
+    CliTestHelper helper;
+
+    CaptureStdout capture;
+
+    auto cli = helper.makeCli();
+    const char* argv[] = {"yams", "doctor", "dedupe", "--help"};
+    (void)cli->run(4, const_cast<char**>(argv));
+
+    std::string output = capture.str();
+
+    // Should show dedupe options
+    CHECK(output.find("--mode") != std::string::npos);
+    CHECK(output.find("--strategy") != std::string::npos);
+    CHECK(output.find("--apply") != std::string::npos);
+}
+
+TEST_CASE("DoctorCommand - repair subcommand help displays correctly", "[cli][doctor][catch2]") {
+    CliTestHelper helper;
+
+    CaptureStdout capture;
+
+    auto cli = helper.makeCli();
+    const char* argv[] = {"yams", "doctor", "repair", "--help"};
+    (void)cli->run(4, const_cast<char**>(argv));
+
+    std::string output = capture.str();
+
+    // Should show repair options
+    CHECK(output.find("--embeddings") != std::string::npos);
+    CHECK(output.find("--fts5") != std::string::npos);
+}
+
+TEST_CASE("DoctorCommand - validate help displays correctly", "[cli][doctor][catch2]") {
+    CliTestHelper helper;
+
+    CaptureStdout capture;
+
+    auto cli = helper.makeCli();
+    const char* argv[] = {"yams", "doctor", "validate", "--help"};
+    (void)cli->run(4, const_cast<char**>(argv));
+
+    std::string output = capture.str();
+
+    // Should show validate options
+    CHECK(output.find("--graph") != std::string::npos);
+}
+
+TEST_CASE("DoctorCommand - tuning help displays correctly", "[cli][doctor][catch2]") {
+    CliTestHelper helper;
+
+    CaptureStdout capture;
+
+    auto cli = helper.makeCli();
+    const char* argv[] = {"yams", "doctor", "tuning", "--help"};
+    (void)cli->run(4, const_cast<char**>(argv));
+
+    std::string output = capture.str();
+
+    // Should show tuning options
+    CHECK(output.find("--apply") != std::string::npos);
+}
+
+TEST_CASE("DoctorCommand - top-level help displays all subcommands", "[cli][doctor][catch2]") {
+    CliTestHelper helper;
+
+    CaptureStdout capture;
+
+    auto cli = helper.makeCli();
+    const char* argv[] = {"yams", "doctor", "--help"};
+    (void)cli->run(3, const_cast<char**>(argv));
+
+    std::string output = capture.str();
+
+    // Should list available subcommands
+    CHECK(output.find("prune") != std::string::npos);
+    CHECK(output.find("dedupe") != std::string::npos);
+    CHECK(output.find("repair") != std::string::npos);
+}

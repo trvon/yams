@@ -418,12 +418,6 @@ private:
         std::cout << "- " << label << ": " << value << "\n";
     }
 
-    static void printSuccess(const std::string& msg) { std::cout << ui::status_ok(msg) << "\n"; }
-
-    static void printWarn(const std::string& msg) { std::cout << ui::status_warning(msg) << "\n"; }
-
-    static void printError(const std::string& msg) { std::cout << ui::status_error(msg) << "\n"; }
-
     static void printSummary(const std::string& title, const std::vector<StepResult>& steps) {
         printHeader(title);
         for (const auto& s : steps) {
@@ -1927,9 +1921,14 @@ private:
         // Warn about old location if models found there
         if (old_model_count > 0) {
             std::cout << "\n";
-            printWarn("Found " + std::to_string(old_model_count) +
-                      " model(s) in OLD location: " + old_base.string());
-            printWarn("Models should be in unified storage: " + new_base.string());
+            std::cout << "  "
+                      << ui::status_warning("Found " + std::to_string(old_model_count) +
+                                            " model(s) in OLD location: " + old_base.string())
+                      << "\n";
+            std::cout << "  "
+                      << ui::status_warning("Models should be in unified storage: " +
+                                            new_base.string())
+                      << "\n";
             std::cout << "\nMigration command:\n";
             std::cout << "  mkdir -p " << new_base.string() << "\n";
             std::cout << "  mv " << old_base.string() << "/* " << new_base.string() << "/\n";
@@ -2033,7 +2032,10 @@ private:
                                      ".local/share/yams/vectors.db";
 
         if (!fs::exists(dbPath)) {
-            printWarn("Vector database does not exist yet: " + dbPath.string());
+            std::cout << "  "
+                      << ui::status_warning("Vector database does not exist yet: " +
+                                            dbPath.string())
+                      << "\n";
             std::cout << "  → Database will be created automatically when daemon starts.\n";
             return;
         }
@@ -2041,7 +2043,10 @@ private:
         sqlite3* db = nullptr;
         int rc = sqlite3_open(dbPath.string().c_str(), &db);
         if (rc != SQLITE_OK) {
-            printError("Failed to open vector database: " + std::string(sqlite3_errmsg(db)));
+            std::cout << "  "
+                      << ui::status_error("Failed to open vector database: " +
+                                          std::string(sqlite3_errmsg(db)))
+                      << "\n";
             if (db)
                 sqlite3_close(db);
             return;
@@ -2050,8 +2055,10 @@ private:
         char* error_msg = nullptr;
         rc = sqlite3_vec_init(db, &error_msg, nullptr);
         if (rc != SQLITE_OK) {
-            printError("Failed to initialize vec0 module: " +
-                       std::string(error_msg ? error_msg : "unknown"));
+            std::cout << "  "
+                      << ui::status_error("Failed to initialize vec0 module: " +
+                                          std::string(error_msg ? error_msg : "unknown"))
+                      << "\n";
             if (error_msg)
                 sqlite3_free(error_msg);
             sqlite3_close(db);
@@ -2068,12 +2075,12 @@ private:
         }
 
         if (!vec0_available) {
-            printError("vec0 module failed to load");
+            std::cout << "  " << ui::status_error("vec0 module failed to load") << "\n";
             sqlite3_close(db);
             return;
         }
 
-        printSuccess("vec0 module is available");
+        std::cout << "  " << ui::status_ok("vec0 module is available") << "\n";
 
         // Test 2: Check if doc_embeddings table uses vec0 virtual table
         const char* schema_check =
@@ -2090,10 +2097,13 @@ private:
         }
 
         if (schema_ddl.empty()) {
-            printWarn("doc_embeddings table does not exist yet");
+            std::cout << "  " << ui::status_warning("doc_embeddings table does not exist yet")
+                      << "\n";
             std::cout << "  → Table will be created automatically when daemon starts.\n";
         } else if (schema_ddl.find("USING vec0") == std::string::npos) {
-            printError("doc_embeddings table not using vec0 virtual table");
+            std::cout << "  "
+                      << ui::status_error("doc_embeddings table not using vec0 virtual table")
+                      << "\n";
             std::cout << "\nSchema: " << schema_ddl.substr(0, 100) << "...\n\n";
             std::cout << "This table was created without the vec0 module.\n";
             std::cout << "Vector search will not work correctly.\n\n";
@@ -2101,7 +2111,9 @@ private:
             std::cout << "  1. Recreate the vector tables:\n";
             std::cout << "     yams doctor --recreate-vectors --stop-daemon\n\n";
         } else {
-            printSuccess("doc_embeddings table correctly uses vec0 virtual table");
+            std::cout << "  "
+                      << ui::status_ok("doc_embeddings table correctly uses vec0 virtual table")
+                      << "\n";
 
             // Extract dimension from schema
             auto pos = schema_ddl.find("float[");
@@ -2133,19 +2145,27 @@ private:
                 cfg.requestTimeout = std::chrono::seconds(5);
                 auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
                 if (!leaseRes) {
-                    printError("Daemon unavailable: " + leaseRes.error().message);
+                    std::cout << "  "
+                              << ui::status_error("Daemon unavailable: " + leaseRes.error().message)
+                              << "\n";
                     return;
                 }
                 auto leaseHandle = std::move(leaseRes.value());
                 auto& client = **leaseHandle;
                 auto statusRes = yams::cli::run_result(client.status(), std::chrono::seconds(5));
                 if (!statusRes) {
-                    printError("Failed to get daemon status: " + statusRes.error().message);
+                    std::cout << "  "
+                              << ui::status_error("Failed to get daemon status: " +
+                                                  statusRes.error().message)
+                              << "\n";
                     return;
                 }
                 status = statusRes.value();
             } catch (const std::exception& e) {
-                printError(std::string("Failed to get daemon status: ") + e.what());
+                std::cout << "  "
+                          << ui::status_error(std::string("Failed to get daemon status: ") +
+                                              e.what())
+                          << "\n";
                 return;
             }
         }
@@ -2671,7 +2691,7 @@ void DoctorCommand::runDedupe() {
     try {
         printHeader("Document Dedupe");
         if (!cli_) {
-            printError("CLI context unavailable");
+            std::cout << "  " << ui::status_error("CLI context unavailable") << "\n";
             return;
         }
         namespace fs = std::filesystem;
@@ -2686,20 +2706,21 @@ void DoctorCommand::runDedupe() {
             }
         }
         if (dbPath.empty()) {
-            printError("metadata.db not found under data path");
+            std::cout << "  " << ui::status_error("metadata.db not found under data path") << "\n";
             return;
         }
         yams::metadata::Database db;
         auto ro = db.open(dbPath.string(), yams::metadata::ConnectionMode::ReadWrite);
         if (!ro) {
-            printError(std::string("Open failed: ") + ro.error().message);
+            std::cout << "  " << ui::status_error(std::string("Open failed: ") + ro.error().message)
+                      << "\n";
             return;
         }
         auto ps = db.prepare(
             "SELECT id,file_path,file_name,file_size,sha256_hash,modified_time,indexed_time FROM "
             "documents");
         if (!ps) {
-            printError("Prepare failed: " + ps.error().message);
+            std::cout << "  " << ui::status_error("Prepare failed: " + ps.error().message) << "\n";
             return;
         }
         yams::metadata::Statement stmt = std::move(ps).value();
@@ -2716,7 +2737,8 @@ void DoctorCommand::runDedupe() {
         while (true) {
             auto step = stmt.step();
             if (!step) {
-                printError("Step error: " + step.error().message);
+                std::cout << "  " << ui::status_error("Step error: " + step.error().message)
+                          << "\n";
                 return;
             }
             if (!step.value())
@@ -2726,7 +2748,7 @@ void DoctorCommand::runDedupe() {
                             stmt.getInt64(6)});
         }
         if (rows.empty()) {
-            printSuccess("No documents");
+            std::cout << "  " << ui::status_ok("No documents") << "\n";
             return;
         }
         struct G {
@@ -2783,7 +2805,8 @@ void DoctorCommand::runDedupe() {
             }
         }
         if (!dupGroups) {
-            printSuccess("No duplicate groups (mode=" + dedupeMode_ + ")");
+            std::cout << "  " << ui::status_ok("No duplicate groups (mode=" + dedupeMode_ + ")")
+                      << "\n";
             return;
         }
         printStatusLine("Total documents", std::to_string(rows.size()));
@@ -2792,23 +2815,23 @@ void DoctorCommand::runDedupe() {
         if (skipped)
             printStatusLine("Skipped (hash mismatch, use --force)", std::to_string(skipped));
         if (!dedupeApply_) {
-            printWarn("Dry-run. Use --apply to delete.");
+            std::cout << "  " << ui::status_warning("Dry-run. Use --apply to delete.") << "\n";
             return;
         }
         if (toDelete.empty()) {
-            printSuccess("Nothing to delete");
+            std::cout << "  " << ui::status_ok("Nothing to delete") << "\n";
             return;
         }
         auto br = db.execute("BEGIN TRANSACTION");
         if (!br) {
-            printError("BEGIN failed: " + br.error().message);
+            std::cout << "  " << ui::status_error("BEGIN failed: " + br.error().message) << "\n";
             return;
         }
         bool err = false;
         for (auto id : toDelete) {
             auto psd = db.prepare("DELETE FROM documents WHERE id=?");
             if (!psd) {
-                printError("Prepare delete failed");
+                std::cout << "  " << ui::status_error("Prepare delete failed") << "\n";
                 err = true;
                 break;
             }
@@ -2826,14 +2849,16 @@ void DoctorCommand::runDedupe() {
         }
         auto er = db.execute(err ? "ROLLBACK" : "COMMIT");
         if (!er)
-            printError("Txn end failed: " + er.error().message);
+            std::cout << "  " << ui::status_error("Txn end failed: " + er.error().message) << "\n";
         if (err) {
-            printError("Aborted due to errors");
+            std::cout << "  " << ui::status_error("Aborted due to errors") << "\n";
             return;
         }
-        printSuccess("Deleted " + std::to_string(toDelete.size()) + " duplicate rows");
+        std::cout << "  "
+                  << ui::status_ok("Deleted " + std::to_string(toDelete.size()) + " duplicate rows")
+                  << "\n";
     } catch (const std::exception& e) {
-        printError(std::string("Exception: ") + e.what());
+        std::cout << "  " << ui::status_error(std::string("Exception: ") + e.what()) << "\n";
     }
 }
 
@@ -2901,7 +2926,7 @@ void DoctorCommand::runPrune() {
         }
 
         if (!cli_) {
-            printError("CLI context unavailable");
+            std::cout << "  " << ui::status_error("CLI context unavailable") << "\n";
             return;
         }
 
@@ -2920,7 +2945,10 @@ void DoctorCommand::runPrune() {
         clientCfg.requestTimeout = std::chrono::milliseconds(300000);
 
         if (!daemon::DaemonClient::isDaemonRunning(clientCfg.socketPath)) {
-            printError("Daemon not running on socket: " + clientCfg.socketPath.string());
+            std::cout << "  "
+                      << ui::status_error("Daemon not running on socket: " +
+                                          clientCfg.socketPath.string())
+                      << "\n";
             std::cout << yams::cli::ui::colorize("\nHint:", yams::cli::ui::Ansi::YELLOW)
                       << " Start the daemon with 'yams daemon start'\n\n";
             return;
@@ -2933,7 +2961,10 @@ void DoctorCommand::runPrune() {
 
         auto leaseRes = acquire_cli_daemon_client(clientCfg, 1, 4);
         if (!leaseRes) {
-            printError("Failed to acquire daemon client: " + leaseRes.error().message);
+            std::cout << "  "
+                      << ui::status_error("Failed to acquire daemon client: " +
+                                          leaseRes.error().message)
+                      << "\n";
             return;
         }
 
@@ -2950,16 +2981,20 @@ void DoctorCommand::runPrune() {
         };
         auto spinnerRes = runWithSpinner("Pruning", runPruneRequest, 300000);
         if (!spinnerRes) {
-            printError("Prune request timed out");
+            std::cout << "  " << ui::status_error("Prune request timed out") << "\n";
             return;
         }
         if (!spinnerRes.value()) {
-            printError("Prune request failed: " + spinnerRes.value().error().message);
+            std::cout << "  "
+                      << ui::status_error("Prune request failed: " +
+                                          spinnerRes.value().error().message)
+                      << "\n";
             return;
         }
 
         if (!resp.errorMessage.empty()) {
-            printError("Prune operation failed: " + resp.errorMessage);
+            std::cout << "  " << ui::status_error("Prune operation failed: " + resp.errorMessage)
+                      << "\n";
             return;
         }
 
@@ -3016,7 +3051,7 @@ void DoctorCommand::runPrune() {
         }
 
     } catch (const std::exception& e) {
-        printError(std::string("Prune error: ") + e.what());
+        std::cout << "  " << ui::status_error(std::string("Prune error: ") + e.what()) << "\n";
     }
 }
 } // namespace yams::cli

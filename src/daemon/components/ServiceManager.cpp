@@ -1566,12 +1566,13 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                 if (!indexLoaded && vectorDatabase_) {
                     spdlog::info("[VectorInit] Populating vector index from database...");
                     try {
-                        // Get all unique document hashes from the database
-                        auto stats = vectorDatabase_->getStats();
-                        if (stats.total_vectors > 0) {
+                        // Use getVectorCount() which returns cached count (fast)
+                        // instead of getStats() which does expensive JOIN query
+                        auto dbVectorCount = vectorDatabase_->getVectorCount();
+                        if (dbVectorCount > 0) {
                             spdlog::info("[VectorInit] Found {} vectors in database, loading into "
                                          "search index",
-                                         stats.total_vectors);
+                                         dbVectorCount);
 
                             spdlog::warn(
                                 "[VectorInit] Direct database->index population not yet "
@@ -1694,13 +1695,15 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                 auto stats = vectorIndexManager_->getStats();
                 if (stats.num_vectors == 0) {
                     // Index is empty - check if we have vectors in the database
-                    auto dbStats = vectorDatabase_->getStats();
-                    if (dbStats.total_vectors > 0) {
+                    // Use getVectorCount() which returns cached count (fast)
+                    // instead of getStats() which does expensive JOIN query
+                    auto dbVectorCount = vectorDatabase_->getVectorCount();
+                    if (dbVectorCount > 0) {
                         spdlog::info(
                             "[VectorInit] Found {} vectors in database but search index is empty. "
                             "Run 'yams repair --embeddings' to rebuild the search index from "
                             "database.",
-                            dbStats.total_vectors);
+                            dbVectorCount);
                     }
                 }
             }

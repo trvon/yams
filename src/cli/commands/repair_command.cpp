@@ -72,7 +72,7 @@ public:
         cmd->add_flag("--dry-run", dryRun_, "Preview changes without applying");
         cmd->add_flag("--foreground", foreground_,
                       "Run embeddings repair in the foreground (stream progress)");
-        cmd->add_flag("-v,--verbose", verbose_, "Show detailed progress");
+        cmd->add_flag("-v,--verbose", verbose_, "Show detailed progress and transient errors");
         cmd->add_flag("--force", force_, "Skip confirmation prompts");
 
         cmd->callback([this]() {
@@ -1343,7 +1343,7 @@ private:
 
 // Out-of-class helper definition (below class end)
 Result<void> RepairCommand::rebuildFts5Index(const app::services::AppContext& ctx) {
-    std::cout << "Rebuilding FTS5 index (best-effort)...\n";
+    std::cout << ui::section_header("FTS5 Index Rebuild") << "\n";
     if (!ctx.store || !ctx.metadataRepo) {
         return Error{ErrorCode::NotInitialized, "Store/Metadata not initialized"};
     }
@@ -1353,12 +1353,25 @@ Result<void> RepairCommand::rebuildFts5Index(const app::services::AppContext& ct
                      "Failed to enumerate documents: " + docs.error().message};
     }
 
-    size_t ok = 0, fail = 0;
+    // Use batch stats to aggregate errors instead of logging each one
+    ui::BatchOperationStats stats;
+    stats.total = docs.value().size();
+
+    // Suppress transient errors unless verbose mode is enabled
+    std::optional<ui::ScopedLogLevel> quietMode;
+    if (!verbose_) {
+        // Suppress error-level logs during batch operation; show summary at end
+        quietMode.emplace(spdlog::level::critical);
+    }
+
     ProgressIndicator progress(ProgressIndicator::Style::Percentage);
     if (!verbose_ && docs.value().size() > 100) {
         progress.start("FTS5 reindex");
     }
-    size_t current = 0, total = docs.value().size();
+
+    size_t current = 0;
+    const size_t total = docs.value().size();
+
     for (const auto& d : docs.value()) {
         ++current;
         std::string ext = d.fileExtension;
@@ -1381,24 +1394,61 @@ Result<void> RepairCommand::rebuildFts5Index(const app::services::AppContext& ct
                                                                  d.mimeType);
                 if (ir && contentResult) {
                     (void)ctx.metadataRepo->updateFuzzyIndex(d.id);
-                    ++ok;
+                    ++stats.succeeded;
                 } else {
-                    ++fail;
+                    // Check if this was a transient error (database locked)
+                    std::string errMsg = ir ? "" : ir.error().message;
+                    if (errMsg.find("database is locked") != std::string::npos ||
+                        errMsg.find("SQLITE_BUSY") != std::string::npos) {
+                        ++stats.transient_retries;
+                    }
+                    ++stats.failed;
                 }
             } else {
-                ++fail;
+                ++stats.skipped; // No content to index
+            }
+        } catch (const std::exception& e) {
+            // Check for transient errors in exception message
+            std::string errMsg = e.what();
+            if (errMsg.find("database is locked") != std::string::npos ||
+                errMsg.find("SQLITE_BUSY") != std::string::npos) {
+                ++stats.transient_retries;
+            }
+            ++stats.failed;
+            if (verbose_) {
+                std::cout << "  "
+                          << ui::status_warning("Exception for " + d.fileName + ": " + errMsg)
+                          << "\n";
             }
         } catch (...) {
-            ++fail;
+            ++stats.failed;
         }
 
         if (!verbose_ && total > 100) {
             progress.update(current, total);
         }
     }
+
+    // Release scoped log level before printing summary
+    quietMode.reset();
+
     if (!verbose_ && total > 100)
         progress.stop();
-    std::cout << "FTS5 reindex complete: ok=" << ok << ", fail=" << fail << "\n";
+
+    // Print summary with color-coded stats
+    std::cout << "  " << ui::status_ok("FTS5 reindex complete: " + stats.summary_colored()) << "\n";
+
+    // Show hint if there were transient errors
+    if (stats.transient_retries > 0 && !verbose_) {
+        std::cout
+            << "  "
+            << ui::colorize(
+                   "Hint: " + std::to_string(stats.transient_retries.load()) +
+                       " transient errors (database locked) occurred. Use --verbose for details.",
+                   ui::Ansi::DIM)
+            << "\n";
+    }
+
     return {};
 }
 

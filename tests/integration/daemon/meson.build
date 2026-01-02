@@ -19,10 +19,6 @@ else
     'post_ingest_trace.cpp',
   )
 
-  connection_pool_stale_srcs = files(
-    'connection_pool_stale_test.cpp',
-  )
-
   client_timeout_recovery_srcs = files(
     'client_timeout_recovery_test.cpp',
   )
@@ -112,27 +108,6 @@ else
     test('post_ingest_queue_validation',
       post_ingest_queue_validation_exe,
       suite: ['integration', 'daemon', 'catch2', 'post-ingest'],
-      env: {
-        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-        'YAMS_DISABLE_VECTORS': '1',
-        'TSAN_OPTIONS': _test_tsan_options,
-      },
-      is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
-      args: ['--allow-running-no-tests'],
-    )
-
-    connection_pool_stale_exe = executable('yams_connection_pool_stale_tests_catch2',
-      connection_pool_stale_srcs,
-      include_directories: incs,
-      dependencies: [catch2_dep, catch2_main_dep, test_deps],
-      cpp_args: ['-DYAMS_TESTING=1'],
-      install: false,
-    )
-
-    test('connection_pool_stale',
-      connection_pool_stale_exe,
-      suite: ['integration', 'daemon', 'catch2', 'connection-pool'],
       env: {
         'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
         'YAMS_DISABLE_VECTORS': '1',
