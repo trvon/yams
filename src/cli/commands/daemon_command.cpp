@@ -777,7 +777,9 @@ private:
 
 #ifndef _WIN32
             // Unix: use pkill to find and kill yams-daemon processes with our socket
-            std::string pkillCmd = "pkill -f 'yams-daemon.*" + effectiveSocket + "'";
+            // Use SIGKILL (-9) when --force is set, otherwise SIGTERM (default)
+            std::string signal = force_ ? "-9 " : "";
+            std::string pkillCmd = "pkill " + signal + "-f 'yams-daemon.*" + effectiveSocket + "'";
             int pkillResult = std::system(pkillCmd.c_str());
 
             if (pkillResult == 0) {
@@ -788,7 +790,8 @@ private:
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
             } else {
                 // Try a more general pkill if specific socket match fails
-                pkillResult = std::system("pkill -f 'yams-daemon'");
+                pkillCmd = "pkill " + signal + "-f 'yams-daemon'";
+                pkillResult = std::system(pkillCmd.c_str());
                 if (pkillResult == 0) {
                     spdlog::info("Killed yams-daemon process(es)");
                     stopped = true;

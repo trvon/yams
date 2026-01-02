@@ -1483,15 +1483,27 @@ private:
             std::cout << ui::section_header("Tree-sitter Grammar Status") << "\n";
             std::cout << "Installation path: " << grammarPath << "\n\n";
 
-            // Supported languages
+            // Supported languages (must match grammar_loader.h kGrammarRepos)
             std::vector<std::pair<std::string, std::string>> languages = {
+                {"c", "libtree-sitter-c.so"},
                 {"cpp", "libtree-sitter-cpp.so"},
                 {"python", "libtree-sitter-python.so"},
                 {"rust", "libtree-sitter-rust.so"},
                 {"go", "libtree-sitter-go.so"},
                 {"javascript", "libtree-sitter-javascript.so"},
                 {"typescript", "libtree-sitter-typescript.so"},
-                {"java", "libtree-sitter-java.so"}};
+                {"java", "libtree-sitter-java.so"},
+                {"csharp", "libtree-sitter-c-sharp.so"},
+                {"php", "libtree-sitter-php.so"},
+                {"kotlin", "libtree-sitter-kotlin.so"},
+                {"perl", "libtree-sitter-perl.so"},
+                {"r", "libtree-sitter-r.so"},
+                {"sql", "libtree-sitter-sql.so"},
+                {"solidity", "libtree-sitter-solidity.so"},
+                {"dart", "libtree-sitter-dart.so"},
+                {"p4", "libtree-sitter-p4.so"},
+                {"zig", "libtree-sitter-zig.so"},
+                {"swift", "libtree-sitter-swift.so"}};
 
             std::cout << "Supported Languages:\n";
             for (const auto& [lang, lib] : languages) {
@@ -1516,18 +1528,32 @@ private:
     Result<void> executeGrammarDownload() {
         try {
             // Supported grammars mapped to their repository URLs
+            // Must match grammar_loader.h kGrammarRepos
             std::map<std::string, std::string> grammarRepos = {
+                {"c", "tree-sitter/tree-sitter-c"},
                 {"cpp", "tree-sitter/tree-sitter-cpp"},
                 {"python", "tree-sitter/tree-sitter-python"},
                 {"rust", "tree-sitter/tree-sitter-rust"},
                 {"go", "tree-sitter/tree-sitter-go"},
                 {"javascript", "tree-sitter/tree-sitter-javascript"},
                 {"typescript", "tree-sitter/tree-sitter-typescript"},
-                {"java", "tree-sitter/tree-sitter-java"}};
+                {"java", "tree-sitter/tree-sitter-java"},
+                {"csharp", "tree-sitter/tree-sitter-c-sharp"},
+                {"php", "tree-sitter/tree-sitter-php"},
+                {"kotlin", "fwcd/tree-sitter-kotlin"},
+                {"perl", "tree-sitter-perl/tree-sitter-perl"},
+                {"r", "r-lib/tree-sitter-r"},
+                {"sql", "DerekStride/tree-sitter-sql"},
+                {"solidity", "JoranHonig/tree-sitter-solidity"},
+                {"dart", "UserNobody14/tree-sitter-dart"},
+                {"p4", "prona-p4-learning-platform/tree-sitter-p4"},
+                {"zig", "maxxnino/tree-sitter-zig"},
+                {"swift", "alex-pinkus/tree-sitter-swift"}};
 
             if (grammarRepos.find(grammarLanguage_) == grammarRepos.end()) {
                 std::cout << ui::status_error("Unsupported language: " + grammarLanguage_) << "\n";
-                std::cout << "Supported: cpp, python, rust, go, javascript, typescript, java\n";
+                std::cout << "Supported: c, cpp, python, rust, go, javascript, typescript, java, "
+                          << "csharp, php, kotlin, perl, r, sql, solidity, dart, p4, zig, swift\n";
                 return Error{ErrorCode::InvalidArgument, "Unsupported language"};
             }
 

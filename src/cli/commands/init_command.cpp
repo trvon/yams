@@ -76,6 +76,7 @@ static constexpr GrammarInfo SUPPORTED_GRAMMARS[] = {
     {"typescript", "tree-sitter/tree-sitter-typescript", "TypeScript/TSX", true},
     {"rust", "tree-sitter/tree-sitter-rust", "Rust language", true},
     {"go", "tree-sitter/tree-sitter-go", "Go language", true},
+    {"swift", "alex-pinkus/tree-sitter-swift", "Swift language", true},
     {"java", "tree-sitter/tree-sitter-java", "Java language", false},
     {"csharp", "tree-sitter/tree-sitter-c-sharp", "C# language", false},
     {"php", "tree-sitter/tree-sitter-php", "PHP language", false},

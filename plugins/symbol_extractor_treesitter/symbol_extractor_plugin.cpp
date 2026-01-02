@@ -74,6 +74,7 @@ struct GrammarSpec {
     const char* default_so; // common .so name
 };
 
+// Must match grammar_loader.h kSpecs
 static const GrammarSpec kSpecs[] = {
     {"c", "YAMS_TS_C_LIB", "tree_sitter_c", "libtree-sitter-c.so"},
     {"cpp", "YAMS_TS_CPP_LIB", "tree_sitter_cpp", "libtree-sitter-cpp.so"},
@@ -86,6 +87,25 @@ static const GrammarSpec kSpecs[] = {
     {"ts", "YAMS_TS_TS_LIB", "tree_sitter_typescript", "libtree-sitter-typescript.so"},
     {"typescript", "YAMS_TS_TS_LIB", "tree_sitter_typescript", "libtree-sitter-typescript.so"},
     {"java", "YAMS_TS_JAVA_LIB", "tree_sitter_java", "libtree-sitter-java.so"},
+    {"csharp", "YAMS_TS_CSHARP_LIB", "tree_sitter_c_sharp", "libtree-sitter-c-sharp.so"},
+    {"c#", "YAMS_TS_CSHARP_LIB", "tree_sitter_c_sharp", "libtree-sitter-c-sharp.so"},
+    {"cs", "YAMS_TS_CSHARP_LIB", "tree_sitter_c_sharp", "libtree-sitter-c-sharp.so"},
+    {"php", "YAMS_TS_PHP_LIB", "tree_sitter_php", "libtree-sitter-php.so"},
+    {"kotlin", "YAMS_TS_KOTLIN_LIB", "tree_sitter_kotlin", "libtree-sitter-kotlin.so"},
+    {"kt", "YAMS_TS_KOTLIN_LIB", "tree_sitter_kotlin", "libtree-sitter-kotlin.so"},
+    {"perl", "YAMS_TS_PERL_LIB", "tree_sitter_perl", "libtree-sitter-perl.so"},
+    {"pl", "YAMS_TS_PERL_LIB", "tree_sitter_perl", "libtree-sitter-perl.so"},
+    {"r", "YAMS_TS_R_LIB", "tree_sitter_r", "libtree-sitter-r.so"},
+    {"sql", "YAMS_TS_SQL_LIB", "tree_sitter_sql", "libtree-sitter-sql.so"},
+    {"sol", "YAMS_TS_SOL_LIB", "tree_sitter_solidity", "libtree-sitter-solidity.so"},
+    {"solidity", "YAMS_TS_SOL_LIB", "tree_sitter_solidity", "libtree-sitter-solidity.so"},
+    {"dart", "YAMS_TS_DART_LIB", "tree_sitter_dart", "libtree-sitter-dart.so"},
+    {"flutter", "YAMS_TS_DART_LIB", "tree_sitter_dart", "libtree-sitter-dart.so"},
+    {"p4", "YAMS_TS_P4_LIB", "tree_sitter_p4", "libtree-sitter-p4.so"},
+    {"p4_16", "YAMS_TS_P4_LIB", "tree_sitter_p4", "libtree-sitter-p4.so"},
+    {"p4lang", "YAMS_TS_P4_LIB", "tree_sitter_p4", "libtree-sitter-p4.so"},
+    {"zig", "YAMS_TS_ZIG_LIB", "tree_sitter_zig", "libtree-sitter-zig.so"},
+    {"swift", "YAMS_TS_SWIFT_LIB", "tree_sitter_swift", "libtree-sitter-swift.so"},
 };
 
 // STANDARD GRAMMAR PATHS - matching CLI implementation
