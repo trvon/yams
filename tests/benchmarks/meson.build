@@ -200,7 +200,9 @@ symbol_extraction_bench = executable('symbol_extraction_bench',
 )
 
 # Register as Catch2 test (not a standard test, only run manually or in nightly CI)
+# Tests are tagged [!benchmark] so won't run by default - use --allow-running-no-tests
 test('symbol_extraction_bench', symbol_extraction_bench,
+     args: ['--allow-running-no-tests'],
      suite: ['bench', 'symbol_extraction'],
      is_parallel: false,
      timeout: 300,

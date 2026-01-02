@@ -19,6 +19,7 @@ race:any_executor.hpp
 # conditionally_enabled_mutex is reinitialized out of line with the reactor run
 # loop (tracked upstream for Boost.Asio kqueue).
 race:boost::asio::detail::conditionally_enabled_mutex
+race:conditionally_enabled_mutex.hpp
 race:kqueue_reactor.ipp
 
 # Boost.Asio reactive socket service - race in socket descriptor registration

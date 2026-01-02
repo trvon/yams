@@ -7,6 +7,7 @@
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/associated_executor.hpp>
 #include <boost/asio/async_result.hpp>
+#include <boost/asio/cancellation_state.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/post.hpp>
@@ -70,6 +71,12 @@ AsioTransportAdapter::get_or_create_connection(const Options& opts) {
 awaitable<Result<std::unique_ptr<boost::asio::local::stream_protocol::socket>>>
 AsioTransportAdapter::async_connect_with_timeout(const std::filesystem::path& path,
                                                  std::chrono::milliseconds timeout) {
+    // Check cancellation before proceeding
+    auto cs = co_await this_coro::cancellation_state;
+    if (cs.cancelled() != boost::asio::cancellation_type::none) {
+        co_return Error{ErrorCode::OperationCancelled, "Operation cancelled"};
+    }
+
     auto executor = opts_.executor ? *opts_.executor
                                    : GlobalIOContext::instance().get_io_context().get_executor();
     auto socket = std::make_unique<boost::asio::local::stream_protocol::socket>(executor);
@@ -159,6 +166,12 @@ AsioTransportAdapter::async_connect_with_timeout(const std::filesystem::path& pa
 awaitable<Result<std::vector<uint8_t>>>
 AsioTransportAdapter::async_read_exact(boost::asio::local::stream_protocol::socket& socket,
                                        size_t size, std::chrono::milliseconds timeout) {
+    // Check cancellation before proceeding
+    auto cs = co_await this_coro::cancellation_state;
+    if (cs.cancelled() != boost::asio::cancellation_type::none) {
+        co_return Error{ErrorCode::OperationCancelled, "Operation cancelled"};
+    }
+
     std::vector<uint8_t> buffer(size);
     auto executor = co_await this_coro::executor;
 
@@ -220,6 +233,12 @@ awaitable<Result<void>>
 AsioTransportAdapter::async_write_all(boost::asio::local::stream_protocol::socket& socket,
                                       const std::vector<uint8_t>& data,
                                       std::chrono::milliseconds timeout) {
+    // Check cancellation before proceeding
+    auto cs = co_await this_coro::cancellation_state;
+    if (cs.cancelled() != boost::asio::cancellation_type::none) {
+        co_return Error{ErrorCode::OperationCancelled, "Operation cancelled"};
+    }
+
     auto executor = co_await this_coro::executor;
 
     // Race write against timeout using async_initiate (no experimental APIs)
@@ -295,6 +314,12 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(cons
 }
 
 boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Request&& req) {
+    // Check cancellation before proceeding
+    auto cs = co_await this_coro::cancellation_state;
+    if (cs.cancelled() != boost::asio::cancellation_type::none) {
+        co_return Error{ErrorCode::OperationCancelled, "Operation cancelled"};
+    }
+
     auto conn = co_await get_or_create_connection(opts_);
     if (!conn || !conn->alive) {
         co_return Error{ErrorCode::NetworkError, "Failed to establish connection"};
@@ -366,6 +391,14 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
     while (std::chrono::steady_clock::now() < deadline) {
+        // Check cancellation at each iteration
+        cs = co_await this_coro::cancellation_state;
+        if (cs.cancelled() != boost::asio::cancellation_type::none) {
+            co_await boost::asio::dispatch(conn->strand, use_awaitable);
+            conn->handlers.erase(msg.requestId);
+            co_return Error{ErrorCode::OperationCancelled, "Operation cancelled"};
+        }
+
         if (response_future.wait_for(0ms) == std::future_status::ready) {
             auto result = response_future.get();
             co_return result;
@@ -384,8 +417,20 @@ boost::asio::awaitable<Result<void>>
 AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback onHeader,
                                              ChunkCallback onChunk, ErrorCallback onError,
                                              CompleteCallback onComplete) {
+    // Check cancellation before proceeding
+    auto cs = co_await this_coro::cancellation_state;
+    if (cs.cancelled() != boost::asio::cancellation_type::none) {
+        co_return Error{ErrorCode::OperationCancelled, "Operation cancelled"};
+    }
+
     constexpr int kMaxRetries = 1;
     for (int attempt = 0; attempt <= kMaxRetries; ++attempt) {
+        // Check cancellation at each retry attempt
+        cs = co_await this_coro::cancellation_state;
+        if (cs.cancelled() != boost::asio::cancellation_type::none) {
+            co_return Error{ErrorCode::OperationCancelled, "Operation cancelled"};
+        }
+
         auto conn = co_await get_or_create_connection(opts_);
         if (!conn || !conn->alive) {
             if (attempt < kMaxRetries) {
@@ -448,6 +493,14 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
         boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
         while (std::chrono::steady_clock::now() < deadline) {
+            // Check cancellation at each iteration
+            cs = co_await this_coro::cancellation_state;
+            if (cs.cancelled() != boost::asio::cancellation_type::none) {
+                co_await boost::asio::dispatch(conn->strand, use_awaitable);
+                conn->handlers.erase(msg.requestId);
+                co_return Error{ErrorCode::OperationCancelled, "Operation cancelled"};
+            }
+
             if (done_future.wait_for(0ms) == std::future_status::ready) {
                 auto result = done_future.get();
 

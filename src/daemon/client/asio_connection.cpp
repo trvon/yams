@@ -4,6 +4,7 @@
 #include <boost/asio/associated_executor.hpp>
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/buffer.hpp>
+#include <boost/asio/cancellation_state.hpp>
 #include <boost/asio/dispatch.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/redirect_error.hpp>
@@ -22,12 +23,24 @@ using boost::asio::use_awaitable;
 namespace this_coro = boost::asio::this_coro;
 
 boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vector<uint8_t> frame) {
+    // Check cancellation before proceeding
+    auto cs = co_await this_coro::cancellation_state;
+    if (cs.cancelled() != boost::asio::cancellation_type::none) {
+        co_return Error{ErrorCode::OperationCancelled, "Operation cancelled"};
+    }
+
     co_await boost::asio::dispatch(strand, use_awaitable);
     write_queue.emplace_back(std::move(frame));
     if (writing)
         co_return Result<void>();
     writing = true;
     while (!write_queue.empty()) {
+        // Check cancellation at each iteration
+        cs = co_await this_coro::cancellation_state;
+        if (cs.cancelled() != boost::asio::cancellation_type::none) {
+            writing = false;
+            co_return Error{ErrorCode::OperationCancelled, "Operation cancelled"};
+        }
         auto cap = batch_cap.load(std::memory_order_relaxed);
         std::size_t batched = 0;
         std::size_t frames = 0;

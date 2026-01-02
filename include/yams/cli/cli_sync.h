@@ -4,8 +4,10 @@
 #include <future>
 #include <type_traits>
 
+#include <boost/asio/bind_cancellation_slot.hpp>
+#include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
+#include <boost/asio/use_future.hpp>
 #include <yams/daemon/client/global_io_context.h>
 
 #include <yams/core/types.h>
@@ -13,37 +15,52 @@
 namespace yams::cli {
 
 // Run a Boost.Asio awaitable<Result<T>> synchronously with a timeout.
-// Returns Result<T> or a Timeout/InternalError on failure.
+// Uses cancellation_signal for proper cleanup on timeout per Boost.Asio best practices.
 template <typename T, typename Rep, typename Period>
 inline yams::Result<T> run_sync(boost::asio::awaitable<yams::Result<T>> aw,
                                 const std::chrono::duration<Rep, Period>& timeout) {
     try {
-        std::promise<yams::Result<T>> prom;
-        std::promise<void> done_prom;
-        auto fut = prom.get_future();
-        auto done_fut = done_prom.get_future();
-        boost::asio::co_spawn(
+        boost::asio::cancellation_signal cancel_signal;
+
+        auto result_future = boost::asio::co_spawn(
             yams::daemon::GlobalIOContext::global_executor(),
-            [aw = std::move(aw), p = std::move(prom),
-             d = std::move(done_prom)]() mutable -> boost::asio::awaitable<void> {
+            [aw = std::move(aw)]() mutable -> boost::asio::awaitable<yams::Result<T>> {
                 try {
-                    auto r = co_await std::move(aw);
-                    p.set_value(std::move(r));
+                    co_return co_await std::move(aw);
+                } catch (const boost::system::system_error& e) {
+                    if (e.code() == boost::asio::error::operation_aborted) {
+                        co_return yams::Error{yams::ErrorCode::OperationCancelled, "cancelled"};
+                    }
+                    co_return yams::Error{yams::ErrorCode::InternalError, e.what()};
                 } catch (const std::exception& e) {
-                    p.set_value(yams::Error{yams::ErrorCode::InternalError, e.what()});
+                    co_return yams::Error{yams::ErrorCode::InternalError, e.what()};
                 } catch (...) {
-                    p.set_value(yams::Error{yams::ErrorCode::InternalError, "unknown error"});
+                    co_return yams::Error{yams::ErrorCode::InternalError, "unknown error"};
                 }
-                d.set_value();
-                co_return;
             },
-            boost::asio::detached);
-        if (fut.wait_for(timeout) != std::future_status::ready) {
-            return yams::Error{yams::ErrorCode::Timeout, "timeout"};
+            boost::asio::bind_cancellation_slot(cancel_signal.slot(), boost::asio::use_future));
+
+        if (result_future.wait_for(timeout) == std::future_status::ready) {
+            try {
+                return result_future.get();
+            } catch (const std::exception& e) {
+                return yams::Error{yams::ErrorCode::InternalError, e.what()};
+            }
         }
-        auto result = fut.get();
-        done_fut.wait();
-        return result;
+
+        // Timeout: emit cancellation and wait for coroutine to complete
+        cancel_signal.emit(boost::asio::cancellation_type::terminal);
+
+        // Wait for coroutine to acknowledge cancellation and complete
+        constexpr auto cancel_grace = std::chrono::milliseconds(1000);
+        if (result_future.wait_for(cancel_grace) == std::future_status::ready) {
+            try {
+                result_future.get(); // Consume to clean up
+            } catch (...) {
+            }
+        }
+
+        return yams::Error{yams::ErrorCode::Timeout, "timeout"};
     } catch (const std::exception& e) {
         return yams::Error{yams::ErrorCode::InternalError, e.what()};
     } catch (...) {

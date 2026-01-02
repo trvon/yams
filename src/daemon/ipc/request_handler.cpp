@@ -466,218 +466,237 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                 break;
             }
 
-            // Feed data to frame reader
+            // Feed data to frame reader. Loop to handle multiple frames in one read.
             spdlog::debug("Feeding {} bytes to frame reader", bytes_read);
-            auto feed_result = reader.feed(buf.data(), bytes_read);
-            stats_.bytes_received += feed_result.consumed;
-            spdlog::debug("Frame reader consumed {} bytes, status={}", feed_result.consumed,
-                          static_cast<int>(feed_result.status));
+            size_t feed_offset = 0;
+            size_t feed_remaining = bytes_read;
+            bool feed_error = false;
 
-            if (feed_result.status == FrameReader::FrameStatus::InvalidFrame) {
-                spdlog::error("Invalid frame received");
-                // Fatal framing error: close to avoid poisoning persistent streams
-                (void)co_await send_error(*sock, ErrorCode::InvalidArgument,
-                                          "Invalid frame format");
-                boost::system::error_code ignore_ec;
-                sock->close(ignore_ec);
-                break;
-            }
+            while (feed_remaining > 0 && !feed_error && !should_exit) {
+                auto feed_result = reader.feed(buf.data() + feed_offset, feed_remaining);
+                stats_.bytes_received += feed_result.consumed;
+                spdlog::debug("Frame reader consumed {} bytes, status={}", feed_result.consumed,
+                              static_cast<int>(feed_result.status));
 
-            if (feed_result.status == FrameReader::FrameStatus::FrameTooLarge) {
-                spdlog::error("Frame too large");
-                (void)co_await send_error(*sock, ErrorCode::InvalidArgument,
-                                          "Frame exceeds maximum size");
-                boost::system::error_code ignore_ec;
-                sock->close(ignore_ec);
-                break;
-            }
+                feed_offset += feed_result.consumed;
+                feed_remaining -= feed_result.consumed;
 
-            // Process complete frames
-            while (reader.has_frame()) {
-                auto frame_result = reader.get_frame();
-                if (!frame_result) {
-                    spdlog::error("Closing connection: failed to get frame: {}",
-                                  frame_result.error().message);
-                    (void)co_await send_error(*sock, ErrorCode::SerializationError,
-                                              "Failed to get frame");
-                    boost::system::error_code ignore_ec;
-                    sock->close(ignore_ec);
-                    should_exit = true;
-                    break;
-                }
-
-                // Parse the frame
-                auto message_result = framer_.parse_frame(frame_result.value());
-                if (!message_result) {
-                    spdlog::error("Closing connection: failed to parse frame: {}",
-                                  message_result.error().message);
-                    // Map parse/serialization errors to ErrorResponse at server boundary.
-                    // Try to recover request_id from header for correlation; if unavailable, use 0.
-                    uint64_t correlated_id = 0;
-                    if (frame_result &&
-                        frame_result.value().size() >= sizeof(MessageFramer::FrameHeader)) {
-                        MessageFramer::FrameHeader hdr{};
-                        std::memcpy(&hdr, frame_result.value().data(), sizeof(hdr));
-                        hdr.from_network();
-                        // Only accept valid header for correlation
-                        if (hdr.is_valid()) {
-                            // request_id lives in payload; we cannot extract it without a
-                            // successful decode. Keep 0 here but still send a shaped ErrorResponse
-                            // so clients don't hang.
-                            correlated_id = 0;
-                        }
-                    }
-                    (void)co_await send_error(*sock, message_result.error().code,
-                                              message_result.error().message, correlated_id);
-                    boost::system::error_code ignore_ec;
-                    sock->close(ignore_ec);
-                    should_exit = true;
-                    break;
-                }
-
-                // Extract request from message
-                auto message = std::move(message_result.value());
-                auto* request_ptr = std::get_if<Request>(&message.payload);
-                if (!request_ptr) {
-                    spdlog::error("Closing connection: received non-request message");
-                    // Correlate error with the observed message requestId and close
+                if (feed_result.status == FrameReader::FrameStatus::InvalidFrame) {
+                    spdlog::error("Invalid frame received");
                     (void)co_await send_error(*sock, ErrorCode::InvalidArgument,
-                                              "Expected request message", message.requestId);
+                                              "Invalid frame format");
                     boost::system::error_code ignore_ec;
                     sock->close(ignore_ec);
-                    should_exit = true;
+                    feed_error = true;
                     break;
                 }
 
-                // Inform FSM that a valid request header/body has been parsed
-                if (fsm.alive()) {
-                    ConnectionFsm::FrameInfo finfo{};
-                    finfo.payload_size = 0; // unknown at this level
-                    fsm.on_header_parsed(finfo);
-                    fsm.on_body_parsed();
+                if (feed_result.status == FrameReader::FrameStatus::FrameTooLarge) {
+                    spdlog::error("Frame too large");
+                    (void)co_await send_error(*sock, ErrorCode::InvalidArgument,
+                                              "Frame exceeds maximum size");
+                    boost::system::error_code ignore_ec;
+                    sock->close(ignore_ec);
+                    feed_error = true;
+                    break;
                 }
 
-                // Handle the request with correlation id
-                // Route through streaming-aware path so FSM transitions are captured
-                spdlog::debug("RequestHandler::handle_connection: Routing request_id={} with "
-                              "expectsStreamingResponse={}",
-                              message.requestId, message.expectsStreamingResponse);
-                if (config_.enable_multiplexing) {
-                    auto cur = inflight_.load(std::memory_order_relaxed);
-                    spdlog::debug("[MUX] req_id={} inflight={}/{}", message.requestId, cur,
-                                  config_.max_inflight_per_connection);
-                    if (cur >= config_.max_inflight_per_connection) {
-                        (void)co_await send_error(*sock, ErrorCode::ResourceExhausted,
-                                                  "Too many in-flight requests", message.requestId);
-                    } else {
-                        inflight_.fetch_add(1, std::memory_order_relaxed);
-                        // Create per-request context
-                        {
-                            std::lock_guard<std::mutex> lk(ctx_mtx_);
-                            auto ctx = std::make_shared<RequestContext>();
-                            ctx->start = std::chrono::steady_clock::now();
-                            contexts_[message.requestId] = ctx;
-                            RequestContextRegistry::instance().register_context(message.requestId,
-                                                                                ctx);
-                        }
-                        MuxMetricsRegistry::instance().incrementActiveHandlers(1);
-                        auto request_id = message.requestId;
-                        auto expects_streaming = message.expectsStreamingResponse;
-                        auto routed_request = std::move(*request_ptr);
-                        auto spawn_exec = config_.worker_executor ? config_.worker_executor
-                                                                  : sock->get_executor();
-                        boost::asio::co_spawn(
-                            spawn_exec,
-                            [self = shared_from_this(), sock, req = std::move(routed_request),
-                             req_id = request_id,
-                             expects = expects_streaming]() -> boost::asio::awaitable<void> {
-                                struct Cleanup {
-                                    std::shared_ptr<RequestHandler> self;
-                                    uint64_t req_id;
-                                    ~Cleanup() {
-                                        if (!self) {
-                                            return;
-                                        }
-                                        self->inflight_.fetch_sub(1, std::memory_order_relaxed);
-                                        MuxMetricsRegistry::instance().incrementActiveHandlers(-1);
-                                        {
-                                            std::lock_guard<std::mutex> lk(self->ctx_mtx_);
-                                            auto it = self->contexts_.find(req_id);
-                                            if (it != self->contexts_.end()) {
-                                                it->second->completed.store(
-                                                    true, std::memory_order_relaxed);
-                                                self->contexts_.erase(it);
-                                            }
-                                        }
-                                        RequestContextRegistry::instance().deregister_context(
-                                            req_id);
-                                    }
-                                } cleanup{self, req_id};
+                // If no data was consumed and no frame is ready, we need more data
+                if (feed_result.consumed == 0 && !reader.has_frame()) {
+                    break;
+                }
 
-                                try {
-                                    spdlog::info("[MUX_SPAWN] req_id={} type={} expects={}", req_id,
-                                                 static_cast<int>(getMessageType(req)), expects);
-                                    auto r = co_await self->handle_streaming_request(
-                                        *sock, req, req_id, nullptr, expects);
-                                    if (!r) {
-                                        spdlog::debug(
-                                            "Multiplexed request failed (requestId={}): {}", req_id,
-                                            r.error().message);
-                                    }
-                                } catch (const std::exception& e) {
-                                    spdlog::error(
-                                        "Multiplexed request threw exception (requestId={}): {}",
-                                        req_id, e.what());
-                                } catch (...) {
-                                    spdlog::error("Multiplexed request threw unknown exception "
-                                                  "(requestId={})",
-                                                  req_id);
-                                }
-                                co_return;
-                            },
-                            boost::asio::detached);
-                        if (fsm.alive()) {
-                            fsm.on_response_complete(false);
-                        }
-                    }
-                } else {
-                    auto handle_result =
-                        co_await handle_streaming_request(*sock, *request_ptr, message.requestId,
-                                                          &fsm, message.expectsStreamingResponse);
-                    if (!handle_result) {
-                        // Downgrade common client-initiated close errors to debug to avoid noisy
-                        // logs
-                        const auto& msg = handle_result.error().message;
-                        if (msg.find("Connection reset by peer") != std::string::npos ||
-                            msg.find("Broken pipe") != std::string::npos ||
-                            msg.find("EPIPE") != std::string::npos ||
-                            msg.find("ECONNRESET") != std::string::npos) {
-                            spdlog::debug("Request handling ended by client: {}", msg);
-                        } else {
-                            spdlog::error("Request handling failed: {}", msg);
-                        }
+                // Process complete frames before re-feeding remaining data
+                while (reader.has_frame()) {
+                    auto frame_result = reader.get_frame();
+                    if (!frame_result) {
+                        spdlog::error("Closing connection: failed to get frame: {}",
+                                      frame_result.error().message);
+                        (void)co_await send_error(*sock, ErrorCode::SerializationError,
+                                                  "Failed to get frame");
+                        boost::system::error_code ignore_ec;
+                        sock->close(ignore_ec);
                         should_exit = true;
                         break;
                     }
-                }
 
-                // Defensive: ensure FSM is ready to read the next request on persistent
-                // connections. If the processor didn't drive on_response_complete() for any
-                // reason, normalize state back to Connected.
-                if (!config_.close_after_response) {
-                    auto s = fsm.state();
-                    if (s != ConnectionFsm::State::Connected &&
-                        s != ConnectionFsm::State::ReadingHeader) {
-                        spdlog::debug(
-                            "Post-response FSM state was {} — forcing Connected for persistence",
-                            ConnectionFsm::to_string(s));
-                        if (fsm.alive()) {
-                            fsm.on_response_complete(false);
+                    // Parse the frame
+                    auto message_result = framer_.parse_frame(frame_result.value());
+                    if (!message_result) {
+                        spdlog::error("Closing connection: failed to parse frame: {}",
+                                      message_result.error().message);
+                        // Map parse/serialization errors to ErrorResponse at server boundary.
+                        // Try to recover request_id from header for correlation; if unavailable,
+                        // use 0.
+                        uint64_t correlated_id = 0;
+                        if (frame_result &&
+                            frame_result.value().size() >= sizeof(MessageFramer::FrameHeader)) {
+                            MessageFramer::FrameHeader hdr{};
+                            std::memcpy(&hdr, frame_result.value().data(), sizeof(hdr));
+                            hdr.from_network();
+                            // Only accept valid header for correlation
+                            if (hdr.is_valid()) {
+                                // request_id lives in payload; we cannot extract it without a
+                                // successful decode. Keep 0 here but still send a shaped
+                                // ErrorResponse so clients don't hang.
+                                correlated_id = 0;
+                            }
+                        }
+                        (void)co_await send_error(*sock, message_result.error().code,
+                                                  message_result.error().message, correlated_id);
+                        boost::system::error_code ignore_ec;
+                        sock->close(ignore_ec);
+                        should_exit = true;
+                        break;
+                    }
+
+                    // Extract request from message
+                    auto message = std::move(message_result.value());
+                    auto* request_ptr = std::get_if<Request>(&message.payload);
+                    if (!request_ptr) {
+                        spdlog::error("Closing connection: received non-request message");
+                        // Correlate error with the observed message requestId and close
+                        (void)co_await send_error(*sock, ErrorCode::InvalidArgument,
+                                                  "Expected request message", message.requestId);
+                        boost::system::error_code ignore_ec;
+                        sock->close(ignore_ec);
+                        should_exit = true;
+                        break;
+                    }
+
+                    // Inform FSM that a valid request header/body has been parsed
+                    if (fsm.alive()) {
+                        ConnectionFsm::FrameInfo finfo{};
+                        finfo.payload_size = 0; // unknown at this level
+                        fsm.on_header_parsed(finfo);
+                        fsm.on_body_parsed();
+                    }
+
+                    // Handle the request with correlation id
+                    // Route through streaming-aware path so FSM transitions are captured
+                    spdlog::debug("RequestHandler::handle_connection: Routing request_id={} with "
+                                  "expectsStreamingResponse={}",
+                                  message.requestId, message.expectsStreamingResponse);
+                    if (config_.enable_multiplexing) {
+                        auto cur = inflight_.load(std::memory_order_relaxed);
+                        spdlog::debug("[MUX] req_id={} inflight={}/{}", message.requestId, cur,
+                                      config_.max_inflight_per_connection);
+                        if (cur >= config_.max_inflight_per_connection) {
+                            (void)co_await send_error(*sock, ErrorCode::ResourceExhausted,
+                                                      "Too many in-flight requests",
+                                                      message.requestId);
+                        } else {
+                            inflight_.fetch_add(1, std::memory_order_relaxed);
+                            // Create per-request context
+                            {
+                                std::lock_guard<std::mutex> lk(ctx_mtx_);
+                                auto ctx = std::make_shared<RequestContext>();
+                                ctx->start = std::chrono::steady_clock::now();
+                                contexts_[message.requestId] = ctx;
+                                RequestContextRegistry::instance().register_context(
+                                    message.requestId, ctx);
+                            }
+                            MuxMetricsRegistry::instance().incrementActiveHandlers(1);
+                            auto request_id = message.requestId;
+                            auto expects_streaming = message.expectsStreamingResponse;
+                            auto routed_request = std::move(*request_ptr);
+                            auto spawn_exec = config_.worker_executor ? config_.worker_executor
+                                                                      : sock->get_executor();
+                            boost::asio::co_spawn(
+                                spawn_exec,
+                                [self = shared_from_this(), sock, req = std::move(routed_request),
+                                 req_id = request_id,
+                                 expects = expects_streaming]() -> boost::asio::awaitable<void> {
+                                    struct Cleanup {
+                                        std::shared_ptr<RequestHandler> self;
+                                        uint64_t req_id;
+                                        ~Cleanup() {
+                                            if (!self) {
+                                                return;
+                                            }
+                                            self->inflight_.fetch_sub(1, std::memory_order_relaxed);
+                                            MuxMetricsRegistry::instance().incrementActiveHandlers(
+                                                -1);
+                                            {
+                                                std::lock_guard<std::mutex> lk(self->ctx_mtx_);
+                                                auto it = self->contexts_.find(req_id);
+                                                if (it != self->contexts_.end()) {
+                                                    it->second->completed.store(
+                                                        true, std::memory_order_relaxed);
+                                                    self->contexts_.erase(it);
+                                                }
+                                            }
+                                            RequestContextRegistry::instance().deregister_context(
+                                                req_id);
+                                        }
+                                    } cleanup{self, req_id};
+
+                                    try {
+                                        spdlog::info("[MUX_SPAWN] req_id={} type={} expects={}",
+                                                     req_id, static_cast<int>(getMessageType(req)),
+                                                     expects);
+                                        auto r = co_await self->handle_streaming_request(
+                                            *sock, req, req_id, nullptr, expects);
+                                        if (!r) {
+                                            spdlog::debug(
+                                                "Multiplexed request failed (requestId={}): {}",
+                                                req_id, r.error().message);
+                                        }
+                                    } catch (const std::exception& e) {
+                                        spdlog::error("Multiplexed request threw exception "
+                                                      "(requestId={}): {}",
+                                                      req_id, e.what());
+                                    } catch (...) {
+                                        spdlog::error("Multiplexed request threw unknown exception "
+                                                      "(requestId={})",
+                                                      req_id);
+                                    }
+                                    co_return;
+                                },
+                                boost::asio::detached);
+                            if (fsm.alive()) {
+                                fsm.on_response_complete(false);
+                            }
+                        }
+                    } else {
+                        auto handle_result = co_await handle_streaming_request(
+                            *sock, *request_ptr, message.requestId, &fsm,
+                            message.expectsStreamingResponse);
+                        if (!handle_result) {
+                            // Downgrade common client-initiated close errors to debug to avoid
+                            // noisy logs
+                            const auto& msg = handle_result.error().message;
+                            if (msg.find("Connection reset by peer") != std::string::npos ||
+                                msg.find("Broken pipe") != std::string::npos ||
+                                msg.find("EPIPE") != std::string::npos ||
+                                msg.find("ECONNRESET") != std::string::npos) {
+                                spdlog::debug("Request handling ended by client: {}", msg);
+                            } else {
+                                spdlog::error("Request handling failed: {}", msg);
+                            }
+                            should_exit = true;
+                            break;
                         }
                     }
-                }
-            }
-            if (should_exit)
+
+                    // Defensive: ensure FSM is ready to read the next request on persistent
+                    // connections. If the processor didn't drive on_response_complete() for any
+                    // reason, normalize state back to Connected.
+                    if (!config_.close_after_response) {
+                        auto s = fsm.state();
+                        if (s != ConnectionFsm::State::Connected &&
+                            s != ConnectionFsm::State::ReadingHeader) {
+                            spdlog::debug("Post-response FSM state was {} — forcing Connected for "
+                                          "persistence",
+                                          ConnectionFsm::to_string(s));
+                            if (fsm.alive()) {
+                                fsm.on_response_complete(false);
+                            }
+                        }
+                    }
+                } // end while (reader.has_frame())
+            } // end while (feed_remaining > 0)
+            if (feed_error || should_exit)
                 break;
         }
 

@@ -3,6 +3,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstdlib>
 #include <filesystem>
 #include <random>
 #include <thread>
@@ -59,6 +60,10 @@ private:
 
 TEST_CASE("RepairUtilScan missing embeddings list identifies missing documents",
           "[repair][embedding][catch2]") {
+    if (std::getenv("YAMS_DISABLE_VECTORS") || std::getenv("YAMS_DISABLE_VECTOR_DB")) {
+        SKIP("Vectors disabled via environment");
+    }
+
     // Prepare temp dir for vector DB
     auto tmp = std::filesystem::temp_directory_path() /
                ("yams_repair_catch2_" + std::to_string(std::rand()));

@@ -63,16 +63,23 @@ struct ContentStoreBuilder::Impl {
                 compression::CompressionPolicy::Rules policyRules;
 
                 // Load compression settings from config if available
-                loadCompressionSettings(policyRules);
+                bool hasNeverCompressBelow = false;
+                bool hasAlwaysCompressAbove = false;
+                loadCompressionSettings(policyRules, hasNeverCompressBelow, hasAlwaysCompressAbove);
 
-                // Force eager compression defaults so every write is stored compressed.
-                policyRules.neverCompressBelow = 0;
-                policyRules.alwaysCompressAbove = 1;
+                // Only apply eager compression defaults if config didn't specify thresholds
+                if (!hasNeverCompressBelow) {
+                    policyRules.neverCompressBelow = 0;
+                }
+                if (!hasAlwaysCompressAbove) {
+                    policyRules.alwaysCompressAbove = 1;
+                }
                 if (policyRules.preferZstdBelow == 0) {
                     policyRules.preferZstdBelow = std::numeric_limits<uint64_t>::max();
                 }
-                policyRules.compressAfterAge = std::chrono::hours(0);
-                // Retain archive defaults unless explicitly configured.
+                if (policyRules.compressAfterAge.count() == 0) {
+                    policyRules.compressAfterAge = std::chrono::hours(0);
+                }
                 if (policyRules.archiveAfterAge.count() == 0) {
                     policyRules.archiveAfterAge = std::chrono::hours(24 * 30);
                 }
@@ -152,7 +159,11 @@ struct ContentStoreBuilder::Impl {
         return Result<void>();
     }
 
-    void loadCompressionSettings(compression::CompressionPolicy::Rules& rules) {
+    void loadCompressionSettings(compression::CompressionPolicy::Rules& rules,
+                                 bool& hasNeverCompressBelow, bool& hasAlwaysCompressAbove) {
+        hasNeverCompressBelow = false;
+        hasAlwaysCompressAbove = false;
+
         // Try to read config file
         fs::path configPath = getConfigPath();
         if (!fs::exists(configPath)) {
@@ -183,6 +194,7 @@ struct ContentStoreBuilder::Impl {
         if (configMap.find("compression.chunk_threshold") != configMap.end()) {
             try {
                 rules.neverCompressBelow = std::stoull(configMap["compression.chunk_threshold"]);
+                hasNeverCompressBelow = true;
             } catch (...) {
             }
         }
@@ -191,6 +203,7 @@ struct ContentStoreBuilder::Impl {
             try {
                 rules.alwaysCompressAbove =
                     std::stoull(configMap["compression.always_compress_above"]);
+                hasAlwaysCompressAbove = true;
             } catch (...) {
             }
         }
@@ -199,6 +212,7 @@ struct ContentStoreBuilder::Impl {
             try {
                 rules.neverCompressBelow =
                     std::stoull(configMap["compression.never_compress_below"]);
+                hasNeverCompressBelow = true;
             } catch (...) {
             }
         }

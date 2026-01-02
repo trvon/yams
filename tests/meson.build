@@ -1956,7 +1956,8 @@ if catch2_dep.found()
   test('plugin_process_minimal', plugin_process_minimal_exe,
     suite: ['catch2', 'unit', 'extraction', 'plugin', 'debug'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
+    timeout: 30,
+    is_parallel: false
   )
 
   test('plugin_process_launcher', plugin_process_launcher_exe,
@@ -2015,7 +2016,8 @@ if catch2_dep.found()
   test('service_utilities', service_utilities_exe,
     suite: ['catch2', 'unit', 'services', 'utilities'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
+    timeout: 60,
+    is_parallel: false
   )
 
   # Search tests
@@ -2033,7 +2035,8 @@ if catch2_dep.found()
     test('ghidra_plugin_communication', ghidra_plugin_exe,
       suite: ['catch2', 'integration', 'plugin', 'ghidra'],
       env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path, 'YAMS_SOURCE_DIR': meson.project_source_root() },
-      timeout: 30
+      timeout: 30,
+      is_parallel: false
     )
   endif
 
@@ -2041,25 +2044,29 @@ if catch2_dep.found()
   test('daemon_fsm_suite', catch2_daemon_fsm_exe,
     suite: ['catch2', 'unit', 'daemon', 'fsm'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
+    timeout: 60,
+    is_parallel: false
   )
 
   test('daemon_metrics_status', catch2_daemon_metrics_exe,
     suite: ['catch2', 'unit', 'daemon', 'metrics', 'status'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
+    timeout: 60,
+    is_parallel: false
   )
 
   test('daemon_components', catch2_daemon_components_exe,
     suite: ['catch2', 'unit', 'daemon', 'components'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
+    timeout: 60,
+    is_parallel: false
   )
 
   test('daemon_protocol', catch2_daemon_protocol_exe,
     suite: ['catch2', 'unit', 'daemon', 'protocol'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
+    timeout: 60,
+    is_parallel: false
   )
 
   test('daemon_background_processing', catch2_daemon_background_exe,
@@ -2071,7 +2078,8 @@ if catch2_dep.found()
   test('daemon_graph_component', catch2_daemon_graph_component_exe,
     suite: ['catch2', 'unit', 'daemon', 'graph', 'pbi-009'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
+    timeout: 60,
+    is_parallel: false
   )
 
   test('daemon_component_submodule', catch2_daemon_component_submodule_exe,
@@ -2083,19 +2091,22 @@ if catch2_dep.found()
   test('daemon_plugin_harness', catch2_daemon_plugin_exe,
     suite: ['catch2', 'unit', 'daemon', 'plugin'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
+    timeout: 60,
+    is_parallel: false
   )
 
   test('plugin_infrastructure', catch2_plugin_infrastructure_exe,
     suite: ['catch2', 'unit', 'daemon', 'plugin', 'infrastructure'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
+    timeout: 60,
+    is_parallel: false
   )
 
   test('external_plugin_host', catch2_external_plugin_host_exe,
     suite: ['catch2', 'unit', 'daemon', 'plugin', 'external'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
+    timeout: 60,
+    is_parallel: false
   )
 
   test('extractor_adapter', catch2_extractor_adapter_exe,

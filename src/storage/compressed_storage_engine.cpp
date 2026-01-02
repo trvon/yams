@@ -69,6 +69,10 @@ public:
             return underlying_->store(hash, data);
         }
 
+        if (data.size() < config_.policyRules.neverCompressBelow) {
+            return underlying_->store(hash, data);
+        }
+
         auto level =
             config_.policyRules.defaultZstdLevel == 0 ? 3 : config_.policyRules.defaultZstdLevel;
         auto decision = compression::CompressionDecision::compress(

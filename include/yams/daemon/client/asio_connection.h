@@ -12,6 +12,7 @@
 #include <vector>
 
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -65,8 +66,22 @@ struct AsioConnection {
         }
     }
 
+    void cancel() {
+        alive.store(false, std::memory_order_release);
+        cancel_signal.emit(boost::asio::cancellation_type::terminal);
+        if (socket && socket->is_open()) {
+            boost::system::error_code ec;
+            socket->cancel(ec);
+            socket->close(ec);
+        }
+    }
+
+    // Get cancellation slot for binding to async operations
+    boost::asio::cancellation_slot cancellation_slot() { return cancel_signal.slot(); }
+
     TransportOptions opts;
     boost::asio::strand<boost::asio::any_io_executor> strand;
+    boost::asio::cancellation_signal cancel_signal;
     std::unique_ptr<socket_t> socket;
     std::atomic<bool> read_started{false};
     std::atomic<bool> alive{false};

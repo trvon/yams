@@ -705,7 +705,11 @@ void ServiceManager::shutdown() {
         spdlog::info("[ServiceManager] Phase 1: No background task manager to stop");
     }
 
-    // Phase 2: Signal stop to session watcher (don't wait yet - timer would block)
+    // Phase 2: Signal stop to session watcher and wait for it to complete
+    // We must wait for the session watcher BEFORE stopping the io_context, because:
+    // - The session watcher is a coroutine suspended on a timer
+    // - When we request stop, it will exit on its next timer wake-up
+    // - If we stop io_context first, worker threads exit and the coroutine can never resume
     spdlog::info("[ServiceManager] Phase 2: Signaling session watcher stop");
     try {
         if (sessionWatchStopSource_.stop_possible())
@@ -717,37 +721,35 @@ void ServiceManager::shutdown() {
         spdlog::warn("[ServiceManager] Phase 2: Session watcher stop signal failed");
     }
 
+    // Phase 2.5: Wait for session watcher to complete (it checks stop_requested on timer wake)
+    // Timer interval is 2s by default, so wait up to 3s for graceful completion
+    spdlog::info("[ServiceManager] Phase 2.5: Waiting for session watcher to complete");
+    try {
+        if (sessionWatcherFuture_.valid()) {
+            auto status = sessionWatcherFuture_.wait_for(std::chrono::seconds(3));
+            if (status == std::future_status::timeout) {
+                spdlog::warn("[ServiceManager] Phase 2.5: Session watcher future timed out");
+            } else {
+                sessionWatcherFuture_.get();
+                spdlog::info("[ServiceManager] Phase 2.5: Session watcher completed");
+            }
+            sessionWatcherFuture_ = std::future<void>();
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("[ServiceManager] Phase 2.5: Session watcher stop failed: {}", e.what());
+    } catch (...) {
+        spdlog::warn("[ServiceManager] Phase 2.5: Session watcher stop failed");
+    }
+
     // Phase 3: (Removed - work guard now managed by WorkCoordinator)
     spdlog::info("[ServiceManager] Phase 3: Skipped (work guard managed by WorkCoordinator)");
 
     // Phase 4: Cancel all asynchronous operations and stop WorkCoordinator io_context
-    // This MUST happen before waiting on session watcher future, because session watcher
-    // is blocked on a timer that only completes when io_context is stopped.
     spdlog::info("[ServiceManager] Phase 4: Cancelling async operations");
     shutdownSignal_.emit(boost::asio::cancellation_type::terminal);
     if (workCoordinator_) {
         workCoordinator_->stop();
         spdlog::info("[ServiceManager] Phase 4: WorkCoordinator stop() called");
-    }
-
-    // Phase 4.5: Now wait for session watcher to complete (timer is cancelled by io_context stop)
-    spdlog::info("[ServiceManager] Phase 4.5: Waiting for session watcher to complete");
-    try {
-        if (sessionWatcherFuture_.valid()) {
-            // Use wait_for with timeout to prevent indefinite hang
-            auto status = sessionWatcherFuture_.wait_for(std::chrono::seconds(5));
-            if (status == std::future_status::timeout) {
-                spdlog::warn("[ServiceManager] Phase 4.5: Session watcher future timed out");
-            } else {
-                sessionWatcherFuture_.get();
-                spdlog::info("[ServiceManager] Phase 4.5: Session watcher completed");
-            }
-            sessionWatcherFuture_ = std::future<void>();
-        }
-    } catch (const std::exception& e) {
-        spdlog::warn("[ServiceManager] Phase 4.5: Session watcher stop failed: {}", e.what());
-    } catch (...) {
-        spdlog::warn("[ServiceManager] Phase 4.5: Session watcher stop failed");
     }
 
     // Phase 5: Join worker threads IMMEDIATELY to ensure no threads are accessing

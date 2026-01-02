@@ -1384,56 +1384,91 @@ Result<std::vector<int64_t>> MetadataRepository::getAllFts5IndexedDocumentIds() 
     });
 }
 
-// Helper function to sanitize FTS5 query strings
-std::string sanitizeFTS5Query(const std::string& query) {
-    // Trim whitespace from both ends
-    std::string trimmed = query;
-    trimmed.erase(0, trimmed.find_first_not_of(" \t\n\r"));
-    trimmed.erase(trimmed.find_last_not_of(" \t\n\r") + 1);
-
-    // If empty after trimming, return empty phrase
-    if (trimmed.empty()) {
-        return "\"\"";
-    }
-
-    // Check if the query might be using advanced FTS5 operators
-    // (AND, OR, NOT, NEAR) - if so, leave it as-is for power users
-    bool hasAdvancedOperators = false;
-    if (trimmed.find(" AND ") != std::string::npos || trimmed.find(" OR ") != std::string::npos ||
-        trimmed.find(" NOT ") != std::string::npos || trimmed.find("NEAR(") != std::string::npos) {
-        hasAdvancedOperators = true;
-    }
-
-    // If using advanced operators, do minimal sanitization
-    if (hasAdvancedOperators) {
-        // Just remove trailing operators that would cause syntax errors
-        while (!trimmed.empty()) {
-            char lastChar = trimmed.back();
-            if (lastChar == '-' || lastChar == '+' || lastChar == '*' || lastChar == '(' ||
-                lastChar == ')') {
-                trimmed.pop_back();
-            } else {
-                break;
-            }
-        }
-        return trimmed.empty() ? "\"\"" : trimmed;
-    }
-
-    // For regular queries, just escape internal quotes. This allows FTS5 to use
-    // its default AND behavior for multiple terms, which is a more sensible
-    // default than a phrase search for "bag of words" queries.
+// Helper: escape a single term for FTS5 by wrapping in quotes
+// Per SQLite docs: replace " with "" and wrap in double quotes
+static std::string quoteFTS5Term(const std::string& term) {
     std::string escaped;
-    for (char c : trimmed) {
+    escaped.reserve(term.size() + 4);
+    escaped += '"';
+    for (char c : term) {
         if (c == '"') {
-            // Escape quotes by doubling them (FTS5 syntax)
             escaped += "\"\"";
         } else {
             escaped += c;
         }
     }
-
-    // DO NOT wrap in quotes. Let FTS5 handle it as a set of terms.
+    escaped += '"';
     return escaped;
+}
+
+// Helper function to sanitize FTS5 query strings
+// Best practice: split into terms and wrap each in quotes to preserve AND behavior
+// while safely escaping all FTS5 special characters (~, -, +, *, ^, :, etc.)
+// See: https://sqlite.org/forum/forumpost/576d6cc2d2
+std::string sanitizeFTS5Query(const std::string& query) {
+    // Trim whitespace from both ends
+    std::string trimmed = query;
+    trimmed.erase(0, trimmed.find_first_not_of(" \t\n\r"));
+    if (!trimmed.empty()) {
+        auto lastNonWs = trimmed.find_last_not_of(" \t\n\r");
+        if (lastNonWs != std::string::npos) {
+            trimmed.erase(lastNonWs + 1);
+        }
+    }
+
+    if (trimmed.empty()) {
+        return "\"\"";
+    }
+
+    // Check if the query uses advanced FTS5 operators (AND, OR, NOT, NEAR)
+    // Power users can use these directly - do minimal sanitization
+    bool hasAdvancedOperators =
+        trimmed.find(" AND ") != std::string::npos || trimmed.find(" OR ") != std::string::npos ||
+        trimmed.find(" NOT ") != std::string::npos || trimmed.find("NEAR(") != std::string::npos;
+
+    if (hasAdvancedOperators) {
+        // For advanced queries, just escape quotes
+        std::string escaped;
+        for (char c : trimmed) {
+            if (c == '"') {
+                escaped += "\"\"";
+            } else {
+                escaped += c;
+            }
+        }
+        return escaped;
+    }
+
+    // Split on whitespace and quote each term individually
+    // This preserves AND behavior while safely handling special chars
+    std::vector<std::string> terms;
+    std::string current;
+    for (char c : trimmed) {
+        if (c == ' ' || c == '\t') {
+            if (!current.empty()) {
+                terms.push_back(current);
+                current.clear();
+            }
+        } else {
+            current += c;
+        }
+    }
+    if (!current.empty()) {
+        terms.push_back(current);
+    }
+
+    if (terms.empty()) {
+        return "\"\"";
+    }
+
+    // Quote each term and join with spaces (implicit AND in FTS5)
+    std::string result;
+    for (size_t i = 0; i < terms.size(); ++i) {
+        if (i > 0)
+            result += ' ';
+        result += quoteFTS5Term(terms[i]);
+    }
+    return result;
 }
 
 Result<SearchResults>

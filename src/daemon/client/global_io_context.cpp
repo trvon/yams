@@ -62,7 +62,6 @@ GlobalIOContext& GlobalIOContext::instance() {
 }
 
 void GlobalIOContext::reset() {
-    // Guard against static destruction
     if (is_destroyed()) {
         return;
     }
@@ -78,19 +77,19 @@ void GlobalIOContext::reset() {
         }
     }
 
+    // Close all connections and clear pools
+    // Don't restart io_context - strands hold executor references that would become invalid
+    ConnectionRegistry::instance().closeAll();
     AsioConnectionPool::shutdown_all();
-    instance().restart();
 }
 
 void GlobalIOContext::restart() {
-    // Guard against static destruction - mutex may already be destroyed
     if (destroyed_.load(std::memory_order_acquire)) {
         return;
     }
 
     std::lock_guard<std::mutex> lock(this->restart_mutex_);
 
-    // Double-check after acquiring lock (destructor might have started)
     if (destroyed_.load(std::memory_order_acquire)) {
         return;
     }
@@ -100,7 +99,19 @@ void GlobalIOContext::restart() {
         this->work_guard_.reset();
     }
 
-    io_context_->stop();
+    constexpr auto drain_timeout = std::chrono::milliseconds(2000);
+    auto drain_deadline = std::chrono::steady_clock::now() + drain_timeout;
+
+    while (std::chrono::steady_clock::now() < drain_deadline) {
+        if (io_context_->stopped()) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    if (!io_context_->stopped()) {
+        io_context_->stop();
+    }
 
     for (auto& t : this->io_threads_) {
         if (t.joinable()) {
@@ -121,7 +132,7 @@ void GlobalIOContext::restart() {
     }
     this->io_threads_.clear();
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     io_context_->restart();
     this->work_guard_ = std::make_unique<WorkGuard>(io_context_->get_executor());
