@@ -335,26 +335,44 @@ private:
     }
 
     void cleanupDaemonFiles(const std::string& socketPath, const std::string& pidFilePath) {
+        auto removeWithRetry = [](const std::filesystem::path& path,
+                                  const std::string& label) {
+            if (path.empty()) {
+                return;
+            }
+            std::error_code ec;
+            for (int attempt = 0; attempt < 5; ++attempt) {
+                if (!safe_exists(path)) {
+                    return;
+                }
+                ec.clear();
+                if (std::filesystem::remove(path, ec)) {
+                    spdlog::debug("Removed stale {} file: {}", label, path.string());
+                    return;
+                }
+#ifdef _WIN32
+                if (ec.value() == ERROR_SHARING_VIOLATION ||
+                    ec.value() == ERROR_ACCESS_DENIED) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    continue;
+                }
+#endif
+                break;
+            }
+            if (ec) {
+                spdlog::warn("Failed to remove {} file {}: {}", label, path.string(),
+                             ec.message());
+            }
+        };
+
         // Remove socket file if it exists
         if (!socketPath.empty()) {
-            std::filesystem::path sp{socketPath};
-            std::error_code ec;
-            if (safe_exists(sp) && std::filesystem::remove(sp, ec)) {
-                spdlog::debug("Removed stale socket file: {}", socketPath);
-            } else if (ec) {
-                spdlog::warn("Failed to remove socket file {}: {}", socketPath, ec.message());
-            }
+            removeWithRetry(std::filesystem::path{socketPath}, "socket");
         }
 
         // Remove PID file if it exists
         if (!pidFilePath.empty()) {
-            std::filesystem::path pp{pidFilePath};
-            std::error_code ec;
-            if (safe_exists(pp) && std::filesystem::remove(pp, ec)) {
-                spdlog::debug("Removed stale PID file: {}", pidFilePath);
-            } else if (ec) {
-                spdlog::warn("Failed to remove PID file {}: {}", pidFilePath, ec.message());
-            }
+            removeWithRetry(std::filesystem::path{pidFilePath}, "PID");
         }
     }
 
@@ -821,7 +839,7 @@ private:
 
         // Clean up files if daemon was stopped
         if (stopped) {
-            cleanupDaemonFiles(socketPath_, pidFile_);
+            cleanupDaemonFiles(effectiveSocket, pidFile_);
             stopSpinner();
             std::cout << "[OK] YAMS daemon stopped successfully\n";
         } else {
