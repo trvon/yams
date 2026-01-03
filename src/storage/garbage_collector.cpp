@@ -1,7 +1,9 @@
 #include <yams/profiling.h>
 #include <yams/storage/reference_counter.h>
 #include <yams/storage/storage_engine.h>
+#include <yams/compression/compression_header.h>
 
+#include <fstream>
 #include <spdlog/spdlog.h>
 #if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
 #include <format>
@@ -276,13 +278,29 @@ Result<void> rebuildReferenceDatabase(const std::filesystem::path& dbPath,
                 }
 
                 std::string blockHash = blockEntry.path().filename().string();
-                size_t blockSize = blockEntry.file_size();
+                size_t compressedSize = blockEntry.file_size();
+                size_t uncompressedSize = compressedSize; // Default: assume not compressed
 
-                // Add to reference database with count of 1
-                txn->increment(blockHash, blockSize);
+                // Try to read compression header to get uncompressed size
+                if (compressedSize >= compression::CompressionHeader::SIZE) {
+                    std::ifstream file(blockEntry.path(), std::ios::binary);
+                    if (file) {
+                        std::array<std::byte, compression::CompressionHeader::SIZE> headerBytes;
+                        file.read(reinterpret_cast<char*>(headerBytes.data()), headerBytes.size());
+                        if (file.gcount() == static_cast<std::streamsize>(headerBytes.size())) {
+                            auto headerResult = compression::CompressionHeader::parse(headerBytes);
+                            if (headerResult) {
+                                uncompressedSize = headerResult.value().uncompressedSize;
+                            }
+                        }
+                    }
+                }
+
+                // Add to reference database with both sizes
+                txn->increment(blockHash, compressedSize, uncompressedSize);
 
                 blocksFound++;
-                totalSize += blockSize;
+                totalSize += compressedSize;
 
                 // Progress logging
                 if (blocksFound % 1000 == 0) {

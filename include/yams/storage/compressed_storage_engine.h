@@ -50,6 +50,7 @@ public:
     [[nodiscard]] Result<bool> exists(std::string_view hash) const noexcept override;
 
     [[nodiscard]] Result<void> remove(std::string_view hash) override;
+    [[nodiscard]] Result<uint64_t> getBlockSize(std::string_view hash) const override;
 
     // Additional compressed storage functionality
     [[nodiscard]] Result<uint64_t> getCompressedSize(std::string_view key) const;

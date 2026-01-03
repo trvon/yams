@@ -12,14 +12,16 @@ PRAGMA journal_mode = WAL;
 CREATE TABLE IF NOT EXISTS block_references (
     block_hash TEXT PRIMARY KEY,              -- SHA-256 hash of the block
     ref_count INTEGER NOT NULL DEFAULT 0,     -- Current reference count
-    block_size INTEGER NOT NULL,              -- Size of the block in bytes
+    block_size INTEGER NOT NULL,              -- Size of the block in bytes (on-disk, compressed)
+    uncompressed_size INTEGER,                -- Original size before compression (NULL if not compressed)
     created_at INTEGER NOT NULL,              -- Unix timestamp when first referenced
     last_accessed INTEGER NOT NULL,           -- Unix timestamp of last access
     metadata TEXT,                            -- Optional JSON metadata
-    
+
     -- Constraints
     CHECK (ref_count >= 0),
-    CHECK (block_size > 0)
+    CHECK (block_size > 0),
+    CHECK (uncompressed_size IS NULL OR uncompressed_size >= block_size)
 );
 
 -- Index for finding unreferenced blocks (GC)
@@ -72,6 +74,7 @@ INSERT OR IGNORE INTO ref_statistics (stat_name, stat_value, updated_at) VALUES
     ('total_blocks', 0, strftime('%s', 'now')),
     ('total_references', 0, strftime('%s', 'now')),
     ('total_bytes', 0, strftime('%s', 'now')),
+    ('total_uncompressed_bytes', 0, strftime('%s', 'now')),
     ('transactions_completed', 0, strftime('%s', 'now')),
     ('transactions_rolled_back', 0, strftime('%s', 'now')),
     ('gc_runs', 0, strftime('%s', 'now')),
@@ -98,9 +101,10 @@ CREATE INDEX IF NOT EXISTS idx_audit_block ON ref_audit_log(block_hash);
 
 -- View for unreferenced blocks (garbage collection candidates)
 CREATE VIEW IF NOT EXISTS unreferenced_blocks AS
-SELECT 
+SELECT
     block_hash,
     block_size,
+    uncompressed_size,
     created_at,
     last_accessed,
     (strftime('%s', 'now') - last_accessed) AS age_seconds
@@ -110,10 +114,12 @@ ORDER BY last_accessed ASC;
 
 -- View for block statistics
 CREATE VIEW IF NOT EXISTS block_statistics AS
-SELECT 
+SELECT
     COUNT(*) AS total_blocks,
     SUM(ref_count) AS total_references,
     SUM(block_size) AS total_bytes,
+    SUM(COALESCE(uncompressed_size, block_size)) AS total_uncompressed_bytes,
+    SUM(COALESCE(uncompressed_size, block_size)) - SUM(block_size) AS compression_saved_bytes,
     COUNT(CASE WHEN ref_count = 0 THEN 1 END) AS unreferenced_blocks,
     SUM(CASE WHEN ref_count = 0 THEN block_size ELSE 0 END) AS unreferenced_bytes,
     AVG(ref_count) AS avg_ref_count,
@@ -142,20 +148,26 @@ ORDER BY t.start_timestamp DESC;
 CREATE TRIGGER IF NOT EXISTS update_stats_on_insert
 AFTER INSERT ON block_references
 BEGIN
-    UPDATE ref_statistics 
+    UPDATE ref_statistics
     SET stat_value = stat_value + 1,
         updated_at = strftime('%s', 'now')
     WHERE stat_name = 'total_blocks';
-    
-    UPDATE ref_statistics 
+
+    UPDATE ref_statistics
     SET stat_value = stat_value + NEW.ref_count,
         updated_at = strftime('%s', 'now')
     WHERE stat_name = 'total_references';
-    
-    UPDATE ref_statistics 
+
+    UPDATE ref_statistics
     SET stat_value = stat_value + NEW.block_size,
         updated_at = strftime('%s', 'now')
     WHERE stat_name = 'total_bytes';
+
+    -- Track uncompressed bytes (use uncompressed_size if set, otherwise block_size)
+    UPDATE ref_statistics
+    SET stat_value = stat_value + COALESCE(NEW.uncompressed_size, NEW.block_size),
+        updated_at = strftime('%s', 'now')
+    WHERE stat_name = 'total_uncompressed_bytes';
 END;
 
 CREATE TRIGGER IF NOT EXISTS update_stats_on_update
@@ -174,25 +186,31 @@ END;
 CREATE TRIGGER IF NOT EXISTS update_stats_on_delete
 AFTER DELETE ON block_references
 BEGIN
-    UPDATE ref_statistics 
+    UPDATE ref_statistics
     SET stat_value = stat_value - 1,
         updated_at = strftime('%s', 'now')
     WHERE stat_name = 'total_blocks';
-    
-    UPDATE ref_statistics 
+
+    UPDATE ref_statistics
     SET stat_value = stat_value - OLD.ref_count,
         updated_at = strftime('%s', 'now')
     WHERE stat_name = 'total_references';
-    
-    UPDATE ref_statistics 
+
+    UPDATE ref_statistics
     SET stat_value = stat_value - OLD.block_size,
         updated_at = strftime('%s', 'now')
     WHERE stat_name = 'total_bytes';
-    
+
+    -- Decrement uncompressed bytes (use uncompressed_size if set, otherwise block_size)
+    UPDATE ref_statistics
+    SET stat_value = stat_value - COALESCE(OLD.uncompressed_size, OLD.block_size),
+        updated_at = strftime('%s', 'now')
+    WHERE stat_name = 'total_uncompressed_bytes';
+
     -- Log deletion
     INSERT INTO ref_audit_log (timestamp, operation, block_hash, old_value, details)
-    VALUES (strftime('%s', 'now'), 'DELETE_BLOCK', OLD.block_hash, OLD.ref_count, 
-            json_object('size', OLD.block_size));
+    VALUES (strftime('%s', 'now'), 'DELETE_BLOCK', OLD.block_hash, OLD.ref_count,
+            json_object('size', OLD.block_size, 'uncompressed_size', OLD.uncompressed_size));
 END;
 
 -- Update last_accessed timestamp on reference count changes

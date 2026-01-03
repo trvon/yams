@@ -7,6 +7,7 @@
 #include <thread>
 #include <zstd.h>
 #include <yams/compression/compression_header.h>
+#include <yams/compression/compression_monitor.h>
 #include <yams/compression/compression_stats.h>
 #include <yams/compression/compressor_interface.h>
 #include <yams/storage/compressed_storage_engine.h>
@@ -154,6 +155,10 @@ public:
     StorageStats getStats() const noexcept { return underlying_->getStats(); }
 
     Result<uint64_t> getStorageSize() const { return underlying_->getStorageSize(); }
+
+    Result<uint64_t> getBlockSize(std::string_view hash) const {
+        return underlying_->getBlockSize(hash);
+    }
 
     // Async operations - delegate to underlying storage
     std::future<Result<void>> storeAsync(std::string_view hash, std::span<const std::byte> data) {
@@ -389,14 +394,26 @@ private:
         std::memcpy(output.data() + sizeof(header), result.value().data.data(),
                     result.value().data.size());
 
-        // Update statistics
+        // Update local statistics
         updateStats([&](compression::CompressionStats& stats) {
             stats.totalCompressedFiles++;
             stats.totalCompressedBytes += output.size();
+            stats.totalUncompressedBytes += data.size();
             stats.totalSpaceSaved += data.size() - output.size();
             stats.algorithmStats[decision.algorithm].recordCompression(result.value());
             stats.onDemandCompressions++;
         });
+
+        // Update global statistics for DaemonMetrics visibility
+        {
+            auto& globalStats = compression::CompressionMonitor::getGlobalStats();
+            auto& globalMutex = compression::CompressionMonitor::getGlobalStatsMutex();
+            std::lock_guard lock(globalMutex);
+            globalStats.totalCompressedFiles++;
+            globalStats.totalCompressedBytes += output.size();
+            globalStats.totalUncompressedBytes += data.size();
+            globalStats.totalSpaceSaved += data.size() - output.size();
+        }
 
         return output;
     }
@@ -576,6 +593,18 @@ Result<bool> CompressedStorageEngine::exists(std::string_view hash) const noexce
 
 Result<void> CompressedStorageEngine::remove(std::string_view hash) {
     return pImpl->remove(hash);
+}
+
+Result<uint64_t> CompressedStorageEngine::getBlockSize(std::string_view hash) const {
+    return pImpl->getBlockSize(hash);
+}
+
+Result<uint64_t> CompressedStorageEngine::getCompressedSize(std::string_view key) const {
+    return pImpl->getBlockSize(key);
+}
+
+Result<uint64_t> CompressedStorageEngine::getUncompressedSize(std::string_view key) const {
+    return pImpl->size(key);
 }
 
 // Required StorageEngine interface methods

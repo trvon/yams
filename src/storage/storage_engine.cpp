@@ -336,6 +336,31 @@ Result<void> StorageEngine::remove(std::string_view hash) {
     return {};
 }
 
+Result<uint64_t> StorageEngine::getBlockSize(std::string_view hash) const {
+    // Allow manifest keys (hash.manifest) and regular hashes
+    bool isManifest = hash.ends_with(".manifest");
+    if (!isManifest && hash.length() != HASH_STRING_SIZE) {
+        spdlog::error(
+            "Invalid hash length for getBlockSize: expected {} characters, got {} for hash '{}'",
+            HASH_STRING_SIZE, hash.length(), hash);
+        return Result<uint64_t>(ErrorCode::InvalidArgument);
+    }
+
+    auto objectPath = getObjectPath(hash);
+
+    std::error_code ec;
+    if (!std::filesystem::exists(objectPath, ec)) {
+        return Result<uint64_t>(ErrorCode::ChunkNotFound);
+    }
+
+    auto fileSize = std::filesystem::file_size(objectPath, ec);
+    if (ec) {
+        return Result<uint64_t>(ErrorCode::IOError);
+    }
+
+    return static_cast<uint64_t>(fileSize);
+}
+
 std::future<Result<void>> StorageEngine::storeAsync(std::string_view hash,
                                                     std::span<const std::byte> data) {
     // Create a copy of the data for async operation

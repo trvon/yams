@@ -998,24 +998,18 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                     // Lightweight fields
                     out.storeObjects = ss.totalObjects;
 
-                    // For logical bytes, we need uncompressed sizes.
-                    // ss.totalBytes may be either compressed or uncompressed depending on
-                    // how the content store was initialized. We use compression stats when
-                    // available to get the true logical (uncompressed) size.
-                    uint64_t logicalFromCompression = 0;
-                    uint64_t compressSaved = 0;
-                    try {
-                        auto& g = yams::compression::CompressionMonitor::getGlobalStats();
-                        logicalFromCompression = g.totalUncompressedBytes.load();
-                        compressSaved = g.totalSpaceSaved.load();
-                    } catch (...) {
-                    }
+                    // Use persistent uncompressed bytes from reference counter stats
+                    // (now stored in block_references table and persisted across restarts)
+                    uint64_t compressSaved = ss.compressionSaved();
 
-                    // Use compression-based logical bytes if available and non-zero,
-                    // otherwise fall back to ss.totalBytes (which is correct for
-                    // uncompressed storage or fresh daemon starts)
-                    out.logicalBytes =
-                        (logicalFromCompression > 0) ? logicalFromCompression : ss.totalBytes;
+                    // Calculate logical bytes (uncompressed size):
+                    // ss.totalUncompressedBytes comes from persistent ref_statistics
+                    if (ss.totalUncompressedBytes > 0) {
+                        out.logicalBytes = ss.totalUncompressedBytes;
+                    } else {
+                        // Fallback: no uncompressed data tracked yet
+                        out.logicalBytes = ss.totalBytes;
+                    }
 
                     // casUniqueRawBytes represents the unique bytes in CAS (on-disk)
                     // which is ss.totalBytes minus dedup savings. When compression is

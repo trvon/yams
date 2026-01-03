@@ -103,6 +103,14 @@ public:
         return total;
     }
 
+    Result<uint64_t> getBlockSize(std::string_view hash) const override {
+        auto it = storage_.find(std::string(hash));
+        if (it == storage_.end()) {
+            return Error{ErrorCode::NotFound, "Hash not found"};
+        }
+        return static_cast<uint64_t>(it->second.size());
+    }
+
     void clear() { storage_.clear(); }
 
 private:

@@ -83,7 +83,13 @@ public:
             if (existsResult.value()) {
                 // Chunk already exists, just increment reference
                 bytesDeduped += chunk.size;
-                auto incResult = refCounter_->increment(chunk.hash, chunk.size);
+
+                // Get on-disk (compressed) size for reference counting
+                auto blockSizeResult = storage_->getBlockSize(chunk.hash);
+                size_t compressedSize =
+                    blockSizeResult ? static_cast<size_t>(blockSizeResult.value()) : chunk.size;
+
+                auto incResult = refCounter_->increment(chunk.hash, compressedSize, chunk.size);
                 if (!incResult) {
                     transaction->rollback();
                     return Result<StoreResult>(incResult.error());
@@ -99,8 +105,13 @@ public:
 
                 bytesStored += chunk.size;
 
-                // Add initial reference
-                auto incResult = refCounter_->increment(chunk.hash, chunk.size);
+                // Get on-disk (compressed) size for reference counting
+                auto blockSizeResult = storage_->getBlockSize(chunk.hash);
+                size_t compressedSize =
+                    blockSizeResult ? static_cast<size_t>(blockSizeResult.value()) : chunk.size;
+
+                // Add initial reference with both compressed and uncompressed sizes
+                auto incResult = refCounter_->increment(chunk.hash, compressedSize, chunk.size);
                 if (!incResult) {
                     transaction->rollback();
                     return Result<StoreResult>(incResult.error());
@@ -576,6 +587,8 @@ public:
                 if (currentStats.totalBytes == 0 && refStats.value().totalBytes > 0) {
                     currentStats.totalBytes = refStats.value().totalBytes;
                 }
+                // Get uncompressed bytes from persistent storage
+                currentStats.totalUncompressedBytes = refStats.value().totalUncompressedBytes;
             }
         }
 

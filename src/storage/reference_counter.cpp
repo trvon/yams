@@ -186,11 +186,13 @@ Result<void> ReferenceCounter::initializeDatabase() {
                     block_hash TEXT PRIMARY KEY,
                     ref_count INTEGER NOT NULL DEFAULT 0,
                     block_size INTEGER NOT NULL,
+                    uncompressed_size INTEGER,
                     created_at INTEGER NOT NULL,
                     last_accessed INTEGER NOT NULL,
                     metadata TEXT,
                     CHECK (ref_count >= 0),
-                    CHECK (block_size > 0)
+                    CHECK (block_size > 0),
+                    CHECK (uncompressed_size IS NULL OR uncompressed_size >= block_size)
                 );
                 
                 -- Transaction log for crash recovery and atomicity
@@ -229,6 +231,7 @@ Result<void> ReferenceCounter::initializeDatabase() {
                     ('total_blocks', 0, strftime('%s', 'now')),
                     ('total_references', 0, strftime('%s', 'now')),
                     ('total_bytes', 0, strftime('%s', 'now')),
+                    ('total_uncompressed_bytes', 0, strftime('%s', 'now')),
                     ('transactions_completed', 0, strftime('%s', 'now')),
                     ('transactions_rolled_back', 0, strftime('%s', 'now')),
                     ('gc_runs', 0, strftime('%s', 'now')),
@@ -306,6 +309,8 @@ Result<void> ReferenceCounter::initializeDatabase() {
                       WHERE stat_name='total_blocks';
                     UPDATE ref_statistics SET stat_value = stat_value + NEW.block_size, updated_at=strftime('%s','now')
                       WHERE stat_name='total_bytes';
+                    UPDATE ref_statistics SET stat_value = stat_value + COALESCE(NEW.uncompressed_size, NEW.block_size), updated_at=strftime('%s','now')
+                      WHERE stat_name='total_uncompressed_bytes';
                     UPDATE ref_statistics SET stat_value = stat_value + NEW.ref_count, updated_at=strftime('%s','now')
                       WHERE stat_name='total_references';
                     UPDATE ref_statistics SET stat_value = stat_value + (CASE WHEN NEW.ref_count=0 THEN 1 ELSE 0 END), updated_at=strftime('%s','now')
@@ -339,6 +344,8 @@ Result<void> ReferenceCounter::initializeDatabase() {
                       WHERE stat_name='total_blocks';
                     UPDATE ref_statistics SET stat_value = stat_value - OLD.block_size, updated_at=strftime('%s','now')
                       WHERE stat_name='total_bytes';
+                    UPDATE ref_statistics SET stat_value = stat_value - COALESCE(OLD.uncompressed_size, OLD.block_size), updated_at=strftime('%s','now')
+                      WHERE stat_name='total_uncompressed_bytes';
                     UPDATE ref_statistics SET stat_value = stat_value - OLD.ref_count, updated_at=strftime('%s','now')
                       WHERE stat_name='total_references';
                     UPDATE ref_statistics SET stat_value = stat_value - (CASE WHEN OLD.ref_count=0 THEN 1 ELSE 0 END), updated_at=strftime('%s','now')
@@ -353,6 +360,7 @@ Result<void> ReferenceCounter::initializeDatabase() {
                   ('total_blocks', (SELECT COUNT(*) FROM block_references), strftime('%s','now')),
                   ('total_references', (SELECT IFNULL(SUM(ref_count),0) FROM block_references), strftime('%s','now')),
                   ('total_bytes', (SELECT IFNULL(SUM(block_size),0) FROM block_references), strftime('%s','now')),
+                  ('total_uncompressed_bytes', (SELECT IFNULL(SUM(COALESCE(uncompressed_size, block_size)),0) FROM block_references), strftime('%s','now')),
                   ('unreferenced_blocks', (SELECT COUNT(*) FROM block_references WHERE ref_count=0), strftime('%s','now')),
                   ('unreferenced_bytes', (SELECT IFNULL(SUM(block_size),0) FROM block_references WHERE ref_count=0), strftime('%s','now'));
             )");
@@ -361,6 +369,23 @@ Result<void> ReferenceCounter::initializeDatabase() {
         // Ensure stats materialization objects exist even when schema was loaded from file
         pImpl->db->execute(R"(
             CREATE INDEX IF NOT EXISTS idx_unref_order ON block_references(ref_count, last_accessed);
+
+            -- Ensure total_uncompressed_bytes stat exists (for schema upgrades)
+            INSERT OR IGNORE INTO ref_statistics (stat_name, stat_value, updated_at)
+            VALUES ('total_uncompressed_bytes', 0, strftime('%s', 'now'));
+        )");
+
+        // Schema upgrade: Add uncompressed_size column if it doesn't exist
+        try {
+            pImpl->db->execute("ALTER TABLE block_references ADD COLUMN uncompressed_size INTEGER");
+            spdlog::info("Added uncompressed_size column to block_references table");
+        } catch (...) {
+            // Column already exists, ignore
+        }
+
+        // Continue with trigger creation
+        pImpl->db->execute(R"(
+
             CREATE TRIGGER IF NOT EXISTS trg_blocks_after_insert
             AFTER INSERT ON block_references
             BEGIN
@@ -368,6 +393,8 @@ Result<void> ReferenceCounter::initializeDatabase() {
                   WHERE stat_name='total_blocks';
                 UPDATE ref_statistics SET stat_value = stat_value + NEW.block_size, updated_at=strftime('%s','now')
                   WHERE stat_name='total_bytes';
+                UPDATE ref_statistics SET stat_value = stat_value + COALESCE(NEW.uncompressed_size, NEW.block_size), updated_at=strftime('%s','now')
+                  WHERE stat_name='total_uncompressed_bytes';
                 UPDATE ref_statistics SET stat_value = stat_value + NEW.ref_count, updated_at=strftime('%s','now')
                   WHERE stat_name='total_references';
                 UPDATE ref_statistics SET stat_value = stat_value + (CASE WHEN NEW.ref_count=0 THEN 1 ELSE 0 END), updated_at=strftime('%s','now')
@@ -398,6 +425,8 @@ Result<void> ReferenceCounter::initializeDatabase() {
                   WHERE stat_name='total_blocks';
                 UPDATE ref_statistics SET stat_value = stat_value - OLD.block_size, updated_at=strftime('%s','now')
                   WHERE stat_name='total_bytes';
+                UPDATE ref_statistics SET stat_value = stat_value - COALESCE(OLD.uncompressed_size, OLD.block_size), updated_at=strftime('%s','now')
+                  WHERE stat_name='total_uncompressed_bytes';
                 UPDATE ref_statistics SET stat_value = stat_value - OLD.ref_count, updated_at=strftime('%s','now')
                   WHERE stat_name='total_references';
                 UPDATE ref_statistics SET stat_value = stat_value - (CASE WHEN OLD.ref_count=0 THEN 1 ELSE 0 END), updated_at=strftime('%s','now')
@@ -411,6 +440,7 @@ Result<void> ReferenceCounter::initializeDatabase() {
               ('total_blocks', (SELECT COUNT(*) FROM block_references), strftime('%s','now')),
               ('total_references', (SELECT IFNULL(SUM(ref_count),0) FROM block_references), strftime('%s','now')),
               ('total_bytes', (SELECT IFNULL(SUM(block_size),0) FROM block_references), strftime('%s','now')),
+              ('total_uncompressed_bytes', (SELECT IFNULL(SUM(COALESCE(uncompressed_size, block_size)),0) FROM block_references), strftime('%s','now')),
               ('unreferenced_blocks', (SELECT COUNT(*) FROM block_references WHERE ref_count=0), strftime('%s','now')),
               ('unreferenced_bytes', (SELECT IFNULL(SUM(block_size),0) FROM block_references WHERE ref_count=0), strftime('%s','now'));
         )");
@@ -420,8 +450,8 @@ Result<void> ReferenceCounter::initializeDatabase() {
 
         // Prepare common statements
         pImpl->stmtCache->get(Impl::INCREMENT_STMT, R"(
-            INSERT INTO block_references (block_hash, ref_count, block_size, created_at, last_accessed)
-            VALUES (?, 1, ?, strftime('%s', 'now'), strftime('%s', 'now'))
+            INSERT INTO block_references (block_hash, ref_count, block_size, uncompressed_size, created_at, last_accessed)
+            VALUES (?, 1, ?, ?, strftime('%s', 'now'), strftime('%s', 'now'))
             ON CONFLICT(block_hash) DO UPDATE SET
                 ref_count = ref_count + 1,
                 last_accessed = strftime('%s', 'now')
@@ -458,14 +488,16 @@ Result<void> ReferenceCounter::initializeDatabase() {
     }
 }
 
-// Single increment operation
-Result<void> ReferenceCounter::increment(std::string_view blockHash, size_t blockSize) {
+// Single increment operation with both compressed and uncompressed sizes
+Result<void> ReferenceCounter::increment(std::string_view blockHash, size_t compressedSize,
+                                         size_t uncompressedSize) {
     try {
         std::unique_lock lock(pImpl->dbMutex);
 
         auto stmt = pImpl->stmtCache->get(Impl::INCREMENT_STMT, "");
         stmt.bind(1, blockHash);
-        stmt.bind(2, static_cast<int64_t>(blockSize));
+        stmt.bind(2, static_cast<int64_t>(compressedSize));
+        stmt.bind(3, static_cast<int64_t>(uncompressedSize));
         stmt.execute();
 
         return {};
@@ -541,6 +573,7 @@ Result<RefCountStats> ReferenceCounter::getStats() const {
                   (SELECT stat_value FROM ref_statistics WHERE stat_name='total_blocks'),
                   (SELECT stat_value FROM ref_statistics WHERE stat_name='total_references'),
                   (SELECT stat_value FROM ref_statistics WHERE stat_name='total_bytes'),
+                  (SELECT stat_value FROM ref_statistics WHERE stat_name='total_uncompressed_bytes'),
                   (SELECT stat_value FROM ref_statistics WHERE stat_name='unreferenced_blocks'),
                   (SELECT stat_value FROM ref_statistics WHERE stat_name='unreferenced_bytes'),
                   (SELECT stat_value FROM ref_statistics WHERE stat_name='transactions_completed'),
@@ -551,10 +584,11 @@ Result<RefCountStats> ReferenceCounter::getStats() const {
                 stats.totalBlocks = static_cast<uint64_t>(stmt.getInt64(0));
                 stats.totalReferences = static_cast<uint64_t>(stmt.getInt64(1));
                 stats.totalBytes = static_cast<uint64_t>(stmt.getInt64(2));
-                stats.unreferencedBlocks = static_cast<uint64_t>(stmt.getInt64(3));
-                stats.unreferencedBytes = static_cast<uint64_t>(stmt.getInt64(4));
-                stats.transactions = static_cast<uint64_t>(stmt.getInt64(5));
-                stats.rollbacks = static_cast<uint64_t>(stmt.getInt64(6));
+                stats.totalUncompressedBytes = static_cast<uint64_t>(stmt.getInt64(3));
+                stats.unreferencedBlocks = static_cast<uint64_t>(stmt.getInt64(4));
+                stats.unreferencedBytes = static_cast<uint64_t>(stmt.getInt64(5));
+                stats.transactions = static_cast<uint64_t>(stmt.getInt64(6));
+                stats.rollbacks = static_cast<uint64_t>(stmt.getInt64(7));
             }
             // stmt destructor called here, finalizes sqlite3_stmt
         }
@@ -567,6 +601,7 @@ Result<RefCountStats> ReferenceCounter::getStats() const {
                   COUNT(*) AS total_blocks,
                   IFNULL(SUM(ref_count), 0) AS total_references,
                   IFNULL(SUM(block_size), 0) AS total_bytes,
+                  IFNULL(SUM(COALESCE(uncompressed_size, block_size)), 0) AS total_uncompressed_bytes,
                   COUNT(CASE WHEN ref_count = 0 THEN 1 END) AS unreferenced_blocks,
                   IFNULL(SUM(CASE WHEN ref_count = 0 THEN block_size ELSE 0 END), 0) AS unreferenced_bytes
                 FROM block_references
@@ -576,15 +611,19 @@ Result<RefCountStats> ReferenceCounter::getStats() const {
                 const auto tableBlocks = static_cast<uint64_t>(recalcStmt.getInt64(0));
                 const auto tableRefs = static_cast<uint64_t>(recalcStmt.getInt64(1));
                 const auto tableBytes = static_cast<uint64_t>(recalcStmt.getInt64(2));
-                const auto tableUnref = static_cast<uint64_t>(recalcStmt.getInt64(3));
-                const auto tableUnrefBytes = static_cast<uint64_t>(recalcStmt.getInt64(4));
+                const auto tableUncompBytes = static_cast<uint64_t>(recalcStmt.getInt64(3));
+                const auto tableUnref = static_cast<uint64_t>(recalcStmt.getInt64(4));
+                const auto tableUnrefBytes = static_cast<uint64_t>(recalcStmt.getInt64(5));
 
                 if (stats.totalBlocks != tableBlocks || stats.totalReferences != tableRefs ||
-                    stats.totalBytes != tableBytes || stats.unreferencedBlocks != tableUnref ||
+                    stats.totalBytes != tableBytes ||
+                    stats.totalUncompressedBytes != tableUncompBytes ||
+                    stats.unreferencedBlocks != tableUnref ||
                     stats.unreferencedBytes != tableUnrefBytes) {
                     stats.totalBlocks = tableBlocks;
                     stats.totalReferences = tableRefs;
                     stats.totalBytes = tableBytes;
+                    stats.totalUncompressedBytes = tableUncompBytes;
                     stats.unreferencedBlocks = tableUnref;
                     stats.unreferencedBytes = tableUnrefBytes;
                 }
@@ -698,15 +737,17 @@ ReferenceCounter::Transaction::operator=(Transaction&& other) noexcept {
     return *this;
 }
 
-// Increment in transaction
-void ReferenceCounter::Transaction::increment(std::string_view blockHash, size_t blockSize) {
+// Increment in transaction with both compressed and uncompressed sizes
+void ReferenceCounter::Transaction::increment(std::string_view blockHash, size_t compressedSize,
+                                              size_t uncompressedSize) {
     if (!active_) {
         throw std::runtime_error("Transaction is not active");
     }
 
     operations_.push_back({.type = Operation::Type::Increment,
                            .blockHash = std::string(blockHash),
-                           .blockSize = blockSize,
+                           .compressedSize = compressedSize,
+                           .uncompressedSize = uncompressedSize,
                            .delta = 1});
 
     // Operations are recorded only in-memory during queue phase
@@ -721,7 +762,8 @@ void ReferenceCounter::Transaction::decrement(std::string_view blockHash) {
 
     operations_.push_back({.type = Operation::Type::Decrement,
                            .blockHash = std::string(blockHash),
-                           .blockSize = 0,
+                           .compressedSize = 0,
+                           .uncompressedSize = 0,
                            .delta = -1});
 
     // Operations are recorded only in-memory during queue phase
@@ -747,7 +789,8 @@ Result<void> ReferenceCounter::Transaction::commit() {
                     auto stmt =
                         counter_->pImpl->stmtCache->get(ReferenceCounter::Impl::INCREMENT_STMT, "");
                     stmt.bind(1, op.blockHash);
-                    stmt.bind(2, static_cast<int64_t>(op.blockSize));
+                    stmt.bind(2, static_cast<int64_t>(op.compressedSize));
+                    stmt.bind(3, static_cast<int64_t>(op.uncompressedSize));
                     stmt.execute();
                 } else {
                     auto stmt =
@@ -760,7 +803,7 @@ Result<void> ReferenceCounter::Transaction::commit() {
             // Record all operations in audit log during commit
             for (const auto& op : operations_) {
                 auto stmt = counter_->pImpl->db->prepare(R"(
-                    INSERT INTO ref_transaction_ops 
+                    INSERT INTO ref_transaction_ops
                     (transaction_id, block_hash, operation, delta, block_size, timestamp)
                     VALUES (?, ?, ?, ?, ?, strftime('%s', 'now'))
                 )");
@@ -770,7 +813,7 @@ Result<void> ReferenceCounter::Transaction::commit() {
                                                                                : "DECREMENT"));
                 stmt.bind(4,
                           1); // Schema requires positive delta - operation type indicates direction
-                stmt.bind(5, static_cast<int64_t>(op.blockSize));
+                stmt.bind(5, static_cast<int64_t>(op.compressedSize));
                 stmt.execute();
             }
 

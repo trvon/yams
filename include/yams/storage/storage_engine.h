@@ -77,6 +77,9 @@ public:
     virtual Result<bool> exists(std::string_view hash) const noexcept = 0;
     virtual Result<void> remove(std::string_view hash) = 0;
 
+    // Get on-disk size of a block (returns compressed size if compression is enabled)
+    virtual Result<uint64_t> getBlockSize(std::string_view hash) const = 0;
+
     // Async operations
     virtual std::future<Result<void>> storeAsync(std::string_view hash,
                                                  std::span<const std::byte> data) = 0;
@@ -111,6 +114,7 @@ public:
     Result<RawObject> retrieveRaw(std::string_view hash) const override;
     Result<bool> exists(std::string_view hash) const noexcept override;
     Result<void> remove(std::string_view hash) override;
+    Result<uint64_t> getBlockSize(std::string_view hash) const override;
 
     // Async operations with C++20 coroutines
     std::future<Result<void>> storeAsync(std::string_view hash,

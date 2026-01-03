@@ -27,13 +27,14 @@ class StorageEngine;
 
 // Reference counting statistics
 struct RefCountStats {
-    uint64_t totalBlocks;        // Total number of tracked blocks
-    uint64_t totalReferences;    // Sum of all reference counts
-    uint64_t totalBytes;         // Total size of all blocks
-    uint64_t unreferencedBlocks; // Blocks with ref_count = 0
-    uint64_t unreferencedBytes;  // Size of unreferenced blocks
-    uint64_t transactions;       // Total transactions processed
-    uint64_t rollbacks;          // Total rolled back transactions
+    uint64_t totalBlocks;            // Total number of tracked blocks
+    uint64_t totalReferences;        // Sum of all reference counts
+    uint64_t totalBytes;             // Total size of all blocks (on-disk, compressed)
+    uint64_t totalUncompressedBytes; // Total uncompressed size of all blocks
+    uint64_t unreferencedBlocks;     // Blocks with ref_count = 0
+    uint64_t unreferencedBytes;      // Size of unreferenced blocks
+    uint64_t transactions;           // Total transactions processed
+    uint64_t rollbacks;              // Total rolled back transactions
 };
 
 // Options for garbage collection
@@ -70,7 +71,13 @@ public:
     virtual ~IReferenceCounter() = default;
 
     // Single operations
-    virtual Result<void> increment(std::string_view blockHash, size_t blockSize) = 0;
+    // New signature with both compressed and uncompressed sizes
+    virtual Result<void> increment(std::string_view blockHash, size_t compressedSize,
+                                   size_t uncompressedSize) = 0;
+    // Legacy signature (assumes no compression: uncompressedSize = compressedSize)
+    Result<void> increment(std::string_view blockHash, size_t blockSize) {
+        return increment(blockHash, blockSize, blockSize);
+    }
     virtual Result<void> decrement(std::string_view blockHash) = 0;
 
     // Queries
@@ -83,7 +90,14 @@ public:
     public:
         virtual ~ITransaction() = default;
 
-        virtual void increment(std::string_view blockHash, size_t blockSize = 0) = 0;
+        // New signature with both compressed and uncompressed sizes
+        virtual void increment(std::string_view blockHash, size_t compressedSize,
+                               size_t uncompressedSize) = 0;
+        // Legacy signature (assumes no compression: uncompressedSize = compressedSize)
+        void increment(std::string_view blockHash, size_t blockSize) {
+            increment(blockHash, blockSize, blockSize);
+        }
+        void increment(std::string_view blockHash) { increment(blockHash, 0, 0); }
         virtual void decrement(std::string_view blockHash) = 0;
         virtual Result<void> commit() = 0;
         virtual void rollback() = 0;
@@ -116,7 +130,9 @@ public:
     ReferenceCounter& operator=(ReferenceCounter&&) noexcept;
 
     // Single operations
-    Result<void> increment(std::string_view blockHash, size_t blockSize) override;
+    using IReferenceCounter::increment; // Bring base class overload into scope
+    Result<void> increment(std::string_view blockHash, size_t compressedSize,
+                           size_t uncompressedSize) override;
     Result<void> decrement(std::string_view blockHash) override;
 
     // Batch operations with C++20 ranges
@@ -192,7 +208,9 @@ public:
         Transaction& operator=(Transaction&&) noexcept;
 
         // Operations
-        void increment(std::string_view blockHash, size_t blockSize = 0) override;
+        using ITransaction::increment; // Bring legacy overloads into scope
+        void increment(std::string_view blockHash, size_t compressedSize,
+                       size_t uncompressedSize) override;
         void decrement(std::string_view blockHash) override;
 
         // Batch operations for efficiency
@@ -229,7 +247,8 @@ public:
             enum class Type { Increment, Decrement };
             Type type;
             std::string blockHash;
-            size_t blockSize;
+            size_t compressedSize;
+            size_t uncompressedSize;
             int delta;
         };
         std::vector<Operation> operations_;

@@ -40,18 +40,24 @@ struct RetrieveResult {
 
 // Content store statistics
 struct ContentStoreStats {
-    uint64_t totalObjects = 0;       // Total unique objects
-    uint64_t totalBytes = 0;         // Total bytes stored
-    uint64_t uniqueBlocks = 0;       // Unique blocks in storage
-    uint64_t deduplicatedBytes = 0;  // Bytes saved by dedup
-    uint64_t storeOperations = 0;    // Total store operations
-    uint64_t retrieveOperations = 0; // Total retrieve operations
-    uint64_t deleteOperations = 0;   // Total delete operations
-    TimePoint lastOperation{};       // Last operation timestamp (initialized to epoch)
+    uint64_t totalObjects = 0;           // Total unique objects
+    uint64_t totalBytes = 0;             // Total bytes stored (on-disk, compressed)
+    uint64_t totalUncompressedBytes = 0; // Total uncompressed bytes (logical size)
+    uint64_t uniqueBlocks = 0;           // Unique blocks in storage
+    uint64_t deduplicatedBytes = 0;      // Bytes saved by dedup
+    uint64_t storeOperations = 0;        // Total store operations
+    uint64_t retrieveOperations = 0;     // Total retrieve operations
+    uint64_t deleteOperations = 0;       // Total delete operations
+    TimePoint lastOperation{};           // Last operation timestamp (initialized to epoch)
 
     // Calculate deduplication ratio
     [[nodiscard]] double dedupRatio() const noexcept {
         return totalBytes > 0 ? 1.0 - (static_cast<double>(uniqueBlocks) / totalBytes) : 0.0;
+    }
+
+    // Calculate compression savings (logical - raw)
+    [[nodiscard]] uint64_t compressionSaved() const noexcept {
+        return totalUncompressedBytes > totalBytes ? totalUncompressedBytes - totalBytes : 0;
     }
 };
 

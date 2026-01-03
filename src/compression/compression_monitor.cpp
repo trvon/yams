@@ -502,6 +502,7 @@ void CompressionTracker::complete(const CompressionResult& result) {
 
     stats.totalCompressedFiles++;
     stats.totalCompressedBytes += result.compressedSize;
+    stats.totalUncompressedBytes += originalSize_;
     stats.totalSpaceSaved += (originalSize_ - result.compressedSize);
 }
 
