@@ -3571,10 +3571,17 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
         ropts.requestTimeoutMs = 60000;
         ropts.headerTimeoutMs = 30000;
         ropts.bodyTimeoutMs = 120000;
-        auto resolver = [this](const std::string& nm) -> Result<std::string> {
-            if (documentService_)
-                return documentService_->resolveNameToHash(nm);
-            return Error{ErrorCode::NotFound, "resolver unavailable"};
+        auto docService = documentService_;
+        if (!docService) {
+            docService = app::services::makeDocumentService(appContext_);
+            if (docService) {
+                documentService_ = docService;
+            }
+        }
+        auto resolver = [docService](const std::string& nm) -> Result<std::string> {
+            if (docService)
+                return docService->resolveNameToHash(nm);
+            return Error{ErrorCode::NotInitialized, "Document service not available"};
         };
 
         // Prefer latest when disambiguating unless caller explicitly asked for oldest.
@@ -4678,7 +4685,13 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
     // use document service to resolve exact path or suffix, then retrieve by hash.
     if (!req.path.empty() ||
         (req.name.find('/') != std::string::npos || req.name.find('\\') != std::string::npos)) {
-        auto docService = app::services::makeDocumentService(appContext_);
+        auto docService = documentService_;
+        if (!docService) {
+            docService = app::services::makeDocumentService(appContext_);
+            if (docService) {
+                documentService_ = docService;
+            }
+        }
         if (!docService) {
             co_return Error{ErrorCode::NotInitialized, "Document service not available"};
         }
@@ -4778,10 +4791,17 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
     ropts.requestTimeoutMs = 60000;
     ropts.headerTimeoutMs = 30000;
     ropts.bodyTimeoutMs = 120000;
-    auto resolver = [this](const std::string& nm) -> Result<std::string> {
-        if (documentService_)
-            return documentService_->resolveNameToHash(nm);
-        return Error{ErrorCode::NotFound, "resolver unavailable"};
+    auto docService = documentService_;
+    if (!docService) {
+        docService = app::services::makeDocumentService(appContext_);
+        if (docService) {
+            documentService_ = docService;
+        }
+    }
+    auto resolver = [docService](const std::string& nm) -> Result<std::string> {
+        if (docService)
+            return docService->resolveNameToHash(nm);
+        return Error{ErrorCode::NotInitialized, "Document service not available"};
     };
 
     auto r = rsvc.getByNameSmart(req.name, req.oldest, true, /*useSession*/ false, std::string{},

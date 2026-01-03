@@ -3,7 +3,10 @@
 #include <yams/storage/storage_engine.h>
 #include <yams/compression/compression_header.h>
 
+#include <array>
+#include <cstddef>
 #include <fstream>
+#include <span>
 #include <spdlog/spdlog.h>
 #if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
 #include <format>
