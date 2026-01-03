@@ -399,6 +399,9 @@ if get_option('build-fuzzers')
   subdir('tools/fuzzing')
 endif
 
+sql_install_dir = join_paths(get_option('datadir'), 'yams', 'sql')
+install_data('sql/reference_schema.sql', install_dir: sql_install_dir)
+
 summary({
   'project': meson.project_name(),
   'version': meson.project_version(),
