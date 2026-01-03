@@ -4,6 +4,7 @@
 #include <yams/storage/storage_engine.h>
 
 #include <chrono>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -60,6 +61,18 @@ struct PathTreeRepairResult {
     uint64_t errors{0};
 };
 
+/// Result of block references repair operation
+struct BlockRefsRepairResult {
+    uint64_t blocksScanned{0};
+    uint64_t blocksUpdated{0};
+    uint64_t blocksSkipped{0};
+    uint64_t errors{0};
+    uint64_t compressedBlocks{0};       ///< Blocks with compression headers
+    uint64_t uncompressedBlocks{0};     ///< Blocks without compression
+    uint64_t totalDiskBytes{0};         ///< Sum of on-disk file sizes
+    uint64_t totalUncompressedBytes{0}; ///< Sum of uncompressed sizes
+};
+
 /// Candidate file for pruning
 struct PruneCandidate {
     std::string hash;
@@ -103,6 +116,17 @@ public:
     /// Rebuild path tree entries for all documents missing from the path tree
     [[nodiscard]] Result<PathTreeRepairResult>
     repairPathTree(std::function<void(uint64_t current, uint64_t total)> progress = nullptr);
+
+    // Block references repair operations
+    /// Scan CAS files and update block_references with correct sizes from disk and headers
+    /// @param objectsPath Path to the CAS objects directory
+    /// @param refsDbPath Path to the refs.db database
+    /// @param dryRun If true, only report what would be updated
+    /// @param progress Optional progress callback
+    [[nodiscard]] static Result<BlockRefsRepairResult>
+    repairBlockReferences(const std::filesystem::path& objectsPath,
+                          const std::filesystem::path& refsDbPath, bool dryRun = false,
+                          std::function<void(uint64_t current, uint64_t total)> progress = nullptr);
 
 private:
     [[nodiscard]] bool storeIfValid(const std::string& blockHash,

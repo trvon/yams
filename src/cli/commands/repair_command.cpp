@@ -58,6 +58,8 @@ public:
                       "Repair download documents: add tags/metadata and normalize names");
         cmd->add_flag("--path-tree", repairPathTree_,
                       "Rebuild path tree index for documents missing from the tree");
+        cmd->add_flag("--refs,--ref", repairBlockRefs_,
+                      "Repair block_references with correct sizes from CAS files");
         // Embeddings-specific options
         cmd->add_option("--include-mime", includeMime_,
                         "Additional MIME types to embed (e.g., application/pdf). Repeatable.")
@@ -133,7 +135,7 @@ public:
             // If no specific repair requested, default to orphans
             if (!repairOrphans_ && !repairMime_ && !repairChunks_ && !repairEmbeddings_ &&
                 !repairFts5_ && !optimizeDb_ && !verifyChecksums_ && !mergeDuplicates_ &&
-                !repairPathTree_ && !repairAll_) {
+                !repairPathTree_ && !repairBlockRefs_ && !repairAll_) {
                 repairOrphans_ = true;
             }
 
@@ -147,6 +149,7 @@ public:
                 optimizeDb_ = true;
                 repairDownloads_ = true;
                 repairPathTree_ = true;
+                repairBlockRefs_ = true;
                 // verifyChecksums_ = true;  // Not implemented yet
                 // mergeDuplicates_ = true;  // Not implemented yet
             }
@@ -159,6 +162,19 @@ public:
                 std::cout << "Using data directory: " << dd.string() << "\n\n";
             } catch (...) {
                 // non-fatal
+            }
+
+            // Warn about daemon for operations that modify refs.db
+            if ((repairBlockRefs_ || repairChunks_) && !dryRun_) {
+                std::string flags = repairBlockRefs_ && repairChunks_
+                                        ? "--refs/--chunks"
+                                        : (repairBlockRefs_ ? "--refs" : "--chunks");
+                std::cout << ui::colorize("⚠ Tip: For best results with " + flags +
+                                              ", stop the daemon first:\n"
+                                              "  yams daemon stop && yams repair " +
+                                              flags + " && yams daemon start\n",
+                                          ui::Ansi::YELLOW)
+                          << "\n";
             }
 
             if (dryRun_) {
@@ -241,6 +257,14 @@ public:
                 anyRepairs = true;
             }
 
+            // Repair block references
+            if (repairBlockRefs_) {
+                auto result = repairBlockReferences();
+                if (!result)
+                    return result;
+                anyRepairs = true;
+            }
+
             // Verify checksums (not implemented yet)
             if (verifyChecksums_) {
                 std::cout << "Checksum verification: Not implemented yet\n";
@@ -278,6 +302,7 @@ private:
     bool mergeDuplicates_ = false;
     bool repairDownloads_ = false;
     bool repairPathTree_ = false;
+    bool repairBlockRefs_ = false;
     bool foreground_ = false; // default background
     std::vector<std::string> includeMime_;
     std::string embeddingModel_;
@@ -294,6 +319,9 @@ private:
 
     // Helper to rebuild path tree index for documents missing from the tree
     Result<void> rebuildPathTree(std::shared_ptr<metadata::IMetadataRepository> metadataRepo);
+
+    // Helper to repair block references with correct sizes from CAS files
+    Result<void> repairBlockReferences();
 
     Result<void>
     cleanOrphanedMetadata(std::shared_ptr<api::IContentStore> store,
@@ -634,6 +662,9 @@ private:
                          "Failed to prepare query: " + std::string(sqlite3_errmsg(db))};
         }
 
+        ui::SpinnerRunner refsSpinner;
+        refsSpinner.start("Querying refs.db for referenced blocks...");
+
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             const char* hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
             if (hash) {
@@ -641,11 +672,15 @@ private:
             }
         }
         sqlite3_finalize(stmt);
+        refsSpinner.stop();
 
         std::cout << "  Found " << referencedHashes.size() << " referenced chunks in refs.db\n";
         fs::path objectsPath = cli_->getDataPath() / "storage" / "objects";
         size_t manifestsScanned = 0;
         size_t chunksFromManifests = 0;
+
+        ui::SpinnerRunner manifestSpinner;
+        manifestSpinner.start("Scanning manifest files...");
 
         if (fs::exists(objectsPath)) {
             for (const auto& dirEntry : fs::directory_iterator(objectsPath)) {
@@ -747,6 +782,7 @@ private:
                 }
             }
         }
+        manifestSpinner.stop();
 
         std::cout << "  Scanned " << manifestsScanned << " manifest files, found "
                   << chunksFromManifests << " chunk references\n";
@@ -755,6 +791,9 @@ private:
 
         // Now, get all files that exist in storage (excluding manifests)
         std::vector<std::pair<std::string, fs::path>> existingFiles;
+
+        ui::SpinnerRunner storageSpinner;
+        storageSpinner.start("Scanning storage for chunk files...");
 
         if (fs::exists(objectsPath)) {
             for (const auto& dirEntry : fs::directory_iterator(objectsPath)) {
@@ -776,6 +815,7 @@ private:
                 }
             }
         }
+        storageSpinner.stop();
 
         std::cout << "  Found " << existingFiles.size() << " chunk files in storage\n";
 
@@ -1509,6 +1549,71 @@ RepairCommand::rebuildPathTree(std::shared_ptr<metadata::IMetadataRepository> me
     std::cout << "    Documents scanned: " << stats.documentsScanned << "\n";
     std::cout << "    Nodes created:     " << stats.nodesCreated << "\n";
     std::cout << "    Errors:            " << stats.errors << "\n";
+
+    return Result<void>();
+}
+
+Result<void> RepairCommand::repairBlockReferences() {
+    std::cout << "Repairing block references (sizes from CAS files)...\n";
+
+    namespace fs = std::filesystem;
+
+    // Get storage paths
+    fs::path objectsPath = cli_->getDataPath() / "storage" / "objects";
+    fs::path refsDbPath = cli_->getDataPath() / "storage" / "refs.db";
+
+    if (!fs::exists(objectsPath)) {
+        std::cout << "  No objects directory found\n";
+        return Result<void>();
+    }
+
+    if (!fs::exists(refsDbPath)) {
+        std::cout << "  No refs.db found\n";
+        return Result<void>();
+    }
+
+    std::cout << "  Objects: " << objectsPath.string() << "\n";
+    std::cout << "  RefsDB:  " << refsDbPath.string() << "\n";
+
+    // Progress indicator for scanning
+    ui::SpinnerRunner scanSpinner;
+    scanSpinner.start("Scanning CAS files...");
+
+    // Progress callback (spinner doesn't need updates, just runs)
+    auto progressFn = [](uint64_t /*current*/, uint64_t /*total*/) {
+        // Spinner runs independently, no update needed
+    };
+
+    auto result = integrity::RepairManager::repairBlockReferences(objectsPath, refsDbPath, dryRun_,
+                                                                  progressFn);
+    scanSpinner.stop();
+
+    if (!result) {
+        return result.error();
+    }
+
+    const auto& stats = result.value();
+
+    if (dryRun_) {
+        std::cout << "  [DRY RUN] Would update " << stats.blocksUpdated << " block references\n";
+    } else {
+        std::cout << "  ✓ Block references repair complete\n";
+    }
+    std::cout << "    Blocks scanned:       " << stats.blocksScanned << "\n";
+    std::cout << "    Blocks updated:       " << stats.blocksUpdated << "\n";
+    std::cout << "    Blocks skipped:       " << stats.blocksSkipped << "\n";
+    std::cout << "    Compressed blocks:    " << stats.compressedBlocks << "\n";
+    std::cout << "    Uncompressed blocks:  " << stats.uncompressedBlocks << "\n";
+    std::cout << "    Total disk bytes:     " << ui::format_bytes(stats.totalDiskBytes) << "\n";
+    std::cout << "    Total uncompressed:   " << ui::format_bytes(stats.totalUncompressedBytes)
+              << "\n";
+    if (stats.totalUncompressedBytes > stats.totalDiskBytes) {
+        std::cout << "    Compression savings:  "
+                  << ui::format_bytes(stats.totalUncompressedBytes - stats.totalDiskBytes) << "\n";
+    }
+    if (stats.errors > 0) {
+        std::cout << "    Errors:               " << stats.errors << "\n";
+    }
 
     return Result<void>();
 }

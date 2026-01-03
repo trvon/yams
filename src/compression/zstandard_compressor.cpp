@@ -120,6 +120,29 @@ public:
             }
         }
 
+        // Sanity checks: prevent absurd allocations from corrupted frame headers
+        // Only apply ratio check when size comes from frame header (expectedSize was 0)
+        // because valid highly-compressible data can have extreme ratios (e.g., zeros)
+        constexpr size_t kMaxAbsoluteSize = 16ULL * 1024 * 1024 * 1024; // 16GB max
+        if (decompressedSize > kMaxAbsoluteSize) {
+            return Error{ErrorCode::InvalidData,
+                         fmt::format("Reported decompressed size {} exceeds maximum allowed ({})",
+                                     decompressedSize, kMaxAbsoluteSize)};
+        }
+
+        // Ratio check only when parsing size from frame header (not caller-provided)
+        if (expectedSize == 0) {
+            constexpr size_t kMaxCompressionRatio = 1000;
+            const size_t maxByRatio = data.size() * kMaxCompressionRatio;
+            if (decompressedSize > maxByRatio) {
+                return Error{ErrorCode::InvalidData,
+                             fmt::format("Frame header claims {} bytes but compressed data is only "
+                                         "{} bytes (ratio {}x exceeds limit)",
+                                         decompressedSize, data.size(),
+                                         decompressedSize / std::max(data.size(), size_t{1}))};
+            }
+        }
+
         std::vector<std::byte> decompressed(decompressedSize);
 
         auto start = std::chrono::steady_clock::now();
