@@ -126,13 +126,18 @@ public:
 
     ~Impl() = default;
 
+    // Mark as shutting down - checked by coroutines to exit early
+    void markShuttingDown() { shutting_down_.store(true, std::memory_order_release); }
+    bool isShuttingDown() const { return shutting_down_.load(std::memory_order_acquire); }
+
     ClientConfig config_;
     CircuitBreaker breaker_;
     std::chrono::milliseconds headerTimeout_{30000}; // 30s default
     std::chrono::milliseconds bodyTimeout_{60000};   // 60s default
     TransportOptions transportOptions_;
     std::shared_ptr<AsioConnectionPool> pool_;
-    bool explicitly_disconnected_{false}; // Track explicit disconnect() calls
+    bool explicitly_disconnected_{false};    // Track explicit disconnect() calls
+    std::atomic<bool> shutting_down_{false}; // Set when DaemonClient is being destroyed
 
     void refresh_transport() {
         transportOptions_.socketPath = config_.socketPath;
@@ -317,6 +322,11 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_shared<
 }
 
 DaemonClient::~DaemonClient() {
+    // Mark as shutting down FIRST - this allows any pending coroutines to exit early
+    // when they resume, preventing use-after-free crashes
+    if (pImpl) {
+        pImpl->markShuttingDown();
+    }
     // Only shut down non-shared pools. Shared pools (from the registry) may be
     // in use by other clients and will be cleaned up by shutdown_all() or when
     // the io_context is reset.
@@ -445,22 +455,47 @@ boost::asio::awaitable<Result<void>> DaemonClient::connect() {
     };
 
     {
-        auto r = co_await try_connect(impl->config_.connectTimeout);
-        if (r) {
-            if (!impl->config_.enableCircuitBreaker)
-                impl->breaker_.recordSuccess();
-            // Clear explicitly disconnected flag on successful connection
-            impl->explicitly_disconnected_ = false;
-            // Refresh transport to get a fresh pool in case the old one was shut down
-            // This handles reconnection after daemon restart
-            if (impl->pool_ && impl->pool_->is_shutdown()) {
-                spdlog::debug("[DaemonClient::connect] pool was shutdown, refreshing transport");
-                impl->refresh_transport();
+        // Try with a few retries even when autoStart=false
+        // This handles race conditions where daemon reports ready but is still completing async
+        // init
+        const int quickRetries = impl->config_.autoStart ? 1 : 3;
+        const auto retryDelay = std::chrono::milliseconds(100);
+        Result<void> lastError;
+
+        for (int i = 0; i < quickRetries; ++i) {
+            auto r = co_await try_connect(impl->config_.connectTimeout);
+            if (r) {
+                if (!impl->config_.enableCircuitBreaker)
+                    impl->breaker_.recordSuccess();
+                // Clear explicitly disconnected flag on successful connection
+                impl->explicitly_disconnected_ = false;
+                // Refresh transport to get a fresh pool in case the old one was shut down
+                // This handles reconnection after daemon restart
+                if (impl->pool_ && impl->pool_->is_shutdown()) {
+                    spdlog::debug(
+                        "[DaemonClient::connect] pool was shutdown, refreshing transport");
+                    impl->refresh_transport();
+                }
+                co_return Result<void>();
             }
-            co_return Result<void>();
+            lastError = r;
+
+            // If not autoStart and socket doesn't exist, don't retry
+            // (daemon definitely isn't running)
+            if (!impl->config_.autoStart && !std::filesystem::exists(socketPath)) {
+                co_return r.error();
+            }
+
+            // Brief delay before retry
+            if (i + 1 < quickRetries) {
+                steady_timer t(co_await boost::asio::this_coro::executor);
+                t.expires_after(retryDelay);
+                co_await t.async_wait(boost::asio::use_awaitable);
+            }
         }
+
         if (!impl->config_.autoStart) {
-            co_return r.error();
+            co_return lastError.error();
         }
     }
 
@@ -700,6 +735,9 @@ boost::asio::awaitable<Result<void>> DaemonClient::ping() {
 boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(const Request& req) {
     // Capture shared_ptr to extend Impl lifetime across co_await suspension points
     auto impl = pImpl;
+    if (!impl || impl->isShuttingDown()) {
+        co_return Error{ErrorCode::InvalidState, "DaemonClient is shutting down"};
+    }
     spdlog::debug("DaemonClient::sendRequest: [{}] streaming={} sock='{}'", getRequestName(req),
                   false, impl->config_.socketPath.string());
     // Use request-type-aware timeout without shortening configured limits
@@ -718,6 +756,10 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(const Request
     }
     AsioTransportAdapter adapter(opts);
     auto r = co_await adapter.send_request(req);
+    // After resumption, check if client was destroyed during suspension
+    if (impl->isShuttingDown()) {
+        co_return Error{ErrorCode::InvalidState, "DaemonClient destroyed during request"};
+    }
     if (!r)
         co_return r.error();
     co_return r.value();
@@ -726,6 +768,9 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(const Request
 boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(Request&& req) {
     // Capture shared_ptr to extend Impl lifetime across co_await suspension points
     auto impl = pImpl;
+    if (!impl || impl->isShuttingDown()) {
+        co_return Error{ErrorCode::InvalidState, "DaemonClient is shutting down"};
+    }
     const auto type = getRequestName(req);
     spdlog::debug("DaemonClient::sendRequest(move): [{}] streaming={} sock='{}'", type, false,
                   impl->config_.socketPath.string());
@@ -740,6 +785,10 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(Request&& req
     }
     AsioTransportAdapter adapter(opts);
     auto r = co_await adapter.send_request(std::move(req));
+    // After resumption, check if client was destroyed during suspension
+    if (impl->isShuttingDown()) {
+        co_return Error{ErrorCode::InvalidState, "DaemonClient destroyed during request"};
+    }
     if (!r)
         co_return r.error();
     co_return r.value();
@@ -1069,6 +1118,9 @@ DaemonClient::sendRequestStreaming(const Request& req,
                                    std::shared_ptr<ChunkedResponseHandler> handler) {
     // Capture shared_ptr to extend Impl lifetime across co_await suspension points
     auto impl = pImpl;
+    if (!impl || impl->isShuttingDown()) {
+        co_return Error{ErrorCode::InvalidState, "DaemonClient is shutting down"};
+    }
     spdlog::debug("DaemonClient::sendRequestStreaming: [{}] streaming={} sock='{}'",
                   getRequestName(req), true, impl->config_.socketPath.string());
     // Skip the legacy connect() call when using AsioTransportAdapter
@@ -1117,6 +1169,10 @@ DaemonClient::sendRequestStreaming(const Request& req,
         "DaemonClient::sendRequestStreaming calling adapter.send_request_streaming pool={}",
         opts.poolEnabled);
     auto res = co_await adapter.send_request_streaming(req, onHeader, onChunk, onError, onComplete);
+    // After resumption, check if client was destroyed during suspension
+    if (impl->isShuttingDown()) {
+        co_return Error{ErrorCode::InvalidState, "DaemonClient destroyed during request"};
+    }
     if (!res)
         co_return res.error();
     co_return Result<void>();

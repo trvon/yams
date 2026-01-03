@@ -1,4 +1,9 @@
 # Daemon integration tests - Catch2 socket/client integration tests
+#
+# IMPORTANT: Each test case runs in its own process to avoid static pool state
+# issues (RepairThreadPool, ConnectionRegistry, GlobalIOContext) that cause
+# std::future_error crashes when multiple daemon instances are created/destroyed
+# within a single process.
 
 if not catch2_dep.found()
   message('Catch2 not found; skipping daemon integration tests (PBI-066).')
@@ -6,15 +11,15 @@ else
   daemon_catch2_srcs = files(
     'daemon_socket_client_test.cpp',
   )
-  
+
   daemon_shutdown_srcs = files(
     'daemon_shutdown_test.cpp',
   )
-  
+
   post_ingest_queue_validation_srcs = files(
     'post_ingest_queue_validation_test.cpp',
   )
-  
+
   post_ingest_trace_srcs = files(
     'post_ingest_trace.cpp',
   )
@@ -54,7 +59,15 @@ else
     if not catch2_main_dep.found()
       catch2_main_dep = dependency('Catch2WithMain', required: false, method: 'cmake')
     endif
-    
+
+    # Common environment for daemon tests
+    _daemon_test_env = {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'YAMS_DISABLE_VECTORS': '1',
+      'YAMS_DISABLE_SESSION_WATCHER': '1',
+      'TSAN_OPTIONS': _test_tsan_options,
+    }
+
     daemon_catch2_exe = executable('yams_daemon_socket_tests_catch2',
       daemon_catch2_srcs,
       include_directories: incs,
@@ -63,17 +76,70 @@ else
       install: false,
     )
 
-    test('daemon_socket_client',
+    # Split socket tests into individual processes to avoid static pool state issues
+    # Each test case creates/destroys a daemon, and static singletons (RepairThreadPool,
+    # ConnectionRegistry) don't reset properly between runs, causing future_error crashes.
+    test('daemon_socket_connection_lifecycle',
       daemon_catch2_exe,
       suite: ['integration', 'daemon', 'catch2', 'socket'],
-      env: {
-        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-        'YAMS_DISABLE_VECTORS': '1',
-        'TSAN_OPTIONS': _test_tsan_options,
-      },
+      env: _daemon_test_env,
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
-      args: ['--allow-running-no-tests'],
+      args: ['Daemon socket connection lifecycle', '--allow-running-no-tests'],
+    )
+
+    test('daemon_socket_request_execution',
+      daemon_catch2_exe,
+      suite: ['integration', 'daemon', 'catch2', 'socket'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Daemon client request execution', '--allow-running-no-tests'],
+    )
+
+    test('daemon_socket_error_handling',
+      daemon_catch2_exe,
+      suite: ['integration', 'daemon', 'catch2', 'socket'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Daemon client error handling', '--allow-running-no-tests'],
+    )
+
+    test('daemon_socket_concurrent_requests',
+      daemon_catch2_exe,
+      suite: ['integration', 'daemon', 'catch2', 'socket'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Daemon client concurrent requests', '--allow-running-no-tests'],
+    )
+
+    test('daemon_socket_timeout_behavior',
+      daemon_catch2_exe,
+      suite: ['integration', 'daemon', 'catch2', 'socket'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Daemon client timeout behavior', '--allow-running-no-tests'],
+    )
+
+    test('daemon_socket_move_semantics',
+      daemon_catch2_exe,
+      suite: ['integration', 'daemon', 'catch2', 'socket'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Daemon client move semantics', '--allow-running-no-tests'],
+    )
+
+    test('daemon_socket_file_lifecycle',
+      daemon_catch2_exe,
+      suite: ['integration', 'daemon', 'catch2', 'socket'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Daemon socket file lifecycle', '--allow-running-no-tests'],
     )
 
     daemon_shutdown_exe = executable('yams_daemon_shutdown_tests_catch2',
@@ -84,17 +150,59 @@ else
       install: false,
     )
 
-    test('daemon_shutdown',
+    # Split shutdown tests into individual processes
+    test('daemon_shutdown_timing',
       daemon_shutdown_exe,
       suite: ['integration', 'daemon', 'catch2', 'shutdown'],
-      env: {
-        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-        'YAMS_DISABLE_VECTORS': '1',
-        'TSAN_OPTIONS': _test_tsan_options,
-      },
+      env: _daemon_test_env,
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
-      args: ['--allow-running-no-tests'],
+      args: ['Daemon shutdown timing', '--allow-running-no-tests'],
+    )
+
+    test('daemon_shutdown_inflight_ops',
+      daemon_shutdown_exe,
+      suite: ['integration', 'daemon', 'catch2', 'shutdown'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Daemon shutdown with in-flight operations', '--allow-running-no-tests'],
+    )
+
+    test('daemon_shutdown_idempotency',
+      daemon_shutdown_exe,
+      suite: ['integration', 'daemon', 'catch2', 'shutdown'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Daemon shutdown idempotency', '--allow-running-no-tests'],
+    )
+
+    test('daemon_shutdown_after_ops',
+      daemon_shutdown_exe,
+      suite: ['integration', 'daemon', 'catch2', 'shutdown'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Daemon shutdown after operations', '--allow-running-no-tests'],
+    )
+
+    test('daemon_shutdown_under_load',
+      daemon_shutdown_exe,
+      suite: ['integration', 'daemon', 'catch2', 'shutdown'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Daemon shutdown under load', '--allow-running-no-tests'],
+    )
+
+    test('daemon_shutdown_graceful',
+      daemon_shutdown_exe,
+      suite: ['integration', 'daemon', 'catch2', 'shutdown'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Daemon graceful shutdown behavior', '--allow-running-no-tests'],
     )
     
     post_ingest_queue_validation_exe = executable('yams_post_ingest_queue_validation',
@@ -108,11 +216,7 @@ else
     test('post_ingest_queue_validation',
       post_ingest_queue_validation_exe,
       suite: ['integration', 'daemon', 'catch2', 'post-ingest'],
-      env: {
-        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-        'YAMS_DISABLE_VECTORS': '1',
-        'TSAN_OPTIONS': _test_tsan_options,
-      },
+      env: _daemon_test_env,
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
       args: ['--allow-running-no-tests'],
@@ -129,11 +233,7 @@ else
     test('client_timeout_recovery',
       client_timeout_recovery_exe,
       suite: ['integration', 'daemon', 'catch2', 'timeout'],
-      env: {
-        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-        'YAMS_DISABLE_VECTORS': '1',
-        'TSAN_OPTIONS': _test_tsan_options,
-      },
+      env: _daemon_test_env,
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
       args: ['--allow-running-no-tests'],
@@ -150,11 +250,7 @@ else
     test('idle_streaming',
       idle_streaming_exe,
       suite: ['integration', 'daemon', 'catch2', 'idle', 'streaming'],
-      env: {
-        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-        'YAMS_DISABLE_VECTORS': '1',
-        'TSAN_OPTIONS': _test_tsan_options,
-      },
+      env: _daemon_test_env,
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
       args: ['--allow-running-no-tests'],
@@ -171,11 +267,7 @@ else
     test('writer_drain',
       writer_drain_exe,
       suite: ['integration', 'daemon', 'catch2', 'writer-drain', 'streaming'],
-      env: {
-        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-        'YAMS_DISABLE_VECTORS': '1',
-        'TSAN_OPTIONS': _test_tsan_options,
-      },
+      env: _daemon_test_env,
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
       args: ['--allow-running-no-tests'],
@@ -192,11 +284,7 @@ else
     test('socket_memory_pressure',
       socket_memory_pressure_exe,
       suite: ['integration', 'daemon', 'catch2', 'socket', 'memory-pressure', 'crash'],
-      env: {
-        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-        'YAMS_DISABLE_VECTORS': '1',
-        'TSAN_OPTIONS': _test_tsan_options,
-      },
+      env: _daemon_test_env,
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
       args: ['--allow-running-no-tests'],
@@ -213,11 +301,7 @@ else
     test('stats_command_crash',
       stats_command_crash_exe,
       suite: ['integration', 'daemon', 'catch2', 'stats', 'crash'],
-      env: {
-        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-        'YAMS_DISABLE_VECTORS': '1',
-        'TSAN_OPTIONS': _test_tsan_options,
-      },
+      env: _daemon_test_env,
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
     )
@@ -230,13 +314,17 @@ else
       install: false,
     )
 
+    # KG tests need vectors enabled, but still disable session watcher
+    _kg_test_env = {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'YAMS_DISABLE_SESSION_WATCHER': '1',
+      'TSAN_OPTIONS': _test_tsan_options,
+    }
+
     test('entity_graph_integration',
       entity_graph_integration_exe,
       suite: ['integration', 'daemon', 'catch2', 'kg', 'pbi-009'],
-      env: {
-        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-        'TSAN_OPTIONS': _test_tsan_options,
-      },
+      env: _kg_test_env,
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
       args: ['--allow-running-no-tests'],
@@ -253,10 +341,7 @@ else
     test('ghidra_kg_entity_ingestion',
       ghidra_kg_entity_ingestion_exe,
       suite: ['integration', 'daemon', 'catch2', 'kg', 'ghidra', 'pbi-3jb'],
-      env: {
-        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-        'TSAN_OPTIONS': _test_tsan_options,
-      },
+      env: _kg_test_env,
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
       args: ['--allow-running-no-tests'],

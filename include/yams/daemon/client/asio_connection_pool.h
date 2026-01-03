@@ -7,6 +7,7 @@
 #include <unordered_map>
 
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/cancellation_signal.hpp>
 
 #include <yams/daemon/client/asio_connection.h>
 #include <yams/daemon/client/transport_options.h>
@@ -42,6 +43,7 @@ private:
     bool shared_{true};
     std::atomic<bool> shutdown_{false};
     std::mutex mutex_;
+    boost::asio::cancellation_signal shutdown_signal_; // Emitted on shutdown to cancel pending ops
 
     // Pool of available connections (not just one!)
     // Use weak_ptr to allow connections to be destroyed when not in use

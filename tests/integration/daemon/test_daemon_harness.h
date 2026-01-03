@@ -8,6 +8,7 @@
 #include <thread>
 #include "test_async_helpers.h"
 #include <yams/compat/unistd.h>
+#include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/daemon.h>
@@ -185,6 +186,13 @@ public:
             if (yams_safe) {
                 unsetenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
             }
+
+            // Shutdown all connection pools BEFORE resetting GlobalIOContext
+            // This ensures all client-side connections are properly closed while
+            // the io_context is still running, preventing stale connections in
+            // subsequent test sections that create new daemons
+            yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
+            spdlog::info("[DaemonHarness] Connection pools shut down");
 
             // Windows needs additional time before GlobalIOContext::reset()
             // Windows thread cleanup is slower than Unix

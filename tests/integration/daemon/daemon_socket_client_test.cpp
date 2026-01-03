@@ -33,6 +33,26 @@ DaemonClient createClient(const std::filesystem::path& socketPath,
     return DaemonClient(config);
 }
 
+// Helper to retry get request with delay - handles async post-ingest processing
+// streamingAddDocument returns immediately but document may not be available until
+// post-ingest completes (FTS5 indexing, metadata extraction, etc.)
+template <typename Client>
+yams::Result<GetResponse> getWithRetry(Client& client, const std::string& hash, int maxRetries = 10,
+                                       std::chrono::milliseconds retryDelay = 100ms) {
+    GetRequest getReq;
+    getReq.hash = hash;
+
+    for (int i = 0; i < maxRetries; ++i) {
+        auto getResult = yams::cli::run_sync(client.get(getReq), 5s);
+        if (getResult.has_value()) {
+            return getResult;
+        }
+        std::this_thread::sleep_for(retryDelay);
+    }
+    // Return last attempt's result
+    return yams::cli::run_sync(client.get(getReq), 5s);
+}
+
 } // namespace
 
 TEST_CASE("Daemon socket connection lifecycle", "[daemon][socket][integration]") {
@@ -173,11 +193,8 @@ TEST_CASE("Daemon client request execution", "[daemon][socket][requests]") {
         std::string docHash = addResult.value().hash;
         REQUIRE(!docHash.empty());
 
-        // Retrieve it
-        GetRequest getReq;
-        getReq.hash = docHash;
-
-        auto getResult = yams::cli::run_sync(client.get(getReq), 5s);
+        // Retrieve it (with retry since streamingAddDocument is async)
+        auto getResult = getWithRetry(client, docHash);
         REQUIRE(getResult.has_value());
         REQUIRE(getResult.value().content == "Hello from request execution test!");
         REQUIRE(getResult.value().name == "test_request_execution.txt");
@@ -287,7 +304,8 @@ TEST_CASE("Daemon client concurrent requests", "[daemon][socket][concurrency]") 
     }
 
     SECTION("list after adding documents") {
-        // Add documents
+        // Add documents with delay to avoid database lock contention from async post-ingest
+        std::vector<std::string> hashes;
         for (int i = 0; i < 3; ++i) {
             AddDocumentRequest req;
             req.name = "multi_doc" + std::to_string(i) + ".txt";
@@ -295,6 +313,15 @@ TEST_CASE("Daemon client concurrent requests", "[daemon][socket][concurrency]") 
 
             auto result = yams::cli::run_sync(client.streamingAddDocument(req), 5s);
             REQUIRE(result.has_value());
+            hashes.push_back(result.value().hash);
+            // Small delay to let post-ingest process and release database lock
+            std::this_thread::sleep_for(50ms);
+        }
+
+        // Wait for all documents to be available (async post-ingest processing)
+        for (const auto& hash : hashes) {
+            auto getResult = getWithRetry(client, hash);
+            REQUIRE(getResult.has_value());
         }
 
         // List should show all documents

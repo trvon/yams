@@ -113,6 +113,11 @@ private:
     std::vector<std::string> sessionPatterns_;
     bool jsonOutput_ = false;
 
+    bool shouldShowSpinner() const {
+        bool jsonMode = jsonOutput_ || (cli_ && cli_->getJsonOutput());
+        return !jsonMode && !pathsOnly_ && !filesOnly_ && !countOnly_;
+    }
+
     // Helpers for configuration discovery
     std::map<std::string, std::string> parseSimpleToml(const std::filesystem::path& path) const {
         std::map<std::string, std::string> config;
@@ -742,7 +747,20 @@ public:
                 ropts.bodyTimeoutMs = 120000;
                 ropts.requestTimeoutMs = 30000;
 
+                // Show spinner during search
+                std::shared_ptr<ui::SpinnerRunner> spinner =
+                    shouldShowSpinner() ? std::make_shared<ui::SpinnerRunner>() : nullptr;
+                if (spinner) {
+                    spinner->start("Searching...");
+                }
+                auto stopSpinner = [&spinner]() {
+                    if (spinner) {
+                        spinner->stop();
+                    }
+                };
+
                 auto gres = rsvc.grep(dreq, ropts);
+                stopSpinner();
                 if (!gres) {
                     if (gres.error().code == ErrorCode::Timeout) {
                         spdlog::warn(

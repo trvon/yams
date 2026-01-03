@@ -68,6 +68,7 @@ struct GrammarInfo {
     bool recommended; // Show in default selection
 };
 
+// Must match grammar_loader.h kGrammarRepos
 static constexpr GrammarInfo SUPPORTED_GRAMMARS[] = {
     {"c", "tree-sitter/tree-sitter-c", "C language", true},
     {"cpp", "tree-sitter/tree-sitter-cpp", "C++ language", true},
@@ -81,9 +82,13 @@ static constexpr GrammarInfo SUPPORTED_GRAMMARS[] = {
     {"csharp", "tree-sitter/tree-sitter-c-sharp", "C# language", false},
     {"php", "tree-sitter/tree-sitter-php", "PHP language", false},
     {"kotlin", "fwcd/tree-sitter-kotlin", "Kotlin language", false},
+    {"perl", "tree-sitter-perl/tree-sitter-perl", "Perl language", false},
+    {"r", "r-lib/tree-sitter-r", "R language", false},
     {"dart", "UserNobody14/tree-sitter-dart", "Dart/Flutter", false},
     {"sql", "DerekStride/tree-sitter-sql", "SQL queries", false},
     {"solidity", "JoranHonig/tree-sitter-solidity", "Solidity (Ethereum)", false},
+    {"p4", "prona-p4-learning-platform/tree-sitter-p4", "P4 network language", false},
+    {"zig", "maxxnino/tree-sitter-zig", "Zig language", false},
 };
 
 class InitCommand : public ICommand {
@@ -1081,7 +1086,10 @@ private:
             return Error{ErrorCode::InvalidArgument, "Unknown model: " + model.name};
         }
 
-        std::cout << "\nDownloading model: " << model.name << " (~" << model.size_mb << " MB)...\n";
+        std::cout << "\n" << cli::ui::section_header("Downloading Model") << "\n";
+        std::cout << cli::ui::key_value("Model", model.name) << "\n";
+        std::cout << cli::ui::key_value("Size", "~" + std::to_string(model.size_mb) + " MB")
+                  << "\n\n";
 
         // Download model.onnx (try multiple paths)
         std::vector<std::string> modelPaths = {"onnx/model.onnx", "model.onnx"};
@@ -1241,12 +1249,14 @@ private:
             std::cout << "\n";
         } else {
             // Interactive mode: show menu
-            std::cout << "\nAvailable tree-sitter grammars:\n";
-            std::cout << "  [1] Recommended (C, C++, Python, JS, TS, Rust, Go)\n";
-            std::cout << "  [2] All supported grammars\n";
-            std::cout << "  [3] Select specific languages\n";
-            std::cout << "  [4] Skip grammar download\n";
-            std::cout << "Choice [1]: ";
+            std::cout << "\n" << cli::ui::section_header("Tree-sitter Grammars") << "\n";
+            std::cout << cli::ui::numbered_item(
+                             "Recommended (C, C++, Python, JS, TS, Rust, Go, Swift)", 1, 2)
+                      << "\n";
+            std::cout << cli::ui::numbered_item("All supported grammars", 2, 2) << "\n";
+            std::cout << cli::ui::numbered_item("Select specific languages", 3, 2) << "\n";
+            std::cout << cli::ui::numbered_item("Skip grammar download", 4, 2) << "\n";
+            std::cout << "  Choice [1]: ";
 
             std::string choice;
             std::getline(std::cin, choice);
@@ -1319,7 +1329,26 @@ private:
             return;
         }
 
-        std::cout << "\nDownloading and building grammars to: " << grammarDir.string() << "\n\n";
+        // Check if tree-sitter CLI is available (needed for some grammars)
+        bool hasTreeSitter = false;
+#ifdef _WIN32
+        hasTreeSitter = std::system("where tree-sitter > NUL 2>&1") == 0;
+#else
+        hasTreeSitter = std::system("which tree-sitter > /dev/null 2>&1") == 0;
+#endif
+
+        std::cout << "\n" << cli::ui::section_header("Building Grammars") << "\n";
+        std::cout << cli::ui::key_value("Output", grammarDir.string()) << "\n";
+        if (!hasTreeSitter) {
+            std::cout << cli::ui::colorize(
+                             "  Note: Some grammars (swift, perl, p4) require tree-sitter CLI",
+                             cli::ui::Ansi::DIM)
+                      << "\n";
+            std::cout << cli::ui::colorize("        Install with: npm i -g tree-sitter-cli",
+                                           cli::ui::Ansi::DIM)
+                      << "\n";
+        }
+        std::cout << "\n";
 
         size_t succeeded = 0;
         size_t failed = 0;
@@ -1338,14 +1367,21 @@ private:
             }
         }
 
-        std::cout << "\nGrammar setup complete: "
-                  << cli::ui::colorize(std::to_string(succeeded) + " succeeded",
-                                       cli::ui::Ansi::GREEN);
-        if (failed > 0) {
-            std::cout << ", "
-                      << cli::ui::colorize(std::to_string(failed) + " failed", cli::ui::Ansi::RED);
-        }
         std::cout << "\n";
+        if (failed == 0) {
+            std::cout << cli::ui::status_ok("Grammar setup complete: " + std::to_string(succeeded) +
+                                            " succeeded")
+                      << "\n";
+        } else {
+            std::cout << cli::ui::status_warning(
+                             "Grammar setup complete: " +
+                             cli::ui::colorize(std::to_string(succeeded) + " succeeded",
+                                               cli::ui::Ansi::GREEN) +
+                             ", " +
+                             cli::ui::colorize(std::to_string(failed) + " failed",
+                                               cli::ui::Ansi::RED))
+                      << "\n";
+        }
     }
 
     static bool checkBuildToolsAvailable() {
@@ -1431,9 +1467,36 @@ private:
             auto scannerC = buildDir / "src" / "scanner.c";
             auto scannerCC = buildDir / "src" / "scanner.cc";
 
+            // Some grammars don't ship pre-generated parser.c - need tree-sitter generate
             if (!fs::exists(parserC)) {
-                cleanup();
-                return Error{ErrorCode::NotFound, "parser.c not found"};
+                // Check if tree-sitter CLI is available
+#ifdef _WIN32
+                bool hasTreeSitter = std::system("where tree-sitter > NUL 2>&1") == 0;
+#else
+                bool hasTreeSitter = std::system("which tree-sitter > /dev/null 2>&1") == 0;
+#endif
+                if (!hasTreeSitter) {
+                    cleanup();
+                    return Error{ErrorCode::NotFound, "parser.c missing, install tree-sitter CLI"};
+                }
+
+                // Run tree-sitter generate
+                std::string genCmd = "cd \"" + buildDir.string() + "\" && tree-sitter generate";
+#ifdef _WIN32
+                genCmd += " > NUL 2>&1";
+#else
+                genCmd += " > /dev/null 2>&1";
+#endif
+                if (std::system(genCmd.c_str()) != 0) {
+                    cleanup();
+                    return Error{ErrorCode::InternalError, "tree-sitter generate failed"};
+                }
+
+                // Re-check for parser.c
+                if (!fs::exists(parserC)) {
+                    cleanup();
+                    return Error{ErrorCode::NotFound, "parser.c not found after generate"};
+                }
             }
 
             // Determine library name and compiler

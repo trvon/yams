@@ -400,6 +400,10 @@ void AsioConnectionPool::shutdown(std::chrono::milliseconds timeout) {
         return;
     }
 
+    // Emit cancellation signal to abort any pending acquire/create_connection operations
+    // This wakes up coroutines waiting on async_connect_with_timeout
+    shutdown_signal_.emit(boost::asio::cancellation_type::terminal);
+
     std::lock_guard<std::mutex> lk(mutex_);
 
     for (auto& weak : connection_pool_) {
@@ -422,8 +426,24 @@ void AsioConnectionPool::shutdown(std::chrono::milliseconds timeout) {
 }
 
 awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection() {
+    // Check shutdown before starting
+    if (shutdown_.load(std::memory_order_acquire)) {
+        co_return nullptr;
+    }
+
     auto conn = std::make_shared<AsioConnection>(opts_);
     auto socket_res = co_await async_connect_with_timeout(opts_);
+
+    // Check shutdown after connection attempt - pool may have been shut down while connecting
+    if (shutdown_.load(std::memory_order_acquire)) {
+        // Close the socket if we got one, then bail
+        if (socket_res && socket_res.value()) {
+            boost::system::error_code ec;
+            socket_res.value()->close(ec);
+        }
+        co_return nullptr;
+    }
+
     if (!socket_res) {
         co_return nullptr;
     }
