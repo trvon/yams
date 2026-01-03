@@ -28,3 +28,11 @@ race:kqueue_reactor.ipp
 # This is a known boost::asio internal issue.
 race:boost::asio::detail::reactive_socket_service_base::construct
 race:reactive_socket_service_base.ipp
+
+# Boost.Asio strand destructor - mutex use-after-free during complex shutdown
+# When ServiceManager is destroyed, pending async operations may still hold
+# references to the strand's executor. This is a destruction order issue
+# in complex coroutine-based shutdown sequences.
+mutex:boost::asio::strand
+mutex:boost::asio::detail::posix_mutex
+mutex:boost::asio::detail::strand_executor_service

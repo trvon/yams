@@ -445,9 +445,13 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
     Write-Host "DEBUG: Final meson command: meson $($mesonArgs -join ' ')"
     & meson @mesonArgs
 } else {
-    Write-Host 'Meson builddir already configured.'
+    Write-Host 'Meson builddir already configured, reconfiguring...'
     Write-Host "Ensuring prefix is set to: $InstallPrefix"
-    meson configure $buildDir "-Dprefix=$InstallPrefix"
+    # Use --reconfigure to handle Meson version upgrades gracefully
+    $reconfigureArgs = @('setup', '--reconfigure', $buildDir, "-Dprefix=$InstallPrefix")
+    if ($mesonToolchainArg) { $reconfigureArgs += $mesonToolchainArg }
+    if ($mesonToolchainFile) { $reconfigureArgs += $mesonToolchainFile }
+    & meson @reconfigureArgs
 }
 
 Write-Host 'Compiling...'

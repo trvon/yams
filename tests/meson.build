@@ -2143,10 +2143,9 @@ if catch2_dep.found()
 
   test('multiplex_client', catch2_multiplex_client_exe,
     suite: ['catch2', 'unit', 'daemon', 'multiplex', 'yams-3s4'],
+    args: ['--allow-running-no-tests'],  # All tests have [.requires_daemon] tag
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60,
-    # All tests have [.requires_daemon] tag - hidden without daemon (Catch2 exit code 2)
-    should_fail: true
+    timeout: 60
   )
 
   test('entity_graph_service', catch2_entity_graph_service_exe,
@@ -2193,28 +2192,25 @@ if catch2_dep.found()
 
   test('request_io_edge', catch2_request_io_edge_exe,
     suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
+    args: ['--allow-running-no-tests'],  # Placeholder tests - all skipped
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 30,
-    is_parallel: false,
-    # Placeholder tests - all skipped, Catch2 returns exit code 2
-    should_fail: true
+    is_parallel: false
   )
 
   test('daemon_warm_bench', catch2_daemon_warm_bench_exe,
     suite: ['catch2', 'unit', 'daemon', 'bench', 'yams-3s4'],
+    args: ['--allow-running-no-tests'],  # Bench only runs when YAMS_BENCH_FAST=1
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120,
-    # Bench only runs when YAMS_BENCH_FAST=1, otherwise skips (exit code 2)
-    should_fail: true
+    timeout: 120
   )
 
   test('request_lifetime', catch2_request_lifetime_exe,
     suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
+    args: ['--allow-running-no-tests'],  # Skips when streaming disabled
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 30,
-    is_parallel: false,
-    # Test skips because streaming is disabled (force_unary=true)
-    should_fail: true
+    is_parallel: false
   )
 
   test('asio_connection_pool', catch2_asio_connection_pool_exe,
@@ -2338,8 +2334,10 @@ if catch2_dep.found()
 
   # Repair submodule tests (embedding repair scan)
   # Migrated from GTest as part of yams-3s4 / yams-1jm
+  # Note: --allow-running-no-tests needed because tests skip when YAMS_DISABLE_VECTORS=1
   test('repair_submodule', catch2_repair_submodule_exe,
     suite: ['catch2', 'unit', 'repair', 'yams-repair'],
+    args: ['--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 180
   )
