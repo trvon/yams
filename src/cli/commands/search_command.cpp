@@ -23,7 +23,6 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/profiling.h>
 #include <yams/search/search_engine_builder.h>
-#include <yams/search/search_executor.h>
 #include <yams/vector/vector_index_manager.h>
 // Daemon client API for daemon-first search
 #include <yams/cli/daemon_helpers.h>
@@ -1184,7 +1183,13 @@ public:
                         co_return co_await client.streamingSearch(rq);
                     co_return co_await client.call(rq);
                 };
+                const auto ipcStart = std::chrono::steady_clock::now();
                 auto r = co_await callOnce(dreq);
+                const auto ipcEnd = std::chrono::steady_clock::now();
+                spdlog::info(
+                    "[TIMING] IPC call completed in {}ms",
+                    std::chrono::duration_cast<std::chrono::milliseconds>(ipcEnd - ipcStart)
+                        .count());
                 if (!r && enableStream) {
                     const auto& err = r.error();
                     if (err.code == ErrorCode::Timeout &&

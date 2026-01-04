@@ -12,7 +12,6 @@
 #include <yams/metadata/database.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
-#include <yams/search/search_executor.h>
 #include <yams/vector/vector_database.h>
 #include <yams/vector/vector_index_manager.h>
 
@@ -52,10 +51,6 @@ public:
         return metadataRepo_;
     }
 
-    /**
-     * Get the search executor instance
-     */
-    std::shared_ptr<search::SearchExecutor> getSearchExecutor() const { return searchExecutor_; }
     std::shared_ptr<metadata::KnowledgeGraphStore> getKnowledgeGraphStore() const {
         return kgStore_;
     }
@@ -197,7 +192,6 @@ private:
 
     // Core components
     std::shared_ptr<api::IContentStore> contentStore_;
-    std::shared_ptr<search::SearchExecutor> searchExecutor_;
     std::shared_ptr<metadata::ConnectionPool> connectionPool_;
     std::shared_ptr<metadata::Database> database_;
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;

@@ -20,11 +20,8 @@
 #include <benchmark/benchmark.h>
 
 #include "tests/integration/daemon/test_async_helpers.h"
-#include <boost/asio/awaitable.hpp>
-#include <boost/asio/io_context.hpp>
+#include "tests/integration/daemon/test_daemon_harness.h"
 #include <yams/daemon/client/daemon_client.h>
-#include <yams/daemon/client/global_io_context.h>
-#include <yams/daemon/daemon.h>
 
 #include <algorithm>
 #include <chrono>
@@ -42,7 +39,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-#include <curl/curl.h>
 #include <yams/compat/unistd.h>
 
 namespace fs = std::filesystem;
@@ -69,80 +65,6 @@ struct BEIRDataset {
     fs::path basePath;
 };
 
-static size_t writeCallback(void* contents, size_t size, size_t nmemb, void* userp) {
-    ((std::string*)userp)->append((char*)contents, size * nmemb);
-    return size * nmemb;
-}
-
-static Result<std::string> downloadFile(const std::string& url) {
-    CURL* curl = curl_easy_init();
-    if (!curl) {
-        return Error{ErrorCode::IoError, "Failed to initialize libcurl"};
-    }
-
-    std::string response;
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
-
-    CURLcode res = curl_easy_perform(curl);
-    curl_easy_cleanup(curl);
-
-    if (res != CURLE_OK) {
-        return Error{ErrorCode::NetworkError,
-                     "Download failed: " + std::string(curl_easy_strerror(res))};
-    }
-
-    return response;
-}
-
-static Result<void> downloadSciFactDataset(const fs::path& cacheDir) {
-    const char* home = std::getenv("HOME");
-    if (!home) {
-        return Error{ErrorCode::InvalidArgument, "HOME environment variable not set"};
-    }
-
-    fs::path scifactDir =
-        cacheDir.empty() ? fs::path(home) / ".cache" / "yams" / "benchmarks" / "scifact" : cacheDir;
-
-    fs::create_directories(scifactDir);
-
-    std::vector<std::pair<std::string, std::string>> files = {
-        {"https://raw.githubusercontent.com/beir-cellar/scifact/main/corpus.jsonl", "corpus.jsonl"},
-        {"https://raw.githubusercontent.com/beir-cellar/scifact/main/queries.jsonl",
-         "queries.jsonl"},
-        {"https://raw.githubusercontent.com/beir-cellar/scifact/main/qrels/test.tsv", "qrels.tsv"}};
-
-    for (const auto& [url, filename] : files) {
-        fs::path filePath = scifactDir / filename;
-        if (fs::exists(filePath)) {
-            spdlog::info("Dataset file already exists: {}", filePath.string());
-            continue;
-        }
-
-        spdlog::info("Downloading {} from {}", filename, url);
-        auto result = downloadFile(url);
-        if (!result) {
-            return Error{result.error().code,
-                         "Failed to download " + filename + ": " + result.error().message};
-        }
-
-        std::ofstream outFile(filePath);
-        if (!outFile) {
-            return Error{ErrorCode::IoError, "Failed to write " + filePath.string()};
-        }
-        outFile << result.value();
-        outFile.close();
-
-        spdlog::info("Downloaded {} ({} bytes)", filename, result.value().size());
-    }
-
-    spdlog::info("SciFact dataset downloaded to {}", scifactDir.string());
-    return {};
-}
-
 static Result<BEIRDataset> loadSciFactDataset(const fs::path& cacheDir) {
     const char* home = std::getenv("HOME");
     if (!home) {
@@ -158,14 +80,16 @@ static Result<BEIRDataset> loadSciFactDataset(const fs::path& cacheDir) {
 
     fs::path corpusFile = scifactDir / "corpus.jsonl";
     fs::path queriesFile = scifactDir / "queries.jsonl";
-    fs::path qrelsFile = scifactDir / "qrels" / "test.tsv";
+    fs::path qrelsFile = scifactDir / "qrels" / "test.tsv"; // Standard BEIR structure
 
     if (!fs::exists(corpusFile) || !fs::exists(queriesFile) || !fs::exists(qrelsFile)) {
-        spdlog::info("SciFact dataset not found, downloading...");
-        auto dlResult = downloadSciFactDataset(cacheDir);
-        if (!dlResult) {
-            return Error{dlResult.error().code, dlResult.error().message};
-        }
+        return Error{
+            ErrorCode::NotFound,
+            "SciFact dataset not found. Please download manually:\n"
+            "  mkdir -p ~/.cache/yams/benchmarks && cd ~/.cache/yams/benchmarks\n"
+            "  curl -L -o scifact.zip "
+            "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/scifact.zip\n"
+            "  unzip scifact.zip"};
     }
 
     std::ifstream corpusIn(corpusFile);
@@ -211,13 +135,21 @@ static Result<BEIRDataset> loadSciFactDataset(const fs::path& cacheDir) {
     queriesIn.close();
 
     std::ifstream qrelsIn(qrelsFile);
+    bool firstLine = true;
     while (std::getline(qrelsIn, line)) {
         if (line.empty() || line[0] == '#')
             continue;
+        // Skip header row
+        if (firstLine) {
+            firstLine = false;
+            if (line.find("query-id") != std::string::npos)
+                continue;
+        }
         std::istringstream iss(line);
-        std::string queryId, iteration, docId, scoreStr;
-        if (std::getline(iss, queryId, '\t') && std::getline(iss, iteration, '\t') &&
-            std::getline(iss, docId, '\t') && std::getline(iss, scoreStr, '\t')) {
+        std::string queryId, docId, scoreStr;
+        // BEIR format: query-id, corpus-id, score (3 columns, no iteration)
+        if (std::getline(iss, queryId, '\t') && std::getline(iss, docId, '\t') &&
+            std::getline(iss, scoreStr, '\t')) {
             int score = std::stoi(scoreStr);
             dataset.qrels.emplace(queryId, std::make_pair(docId, score));
         }
@@ -230,128 +162,7 @@ static Result<BEIRDataset> loadSciFactDataset(const fs::path& cacheDir) {
     return dataset;
 }
 
-class SimpleDaemonHarness {
-public:
-    SimpleDaemonHarness() {
-        auto id = randomId();
-        root_ = fs::temp_directory_path() / ("yams_bench_" + id);
-        fs::create_directories(root_);
-        data_ = root_ / "data";
-        fs::create_directories(data_);
-        sock_ = fs::path("/tmp") / ("bench_" + id + ".sock");
-        pid_ = root_ / "bench.pid";
-        log_ = root_ / "bench.log";
-    }
-
-    ~SimpleDaemonHarness() {
-        stop();
-        cleanup();
-    }
-
-    bool start() {
-        yams::daemon::DaemonConfig cfg;
-        cfg.dataDir = data_;
-        cfg.socketPath = sock_;
-        cfg.pidFile = pid_;
-        cfg.logFile = log_;
-        cfg.enableModelProvider = true;
-
-        // Configure real embedding provider for integration/benchmark mode
-        cfg.useMockModelProvider = false;
-        cfg.autoLoadPlugins = true;
-
-        // Set plugin directory to builddir if not overridden by environment
-        const char* envPluginDir = std::getenv("YAMS_PLUGIN_DIR");
-        if (envPluginDir) {
-            cfg.pluginDir = fs::path(envPluginDir);
-        } else {
-            // Default to builddir/plugins for benchmark mode
-            cfg.pluginDir = fs::path("builddir") / "plugins";
-        }
-
-        // Configure model pool to preload embedding model
-        cfg.modelPoolConfig.lazyLoading = false;
-        cfg.modelPoolConfig.preloadModels = {"all-MiniLM-L6-v2"};
-
-        daemon_ = std::make_unique<yams::daemon::YamsDaemon>(cfg);
-
-        auto s = daemon_->start();
-        if (!s)
-            return false;
-
-        // Start runLoop in background thread - CRITICAL for processing requests
-        runLoopThread_ = std::thread([this]() { daemon_->runLoop(); });
-
-        auto deadline = std::chrono::steady_clock::now() + 30s;
-        while (std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::sleep_for(100ms);
-            auto lifecycle = daemon_->getLifecycle().snapshot();
-            if (lifecycle.state == yams::daemon::LifecycleState::Ready)
-                return true;
-            if (lifecycle.state == yams::daemon::LifecycleState::Failed)
-                return false;
-        }
-        return false;
-    }
-
-    void stop() {
-        if (daemon_) {
-            auto stopResult = daemon_->stop();
-            if (!stopResult) {
-                spdlog::warn("Daemon stop returned error: {}", stopResult.error().message);
-            }
-
-            // Join the runLoop thread before continuing
-            if (runLoopThread_.joinable()) {
-                runLoopThread_.join();
-            }
-
-            int retries = 0;
-            while (daemon_->isRunning() && retries < 50) {
-                std::this_thread::sleep_for(10ms);
-                retries++;
-            }
-
-            const char* yams_testing = std::getenv("YAMS_TESTING");
-            if (yams_testing) {
-                unsetenv("YAMS_TESTING");
-            }
-
-            yams::daemon::GlobalIOContext::reset();
-
-            if (yams_testing) {
-                setenv("YAMS_TESTING", yams_testing, 1);
-            }
-
-            daemon_.reset();
-            std::this_thread::sleep_for(500ms);
-        }
-    }
-
-    const fs::path& socketPath() const { return sock_; }
-    const fs::path& root() const { return root_; }
-
-private:
-    static std::string randomId() {
-        static const char* cs = "abcdefghijklmnopqrstuvwxyz0123456789";
-        thread_local std::mt19937_64 rng{std::random_device{}()};
-        std::uniform_int_distribution<size_t> dist(0, 35);
-        std::string out;
-        for (int i = 0; i < 8; ++i)
-            out.push_back(cs[dist(rng)]);
-        return out;
-    }
-
-    void cleanup() {
-        std::error_code ec;
-        if (!root_.empty())
-            fs::remove_all(root_, ec);
-    }
-
-    std::unique_ptr<yams::daemon::YamsDaemon> daemon_;
-    std::thread runLoopThread_;
-    fs::path root_, data_, sock_, pid_, log_;
-};
+using yams::test::DaemonHarness;
 
 struct TestQuery {
     std::string query;
@@ -569,7 +380,7 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client,
 }
 
 struct BenchFixture {
-    std::unique_ptr<SimpleDaemonHarness> harness;
+    std::unique_ptr<DaemonHarness> harness;
     std::unique_ptr<yams::daemon::DaemonClient> client;
     std::unique_ptr<CorpusGenerator> corpus;
     std::unique_ptr<BEIRCorpusLoader> beirCorpus;
@@ -601,8 +412,30 @@ struct BenchFixture {
         spdlog::info("Setting up RAG benchmark: {} dataset, {} docs, {} queries, k={}",
                      useBEIR ? "SciFact BEIR" : "synthetic", corpusSize, numQueries, topK);
 
-        harness = std::make_unique<SimpleDaemonHarness>();
-        if (!harness->start())
+        const char* disableVectors = std::getenv("YAMS_DISABLE_VECTORS");
+        bool vectorsDisabled = disableVectors && std::string(disableVectors) == "1";
+
+        DaemonHarness::Options harnessOptions;
+        harnessOptions.isolateState = true;
+        harnessOptions.useMockModelProvider = vectorsDisabled;
+        harnessOptions.autoLoadPlugins = !vectorsDisabled;
+        harnessOptions.configureModelPool = !vectorsDisabled;
+        harnessOptions.modelPoolLazyLoading = false;
+
+        if (!vectorsDisabled) {
+            const char* envPluginDir = std::getenv("YAMS_PLUGIN_DIR");
+            if (envPluginDir) {
+                harnessOptions.pluginDir = fs::path(envPluginDir);
+            } else {
+                harnessOptions.pluginDir = fs::current_path() / "builddir" / "plugins";
+            }
+            harnessOptions.preloadModels = {"all-MiniLM-L6-v2"};
+        } else {
+            spdlog::info("Using mock model provider (YAMS_DISABLE_VECTORS=1)");
+        }
+
+        harness = std::make_unique<DaemonHarness>(harnessOptions);
+        if (!harness->start(std::chrono::seconds(30)))
             throw std::runtime_error("Failed to start daemon");
 
         if (useBEIR) {
@@ -614,13 +447,13 @@ struct BenchFixture {
             }
             BEIRDataset dataset = dsResult.value();
 
-            fs::path corpusDir = harness->root() / "corpus";
+            fs::path corpusDir = harness->rootDir() / "corpus";
             beirCorpus = std::make_unique<BEIRCorpusLoader>(dataset, corpusDir);
             beirCorpus->writeDocumentsAsFiles();
             corpusSize = dataset.documents.size();
             numQueries = dataset.queries.size();
         } else {
-            corpus = std::make_unique<CorpusGenerator>(harness->root() / "corpus");
+            corpus = std::make_unique<CorpusGenerator>(harness->rootDir() / "corpus");
             corpus->generateDocuments(corpusSize);
         }
 
@@ -634,58 +467,62 @@ struct BenchFixture {
         if (!connectResult)
             throw std::runtime_error("Failed to connect: " + connectResult.error().message);
 
-        spdlog::info("Ingesting {} documents...", corpusSize);
-        int successCount = 0, failCount = 0;
-        std::vector<std::string> docPaths;
+        // Use directory ingestion for faster bulk add via IndexingService
+        fs::path corpusDir = useBEIR ? beirCorpus->corpusDir : corpus->corpusDir;
+        spdlog::info("Ingesting {} documents from {}...", corpusSize, corpusDir.string());
 
-        if (useBEIR) {
-            docPaths = beirCorpus->getDocumentPaths();
-        } else {
-            for (const auto& filename : corpus->createdFiles) {
-                docPaths.push_back((corpus->corpusDir / filename).string());
-            }
+        yams::daemon::AddDocumentRequest addReq;
+        addReq.path = corpusDir.string();
+        addReq.recursive = true;
+        addReq.noEmbeddings = false;
+        addReq.includePatterns = {"*.txt"};
+
+        auto addResult = yams::cli::run_sync(client->streamingAddDocument(addReq), 120s);
+        if (!addResult) {
+            throw std::runtime_error("Failed to ingest directory: " + addResult.error().message);
         }
+        spdlog::info("Directory ingestion request accepted: {}", addResult.value().message);
 
-        for (const auto& filePath : docPaths) {
-            yams::daemon::AddDocumentRequest addReq;
-            addReq.path = filePath;
-            addReq.noEmbeddings = false;
-            auto addResult = yams::cli::run_sync(client->streamingAddDocument(addReq), 30s);
-            if (!addResult) {
-                spdlog::warn("Failed to ingest {}: {}", filePath, addResult.error().message);
-                failCount++;
-            } else {
-                successCount++;
-                if (successCount % 10 == 0 || successCount == corpusSize) {
-                    spdlog::info("Ingested {}/{} documents", successCount, corpusSize);
-                }
-            }
-        }
-        spdlog::info("Ingestion complete: {} succeeded, {} failed", successCount, failCount);
-
-        spdlog::info("Waiting for ingestion to complete...");
-        auto deadline = std::chrono::steady_clock::now() + 60s;
+        // Wait for directory ingestion to complete by monitoring document count
+        spdlog::info("Waiting for ingestion to complete (expecting {} documents)...", corpusSize);
+        auto deadline =
+            std::chrono::steady_clock::now() + 120s; // 2 minute timeout for bulk ingestion
+        uint64_t lastDocCount = 0;
         uint32_t lastDepth = 0;
         bool completed = false;
+        int stableChecks = 0;
         while (std::chrono::steady_clock::now() < deadline) {
             auto statusResult = yams::cli::run_sync(client->status(), 5s);
             if (statusResult) {
                 uint32_t depth = statusResult.value().postIngestQueueDepth;
-                if (depth != lastDepth) {
-                    spdlog::info("Post-ingest queue depth: {}", depth);
-                    lastDepth = depth;
+                uint64_t docCount = 0;
+                auto it = statusResult.value().requestCounts.find("documents_total");
+                if (it != statusResult.value().requestCounts.end()) {
+                    docCount = it->second;
                 }
-                if (depth == 0) {
-                    spdlog::info("All documents ingested and indexed");
+
+                if (depth != lastDepth || docCount != lastDocCount) {
+                    spdlog::info("Documents: {} / {}, queue depth: {}", docCount, corpusSize,
+                                 depth);
+                    lastDepth = depth;
+                    lastDocCount = docCount;
+                    stableChecks = 0;
+                } else {
+                    stableChecks++;
+                }
+
+                // Complete when queue is empty AND we have expected doc count (or stable for 5s)
+                if (depth == 0 && (docCount >= (uint64_t)corpusSize || stableChecks >= 10)) {
+                    spdlog::info("Ingestion complete: {} documents indexed", docCount);
                     completed = true;
                     break;
                 }
             }
-            std::this_thread::sleep_for(200ms);
+            std::this_thread::sleep_for(500ms);
         }
         if (!completed) {
-            spdlog::warn("Ingestion did not complete within 60s timeout (last depth: {})",
-                         lastDepth);
+            spdlog::warn("Ingestion did not complete within timeout (docs: {}, queue: {})",
+                         lastDocCount, lastDepth);
         }
 
         // Wait for embedding provider to become available
@@ -707,27 +544,79 @@ struct BenchFixture {
             spdlog::warn("Embedding provider did not become available within 30s");
         }
 
-        // Additional wait for embeddings to be generated
+        // Wait for embeddings to be generated by checking vector count
         // The embedding service processes documents asynchronously after FTS5 indexing
-        spdlog::info("Waiting for embeddings to be generated (20s)...");
-        std::this_thread::sleep_for(20s);
+        // Vector count is exposed via requestCounts["vector_count"] in StatusResponse
+        bool vectorsEnabled = !vectorsDisabled;
 
-        // Check vector count to verify embeddings were created
-        auto finalStatus = yams::cli::run_sync(client->status(), 5s);
-        if (finalStatus && finalStatus.value().vectorDbReady) {
-            spdlog::info("Vector DB ready: dim={}", finalStatus.value().vectorDbDim);
+        if (vectorsEnabled) {
+            spdlog::info("Waiting for embeddings to be generated...");
+            deadline =
+                std::chrono::steady_clock::now() + 900s; // 15 minute timeout for large corpus
+            uint64_t lastVectorCount = 0;
+            int stableCount = 0;
+            while (std::chrono::steady_clock::now() < deadline) {
+                auto statusResult = yams::cli::run_sync(client->status(), 5s);
+                if (statusResult) {
+                    // Access vector count from requestCounts map
+                    uint64_t vectorCount = 0;
+                    auto it = statusResult.value().requestCounts.find("vector_count");
+                    if (it != statusResult.value().requestCounts.end()) {
+                        vectorCount = it->second;
+                    }
+                    if (vectorCount != lastVectorCount) {
+                        spdlog::info("Vector count: {} / {} docs", vectorCount, corpusSize);
+                        lastVectorCount = vectorCount;
+                        stableCount = 0;
+                    } else {
+                        stableCount++;
+                        // If vector count hasn't changed for 10 checks (5s), assume done
+                        if (stableCount >= 10 && vectorCount > 0) {
+                            spdlog::info("Embedding generation complete: {} vectors", vectorCount);
+                            break;
+                        }
+                    }
+                }
+                std::this_thread::sleep_for(500ms);
+            }
+
+            // Check vector count to verify embeddings were created
+            auto finalStatus = yams::cli::run_sync(client->status(), 5s);
+            if (finalStatus && finalStatus.value().vectorDbReady) {
+                uint64_t finalVectorCount = 0;
+                auto it = finalStatus.value().requestCounts.find("vector_count");
+                if (it != finalStatus.value().requestCounts.end()) {
+                    finalVectorCount = it->second;
+                }
+                spdlog::info("Vector DB ready: dim={}, vectors={}", finalStatus.value().vectorDbDim,
+                             finalVectorCount);
+            } else {
+                spdlog::warn("Vector DB may not be ready or no embeddings generated");
+            }
         } else {
-            spdlog::warn("Vector DB may not be ready or no embeddings generated");
+            spdlog::info("Vectors disabled - skipping embedding generation wait");
         }
 
-        // Verify document count by doing a test search
-        yams::daemon::SearchRequest testReq;
-        testReq.query = "test";
-        testReq.searchType = "hybrid";
-        testReq.limit = 1000;
-        testReq.timeout = 5s;
-        auto testResult = yams::cli::run_sync(client->search(testReq), 10s);
-        int indexedDocCount = testResult ? testResult.value().results.size() : 0;
+        // Verify document count using status metrics (avoids degraded search false negatives)
+        uint64_t indexedDocCount = 0;
+        auto statusResult = yams::cli::run_sync(client->status(), 5s);
+        if (statusResult) {
+            auto it = statusResult.value().requestCounts.find("documents_total");
+            if (it != statusResult.value().requestCounts.end()) {
+                indexedDocCount = it->second;
+            }
+        }
+
+        if (indexedDocCount == 0) {
+            yams::daemon::SearchRequest testReq;
+            testReq.query = "test";
+            testReq.searchType = "hybrid";
+            testReq.limit = 1000;
+            testReq.timeout = 5s;
+            auto testResult = yams::cli::run_sync(client->search(testReq), 10s);
+            indexedDocCount = testResult ? testResult.value().results.size() : 0;
+        }
+
         spdlog::info("Verified indexed documents: {} (expected: {})", indexedDocCount, corpusSize);
         if (indexedDocCount == 0) {
             spdlog::error("NO DOCUMENTS IN INDEX! Ingestion failed completely.");

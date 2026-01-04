@@ -68,11 +68,9 @@ public:
 
             // Add additional verbose stats if requested
             if (req.verbose) {
-                if (ctx_.searchExecutor) {
+                if (ctx_.searchEngine) {
                     // Could add search index stats here
                     response.additionalStats["search_indexed_documents"] = 0; // placeholder
-                }
-                if (ctx_.searchEngine) {
                     // Could add vector database stats here
                     response.additionalStats["vector_embeddings"] = 0; // placeholder
                 }

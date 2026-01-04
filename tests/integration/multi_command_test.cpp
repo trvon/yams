@@ -7,7 +7,6 @@
 #include <yams/api/content_store.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/metadata_repository.h>
-#include <yams/search/search_executor.h>
 
 using namespace yams;
 using namespace yams::api;

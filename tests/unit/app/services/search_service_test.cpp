@@ -18,7 +18,6 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 #include <yams/search/search_engine.h>
-#include <yams/search/search_executor.h>
 
 #include "common/fixture_manager.h"
 #include "common/test_data_generator.h"
@@ -186,14 +185,12 @@ private:
             const_cast<std::unique_ptr<IContentStore>&>(uniqueStore).release());
 
         // Search components might be optional or need special initialization
-        searchExecutor_ = nullptr;
         searchEngine_ = nullptr;
 
         // Create app context
         appContext_.store = contentStore_;
         ASSERT_TRUE(metadataRepo_);
         appContext_.metadataRepo = metadataRepo_;
-        appContext_.searchExecutor = searchExecutor_;
         appContext_.searchEngine = searchEngine_;
         appContext_.workerExecutor = boost::asio::system_executor();
 
@@ -230,8 +227,6 @@ private:
 
     void cleanupServices() {
         searchService_.reset();
-        searchExecutor_.reset();
-        appContext_.searchExecutor.reset();
         if (searchEngine_) {
             searchEngine_.reset();
         }
@@ -281,7 +276,6 @@ protected:
 
     // Service components
     std::shared_ptr<IContentStore> contentStore_;
-    std::shared_ptr<search::SearchExecutor> searchExecutor_;
     std::shared_ptr<search::SearchEngine> searchEngine_;
     AppContext appContext_;
     std::shared_ptr<ISearchService> searchService_;

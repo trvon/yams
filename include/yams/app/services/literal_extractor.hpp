@@ -40,9 +40,13 @@ private:
 };
 
 /// Boyer-Moore-Horspool string search implementation
-/// Optimal for patterns >= 3 characters, average O(n/m) complexity
+/// Uses std::string::find for patterns < 16 chars (benchmark-optimized)
 class BMHSearcher {
 public:
+    /// Minimum pattern length for BMH algorithm
+    /// Below this threshold, std::string::find is faster
+    static constexpr size_t kMinBMHLength = 16;
+
     /// Construct searcher with pattern
     explicit BMHSearcher(std::string_view pattern, bool ignoreCase = false);
 
@@ -56,13 +60,19 @@ public:
     /// Get the pattern being searched for
     std::string_view pattern() const { return pattern_; }
 
+    /// Check if using fast path (std::string::find)
+    bool usesFastPath() const { return useFastPath_; }
+
 private:
     std::string pattern_;
     std::array<size_t, 256> shift_; ///< Bad character shift table
     bool ignoreCase_;
+    bool useFastPath_; ///< True if using std::string::find for short patterns
 
     void buildShiftTable();
     static unsigned char toLower(unsigned char c);
+    size_t findFast(std::string_view text, size_t startPos) const;
+    size_t findBMH(std::string_view text, size_t startPos) const;
 };
 
 } // namespace services

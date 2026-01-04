@@ -76,6 +76,16 @@ public:
     }
 
     bool start() {
+        // Save original working directory and change to temp dir
+        // This prevents session auto-watch from indexing CWD
+        originalCwd_ = fs::current_path();
+        fs::current_path(root_);
+
+        // Also isolate session state to prevent global session watch from triggering
+        originalXdgState_ = std::getenv("XDG_STATE_HOME") ? std::getenv("XDG_STATE_HOME") : "";
+        setenv("XDG_STATE_HOME", (root_ / "state").string().c_str(), 1);
+        fs::create_directories(root_ / "state" / "yams" / "sessions");
+
         yams::daemon::DaemonConfig cfg;
         cfg.dataDir = data_;
         cfg.socketPath = sock_;
@@ -83,13 +93,23 @@ public:
         cfg.logFile = log_;
         cfg.enableModelProvider = true;
 
-        // Use real model provider with plugins for accurate end-to-end benchmark
-        cfg.useMockModelProvider = false;
-        cfg.autoLoadPlugins = true;
+        // Check if vectors are disabled (FTS-only mode)
+        const char* disableVectors = std::getenv("YAMS_DISABLE_VECTORS");
+        bool vectorsDisabled = disableVectors && std::string(disableVectors) == "1";
 
-        // Configure model pool for real embedding generation
-        cfg.modelPoolConfig.lazyLoading = false;
-        cfg.modelPoolConfig.preloadModels = {"all-MiniLM-L6-v2"};
+        if (vectorsDisabled) {
+            cfg.useMockModelProvider = true;
+            cfg.autoLoadPlugins = false;
+            spdlog::info("Using mock model provider (YAMS_DISABLE_VECTORS=1)");
+        } else {
+            // Use real model provider with plugins for accurate end-to-end benchmark
+            cfg.useMockModelProvider = false;
+            cfg.autoLoadPlugins = true;
+
+            // Configure model pool for real embedding generation
+            cfg.modelPoolConfig.lazyLoading = false;
+            cfg.modelPoolConfig.preloadModels = {"all-MiniLM-L6-v2"};
+        }
 
         daemon_ = std::make_unique<yams::daemon::YamsDaemon>(cfg);
 
@@ -98,6 +118,9 @@ public:
             spdlog::error("Failed to start daemon: {}", s.error().message);
             return false;
         }
+
+        // Start runLoop in background thread - CRITICAL for processing requests
+        runLoopThread_ = std::thread([this]() { daemon_->runLoop(); });
 
         auto deadline = std::chrono::steady_clock::now() + 30s;
         while (std::chrono::steady_clock::now() < deadline) {
@@ -125,6 +148,11 @@ public:
             if (!stopResult) {
                 spdlog::warn("[SimpleDaemonHarness] Daemon stop returned error: {}",
                              stopResult.error().message);
+            }
+
+            // Join the runLoop thread before continuing
+            if (runLoopThread_.joinable()) {
+                runLoopThread_.join();
             }
 
             // Wait for daemon to report it's no longer running
@@ -169,6 +197,19 @@ public:
             // Real model provider + plugins create additional threads beyond base daemon
             std::this_thread::sleep_for(500ms);
         }
+
+        // Restore original working directory
+        if (!originalCwd_.empty()) {
+            std::error_code ec;
+            fs::current_path(originalCwd_, ec);
+        }
+
+        // Restore original XDG_STATE_HOME
+        if (originalXdgState_.empty()) {
+            unsetenv("XDG_STATE_HOME");
+        } else {
+            setenv("XDG_STATE_HOME", originalXdgState_.c_str(), 1);
+        }
     }
 
     const fs::path& socketPath() const { return sock_; }
@@ -194,7 +235,10 @@ private:
     }
 
     std::unique_ptr<yams::daemon::YamsDaemon> daemon_;
+    std::thread runLoopThread_;
     fs::path root_, data_, sock_, pid_, log_;
+    fs::path originalCwd_;
+    std::string originalXdgState_;
 };
 
 // ============================================================================

@@ -64,7 +64,6 @@ namespace yams::integrity {
 class RepairManager;
 } // namespace yams::integrity
 namespace yams::search {
-class SearchExecutor;
 class SearchEngine;
 class SearchEngineBuilder;
 } // namespace yams::search
@@ -125,9 +124,6 @@ public:
                 return repo;
         }
         return metadataRepo_; // Fallback to old member
-    }
-    std::shared_ptr<search::SearchExecutor> getSearchExecutor() const {
-        return std::atomic_load(&searchExecutor_);
     }
     std::shared_ptr<IModelProvider> getModelProvider() const { return modelProvider_; }
     std::shared_ptr<yams::search::SearchEngine> getSearchEngineSnapshot() const;
@@ -494,7 +490,6 @@ private:
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_;
     std::shared_ptr<GraphComponent> graphComponent_;
-    std::shared_ptr<search::SearchExecutor> searchExecutor_;
     std::shared_ptr<vector::VectorIndexManager> vectorIndexManager_;
     std::shared_ptr<vector::VectorDatabase> vectorDatabase_;
     std::shared_ptr<IModelProvider> modelProvider_;

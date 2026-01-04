@@ -41,7 +41,6 @@ TEST_CASE("HybridSearch - Windows ONNX Runtime API too old", "[hybrid][windows][
 #include <yams/metadata/migration.h>
 #include <yams/search/search_engine.h>
 #include <yams/search/search_engine_builder.h>
-#include <yams/search/search_executor.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
 #include <yams/vector/vector_index_manager.h>
@@ -255,7 +254,6 @@ private:
     void setupServices() {
         appContext_.store = contentStore_;
         appContext_.metadataRepo = metadataRepo_;
-        appContext_.searchExecutor = nullptr; // Optional
         appContext_.workerExecutor = boost::asio::system_executor();
 
 // Initialize hybrid search engine for integration testing

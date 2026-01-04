@@ -140,27 +140,28 @@ yams add <changed-files> \
   --label "$TASK$: <brief-description>"
 ```
 
-### Code Search (Why YAMS > CLI tools)
+### Code Search (YAMS > CLI tools)
+
+**ALWAYS use `yams grep` first for code search** - it's optimized for pattern matching in source code.
+Only use `yams search` for semantic/document search or when `yams grep` returns no results.
+
 Notes:
 - If results are empty, ensure the repo is indexed (`yams add ...`) and the daemon is ready (`yams status`).
 - Scope searches to the repo with `--cwd` or `--path` when multiple projects share a storage.
 - If YAMS is not indexed yet, use `rg` to locate files, then index them.
 
 ```bash
-# Find how we implemented something before
-yams search "authentication middleware" --cwd .
+# Step 1: ALWAYS try yams grep first for code pattern matching
+yams grep "authentication middleware" --cwd .
+yams grep "task-bd-a3f8e9" --cwd .
+yams grep "error.*handling.*retry" --cwd . --fuzzy
 
-# Find all code related to a feature
-yams search "task-bd-a3f8e9" --cwd .
-
-# Find code patterns across the project
-yams search "error handling retry" --cwd . --fuzzy
+# Step 2: Only if grep returns no results, use yams search for semantic search
+yams search "authentication middleware" --cwd .  # Semantic/document search
+yams search "rate limiting" --cwd . --fuzzy       # Fuzzy semantic matching
 
 # Graph connections: find related code and ideas
 yams graph "auth" --depth 2
-
-# Find code that relates to a concept
-yams search "rate limiting" --fuzzy
 ```
 
 ### Linking Code to Ideas
@@ -277,9 +278,10 @@ $WHY
 # 1. Find ready work
 bd ready --json | jq '.[0]'
 
-# 2. Search for related code and knowledge
-yams search "$FEATURE_DOMAIN" --cwd . --limit 10
-yams search "$TECHNOLOGY patterns" --cwd . --fuzzy
+# 2. Search for related code and knowledge (ALWAYS use grep first for code)
+yams grep "$FEATURE_DOMAIN" --cwd .
+yams grep "$TECHNOLOGY patterns" --cwd . --fuzzy
+yams search "$FEATURE_DOMAIN" --cwd . --limit 10  # Only if grep is empty
 
 # 3. Start the task
 bd update $TASK$ --status in_progress
@@ -372,6 +374,7 @@ bd sync --flush-only                 # Export JSONL only (no git)
 ```
 
 ### YAMS CLI (selected commands)
+- **grep**: code pattern matching (ALWAYS use first for code search); positional args or `-q/--query`; `--cwd`; `--fuzzy` for fuzzy matching; `-F/--literal-text` for exact matches; display options (`--show-hash`, `-v/--verbose`, `--json`); line context (`-n/--line-numbers`, `-A/-B/-C`); filters (`--ext`, `--file-type`, `--text-only`, `--binary-only`); time filters.
 - **add**: multi-path add with daemon-first flow; supports `--name`, `--tags` (unused in this repo), `--metadata`, `--mime-type`, `--no-auto-mime`, `--no-embeddings`, collections/snapshots (`--collection`, `--snapshot-id`, `--snapshot-label`), directory controls (`-r/--recursive`, `--include`, `--exclude`, `--verify`), session scope (`--global/--no-session`), and daemon robustness (`--daemon-timeout-ms`, `--daemon-retries`, `--daemon-backoff-ms`, `--daemon-ready-timeout-ms`). Stdin supported via `-`.
 - **search**: queries via positional args or `-q/--query`; accepts `--stdin`/`--query-file`; defaults to `--type hybrid`; fuzzy toggle `-f/--fuzzy` with `--similarity`; `--paths-only`; grouping controls (`--no-group-versions`, `--versions {latest|all}`, `--versions-topk`, `--versions-sort`, `--no-tools`, `--json-grouped`); session scope (`--session`, `--global/--no-session`); `--cwd`; streaming (`--streaming`, `--chunk-size`, header/body timeouts); literal text `-F/--literal-text`; display (`--show-hash`, `-v/--verbose`, `--json`); line/context (`-n/--line-numbers`, `-A/-B/-C`); hash search `--hash`; tag filters (`--tags` (unused in this repo), `--match-all-tags`); include globs; file filters (`--ext`, `--mime`, `--file-type`, `--text-only`, `--binary-only`); time filters (`--created-*`, `--modified-*`, `--indexed-*`).
 - **graph**: target by positional `hash`, `--name`, `--node-key`, or `--node-id`; traversal depth `--depth 1-5`; filter relations with `--relation/-r`; list-only mode via `--list-type` (use `--isolated` to find nodes with no incoming edges); pagination `--limit/--offset`; output `--format table|json|dot` or `--json`; `--verbose` shows properties/hashes; `--prop-filter` for property text.
@@ -399,7 +402,7 @@ bd sync --flush-only                 # Export JSONL only (no git)
 1. **Use `bd` for ALL task tracking** - Status, dependencies, workflow
 2. **Index ALL code changes in YAMS** - Superior search and graph connections
 3. **Tag code with task ID** - `code,task-$TASK$,<component>`
-4. **Search YAMS before implementing** - Find related code and patterns first
+4. **Search YAMS before implementing** - ALWAYS use `yams grep` first for code patterns
 5. **Never track tasks in YAMS** - That's what Beads is for
 6. **Always check `bd ready`** before starting work
 7. **Do not run `bd sync` in this repo** - Beads is local-only; use `bd sync --flush-only` if you need to export JSONL

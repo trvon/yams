@@ -17,8 +17,8 @@
 #ifndef NOMINMAX
 #define NOMINMAX 1
 #endif
-#include <Windows.h>
 #include <Psapi.h>
+#include <Windows.h>
 #endif
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -57,7 +57,6 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/repair/embedding_repair_util.h>
 #include <yams/search/search_engine_builder.h>
-#include <yams/search/search_executor.h>
 #include <yams/search/search_results.h>
 #include <yams/vector/batch_metrics.h>
 #include <yams/vector/dynamic_batcher.h>

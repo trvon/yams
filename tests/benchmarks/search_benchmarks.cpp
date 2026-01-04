@@ -17,7 +17,6 @@
 #include <yams/search/parallel_post_processor.hpp>
 #include <yams/search/query_parser.h>
 #include <yams/search/query_tokenizer.h>
-#include <yams/search/search_executor.h>
 
 namespace yams::benchmark {
 

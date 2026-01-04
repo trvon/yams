@@ -1064,7 +1064,6 @@ if catch2_dep.found()
       'unit/search/kg_scorer_simple_catch2_test.cpp',
       'unit/search/query_parser_catch2_test.cpp',
       'unit/search/query_qualifiers_catch2_test.cpp',
-      'unit/search/search_executor_catch2_test.cpp',
       'unit/search/search_smoke_catch2_test.cpp',
     ),
     include_directories: incs,

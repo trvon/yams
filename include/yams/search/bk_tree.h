@@ -14,9 +14,11 @@
 #endif
 
 #include <algorithm>
+#include <future>
 #include <limits>
 #include <memory>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 #include <yams/core/types.h>
@@ -90,6 +92,13 @@ public:
     void addBatch(const std::vector<std::string>& values);
 
     /**
+     * @brief Add multiple strings to the tree in parallel (for large batches)
+     * @param values Strings to add
+     * @param parallelThreshold Minimum batch size for parallel execution (default 1000)
+     */
+    void addBatchParallel(const std::vector<std::string>& values, size_t parallelThreshold = 1000);
+
+    /**
      * @brief Search for strings within a given distance
      * @param query Query string
      * @param maxDistance Maximum edit distance
@@ -97,6 +106,17 @@ public:
      */
     std::vector<std::pair<std::string, size_t>> search(const std::string& query,
                                                        size_t maxDistance) const;
+
+    /**
+     * @brief Search for strings within a given distance (parallel version)
+     * @param query Query string
+     * @param maxDistance Maximum edit distance
+     * @param parallelismThreshold Minimum branches to trigger parallel traversal
+     * @return Vector of matching strings with their distances
+     */
+    std::vector<std::pair<std::string, size_t>>
+    searchParallel(const std::string& query, size_t maxDistance,
+                   size_t parallelismThreshold = 4) const;
 
     /**
      * @brief Search for best N matches
@@ -139,6 +159,7 @@ private:
     std::unique_ptr<BKNode> root_;
     std::unique_ptr<IDistanceMetric> metric_;
     size_t size_ = 0;
+    mutable std::mutex mutex_;
 
     void addToNode(BKNode* node, const std::string& value);
     void searchNode(const BKNode* node, const std::string& query, size_t maxDistance,
@@ -178,19 +199,11 @@ public:
     size_t size() const { return stringToTrigrams_.size(); }
 
 private:
-    // Map from trigram to set of string IDs containing it
     std::unordered_map<std::string, std::vector<std::string>> trigramToStrings_;
-
-    // Map from string ID to its trigrams
     std::unordered_map<std::string, std::vector<std::string>> stringToTrigrams_;
-
-    // Map from string ID to original value
     std::unordered_map<std::string, std::string> idToString_;
 
-    // Extract trigrams from a string
     std::vector<std::string> extractTrigrams(const std::string& str) const;
-
-    // Calculate Jaccard similarity between two trigram sets
     float jaccardSimilarity(const std::vector<std::string>& set1,
                             const std::vector<std::string>& set2) const;
 };
@@ -240,6 +253,17 @@ public:
                                      const SearchOptions& options = SearchOptions{}) const;
 
     /**
+     * @brief Search for documents concurrently (batch queries)
+     * @param queries Vector of search queries
+     * @param maxResults Maximum results per query
+     * @param options Search options
+     * @return Vector of result vectors, one per query
+     */
+    std::vector<std::vector<SearchResult>>
+    searchConcurrent(const std::vector<std::string>& queries, size_t maxResults = 10,
+                     const SearchOptions& options = SearchOptions{}) const;
+
+    /**
      * @brief Clear all indices
      */
     void clear();
@@ -264,7 +288,6 @@ private:
     std::unordered_map<std::string, std::string> idToTitle_;
     std::unordered_map<std::string, std::vector<std::string>> idToKeywords_;
 
-    // Combine and rank results from different search methods
     std::vector<SearchResult>
     combineResults(const std::vector<std::pair<std::string, float>>& trigramResults,
                    const std::vector<std::pair<std::string, size_t>>& bkResults,

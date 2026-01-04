@@ -11,7 +11,6 @@
 #include <yams/downloader/downloader.hpp>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_engine.h>
-#include <yams/search/search_executor.h>
 // Required for yams::extraction::IContentExtractor
 #include <yams/extraction/content_extractor.h>
 
@@ -93,10 +92,9 @@ struct AppContext {
     yams::daemon::ServiceManager* service_manager = nullptr;
     boost::asio::any_io_executor workerExecutor;
     std::shared_ptr<api::IContentStore> store;
-    std::shared_ptr<search::SearchExecutor> searchExecutor;
     std::shared_ptr<metadata::MetadataRepository> metadataRepo;
-    std::shared_ptr<search::SearchEngine> searchEngine;     // New SearchEngine
-    std::shared_ptr<vector::VectorDatabase> vectorDatabase; // For SearchEngineBuilder
+    std::shared_ptr<search::SearchEngine> searchEngine;
+    std::shared_ptr<vector::VectorDatabase> vectorDatabase;
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore; // PBI-043: tree diff KG integration
     std::shared_ptr<IGraphQueryService> graphQueryService;  // PBI-009: centralized graph queries
     // Optional: externally-provided content extractors (plugins)

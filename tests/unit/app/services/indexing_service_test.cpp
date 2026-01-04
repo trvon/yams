@@ -9,7 +9,6 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 #include <yams/search/search_engine.h>
-#include <yams/search/search_executor.h>
 
 #include <chrono>
 #include <filesystem>
@@ -34,7 +33,6 @@ struct IndexingFixture {
 
     ~IndexingFixture() {
         indexingService_.reset();
-        searchExecutor_.reset();
         searchEngine_.reset();
 
         if (database_) {
@@ -115,7 +113,6 @@ struct IndexingFixture {
 
         appContext_.service_manager = nullptr;
         appContext_.store = contentStore_;
-        appContext_.searchExecutor = nullptr;
         appContext_.metadataRepo = metadataRepo_;
         appContext_.searchEngine = nullptr;
 
@@ -156,7 +153,6 @@ struct IndexingFixture {
     std::unique_ptr<ConnectionPool> pool_;
     std::shared_ptr<MetadataRepository> metadataRepo_;
     std::shared_ptr<IContentStore> contentStore_;
-    std::shared_ptr<search::SearchExecutor> searchExecutor_;
     std::shared_ptr<search::SearchEngine> searchEngine_;
     AppContext appContext_;
     std::shared_ptr<IIndexingService> indexingService_;

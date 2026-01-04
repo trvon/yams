@@ -47,7 +47,7 @@ struct ServiceBundle {
  *
  * Requirements:
  * - ctx.store and ctx.metadataRepo are typically required by most services.
- * - ctx.searchExecutor / ctx.hybridEngine are used by search implementations.
+ * - ctx.searchEngine is used by search implementations.
  *
  * Returns a ServiceBundle with all services constructed (or nullptr members if
  * a particular service cannot be created due to missing dependencies).

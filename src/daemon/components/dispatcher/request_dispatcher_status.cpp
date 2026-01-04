@@ -255,6 +255,10 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 res.requestCounts["documents_content_extracted"] =
                     static_cast<size_t>(snap->documentsContentExtracted);
             }
+            // Vector count from cached metrics (for benchmarks/tools waiting for embeddings)
+            if (snap->vectorRowsExact > 0) {
+                res.requestCounts["vector_count"] = static_cast<size_t>(snap->vectorRowsExact);
+            }
         } else {
             auto uptime = std::chrono::steady_clock::now() - state_->stats.startTime;
             res.running = true;

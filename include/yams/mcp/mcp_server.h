@@ -14,7 +14,6 @@
 #include <yams/mcp/tool_registry.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_engine.h>
-#include <yams/search/search_executor.h>
 #include <yams/version.hpp>
 
 #include <nlohmann/json.hpp>
@@ -456,7 +455,6 @@ private:
 
     // Core services
     std::shared_ptr<api::IContentStore> store_;
-    std::shared_ptr<search::SearchExecutor> searchExecutor_;
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<search::SearchEngine> searchEngine_;
 

@@ -566,11 +566,8 @@ yams::Result<void> ServiceManager::initialize() {
         spdlog::debug("PoolManager configure error: {}", e.what());
     }
 
-    // Sanity check: if dependencies are ready but searchExecutor_ not initialized
-    if (state_.readiness.databaseReady.load() && state_.readiness.metadataRepoReady.load() &&
-        !std::atomic_load(&searchExecutor_)) {
-        spdlog::warn("SearchExecutor not initialized despite database and metadata repo ready");
-    }
+    // SearchEngine initialization is handled separately via searchEngineManager_
+    // (SearchExecutor has been deprecated and removed)
     return Result<void>();
 }
 
@@ -915,8 +912,6 @@ void ServiceManager::shutdown() {
 
     // Release all remaining resources
     spdlog::info("[ServiceManager] Phase 8: Releasing remaining resources");
-    std::atomic_store(&searchExecutor_, std::shared_ptr<search::SearchExecutor>());
-    spdlog::info("[ServiceManager] Phase 9.1: Search executor reset");
     metadataRepo_.reset();
     spdlog::info("[ServiceManager] Phase 9.2: Metadata repository reset");
     vectorIndexManager_.reset();
@@ -1381,11 +1376,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         }
     }
 
-    if (database_ && metadataRepo_)
-        std::atomic_store(&searchExecutor_,
-                          std::make_shared<search::SearchExecutor>(database_, metadataRepo_));
     retrievalSessions_ = std::make_unique<RetrievalSessionManager>();
-    spdlog::info("[ServiceManager] Phase: Executors and Sessions Initialized.");
+    spdlog::info("[ServiceManager] Phase: Sessions Initialized.");
 
     // Initialize post-ingest queue (decouple extraction/index/graph from add paths)
     try {
@@ -2353,7 +2345,6 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
     app::services::AppContext ctx;
     ctx.service_manager = const_cast<ServiceManager*>(this);
     ctx.store = contentStore_;
-    ctx.searchExecutor = std::atomic_load(&searchExecutor_);
     ctx.metadataRepo = metadataRepo_;
     ctx.searchEngine = getSearchEngineSnapshot();
     ctx.vectorDatabase = getVectorDatabase();
@@ -2424,29 +2415,15 @@ size_t ServiceManager::getWorkerQueueDepth() const {
 
 ServiceManager::SearchLoadMetrics ServiceManager::getSearchLoadMetrics() const {
     SearchLoadMetrics metrics;
-    auto exec = std::atomic_load(&searchExecutor_);
-    if (!exec)
-        return metrics;
-    auto load = exec->getLoadMetrics();
-    metrics.active = load.active;
-    metrics.queued = load.queued;
-    metrics.executed = load.executed;
-    metrics.avgLatencyUs = load.avgLatencyUs;
-    metrics.concurrencyLimit = load.concurrencyLimit;
-    // Note: cache metrics removed - cache has been removed from SearchExecutor
+    // SearchExecutor has been removed - metrics are no longer available
+    // SearchEngine uses a different concurrency model
     return metrics;
 }
 
-bool ServiceManager::applySearchConcurrencyTarget(std::size_t target) {
-    auto exec = std::atomic_load(&searchExecutor_);
-    if (!exec)
-        return false;
-    try {
-        exec->setConcurrencyLimit(static_cast<std::uint32_t>(target));
-        return true;
-    } catch (...) {
-        return false;
-    }
+bool ServiceManager::applySearchConcurrencyTarget(std::size_t /*target*/) {
+    // SearchExecutor has been removed - concurrency tuning is no longer applicable
+    // SearchEngine uses a different concurrency model
+    return false;
 }
 
 // (Namespace yams::daemon remains open for subsequent member definitions)
@@ -2602,10 +2579,6 @@ ServiceManager::co_initSearchEngine(boost::asio::any_io_executor exec,
         }
 
         searchEngine_ = engine;
-
-        // Create search executor
-        std::atomic_store(&searchExecutor_,
-                          std::make_shared<yams::search::SearchExecutor>(database_, metadataRepo_));
 
         // Mark readiness
         state_.readiness.searchEngineReady.store(true);

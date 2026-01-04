@@ -127,10 +127,10 @@ struct MetricsSnapshot {
     uint32_t vectorDbDim{0};
 
     // Service states (centralized)
-    std::string serviceContentStore;   // "running"|"unavailable"
-    std::string serviceMetadataRepo;   // "running"|"unavailable"
-    std::string serviceSearchExecutor; // "available"|"unavailable"
-    std::string searchExecutorReason;  // optional reason when unavailable
+    std::string serviceContentStore; // "running"|"unavailable"
+    std::string serviceMetadataRepo; // "running"|"unavailable"
+    std::string serviceSearchEngine; // "available"|"unavailable"
+    std::string searchEngineReason;  // optional reason when unavailable
 
     // Document counts (cached from metadata repo, avoid live DB queries on hot path)
     std::uint64_t documentsTotal{0};

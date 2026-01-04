@@ -297,7 +297,6 @@ struct LocalIngestionSession {
 
         session.context.store = session.contentStore;
         session.context.metadataRepo = session.metadataRepo;
-        session.context.searchExecutor = nullptr;
         session.context.searchEngine = nullptr;
 
         return session;

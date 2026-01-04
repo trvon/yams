@@ -568,7 +568,6 @@ std::shared_ptr<app::services::AppContext> YamsCLI::getAppContext() {
         // Create the app context with all available components
         appContext_ = std::make_shared<app::services::AppContext>();
         appContext_->store = getContentStore();
-        appContext_->searchExecutor = getSearchExecutor();
         appContext_->metadataRepo = getMetadataRepository();
         appContext_->kgStore = getKnowledgeGraphStore(); // PBI-043: tree diff KG integration
         appContext_->workerExecutor = executor_;         // 066-59: Thread executor through services
@@ -720,9 +719,6 @@ Result<void> YamsCLI::initializeStorage() {
         auto store =
             std::move(const_cast<std::unique_ptr<api::IContentStore>&>(storeResult.value()));
         contentStore_ = std::shared_ptr<api::IContentStore>(store.release());
-
-        // Initialize search executor
-        searchExecutor_ = std::make_shared<search::SearchExecutor>(database_, metadataRepo_);
 
         // Initialize Knowledge Graph store with defaults (local-first)
         {

@@ -86,8 +86,11 @@ struct SearchEngineConfig {
     size_t maxResults = 100;                     // Maximum results to return
     float similarityThreshold = 0.65f;           // Minimum similarity threshold
     bool enableParallelExecution = true;         // Parallel component queries
-    std::chrono::milliseconds componentTimeout = // Timeout per component (10s for cold-start)
-        std::chrono::milliseconds(10000);
+    std::chrono::milliseconds componentTimeout = // Timeout per component (0 = no timeout)
+        std::chrono::milliseconds(0);
+
+    // Benchmarking support
+    bool enableProfiling = false; // Enable detailed profiling output
 
     // Result fusion strategy
     enum class FusionStrategy {
@@ -98,7 +101,7 @@ struct SearchEngineConfig {
     } fusionStrategy = FusionStrategy::WEIGHTED_RECIPROCAL;
 
     // Component-specific settings
-    size_t fts5MaxResults = 200;     // FTS5 candidate limit
+    size_t fts5MaxResults = 150;     // FTS5 candidate limit
     size_t pathTreeMaxResults = 100; // Path tree candidate limit
     size_t symbolMaxResults = 150;   // Symbol search candidate limit
     size_t kgMaxResults = 50;        // KG traversal candidate limit

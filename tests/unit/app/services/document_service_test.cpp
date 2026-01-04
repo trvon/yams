@@ -14,7 +14,6 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 #include <yams/search/search_engine.h>
-#include <yams/search/search_executor.h>
 
 using namespace yams;
 using namespace yams::app::services;
@@ -31,7 +30,6 @@ struct DocumentFixture {
 
     ~DocumentFixture() {
         documentService_.reset();
-        searchExecutor_.reset();
         searchEngine_.reset();
         contentStore_.reset();
 
@@ -96,12 +94,10 @@ struct DocumentFixture {
         contentStore_ = std::shared_ptr<IContentStore>(
             const_cast<std::unique_ptr<IContentStore>&>(uniqueStore).release());
 
-        searchExecutor_ = nullptr;
         searchEngine_ = nullptr;
 
         appContext_.store = contentStore_;
         appContext_.metadataRepo = metadataRepo_;
-        appContext_.searchExecutor = searchExecutor_;
         appContext_.searchEngine = searchEngine_;
 
         documentService_ = makeDocumentService(appContext_);
@@ -143,7 +139,6 @@ struct DocumentFixture {
     std::unique_ptr<ConnectionPool> pool_;
     std::shared_ptr<MetadataRepository> metadataRepo_;
     std::shared_ptr<IContentStore> contentStore_;
-    std::shared_ptr<search::SearchExecutor> searchExecutor_;
     std::shared_ptr<search::SearchEngine> searchEngine_;
     AppContext appContext_;
     std::shared_ptr<IDocumentService> documentService_;

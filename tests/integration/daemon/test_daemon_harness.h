@@ -4,8 +4,10 @@
 #include <spdlog/spdlog.h>
 #include <cstdlib>
 #include <filesystem>
+#include <optional>
 #include <random>
 #include <thread>
+#include <vector>
 #include "test_async_helpers.h"
 #include <yams/compat/unistd.h>
 #include <yams/daemon/client/asio_connection_pool.h>
@@ -28,9 +30,25 @@
 
 namespace yams::test {
 
+// Options struct must be defined outside DaemonHarness to avoid Clang issue with
+// default member initializers in nested structs used as default function arguments.
+// See: https://bugs.llvm.org/show_bug.cgi?id=36684
+struct DaemonHarnessOptions {
+    bool enableModelProvider = true;
+    bool useMockModelProvider = true;
+    bool autoLoadPlugins = false;
+    bool isolateState = false;
+    bool configureModelPool = false;
+    bool modelPoolLazyLoading = true;
+    std::vector<std::string> preloadModels;
+    std::optional<std::filesystem::path> pluginDir;
+};
+
 class DaemonHarness {
 public:
-    DaemonHarness() {
+    using Options = DaemonHarnessOptions;
+
+    explicit DaemonHarness(Options options = Options()) : options_(std::move(options)) {
         namespace fs = std::filesystem;
         // Ensure mock provider and disable ABI plugins for stability
         // Create temp working dir
@@ -66,14 +84,31 @@ public:
         // Always create new daemon instance on start()
         // (daemon cannot be restarted after stop() - must create new instance)
         spdlog::info("[DaemonHarness] Creating new daemon instance...");
+
+        if (options_.isolateState) {
+            originalCwd_ = std::filesystem::current_path();
+            std::filesystem::current_path(root_);
+            originalXdgState_ = std::getenv("XDG_STATE_HOME") ? std::getenv("XDG_STATE_HOME") : "";
+            setenv("XDG_STATE_HOME", (root_ / "state").string().c_str(), 1);
+            std::filesystem::create_directories(root_ / "state" / "yams" / "sessions");
+            isolateStateActive_ = true;
+        }
+
         yams::daemon::DaemonConfig cfg;
         cfg.dataDir = data_;
         cfg.socketPath = sock_;
         cfg.pidFile = pid_;
         cfg.logFile = log_;
-        cfg.enableModelProvider = true;
-        cfg.autoLoadPlugins = false;
-        cfg.useMockModelProvider = true;
+        cfg.enableModelProvider = options_.enableModelProvider;
+        cfg.autoLoadPlugins = options_.autoLoadPlugins;
+        cfg.useMockModelProvider = options_.useMockModelProvider;
+        if (options_.pluginDir) {
+            cfg.pluginDir = *options_.pluginDir;
+        }
+        if (options_.configureModelPool) {
+            cfg.modelPoolConfig.lazyLoading = options_.modelPoolLazyLoading;
+            cfg.modelPoolConfig.preloadModels = options_.preloadModels;
+        }
         daemon_ = std::make_unique<yams::daemon::YamsDaemon>(cfg);
         spdlog::info("[DaemonHarness] Daemon instance created");
 
@@ -214,6 +249,19 @@ public:
                 setenv("YAMS_TEST_SAFE_SINGLE_INSTANCE", yams_safe, 1);
             }
 
+            if (isolateStateActive_) {
+                std::error_code ec;
+                if (!originalCwd_.empty()) {
+                    std::filesystem::current_path(originalCwd_, ec);
+                }
+                if (originalXdgState_.empty()) {
+                    unsetenv("XDG_STATE_HOME");
+                } else {
+                    setenv("XDG_STATE_HOME", originalXdgState_.c_str(), 1);
+                }
+                isolateStateActive_ = false;
+            }
+
             // Reset daemon so it can be recreated on next start()
             daemon_.reset();
 
@@ -254,6 +302,7 @@ public:
 
     const std::filesystem::path& socketPath() const { return sock_; }
     const std::filesystem::path& dataDir() const { return data_; }
+    const std::filesystem::path& rootDir() const { return root_; }
     yams::daemon::YamsDaemon* daemon() const { return daemon_.get(); }
 
 private:
@@ -305,6 +354,10 @@ private:
     std::unique_ptr<yams::daemon::YamsDaemon> daemon_;
     std::thread runLoopThread_; // Background thread for runLoop
     std::filesystem::path root_, data_, sock_, pid_, log_;
+    std::filesystem::path originalCwd_;
+    std::string originalXdgState_;
+    bool isolateStateActive_ = false;
+    Options options_;
 };
 
 } // namespace yams::test

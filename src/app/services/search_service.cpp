@@ -892,11 +892,17 @@ private:
                 const auto& contentMap = contentResult.value();
 
                 // Hydrate snippets from in-memory maps (no DB queries!)
+                // Limit content text to first 10KB for faster snippet generation
+                constexpr size_t kMaxContentForSnippet = 10240;
                 for (const auto& [docId, content] : contentMap) {
                     if (budgetExceeded())
                         break;
                     if (!content.contentText.empty()) {
-                        auto snippet = utils::createSnippet(content.contentText, 200, true);
+                        std::string_view contentView = content.contentText;
+                        if (contentView.size() > kMaxContentForSnippet) {
+                            contentView = contentView.substr(0, kMaxContentForSnippet);
+                        }
+                        auto snippet = utils::createSnippet(std::string(contentView), 200, true);
                         if (auto it = docIdToIndices.find(docId); it != docIdToIndices.end()) {
                             for (size_t idx : it->second) {
                                 resp.results[idx].snippet = snippet;

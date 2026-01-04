@@ -2,15 +2,16 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <future>
 #include <iostream>
 #include <queue>
 #include <set>
 #include <sstream>
+#include <thread>
 #include <yams/search/bk_tree.h>
 
 namespace yams::search {
 
-// Levenshtein Distance Implementation
 size_t LevenshteinDistance::distance(const std::string& s1, const std::string& s2) const {
     const size_t m = s1.length();
     const size_t n = s2.length();
@@ -20,11 +21,9 @@ size_t LevenshteinDistance::distance(const std::string& s1, const std::string& s
     if (n == 0)
         return m;
 
-    // Use two rows instead of full matrix for space efficiency
     std::vector<size_t> prevRow(n + 1);
     std::vector<size_t> currRow(n + 1);
 
-    // Initialize first row
     for (size_t j = 0; j <= n; ++j) {
         prevRow[j] = j;
     }
@@ -35,11 +34,7 @@ size_t LevenshteinDistance::distance(const std::string& s1, const std::string& s
         for (size_t j = 1; j <= n; ++j) {
             size_t cost = (s1[i - 1] == s2[j - 1]) ? 0 : 1;
 
-            currRow[j] = std::min({
-                prevRow[j] + 1,       // deletion
-                currRow[j - 1] + 1,   // insertion
-                prevRow[j - 1] + cost // substitution
-            });
+            currRow[j] = std::min({prevRow[j] + 1, currRow[j - 1] + 1, prevRow[j - 1] + cost});
         }
 
         std::swap(prevRow, currRow);
@@ -48,7 +43,6 @@ size_t LevenshteinDistance::distance(const std::string& s1, const std::string& s
     return prevRow[n];
 }
 
-// Damerau-Levenshtein Distance Implementation
 size_t DamerauLevenshteinDistance::distance(const std::string& s1, const std::string& s2) const {
     const size_t m = s1.length();
     const size_t n = s2.length();
@@ -58,10 +52,8 @@ size_t DamerauLevenshteinDistance::distance(const std::string& s1, const std::st
     if (n == 0)
         return m;
 
-    // Create a 2D matrix for dynamic programming
     std::vector<std::vector<size_t>> dp(m + 1, std::vector<size_t>(n + 1));
 
-    // Initialize first column and row
     for (size_t i = 0; i <= m; ++i) {
         dp[i][0] = i;
     }
@@ -69,18 +61,12 @@ size_t DamerauLevenshteinDistance::distance(const std::string& s1, const std::st
         dp[0][j] = j;
     }
 
-    // Fill the matrix
     for (size_t i = 1; i <= m; ++i) {
         for (size_t j = 1; j <= n; ++j) {
             size_t cost = (s1[i - 1] == s2[j - 1]) ? 0 : 1;
 
-            dp[i][j] = std::min({
-                dp[i - 1][j] + 1,       // deletion
-                dp[i][j - 1] + 1,       // insertion
-                dp[i - 1][j - 1] + cost // substitution
-            });
+            dp[i][j] = std::min({dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost});
 
-            // Transposition
             if (i > 1 && j > 1 && s1[i - 1] == s2[j - 2] && s1[i - 2] == s2[j - 1]) {
                 dp[i][j] = std::min(dp[i][j], dp[i - 2][j - 2] + cost);
             }
@@ -90,10 +76,10 @@ size_t DamerauLevenshteinDistance::distance(const std::string& s1, const std::st
     return dp[m][n];
 }
 
-// BKTree Implementation
 BKTree::BKTree(std::unique_ptr<IDistanceMetric> metric) : metric_(std::move(metric)) {}
 
 void BKTree::add(const std::string& value) {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!root_) {
         root_ = std::make_unique<BKNode>(value);
         size_++;
@@ -108,7 +94,6 @@ void BKTree::addToNode(BKNode* node, const std::string& value) {
     size_t dist = metric_->distance(node->value, value);
 
     if (dist == 0) {
-        // String already exists
         return;
     }
 
@@ -126,6 +111,105 @@ void BKTree::addBatch(const std::vector<std::string>& values) {
     }
 }
 
+void BKTree::addBatchParallel(const std::vector<std::string>& values, size_t parallelThreshold) {
+    if (values.size() < parallelThreshold) {
+        addBatch(values);
+        return;
+    }
+
+    size_t numThreads = std::thread::hardware_concurrency();
+    if (numThreads == 0)
+        numThreads = 4;
+    numThreads = std::min(numThreads, values.size());
+
+    size_t chunkSize = values.size() / numThreads;
+
+    std::vector<std::future<void>> futures;
+    futures.reserve(numThreads);
+
+    std::vector<std::vector<std::string>> chunkValues(numThreads);
+
+    for (size_t i = 0; i < numThreads; ++i) {
+        size_t start = i * chunkSize;
+        size_t end = (i == numThreads - 1) ? values.size() : start + chunkSize;
+        chunkValues[i].reserve(end - start);
+        for (size_t j = start; j < end; ++j) {
+            chunkValues[i].push_back(values[j]);
+        }
+    }
+
+    for (size_t i = 0; i < numThreads; ++i) {
+        futures.push_back(std::async(std::launch::async, [this, &chunkValues, i, numThreads]() {
+            if (chunkValues[i].empty())
+                return;
+
+            std::unique_ptr<BKNode> subtreeRoot;
+            size_t subtreeSize = 0;
+
+            for (const auto& value : chunkValues[i]) {
+                if (!subtreeRoot) {
+                    subtreeRoot = std::make_unique<BKNode>(value);
+                } else {
+                    size_t dist = metric_->distance(subtreeRoot->value, value);
+                    if (dist != 0) {
+                        std::function<void(BKNode*, const std::string&)> insertNode =
+                            [&](BKNode* node, const std::string& val) {
+                                size_t d = metric_->distance(node->value, val);
+                                if (d == 0)
+                                    return;
+                                auto itr = node->children.find(d);
+                                if (itr == node->children.end()) {
+                                    node->children[d] = std::make_unique<BKNode>(val);
+                                } else {
+                                    insertNode(itr->second.get(), val);
+                                }
+                            };
+                        auto it = subtreeRoot->children.find(dist);
+                        if (it == subtreeRoot->children.end()) {
+                            subtreeRoot->children[dist] = std::make_unique<BKNode>(value);
+                        } else {
+                            insertNode(it->second.get(), value);
+                        }
+                    }
+                }
+                subtreeSize++;
+            }
+
+            chunkValues[i].clear();
+            chunkValues[i].shrink_to_fit();
+
+            if (subtreeRoot) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!root_) {
+                    root_ = std::move(subtreeRoot);
+                    size_ += subtreeSize;
+                } else {
+                    std::function<void(BKNode*, std::unique_ptr<BKNode>)> mergeSubtree =
+                        [&](BKNode* mainNode, std::unique_ptr<BKNode> subNode) {
+                            if (!subNode)
+                                return;
+                            size_t dist = metric_->distance(mainNode->value, subNode->value);
+                            if (dist == 0)
+                                return;
+                            auto it = mainNode->children.find(dist);
+                            if (it == mainNode->children.end()) {
+                                mainNode->children[dist] = std::move(subNode);
+                            } else {
+                                mergeSubtree(it->second.get(), std::move(subNode));
+                            }
+                        };
+                    mergeSubtree(root_.get(), std::move(subtreeRoot));
+                    size_ += subtreeSize;
+                }
+            }
+        }));
+    }
+
+    for (auto& fut : futures) {
+        fut.get();
+    }
+}
+
 std::vector<std::pair<std::string, size_t>> BKTree::search(const std::string& query,
                                                            size_t maxDistance) const {
     std::vector<std::pair<std::string, size_t>> results;
@@ -136,7 +220,6 @@ std::vector<std::pair<std::string, size_t>> BKTree::search(const std::string& qu
 
     searchNode(root_.get(), query, maxDistance, results);
 
-    // Sort by distance
     std::ranges::sort(results, [](const auto& a, const auto& b) { return a.second < b.second; });
 
     return results;
@@ -150,7 +233,6 @@ void BKTree::searchNode(const BKNode* node, const std::string& query, size_t max
         results.emplace_back(node->value, dist);
     }
 
-    // Use triangle inequality to prune search space
     size_t minDist = (dist > maxDistance) ? dist - maxDistance : 0;
     size_t maxDist = dist + maxDistance;
 
@@ -172,7 +254,106 @@ BKTree::searchBest(const std::string& query, size_t maxResults, size_t maxDistan
     return results;
 }
 
+std::vector<std::pair<std::string, size_t>>
+BKTree::searchParallel(const std::string& query, size_t maxDistance,
+                       size_t parallelismThreshold) const {
+    std::vector<std::pair<std::string, size_t>> results;
+
+    if (!root_) {
+        return results;
+    }
+
+    struct SearchTask {
+        const BKNode* node;
+        size_t minDist;
+        size_t maxDist;
+    };
+
+    std::deque<SearchTask> taskQueue;
+    std::mutex resultsMutex;
+
+    size_t rootDist = metric_->distance(root_->value, query);
+    if (rootDist <= maxDistance) {
+        results.emplace_back(root_->value, rootDist);
+    }
+
+    size_t rootMinDist = (rootDist > maxDistance) ? rootDist - maxDistance : 0;
+    size_t rootMaxDist = rootDist + maxDistance;
+
+    for (const auto& [childDist, childNode] : root_->children) {
+        if (childDist >= rootMinDist && childDist <= rootMaxDist) {
+            taskQueue.push_back({childNode.get(), rootMinDist, rootMaxDist});
+        }
+    }
+
+    while (!taskQueue.empty()) {
+        size_t batchSize = std::min(taskQueue.size(), parallelismThreshold);
+
+        if (batchSize == 1) {
+            const auto& task = taskQueue.front();
+            size_t dist = metric_->distance(task.node->value, query);
+
+            if (dist <= maxDistance) {
+                std::lock_guard<std::mutex> lock(resultsMutex);
+                results.emplace_back(task.node->value, dist);
+            }
+
+            size_t minDist = (dist > maxDistance) ? dist - maxDistance : 0;
+            size_t maxDist = dist + maxDistance;
+
+            for (const auto& [childDist, childNode] : task.node->children) {
+                if (childDist >= minDist && childDist <= maxDist) {
+                    taskQueue.push_back({childNode.get(), minDist, maxDist});
+                }
+            }
+            taskQueue.pop_front();
+        } else {
+            std::vector<std::future<void>> futures;
+
+            for (size_t i = 0; i < batchSize && !taskQueue.empty(); ++i) {
+                SearchTask task = taskQueue.front();
+                taskQueue.pop_front();
+
+                futures.push_back(
+                    std::async(std::launch::async, [this, task, &results, &resultsMutex, &taskQueue,
+                                                    query, maxDistance]() {
+                        size_t dist = metric_->distance(task.node->value, query);
+
+                        if (dist <= maxDistance) {
+                            std::lock_guard<std::mutex> lock(resultsMutex);
+                            results.emplace_back(task.node->value, dist);
+                        }
+
+                        size_t minDist = (dist > maxDistance) ? dist - maxDistance : 0;
+                        size_t maxDist = dist + maxDistance;
+
+                        std::vector<SearchTask> childTasks;
+                        for (const auto& [childDist, childNode] : task.node->children) {
+                            if (childDist >= minDist && childDist <= maxDist) {
+                                childTasks.push_back({childNode.get(), minDist, maxDist});
+                            }
+                        }
+
+                        std::lock_guard<std::mutex> lock(resultsMutex);
+                        for (auto& ct : childTasks) {
+                            taskQueue.push_back(std::move(ct));
+                        }
+                    }));
+            }
+
+            for (auto& fut : futures) {
+                fut.get();
+            }
+        }
+    }
+
+    std::ranges::sort(results, [](const auto& a, const auto& b) { return a.second < b.second; });
+
+    return results;
+}
+
 void BKTree::clear() {
+    std::lock_guard<std::mutex> lock(mutex_);
     root_.reset();
     size_ = 0;
 }
@@ -198,17 +379,14 @@ void BKTree::collectStats(const BKNode* node, size_t depth, Stats& stats) const 
     }
 }
 
-// TrigramIndex Implementation
 std::vector<std::string> TrigramIndex::extractTrigrams(const std::string& str) const {
     std::vector<std::string> trigrams;
 
     if (str.length() < 3) {
-        // For short strings, use the string itself
         trigrams.push_back(str);
         return trigrams;
     }
 
-    // Add padding for better matching at boundaries
     std::string padded = "  " + str + "  ";
 
     for (size_t i = 0; i <= padded.length() - 3; ++i) {
@@ -219,7 +397,6 @@ std::vector<std::string> TrigramIndex::extractTrigrams(const std::string& str) c
 }
 
 void TrigramIndex::add(const std::string& id, const std::string& value) {
-    // Convert to lowercase for case-insensitive matching
     std::string lowerValue = value;
     std::ranges::transform(lowerValue, lowerValue.begin(), ::tolower);
 
@@ -257,12 +434,7 @@ std::vector<std::pair<std::string, float>> TrigramIndex::search(const std::strin
     std::ranges::transform(lowerQuery, lowerQuery.begin(), ::tolower);
 
     auto queryTrigrams = extractTrigrams(lowerQuery);
-    // std::cerr << "[DEBUG] TrigramIndex::search query='" << query << "' trigrams=" <<
-    // queryTrigrams.size()
-    //           << " threshold=" << threshold << std::endl;
-    // std::cerr << "[DEBUG] Total trigrams in index: " << trigramToStrings_.size() << std::endl;
 
-    // Collect candidate strings that share trigrams with query
     std::unordered_map<std::string, int> candidateCounts;
     for (const auto& trigram : queryTrigrams) {
         auto it = trigramToStrings_.find(trigram);
@@ -273,7 +445,6 @@ std::vector<std::pair<std::string, float>> TrigramIndex::search(const std::strin
         }
     }
 
-    // Calculate similarity scores
     std::vector<std::pair<std::string, float>> results;
 
     for (const auto& [id, count] : candidateCounts) {
@@ -281,7 +452,6 @@ std::vector<std::pair<std::string, float>> TrigramIndex::search(const std::strin
         if (it != stringToTrigrams_.end()) {
             float similarity = jaccardSimilarity(queryTrigrams, it->second);
 
-            // For short queries, also check substring matching
             auto strIt = idToString_.find(id);
             if (strIt != idToString_.end() && query.length() <= 10) {
                 std::string lowerStr = strIt->second;
@@ -322,18 +492,15 @@ void TrigramIndex::clear() {
     idToString_.clear();
 }
 
-// HybridFuzzySearch Implementation
 HybridFuzzySearch::HybridFuzzySearch()
     : titleTree_(std::make_unique<DamerauLevenshteinDistance>()),
       keywordTree_(std::make_unique<DamerauLevenshteinDistance>()) {}
 
 void HybridFuzzySearch::addDocument(const std::string& id, const std::string& title,
                                     const std::vector<std::string>& keywords) {
-    // Store document info
     idToTitle_[id] = title;
     idToKeywords_[id] = keywords;
 
-    // Add to BK-trees
     titleTree_.add(title);
     for (const auto& keyword : keywords) {
         keywordTree_.add(keyword);
@@ -343,22 +510,18 @@ void HybridFuzzySearch::addDocument(const std::string& id, const std::string& ti
     std::string word;
     int wordIndex = 0;
     while (titleStream >> word) {
-        // Clean word - remove punctuation
         word.erase(std::ranges::remove_if(
                        word, [](char c) { return !std::isalnum(c) && c != '-' && c != '_'; })
                        .begin(),
                    word.end());
 
         if (!word.empty() && word.length() > 2) {
-            // Index each word with document ID
             titleTrigrams_.add(id + "_w" + std::to_string(wordIndex++), word);
         }
     }
 
-    // Also index the full title for exact/near-exact matches
     titleTrigrams_.add(id, title);
 
-    // Index keywords individually
     for (size_t i = 0; i < keywords.size(); ++i) {
         keywordTrigrams_.add(id + "_kw" + std::to_string(i), keywords[i]);
     }
@@ -372,10 +535,8 @@ HybridFuzzySearch::search(const std::string& query, size_t maxResults,
     std::istringstream queryStream(query);
     std::string word;
     while (queryStream >> word) {
-        // Clean word - remove punctuation
         std::erase_if(word, [](char c) { return !std::isalnum(c) && c != '-' && c != '_'; });
 
-        // Convert to lowercase
         std::ranges::transform(word, word.begin(), ::tolower);
 
         if (!word.empty() && word.length() > 2) {
@@ -383,31 +544,21 @@ HybridFuzzySearch::search(const std::string& query, size_t maxResults,
         }
     }
 
-    // If multi-word query, handle differently
     if (queryWords.size() > 1) {
-        // std::cerr << "[DEBUG] Multi-word query detected with " << queryWords.size() << " words"
-        // << std::endl;
-
-        // Track which documents match which words
         std::unordered_map<std::string, std::set<std::string>> docWordMatches;
         std::unordered_map<std::string, float> docMaxScores;
 
-        // Search for each word independently
         for (const auto& queryWord : queryWords) {
             float adjustmentFactor = 1.0f / std::sqrt(static_cast<float>(queryWords.size()));
             float wordSimilarity = options.minSimilarity * adjustmentFactor;
 
-            // Clamp to reasonable range: [0.2, 0.7]
             wordSimilarity = std::clamp(wordSimilarity, 0.2f, 0.7f);
 
-            // Search using trigrams
             if (options.useTrigramPrefilter) {
                 auto trigramResults = titleTrigrams_.search(queryWord, wordSimilarity);
                 auto keywordResults = keywordTrigrams_.search(queryWord, wordSimilarity);
 
-                // Process results
                 for (const auto& [id, score] : trigramResults) {
-                    // Extract base document ID
                     std::string baseId = id;
                     size_t pos = id.find("_");
                     if (pos != std::string::npos) {
@@ -419,7 +570,6 @@ HybridFuzzySearch::search(const std::string& query, size_t maxResults,
                 }
 
                 for (const auto& [id, score] : keywordResults) {
-                    // Extract base document ID
                     std::string baseId = id;
                     size_t pos = id.find("_");
                     if (pos != std::string::npos) {
@@ -431,21 +581,17 @@ HybridFuzzySearch::search(const std::string& query, size_t maxResults,
                 }
             }
 
-            // BK-tree search for exact/close matches
             if (options.useBKTree) {
-                // Limit edit distance to 2 for performance (industry standard)
                 size_t maxDist = std::min(options.maxEditDistance, size_t(2));
                 auto bkResults = titleTree_.search(queryWord, maxDist);
 
                 for (const auto& [title, distance] : bkResults) {
-                    // Find documents with this word in title
                     for (const auto& [id, docTitle] : idToTitle_) {
                         std::string lowerTitle = docTitle;
                         std::transform(lowerTitle.begin(), lowerTitle.end(), lowerTitle.begin(),
                                        ::tolower);
 
-                        if (lowerTitle.find(queryWord) != std::string::npos ||
-                            distance <= 2) { // Allow up to 2 edits
+                        if (lowerTitle.find(queryWord) != std::string::npos || distance <= 2) {
                             float score = 1.0f - (float(distance) / float(maxDist + 1));
                             docWordMatches[id].insert(queryWord);
                             docMaxScores[id] = std::max(docMaxScores[id], score);
@@ -455,8 +601,7 @@ HybridFuzzySearch::search(const std::string& query, size_t maxResults,
             }
         }
 
-        // Calculate final scores based on matched words (industry standard)
-        float minShouldMatch = 0.5f; // At least 50% of words should match
+        float minShouldMatch = 0.5f;
         int requiredMatches = std::max(1, (int)std::ceil(queryWords.size() * minShouldMatch));
 
         for (const auto& [docId, matchedWords] : docWordMatches) {
@@ -464,7 +609,6 @@ HybridFuzzySearch::search(const std::string& query, size_t maxResults,
                 SearchResult result;
                 result.id = docId;
 
-                // Get document title
                 auto titleIt = idToTitle_.find(docId);
                 if (titleIt != idToTitle_.end()) {
                     result.title = titleIt->second;
@@ -472,33 +616,25 @@ HybridFuzzySearch::search(const std::string& query, size_t maxResults,
                     result.title = "Document " + docId;
                 }
 
-                // Score based on proportion of words matched and individual scores
                 float matchRatio = (float)matchedWords.size() / (float)queryWords.size();
                 float avgScore = docMaxScores[docId];
                 result.score = matchRatio * avgScore;
 
-                // Boost if all words matched
                 if (matchedWords.size() == queryWords.size()) {
                     result.score = std::min(1.0f, result.score * 1.2f);
                 }
 
                 result.matchType = "multi-word";
                 resultMap[docId] = result;
-
-                // std::cerr << "[DEBUG] Doc " << docId << " matched " << matchedWords.size()
-                //           << "/" << queryWords.size() << " words, score=" << result.score <<
-                //           std::endl;
             }
         }
 
     } else {
         if (options.useTrigramPrefilter) {
-            // Search in both title and keyword trigrams
             auto trigramResults = titleTrigrams_.search(query, options.minSimilarity);
             auto keywordTrigramResults = keywordTrigrams_.search(query, options.minSimilarity);
             for (const auto& [id, score] : keywordTrigramResults) {
-                trigramResults.push_back(
-                    {id, score * 0.9f}); // Slightly lower weight for keyword matches
+                trigramResults.push_back({id, score * 0.9f});
             }
 
             for (const auto& [id, score] : trigramResults) {
@@ -506,12 +642,10 @@ HybridFuzzySearch::search(const std::string& query, size_t maxResults,
                     SearchResult result;
                     result.id = id;
 
-                    // Handle regular IDs, content IDs, word IDs, and keyword IDs
                     auto titleIt = idToTitle_.find(id);
                     if (titleIt != idToTitle_.end()) {
                         result.title = titleIt->second;
                     } else {
-                        // Extract base document ID from special IDs
                         std::string baseId = id;
                         size_t contentPos = id.find("_content");
                         size_t wordPos = id.find("_w");
@@ -532,7 +666,6 @@ HybridFuzzySearch::search(const std::string& query, size_t maxResults,
                             result.title = "Document " + baseId;
                         }
 
-                        // Normalize ID to base document ID for result aggregation
                         result.id = baseId;
                     }
 
@@ -545,15 +678,12 @@ HybridFuzzySearch::search(const std::string& query, size_t maxResults,
             }
         }
 
-        // BK-tree search
         if (options.useBKTree) {
             auto bkResults = titleTree_.search(query, options.maxEditDistance);
 
             for (const auto& [title, distance] : bkResults) {
-                // Find document ID by title
                 for (const auto& [id, docTitle] : idToTitle_) {
                     if (docTitle == title) {
-                        // Convert edit distance to similarity score
                         float maxLen = std::max(query.length(), title.length());
                         float score = 1.0f - (static_cast<float>(distance) / maxLen);
 
@@ -588,7 +718,6 @@ HybridFuzzySearch::search(const std::string& query, size_t maxResults,
         if (a.score != b.score) {
             return a.score > b.score;
         }
-        // Tiebreaker: prefer exact title match, then shorter titles
         bool aExact = (a.title == query);
         bool bExact = (b.title == query);
         if (aExact != bExact)
@@ -601,6 +730,28 @@ HybridFuzzySearch::search(const std::string& query, size_t maxResults,
     }
 
     return results;
+}
+
+std::vector<std::vector<HybridFuzzySearch::SearchResult>>
+HybridFuzzySearch::searchConcurrent(const std::vector<std::string>& queries, size_t maxResults,
+                                    const SearchOptions& options) const {
+    std::vector<std::future<std::vector<SearchResult>>> futures;
+    futures.reserve(queries.size());
+
+    for (const auto& query : queries) {
+        futures.push_back(std::async(std::launch::async, [this, &query, maxResults, &options]() {
+            return search(query, maxResults, options);
+        }));
+    }
+
+    std::vector<std::vector<SearchResult>> allResults;
+    allResults.reserve(queries.size());
+
+    for (auto& fut : futures) {
+        allResults.push_back(fut.get());
+    }
+
+    return allResults;
 }
 
 void HybridFuzzySearch::clear() {

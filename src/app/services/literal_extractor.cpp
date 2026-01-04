@@ -105,7 +105,11 @@ std::vector<std::string> LiteralExtractor::extractAllLiterals(std::string_view p
 // --- Boyer-Moore-Horspool Implementation ---
 
 BMHSearcher::BMHSearcher(std::string_view pattern, bool ignoreCase)
-    : pattern_(pattern), ignoreCase_(ignoreCase) {
+    : pattern_(pattern), ignoreCase_(ignoreCase), useFastPath_(false) {
+    if (pattern_.size() < kMinBMHLength) {
+        useFastPath_ = true;
+        return;
+    }
     if (ignoreCase_) {
         std::transform(pattern_.begin(), pattern_.end(), pattern_.begin(),
                        [](unsigned char c) { return std::tolower(c); });
@@ -116,11 +120,8 @@ BMHSearcher::BMHSearcher(std::string_view pattern, bool ignoreCase)
 void BMHSearcher::buildShiftTable() {
     const size_t m = pattern_.size();
 
-    // Initialize all shifts to pattern length
     shift_.fill(m);
 
-    // Build bad character shift table
-    // For each character, store distance from end (excluding last char)
     for (size_t i = 0; i < m - 1; ++i) {
         unsigned char c = static_cast<unsigned char>(pattern_[i]);
         shift_[c] = m - 1 - i;
@@ -132,6 +133,30 @@ unsigned char BMHSearcher::toLower(unsigned char c) {
 }
 
 size_t BMHSearcher::find(std::string_view text, size_t startPos) const {
+    if (useFastPath_) {
+        return findFast(text, startPos);
+    }
+    return findBMH(text, startPos);
+}
+
+size_t BMHSearcher::findFast(std::string_view text, size_t startPos) const {
+    const size_t m = pattern_.size();
+    const size_t n = text.size();
+
+    if (m == 0 || n == 0 || m > n || startPos > n - m) {
+        return std::string::npos;
+    }
+
+    std::string textStr(text);
+    if (ignoreCase_) {
+        std::transform(textStr.begin(), textStr.end(), textStr.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+    }
+
+    return textStr.find(pattern_, startPos);
+}
+
+size_t BMHSearcher::findBMH(std::string_view text, size_t startPos) const {
     const size_t m = pattern_.size();
     const size_t n = text.size();
 
@@ -142,7 +167,6 @@ size_t BMHSearcher::find(std::string_view text, size_t startPos) const {
     size_t pos = startPos;
 
     while (pos <= n - m) {
-        // Check from end of pattern backwards
         size_t j = m - 1;
         while (j != static_cast<size_t>(-1)) {
             unsigned char textChar = static_cast<unsigned char>(text[pos + j]);
@@ -159,11 +183,9 @@ size_t BMHSearcher::find(std::string_view text, size_t startPos) const {
         }
 
         if (j == static_cast<size_t>(-1)) {
-            // Found match
             return pos;
         }
 
-        // Shift by bad character rule
         unsigned char badChar = static_cast<unsigned char>(text[pos + m - 1]);
         if (ignoreCase_) {
             badChar = toLower(badChar);
@@ -182,7 +204,7 @@ std::vector<size_t> BMHSearcher::findAll(std::string_view text) const {
         pos = find(text, pos);
         if (pos != std::string::npos) {
             matches.push_back(pos);
-            pos += 1; // Move to next position
+            pos += 1;
         }
     }
 

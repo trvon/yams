@@ -1039,22 +1039,24 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 } catch (...) {
                 }
             }
-            // Search executor and reason when unavailable
-            if (services_->getSearchExecutor()) {
-                out.serviceSearchExecutor = "available";
+            // Search engine and reason when unavailable
+            if (services_->getSearchEngineSnapshot()) {
+                out.serviceSearchEngine = "available";
             } else {
-                out.serviceSearchExecutor = "unavailable";
+                out.serviceSearchEngine = "unavailable";
                 std::string reason;
                 try {
                     if (!state_->readiness.databaseReady.load())
                         reason = "database_not_ready";
                     else if (!state_->readiness.metadataRepoReady.load())
                         reason = "metadata_repo_not_ready";
+                    else if (!state_->readiness.searchEngineReady.load())
+                        reason = "search_engine_not_built";
                     else
                         reason = "not_initialized";
                 } catch (...) {
                 }
-                out.searchExecutorReason = reason;
+                out.searchEngineReason = reason;
             }
         }
     } catch (...) {

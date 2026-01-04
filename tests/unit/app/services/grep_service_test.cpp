@@ -111,7 +111,6 @@ struct GrepFixture {
 
         ctx_.service_manager = nullptr;
         ctx_.store = store_;
-        ctx_.searchExecutor = nullptr;
         ctx_.metadataRepo = repo_;
         ctx_.searchEngine = nullptr;
 
