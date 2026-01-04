@@ -93,7 +93,7 @@ if benchmark_dep.found()
   ] + tracy_deps + [benchmark_dep]
 
   # RAG retrieval quality benchmark
-  retrieval_quality_bench_deps = search_bench_deps + [test_deps]
+  retrieval_quality_bench_deps = search_bench_deps + [test_deps, dependency('libcurl'), dependency('nlohmann_json')]
 
   retrieval_quality_bench = executable('retrieval_quality_bench',
     files('../../src/search/benchmarks/retrieval_quality_bench.cpp'),

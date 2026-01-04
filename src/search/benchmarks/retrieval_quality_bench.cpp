@@ -11,8 +11,11 @@
     YAMS_BENCH_CORPUS_SIZE=N          - Number of documents to generate (default: 50)
     YAMS_BENCH_NUM_QUERIES=N          - Number of test queries (default: 10)
     YAMS_BENCH_TOPK=N                 - Retrieve top K results (default: 10)
+    YAMS_BENCH_DATASET=scifact         - Use BEIR dataset (default: synthetic)
+    YAMS_BENCH_DATASET_PATH=...       - Path to dataset directory
 */
 
+#include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <benchmark/benchmark.h>
 
@@ -27,19 +30,205 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <map>
 #include <memory>
 #include <random>
 #include <set>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
+#include <curl/curl.h>
 #include <yams/compat/unistd.h>
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
+using namespace yams;
+using json = nlohmann::json;
+
+struct BEIRDocument {
+    std::string id;
+    std::string title;
+    std::string text;
+};
+
+struct BEIRQuery {
+    std::string id;
+    std::string text;
+};
+
+struct BEIRDataset {
+    std::string name;
+    std::map<std::string, BEIRDocument> documents;
+    std::map<std::string, BEIRQuery> queries;
+    std::multimap<std::string, std::pair<std::string, int>> qrels;
+    fs::path basePath;
+};
+
+static size_t writeCallback(void* contents, size_t size, size_t nmemb, void* userp) {
+    ((std::string*)userp)->append((char*)contents, size * nmemb);
+    return size * nmemb;
+}
+
+static Result<std::string> downloadFile(const std::string& url) {
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        return Error{ErrorCode::IoError, "Failed to initialize libcurl"};
+    }
+
+    std::string response;
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
+
+    CURLcode res = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK) {
+        return Error{ErrorCode::NetworkError,
+                     "Download failed: " + std::string(curl_easy_strerror(res))};
+    }
+
+    return response;
+}
+
+static Result<void> downloadSciFactDataset(const fs::path& cacheDir) {
+    const char* home = std::getenv("HOME");
+    if (!home) {
+        return Error{ErrorCode::InvalidArgument, "HOME environment variable not set"};
+    }
+
+    fs::path scifactDir =
+        cacheDir.empty() ? fs::path(home) / ".cache" / "yams" / "benchmarks" / "scifact" : cacheDir;
+
+    fs::create_directories(scifactDir);
+
+    std::vector<std::pair<std::string, std::string>> files = {
+        {"https://raw.githubusercontent.com/beir-cellar/scifact/main/corpus.jsonl", "corpus.jsonl"},
+        {"https://raw.githubusercontent.com/beir-cellar/scifact/main/queries.jsonl",
+         "queries.jsonl"},
+        {"https://raw.githubusercontent.com/beir-cellar/scifact/main/qrels/test.tsv", "qrels.tsv"}};
+
+    for (const auto& [url, filename] : files) {
+        fs::path filePath = scifactDir / filename;
+        if (fs::exists(filePath)) {
+            spdlog::info("Dataset file already exists: {}", filePath.string());
+            continue;
+        }
+
+        spdlog::info("Downloading {} from {}", filename, url);
+        auto result = downloadFile(url);
+        if (!result) {
+            return Error{result.error().code,
+                         "Failed to download " + filename + ": " + result.error().message};
+        }
+
+        std::ofstream outFile(filePath);
+        if (!outFile) {
+            return Error{ErrorCode::IoError, "Failed to write " + filePath.string()};
+        }
+        outFile << result.value();
+        outFile.close();
+
+        spdlog::info("Downloaded {} ({} bytes)", filename, result.value().size());
+    }
+
+    spdlog::info("SciFact dataset downloaded to {}", scifactDir.string());
+    return {};
+}
+
+static Result<BEIRDataset> loadSciFactDataset(const fs::path& cacheDir) {
+    const char* home = std::getenv("HOME");
+    if (!home) {
+        return Error{ErrorCode::InvalidArgument, "HOME environment variable not set"};
+    }
+
+    fs::path scifactDir =
+        cacheDir.empty() ? fs::path(home) / ".cache" / "yams" / "benchmarks" / "scifact" : cacheDir;
+
+    BEIRDataset dataset;
+    dataset.name = "SciFact";
+    dataset.basePath = scifactDir;
+
+    fs::path corpusFile = scifactDir / "corpus.jsonl";
+    fs::path queriesFile = scifactDir / "queries.jsonl";
+    fs::path qrelsFile = scifactDir / "qrels" / "test.tsv";
+
+    if (!fs::exists(corpusFile) || !fs::exists(queriesFile) || !fs::exists(qrelsFile)) {
+        spdlog::info("SciFact dataset not found, downloading...");
+        auto dlResult = downloadSciFactDataset(cacheDir);
+        if (!dlResult) {
+            return Error{dlResult.error().code, dlResult.error().message};
+        }
+    }
+
+    std::ifstream corpusIn(corpusFile);
+    std::string line;
+    while (std::getline(corpusIn, line)) {
+        if (line.empty())
+            continue;
+        try {
+            auto j = json::parse(line);
+            BEIRDocument doc;
+            doc.id = j.value("_id", "");
+            if (doc.id.empty())
+                doc.id = j.value("id", "");
+            doc.title = j.value("title", "");
+            doc.text = j.value("text", "");
+            if (!doc.id.empty() && !doc.text.empty()) {
+                dataset.documents[doc.id] = doc;
+            }
+        } catch (const json::exception& e) {
+            spdlog::warn("Failed to parse corpus line: {}", e.what());
+        }
+    }
+    corpusIn.close();
+
+    std::ifstream queriesIn(queriesFile);
+    while (std::getline(queriesIn, line)) {
+        if (line.empty())
+            continue;
+        try {
+            auto j = json::parse(line);
+            BEIRQuery q;
+            q.id = j.value("_id", "");
+            if (q.id.empty())
+                q.id = j.value("id", "");
+            q.text = j.value("text", "");
+            if (!q.id.empty() && !q.text.empty()) {
+                dataset.queries[q.id] = q;
+            }
+        } catch (const json::exception& e) {
+            spdlog::warn("Failed to parse query line: {}", e.what());
+        }
+    }
+    queriesIn.close();
+
+    std::ifstream qrelsIn(qrelsFile);
+    while (std::getline(qrelsIn, line)) {
+        if (line.empty() || line[0] == '#')
+            continue;
+        std::istringstream iss(line);
+        std::string queryId, iteration, docId, scoreStr;
+        if (std::getline(iss, queryId, '\t') && std::getline(iss, iteration, '\t') &&
+            std::getline(iss, docId, '\t') && std::getline(iss, scoreStr, '\t')) {
+            int score = std::stoi(scoreStr);
+            dataset.qrels.emplace(queryId, std::make_pair(docId, score));
+        }
+    }
+    qrelsIn.close();
+
+    spdlog::info("Loaded BEIR dataset: {} documents, {} queries, {} qrels",
+                 dataset.documents.size(), dataset.queries.size(), dataset.qrels.size());
+
+    return dataset;
+}
 
 class SimpleDaemonHarness {
 public:
@@ -90,6 +279,9 @@ public:
         if (!s)
             return false;
 
+        // Start runLoop in background thread - CRITICAL for processing requests
+        runLoopThread_ = std::thread([this]() { daemon_->runLoop(); });
+
         auto deadline = std::chrono::steady_clock::now() + 30s;
         while (std::chrono::steady_clock::now() < deadline) {
             std::this_thread::sleep_for(100ms);
@@ -107,6 +299,11 @@ public:
             auto stopResult = daemon_->stop();
             if (!stopResult) {
                 spdlog::warn("Daemon stop returned error: {}", stopResult.error().message);
+            }
+
+            // Join the runLoop thread before continuing
+            if (runLoopThread_.joinable()) {
+                runLoopThread_.join();
             }
 
             int retries = 0;
@@ -152,13 +349,16 @@ private:
     }
 
     std::unique_ptr<yams::daemon::YamsDaemon> daemon_;
+    std::thread runLoopThread_;
     fs::path root_, data_, sock_, pid_, log_;
 };
 
 struct TestQuery {
     std::string query;
     std::set<std::string> relevantFiles;
+    std::set<std::string> relevantDocIds;
     std::map<std::string, int> relevanceGrades;
+    bool useDocIds;
 };
 
 struct CorpusGenerator {
@@ -209,6 +409,60 @@ struct CorpusGenerator {
     }
 };
 
+struct BEIRCorpusLoader {
+    BEIRDataset dataset;
+    fs::path corpusDir;
+    std::map<std::string, std::string> docIdToHash;
+
+    BEIRCorpusLoader(const BEIRDataset& ds, const fs::path& dir) : dataset(ds), corpusDir(dir) {}
+
+    void writeDocumentsAsFiles() {
+        fs::create_directories(corpusDir);
+        for (const auto& [id, doc] : dataset.documents) {
+            fs::path filePath = corpusDir / (id + ".txt");
+            std::ofstream outFile(filePath);
+            if (doc.title.empty()) {
+                outFile << doc.text;
+            } else {
+                outFile << doc.title << "\n\n" << doc.text;
+            }
+            outFile.close();
+            docIdToHash[id] = filePath.string();
+        }
+        spdlog::info("Wrote {} documents to {}", dataset.documents.size(), corpusDir.string());
+    }
+
+    std::vector<TestQuery> generateTestQueries() {
+        std::vector<TestQuery> testQueries;
+        for (const auto& [queryId, query] : dataset.queries) {
+            TestQuery tq;
+            tq.query = query.text;
+            tq.useDocIds = true;
+
+            auto range = dataset.qrels.equal_range(queryId);
+            for (auto it = range.first; it != range.second; ++it) {
+                const auto& [docId, score] = it->second;
+                tq.relevantDocIds.insert(docId);
+                tq.relevanceGrades[docId] = score;
+            }
+
+            if (!tq.relevantDocIds.empty()) {
+                testQueries.push_back(tq);
+            }
+        }
+        spdlog::info("Generated {} test queries from BEIR dataset", testQueries.size());
+        return testQueries;
+    }
+
+    std::vector<std::string> getDocumentPaths() const {
+        std::vector<std::string> paths;
+        for (const auto& [id, doc] : dataset.documents) {
+            paths.push_back((corpusDir / (id + ".txt")).string());
+        }
+        return paths;
+    }
+};
+
 struct RetrievalMetrics {
     double mrr = 0.0, recallAtK = 0.0, precisionAtK = 0.0, ndcgAtK = 0.0, map = 0.0;
     int numQueries = 0;
@@ -256,7 +510,21 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client,
 
         for (size_t i = 0; i < std::min((size_t)k, results.size()); ++i) {
             std::string filename = fs::path(results[i].path).filename().string();
-            bool isRelevant = tq.relevantFiles.count(filename) > 0;
+            bool isRelevant = false;
+            std::string key;
+
+            if (tq.useDocIds) {
+                std::string docId = filename;
+                if (docId.size() > 4 && docId.substr(docId.size() - 4) == ".txt") {
+                    docId = docId.substr(0, docId.size() - 4);
+                }
+                key = docId;
+                isRelevant = tq.relevantDocIds.count(docId) > 0;
+            } else {
+                key = filename;
+                isRelevant = tq.relevantFiles.count(filename) > 0;
+            }
+
             if (isRelevant) {
                 numRelevantInTopK++;
                 if (firstRelevantRank < 0)
@@ -264,14 +532,19 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client,
                 numRelevantSeen++;
                 avgPrecision += (double)numRelevantSeen / (i + 1);
             }
-            auto gradeIt = tq.relevanceGrades.find(filename);
+            auto gradeIt = tq.relevanceGrades.find(key);
             retrievedGrades.push_back((gradeIt != tq.relevanceGrades.end()) ? gradeIt->second : 0);
         }
 
         if (firstRelevantRank > 0)
             totalMRR += 1.0 / firstRelevantRank;
-        if (tq.relevantFiles.size() > 0)
-            totalRecall += (double)numRelevantInTopK / tq.relevantFiles.size();
+        if (tq.useDocIds) {
+            if (tq.relevantDocIds.size() > 0)
+                totalRecall += (double)numRelevantInTopK / tq.relevantDocIds.size();
+        } else {
+            if (tq.relevantFiles.size() > 0)
+                totalRecall += (double)numRelevantInTopK / tq.relevantFiles.size();
+        }
         if (results.size() > 0)
             totalPrecision += (double)numRelevantInTopK / std::min((size_t)k, results.size());
         if (numRelevantSeen > 0)
@@ -299,13 +572,25 @@ struct BenchFixture {
     std::unique_ptr<SimpleDaemonHarness> harness;
     std::unique_ptr<yams::daemon::DaemonClient> client;
     std::unique_ptr<CorpusGenerator> corpus;
+    std::unique_ptr<BEIRCorpusLoader> beirCorpus;
     std::vector<TestQuery> queries;
     int corpusSize = 50, numQueries = 10, topK = 10;
+    bool useBEIR = false;
 
     void setup() {
+        const char* env_dataset = std::getenv("YAMS_BENCH_DATASET");
+        const char* env_path = std::getenv("YAMS_BENCH_DATASET_PATH");
         const char* env_size = std::getenv("YAMS_BENCH_CORPUS_SIZE");
         const char* env_queries = std::getenv("YAMS_BENCH_NUM_QUERIES");
         const char* env_topk = std::getenv("YAMS_BENCH_TOPK");
+
+        if (env_dataset) {
+            std::string datasetName = env_dataset;
+            if (datasetName == "scifact") {
+                useBEIR = true;
+            }
+        }
+
         if (env_size)
             corpusSize = std::stoi(env_size);
         if (env_queries)
@@ -313,15 +598,31 @@ struct BenchFixture {
         if (env_topk)
             topK = std::stoi(env_topk);
 
-        spdlog::info("Setting up RAG benchmark: {} docs, {} queries, k={}", corpusSize, numQueries,
-                     topK);
+        spdlog::info("Setting up RAG benchmark: {} dataset, {} docs, {} queries, k={}",
+                     useBEIR ? "SciFact BEIR" : "synthetic", corpusSize, numQueries, topK);
 
         harness = std::make_unique<SimpleDaemonHarness>();
         if (!harness->start())
             throw std::runtime_error("Failed to start daemon");
 
-        corpus = std::make_unique<CorpusGenerator>(harness->root() / "corpus");
-        corpus->generateDocuments(corpusSize);
+        if (useBEIR) {
+            fs::path cachePath = env_path ? fs::path(env_path) : fs::path();
+            auto dsResult = loadSciFactDataset(cachePath);
+            if (!dsResult) {
+                throw std::runtime_error("Failed to load BEIR dataset: " +
+                                         dsResult.error().message);
+            }
+            BEIRDataset dataset = dsResult.value();
+
+            fs::path corpusDir = harness->root() / "corpus";
+            beirCorpus = std::make_unique<BEIRCorpusLoader>(dataset, corpusDir);
+            beirCorpus->writeDocumentsAsFiles();
+            corpusSize = dataset.documents.size();
+            numQueries = dataset.queries.size();
+        } else {
+            corpus = std::make_unique<CorpusGenerator>(harness->root() / "corpus");
+            corpus->generateDocuments(corpusSize);
+        }
 
         yams::daemon::ClientConfig clientCfg;
         clientCfg.socketPath = harness->socketPath();
@@ -335,13 +636,23 @@ struct BenchFixture {
 
         spdlog::info("Ingesting {} documents...", corpusSize);
         int successCount = 0, failCount = 0;
-        for (const auto& filename : corpus->createdFiles) {
+        std::vector<std::string> docPaths;
+
+        if (useBEIR) {
+            docPaths = beirCorpus->getDocumentPaths();
+        } else {
+            for (const auto& filename : corpus->createdFiles) {
+                docPaths.push_back((corpus->corpusDir / filename).string());
+            }
+        }
+
+        for (const auto& filePath : docPaths) {
             yams::daemon::AddDocumentRequest addReq;
-            addReq.path = (corpus->corpusDir / filename).string();
+            addReq.path = filePath;
             addReq.noEmbeddings = false;
             auto addResult = yams::cli::run_sync(client->streamingAddDocument(addReq), 30s);
             if (!addResult) {
-                spdlog::warn("Failed to ingest {}: {}", filename, addResult.error().message);
+                spdlog::warn("Failed to ingest {}: {}", filePath, addResult.error().message);
                 failCount++;
             } else {
                 successCount++;
@@ -423,7 +734,11 @@ struct BenchFixture {
             throw std::runtime_error("No documents indexed - benchmark cannot proceed");
         }
 
-        queries = corpus->generateQueries(numQueries);
+        if (useBEIR) {
+            queries = beirCorpus->generateTestQueries();
+        } else {
+            queries = corpus->generateQueries(numQueries);
+        }
         spdlog::info("Generated {} test queries", queries.size());
     }
 

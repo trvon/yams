@@ -110,7 +110,7 @@ jobs:
           export YAMS_CONAN_EXTRA_OPTIONS="-o build_tests=True -o build_benchmarks=True"
           export YAMS_EXTRA_MESON_FLAGS="-Dbuild-tests=true -Denable-onnx=disabled"
           
-          ./setup.sh Release
+          ./setup.sh Debug
           meson compile -C builddir
 
       - name: Run Bench Test Suite

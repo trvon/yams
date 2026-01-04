@@ -123,7 +123,7 @@ jobs:
             ccache-${{ runner.os }}-${{ matrix.suffix }}-
             ccache-${{ runner.os }}-
 
-      - name: Install Conan
+      - name: Install Conan and Meson
         shell: bash
         run: |
           set -euo pipefail
@@ -136,12 +136,15 @@ jobs:
             python -m pip install --user --upgrade pipx || true
             python -m pipx ensurepath || true
             pipx install conan
+            # Install Meson/Ninja to ensure version consistency with tests job
+            python -m pip install --user --upgrade meson ninja
           else
             python3 -m pip install --user --upgrade pipx || true
             python3 -m pipx ensurepath || true
             pipx install --python python3 conan || pipx install conan || pip3 install --user --upgrade conan
           fi
           conan --version
+          [ "$RUNNER_OS" = "Windows" ] && meson --version || true
           mkdir -p ~/.conan2
           cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
 

@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Performance
 - IPC latency reduced from ~8-28ms to ~2-5ms (connection pooling, async timers, cached config).
 - Post-ingest throughput: dedicated worker pool, adaptive backoff, batched directory ingests.
+- Search optimizations: batch vector/KG lookups, flat_map for cache-friendly access, branch hints, memory pre-allocation.
+- Daemon startup throttling: PathTreeRepair via RepairCoordinator, Fts5Job startup delay (2s), reduced batch sizes (1000→100).
 
 ### Fixed
 - Compression stats now persist across daemon restarts (`Storage Logical Bytes` vs

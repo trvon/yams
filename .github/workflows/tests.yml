@@ -141,6 +141,11 @@ jobs:
           export PATH="$USER_BASE/Scripts:$USER_BASE/bin:$PATH"
           echo "meson version: $(meson --version || echo 'missing')"
           echo "ninja version: $(ninja --version || echo 'missing')"
+          # Clean stale builddir to avoid Meson version incompatibility
+          if [ -d "${{ env.BUILD_DIR }}" ]; then
+            echo "Removing stale builddir to ensure clean Meson configuration"
+            rm -rf "${{ env.BUILD_DIR }}"
+          fi
 
       - name: Install Zig (Windows)
         if: runner.os == 'Windows'

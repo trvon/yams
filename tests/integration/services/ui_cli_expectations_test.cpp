@@ -74,11 +74,14 @@ protected:
             GTEST_SKIP() << "Skipping: AF_UNIX not available in this environment.";
         }
         harness_ = std::make_unique<yams::test::DaemonHarness>();
-        ASSERT_TRUE(harness_->start(5s)) << "Failed to start daemon";
+        // Use 15s timeout for CI environments which can be slower
+        ASSERT_TRUE(harness_->start(15s)) << "Failed to start daemon";
         storageDir_ = harness_->dataDir();
         socketPath_ = harness_->socketPath();
         root_ = storageDir_.parent_path();
         fs::create_directories(root_ / "ingest");
+        // Allow additional settling time for daemon services to fully initialize
+        std::this_thread::sleep_for(100ms);
     }
 
     void TearDown() override { harness_.reset(); }

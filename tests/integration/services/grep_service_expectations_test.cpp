@@ -36,6 +36,7 @@ protected:
     fs::path storageDir_;
     fs::path socketPath_;
     std::unique_ptr<yams::daemon::YamsDaemon> daemon_;
+    std::thread runLoopThread_;
 
     static bool canBindUnixSocketHere();
 
@@ -62,12 +63,30 @@ protected:
         daemon_ = std::make_unique<yams::daemon::YamsDaemon>(cfg);
         auto started = daemon_->start();
         ASSERT_TRUE(started) << started.error().message;
-        std::this_thread::sleep_for(150ms);
+
+        // Start runLoop in background thread - CRITICAL for processing requests
+        runLoopThread_ = std::thread([this]() { daemon_->runLoop(); });
+
+        // Wait for daemon to reach Ready state (up to 15s for CI)
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        while (std::chrono::steady_clock::now() < deadline) {
+            auto lifecycle = daemon_->getLifecycle().snapshot();
+            if (lifecycle.state == yams::daemon::LifecycleState::Ready) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        // Additional settling time
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     void TearDown() override {
-        if (daemon_)
+        if (daemon_) {
             daemon_->stop();
+            if (runLoopThread_.joinable()) {
+                runLoopThread_.join();
+            }
+        }
         std::error_code ec;
         fs::remove_all(root_, ec);
     }
