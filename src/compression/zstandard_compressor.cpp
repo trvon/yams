@@ -84,8 +84,10 @@ public:
         // Resize to actual compressed size
         compressed.resize(result);
 
-        // If compression didn't help (output >= input), return original uncompressed
-        if (result >= data.size()) {
+        // If compression didn't help (output + 64-byte header >= input), return original
+        // uncompressed
+        constexpr size_t HEADER_OVERHEAD = 64;
+        if (result + HEADER_OVERHEAD >= data.size()) {
             spdlog::debug(
                 "Zstandard compression ineffective ({} >= {}), storing uncompressed in {}μs",
                 result, data.size(), duration.count());

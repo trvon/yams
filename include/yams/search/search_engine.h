@@ -110,6 +110,9 @@ struct SearchEngineConfig {
     bool useConnectionPriority = true;   // Use High priority for search queries
     size_t minChunkSizeForParallel = 50; // Min results for parallel processing
 
+    // Symbol ranking
+    bool symbolRank = true; // Enable automatic symbol ranking boost for code-like queries
+
     // Debugging
     bool includeDebugInfo = false; // Include per-component scores in results
 

@@ -74,6 +74,7 @@ private:
     bool showHash_ = false;
     bool verbose_ = false;
     bool jsonOutput_ = false;
+    bool symbolRank_ = true; // Enable symbol ranking boost for code-like queries
     std::string hashQuery_;
 
     // Line-level search options
@@ -717,6 +718,10 @@ public:
         cmd->add_flag("--show-hash", showHash_, "Show document hashes in results");
         cmd->add_flag("-v,--verbose", verbose_, "Show detailed information including full hashes");
         cmd->add_flag("--json", jsonOutput_, "Output results in JSON format");
+        cmd->add_flag(
+            "--symbol-rank,--no-symbol-rank", symbolRank_,
+            "Enable/disable automatic symbol ranking boost for code-like queries (enabled by "
+            "default)");
 
         // Line-level search options
         cmd->add_flag("-n,--line-numbers", showLineNumbers_, "Show line numbers with matches");
@@ -974,6 +979,7 @@ public:
             dreq.showHash = showHash_;
             dreq.verbose = verbose_;
             dreq.showLineNumbers = showLineNumbers_;
+            dreq.symbolRank = symbolRank_;
             // Engine-level filters
             if (!includeGlobsExpanded.empty()) {
                 dreq.pathPatterns =

@@ -793,8 +793,11 @@ private:
 
         // Collect all hashes and paths that need hydration
         std::vector<std::string> hashes;
+        hashes.reserve(resp.results.size());
         std::unordered_map<std::string, std::vector<size_t>> hashToIndices;
+        hashToIndices.reserve(resp.results.size());
         std::unordered_map<std::string, std::vector<size_t>> pathToIndices;
+        pathToIndices.reserve(resp.results.size());
 
         for (size_t i = 0; i < resp.results.size(); ++i) {
             const auto& it = resp.results[i];
@@ -816,6 +819,7 @@ private:
 
         // Batch fetch documents by hash (1 query instead of N)
         std::unordered_map<std::string, metadata::DocumentInfo> docsMap;
+        docsMap.reserve(hashes.size() + pathToIndices.size());
         if (!hashes.empty()) {
             auto docsResult = co_await retryMetadataOp(
                 [&]() { return ctx_.metadataRepo->batchGetDocumentsByHash(hashes); }, 4,

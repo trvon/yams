@@ -677,6 +677,8 @@ public:
             // Split candidates into chunks for parallel processing
             const size_t chunkSize =
                 std::max<size_t>(10, docs.size() / std::thread::hardware_concurrency());
+            futures.reserve((docs.size() + chunkSize - 1) / chunkSize);
+
             for (size_t i = 0; i < docs.size(); i += chunkSize) {
                 size_t end = std::min(i + chunkSize, docs.size());
 

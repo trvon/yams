@@ -781,7 +781,7 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::querySymbols(const std:
                                         query.find("::") != std::string::npos ||
                                         (query.length() > 1 && std::isupper(query[0]));
 
-            if (queryLooksLikeSymbol) {
+            if (queryLooksLikeSymbol && config_.symbolRank) {
                 scoreMultiplier *= 1.2f;
             }
 

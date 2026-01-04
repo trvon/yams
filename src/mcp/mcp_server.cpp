@@ -1800,6 +1800,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     dreq.beforeContext = req.beforeContext;
     dreq.afterContext = req.afterContext;
     dreq.context = req.context;
+    dreq.symbolRank = req.symbolRank;
 
     // Send early progress notification
     sendProgress("search", 0.0, "search started");

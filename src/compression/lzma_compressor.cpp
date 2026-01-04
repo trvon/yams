@@ -207,10 +207,13 @@ private:
 
         size_t compressedSize = KRONOS_LZMA_PROPS_SIZE + destLen;
 
-        // If compression didn't help (output >= input), return original uncompressed
-        if (compressedSize >= data.size()) {
-            spdlog::debug("LZMA compression ineffective ({} >= {}), storing uncompressed in {}μs",
-                          compressedSize, data.size(), duration.count());
+        // If compression didn't help (output + 64-byte header >= input), return original
+        // uncompressed
+        constexpr size_t HEADER_OVERHEAD = 64;
+        if (compressedSize + HEADER_OVERHEAD >= data.size()) {
+            spdlog::debug(
+                "LZMA compression ineffective ({} + {} >= {}), storing uncompressed in {}μs",
+                compressedSize, HEADER_OVERHEAD, data.size(), duration.count());
             return CompressionResult::makeUncompressed(
                 data, std::chrono::duration_cast<std::chrono::milliseconds>(duration));
         }
@@ -296,10 +299,13 @@ private:
 
         size_t compressedSize = 1 + destLen;
 
-        // If compression didn't help (output >= input), return original uncompressed
-        if (compressedSize >= data.size()) {
-            spdlog::debug("LZMA2 compression ineffective ({} >= {}), storing uncompressed in {}μs",
-                          compressedSize, data.size(), duration.count());
+        // If compression didn't help (output + 64-byte header >= input), return original
+        // uncompressed
+        constexpr size_t HEADER_OVERHEAD = 64;
+        if (compressedSize + HEADER_OVERHEAD >= data.size()) {
+            spdlog::debug(
+                "LZMA2 compression ineffective ({} + {} >= {}), storing uncompressed in {}μs",
+                compressedSize, HEADER_OVERHEAD, data.size(), duration.count());
             return CompressionResult::makeUncompressed(
                 data, std::chrono::duration_cast<std::chrono::milliseconds>(duration));
         }

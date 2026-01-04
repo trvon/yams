@@ -83,6 +83,7 @@ struct SearchRequest {
     bool useSession = false;
     std::string sessionName;
     bool globalSearch = false; // Session-isolated memory (PBI-082): bypass session isolation
+    bool symbolRank = true;    // Enable automatic symbol ranking boost for code-like queries
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -97,7 +98,7 @@ struct SearchRequest {
             << static_cast<int32_t>(vectorStageTimeoutMs)
             << static_cast<int32_t>(keywordStageTimeoutMs)
             << static_cast<int32_t>(snippetHydrationTimeoutMs) << useSession << sessionName
-            << globalSearch;
+            << globalSearch << symbolRank;
     }
 
     template <typename Deserializer>
@@ -289,6 +290,9 @@ struct SearchRequest {
         // Session-isolated memory (PBI-082)
         if (auto gs = deser.template read<bool>(); gs) {
             req.globalSearch = gs.value();
+        }
+        if (auto sr = deser.template read<bool>(); sr) {
+            req.symbolRank = sr.value();
         }
 
         return req;

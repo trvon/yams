@@ -131,6 +131,9 @@ struct MCPSearchRequest {
     bool useSession = true;  // default: scope to current session when available
     std::string sessionName; // optional: target a specific session
 
+    // Symbol ranking
+    bool symbolRank = true; // Enable automatic symbol ranking boost for code-like queries
+
     static MCPSearchRequest fromJson(const json& j);
     json toJson() const;
 };
