@@ -55,6 +55,25 @@ struct CompressionResult {
                                       100.0
                                 : 0.0;
     }
+
+    /**
+     * @brief Create an uncompressed result (for when compression is ineffective)
+     * @param data Original data to store uncompressed
+     * @param duration Time spent attempting compression
+     * @return CompressionResult with algorithm=None
+     */
+    [[nodiscard]] static CompressionResult
+    makeUncompressed(std::span<const std::byte> data,
+                     std::chrono::milliseconds duration = std::chrono::milliseconds{0}) {
+        CompressionResult result;
+        result.data.assign(data.begin(), data.end());
+        result.algorithm = CompressionAlgorithm::None;
+        result.level = 0;
+        result.originalSize = data.size();
+        result.compressedSize = data.size();
+        result.duration = duration;
+        return result;
+    }
 };
 
 /**

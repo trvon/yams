@@ -84,6 +84,15 @@ public:
         // Resize to actual compressed size
         compressed.resize(result);
 
+        // If compression didn't help (output >= input), return original uncompressed
+        if (result >= data.size()) {
+            spdlog::debug(
+                "Zstandard compression ineffective ({} >= {}), storing uncompressed in {}μs",
+                result, data.size(), duration.count());
+            return CompressionResult::makeUncompressed(
+                data, std::chrono::duration_cast<std::chrono::milliseconds>(duration));
+        }
+
         CompressionResult compResult;
         compResult.data = std::move(compressed);
         compResult.algorithm = CompressionAlgorithm::Zstandard;

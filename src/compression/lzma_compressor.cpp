@@ -205,6 +205,16 @@ private:
         auto end = std::chrono::steady_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 
+        size_t compressedSize = KRONOS_LZMA_PROPS_SIZE + destLen;
+
+        // If compression didn't help (output >= input), return original uncompressed
+        if (compressedSize >= data.size()) {
+            spdlog::debug("LZMA compression ineffective ({} >= {}), storing uncompressed in {}μs",
+                          compressedSize, data.size(), duration.count());
+            return CompressionResult::makeUncompressed(
+                data, std::chrono::duration_cast<std::chrono::milliseconds>(duration));
+        }
+
         CompressionResult result;
         result.data = std::move(compressed);
         result.algorithm = CompressionAlgorithm::LZMA;
@@ -283,6 +293,16 @@ private:
 
         auto end = std::chrono::steady_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+
+        size_t compressedSize = 1 + destLen;
+
+        // If compression didn't help (output >= input), return original uncompressed
+        if (compressedSize >= data.size()) {
+            spdlog::debug("LZMA2 compression ineffective ({} >= {}), storing uncompressed in {}μs",
+                          compressedSize, data.size(), duration.count());
+            return CompressionResult::makeUncompressed(
+                data, std::chrono::duration_cast<std::chrono::milliseconds>(duration));
+        }
 
         CompressionResult result;
         result.data = std::move(compressed);

@@ -25,7 +25,7 @@
 set -euo pipefail
 
 ENABLE_COVERAGE=false
-ENABLE_TSAN=""
+ENABLE_TSAN="${ENABLE_TSAN:-}"  # Preserve environment variable if set
 BUILD_TYPE_INPUT=""
 
 while [[ $# -gt 0 ]]; do

@@ -121,7 +121,9 @@ TEST_CASE_METHOD(TransactionManagerFixture, "TransactionManager - CompressInTran
 
     // Should succeed or fail based on algorithm availability
     if (result.has_value()) {
-        CHECK(result.value().algorithm == CompressionAlgorithm::Zstandard);
+        // May return None if compression was ineffective (output >= input)
+        CHECK((result.value().algorithm == CompressionAlgorithm::Zstandard ||
+               result.value().algorithm == CompressionAlgorithm::None));
         CHECK(result.value().originalSize == data.size());
     }
 }
