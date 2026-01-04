@@ -208,6 +208,12 @@ public:
         yams::integrity::PruneConfig config;
     };
 
+    // PathTreeRepair job - creates missing path tree entries for documents
+    struct PathTreeJob {
+        uint64_t requestId{0}; // To match response
+        bool runOnce{true};    // Run once at startup vs periodic
+    };
+
 private:
     InternalEventBus() = default;
     std::mutex mu_;

@@ -72,7 +72,6 @@ void BackgroundTaskManager::start() {
     try {
         launchFts5JobConsumer();
         launchOrphanScanTask();
-        launchPathTreeRepairTask();
         launchCheckpointTask();
         launchStorageGcTask();
         launchGraphPruneTask();
@@ -123,9 +122,34 @@ void BackgroundTaskManager::launchFts5JobConsumer() {
             auto channel = Bus::instance().get_or_create_channel<Bus::Fts5Job>("fts5_jobs", 512);
             using namespace std::chrono_literals;
 
-            // Create local timer (not a member, no shared state)
             auto executor = co_await boost::asio::this_coro::executor;
             boost::asio::steady_timer timer(executor);
+
+            const uint32_t startupDelayMs = TuneAdvisor::fts5StartupDelayMs();
+            const uint32_t startupThrottleMs = TuneAdvisor::fts5StartupThrottleMs();
+            const uint32_t normalThrottleMs = 10;
+
+            spdlog::debug(
+                "[Fts5Job] Startup delay={}ms, startup throttle={}ms, normal throttle={}ms",
+                startupDelayMs, startupThrottleMs, normalThrottleMs);
+
+            bool startupComplete = false;
+            int64_t jobsProcessedDuringStartup = 0;
+            constexpr int64_t startupJobThreshold = 100;
+
+            if (startupDelayMs > 0) {
+                timer.expires_after(std::chrono::milliseconds(startupDelayMs));
+                try {
+                    co_await timer.async_wait(boost::asio::use_awaitable);
+                } catch (const boost::system::system_error& e) {
+                    if (e.code() == boost::asio::error::operation_aborted) {
+                        co_return;
+                    }
+                    throw;
+                }
+            }
+            startupComplete = true;
+            spdlog::debug("[Fts5Job] Startup phase complete, entering normal operation");
 
             while (!stopFlag->load(std::memory_order_acquire)) {
                 Bus::Fts5Job job;
@@ -137,8 +161,6 @@ void BackgroundTaskManager::launchFts5JobConsumer() {
                         spdlog::debug("[Fts5Job] Metadata not ready, dropping {} docs",
                                       job.hashes.size());
                     } else if (job.operation == Bus::Fts5Operation::ExtractAndIndex) {
-                        // Delegate to PostIngestQueue - it already handles extraction in worker
-                        // threads
                         auto postIngest = self->getPostIngestQueue();
                         if (!postIngest) {
                             spdlog::debug("[Fts5Job] PostIngestQueue not ready, dropping {} docs",
@@ -148,7 +170,6 @@ void BackgroundTaskManager::launchFts5JobConsumer() {
 
                         size_t enqueued{0}, skipped{0};
                         for (const auto& h : job.hashes) {
-                            // Get MIME type for the task
                             std::string mime;
                             if (meta) {
                                 auto docRes = meta->getDocumentByHash(h);
@@ -157,9 +178,7 @@ void BackgroundTaskManager::launchFts5JobConsumer() {
                                 }
                             }
 
-                            // Enqueue to PostIngestQueue for extraction in worker threads
-                            PostIngestQueue::Task task{h, mime,
-                                                       "", // session
+                            PostIngestQueue::Task task{h, mime, "",
                                                        std::chrono::steady_clock::now(),
                                                        PostIngestQueue::Task::Stage::Metadata};
 
@@ -202,15 +221,25 @@ void BackgroundTaskManager::launchFts5JobConsumer() {
                     }
 
                     Bus::instance().incFts5Consumed();
+
+                    ++jobsProcessedDuringStartup;
+                    uint32_t throttleMs =
+                        (startupComplete && jobsProcessedDuringStartup > startupJobThreshold)
+                            ? normalThrottleMs
+                            : startupThrottleMs;
+
+                    timer.expires_after(std::chrono::milliseconds(throttleMs));
+                    co_await timer.async_wait(boost::asio::use_awaitable);
+
                     continue;
                 }
 
-                timer.expires_after(10ms);
+                timer.expires_after(std::chrono::milliseconds(normalThrottleMs));
                 try {
                     co_await timer.async_wait(boost::asio::use_awaitable);
                 } catch (const boost::system::system_error& e) {
                     if (e.code() == boost::asio::error::operation_aborted) {
-                        break; // Exit gracefully on cancellation
+                        break;
                     }
                     throw;
                 }
@@ -307,6 +336,10 @@ void BackgroundTaskManager::launchOrphanScanTask() {
                                     if (!fts5Q->try_push(std::move(orphanJob))) {
                                         spdlog::warn("[OrphanScan] Queue full, batch dropped");
                                     }
+
+                                    // Yield between batches to avoid flooding the queue
+                                    timer.expires_after(50ms);
+                                    co_await timer.async_wait(boost::asio::use_awaitable);
                                 }
                             }
                         }
@@ -331,114 +364,6 @@ void BackgroundTaskManager::launchOrphanScanTask() {
                 }
             }
             spdlog::debug("[OrphanScan] Task stopped");
-            co_return;
-        },
-        boost::asio::detached);
-}
-
-void BackgroundTaskManager::launchPathTreeRepairTask() {
-    auto self = deps_.serviceManager.lock();
-    if (!self) {
-        throw std::runtime_error(
-            "BackgroundTaskManager: ServiceManager weak_ptr expired in launchPathTreeRepairTask");
-    }
-
-    auto exec = deps_.executor;
-    auto stopFlag = stopRequested_;
-    auto& fsm = deps_.lifecycleFsm;
-
-    spdlog::debug("[BackgroundTaskManager] Launching PathTreeRepair task");
-    boost::asio::co_spawn(
-        exec,
-        [self, stopFlag, &fsm]() -> boost::asio::awaitable<void> {
-            using namespace std::chrono_literals;
-
-            auto executor = co_await boost::asio::this_coro::executor;
-            boost::asio::steady_timer timer(executor);
-
-            constexpr int maxWaitIterations = 60;
-            int waitIterations = 0;
-            bool fsmReady = false;
-
-            while (!fsmReady && waitIterations < maxWaitIterations) {
-                if (stopFlag->load(std::memory_order_acquire)) {
-                    co_return;
-                }
-
-                auto snap = fsm.snapshot();
-                auto degradedSubs = fsm.degradedSubsystems();
-                bool hasDegraded = std::any_of(degradedSubs.begin(), degradedSubs.end(),
-                                               [](const auto& p) { return p.second; });
-
-                if (snap.state == LifecycleState::Ready && !hasDegraded) {
-                    fsmReady = true;
-                    spdlog::debug("[PathTreeRepair] FSM ready, no degraded subsystems");
-                } else {
-                    waitIterations++;
-                    timer.expires_after(5s);
-                    try {
-                        co_await timer.async_wait(boost::asio::use_awaitable);
-                    } catch (const boost::system::system_error& e) {
-                        if (e.code() == boost::asio::error::operation_aborted) {
-                            co_return;
-                        }
-                        throw;
-                    }
-                }
-            }
-
-            if (!fsmReady) {
-                spdlog::warn("[PathTreeRepair] Timeout waiting for FSM ready state, skipping");
-                co_return;
-            }
-
-            timer.expires_after(30s);
-            try {
-                co_await timer.async_wait(boost::asio::use_awaitable);
-            } catch (const boost::system::system_error& e) {
-                if (e.code() == boost::asio::error::operation_aborted) {
-                    co_return;
-                }
-                throw;
-            }
-
-            if (stopFlag->load(std::memory_order_acquire)) {
-                co_return;
-            }
-
-            auto repairMgr = self->getRepairManager();
-            if (!repairMgr) {
-                spdlog::warn("[PathTreeRepair] RepairManager not available, skipping repair");
-                co_return;
-            }
-
-            spdlog::info("[PathTreeRepair] Starting path tree repair scan");
-
-            try {
-                auto result = repairMgr->repairPathTree([](uint64_t current, uint64_t total) {
-                    if (current % 500 == 0 && total > 0) {
-                        spdlog::debug("[PathTreeRepair] Progress: {}/{}", current, total);
-                    }
-                });
-
-                if (result) {
-                    const auto& stats = result.value();
-                    if (stats.nodesCreated > 0) {
-                        spdlog::info("[PathTreeRepair] Complete: scanned={} created={} errors={}",
-                                     stats.documentsScanned, stats.nodesCreated, stats.errors);
-                    } else {
-                        spdlog::debug("[PathTreeRepair] Complete: no missing entries found "
-                                      "(scanned {} docs)",
-                                      stats.documentsScanned);
-                    }
-                } else {
-                    spdlog::warn("[PathTreeRepair] Failed: {}", result.error().message);
-                }
-            } catch (const std::exception& e) {
-                spdlog::warn("[PathTreeRepair] Exception: {}", e.what());
-            }
-
-            spdlog::debug("[PathTreeRepair] Task completed");
             co_return;
         },
         boost::asio::detached);

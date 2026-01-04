@@ -188,6 +188,58 @@
 #endif
 #endif
 
+/**
+ * @def YAMS_HAS_LIKELY_UNLIKELY
+ * @brief Indicates support for [[likely]] and [[unlikely]] attributes (C++20)
+ *
+ * Requires:
+ * - GCC 7+
+ * - Clang 9+
+ * - MSVC 19.20+ (VS 2019 16.3+)
+ * - Apple Clang 11+
+ */
+#ifndef YAMS_HAS_LIKELY_UNLIKELY
+#if defined(__cpp_attributes) && __cpp_attributes >= 201803L
+#define YAMS_HAS_LIKELY_UNLIKELY 1
+#else
+#define YAMS_HAS_LIKELY_UNLIKELY 0
+#endif
+#endif
+
+/**
+ * @def YAMS_HAS_FLAT_MAP
+ * @brief Indicates support for std::flat_map (C++23)
+ *
+ * Requires:
+ * - GCC 12+
+ * - Clang 17+
+ * - MSVC 19.33+
+ */
+#ifndef YAMS_HAS_FLAT_MAP
+#if defined(__cpp_lib_flat_map) && __cpp_lib_flat_map >= 202207L
+#define YAMS_HAS_FLAT_MAP 1
+#else
+#define YAMS_HAS_FLAT_MAP 0
+#endif
+#endif
+
+/**
+ * @def YAMS_HAS_MOVE_ONLY_FUNCTION
+ * @brief Indicates support for std::move_only_function (C++23)
+ *
+ * Requires:
+ * - GCC 12+
+ * - Clang 17+
+ * - MSVC 19.33+
+ */
+#ifndef YAMS_HAS_MOVE_ONLY_FUNCTION
+#if defined(__cpp_lib_move_only_function) && __cpp_lib_move_only_function >= 202110L
+#define YAMS_HAS_MOVE_ONLY_FUNCTION 1
+#else
+#define YAMS_HAS_MOVE_ONLY_FUNCTION 0
+#endif
+#endif
+
 // ============================================================================
 // C++26 Feature Detection (Experimental)
 // ============================================================================
@@ -295,6 +347,9 @@ struct FeatureInfo {
     static constexpr bool has_string_contains = YAMS_HAS_STRING_CONTAINS;
     static constexpr bool has_ranges = YAMS_HAS_RANGES;
     static constexpr bool has_constexpr_algorithms = YAMS_HAS_CONSTEXPR_ALGORITHMS;
+    static constexpr bool has_likely_unlikely = YAMS_HAS_LIKELY_UNLIKELY;
+    static constexpr bool has_flat_map = YAMS_HAS_FLAT_MAP;
+    static constexpr bool has_move_only_function = YAMS_HAS_MOVE_ONLY_FUNCTION;
     static constexpr bool has_profiles = YAMS_HAS_PROFILES;
     static constexpr bool has_reflection = YAMS_HAS_REFLECTION;
     static constexpr long cpp_version = YAMS_CPP_VERSION;

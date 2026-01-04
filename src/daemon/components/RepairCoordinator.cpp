@@ -236,6 +236,15 @@ void RepairCoordinator::start() {
     spdlog::debug(
         "RepairCoordinator started (awaitable) (enable={}, batch={}, dedicated_threads=2)",
         cfg_.enable, cfg_.maxBatch);
+
+    // Enqueue initial PathTreeRepair job (run once at startup)
+    static auto pathTreeQueue =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PathTreeJob>(
+            "path_tree_repair_jobs", 32);
+    InternalEventBus::PathTreeJob initialPathTreeJob{1, true}; // requestId=1, runOnce=true
+    if (!pathTreeQueue->try_push(initialPathTreeJob)) {
+        spdlog::warn("RepairCoordinator: failed to enqueue initial PathTreeRepair job");
+    }
 }
 
 void RepairCoordinator::stop() {
@@ -378,6 +387,14 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::PruneJob>("prune_jobs",
                                                                                        128);
 
+    // Get or create PathTreeRepair job channel
+    static auto pathTreeQueue =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PathTreeJob>(
+            "path_tree_repair_jobs", 32);
+
+    // PathTreeRepair completion tracking (run once at startup)
+    bool pathTreeRepairDone = false;
+
     while (running_.load(std::memory_order_relaxed) &&
            shutdownState_->running.load(std::memory_order_acquire)) {
         // Update FSM hints with current running state
@@ -424,6 +441,93 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                 // Track this as incomplete work
             } catch (const std::exception& e) {
                 spdlog::error("Prune job {} exception: {}", pruneJob.requestId, e.what());
+            }
+        }
+
+        // Process PathTreeRepair jobs (run once at startup via job queue)
+        if (!pathTreeRepairDone) {
+            InternalEventBus::PathTreeJob pathTreeJob;
+            if (pathTreeQueue->try_pop(pathTreeJob)) {
+                spdlog::debug("RepairCoordinator: processing PathTreeRepair job");
+                InternalEventBus::instance().incPostConsumed();
+
+                auto repairMgr = services_ ? services_->getRepairManager() : nullptr;
+                auto metaRepo = services_ ? services_->getMetadataRepo() : nullptr;
+
+                if (!repairMgr || !metaRepo) {
+                    spdlog::warn("RepairCoordinator: services unavailable for PathTreeRepair");
+                } else {
+                    // Run PathTreeRepair with batch processing and yields
+                    try {
+                        auto docsResult =
+                            metaRepo->queryDocuments(metadata::DocumentQueryOptions{});
+                        if (docsResult && !docsResult.value().empty()) {
+                            spdlog::info("RepairCoordinator: PathTreeRepair scanning {} documents",
+                                         docsResult.value().size());
+
+                            uint64_t created = 0;
+                            uint64_t errors = 0;
+                            uint64_t scanned = 0;
+                            const size_t batchSize = TuneAdvisor::repairStartupBatchSize();
+
+                            for (size_t i = 0; i < docsResult.value().size(); i += batchSize) {
+                                if (!running_.load(std::memory_order_relaxed)) {
+                                    spdlog::debug("RepairCoordinator: PathTreeRepair interrupted");
+                                    break;
+                                }
+
+                                size_t batchEnd =
+                                    std::min(i + batchSize, docsResult.value().size());
+                                for (size_t j = i; j < batchEnd; ++j) {
+                                    const auto& doc = docsResult.value()[j];
+                                    if (doc.filePath.empty()) {
+                                        continue;
+                                    }
+
+                                    auto existingNode =
+                                        metaRepo->findPathTreeNodeByFullPath(doc.filePath);
+                                    if (existingNode && existingNode.value().has_value()) {
+                                        continue;
+                                    }
+
+                                    try {
+                                        auto treeRes = metaRepo->upsertPathTreeForDocument(
+                                            doc, doc.id, true, std::span<const float>());
+                                        if (treeRes) {
+                                            ++created;
+                                        } else {
+                                            ++errors;
+                                        }
+                                    } catch (const std::exception& e) {
+                                        ++errors;
+                                    }
+                                    ++scanned;
+
+                                    // Progress logging every 500 docs
+                                    if (scanned % 500 == 0) {
+                                        spdlog::debug(
+                                            "RepairCoordinator: PathTreeRepair progress: {}/{}",
+                                            scanned, docsResult.value().size());
+                                    }
+                                }
+
+                                // Yield between batches to avoid blocking
+                                timer.expires_after(10ms);
+                                co_await timer.async_wait(boost::asio::use_awaitable);
+                            }
+
+                            spdlog::info("RepairCoordinator: PathTreeRepair complete (scanned={}, "
+                                         "created={}, errors={})",
+                                         scanned, created, errors);
+                        } else {
+                            spdlog::debug(
+                                "RepairCoordinator: PathTreeRepair - no documents to scan");
+                        }
+                    } catch (const std::exception& e) {
+                        spdlog::warn("RepairCoordinator: PathTreeRepair exception: {}", e.what());
+                    }
+                }
+                pathTreeRepairDone = true;
             }
         }
 
@@ -488,8 +592,8 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                                     ? nullptr
                                     : (services_ ? services_->getVectorDatabase() : nullptr);
 
-                            // Query in batches to avoid locking DB for too long
-                            const size_t batchSize = 1000;
+                            // Use smaller batch size during startup to reduce load
+                            const size_t batchSize = TuneAdvisor::repairStartupBatchSize();
                             size_t offset = 0;
                             size_t totalEnqueued = 0;
 
@@ -714,6 +818,10 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                 InternalEventBus::instance().incFts5Dropped();
             }
         }
+
+        // Throttle processing to avoid overloading the system (tick-based)
+        timer.expires_after(100ms);
+        co_await timer.async_wait(boost::asio::use_awaitable);
     }
 
     spdlog::debug("RepairCoordinator stopped");

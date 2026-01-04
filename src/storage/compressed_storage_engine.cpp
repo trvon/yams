@@ -366,6 +366,11 @@ private:
             return result.error();
         }
 
+        // If compressor returned None (compression was ineffective), return original data
+        if (result.value().algorithm == compression::CompressionAlgorithm::None) {
+            return std::vector<std::byte>(data.begin(), data.end());
+        }
+
         // Create header
         compression::CompressionHeader header;
         header.magic = compression::CompressionHeader::MAGIC;

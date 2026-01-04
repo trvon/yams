@@ -310,6 +310,16 @@ public:
         }
         return def;
     }
+
+    // Batch size for repair operations during startup phase. Default 100.
+    // Smaller batches reduce startup load. Normal operation uses repairMaxBatch (32).
+    static uint32_t repairStartupBatchSize() { return 100; }
+
+    // Duration of startup phase in ticks (each tick is statusTickMs, default 250ms).
+    // During startup, smaller batch sizes are used to reduce load.
+    // Default 20 ticks = 5 seconds (20 * 250ms = 5000ms).
+    static uint32_t repairStartupDurationTicks() { return 20; }
+
     // Maintenance tokens (concurrency) when daemon is idle. Default 1.
     static uint32_t repairTokensIdle() {
         uint32_t def = 1;
@@ -394,6 +404,36 @@ public:
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 return v;
+            } catch (...) {
+            }
+        }
+        return def;
+    }
+
+    // Fts5Job consumer startup delay (ms). Default 2000ms.
+    // Gives time for daemon to fully initialize before processing FTS5 jobs.
+    static uint32_t fts5StartupDelayMs() {
+        uint32_t def = 2000;
+        if (const char* s = std::getenv("YAMS_FTS5_STARTUP_DELAY_MS")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v <= 60000)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return def;
+    }
+
+    // Fts5Job consumer throttle during startup (ms). Default 100ms.
+    // Higher value reduces startup load. Normal operation uses 10ms.
+    static uint32_t fts5StartupThrottleMs() {
+        uint32_t def = 100;
+        if (const char* s = std::getenv("YAMS_FTS5_STARTUP_THROTTLE_MS")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 10 && v <= 1000)
+                    return v;
             } catch (...) {
             }
         }
