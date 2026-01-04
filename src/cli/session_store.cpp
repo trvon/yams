@@ -78,6 +78,36 @@ static std::vector<std::string> load_pinned_legacy() {
     return out;
 }
 
+static bool has_wildcards(const std::string& value) {
+    return value.find('*') != std::string::npos || value.find('?') != std::string::npos ||
+           value.find('[') != std::string::npos || value.find(']') != std::string::npos;
+}
+
+static bool looks_like_path(const std::string& value) {
+    return value.find('/') != std::string::npos || value.find('\\') != std::string::npos ||
+           value.find(':') != std::string::npos;
+}
+
+static std::string normalize_selector_path(const std::string& value) {
+    if (!looks_like_path(value))
+        return value;
+
+    std::string normalized = value;
+    std::replace(normalized.begin(), normalized.end(), '\\', '/');
+
+    if (!has_wildcards(normalized)) {
+        std::error_code ec;
+        std::filesystem::path candidate(value);
+        if (std::filesystem::exists(candidate, ec) && std::filesystem::is_directory(candidate, ec)) {
+            if (!normalized.empty() && normalized.back() != '/')
+                normalized += '/';
+            normalized += "**/*";
+        }
+    }
+
+    return normalized;
+}
+
 std::vector<std::string> active_include_patterns(const std::optional<std::string>& name) {
     std::vector<std::string> out;
     std::string session = name.value_or(current_session().value_or(""));
@@ -92,14 +122,16 @@ std::vector<std::string> active_include_patterns(const std::optional<std::string
                     if (j.contains("selectors") && j["selectors"].is_array()) {
                         for (auto& sel : j["selectors"]) {
                             if (sel.contains("path") && sel["path"].is_string()) {
-                                out.push_back(sel["path"].get<std::string>());
+                                out.push_back(
+                                    normalize_selector_path(sel["path"].get<std::string>()));
                             }
                         }
                     }
                     if (j.contains("materialized") && j["materialized"].is_array()) {
                         for (auto& m : j["materialized"]) {
                             if (m.contains("path") && m["path"].is_string())
-                                out.push_back(m["path"].get<std::string>());
+                                out.push_back(
+                                    normalize_selector_path(m["path"].get<std::string>()));
                             else if (m.contains("name") && m["name"].is_string())
                                 out.push_back(m["name"].get<std::string>());
                         }

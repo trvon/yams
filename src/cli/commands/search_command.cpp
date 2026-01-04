@@ -49,7 +49,11 @@ using yams::app::services::utils::normalizeLookupPath;
 class SearchCommand : public ICommand {
 private:
     // Streaming configuration
+#if defined(_WIN32)
+    bool enableStreaming_ = false;
+#else
     bool enableStreaming_ = true;
+#endif
     int headerTimeoutMs_ = 15000;
     int bodyTimeoutMs_ = 60000;
     int chunkSize_ = 64 * 1024;
@@ -1339,6 +1343,103 @@ public:
             }
         }
 
+        std::shared_ptr<ui::SpinnerRunner> spinner =
+            shouldShowSpinner() ? std::make_shared<ui::SpinnerRunner>() : nullptr;
+        if (spinner) {
+            spinner->start("Searching...");
+        }
+        auto stopSpinner = [spinner]() {
+            if (spinner) {
+                spinner->stop();
+            }
+        };
+
+        auto localFallback = [&]() -> boost::asio::awaitable<Result<void>> {
+            if (auto appContext = cli_->getAppContext()) {
+                auto searchService = app::services::makeSearchService(*appContext);
+                if (searchService) {
+                    app::services::SearchRequest sreq;
+                    sreq.query = query_;
+                    sreq.limit = limit_;
+                    sreq.fuzzy = fuzzySearch_;
+                    sreq.similarity = minSimilarity_;
+                    sreq.hash = hashQuery_;
+                    sreq.type = searchType_;
+                    sreq.verbose = verbose_;
+                    sreq.literalText = literalText_;
+                    sreq.showHash = showHash_;
+                    sreq.pathsOnly = pathsOnly_;
+                    sreq.showLineNumbers = showLineNumbers_;
+                    sreq.beforeContext = static_cast<int>(beforeContext_);
+                    sreq.afterContext = static_cast<int>(afterContext_);
+                    sreq.context = static_cast<int>(context_);
+                    sreq.pathPattern = pathFilter_;
+                    sreq.extension = extension_;
+                    sreq.mimeType = mimeType_;
+                    sreq.fileType = fileType_;
+                    sreq.textOnly = textOnly_;
+                    sreq.binaryOnly = binaryOnly_;
+                    sreq.createdAfter = createdAfter_;
+                    sreq.createdBefore = createdBefore_;
+                    sreq.modifiedAfter = modifiedAfter_;
+                    sreq.modifiedBefore = modifiedBefore_;
+                    sreq.indexedAfter = indexedAfter_;
+                    sreq.indexedBefore = indexedBefore_;
+                    if (!filterTags_.empty()) {
+                        std::stringstream ss(filterTags_);
+                        std::string tag;
+                        while (std::getline(ss, tag, ',')) {
+                            tag.erase(0, tag.find_first_not_of(" \t"));
+                            tag.erase(tag.find_last_not_of(" \t") + 1);
+                            if (!tag.empty())
+                                sreq.tags.push_back(tag);
+                        }
+                        sreq.matchAllTags = matchAllTags_;
+                    }
+                    auto local = co_await searchService->search(sreq);
+                    stopSpinner();
+                    if (!local)
+                        co_return local.error();
+                    auto resp = local.value();
+
+                    // Handle paths-only output (special case - uses resp.paths)
+                    if (pathsOnly_) {
+                        std::unordered_set<std::string> seen;
+                        for (const auto& p : resp.paths) {
+                            if (!includeGlobsExpanded.empty() &&
+                                !matchAnyGlob(p, includeGlobsExpanded))
+                                continue;
+                            if (seen.count(p))
+                                continue;
+                            seen.insert(p);
+                            std::cout << p << std::endl;
+                        }
+                        co_return Result<void>();
+                    }
+
+                    // Convert to unified items and render
+                    std::vector<UnifiedItem> localItems;
+                    localItems.reserve(resp.results.size());
+                    for (const auto& it : resp.results) {
+                        if (!includeGlobsExpanded.empty() &&
+                            !matchAnyGlob(it.path, includeGlobsExpanded))
+                            continue;
+                        localItems.push_back(UnifiedItem::fromLocal(it));
+                    }
+
+                    RenderContext localCtx;
+                    localCtx.query = query_;
+                    localCtx.totalCount = resp.total;
+                    localCtx.elapsedMs = resp.executionTimeMs;
+                    localCtx.method = resp.type;
+
+                    co_return renderResults(localItems, localCtx);
+                }
+            }
+            stopSpinner();
+            co_return Error{ErrorCode::Unknown, "Failed to initialize local search services"};
+        };
+
         // Daemon client config
         yams::daemon::DaemonClient::setTimeoutEnvVars(std::chrono::milliseconds(headerTimeoutMs_),
                                                       std::chrono::milliseconds(bodyTimeoutMs_));
@@ -1358,7 +1459,11 @@ public:
 
         auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(clientConfig);
         if (!leaseRes) {
-            co_return leaseRes.error();
+            spdlog::warn("search: unable to acquire daemon client: {}", leaseRes.error().message);
+            if (!(jsonOutput_ || (cli_ && cli_->getJsonOutput()))) {
+                std::cout << "Daemon unavailable; falling back to local search.\n";
+            }
+            co_return co_await localFallback();
         }
         auto leaseHandle = std::move(leaseRes.value());
         struct LeaseScopeExit {
@@ -1418,17 +1523,6 @@ public:
         dreq.modifiedBefore = modifiedBefore_;
         dreq.indexedAfter = indexedAfter_;
         dreq.indexedBefore = indexedBefore_;
-
-        std::shared_ptr<ui::SpinnerRunner> spinner =
-            shouldShowSpinner() ? std::make_shared<ui::SpinnerRunner>() : nullptr;
-        if (spinner) {
-            spinner->start("Searching...");
-        }
-        auto stopSpinner = [spinner]() {
-            if (spinner) {
-                spinner->stop();
-            }
-        };
 
         auto render = [&](const yams::daemon::SearchResponse& resp) -> Result<void> {
             stopSpinner();
@@ -1610,87 +1704,7 @@ public:
         }
 
         // Fallback to local services via co_await
-        stopSpinner();
-        if (auto appContext = cli_->getAppContext()) {
-            auto searchService = app::services::makeSearchService(*appContext);
-            if (searchService) {
-                app::services::SearchRequest sreq;
-                sreq.query = query_;
-                sreq.limit = limit_;
-                sreq.fuzzy = fuzzySearch_;
-                sreq.similarity = minSimilarity_;
-                sreq.hash = hashQuery_;
-                sreq.type = searchType_;
-                sreq.verbose = verbose_;
-                sreq.literalText = literalText_;
-                sreq.showHash = showHash_;
-                sreq.pathsOnly = pathsOnly_;
-                sreq.showLineNumbers = showLineNumbers_;
-                sreq.beforeContext = static_cast<int>(beforeContext_);
-                sreq.afterContext = static_cast<int>(afterContext_);
-                sreq.context = static_cast<int>(context_);
-                sreq.pathPattern = pathFilter_;
-                sreq.extension = extension_;
-                sreq.mimeType = mimeType_;
-                sreq.fileType = fileType_;
-                sreq.textOnly = textOnly_;
-                sreq.binaryOnly = binaryOnly_;
-                sreq.createdAfter = createdAfter_;
-                sreq.createdBefore = createdBefore_;
-                sreq.modifiedAfter = modifiedAfter_;
-                sreq.modifiedBefore = modifiedBefore_;
-                sreq.indexedAfter = indexedAfter_;
-                sreq.indexedBefore = indexedBefore_;
-                if (!filterTags_.empty()) {
-                    std::stringstream ss(filterTags_);
-                    std::string tag;
-                    while (std::getline(ss, tag, ',')) {
-                        tag.erase(0, tag.find_first_not_of(" \t"));
-                        tag.erase(tag.find_last_not_of(" \t") + 1);
-                        if (!tag.empty())
-                            sreq.tags.push_back(tag);
-                    }
-                    sreq.matchAllTags = matchAllTags_;
-                }
-                auto local = co_await searchService->search(sreq);
-                if (!local)
-                    co_return local.error();
-                auto resp = local.value();
-
-                // Handle paths-only output (special case - uses resp.paths)
-                if (pathsOnly_) {
-                    std::unordered_set<std::string> seen;
-                    for (const auto& p : resp.paths) {
-                        if (!includeGlobsExpanded.empty() && !matchAnyGlob(p, includeGlobsExpanded))
-                            continue;
-                        if (seen.count(p))
-                            continue;
-                        seen.insert(p);
-                        std::cout << p << std::endl;
-                    }
-                    co_return Result<void>();
-                }
-
-                // Convert to unified items and render
-                std::vector<UnifiedItem> localItems;
-                localItems.reserve(resp.results.size());
-                for (const auto& it : resp.results) {
-                    if (!includeGlobsExpanded.empty() &&
-                        !matchAnyGlob(it.path, includeGlobsExpanded))
-                        continue;
-                    localItems.push_back(UnifiedItem::fromLocal(it));
-                }
-
-                RenderContext localCtx;
-                localCtx.query = query_;
-                localCtx.totalCount = resp.total;
-                localCtx.elapsedMs = resp.executionTimeMs;
-                localCtx.method = resp.type;
-
-                co_return renderResults(localItems, localCtx);
-            }
-        }
-        co_return Error{ErrorCode::Unknown, derr.message};
+        co_return co_await localFallback();
     }
 };
 
