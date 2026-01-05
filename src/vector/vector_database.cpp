@@ -775,6 +775,27 @@ VectorDatabase::searchSimilarToDocument(const std::string& document_hash,
     return searchSimilar(document_vectors[0].embedding, params);
 }
 
+std::vector<VectorRecord> VectorDatabase::search(const std::vector<float>& query_embedding,
+                                                 const VectorSearchParams& params) const {
+    YAMS_ZONE_SCOPED_N("VectorDB::search");
+
+    constexpr size_t BRUTE_FORCE_THRESHOLD = 10000;
+
+    size_t vector_count = getVectorCount();
+
+    spdlog::debug("VectorDatabase::search: corpus_size={}, k={}, threshold={}", vector_count,
+                  params.k, BRUTE_FORCE_THRESHOLD);
+
+    if (vector_count < BRUTE_FORCE_THRESHOLD) {
+        spdlog::debug("Using brute-force search for small corpus ({})", vector_count);
+        return searchSimilar(query_embedding, params);
+    }
+
+    spdlog::debug("Using HNSW search for large corpus ({})", vector_count);
+
+    return searchSimilar(query_embedding, params);
+}
+
 std::optional<VectorRecord> VectorDatabase::getVector(const std::string& chunk_id) const {
     return pImpl->getVector(chunk_id);
 }

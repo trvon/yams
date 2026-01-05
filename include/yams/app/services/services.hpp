@@ -260,7 +260,8 @@ struct SearchResponse {
     std::size_t total{0};       // total results found
     std::string type;           // actual search type used ("keyword", "semantic", "hybrid", "hash")
     int64_t executionTimeMs{0}; // query execution time
-    std::vector<SearchItem> results; // detailed results
+    std::vector<SearchItem> results;         // detailed results
+    std::vector<search::SearchFacet> facets; // file type distribution facets
 
     // LLM-optimized outputs
     std::vector<std::string> paths; // pathsOnly=true output

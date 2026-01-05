@@ -30,6 +30,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -279,6 +280,9 @@ struct RetrievalMetrics {
     int numQueries = 0;
 };
 
+// Store final metrics globally for summary after teardown
+static RetrievalMetrics g_final_metrics;
+
 double computeDCG(const std::vector<int>& grades, int k) {
     double dcg = 0.0;
     for (int i = 0; i < std::min(k, (int)grades.size()); ++i) {
@@ -445,7 +449,59 @@ struct BenchFixture {
                 throw std::runtime_error("Failed to load BEIR dataset: " +
                                          dsResult.error().message);
             }
-            BEIRDataset dataset = dsResult.value();
+            BEIRDataset fullDataset = dsResult.value();
+
+            // Apply corpus size limit if specified via env var
+            BEIRDataset dataset;
+            dataset.name = fullDataset.name;
+            dataset.basePath = fullDataset.basePath;
+
+            int maxDocs = env_size ? corpusSize : (int)fullDataset.documents.size();
+            int maxQueries = env_queries ? numQueries : (int)fullDataset.queries.size();
+
+            // Copy limited documents
+            int docCount = 0;
+            for (const auto& [id, doc] : fullDataset.documents) {
+                if (docCount >= maxDocs)
+                    break;
+                dataset.documents[id] = doc;
+                docCount++;
+            }
+
+            // Copy queries that have qrels for documents we included
+            std::set<std::string> includedDocIds;
+            for (const auto& [id, doc] : dataset.documents) {
+                includedDocIds.insert(id);
+            }
+
+            int queryCount = 0;
+            for (const auto& [qid, query] : fullDataset.queries) {
+                if (queryCount >= maxQueries)
+                    break;
+                // Check if this query has at least one relevant doc in our subset
+                auto range = fullDataset.qrels.equal_range(qid);
+                bool hasRelevantDoc = false;
+                for (auto it = range.first; it != range.second; ++it) {
+                    if (includedDocIds.count(it->second.first) > 0) {
+                        hasRelevantDoc = true;
+                        break;
+                    }
+                }
+                if (hasRelevantDoc) {
+                    dataset.queries[qid] = query;
+                    // Copy qrels for this query
+                    for (auto it = range.first; it != range.second; ++it) {
+                        if (includedDocIds.count(it->second.first) > 0) {
+                            dataset.qrels.emplace(qid, it->second);
+                        }
+                    }
+                    queryCount++;
+                }
+            }
+
+            spdlog::info("Limited BEIR dataset to {} docs, {} queries (from {} docs, {} queries)",
+                         dataset.documents.size(), dataset.queries.size(),
+                         fullDataset.documents.size(), fullDataset.queries.size());
 
             fs::path corpusDir = harness->rootDir() / "corpus";
             beirCorpus = std::make_unique<BEIRCorpusLoader>(dataset, corpusDir);
@@ -660,6 +716,10 @@ void BM_RetrievalQuality(benchmark::State& state) {
         benchmark::DoNotOptimize(metrics);
     }
     auto metrics = evaluateQueries(*fixture.client, fixture.queries, fixture.topK);
+
+    // Store metrics globally for post-teardown summary
+    g_final_metrics = metrics;
+
     state.counters["MRR"] = metrics.mrr;
     state.counters["Recall@K"] = metrics.recallAtK;
     state.counters["Precision@K"] = metrics.precisionAtK;
@@ -676,5 +736,26 @@ int main(int argc, char** argv) {
     benchmark::RunSpecifiedBenchmarks();
     benchmark::Shutdown();
     CleanupFixture();
+
+    // Re-print summary after all teardown logs
+    // This ensures results are visible even when daemon teardown is verbose
+    std::cout << "\n" << std::string(70, '=') << "\n";
+    std::cout << "              RETRIEVAL QUALITY BENCHMARK RESULTS\n";
+    std::cout << std::string(70, '=') << "\n";
+    std::cout << std::fixed << std::setprecision(4);
+    std::cout << "  MRR (Mean Reciprocal Rank):     " << std::setw(10) << g_final_metrics.mrr
+              << "\n";
+    std::cout << "  Recall@K:                       " << std::setw(10) << g_final_metrics.recallAtK
+              << "\n";
+    std::cout << "  Precision@K:                    " << std::setw(10)
+              << g_final_metrics.precisionAtK << "\n";
+    std::cout << "  nDCG@K (Normalized DCG):        " << std::setw(10) << g_final_metrics.ndcgAtK
+              << "\n";
+    std::cout << "  MAP (Mean Average Precision):   " << std::setw(10) << g_final_metrics.map
+              << "\n";
+    std::cout << "  Number of queries evaluated:    " << std::setw(10) << g_final_metrics.numQueries
+              << "\n";
+    std::cout << std::string(70, '=') << "\n";
+
     return 0;
 }

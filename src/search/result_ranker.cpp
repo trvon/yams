@@ -62,10 +62,20 @@ void ResultRanker::rankResults(std::vector<SearchResultItem>& results,
     }
 
     // Sort by relevance score (descending)
-    std::sort(results.begin(), results.end(),
-              [](const SearchResultItem& a, const SearchResultItem& b) {
-                  return a.relevanceScore > b.relevanceScore;
-              });
+    // Use partial_sort for large result sets (O(n log k) vs O(n log n))
+    if (config_.sortLimit > 0 && results.size() > config_.sortLimit * 2) {
+        std::partial_sort(results.begin(),
+                          results.begin() + static_cast<ptrdiff_t>(config_.sortLimit),
+                          results.end(), [](const SearchResultItem& a, const SearchResultItem& b) {
+                              return a.relevanceScore > b.relevanceScore;
+                          });
+        results.resize(config_.sortLimit);
+    } else {
+        std::sort(results.begin(), results.end(),
+                  [](const SearchResultItem& a, const SearchResultItem& b) {
+                      return a.relevanceScore > b.relevanceScore;
+                  });
+    }
 }
 
 float ResultRanker::calculateTFIDF(const std::string& term, float termFrequency,
@@ -278,6 +288,8 @@ AdvancedRanker::AdvancedRanker(RankingAlgorithm algorithm) : algorithm_(algorith
 
 void AdvancedRanker::rankResults(std::vector<SearchResultItem>& results,
                                  const QueryNode* query) const {
+    const size_t sortLimit = baseRanker_.getConfig().sortLimit;
+
     switch (algorithm_) {
         case RankingAlgorithm::TfIdf:
             baseRanker_.rankResults(results, query);
@@ -287,30 +299,57 @@ void AdvancedRanker::rankResults(std::vector<SearchResultItem>& results,
             for (auto& result : results) {
                 result.relevanceScore = calculateBM25Score(result, query);
             }
-            std::sort(results.begin(), results.end(),
-                      [](const SearchResultItem& a, const SearchResultItem& b) {
-                          return a.relevanceScore > b.relevanceScore;
-                      });
+            if (sortLimit > 0 && results.size() > sortLimit * 2) {
+                std::partial_sort(
+                    results.begin(), results.begin() + static_cast<ptrdiff_t>(sortLimit),
+                    results.end(), [](const SearchResultItem& a, const SearchResultItem& b) {
+                        return a.relevanceScore > b.relevanceScore;
+                    });
+                results.resize(sortLimit);
+            } else {
+                std::sort(results.begin(), results.end(),
+                          [](const SearchResultItem& a, const SearchResultItem& b) {
+                              return a.relevanceScore > b.relevanceScore;
+                          });
+            }
             break;
 
         case RankingAlgorithm::Cosine:
             for (auto& result : results) {
                 result.relevanceScore = calculateCosineScore(result, query);
             }
-            std::sort(results.begin(), results.end(),
-                      [](const SearchResultItem& a, const SearchResultItem& b) {
-                          return a.relevanceScore > b.relevanceScore;
-                      });
+            if (sortLimit > 0 && results.size() > sortLimit * 2) {
+                std::partial_sort(
+                    results.begin(), results.begin() + static_cast<ptrdiff_t>(sortLimit),
+                    results.end(), [](const SearchResultItem& a, const SearchResultItem& b) {
+                        return a.relevanceScore > b.relevanceScore;
+                    });
+                results.resize(sortLimit);
+            } else {
+                std::sort(results.begin(), results.end(),
+                          [](const SearchResultItem& a, const SearchResultItem& b) {
+                              return a.relevanceScore > b.relevanceScore;
+                          });
+            }
             break;
 
         case RankingAlgorithm::Hybrid:
             for (auto& result : results) {
                 result.relevanceScore = calculateHybridScore(result, query);
             }
-            std::sort(results.begin(), results.end(),
-                      [](const SearchResultItem& a, const SearchResultItem& b) {
-                          return a.relevanceScore > b.relevanceScore;
-                      });
+            if (sortLimit > 0 && results.size() > sortLimit * 2) {
+                std::partial_sort(
+                    results.begin(), results.begin() + static_cast<ptrdiff_t>(sortLimit),
+                    results.end(), [](const SearchResultItem& a, const SearchResultItem& b) {
+                        return a.relevanceScore > b.relevanceScore;
+                    });
+                results.resize(sortLimit);
+            } else {
+                std::sort(results.begin(), results.end(),
+                          [](const SearchResultItem& a, const SearchResultItem& b) {
+                              return a.relevanceScore > b.relevanceScore;
+                          });
+            }
             break;
     }
 }

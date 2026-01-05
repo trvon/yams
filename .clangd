@@ -1,0 +1,123 @@
+# YAMS clangd configuration - Performance optimized
+# See https://clangd.llvm.org/config for full documentation
+
+# Default settings for all files
+CompileFlags:
+  # Point to the meson build directory
+  CompilationDatabase: builddir
+  # Remove flags that slow down clangd analysis
+  Remove:
+    # Sanitizers add overhead and aren't needed for IDE features
+    - -fsanitize=*
+    - -fno-sanitize-recover=*
+    # Coverage instrumentation not needed
+    - -fprofile-*
+    - -fcoverage-*
+    # Debug info levels don't affect clangd
+    - -g*
+    # Link-time optimization flags (irrelevant for parsing)
+    - -flto*
+    # Warnings are handled separately by clangd
+    - -Werror
+    # Plugin flags that may not be available
+    - -fplugin=*
+
+Index:
+  # Enable background indexing for better go-to-definition
+  Background: Build
+  # Index standard library for better completions
+  StandardLibrary: Yes
+
+Diagnostics:
+  # Enable unused include detection
+  UnusedIncludes: Strict
+  # Disable missing includes (can be noisy during development)
+  MissingIncludes: None
+  ClangTidy:
+    # Only run fast checks for better performance
+    FastCheckFilter: Strict
+    # Enable useful checks
+    Add:
+      - bugprone-*
+      - modernize-*
+      - performance-*
+      - readability-identifier-naming
+    # Remove slow or noisy checks
+    Remove:
+      - bugprone-easily-swappable-parameters
+      - modernize-use-trailing-return-type
+      - modernize-avoid-c-arrays
+
+Completion:
+  AllScopes: Yes
+  # Faster argument completion
+  ArgumentLists: Delimiters
+
+InlayHints:
+  # Enable helpful hints but limit type name length for performance
+  Enabled: true
+  ParameterNames: true
+  DeducedTypes: true
+  Designators: true
+  BlockEnd: false
+  TypeNameLimit: 32
+
+Hover:
+  ShowAKA: true
+  MacroContentsLimit: 1024
+
+---
+# Disable heavy processing for third-party code
+If:
+  PathMatch: third_party/.*
+Index:
+  Background: Skip
+Diagnostics:
+  Suppress: '*'
+  UnusedIncludes: None
+
+---
+# Skip background indexing for external submodules
+If:
+  PathMatch: external/.*
+Index:
+  Background: Skip
+Diagnostics:
+  Suppress: '*'
+  UnusedIncludes: None
+
+---
+# Skip build directories
+If:
+  PathMatch: build.*/.*
+Index:
+  Background: Skip
+
+---
+# Skip Conan package cache (if symlinked)
+If:
+  PathMatch: .*/\.conan2?/.*
+Index:
+  Background: Skip
+Diagnostics:
+  Suppress: '*'
+
+---
+# Test files - enable all diagnostics
+If:
+  PathMatch: tests/.*
+Diagnostics:
+  ClangTidy:
+    Add:
+      - cert-*
+
+---
+# Header files - additional style checks
+If:
+  PathMatch: include/.*\.h(pp)?
+Diagnostics:
+  ClangTidy:
+    Add:
+      - readability-*
+    Remove:
+      - readability-magic-numbers

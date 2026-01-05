@@ -40,6 +40,10 @@ struct RankingConfig {
 
     // Position-based scoring (earlier matches score higher)
     float positionWeight = 0.1f;
+
+    // Sort optimization: use partial_sort when result count exceeds this limit
+    // Set to 0 to disable partial_sort optimization
+    size_t sortLimit = 100;
 };
 
 /**

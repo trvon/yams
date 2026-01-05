@@ -61,9 +61,8 @@ public:
             BuildOptions o{};
             // Conservative weight distribution preserving existing relevance behavior
             // These weights match a balanced MIXED corpus profile
-            o.config.fts5Weight = 0.40f;
+            o.config.textWeight = 0.45f; // Unified FTS5+symbol text search
             o.config.pathTreeWeight = 0.10f;
-            o.config.symbolWeight = 0.10f;
             o.config.kgWeight = 0.05f;
             o.config.vectorWeight = 0.30f;
             o.config.tagWeight = 0.03f;

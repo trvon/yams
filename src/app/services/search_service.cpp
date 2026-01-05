@@ -1256,6 +1256,7 @@ private:
         resp.timedOutComponents = engineResponse.timedOutComponents;
         resp.failedComponents = engineResponse.failedComponents;
         resp.contributingComponents = engineResponse.contributingComponents;
+        resp.facets = engineResponse.facets;
 
         if (resp.isDegraded) {
             spdlog::info(
@@ -1529,6 +1530,33 @@ private:
             resp.type = "full-text";
             resp.executionTimeMs = res.executionTimeMs;
             resp.usedHybrid = false;
+
+            if (!res.results.empty()) {
+                std::unordered_map<std::string, size_t> extCounts;
+                for (const auto& item : res.results) {
+                    const std::string& path = item.document.filePath;
+                    auto pos = path.rfind('.');
+                    std::string ext = (pos != std::string::npos) ? path.substr(pos) : "(no ext)";
+                    extCounts[ext]++;
+                }
+                std::vector<std::pair<std::string, size_t>> sortedExts(extCounts.begin(),
+                                                                       extCounts.end());
+                std::sort(sortedExts.begin(), sortedExts.end(),
+                          [](const auto& a, const auto& b) { return a.second > b.second; });
+                constexpr size_t kMaxFacetValues = 10;
+                search::SearchFacet facet;
+                facet.name = "extension";
+                facet.displayName = "File Type";
+                for (size_t i = 0; i < std::min(sortedExts.size(), kMaxFacetValues); ++i) {
+                    search::SearchFacet::FacetValue fv;
+                    fv.value = sortedExts[i].first;
+                    fv.display = sortedExts[i].first;
+                    fv.count = sortedExts[i].second;
+                    facet.values.push_back(std::move(fv));
+                }
+                facet.totalValues = sortedExts.size();
+                resp.facets.push_back(std::move(facet));
+            }
 
             if (searchReq.pathsOnly) {
                 const size_t effectiveLimit =

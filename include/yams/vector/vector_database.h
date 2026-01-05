@@ -131,6 +131,10 @@ public:
     std::vector<VectorRecord> searchSimilarToDocument(const std::string& document_hash,
                                                       const VectorSearchParams& params = {}) const;
 
+    // Dual-path search: brute-force for small corpus (<10K), HNSW for large corpus (>=10K)
+    std::vector<VectorRecord> search(const std::vector<float>& query_embedding,
+                                     const VectorSearchParams& params = {}) const;
+
     // Utility operations
     std::optional<VectorRecord> getVector(const std::string& chunk_id) const;
     std::vector<VectorRecord> getVectorsByDocument(const std::string& document_hash) const;

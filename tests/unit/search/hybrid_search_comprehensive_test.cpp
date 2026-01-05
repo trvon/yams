@@ -1950,6 +1950,56 @@ TEST_CASE("Filtering - File type filter (binary only)", "[search][filtering][fil
     REQUIRE(resp.results.size() >= 0);
 }
 
+TEST_CASE("Facets - File type distribution", "[search][facets]") {
+    SKIP_HYBRID_ON_WINDOWS();
+    SearchServiceFixture fixture;
+
+    app::services::SearchRequest req;
+    req.type = "keyword";
+    req.query = "class";
+    req.limit = 100;
+
+    auto resp = fixture.executeSearch(req);
+
+    REQUIRE(resp.results.size() > 0);
+    REQUIRE(resp.facets.size() >= 1);
+
+    bool foundExtensionFacet = false;
+    for (const auto& facet : resp.facets) {
+        if (facet.name == "extension") {
+            foundExtensionFacet = true;
+            REQUIRE(facet.values.size() > 0);
+            REQUIRE(facet.displayName == "File Type");
+
+            bool foundCpp = false;
+            for (const auto& fv : facet.values) {
+                if (fv.value == ".cpp") {
+                    foundCpp = true;
+                    REQUIRE(fv.count > 0);
+                    REQUIRE(fv.value == fv.display);
+                }
+            }
+            REQUIRE(foundCpp);
+            break;
+        }
+    }
+    REQUIRE(foundExtensionFacet);
+}
+
+TEST_CASE("Facets - Empty results returns empty facets", "[search][facets]") {
+    SKIP_HYBRID_ON_WINDOWS();
+    SearchServiceFixture fixture;
+
+    app::services::SearchRequest req;
+    req.type = "keyword";
+    req.query = "zzzznonexistentterm12345";
+    req.limit = 10;
+
+    auto resp = fixture.executeSearch(req);
+
+    REQUIRE(resp.results.size() == 0);
+}
+
 // NOTE: 13 advanced hybrid search tests were previously here but have been removed.
 // These tests used old mock-based architecture (ControllableVectorIndex, ControllableKeywordEngine)
 // that is incompatible with the current PIMPL architecture.

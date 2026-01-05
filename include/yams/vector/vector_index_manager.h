@@ -19,7 +19,8 @@ enum class EmbeddingLevel;
  */
 enum class IndexType {
     FLAT,     // Exact brute-force search
-    HNSW,     // Hierarchical Navigable Small World
+    HNSW,     // Hierarchical Navigable Small World (HNSWlib)
+    USEARCH,  // USearch HNSW implementation
     IVF_FLAT, // Inverted File with Flat quantizer
     IVF_PQ,   // Inverted File with Product Quantization
     LSH,      // Locality Sensitive Hashing

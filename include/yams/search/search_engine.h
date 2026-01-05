@@ -19,6 +19,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include <boost/asio/any_io_executor.hpp>
+
 // Forward declarations
 namespace yams::metadata {
 class KnowledgeGraphStore;
@@ -74,9 +76,8 @@ struct SearchEngineConfig {
     } corpusProfile = CorpusProfile::MIXED;
 
     // Component weights (0.0 = disabled, 1.0 = full weight)
-    float fts5Weight = 0.30f;     // Full-text search weight
+    float textWeight = 0.45f;     // Full-text search weight (merged FTS5 + symbol)
     float pathTreeWeight = 0.15f; // Path tree hierarchical weight
-    float symbolWeight = 0.15f;   // Symbol metadata weight
     float kgWeight = 0.10f;       // Knowledge graph weight
     float vectorWeight = 0.15f;   // Vector similarity weight
     float tagWeight = 0.10f;      // Tag-based search weight
@@ -101,9 +102,8 @@ struct SearchEngineConfig {
     } fusionStrategy = FusionStrategy::WEIGHTED_RECIPROCAL;
 
     // Component-specific settings
-    size_t fts5MaxResults = 150;     // FTS5 candidate limit
+    size_t textMaxResults = 200;     // Full-text search candidate limit (merged FTS5 + symbol)
     size_t pathTreeMaxResults = 100; // Path tree candidate limit
-    size_t symbolMaxResults = 150;   // Symbol search candidate limit
     size_t kgMaxResults = 50;        // KG traversal candidate limit
     size_t vectorMaxResults = 100;   // Vector search k
     size_t tagMaxResults = 200;      // Tag search candidate limit
@@ -123,9 +123,9 @@ struct SearchEngineConfig {
      * @brief Get preset configuration for a corpus profile
      *
      * Returns a SearchEngineConfig with weights tuned for the given profile:
-     * - CODE: fts5=0.20, symbol=0.30, path=0.20, vector=0.10, kg=0.10, tag=0.05, meta=0.05
-     * - PROSE: fts5=0.40, symbol=0.05, path=0.10, vector=0.25, kg=0.05, tag=0.10, meta=0.05
-     * - DOCS: fts5=0.30, symbol=0.15, path=0.15, vector=0.20, kg=0.10, tag=0.05, meta=0.05
+     * - CODE: text=0.50, path=0.20, vector=0.10, kg=0.10, tag=0.05, meta=0.05
+     * - PROSE: text=0.45, path=0.10, vector=0.25, kg=0.05, tag=0.10, meta=0.05
+     * - DOCS: text=0.45, path=0.15, vector=0.20, kg=0.10, tag=0.05, meta=0.05
      * - MIXED: Default balanced weights
      */
     static SearchEngineConfig forProfile(CorpusProfile profile) {
@@ -134,10 +134,8 @@ struct SearchEngineConfig {
 
         switch (profile) {
             case CorpusProfile::CODE:
-                // Code-heavy: prioritize symbols, paths, and structured search
-                config.fts5Weight = 0.20f;
+                config.textWeight = 0.50f;
                 config.pathTreeWeight = 0.20f;
-                config.symbolWeight = 0.30f;
                 config.kgWeight = 0.10f;
                 config.vectorWeight = 0.10f;
                 config.tagWeight = 0.05f;
@@ -145,10 +143,8 @@ struct SearchEngineConfig {
                 break;
 
             case CorpusProfile::PROSE:
-                // Prose-heavy: prioritize FTS5 and semantic vector search
-                config.fts5Weight = 0.40f;
+                config.textWeight = 0.45f;
                 config.pathTreeWeight = 0.10f;
-                config.symbolWeight = 0.05f;
                 config.kgWeight = 0.05f;
                 config.vectorWeight = 0.25f;
                 config.tagWeight = 0.10f;
@@ -156,10 +152,8 @@ struct SearchEngineConfig {
                 break;
 
             case CorpusProfile::DOCS:
-                // Documentation: balanced FTS5/vector with moderate symbol/path
-                config.fts5Weight = 0.30f;
+                config.textWeight = 0.45f;
                 config.pathTreeWeight = 0.15f;
-                config.symbolWeight = 0.15f;
                 config.kgWeight = 0.10f;
                 config.vectorWeight = 0.20f;
                 config.tagWeight = 0.05f;
@@ -169,7 +163,6 @@ struct SearchEngineConfig {
             case CorpusProfile::MIXED:
             case CorpusProfile::CUSTOM:
             default:
-                // Keep default balanced weights
                 break;
         }
 
@@ -264,6 +257,7 @@ struct ComponentResult {
 
 struct SearchResponse {
     std::vector<SearchResult> results;
+    std::vector<SearchFacet> facets;
     std::vector<std::string> timedOutComponents;
     std::vector<std::string> failedComponents;
     std::vector<std::string> contributingComponents;
@@ -294,9 +288,8 @@ public:
 
 private:
     // Individual component query methods (each returns Results ordered by score)
-    Result<std::vector<ComponentResult>> queryFTS5(const std::string& query);
+    Result<std::vector<ComponentResult>> queryFullText(const std::string& query);
     Result<std::vector<ComponentResult>> queryPathTree(const std::string& query);
-    Result<std::vector<ComponentResult>> querySymbols(const std::string& query);
     Result<std::vector<ComponentResult>> queryKnowledgeGraph(const std::string& query);
     Result<std::vector<ComponentResult>> queryVectorIndex(const std::vector<float>& embedding);
 
@@ -434,35 +427,28 @@ public:
      * Returns metrics about search performance and component health.
      */
     struct Statistics {
-        // Query metrics
         std::atomic<uint64_t> totalQueries{0};
         std::atomic<uint64_t> successfulQueries{0};
         std::atomic<uint64_t> failedQueries{0};
-        std::atomic<uint64_t> timedOutQueries{0}; // Parallel component timeouts
+        std::atomic<uint64_t> timedOutQueries{0};
 
-        // Component metrics
-        std::atomic<uint64_t> fts5Queries{0};
+        std::atomic<uint64_t> textQueries{0};
         std::atomic<uint64_t> pathTreeQueries{0};
-        std::atomic<uint64_t> symbolQueries{0};
         std::atomic<uint64_t> kgQueries{0};
         std::atomic<uint64_t> vectorQueries{0};
         std::atomic<uint64_t> tagQueries{0};
         std::atomic<uint64_t> metadataQueries{0};
 
-        // Timing metrics (microseconds)
         std::atomic<uint64_t> totalQueryTimeMicros{0};
         std::atomic<uint64_t> avgQueryTimeMicros{0};
 
-        // Component timing (microseconds)
-        std::atomic<uint64_t> avgFts5TimeMicros{0};
+        std::atomic<uint64_t> avgTextTimeMicros{0};
         std::atomic<uint64_t> avgPathTreeTimeMicros{0};
-        std::atomic<uint64_t> avgSymbolTimeMicros{0};
         std::atomic<uint64_t> avgKgTimeMicros{0};
         std::atomic<uint64_t> avgVectorTimeMicros{0};
         std::atomic<uint64_t> avgTagTimeMicros{0};
         std::atomic<uint64_t> avgMetadataTimeMicros{0};
 
-        // Fusion metrics
         std::atomic<uint64_t> avgResultsPerQuery{0};
         std::atomic<uint64_t> avgComponentsPerResult{0};
     };
@@ -477,6 +463,17 @@ public:
      * Useful for startup validation and monitoring.
      */
     Result<void> healthCheck();
+
+    /**
+     * @brief Set executor for parallel component queries
+     *
+     * When an executor is set, SearchEngine uses boost::asio::post instead of
+     * std::async for parallel component execution. This allows reuse of a thread pool
+     * (e.g., WorkCoordinator's io_context) instead of creating new threads per query.
+     *
+     * @param executor Optional executor. If empty/nullopt, falls back to std::async.
+     */
+    void setExecutor(std::optional<boost::asio::any_io_executor> executor);
 
 private:
     class Impl;

@@ -13,15 +13,16 @@ class QueryNode;
  * @brief Parallel post-processor for search results
  *
  * Parallelizes independent post-FTS5 operations (filtering, facet generation, highlighting)
- * to improve latency on large result sets (>100 items).
+ * to improve latency on large result sets (>500 items).
  *
  * @note Only activates parallelization when result count exceeds PARALLEL_THRESHOLD
- *       to avoid overhead on small result sets.
+ *       to avoid overhead on small result sets. Threshold of 500 balances parallel
+ *       overhead vs benefit for typical search result sizes.
  */
 class ParallelPostProcessor {
 public:
     /// Minimum result count to activate parallel processing
-    static constexpr size_t PARALLEL_THRESHOLD = 100;
+    static constexpr size_t PARALLEL_THRESHOLD = 500;
 
     /**
      * @brief Result of parallel post-processing operations

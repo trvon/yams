@@ -114,8 +114,7 @@ if onnx_feature_requested and onnx_dep.found()
 endif
 
 # Optional include dirs for third-party headers
-# Treat third-party headers as system to avoid external warnings being promoted to errors
-hnsw_inc = include_directories('../../third_party/hnswlib', is_system: true)
+# Note: HNSW implementation now uses sqlite-vec-cpp, hnswlib no longer needed
 
 # Generate sqlite-vec.h (as in CMake)
 sqlite_vec_hdr = configure_file(
@@ -215,7 +214,7 @@ endif
 
 yams_vector = static_library('yams_vector',
   srcs,
-  include_directories: [include_directories('../../include'), include_directories('.'), hnsw_inc, sqlite_vec_cpp_inc],
+  include_directories: [include_directories('../../include'), include_directories('.'), sqlite_vec_cpp_inc],
   dependencies: deps_vec,
   cpp_args: vector_cppargs,
   install: true,

@@ -1,6 +1,6 @@
 {
     "C_Cpp.default.configurationProvider": "mesonbuild.mesonbuild",
-    "C_Cpp.default.compileCommands": "/Volumes/picaso/work/tools/yams/builddir/compile_commands.json",
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/builddir/compile_commands.json",
     "mesonbuild.configureOnOpen": false,
     "mesonbuild.buildFolder": "builddir",
     "files.associations": {
@@ -12,5 +12,22 @@
         "**/build": true,
         "**/__pycache__": true,
         "**/*.pyc": true
-    }
+    },
+    
+    // clangd settings (if using clangd extension instead of C/C++)
+    "clangd.path": "clangd",
+    "clangd.arguments": [
+        "--background-index",
+        "--clang-tidy",
+        "--completion-style=detailed",
+        "--header-insertion=iwyu",
+        "--pch-storage=memory",
+        "-j=4",
+        "--limit-references=100",
+        "--limit-results=50"
+    ],
+    
+    // Disable Microsoft C/C++ IntelliSense if using clangd
+    // Uncomment the line below if you install the clangd extension
+    // "C_Cpp.intelliSenseEngine": "disabled"
 }

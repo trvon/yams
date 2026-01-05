@@ -1137,8 +1137,8 @@ private:
                 // Prefer fast, exact FTS5 keyword results over vector similarity for grep-like use
                 opts.config.maxResults = semanticLimit_ * 3; // Get more results to filter
                 opts.config.vectorWeight = 0.40f;
-                opts.config.fts5Weight = 0.60f;
-                opts.config.kgWeight = 0.0f; // Disable KG for grep scenarios
+                opts.config.textWeight = 0.60f; // Prefer fast, exact text search for grep
+                opts.config.kgWeight = 0.0f;    // Disable KG for grep scenarios
 
                 auto engRes = builder.buildEmbedded(opts);
                 if (engRes) {

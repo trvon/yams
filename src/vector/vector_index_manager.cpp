@@ -12,17 +12,18 @@
 #include <shared_mutex>
 #include <sstream>
 #include <thread>
+#include <type_traits>
 
-// Include HNSWlib before namespace to avoid namespace conflicts
-#if defined(__clang__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wcast-qual"
-#endif
-#include <hnswlib.h>
-#if defined(__clang__)
-#pragma clang diagnostic pop
-#endif
+// Include sqlite-vec-cpp HNSW before namespace to avoid namespace conflicts
+#include <sqlite-vec-cpp/distances/cosine.hpp>
+#include <sqlite-vec-cpp/distances/inner_product.hpp>
+#include <sqlite-vec-cpp/distances/l2.hpp>
+#include <sqlite-vec-cpp/index/hnsw.hpp>
+#include <sqlite-vec-cpp/index/hnsw_persistence.hpp>
+
+#include <atomic>
 #include <unordered_map>
+#include <variant>
 
 namespace yams::vector {
 
@@ -601,11 +602,21 @@ private:
 };
 
 // =============================================================================
-// HNSW Index Implementation using HNSWlib
+// HNSW Index Implementation using sqlite-vec-cpp
 // =============================================================================
 
 class HNSWIndex : public VectorIndex {
 public:
+    // Type aliases for the three distance metrics
+    using L2Index =
+        sqlite_vec_cpp::index::HNSWIndex<float, sqlite_vec_cpp::distances::L2Metric<float>>;
+    using CosineIndex =
+        sqlite_vec_cpp::index::HNSWIndex<float, sqlite_vec_cpp::distances::CosineMetric<float>>;
+    using IPIndex =
+        sqlite_vec_cpp::index::HNSWIndex<float,
+                                         sqlite_vec_cpp::distances::InnerProductMetric<float>>;
+    using HNSWVariant = std::variant<L2Index, CosineIndex, IPIndex>;
+
     explicit HNSWIndex(const IndexConfig& config) : VectorIndex(config), next_label_(0) {
         // Initialize stats
         stats_.type = IndexType::HNSW;
@@ -625,20 +636,26 @@ public:
 
     Result<void> add(const std::string& id, const std::vector<float>& vector) override {
         if (vector.size() != config_.dimension) {
-            return Result<void>(Error{ErrorCode::InvalidArgument, "Vector dimension mismatch"});
+            return Result<void>(
+                Error{ErrorCode::InvalidArgument,
+                      fmt::format("Vector dimension mismatch: expected {}, got {} for id '{}'",
+                                  config_.dimension, vector.size(), id)});
         }
 
         std::unique_lock lock(mutex_);
 
         // Check if ID already exists
         if (id_to_label_.find(id) != id_to_label_.end()) {
-            return Result<void>(
-                Error{ErrorCode::InvalidArgument, "Vector with this ID already exists"});
+            return Result<void>(Error{ErrorCode::InvalidArgument,
+                                      fmt::format("Vector with id '{}' already exists", id)});
         }
 
         // Check capacity
         if (next_label_ >= config_.max_elements) {
-            return Result<void>(Error{ErrorCode::InvalidArgument, "Index at maximum capacity"});
+            return Result<void>(
+                Error{ErrorCode::InvalidArgument,
+                      fmt::format("Index at maximum capacity ({}), cannot add id '{}'",
+                                  config_.max_elements, id)});
         }
 
         try {
@@ -647,7 +664,7 @@ public:
                 config_.normalize_vectors ? vector_utils::normalize(vector) : vector;
 
             // Map string ID to numeric label
-            hnswlib::labeltype label = next_label_++;
+            size_t label = next_label_++;
             id_to_label_[id] = label;
             label_to_id_[label] = id;
 
@@ -655,32 +672,40 @@ public:
             stored_vectors_[label] = normalized_vector;
 
             // Add to HNSW index
-            hnsw_index_->addPoint(normalized_vector.data(), label);
+            std::visit(
+                [&](auto& index) {
+                    index.insert(label, std::span<const float>(normalized_vector));
+                },
+                hnsw_index_);
 
             stats_.num_vectors++;
             updateMemoryStats();
 
             return Result<void>();
         } catch (const std::exception& e) {
-            return Result<void>(
-                Error{ErrorCode::InternalError, std::string("Failed to add vector: ") + e.what()});
+            return Result<void>(Error{ErrorCode::InternalError,
+                                      fmt::format("Failed to add vector '{}': {}", id, e.what())});
         }
     }
 
     Result<void> update(const std::string& id, const std::vector<float>& vector) override {
         if (vector.size() != config_.dimension) {
-            return Result<void>(Error{ErrorCode::InvalidArgument, "Vector dimension mismatch"});
+            return Result<void>(
+                Error{ErrorCode::InvalidArgument,
+                      fmt::format("Vector dimension mismatch: expected {}, got {} for id '{}'",
+                                  config_.dimension, vector.size(), id)});
         }
 
         std::unique_lock lock(mutex_);
 
         auto it = id_to_label_.find(id);
         if (it == id_to_label_.end()) {
-            return Result<void>(Error{ErrorCode::NotFound, "Vector not found"});
+            return Result<void>(
+                Error{ErrorCode::NotFound, fmt::format("Vector '{}' not found for update", id)});
         }
 
         try {
-            hnswlib::labeltype label = it->second;
+            size_t label = it->second;
 
             // Normalize vector if needed
             std::vector<float> normalized_vector =
@@ -689,17 +714,22 @@ public:
             // Update stored vector
             stored_vectors_[label] = normalized_vector;
 
-            // Mark as deleted and re-add (HNSWlib's update mechanism)
-            hnsw_index_->markDelete(label);
-            hnsw_index_->addPoint(normalized_vector.data(), label, true); // replace_deleted = true
+            // sqlite-vec-cpp HNSW: mark as deleted and re-insert with same label
+            std::visit(
+                [&](auto& index) {
+                    index.remove(label); // Soft delete
+                    index.insert(label, std::span<const float>(normalized_vector));
+                },
+                hnsw_index_);
 
             // Update memory stats (vector count doesn't change but memory might)
             updateMemoryStats();
 
             return Result<void>();
         } catch (const std::exception& e) {
-            return Result<void>(Error{ErrorCode::InternalError,
-                                      std::string("Failed to update vector: ") + e.what()});
+            return Result<void>(
+                Error{ErrorCode::InternalError,
+                      fmt::format("Failed to update vector '{}': {}", id, e.what())});
         }
     }
 
@@ -708,14 +738,15 @@ public:
 
         auto it = id_to_label_.find(id);
         if (it == id_to_label_.end()) {
-            return Result<void>(Error{ErrorCode::NotFound, "Vector not found"});
+            return Result<void>(
+                Error{ErrorCode::NotFound, fmt::format("Vector '{}' not found for removal", id)});
         }
 
         try {
-            hnswlib::labeltype label = it->second;
+            size_t label = it->second;
 
-            // Mark as deleted in HNSW
-            hnsw_index_->markDelete(label);
+            // Soft delete in HNSW
+            std::visit([&](auto& index) { index.remove(label); }, hnsw_index_);
 
             // Remove from mappings
             stored_vectors_.erase(label);
@@ -727,8 +758,9 @@ public:
 
             return Result<void>();
         } catch (const std::exception& e) {
-            return Result<void>(Error{ErrorCode::InternalError,
-                                      std::string("Failed to remove vector: ") + e.what()});
+            return Result<void>(
+                Error{ErrorCode::InternalError,
+                      fmt::format("Failed to remove vector '{}': {}", id, e.what())});
         }
     }
 
@@ -736,7 +768,9 @@ public:
                                              const SearchFilter* filter) override {
         if (query.size() != config_.dimension) {
             return Result<std::vector<SearchResult>>(
-                Error{ErrorCode::InvalidArgument, "Query dimension mismatch"});
+                Error{ErrorCode::InvalidArgument,
+                      fmt::format("Query dimension mismatch: expected {}, got {}",
+                                  config_.dimension, query.size())});
         }
 
         std::shared_lock lock(mutex_);
@@ -752,21 +786,53 @@ public:
             std::vector<float> normalized_query =
                 config_.normalize_vectors ? vector_utils::normalize(query) : query;
 
-            // Set search parameters
-            hnsw_index_->setEf(config_.hnsw_ef_search);
-
             // Perform k-NN search (search more if we have filters)
             size_t search_k =
                 filter && filter->hasFilters() ? std::min(k * 10, stats_.num_vectors) : k;
-            auto result_pairs = hnsw_index_->searchKnn(normalized_query.data(), search_k);
 
-            // Convert results to our format and apply filters
+            // Create filter function if needed
+            std::function<bool(size_t)> hnsw_filter = nullptr;
+            if (filter && filter->hasFilters()) {
+                hnsw_filter = [this, filter](size_t label) -> bool {
+                    auto id_it = label_to_id_.find(label);
+                    if (id_it == label_to_id_.end())
+                        return false;
+                    const std::string& id = id_it->second;
+
+                    // Check exclude list
+                    if (!filter->exclude_ids.empty()) {
+                        if (std::find(filter->exclude_ids.begin(), filter->exclude_ids.end(), id) !=
+                            filter->exclude_ids.end()) {
+                            return false;
+                        }
+                    }
+
+                    // Custom filter (metadata not available at this level)
+                    if (filter->custom_filter && !filter->custom_filter(id, {})) {
+                        return false;
+                    }
+
+                    return true;
+                };
+            }
+
+            // Search using visitor pattern
+            std::vector<std::pair<size_t, float>> result_pairs;
+            std::visit(
+                [&](auto& index) {
+                    result_pairs =
+                        index.search_with_filter(std::span<const float>(normalized_query), search_k,
+                                                 config_.hnsw_ef_search, hnsw_filter);
+                },
+                hnsw_index_);
+
+            // Convert results to our format and apply additional filters
             std::vector<SearchResult> results;
             results.reserve(k);
 
-            while (!result_pairs.empty() && results.size() < k) {
-                auto [dist, label] = result_pairs.top();
-                result_pairs.pop();
+            for (const auto& [label, dist] : result_pairs) {
+                if (results.size() >= k)
+                    break;
 
                 // Find the ID for this label
                 auto id_it = label_to_id_.find(label);
@@ -776,25 +842,10 @@ public:
 
                 const std::string& id = id_it->second;
 
-                // Apply filters
-                if (filter && filter->hasFilters()) {
-                    // Check exclude list
-                    if (!filter->exclude_ids.empty()) {
-                        if (std::find(filter->exclude_ids.begin(), filter->exclude_ids.end(), id) !=
-                            filter->exclude_ids.end()) {
-                            continue;
-                        }
-                    }
-
-                    // Check max distance
-                    if (filter->max_distance.has_value() && dist > filter->max_distance.value()) {
-                        continue;
-                    }
-
-                    // Check custom filter
-                    if (filter->custom_filter && !filter->custom_filter(id, {})) {
-                        continue;
-                    }
+                // Apply max_distance filter
+                if (filter && filter->max_distance.has_value() &&
+                    dist > filter->max_distance.value()) {
+                    continue;
                 }
 
                 SearchResult result;
@@ -813,9 +864,6 @@ public:
                 results.push_back(std::move(result));
             }
 
-            // Reverse to get best results first (priority queue gives worst first)
-            std::reverse(results.begin(), results.end());
-
             auto end = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 
@@ -828,14 +876,17 @@ public:
             return Result<std::vector<SearchResult>>(results);
         } catch (const std::exception& e) {
             return Result<std::vector<SearchResult>>(
-                Error{ErrorCode::InternalError, std::string("Search failed: ") + e.what()});
+                Error{ErrorCode::InternalError, fmt::format("Search failed: {}", e.what())});
         }
     }
 
     Result<void> addBatch(const std::vector<std::string>& ids,
                           const std::vector<std::vector<float>>& vectors) override {
         if (ids.size() != vectors.size()) {
-            return Result<void>(Error{ErrorCode::InvalidArgument, "IDs and vectors size mismatch"});
+            return Result<void>(
+                Error{ErrorCode::InvalidArgument,
+                      fmt::format("IDs and vectors size mismatch: {} ids, {} vectors", ids.size(),
+                                  vectors.size())});
         }
 
         std::unique_lock lock(mutex_);
@@ -845,12 +896,13 @@ public:
             if (vectors[i].size() != config_.dimension) {
                 return Result<void>(
                     Error{ErrorCode::InvalidArgument,
-                          "Vector dimension mismatch at index " + std::to_string(i)});
+                          fmt::format("Vector dimension mismatch at index {}: expected {}, got {}",
+                                      i, config_.dimension, vectors[i].size())});
             }
             if (id_to_label_.find(ids[i]) != id_to_label_.end()) {
                 return Result<void>(
                     Error{ErrorCode::InvalidArgument,
-                          "Duplicate ID at index " + std::to_string(i) + ": " + ids[i]});
+                          fmt::format("Duplicate ID at index {}: '{}'", i, ids[i])});
             }
         }
 
@@ -862,13 +914,17 @@ public:
                     config_.normalize_vectors ? vector_utils::normalize(vectors[i]) : vectors[i];
 
                 // Map string ID to numeric label
-                hnswlib::labeltype label = next_label_++;
+                size_t label = next_label_++;
                 id_to_label_[ids[i]] = label;
                 label_to_id_[label] = ids[i];
                 stored_vectors_[label] = normalized_vector;
 
                 // Add to HNSW index
-                hnsw_index_->addPoint(normalized_vector.data(), label);
+                std::visit(
+                    [&](auto& index) {
+                        index.insert(label, std::span<const float>(normalized_vector));
+                    },
+                    hnsw_index_);
 
                 stats_.num_vectors++;
             }
@@ -877,7 +933,7 @@ public:
             return Result<void>();
         } catch (const std::exception& e) {
             return Result<void>(
-                Error{ErrorCode::InternalError, std::string("Batch add failed: ") + e.what()});
+                Error{ErrorCode::InternalError, fmt::format("Batch add failed: {}", e.what())});
         }
     }
 
@@ -902,15 +958,21 @@ public:
         std::unique_lock lock(mutex_);
 
         try {
-            // Save HNSW index
-            hnsw_index_->saveIndex(path);
-
-            // Save ID mappings to a separate file
+            // Save ID mappings and vectors to a file
+            // Note: For HNSW with sqlite-vec-cpp, we rebuild the index on load
+            // rather than persisting the graph structure (simpler and more portable)
             std::string mappings_path = path + ".mappings";
             std::ofstream mappings_file(mappings_path, std::ios::binary);
             if (!mappings_file) {
-                return Result<void>(Error{ErrorCode::IOError, "Failed to create mappings file"});
+                return Result<void>(
+                    Error{ErrorCode::IOError,
+                          fmt::format("Failed to create mappings file: {}", mappings_path)});
             }
+
+            // Write version marker for new format
+            uint32_t format_version = 2; // v2 = sqlite-vec-cpp format
+            mappings_file.write(reinterpret_cast<const char*>(&format_version),
+                                sizeof(format_version));
 
             // Write number of mappings
             size_t num_mappings = id_to_label_.size();
@@ -935,7 +997,7 @@ public:
             return Result<void>();
         } catch (const std::exception& e) {
             return Result<void>(
-                Error{ErrorCode::IOError, std::string("Failed to save index: ") + e.what()});
+                Error{ErrorCode::IOError, fmt::format("Failed to save index: {}", e.what())});
         }
     }
 
@@ -943,18 +1005,32 @@ public:
         std::unique_lock lock(mutex_);
 
         try {
-            // Reinitialize index before loading
-            initializeIndex();
-
-            // Load HNSW index
-            hnsw_index_->loadIndex(path, space_.get());
-
-            // Load ID mappings
+            // Check for mappings file to detect format
             std::string mappings_path = path + ".mappings";
             std::ifstream mappings_file(mappings_path, std::ios::binary);
             if (!mappings_file) {
-                return Result<void>(Error{ErrorCode::IOError, "Failed to open mappings file"});
+                return Result<void>(Error{
+                    ErrorCode::IOError,
+                    fmt::format("Failed to open mappings file: {}. "
+                                "If this is an old HNSWlib format index, migration is required.",
+                                mappings_path)});
             }
+
+            // Read format version
+            uint32_t format_version = 0;
+            mappings_file.read(reinterpret_cast<char*>(&format_version), sizeof(format_version));
+
+            if (format_version != 2) {
+                return Result<void>(Error{
+                    ErrorCode::InvalidArgument,
+                    fmt::format("ERROR: Index at '{}' uses old HNSWlib format (version {}). "
+                                "Migration to sqlite-vec-cpp format (version 2) is required. "
+                                "Please use the migration tool: yams migrate-vectors --path {}",
+                                path, format_version, path)});
+            }
+
+            // Reinitialize index before loading
+            initializeIndex();
 
             // Read number of mappings
             size_t num_mappings;
@@ -965,7 +1041,7 @@ public:
             label_to_id_.clear();
             stored_vectors_.clear();
 
-            // Read each mapping
+            // Read each mapping and rebuild index
             for (size_t i = 0; i < num_mappings; ++i) {
                 size_t id_len;
                 mappings_file.read(reinterpret_cast<char*>(&id_len), sizeof(id_len));
@@ -973,7 +1049,7 @@ public:
                 std::string id(id_len, '\0');
                 mappings_file.read(&id[0], id_len);
 
-                hnswlib::labeltype label;
+                size_t label;
                 mappings_file.read(reinterpret_cast<char*>(&label), sizeof(label));
 
                 id_to_label_[id] = label;
@@ -984,6 +1060,10 @@ public:
                 mappings_file.read(reinterpret_cast<char*>(vec.data()),
                                    config_.dimension * sizeof(float));
                 stored_vectors_[label] = vec;
+
+                // Add to HNSW index
+                std::visit([&](auto& index) { index.insert(label, std::span<const float>(vec)); },
+                           hnsw_index_);
             }
 
             // Read next_label
@@ -995,19 +1075,28 @@ public:
             return Result<void>();
         } catch (const std::exception& e) {
             return Result<void>(
-                Error{ErrorCode::IOError, std::string("Failed to load index: ") + e.what()});
+                Error{ErrorCode::IOError, fmt::format("Failed to load index: {}", e.what())});
         }
     }
 
     Result<void> optimize() override {
-        // HNSW doesn't need regular optimization like other indices
-        // But we could rebuild if there are many deleted items
+        // Check if compaction is needed
+        bool needs_compact = std::visit(
+            [](const auto& index) {
+                return index.needs_compaction(0.2f); // 20% threshold
+            },
+            hnsw_index_);
+
+        if (needs_compact) {
+            std::unique_lock lock(mutex_);
+            std::visit([](auto& index) { index.isolate_deleted(); }, hnsw_index_);
+        }
         return Result<void>();
     }
 
     bool needsOptimization() const override {
-        // Could check for high deletion ratio
-        return false;
+        return std::visit([](const auto& index) { return index.needs_compaction(0.2f); },
+                          hnsw_index_);
     }
 
     size_t size() const override {
@@ -1025,8 +1114,6 @@ public:
         stats_.dimension = config_.dimension;
         stats_.metric = config_.distance_metric;
         stats_.needs_optimization = needsOptimization();
-        // memory_usage_bytes and index_size_bytes are already set by updateMemoryStats()
-        // num_vectors is also already tracked
         return stats_;
     }
 
@@ -1035,7 +1122,7 @@ public:
 
         try {
             // Write version
-            uint32_t version = 1;
+            uint32_t version = 2; // v2 = sqlite-vec-cpp format
             out.write(reinterpret_cast<const char*>(&version), sizeof(version));
 
             // Write number of vectors
@@ -1057,7 +1144,7 @@ public:
 
             return Result<void>();
         } catch (const std::exception& e) {
-            return Error{ErrorCode::IOError, std::string("Serialization failed: ") + e.what()};
+            return Error{ErrorCode::IOError, fmt::format("Serialization failed: {}", e.what())};
         }
     }
 
@@ -1068,8 +1155,14 @@ public:
             // Read version
             uint32_t version;
             in.read(reinterpret_cast<char*>(&version), sizeof(version));
-            if (version != 1) {
-                return Error{ErrorCode::InvalidArgument, "Unsupported serialization version"};
+            if (version == 1) {
+                return Error{ErrorCode::InvalidArgument,
+                             "ERROR: Stream contains old HNSWlib format (version 1). "
+                             "Migration to sqlite-vec-cpp format (version 2) is required."};
+            }
+            if (version != 2) {
+                return Error{ErrorCode::InvalidArgument,
+                             fmt::format("Unsupported serialization version: {}", version)};
             }
 
             // Read number of vectors
@@ -1083,18 +1176,10 @@ public:
             next_label_ = 0;
             stats_.num_vectors = 0;
 
-            // Only initialize if index doesn't exist
-            if (!hnsw_index_) {
-                initializeIndex();
-            }
+            // Reinitialize index
+            initializeIndex();
 
-            // Prepare batch of vectors for efficient loading
-            std::vector<std::vector<float>> all_vectors;
-            std::vector<hnswlib::labeltype> all_labels;
-            all_vectors.reserve(num_vectors);
-            all_labels.reserve(num_vectors);
-
-            // Read all vectors first
+            // Read all vectors and add to index
             for (size_t i = 0; i < num_vectors; ++i) {
                 // Read ID
                 size_t id_len;
@@ -1107,18 +1192,14 @@ public:
                 in.read(reinterpret_cast<char*>(vec.data()), config_.dimension * sizeof(float));
 
                 // Store mappings
-                hnswlib::labeltype label = next_label_++;
+                size_t label = next_label_++;
                 id_to_label_[id] = label;
                 label_to_id_[label] = id;
                 stored_vectors_[label] = vec;
 
-                all_vectors.push_back(vec);
-                all_labels.push_back(label);
-            }
-
-            // Add all points to index at once
-            for (size_t i = 0; i < all_vectors.size(); ++i) {
-                hnsw_index_->addPoint(all_vectors[i].data(), all_labels[i]);
+                // Add to index
+                std::visit([&](auto& index) { index.insert(label, std::span<const float>(vec)); },
+                           hnsw_index_);
             }
 
             stats_.num_vectors = num_vectors;
@@ -1126,7 +1207,7 @@ public:
 
             return Result<void>();
         } catch (const std::exception& e) {
-            return Error{ErrorCode::IOError, std::string("Deserialization failed: ") + e.what()};
+            return Error{ErrorCode::IOError, fmt::format("Deserialization failed: {}", e.what())};
         }
     }
 
@@ -1145,12 +1226,13 @@ public:
 
         auto it = id_to_label_.find(id);
         if (it == id_to_label_.end()) {
-            return Error{ErrorCode::NotFound, "Vector not found"};
+            return Error{ErrorCode::NotFound, fmt::format("Vector '{}' not found", id)};
         }
 
         auto vec_it = stored_vectors_.find(it->second);
         if (vec_it == stored_vectors_.end()) {
-            return Error{ErrorCode::InternalError, "Vector data not found"};
+            return Error{ErrorCode::InternalError,
+                         fmt::format("Vector data not found for id '{}'", id)};
         }
 
         return Result<std::vector<float>>(vec_it->second);
@@ -1158,57 +1240,84 @@ public:
 
 private:
     void initializeIndex() {
-        // Create appropriate space based on distance metric
+        // Create HNSW config
+        auto createConfig = [this]() {
+            typename L2Index::Config cfg;
+            cfg.M = config_.hnsw_m;
+            cfg.M_max = config_.hnsw_m * 2;
+            cfg.M_max_0 = config_.hnsw_m * 2;
+            cfg.ef_construction = config_.hnsw_ef_construction;
+            return cfg;
+        };
+
+        // Create appropriate index based on distance metric
         switch (config_.distance_metric) {
-            case DistanceMetric::L2:
-                space_ = std::make_unique<hnswlib::L2Space>(config_.dimension);
+            case DistanceMetric::L2: {
+                typename L2Index::Config cfg = createConfig();
+                hnsw_index_ = L2Index(cfg);
                 break;
-            case DistanceMetric::INNER_PRODUCT:
-                space_ = std::make_unique<hnswlib::InnerProductSpace>(config_.dimension);
+            }
+            case DistanceMetric::COSINE: {
+                // For cosine similarity, we normalize vectors and use cosine metric
+                config_.normalize_vectors = true;
+                typename CosineIndex::Config cfg;
+                cfg.M = config_.hnsw_m;
+                cfg.M_max = config_.hnsw_m * 2;
+                cfg.M_max_0 = config_.hnsw_m * 2;
+                cfg.ef_construction = config_.hnsw_ef_construction;
+                hnsw_index_ = CosineIndex(cfg);
                 break;
-            case DistanceMetric::COSINE:
-                // For cosine similarity, we normalize vectors and use inner product
-                space_ = std::make_unique<hnswlib::InnerProductSpace>(config_.dimension);
-                config_.normalize_vectors = true; // Force normalization for cosine
+            }
+            case DistanceMetric::INNER_PRODUCT: {
+                typename IPIndex::Config cfg;
+                cfg.M = config_.hnsw_m;
+                cfg.M_max = config_.hnsw_m * 2;
+                cfg.M_max_0 = config_.hnsw_m * 2;
+                cfg.ef_construction = config_.hnsw_ef_construction;
+                hnsw_index_ = IPIndex(cfg);
                 break;
-            default:
+            }
+            default: {
                 // Default to L2
-                space_ = std::make_unique<hnswlib::L2Space>(config_.dimension);
+                typename L2Index::Config cfg = createConfig();
+                hnsw_index_ = L2Index(cfg);
+            }
         }
-
-        // Create HNSW index
-        hnsw_index_ = std::make_unique<hnswlib::HierarchicalNSW<float>>(
-            space_.get(), config_.max_elements, config_.hnsw_m, config_.hnsw_ef_construction,
-            config_.hnsw_seed);
-
-        // Set the ef parameter for search
-        hnsw_index_->setEf(config_.hnsw_ef_search);
     }
 
     void updateMemoryStats() {
-        // Estimate memory usage
-        // HNSW memory: ~(4 * dimension * N + 8 * M * N) bytes
-        size_t hnsw_memory =
-            4 * config_.dimension * stats_.num_vectors + 8 * config_.hnsw_m * stats_.num_vectors;
+        // Accurate memory tracking
+        // Index memory: nodes + edges (estimate based on sqlite-vec-cpp structure)
+        size_t index_memory = std::visit(
+            [this](const auto& index) -> size_t {
+                // Each node: vector storage + edges
+                // Vector: dimension * sizeof(float)
+                // Edges: ~M * 2 * sizeof(size_t) per node average
+                size_t vec_size = config_.dimension * sizeof(float);
+                size_t edge_size = config_.hnsw_m * 2 * sizeof(size_t);
+                return index.size() * (vec_size + edge_size + sizeof(void*) * 4);
+            },
+            hnsw_index_);
 
-        // Add memory for ID mappings and stored vectors
-        size_t mapping_memory =
-            (sizeof(std::string) + sizeof(hnswlib::labeltype)) * stats_.num_vectors * 2;
+        // Mapping memory
+        size_t mapping_memory = (sizeof(std::string) + sizeof(size_t)) * stats_.num_vectors * 2;
+
+        // Stored vectors memory
         size_t vector_memory = config_.dimension * sizeof(float) * stats_.num_vectors;
 
-        stats_.memory_usage_bytes = hnsw_memory + mapping_memory + vector_memory;
+        stats_.memory_usage_bytes = index_memory + mapping_memory + vector_memory;
         stats_.index_size_bytes = stats_.memory_usage_bytes;
     }
 
     mutable std::shared_mutex mutex_;
-    std::unique_ptr<hnswlib::SpaceInterface<float>> space_;
-    std::unique_ptr<hnswlib::HierarchicalNSW<float>> hnsw_index_;
+    HNSWVariant hnsw_index_;
 
-    // ID mappings (since HNSWlib uses numeric labels)
-    std::unordered_map<std::string, hnswlib::labeltype> id_to_label_;
-    std::unordered_map<hnswlib::labeltype, std::string> label_to_id_;
-    std::unordered_map<hnswlib::labeltype, std::vector<float>> stored_vectors_;
-    hnswlib::labeltype next_label_;
+    // ID mappings (since sqlite-vec-cpp uses numeric IDs)
+    std::unordered_map<std::string, size_t> id_to_label_;
+    std::unordered_map<size_t, std::string> label_to_id_;
+    std::unordered_map<size_t, std::vector<float>> stored_vectors_;
+    size_t next_label_;
+    ;
 };
 
 // =============================================================================
