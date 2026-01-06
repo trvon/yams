@@ -34,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Post-ingest throughput: dedicated worker pool, adaptive backoff, batched directory ingests.
 - Search optimizations: batch vector/KG lookups, flat_map for cache-friendly access, branch hints, memory pre-allocation.
 - Daemon startup throttling: PathTreeRepair via RepairCoordinator, Fts5Job startup delay (2s), reduced batch sizes (1000→100).
+- Benchmarks: ingestion/metadata ops improved vs prior baseline (SmallDocument ~1.1K→~2.5K docs/sec; MediumDocument ~17→~57 docs/sec; SingleUpdate ~9.1K→~14.2K ops/sec; BulkUpdate(500) ~7.4K→~11.5K ops/sec).
 
 ### Fixed
 - Compression stats now persist across daemon restarts (`Storage Logical Bytes` vs

@@ -1,21 +1,33 @@
 # YAMS Performance Benchmark Report
 
-**Generated**: October 11, 2025
-**YAMS Version**: 0.1.5+
-**Test Environment**: macOS 26.0.1, Apple Silicon M3 Max (16 cores)
-**Build Configuration**: Debug build with `-O0` (benchmarks should be run in release mode for accurate results)
+**Generated**: 2026-01-05 22:29
+**YAMS Version**: 0.0.0-dev (`de213953`)
+**Test Environment**: macOS (Apple Silicon, 16 cores)
+**Build Configuration**: Debug build (TSAN disabled)
 
-> ⚠️ **Note**: This report needs refreshed benchmark data. Current benchmarks experience database constraint errors during execution. Benchmark infrastructure requires cleanup before generating updated performance metrics.
+> Note: This page is the canonical place for benchmark results. Keep the latest numbers inlined here (avoid relying on generated `bench_results/*` artifacts).
+
+## Contents
+
+- [Executive Summary](#executive-summary)
+- [Test Environment Specifications](#test-environment-specifications)
+- [Performance Benchmarks](#performance-benchmarks)
+  - [Latest Local Runs (2026-01-05)](#latest-local-runs-2026-01-05)
+  - [Cryptographic Operations (SHA-256)](#1-cryptographic-operations-sha-256)
+  - [Content Chunking (Rabin Fingerprinting)](#2-content-chunking-rabin-fingerprinting)
+  - [Compression Performance (Zstandard)](#3-compression-performance-zstandard)
+  - [Concurrent Compression Performance](#4-concurrent-compression-performance)
 
 ## Executive Summary
 
-This report presents comprehensive performance benchmarks for YAMS (Yet Another Memory System) core components measured on Apple Silicon hardware. Key findings:
+This report focuses on benchmark changes that are easy to interpret and compare across runs (primarily ingestion + metadata + IPC framing). Search microbenchmarks can be noisy and hard to compare across different datasets/configs, so they are intentionally de-emphasized here.
 
-- **Compression Performance**: Zstandard compression achieves up to 20.1 GB/s throughput for 1MB data blocks
-- **Concurrent Processing**: Linear scaling observed up to 16 threads with 41.2 GB/s peak throughput
-- **Query Processing**: Tokenization processes up to 3.4M items/second for complex mixed queries
-- **Result Ranking**: Partial sort algorithms achieve 1.86 GB/s throughput for large result sets
-- **System Stability**: 93% test pass rate with critical path components fully operational
+**Measured improvements (throughput)**:
+
+- `Ingestion_SmallDocument`: ~1.1K → ~2.5K docs/sec
+- `Ingestion_MediumDocument`: ~17 → ~57 docs/sec
+- `Metadata_SingleUpdate`: ~9.1K → ~14.2K ops/sec
+- `Metadata_BulkUpdate(500)`: ~7.4K → ~11.5K ops/sec
 
 ## Test Environment Specifications
 
@@ -30,22 +42,23 @@ This report presents comprehensive performance benchmarks for YAMS (Yet Another 
 
 ### Available Benchmark Executables
 
-Located in `build/debug`:
-- `tests/benchmarks/yams_api_benchmarks` - API ingestion and metadata operations
-- `tests/benchmarks/yams_search_benchmarks` - Search engine performance
-- `tests/benchmarks/yams_retrieval_service_benchmarks` - Retrieval service benchmarks
-- `tests/benchmarks/metadata_path_query_bench` - Metadata query performance
-- `tests/benchmarks/tree_list_filter_bench` - Tree-based list filtering
-- `tests/benchmarks/tree_diff_benchmarks` - Tree diff operations
-- `tests/benchmarks/ingestion_throughput_bench` - Ingestion throughput
-- `tests/benchmarks/ipc_stream_bench` - IPC streaming performance
-- `tests/benchmarks/daemon_socket_accept_bench` - Daemon socket operations
-- `tests/benchmarks/search_tree_bench` - Search tree operations
-- `src/benchmarks/yams_bus_bench` - Internal event bus performance
+Located in `builddir/tests/benchmarks/`:
+- `yams_api_benchmarks` - API ingestion and metadata operations (writes `bench_results/api_*`)
+- `yams_search_benchmarks` - Search + query parsing (writes `bench_results/search_*`)
+- `ipc_stream_bench` - IPC streaming performance (writes `bench_results/ipc_stream_*`)
+- `retrieval_quality_bench` - Retrieval-quality evaluation (stdout metrics; uses embedded daemon harness)
+- `yams_retrieval_service_benchmarks` - Retrieval service benchmarks
+- `metadata_path_query_bench` - Metadata query performance
+- `tree_list_filter_bench` - Tree-based list filtering
+- `tree_diff_benchmarks` - Tree diff operations
+- `ingestion_throughput_bench` - Ingestion throughput
+- `daemon_socket_accept_bench` - Daemon socket operations (GTest runner)
 
 ## Test Suite Results
 
-### Unit Test Coverage (October 11, 2025)
+<details>
+<summary>Historical Unit Test Coverage (October 11, 2025)</summary>
+
 
 **Test Execution Summary**:
 - **Unit Test Shards**: 6 shards with parallel execution
@@ -78,7 +91,69 @@ Located in `build/debug`:
 - Vector database: In-memory mode
 - Test isolation: Single instance mode enabled
 
+</details>
+
 ## Performance Benchmarks
+
+### Latest Local Runs (2026-01-05)
+
+#### Quick Links
+- [API Benchmarks](#api-benchmarks)
+- [IPC Streaming Benchmarks](#ipc-streaming-benchmarks)
+- [Retrieval Quality Benchmark](#retrieval-quality-benchmark)
+
+#### Run Commands
+```bash
+# API
+builddir/tests/benchmarks/yams_api_benchmarks --quiet --iterations 5
+
+# IPC streaming
+builddir/tests/benchmarks/ipc_stream_bench --benchmark_min_time=0.05
+
+# Retrieval quality
+YAMS_TEST_SAFE_SINGLE_INSTANCE=1 builddir/tests/benchmarks/retrieval_quality_bench
+```
+
+#### API Benchmarks
+
+(From `builddir/tests/benchmarks/yams_api_benchmarks`, `--iterations 5`)
+
+| Benchmark | Latest | Throughput |
+|-----------|--------|------------|
+| Ingestion_SmallDocument | 0.41 ms | 2464.27 ops/sec |
+| Ingestion_MediumDocument | 17.66 ms | 56.63 ops/sec |
+| Metadata_SingleUpdate | 0.07 ms | 14245.01 ops/sec |
+| Metadata_BulkUpdate | 43.63 ms | 11459.58 ops/sec |
+
+#### Search Benchmarks
+
+Search benchmarks are intentionally not included in the “improvements” summary because the reported numbers can be misleading (different datasets, caching, and internal operation definitions). If you need them for profiling, run the benchmark binary and inspect its output locally:
+
+```bash
+builddir/tests/benchmarks/yams_search_benchmarks --quiet --iterations 5
+```
+
+#### IPC Streaming Benchmarks
+
+(From `builddir/tests/benchmarks/ipc_stream_bench`, `--benchmark_min_time=0.05`)
+
+| Benchmark | Latest | Throughput |
+|-----------|--------|------------|
+| StreamingFramer_32x10_256B | 2.58 ms | 4267.49 ops/sec |
+| StreamingFramer_64x6_512B | 4.51 ms | 1552.41 ops/sec |
+| UnaryFramer_Success_8KB | 0.10 ms | 10050.25 ops/sec |
+
+#### Retrieval Quality Benchmark
+
+(From `builddir/tests/benchmarks/retrieval_quality_bench` with `YAMS_TEST_SAFE_SINGLE_INSTANCE=1`)
+
+| Metric | Value |
+|--------|-------|
+| MRR | 1.0000 |
+| Recall@K | 1.8167 |
+| Precision@K | 1.0000 |
+| nDCG@K | 1.4460 |
+| MAP | 1.0000 |
 
 ### 1. Cryptographic Operations (SHA-256)
 
@@ -195,20 +270,8 @@ Located in `build/debug`:
 
 ### Current Issues & Action Items
 
-**Database Constraint Errors**: The benchmark executables currently encounter SQLite constraint violations when setting up test data. This indicates:
-1. Benchmark databases may need cleanup between runs
-2. Test data generation may be inserting duplicate entries
-3. Schema migrations may not be handling test scenarios properly
-
-**Recommended Fixes**:
-```bash
-# Clean benchmark databases before running
-rm -rf /tmp/yams_bench_* ~/.local/share/yams/bench_*
-
-# Run benchmarks with fresh database
-export YAMS_TEST_DB_PATH="/tmp/yams_bench_$(date +%s).db"
-./tests/benchmarks/yams_api_benchmarks --benchmark_format=json
-```
+- `yams_search_benchmarks` can hit `database is locked` depending on run concurrency and prior temporary state. Rerun after stopping any local daemon and/or cleaning temporary benchmark data.
+- `retrieval_quality_bench` uses an embedded daemon harness; use `YAMS_TEST_SAFE_SINGLE_INSTANCE=1` to avoid instance collisions.
 
 ### Test Execution
 
