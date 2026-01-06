@@ -54,8 +54,8 @@ public:
 
         // Generate deterministic embedding based on text hash
         std::hash<std::string> hasher;
-        size_t seed = hasher(text);
-        std::mt19937 gen(seed);
+        const std::size_t seed = hasher(text);
+        std::mt19937 gen(static_cast<std::mt19937::result_type>(seed));
         std::normal_distribution<float> dist(0.0f, 1.0f);
 
         std::vector<float> embedding(dimension_);

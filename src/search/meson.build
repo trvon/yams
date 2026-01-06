@@ -1,5 +1,6 @@
 spdlog_dep = dependency('spdlog', required: true)
 nlohmann_json_dep = dependency('nlohmann_json', required: true)
+boost_dep = dependency('boost', required: true)
 yams_core = dependency('yams_core', required: false)
 yams_metadata = dependency('yams_metadata', required: false)
 yams_vector = dependency('yams_vector', required: false)
@@ -23,7 +24,7 @@ yams_search = static_library('yams_search',
     'symbol_enrichment.cpp',
   ],
   include_directories: include_directories('../../include'),
-  dependencies: [spdlog_dep, nlohmann_json_dep, yams_core, yams_metadata, yams_vector],
+  dependencies: [spdlog_dep, nlohmann_json_dep, boost_dep, yams_core, yams_metadata, yams_vector],
   install: true,
 )
 
@@ -37,6 +38,6 @@ pkg.generate(yams_search,
 yams_search_dep = declare_dependency(
   link_with: yams_search,
   include_directories: include_directories('../../include'),
-  dependencies: [yams_core, yams_metadata, yams_vector, nlohmann_json_dep, spdlog_dep],
+  dependencies: [yams_core, yams_metadata, yams_vector, nlohmann_json_dep, spdlog_dep, boost_dep],
 )
 meson.override_dependency('yams_search', yams_search_dep)
