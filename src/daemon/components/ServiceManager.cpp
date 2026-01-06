@@ -1648,7 +1648,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         if (buildResult.has_value()) {
             const auto& built = buildResult.value();
             {
-                std::lock_guard<std::shared_mutex> lk(searchEngineMutex_); // Exclusive write
+                std::unique_lock lk(searchEngineMutex_); // Exclusive write
                 searchEngine_ = built;
             }
 
@@ -2094,7 +2094,7 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
         if (rebuildResult.has_value()) {
             const auto& rebuilt = rebuildResult.value();
             {
-                std::lock_guard<std::shared_mutex> lk(searchEngineMutex_);
+                std::unique_lock lk(searchEngineMutex_);
                 searchEngine_ = rebuilt;
             }
 
@@ -2158,7 +2158,7 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
             if (rebuildResult.has_value()) {
                 const auto& rebuilt = rebuildResult.value();
                 {
-                    std::lock_guard<std::shared_mutex> lk(searchEngineMutex_); // Exclusive write
+                    std::unique_lock lk(searchEngineMutex_); // Exclusive write
                     searchEngine_ = rebuilt;
                 }
 

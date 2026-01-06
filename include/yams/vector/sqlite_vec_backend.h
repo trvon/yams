@@ -3,6 +3,8 @@
 #include <sqlite3.h>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
+#include <yams/profiling.h>
 #include <yams/vector/vector_backend.h>
 
 namespace yams::vector {
@@ -128,7 +130,7 @@ private:
     size_t embedding_dim_;
     bool initialized_;
     bool in_transaction_;
-    mutable std::mutex mutex_;
+    mutable YAMS_SHARED_LOCKABLE(std::shared_mutex, mutex_);
 
     // Prepared statements for performance
     struct Statements {

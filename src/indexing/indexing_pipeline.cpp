@@ -139,6 +139,7 @@ void IndexingPipeline::setProgressCallback(ProgressCallback callback) {
 }
 
 void IndexingPipeline::workerThread() {
+    YAMS_ZONE_SCOPED_N("IndexingPipeline::workerThread");
     std::stringstream ss;
     ss << std::this_thread::get_id();
     spdlog::debug("Worker thread started: {}", ss.str());
@@ -190,6 +191,7 @@ void IndexingPipeline::workerThread() {
 }
 
 IndexingResult IndexingPipeline::processTask(IndexingTask& task) {
+    YAMS_ZONE_SCOPED_N("IndexingPipeline::processTask");
     auto startTime = std::chrono::steady_clock::now();
 
     IndexingResult result;
@@ -260,6 +262,7 @@ IndexingResult IndexingPipeline::processTask(IndexingTask& task) {
 }
 
 bool IndexingPipeline::extractDocument(IndexingTask& task) {
+    YAMS_ZONE_SCOPED_N("IndexingPipeline::extractDocument");
     try {
         // Get appropriate extractor
         auto& factory = extraction::TextExtractorFactory::instance();
@@ -306,6 +309,7 @@ bool IndexingPipeline::extractDocument(IndexingTask& task) {
 }
 
 bool IndexingPipeline::processContent(IndexingTask& task) {
+    YAMS_ZONE_SCOPED_N("IndexingPipeline::processContent");
     if (!task.extractionResult) {
         return false;
     }

@@ -58,9 +58,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 BUILD_TYPE_INPUT=${BUILD_TYPE_INPUT:-Release}
-BUILD_TYPE_LOWER=$(echo "${BUILD_TYPE_INPUT}" | tr '[:upper:]' '[:lower:]')
+BUILD_TYPE_INPUT_LOWER=$(echo "${BUILD_TYPE_INPUT}" | tr '[:upper:]' '[:lower:]')
 
-case "${BUILD_TYPE_LOWER}" in
+case "${BUILD_TYPE_INPUT_LOWER}" in
   debug)
     BUILD_TYPE="Debug"
     ;;
@@ -284,16 +284,27 @@ fi
 if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
   BUILD_DIR="build/profiling"
   CONAN_SUBDIR="build-profiling"
+  # Conan often writes profiling/debug toolchains under a nested build-debug directory
+  CONAN_ALT_SUBDIR="build-debug"
+  BUILD_TYPE_MESON_LOWER="debug"
 elif [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
   BUILD_DIR="build/fuzzing"
   CONAN_SUBDIR="build-fuzzing"
+  BUILD_TYPE_MESON_LOWER="debug"
 elif [[ "${BUILD_TYPE}" == "Debug" ]]; then
   BUILD_DIR="builddir"
   CONAN_SUBDIR="build-debug"
+  BUILD_TYPE_MESON_LOWER="debug"
 else
-  BUILD_DIR="build/${BUILD_TYPE_LOWER}"
-  CONAN_SUBDIR="build-${BUILD_TYPE_LOWER}"
+  BUILD_DIR="build/${BUILD_TYPE_INPUT_LOWER}"
+  CONAN_SUBDIR="build-${BUILD_TYPE_INPUT_LOWER}"
+  BUILD_TYPE_MESON_LOWER="${BUILD_TYPE_INPUT_LOWER}"
 fi
+
+# Some Conan generators ignore --output-folder and always emit to build-<build_type>.
+# Remember locations to probe for toolchains and Meson cache files.
+CONAN_GENERATED_DIR="${BUILD_DIR}/build-${BUILD_TYPE_INPUT_LOWER}"
+CONAN_ALT_DIR="${BUILD_DIR}/${CONAN_ALT_SUBDIR:-}"
 
 # Detect install prefix based on platform
 if [[ "$(uname -s)" == "Darwin" ]]; then
@@ -380,19 +391,53 @@ CONAN_ARGS+=(--build=missing)
 conan install . -of "${BUILD_DIR}" "${CONAN_ARGS[@]}" --deployer=runtime_deploy --deployer-folder="${BUILD_DIR}"
 
 # Check for either native or cross file (Conan generates cross file for cross-compilation)
-NATIVE_FILE="${BUILD_DIR}/${CONAN_SUBDIR}/conan/conan_meson_native.ini"
-CROSS_FILE="${BUILD_DIR}/${CONAN_SUBDIR}/conan/conan_meson_cross.ini"
+# Conan 2.x sometimes nests generator output under build-<type>/conan even when -of points at
+# ${BUILD_DIR}. Probe primary, then CONAN_GENERATED_DIR, then the legacy root, then CONAN_ALT_DIR.
+NATIVE_FILE_PRIMARY="${BUILD_DIR}/${CONAN_SUBDIR}/conan/conan_meson_native.ini"
+CROSS_FILE_PRIMARY="${BUILD_DIR}/${CONAN_SUBDIR}/conan/conan_meson_cross.ini"
+NATIVE_FILE_SECONDARY="${CONAN_GENERATED_DIR}/conan/conan_meson_native.ini"
+CROSS_FILE_SECONDARY="${CONAN_GENERATED_DIR}/conan/conan_meson_cross.ini"
+NATIVE_FILE_TERTIARY="${BUILD_DIR}/conan/conan_meson_native.ini"
+CROSS_FILE_TERTIARY="${BUILD_DIR}/conan/conan_meson_cross.ini"
+NATIVE_FILE_QUAT="${CONAN_ALT_DIR}/conan/conan_meson_native.ini"
+CROSS_FILE_QUAT="${CONAN_ALT_DIR}/conan/conan_meson_cross.ini"
 
-if [[ -f "${NATIVE_FILE}" ]]; then
+if [[ -f "${NATIVE_FILE_PRIMARY}" ]]; then
   MESON_TOOLCHAIN_ARG="--native-file"
-  MESON_TOOLCHAIN_FILE="${NATIVE_FILE}"
-elif [[ -f "${CROSS_FILE}" ]]; then
+  MESON_TOOLCHAIN_FILE="${NATIVE_FILE_PRIMARY}"
+elif [[ -f "${CROSS_FILE_PRIMARY}" ]]; then
   MESON_TOOLCHAIN_ARG="--cross-file"
-  MESON_TOOLCHAIN_FILE="${CROSS_FILE}"
+  MESON_TOOLCHAIN_FILE="${CROSS_FILE_PRIMARY}"
+elif [[ -f "${NATIVE_FILE_SECONDARY}" ]]; then
+  MESON_TOOLCHAIN_ARG="--native-file"
+  MESON_TOOLCHAIN_FILE="${NATIVE_FILE_SECONDARY}"
+elif [[ -f "${CROSS_FILE_SECONDARY}" ]]; then
+  MESON_TOOLCHAIN_ARG="--cross-file"
+  MESON_TOOLCHAIN_FILE="${CROSS_FILE_SECONDARY}"
+elif [[ -f "${NATIVE_FILE_TERTIARY}" ]]; then
+  MESON_TOOLCHAIN_ARG="--native-file"
+  MESON_TOOLCHAIN_FILE="${NATIVE_FILE_TERTIARY}"
+elif [[ -f "${CROSS_FILE_TERTIARY}" ]]; then
+  MESON_TOOLCHAIN_ARG="--cross-file"
+  MESON_TOOLCHAIN_FILE="${CROSS_FILE_TERTIARY}"
+elif [[ -n "${CONAN_ALT_DIR}" && -f "${NATIVE_FILE_QUAT}" ]]; then
+  MESON_TOOLCHAIN_ARG="--native-file"
+  MESON_TOOLCHAIN_FILE="${NATIVE_FILE_QUAT}"
+elif [[ -n "${CONAN_ALT_DIR}" && -f "${CROSS_FILE_QUAT}" ]]; then
+  MESON_TOOLCHAIN_ARG="--cross-file"
+  MESON_TOOLCHAIN_FILE="${CROSS_FILE_QUAT}"
 else
   echo "Error: Conan meson toolchain file not found" >&2
-  echo "Expected either: ${NATIVE_FILE}" >&2
-  echo "          or: ${CROSS_FILE}" >&2
+  echo "Checked: ${NATIVE_FILE_PRIMARY}" >&2
+  echo "     and: ${CROSS_FILE_PRIMARY}" >&2
+  echo "     and: ${NATIVE_FILE_SECONDARY}" >&2
+  echo "     and: ${CROSS_FILE_SECONDARY}" >&2
+  echo "     and: ${NATIVE_FILE_TERTIARY}" >&2
+  echo "     and: ${CROSS_FILE_TERTIARY}" >&2
+  if [[ -n "${CONAN_ALT_DIR}" ]]; then
+    echo "     and: ${NATIVE_FILE_QUAT}" >&2
+    echo "     and: ${CROSS_FILE_QUAT}" >&2
+  fi
   echo "Please check the output path from 'conan install'." >&2
   exit 1
 fi
@@ -401,7 +446,7 @@ MESON_ARGS=(
   "${BUILD_DIR}"
   "--prefix" "${INSTALL_PREFIX}"
   "${MESON_TOOLCHAIN_ARG}" "${MESON_TOOLCHAIN_FILE}"
-  "--buildtype" "${BUILD_TYPE_LOWER}"
+  "--buildtype" "${BUILD_TYPE_MESON_LOWER}"
 )
 
 # Detect previous configured cpp_std to decide on reconfigure vs wipe

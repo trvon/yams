@@ -19,6 +19,7 @@
 #include <yams/metadata/database.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_concepts.h>
+#include <yams/profiling.h>
 #include <yams/search/bk_tree.h>
 
 namespace yams::daemon {
@@ -540,7 +541,7 @@ private:
 
     // Fuzzy search indices
     mutable std::unique_ptr<search::HybridFuzzySearch> fuzzySearchIndex_;
-    mutable std::shared_mutex fuzzyIndexMutex_;
+    mutable YAMS_SHARED_LOCKABLE(std::shared_mutex, fuzzyIndexMutex_);
 
     struct PathCacheEntry {
         std::string path;

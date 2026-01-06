@@ -17,9 +17,7 @@
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
-#if defined(TRACY_ENABLE)
-#include <tracy/Tracy.hpp>
-#endif
+#include <yams/profiling.h>
 
 namespace yams::daemon {
 
@@ -57,9 +55,7 @@ boost::asio::awaitable<void> TuningManager::tuningLoop() {
     spdlog::debug("TuningManager loop started");
 
     while (running_.load()) {
-#if defined(TRACY_ENABLE)
-        ZoneScopedN("TuningManager::loop");
-#endif
+        YAMS_ZONE_SCOPED_N("TuningManager::loop");
         try {
             tick_once();
         } catch (const std::exception& e) {
@@ -77,9 +73,7 @@ boost::asio::awaitable<void> TuningManager::tuningLoop() {
 }
 
 void TuningManager::tick_once() {
-#if defined(TRACY_ENABLE)
-    ZoneScopedN("TuningManager::tick_once");
-#endif
+    YAMS_ZONE_SCOPED_N("TuningManager::tick_once");
     if (!sm_ || !state_)
         return;
 

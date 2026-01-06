@@ -11,6 +11,7 @@
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/ipc/request_context_registry.h>
+#include <yams/profiling.h>
 #include <yams/vector/embedding_service.h>
 
 namespace yams::daemon {
@@ -523,6 +524,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
 
 boost::asio::awaitable<Response>
 RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
+    YAMS_ZONE_SCOPED_N("handleAddDocumentRequest");
     co_return co_await yams::daemon::dispatch::guard_await(
         "add_document", [req]() -> boost::asio::awaitable<Response> {
             // Be forgiving: if the path is a directory but recursive was not set, treat it as

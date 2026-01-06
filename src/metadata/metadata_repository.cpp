@@ -23,6 +23,7 @@
 #include <yams/metadata/migration.h>
 #include <yams/metadata/path_utils.h>
 #include <yams/metadata/query_helpers.h>
+#include <yams/profiling.h>
 
 namespace yams::metadata {
 
@@ -90,6 +91,7 @@ Result<void> bindParentId(Statement& stmt, int index, int64_t parentId) {
 
 std::optional<DocumentInfo>
 MetadataRepository::lookupPathCache(const std::string& normalizedPath) const {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::lookupPathCache");
     flushPathCacheBuffer();
     auto snap = std::atomic_load_explicit(&pathCacheSnapshot_, std::memory_order_acquire);
     if (!snap)
@@ -122,6 +124,7 @@ void MetadataRepository::recordPathHit(const std::string& normalizedPath) const 
 }
 
 void MetadataRepository::flushPathCacheBuffer() const {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::flushPathCacheBuffer");
     std::vector<DocumentInfo> batch;
     {
         std::lock_guard<std::mutex> lock(pathCacheWriteBuffer_.mutex);
@@ -326,6 +329,7 @@ MetadataRepository::MetadataRepository(ConnectionPool& pool) : pool_(pool) {
 
 // Document operations
 Result<int64_t> MetadataRepository::insertDocument(const DocumentInfo& info) {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::insertDocument");
     return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
         // Build INSERT OR IGNORE SQL based on whether path indexing columns exist
         std::string sql = "INSERT OR IGNORE INTO documents (file_path, file_name, file_extension, "
@@ -421,6 +425,7 @@ Result<int64_t> MetadataRepository::insertDocument(const DocumentInfo& info) {
 }
 
 Result<std::optional<DocumentInfo>> MetadataRepository::getDocument(int64_t id) {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::getDocument");
     return executeQuery<std::optional<DocumentInfo>>(
         [&](Database& db) -> Result<std::optional<DocumentInfo>> {
             using yams::metadata::sql::QuerySpec;
@@ -520,6 +525,7 @@ MetadataRepository::getAllMetadataInternal(Database& db, int64_t documentId) {
 }
 
 Result<std::optional<DocumentInfo>> MetadataRepository::getDocumentByHash(const std::string& hash) {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::getDocumentByHash");
     return executeQuery<std::optional<DocumentInfo>>(
         [&](Database& db) -> Result<std::optional<DocumentInfo>> {
             using yams::metadata::sql::QuerySpec;
@@ -1272,6 +1278,7 @@ Result<void> indexDocumentContentImpl(Database& db, int64_t documentId, const st
 Result<void> MetadataRepository::indexDocumentContent(int64_t documentId, const std::string& title,
                                                       const std::string& content,
                                                       const std::string& contentType) {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::indexDocumentContent");
     auto result = executeQuery<void>([&](Database& db) -> Result<void> {
         return indexDocumentContentImpl(db, documentId, title, content, contentType,
                                         /*verifyDocumentExists=*/true);
@@ -1426,10 +1433,151 @@ static std::string quoteFTS5Term(const std::string& term) {
     return escaped;
 }
 
+// Strip leading and trailing punctuation from a term.
+// Preserves internal punctuation (e.g., hyphens in "sugar-sweetened").
+// This is critical for FTS5 matching: "India." won't match "India" in the index.
+static std::string stripPunctuation(std::string term) {
+    // Strip trailing punctuation
+    while (!term.empty()) {
+        char c = term.back();
+        if (std::isalnum(static_cast<unsigned char>(c)))
+            break;
+        term.pop_back();
+    }
+    // Strip leading punctuation (e.g., "(HSC)" -> "HSC")
+    while (!term.empty()) {
+        char c = term.front();
+        if (std::isalnum(static_cast<unsigned char>(c)))
+            break;
+        term.erase(term.begin());
+    }
+    return term;
+}
+
+// Backwards compatibility alias
+static std::string stripTrailingPunctuation(std::string term) {
+    return stripPunctuation(std::move(term));
+}
+
+static std::vector<std::string> splitFTS5Terms(const std::string& trimmed) {
+    std::vector<std::string> terms;
+    std::string current;
+    for (char c : trimmed) {
+        if (c == ' ' || c == '\t') {
+            if (!current.empty()) {
+                terms.push_back(current);
+                current.clear();
+            }
+        } else {
+            current += c;
+        }
+    }
+    if (!current.empty()) {
+        terms.push_back(current);
+    }
+    return terms;
+}
+
+static std::vector<std::string> stripPunctuationTokens(const std::vector<std::string>& tokens) {
+    std::vector<std::string> stripped;
+    stripped.reserve(tokens.size());
+    for (const auto& tok : tokens) {
+        auto s = stripTrailingPunctuation(tok);
+        if (!s.empty()) {
+            stripped.push_back(s);
+        }
+    }
+    return stripped;
+}
+
+static std::string joinPreview(const std::vector<std::string>& tokens) {
+    std::string joined;
+    joined.reserve(tokens.size() * 8);
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (i > 0)
+            joined += ", ";
+        if (tokens[i].size() > 64) {
+            joined += tokens[i].substr(0, 64);
+            joined += "…";
+        } else {
+            joined += tokens[i];
+        }
+    }
+    return joined;
+}
+
+static std::string buildDiagnosticAltOrQuery(const std::vector<std::string>& tokens) {
+    std::vector<std::string> stripped = stripPunctuationTokens(tokens);
+
+    std::vector<std::string> altTerms;
+    for (const auto& t : stripped) {
+        if (t.size() >= 4) {
+            altTerms.push_back(t);
+        }
+        if (altTerms.size() >= 5)
+            break;
+    }
+
+    std::string altQuery;
+    if (!altTerms.empty()) {
+        for (size_t i = 0; i < altTerms.size(); ++i) {
+            if (i > 0)
+                altQuery += " OR ";
+            altQuery += quoteFTS5Term(altTerms[i]);
+        }
+    }
+    return altQuery;
+}
+
+static void logFtsTokensIfEnabled(const std::string& rawQuery,
+                                  const std::vector<std::string>& tokens) {
+    if (const char* env = std::getenv("YAMS_FTS_DEBUG_QUERY"); env && std::string(env) == "1") {
+        std::vector<std::string> stripped = stripPunctuationTokens(tokens);
+        std::string previewRaw = joinPreview(tokens);
+        std::string previewStripped = joinPreview(stripped);
+        std::string altQuery = buildDiagnosticAltOrQuery(tokens);
+
+        spdlog::warn(
+            "[FTS5] tokens count={} raw='{}' tokens=[{}] stripped=[{}] stripped_dropped={} "
+            "diag_alt_or=\"{}\"",
+            tokens.size(), rawQuery, previewRaw, previewStripped, tokens.size() - stripped.size(),
+            altQuery);
+    }
+}
+
+// Common English stopwords that add noise to FTS5 AND queries.
+// These are filtered out for natural language queries to improve recall.
+static const std::unordered_set<std::string>& getStopwords() {
+    static const std::unordered_set<std::string> stopwords = {
+        "a",    "an",   "and",   "are",   "as",   "at",   "be",   "by",    "for", "from",
+        "had",  "has",  "have",  "he",    "her",  "his",  "i",    "in",    "is",  "it",
+        "its",  "no",   "not",   "of",    "on",   "or",   "she",  "that",  "the", "their",
+        "them", "then", "there", "these", "they", "this", "to",   "was",   "we",  "were",
+        "what", "when", "where", "which", "who",  "will", "with", "would", "you", "your",
+        "very", "can",  "could", "do",    "does", "did",  "but",  "if",    "so",  "than",
+        "too",  "only", "just",  "also"};
+    return stopwords;
+}
+
+// Check if a term is a stopword (case-insensitive)
+static bool isStopword(const std::string& term) {
+    std::string lower;
+    lower.reserve(term.size());
+    for (char c : term) {
+        lower += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return getStopwords().count(lower) > 0;
+}
+
 // Helper function to sanitize FTS5 query strings
 // Best practice: split into terms and wrap each in quotes to preserve AND behavior
 // while safely escaping all FTS5 special characters (~, -, +, *, ^, :, etc.)
 // See: https://sqlite.org/forum/forumpost/576d6cc2d2
+//
+// For natural language (sentence-like) queries with many terms:
+// - Strip punctuation from tokens
+// - Filter out stopwords
+// - Use OR semantics if many terms remain (improves recall for NL queries)
 std::string sanitizeFTS5Query(const std::string& query) {
     // Trim whitespace from both ends
     std::string trimmed = query;
@@ -1465,34 +1613,64 @@ std::string sanitizeFTS5Query(const std::string& query) {
         return escaped;
     }
 
-    // Split on whitespace and quote each term individually
-    // This preserves AND behavior while safely handling special chars
-    std::vector<std::string> terms;
-    std::string current;
-    for (char c : trimmed) {
-        if (c == ' ' || c == '\t') {
-            if (!current.empty()) {
-                terms.push_back(current);
-                current.clear();
-            }
-        } else {
-            current += c;
-        }
-    }
-    if (!current.empty()) {
-        terms.push_back(current);
-    }
-
+    std::vector<std::string> terms = splitFTS5Terms(trimmed);
     if (terms.empty()) {
         return "\"\"";
     }
 
-    // Quote each term and join with spaces (implicit AND in FTS5)
+    logFtsTokensIfEnabled(query, terms);
+
+    // Strip punctuation from terms before quoting to improve matching.
+    // FTS5 requires exact matches for quoted terms, so "India." won't match "India".
+    // By stripping punctuation, natural language queries match corpus text better.
+    std::vector<std::string> cleanedTerms;
+    cleanedTerms.reserve(terms.size());
+    for (const auto& t : terms) {
+        std::string cleaned = stripPunctuation(t);
+        if (!cleaned.empty()) {
+            cleanedTerms.push_back(std::move(cleaned));
+        }
+    }
+
+    if (cleanedTerms.empty()) {
+        return "\"\"";
+    }
+
+    // For natural language queries (many terms), filter stopwords and use OR semantics.
+    // This dramatically improves recall for sentence-like queries in BEIR/SciFact benchmarks.
+    // Heuristic: if query has 5+ terms, treat as natural language and use OR on content terms.
+    constexpr size_t kNaturalLanguageThreshold = 5;
+    const bool isNaturalLanguageQuery = cleanedTerms.size() >= kNaturalLanguageThreshold;
+
+    if (isNaturalLanguageQuery) {
+        // Filter out stopwords and keep only significant content terms
+        std::vector<std::string> contentTerms;
+        contentTerms.reserve(cleanedTerms.size());
+        for (const auto& t : cleanedTerms) {
+            if (!isStopword(t) && t.size() >= 2) {
+                contentTerms.push_back(t);
+            }
+        }
+
+        // If we have content terms, use OR semantics for better recall
+        if (!contentTerms.empty()) {
+            std::string result;
+            for (size_t i = 0; i < contentTerms.size(); ++i) {
+                if (i > 0)
+                    result += " OR ";
+                result += quoteFTS5Term(contentTerms[i]);
+            }
+            return result;
+        }
+        // Fall through to AND if no content terms remain
+    }
+
+    // For short queries (< 5 terms), use AND semantics (more precise)
     std::string result;
-    for (size_t i = 0; i < terms.size(); ++i) {
+    for (size_t i = 0; i < cleanedTerms.size(); ++i) {
         if (i > 0)
             result += ' ';
-        result += quoteFTS5Term(terms[i]);
+        result += quoteFTS5Term(cleanedTerms[i]);
     }
     return result;
 }
@@ -1500,9 +1678,9 @@ std::string sanitizeFTS5Query(const std::string& query) {
 Result<SearchResults>
 MetadataRepository::search(const std::string& query, int limit, int offset,
                            const std::optional<std::vector<int64_t>>& docIds) {
-    spdlog::info("[MetadataRepo] search() called with query='{}' limit={}", query, limit);
+    YAMS_ZONE_SCOPED_N("MetadataRepo::search");
     return executeQuery<SearchResults>([&](Database& db) -> Result<SearchResults> {
-        spdlog::info("[MetadataRepo] executeQuery lambda entered");
+        YAMS_ZONE_SCOPED_N("MetadataRepo::search::FTS5Query");
         SearchResults results;
         results.query = query;
 
@@ -1542,6 +1720,58 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
         // FTS5 availability is verified at startup, skip check for performance
         // Sanitize the query to prevent FTS5 syntax errors
         std::string sanitizedQuery = sanitizeFTS5Query(query);
+
+        // Optional debug: log raw vs sanitized query.
+        // This is intentionally opt-in because it can be noisy and may contain user text.
+        bool ftsDebug = false;
+        if (const char* env = std::getenv("YAMS_FTS_DEBUG_QUERY"); env && std::string(env) == "1") {
+            ftsDebug = true;
+            spdlog::warn("[FTS5] raw='{}' sanitized='{}' limit={} offset={} docIds={}", query,
+                         sanitizedQuery, limit, offset, (docIds ? docIds->size() : 0));
+        }
+
+        // Diagnostic-only: execute an alternative OR-style query built from stripped tokens to
+        // gauge strictness of AND behavior. This must not affect normal results.
+        std::optional<size_t> diagAltHitCount;
+        std::string diagAltQuery;
+        if (ftsDebug) {
+            std::vector<std::string> diagTokens = splitFTS5Terms(query);
+            diagAltQuery = buildDiagnosticAltOrQuery(diagTokens);
+            if (!diagAltQuery.empty()) {
+                auto diagStmtResult =
+                    db.prepare("SELECT 1 FROM documents_fts WHERE documents_fts MATCH ? LIMIT ?");
+                if (diagStmtResult) {
+                    Statement diagStmt = std::move(diagStmtResult).value();
+                    auto bindRes1 = diagStmt.bind(1, diagAltQuery);
+                    auto bindRes2 = diagStmt.bind(2, effectiveLimit);
+                    if (bindRes1 && bindRes2) {
+                        size_t rowCount = 0;
+                        while (true) {
+                            auto stepRes = diagStmt.step();
+                            if (!stepRes) {
+                                spdlog::debug("FTS5 diag alt query step failed: {}",
+                                              stepRes.error().message);
+                                break;
+                            }
+                            if (!stepRes.value())
+                                break;
+                            ++rowCount;
+                        }
+                        diagAltHitCount = rowCount;
+                    } else {
+                        spdlog::debug("FTS5 diag alt query bind failed");
+                    }
+                } else {
+                    spdlog::debug("FTS5 diag alt query prepare failed: {}",
+                                  diagStmtResult.error().message);
+                }
+            }
+        }
+
+        if (ftsDebug && diagAltHitCount.has_value()) {
+            spdlog::warn("[FTS5 diag_alt_exec] raw='{}' alt_or='{}' text_hits={}", query,
+                         diagAltQuery, *diagAltHitCount);
+        }
 
         using yams::metadata::sql::QuerySpec;
         QuerySpec spec{};
@@ -1723,6 +1953,7 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
 // Bulk operations
 Result<std::optional<DocumentInfo>>
 MetadataRepository::findDocumentByExactPath(const std::string& path) {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::findDocumentByExactPath");
     auto derived = computePathDerivedValues(path);
     if (auto cached = lookupPathCache(derived.normalizedPath))
         return cached;
@@ -1763,6 +1994,7 @@ MetadataRepository::findDocumentByExactPath(const std::string& path) {
 
 Result<std::vector<DocumentInfo>>
 MetadataRepository::queryDocuments(const DocumentQueryOptions& options) {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::queryDocuments");
     return executeQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
             const bool joinFtsForContains = options.containsFragment && options.containsUsesFts &&
@@ -3884,6 +4116,7 @@ MetadataTransaction::~MetadataTransaction() = default;
 Result<SearchResults>
 MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, int limit,
                                 const std::optional<std::vector<int64_t>>& docIds) {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::fuzzySearch");
     return executeQuery<SearchResults>([&]([[maybe_unused]] Database& db) -> Result<SearchResults> {
         SearchResults results;
         results.query = query;
@@ -3981,6 +4214,7 @@ MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, i
 }
 
 Result<void> MetadataRepository::buildFuzzyIndex() {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::buildFuzzyIndex");
     return executeQuery<void>([&](Database& db) -> Result<void> {
         std::unique_lock<std::shared_mutex> lock(fuzzyIndexMutex_);
 

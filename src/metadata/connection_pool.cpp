@@ -5,6 +5,7 @@
 #include <string>
 #include <thread>
 #include <yams/metadata/connection_pool.h>
+#include <yams/profiling.h>
 
 namespace yams::metadata {
 
@@ -115,6 +116,7 @@ void ConnectionPool::shutdown() {
 
 Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::milliseconds timeout,
                                                                   ConnectionPriority priority) {
+    YAMS_ZONE_SCOPED_N("MetadataPool::acquire");
     std::unique_lock<std::mutex> lock(mutex_);
 
     if (shutdown_) {
@@ -404,6 +406,7 @@ void ConnectionPool::pruneIdleConnections() {
 }
 
 Result<std::unique_ptr<Database>> ConnectionPool::createConnection() {
+    YAMS_ZONE_SCOPED_N("MetadataPool::createConnection");
     auto db = std::make_unique<Database>();
 
     auto openResult = db->open(dbPath_, ConnectionMode::Create);
@@ -456,6 +459,7 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
 }
 
 void ConnectionPool::returnConnection(PooledConnection* conn) {
+    YAMS_ZONE_SCOPED_N("MetadataPool::returnConnection");
     if (!conn || !conn->db_)
         return;
 

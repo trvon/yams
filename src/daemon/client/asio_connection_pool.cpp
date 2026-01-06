@@ -3,6 +3,7 @@
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
+#include <yams/profiling.h>
 
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/associated_executor.hpp>
@@ -347,6 +348,7 @@ void AsioConnectionPool::cleanup_stale_connections() {
 }
 
 awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::acquire() {
+    YAMS_ZONE_SCOPED_N("ConnectionPool::acquire");
     // Check if pool is being shut down
     if (shutdown_.load(std::memory_order_acquire)) {
         co_return nullptr;
@@ -354,6 +356,7 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::acquire() {
 
     // Fast path: try to reuse an existing idle connection
     {
+        YAMS_ZONE_SCOPED_N("ConnectionPool::acquire::tryReuse");
         std::lock_guard<std::mutex> lk(mutex_);
         cleanup_stale_connections();
 
@@ -388,6 +391,7 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::acquire() {
 }
 
 void AsioConnectionPool::release(const std::shared_ptr<AsioConnection>& conn) {
+    YAMS_ZONE_SCOPED_N("ConnectionPool::release");
     if (conn) {
         conn->in_use.store(false, std::memory_order_release);
     }
@@ -426,6 +430,7 @@ void AsioConnectionPool::shutdown(std::chrono::milliseconds timeout) {
 }
 
 awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection() {
+    YAMS_ZONE_SCOPED_N("ConnectionPool::create_connection");
     // Check shutdown before starting
     if (shutdown_.load(std::memory_order_acquire)) {
         co_return nullptr;

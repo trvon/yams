@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cstring>
 #include <future>
+#include <shared_mutex>
 #include <sstream>
 #include <yams/profiling.h>
 #include <yams/vector/sqlite_vec_backend.h>
@@ -167,7 +168,7 @@ Result<void> SqliteVecBackend::validateEmbeddingDim(size_t actual_dim) const {
 
 Result<void> SqliteVecBackend::initialize(const std::string& db_path) {
     YAMS_ZONE_SCOPED_N("SqliteVecBackend::initialize");
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
 
     if (initialized_) {
         return Error{ErrorCode::InvalidState, "Backend already initialized"};
@@ -298,7 +299,7 @@ Result<void> SqliteVecBackend::initialize(const std::string& db_path) {
 }
 
 void SqliteVecBackend::close() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
 
     if (!initialized_) {
         return;
@@ -319,12 +320,12 @@ void SqliteVecBackend::close() {
 }
 
 bool SqliteVecBackend::isInitialized() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     return initialized_;
 }
 
 Result<void> SqliteVecBackend::createTables(size_t embedding_dim) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
 
     if (!initialized_) {
         return Error{ErrorCode::NotInitialized, "Backend not initialized"};
@@ -421,7 +422,7 @@ Result<void> SqliteVecBackend::createTables(size_t embedding_dim) {
 }
 
 bool SqliteVecBackend::tablesExist() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
 
     if (!initialized_) {
         return false;
@@ -486,7 +487,7 @@ bool SqliteVecBackend::tablesExist() const {
 }
 
 std::optional<size_t> SqliteVecBackend::getStoredEmbeddingDimension() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     if (!initialized_) {
         return std::nullopt;
     }
@@ -518,7 +519,7 @@ std::optional<size_t> SqliteVecBackend::getStoredEmbeddingDimension() const {
 }
 
 Result<void> SqliteVecBackend::dropTables() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     if (!initialized_) {
         return Error{ErrorCode::NotInitialized, "Backend not initialized"};
     }
@@ -535,7 +536,7 @@ Result<void> SqliteVecBackend::dropTables() {
 }
 
 Result<void> SqliteVecBackend::ensureEmbeddingRowIdColumn() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
 
     if (!initialized_) {
         return Error{ErrorCode::NotInitialized, "Backend not initialized"};
@@ -567,7 +568,7 @@ Result<void> SqliteVecBackend::ensureEmbeddingRowIdColumn() {
 }
 
 Result<SqliteVecBackend::OrphanCleanupStats> SqliteVecBackend::cleanupOrphanRows() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
 
     if (!initialized_) {
         return Error{ErrorCode::NotInitialized, "Backend not initialized"};
@@ -630,7 +631,7 @@ Result<void> SqliteVecBackend::insertVector(const VectorRecord& record) {
     YAMS_ZONE_SCOPED_N("SqliteVecBackend::insertVector");
     YAMS_PLOT("VectorInsert", static_cast<int64_t>(1));
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
 
     if (!initialized_) {
         return Error{ErrorCode::NotInitialized, "Backend not initialized"};
@@ -909,7 +910,7 @@ Result<void> SqliteVecBackend::insertVectorsBatch(const std::vector<VectorRecord
         return Result<void>();
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     spdlog::debug("insertVectorsBatch acquired lock");
 
     if (!initialized_) {
@@ -980,7 +981,7 @@ Result<void> SqliteVecBackend::updateVector(const std::string& chunk_id,
     YAMS_ZONE_SCOPED_N("SqliteVecBackend::updateVector");
     YAMS_PLOT("VectorUpdate", static_cast<int64_t>(1));
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
 
     if (!initialized_) {
         return Error{ErrorCode::NotInitialized, "Backend not initialized"};
@@ -1110,7 +1111,7 @@ Result<void> SqliteVecBackend::deleteVector(const std::string& chunk_id) {
     YAMS_ZONE_SCOPED_N("SqliteVecBackend::deleteVector");
     YAMS_PLOT("VectorDelete", static_cast<int64_t>(1));
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
 
     if (!initialized_) {
         return Error{ErrorCode::NotInitialized, "Backend not initialized"};
@@ -1212,7 +1213,7 @@ Result<void> SqliteVecBackend::deleteVectorsByDocument(const std::string& docume
     YAMS_ZONE_SCOPED_N("SqliteVecBackend::deleteVectorsByDocument");
     YAMS_PLOT("DocumentDelete", static_cast<int64_t>(1));
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
 
     if (!initialized_) {
         return Error{ErrorCode::NotInitialized, "Backend not initialized"};
@@ -1312,7 +1313,7 @@ SqliteVecBackend::searchSimilar(const std::vector<float>& query_embedding, size_
     YAMS_VECTOR_SEARCH_ZONE(k, similarity_threshold);
     YAMS_PLOT("QueryVectorDim", static_cast<int64_t>(query_embedding.size()));
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
 
     if (!initialized_) {
         return Error{ErrorCode::NotInitialized, "Backend not initialized"};
@@ -1392,7 +1393,7 @@ SqliteVecBackend::searchSimilar(const std::vector<float>& query_embedding, size_
 Result<std::optional<VectorRecord>> SqliteVecBackend::getVector(const std::string& chunk_id) {
     YAMS_ZONE_SCOPED_N("SqliteVecBackend::getVector");
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
 
     if (!initialized_) {
         return Error{ErrorCode::NotInitialized, "Backend not initialized"};
@@ -1495,7 +1496,7 @@ Result<std::map<std::string, VectorRecord>>
 SqliteVecBackend::getVectorsBatch(const std::vector<std::string>& chunk_ids) {
     YAMS_ZONE_SCOPED_N("SqliteVecBackend::getVectorsBatch");
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
 
     if (!initialized_) {
         return Error{ErrorCode::NotInitialized, "Backend not initialized"};
@@ -1551,7 +1552,7 @@ Result<std::vector<VectorRecord>>
 SqliteVecBackend::getVectorsByDocument(const std::string& document_hash) {
     YAMS_ZONE_SCOPED_N("SqliteVecBackend::getVectorsByDocument");
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
 
     if (!initialized_) {
         return Error{ErrorCode::NotInitialized, "Backend not initialized"};
@@ -1669,7 +1670,7 @@ SqliteVecBackend::getVectorsByDocument(const std::string& document_hash) {
 Result<bool> SqliteVecBackend::hasEmbedding(const std::string& document_hash) {
     YAMS_ZONE_SCOPED_N("SqliteVecBackend::hasEmbedding");
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
 
     if (!initialized_) {
         return Error{ErrorCode::NotInitialized, "Backend not initialized"};
@@ -1699,7 +1700,7 @@ Result<bool> SqliteVecBackend::hasEmbedding(const std::string& document_hash) {
 Result<size_t> SqliteVecBackend::getVectorCount() {
     YAMS_ZONE_SCOPED_N("SqliteVecBackend::getVectorCount");
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
 
     if (!initialized_) {
         return Error{ErrorCode::NotInitialized, "Backend not initialized"};
@@ -1725,7 +1726,7 @@ Result<size_t> SqliteVecBackend::getVectorCount() {
 Result<VectorDatabase::DatabaseStats> SqliteVecBackend::getStats() {
     YAMS_ZONE_SCOPED_N("SqliteVecBackend::getStats");
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
 
     if (!initialized_) {
         return Error{ErrorCode::NotInitialized, "Backend not initialized"};
@@ -1782,7 +1783,7 @@ Result<void> SqliteVecBackend::buildIndex() {
 Result<void> SqliteVecBackend::optimize() {
     YAMS_ZONE_SCOPED_N("SqliteVecBackend::optimize");
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
 
     if (!initialized_) {
         return Error{ErrorCode::NotInitialized, "Backend not initialized"};
@@ -1812,7 +1813,7 @@ Result<void> SqliteVecBackend::optimize() {
 Result<void> SqliteVecBackend::beginTransaction() {
     YAMS_ZONE_SCOPED_N("SqliteVecBackend::beginTransaction");
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
 
     if (!initialized_) {
         return Error{ErrorCode::NotInitialized, "Backend not initialized"};
@@ -1833,7 +1834,7 @@ Result<void> SqliteVecBackend::beginTransaction() {
 Result<void> SqliteVecBackend::commitTransaction() {
     YAMS_ZONE_SCOPED_N("SqliteVecBackend::commitTransaction");
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
 
     if (!initialized_) {
         return Error{ErrorCode::NotInitialized, "Backend not initialized"};
@@ -1854,7 +1855,7 @@ Result<void> SqliteVecBackend::commitTransaction() {
 Result<void> SqliteVecBackend::rollbackTransaction() {
     YAMS_ZONE_SCOPED_N("SqliteVecBackend::rollbackTransaction");
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
 
     if (!initialized_) {
         return Error{ErrorCode::NotInitialized, "Backend not initialized"};

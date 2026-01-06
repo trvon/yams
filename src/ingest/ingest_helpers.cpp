@@ -3,6 +3,7 @@
 #include <yams/extraction/text_extractor.h>
 #include <yams/ingest/ingest_helpers.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/profiling.h>
 #include <yams/vector/document_chunker.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
@@ -12,6 +13,7 @@ namespace yams::ingest {
 Result<void> persist_content_and_index(metadata::IMetadataRepository& meta, int64_t docId,
                                        const std::string& title, const std::string& text,
                                        const std::string& mime, const std::string& method) {
+    YAMS_ZONE_SCOPED_N("ingest::persist_content_and_index");
     try {
         metadata::DocumentContent contentRow;
         contentRow.documentId = docId;
@@ -46,18 +48,23 @@ Result<size_t> embed_and_insert_document(yams::daemon::IModelProvider& provider,
                                          const std::string& name, const std::string& path,
                                          const std::string& mime,
                                          const yams::vector::ChunkingConfig& cfg) {
+    YAMS_ZONE_SCOPED_N("ingest::embed_and_insert_document");
     try {
-        // Chunk
-        auto chunker = yams::vector::createChunker(yams::vector::ChunkingStrategy::SENTENCE_BASED,
-                                                   cfg, nullptr);
-        auto chunks = chunker->chunkDocument(text, hash);
-        if (chunks.empty()) {
-            yams::vector::DocumentChunk c;
-            c.chunk_id = yams::vector::utils::generateChunkId(hash, 0);
-            c.document_hash = hash;
-            c.content = text;
-            c.chunk_index = 0;
-            chunks.push_back(std::move(c));
+        std::vector<yams::vector::DocumentChunk> chunks;
+        {
+            // Chunk
+            YAMS_ZONE_SCOPED_N("ingest::chunking");
+            auto chunker = yams::vector::createChunker(
+                yams::vector::ChunkingStrategy::SENTENCE_BASED, cfg, nullptr);
+            chunks = chunker->chunkDocument(text, hash);
+            if (chunks.empty()) {
+                yams::vector::DocumentChunk c;
+                c.chunk_id = yams::vector::utils::generateChunkId(hash, 0);
+                c.document_hash = hash;
+                c.content = text;
+                c.chunk_index = 0;
+                chunks.push_back(std::move(c));
+            }
         }
 
         std::vector<std::string> texts;
@@ -65,14 +72,18 @@ Result<size_t> embed_and_insert_document(yams::daemon::IModelProvider& provider,
         for (auto& c : chunks)
             texts.push_back(c.content);
 
-        // Generate embeddings using IModelProvider directly
-        auto embedResult = provider.generateBatchEmbeddingsFor(modelName, texts);
-        if (!embedResult) {
-            return Result<size_t>(
-                Error{ErrorCode::InternalError, std::string("Failed to generate embeddings: ") +
-                                                    embedResult.error().message});
+        std::vector<std::vector<float>> embeds;
+        {
+            // Generate embeddings using IModelProvider directly
+            YAMS_ZONE_SCOPED_N("ingest::embedding_generation");
+            auto embedResult = provider.generateBatchEmbeddingsFor(modelName, texts);
+            if (!embedResult) {
+                return Result<size_t>(
+                    Error{ErrorCode::InternalError, std::string("Failed to generate embeddings: ") +
+                                                        embedResult.error().message});
+            }
+            embeds = std::move(embedResult.value());
         }
-        auto& embeds = embedResult.value();
 
         size_t n = std::min(embeds.size(), chunks.size());
         if (n == 0) {
@@ -117,28 +128,31 @@ Result<size_t> embed_and_insert_document(yams::daemon::IModelProvider& provider,
             r.metadata["path"] = path;
             recs.push_back(std::move(r));
         }
-        if (!vdb.insertVectorsBatch(recs)) {
-            return Result<size_t>(Error{ErrorCode::DatabaseError, vdb.getLastError()});
-        }
-
-        if (!doc_embedding.empty()) {
-            yams::vector::VectorRecord doc_rec;
-            doc_rec.document_hash = hash;
-            doc_rec.chunk_id = yams::vector::utils::generateChunkId(hash, 999999);
-            doc_rec.embedding = std::move(doc_embedding);
-            doc_rec.content = text.substr(0, 1000);
-            doc_rec.level = yams::vector::EmbeddingLevel::DOCUMENT;
-            doc_rec.source_chunk_ids.reserve(n);
-            for (size_t i = 0; i < n; ++i) {
-                doc_rec.source_chunk_ids.push_back(recs[i].chunk_id);
+        {
+            YAMS_ZONE_SCOPED_N("ingest::vector_insertion");
+            if (!vdb.insertVectorsBatch(recs)) {
+                return Result<size_t>(Error{ErrorCode::DatabaseError, vdb.getLastError()});
             }
-            doc_rec.metadata["name"] = name;
-            doc_rec.metadata["mime_type"] = mime;
-            doc_rec.metadata["path"] = path;
 
-            if (!vdb.insertVector(doc_rec)) {
-                spdlog::warn("Failed to insert document-level embedding for hash={}: {}", hash,
-                             vdb.getLastError());
+            if (!doc_embedding.empty()) {
+                yams::vector::VectorRecord doc_rec;
+                doc_rec.document_hash = hash;
+                doc_rec.chunk_id = yams::vector::utils::generateChunkId(hash, 999999);
+                doc_rec.embedding = std::move(doc_embedding);
+                doc_rec.content = text.substr(0, 1000);
+                doc_rec.level = yams::vector::EmbeddingLevel::DOCUMENT;
+                doc_rec.source_chunk_ids.reserve(n);
+                for (size_t i = 0; i < n; ++i) {
+                    doc_rec.source_chunk_ids.push_back(recs[i].chunk_id);
+                }
+                doc_rec.metadata["name"] = name;
+                doc_rec.metadata["mime_type"] = mime;
+                doc_rec.metadata["path"] = path;
+
+                if (!vdb.insertVector(doc_rec)) {
+                    spdlog::warn("Failed to insert document-level embedding for hash={}: {}", hash,
+                                 vdb.getLastError());
+                }
             }
         }
 

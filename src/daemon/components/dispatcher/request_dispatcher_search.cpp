@@ -8,10 +8,12 @@
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/profiling.h>
 
 namespace yams::daemon {
 
 boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const SearchRequest& req) {
+    YAMS_ZONE_SCOPED_N("handleSearchRequest");
     try {
         spdlog::debug("[RequestDispatcher] Received SearchRequest with {} pathPatterns: {}",
                       req.pathPatterns.size(),

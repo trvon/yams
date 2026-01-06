@@ -16,6 +16,7 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
 #include <yams/metadata/query_helpers.h>
+#include <yams/profiling.h>
 
 namespace yams::indexing {
 
@@ -38,6 +39,7 @@ public:
 
     [[nodiscard]] Result<IndexingResult> indexDocument(const std::filesystem::path& path,
                                                        const IndexingConfig& config) override {
+        YAMS_ZONE_SCOPED_N("DocumentIndexer::indexDocument");
         auto startTime = std::chrono::steady_clock::now();
         IndexingResult result;
         result.path = path;
@@ -542,6 +544,7 @@ public:
 
 private:
     Result<std::string> calculateFileHash(const std::filesystem::path& path) {
+        YAMS_ZONE_SCOPED_N("DocumentIndexer::calculateFileHash");
         try {
             crypto::SHA256Hasher hasher;
             return hasher.hashFile(path);
@@ -584,6 +587,7 @@ public:
     std::vector<ContentChunk> chunkContent(const std::string& content,
                                            const std::string& documentId,
                                            const IndexingConfig& config) override {
+        YAMS_ZONE_SCOPED_N("ContentProcessor::chunkContent");
         std::vector<ContentChunk> chunks;
 
         if (content.size() <= config.chunkSize) {

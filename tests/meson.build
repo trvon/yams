@@ -45,7 +45,7 @@ catch2_pkgconfig = find_program('pkg-config', required: false)
 if catch2_pkgconfig.found()
   catch2_incdir = run_command(catch2_pkgconfig, '--variable=includedir', 'catch2',
                               check: false).stdout().strip()
-  if catch2_incdir != '' and catch2_incdir.length() > 0
+  if catch2_incdir != ''
     catch2_incs += [include_directories(catch2_incdir)]
   endif
 endif

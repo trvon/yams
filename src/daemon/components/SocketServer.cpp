@@ -9,9 +9,7 @@
 #include <yams/daemon/ipc/mux_metrics_registry.h>
 #include <yams/daemon/ipc/proto_serializer.h>
 #include <yams/daemon/ipc/request_handler.h>
-#if defined(TRACY_ENABLE)
-#include <tracy/Tracy.hpp>
-#endif
+#include <yams/profiling.h>
 
 #ifdef __linux__
 #include <sys/prctl.h>
@@ -365,9 +363,7 @@ awaitable<void> SocketServer::accept_loop() {
     }
 
     while (running_ && !stopping_) {
-#if defined(TRACY_ENABLE)
-        ZoneScopedN("SocketServer::accept_loop");
-#endif
+        YAMS_ZONE_SCOPED_N("SocketServer::accept_loop");
 
         try {
             // Use non-blocking try_acquire with async retry to avoid blocking the accept loop
@@ -582,9 +578,7 @@ awaitable<void> SocketServer::accept_loop() {
 
 awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> tracked_socket,
                                                 uint64_t conn_token) {
-#if defined(TRACY_ENABLE)
-    ZoneScopedN("SocketServer::handle_connection");
-#endif
+    YAMS_ZONE_SCOPED_N("SocketServer::handle_connection");
     static const bool trace = stream_trace_enabled();
     const auto handler_start_time = std::chrono::steady_clock::now();
 

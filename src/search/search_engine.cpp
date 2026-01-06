@@ -16,6 +16,8 @@
 
 #include <boost/asio/post.hpp>
 
+#include "yams/profiling.h"
+
 #if YAMS_HAS_FLAT_MAP
 #include <flat_map>
 #endif
@@ -430,6 +432,9 @@ Result<SearchResponse> SearchEngine::Impl::searchWithResponse(const std::string&
 
 Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& query,
                                                           const SearchParams& params) {
+    YAMS_ZONE_SCOPED_N("search_engine::execute");
+    YAMS_FRAME_MARK();
+
     auto startTime = std::chrono::steady_clock::now();
     stats_.totalQueries.fetch_add(1, std::memory_order_relaxed);
 
@@ -483,6 +488,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     allComponentResults.reserve(estimatedResults);
 
     if (config_.enableParallelExecution) [[likely]] {
+        YAMS_ZONE_SCOPED_N("search_engine::fanout_parallel");
         std::future<Result<std::vector<ComponentResult>>> textFuture;
         std::future<Result<std::vector<ComponentResult>>> kgFuture;
         std::future<Result<std::vector<ComponentResult>>> pathFuture;
@@ -493,6 +499,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         if (config_.textWeight > 0.0f) {
             textFuture = postWork(
                 [this, &query, &workingConfig]() {
+                    YAMS_ZONE_SCOPED_N("component::text");
                     return queryFullText(query, workingConfig.textMaxResults);
                 },
                 executor_);
@@ -501,6 +508,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         if (config_.kgWeight > 0.0f && kgStore_) {
             kgFuture = postWork(
                 [this, &query, &workingConfig]() {
+                    YAMS_ZONE_SCOPED_N("component::kg");
                     return queryKnowledgeGraph(query, workingConfig.kgMaxResults);
                 },
                 executor_);
@@ -509,6 +517,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         if (config_.pathTreeWeight > 0.0f) {
             pathFuture = postWork(
                 [this, &query, &workingConfig]() {
+                    YAMS_ZONE_SCOPED_N("component::path");
                     return queryPathTree(query, workingConfig.pathTreeMaxResults);
                 },
                 executor_);
@@ -517,6 +526,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         if (config_.vectorWeight > 0.0f && queryEmbedding.has_value() && vectorDb_) {
             vectorFuture = postWork(
                 [this, &queryEmbedding, &workingConfig]() {
+                    YAMS_ZONE_SCOPED_N("component::vector");
                     return queryVectorIndex(queryEmbedding.value(), workingConfig.vectorMaxResults);
                 },
                 executor_);
@@ -525,6 +535,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         if (config_.tagWeight > 0.0f && !params.tags.empty()) {
             tagFuture = postWork(
                 [this, &params, &workingConfig]() {
+                    YAMS_ZONE_SCOPED_N("component::tag");
                     return queryTags(params.tags, params.matchAllTags, workingConfig.tagMaxResults);
                 },
                 executor_);
@@ -533,6 +544,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         if (config_.metadataWeight > 0.0f) {
             metaFuture = postWork(
                 [this, &params, &workingConfig]() {
+                    YAMS_ZONE_SCOPED_N("component::metadata");
                     return queryMetadata(params, workingConfig.metadataMaxResults);
                 },
                 executor_);
@@ -623,6 +635,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             if (weight <= 0.0f)
                 return;
 
+            YAMS_ZONE_SCOPED_N(name);
             auto start = std::chrono::steady_clock::now();
             auto results = queryFn();
             auto end = std::chrono::steady_clock::now();
@@ -675,8 +688,27 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                       stats_.avgMetadataTimeMicros);
     }
 
+    YAMS_PLOT("component_results_count", static_cast<int64_t>(allComponentResults.size()));
+
+    // Opt-in diagnostic: help explain "0 results" situations by showing per-component
+    // hit counts (pre-fusion) and whether an embedding was available.
+    if (const char* env = std::getenv("YAMS_SEARCH_DIAG"); env && std::string(env) == "1") {
+        const bool embeddingsAvailable = queryEmbedding.has_value();
+        spdlog::warn("[search_diag] query='{}' components: contributing={} failed={} timed_out={} "
+                     "embedding={} pre_fusion_total={} "
+                     "weights(text={},vector={},kg={},path={},tag={},meta={})",
+                     query, contributing.size(), failed.size(), timedOut.size(),
+                     embeddingsAvailable ? "yes" : "no", allComponentResults.size(),
+                     workingConfig.textWeight, workingConfig.vectorWeight, workingConfig.kgWeight,
+                     workingConfig.pathTreeWeight, workingConfig.tagWeight,
+                     workingConfig.metadataWeight);
+    }
+
     ResultFusion fusion(workingConfig);
-    response.results = fusion.fuse(allComponentResults);
+    {
+        YAMS_ZONE_SCOPED_N("fusion::results");
+        response.results = fusion.fuse(allComponentResults);
+    }
 
     if (!response.results.empty()) {
         std::unordered_map<std::string, size_t> extCounts;
@@ -851,6 +883,11 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryFullText(const std
         }
 
         spdlog::debug("Full-text query returned {} results for query: {}", results.size(), query);
+
+        if (const char* env = std::getenv("YAMS_SEARCH_DIAG"); env && std::string(env) == "1") {
+            spdlog::warn("[search_diag] text_hits={} limit={} query='{}'", results.size(), limit,
+                         query);
+        }
 
     } catch (const std::exception& e) {
         spdlog::warn("Full-text query exception: {}", e.what());

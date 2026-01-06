@@ -111,7 +111,7 @@ class YamsConan(ConanFile):
         if self.options.build_benchmarks:  # type: ignore
             self.requires("benchmark/1.8.3")
         if self.settings.build_type == "Debug":  # type: ignore
-            self.requires("tracy/0.12.2")
+            self.requires("tracy/0.13.1")
 
     def configure(self):
         # Force new C++11 ABI on Linux (Ubuntu 24.04+ compatibility)

@@ -13,9 +13,7 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
 #include <yams/daemon/ipc/proto_serializer.h>
-#if defined(TRACY_ENABLE)
-#include <tracy/Tracy.hpp>
-#endif
+#include <yams/profiling.h>
 
 namespace {
 using yams::daemon::MessageType;
@@ -63,9 +61,7 @@ void StreamingRequestProcessor::reset_state() {
 
 std::size_t
 StreamingRequestProcessor::compute_item_chunk_count(std::size_t approx_bytes_per_item) const {
-#if defined(TRACY_ENABLE)
-    ZoneScopedN("SRP::compute_item_chunk_count");
-#endif
+    YAMS_ZONE_SCOPED_N("SRP::compute_item_chunk_count");
     std::size_t target = cfg_.chunk_size > 0
                              ? (cfg_.chunk_size / std::max<std::size_t>(approx_bytes_per_item, 1))
                              : 256;
@@ -237,8 +233,8 @@ bool StreamingRequestProcessor::supports_streaming(const Request& request) const
 
 // -------------------- next_chunk (deterministic) ---------------------------
 boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcessor::next_chunk() {
+    YAMS_ZONE_SCOPED_N("SRP::next_chunk");
 #if defined(TRACY_ENABLE)
-    ZoneScopedN("SRP::next_chunk");
     // Mark this streaming step as its own fiber segment for clearer stacks
     YAMS_FIBER_ENTER("srp_chunk");
     struct FiberGuard {

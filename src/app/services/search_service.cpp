@@ -35,6 +35,8 @@
 #include <unistd.h>
 #endif
 
+#include "yams/profiling.h"
+
 // Forward util for snippet creation
 namespace yams::app::services::utils {
 std::string createSnippet(const std::string& content, size_t maxLength, bool preserveWordBoundary);
@@ -392,6 +394,7 @@ public:
     }
 
     boost::asio::awaitable<Result<SearchResponse>> search(const SearchRequest& req) override {
+        YAMS_ZONE_SCOPED_N("search_service::search");
         using namespace std::chrono;
         const auto t0 = steady_clock::now();
         MetadataTelemetry metadataTelemetry;
@@ -401,6 +404,7 @@ public:
             co_return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
         }
 
+        YAMS_ZONE_SCOPED_N("search_service::parse_and_plan");
         auto parsed = yams::search::parseQueryQualifiers(req.query);
         SearchRequest normalizedReq = req;
         normalizedReq.query = parsed.normalizedQuery;
@@ -428,6 +432,7 @@ public:
         }
 
         if (!normalizedReq.hash.empty()) {
+            YAMS_ZONE_SCOPED_N("search_service::hash_lookup");
             if (!looksLikeHash(normalizedReq.hash)) {
                 co_return Error{ErrorCode::InvalidArgument,
                                 "Invalid hash format (expected hex, 8-64 chars)"};
@@ -852,6 +857,7 @@ private:
             if (!snippetTimeoutRecorded && budgetEnabled) {
                 resp.searchStats["snippet_timeout_hit"] = "true";
                 resp.searchStats["snippet_budget_ms"] = std::to_string(snippetBudget.count());
+                YAMS_PLOT("search_service::snippet_timeout", 1);
                 snippetTimeoutRecorded = true;
             }
         };
@@ -866,7 +872,9 @@ private:
             }
             return false;
         };
+        YAMS_PLOT("search_service::snippet_budget_ms", static_cast<double>(snippetBudget.count()));
 
+        YAMS_PLOT("search_service::snippet_docs", static_cast<double>(docsMap.size()));
         for (const auto& [hash, doc] : docsMap) {
             docIds.push_back(doc.id);
             if (auto it = hashToIndices.find(hash); it != hashToIndices.end()) {
@@ -876,6 +884,7 @@ private:
 
         // Batch fetch content for all documents (1 query instead of N)
         if (!docIds.empty()) {
+            YAMS_ZONE_SCOPED_N("search_service::snippet_batch_fetch");
             auto contentResult = co_await retryMetadataOp(
                 [&]() { return ctx_.metadataRepo->batchGetContent(docIds); }, 4,
                 std::chrono::milliseconds(25), telemetry);
@@ -885,6 +894,8 @@ private:
 
             if (contentResult) {
                 const auto& contentMap = contentResult.value();
+                YAMS_PLOT("search_service::snippet_content_rows",
+                          static_cast<double>(contentMap.size()));
 
                 // Hydrate snippets from in-memory maps (no DB queries!)
                 // Limit content text to first 10KB for faster snippet generation
@@ -1283,11 +1294,13 @@ private:
             // Cap worker count to avoid thread explosion
             constexpr size_t kMaxWorkers = 16;
             const size_t workers = std::min(recommendedWorkers(n), kMaxWorkers);
+            YAMS_PLOT("search_service::candidates", static_cast<double>(n));
 
             std::atomic<size_t> next{0};
             std::vector<std::optional<SearchItem>> slots(n);
             const std::string& queryText = req.query;
             auto worker = [&, this]() {
+                YAMS_ZONE_SCOPED_N("search_service::result_shape_worker");
                 while (true) {
                     const size_t i = next.fetch_add(1);
                     if (i >= n)
@@ -1320,6 +1333,7 @@ private:
                     slots[i] = std::move(it);
                 }
             };
+
             std::vector<std::thread> ths;
             ths.reserve(workers);
             for (size_t t = 0; t < workers; ++t)
@@ -1345,8 +1359,10 @@ private:
 
     Result<SearchResponse> metadataSearch(const SearchRequest& req,
                                           MetadataTelemetry* telemetry = nullptr) {
+        YAMS_ZONE_SCOPED_N("search_service::keyword_pipeline");
         // Prepare query - escape regex if literalText is requested
         std::string processedQuery = req.query;
+
         if (req.literalText) {
             // Escape regex special characters
             processedQuery = escapeRegex(req.query);
@@ -1370,6 +1386,7 @@ private:
         // Pre-filter by pathPatterns using SQL-level glob matching (like grep does)
         // This significantly improves performance by reducing the FTS search scope
         if (!req.pathPatterns.empty() && !docIds.has_value()) {
+            YAMS_ZONE_SCOPED_N("search_service::path_prefilter");
             spdlog::debug("[SearchService] Pre-filtering by {} path patterns before FTS",
                           req.pathPatterns.size());
             auto patternDocsRes =
@@ -1386,6 +1403,7 @@ private:
             }
         } else if (!req.pathPatterns.empty() && docIds.has_value()) {
             // If we already have docIds from tags, intersect with path-filtered docs
+            YAMS_ZONE_SCOPED_N("search_service::path_tag_intersect");
             spdlog::debug("[SearchService] Intersecting tag filter with {} path patterns",
                           req.pathPatterns.size());
             auto patternDocsRes =
@@ -1444,6 +1462,7 @@ private:
         }
 
         auto convertResults = [&](const metadata::SearchResults& metaResults) {
+            YAMS_ZONE_SCOPED_N("search_service::convert_results");
             std::vector<SearchItem> serviceResults;
             serviceResults.reserve(metaResults.results.size());
             for (const auto& item : metaResults.results) {
@@ -1460,6 +1479,7 @@ private:
         };
 
         auto runFuzzySearch = [&](const SearchRequest& searchReq) -> Result<SearchResponse> {
+            YAMS_ZONE_SCOPED_N("search_service::fuzzy_search");
             auto r = ctx_.metadataRepo->fuzzySearch(processedQuery, searchReq.similarity,
                                                     static_cast<int>(searchReq.limit), docIds);
             if (!r) {
@@ -1467,6 +1487,7 @@ private:
             }
 
             const auto& res = r.value();
+            YAMS_PLOT("search_service::fuzzy_total", static_cast<double>(res.totalCount));
 
             SearchResponse resp;
             resp.total = res.totalCount;
@@ -1494,6 +1515,7 @@ private:
 
         auto runFullTextSearch = [&](const SearchRequest& searchReq,
                                      bool allowAutoFuzzyFallback) -> Result<SearchResponse> {
+            YAMS_ZONE_SCOPED_N("search_service::keyword_fulltext");
             // If docIds is set to an empty vector (from tag/path/session intersection with no
             // matches), return empty results immediately since we're filtering to a known-empty
             // set. Note: std::nullopt means "no filter", but empty vector means "filter to
@@ -1514,6 +1536,7 @@ private:
             }
 
             const auto& res = r.value();
+            YAMS_PLOT("search_service::fulltext_total", static_cast<double>(res.totalCount));
             if (allowAutoFuzzyFallback && res.totalCount == 0) {
                 SearchRequest fallbackReq = searchReq;
                 fallbackReq.fuzzy = true;
@@ -1581,10 +1604,15 @@ private:
         keywordReq.fuzzy = false;
         auto keywordResults = runFullTextSearch(keywordReq, false);
         auto fuzzyResults = runFuzzySearch(req);
+        YAMS_PLOT("search_service::keyword_results",
+                  keywordResults ? keywordResults->results.size() : 0);
+        YAMS_PLOT("search_service::fuzzy_results", fuzzyResults ? fuzzyResults->results.size() : 0);
 
         if (!keywordResults && !fuzzyResults) {
             return fuzzyResults.error();
         }
+        YAMS_ZONE_SCOPED_N("search_service::merge_keyword_fuzzy");
+
         if (!keywordResults) {
             return fuzzyResults;
         }

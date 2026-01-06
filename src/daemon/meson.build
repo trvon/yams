@@ -1,5 +1,16 @@
 yams_daemon_client_dep = dependency('yams_daemon_client')
 protobuf_dep = dependency('protobuf')
+
+# Tracy profiling support (optional, controlled by -Denable-profiling=true)
+enable_profiling = get_option('enable-profiling')
+tracy_dep = dependency('tracy', required: enable_profiling, static: true)
+tracy_args = []
+tracy_deps = []
+if tracy_dep.found() and enable_profiling
+  tracy_args += ['-DTRACY_ENABLE']
+  tracy_deps += tracy_dep
+  message('Tracy profiling enabled for daemon')
+endif
 # pb_includedir = protobuf_dep.get_variable(pkgconfig: 'includedir', default_value: '')
 # pb_system_inc = pb_includedir != '' ? include_directories(pb_includedir, is_system: true) : []
 pb_system_inc = []
@@ -176,7 +187,8 @@ yams_daemon_lib = static_library('yams_daemon',
     dependency('zlib'),
     nlohmann_json_dep,
     protobuf_dep,
-  ],
+  ] + tracy_deps,
+  cpp_args: tracy_args,
   include_directories: [
     include_directories('../../include'),
     include_directories('.'),
@@ -214,7 +226,8 @@ yams_daemon_exe = executable('yams-daemon',
     dependency('yams_config'),
     protobuf_dep,
     dependency('libcurl', required: false),
-  ],
+  ] + tracy_deps,
+  cpp_args: tracy_args,
   install: true,
   install_dir: get_option('bindir'),
   install_rpath: daemon_install_rpath,

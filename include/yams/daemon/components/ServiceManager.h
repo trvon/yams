@@ -50,6 +50,7 @@
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/extraction/content_extractor.h>
+#include <yams/profiling.h>
 
 // Forward declarations for services
 namespace yams::api {
@@ -519,7 +520,7 @@ private:
     bool embeddingPreloadOnStartup_{false};
 
     std::shared_ptr<yams::search::SearchEngine> searchEngine_;
-    mutable std::shared_mutex searchEngineMutex_; // Allow concurrent reads
+    mutable YAMS_SHARED_LOCKABLE(std::shared_mutex, searchEngineMutex_); // Allow concurrent reads
 
     // Modern async architecture (Phase 0c): WorkCoordinator delegates threading complexity
     // Member declaration order is CRITICAL for correct destruction

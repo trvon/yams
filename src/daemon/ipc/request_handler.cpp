@@ -35,9 +35,7 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/write.hpp>
 #include <yams/compat/thread_stop_compat.h>
-#if defined(TRACY_ENABLE)
-#include <tracy/Tracy.hpp>
-#endif
+#include <yams/profiling.h>
 
 namespace yams::daemon {
 
@@ -1756,9 +1754,7 @@ boost::asio::awaitable<void>
 RequestHandler::writer_drain(boost::asio::local::stream_protocol::socket& socket,
                              ConnectionFsm* fsm) {
     using boost::asio::use_awaitable;
-#if defined(TRACY_ENABLE)
-    ZoneScopedN("RequestHandler::writer_drain");
-#endif
+    YAMS_ZONE_SCOPED_N("RequestHandler::writer_drain");
 
     while (true) {
         uint64_t rid;

@@ -168,6 +168,7 @@ Result<size_t> YamsDaemon::autoloadPluginsNow() {
 }
 
 Result<void> YamsDaemon::start() {
+    YAMS_ZONE_SCOPED_N("YamsDaemon::start");
     if (running_.exchange(true)) {
         return Error{ErrorCode::InvalidState, "Daemon already running"};
     }

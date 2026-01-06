@@ -21,6 +21,7 @@
 
 #include "tests/integration/daemon/test_async_helpers.h"
 #include "tests/integration/daemon/test_daemon_harness.h"
+#include <yams/cli/search_runner.h>
 #include <yams/daemon/client/daemon_client.h>
 
 #include <algorithm>
@@ -280,6 +281,52 @@ struct RetrievalMetrics {
     int numQueries = 0;
 };
 
+struct DebugLogEntry {
+    std::string query;
+    std::vector<std::string> relevantDocIds;
+    std::vector<std::string> relevantFiles;
+    std::vector<std::string> returnedPaths;
+    std::vector<std::string> returnedDocIds;
+    std::vector<float> returnedScores;
+    std::vector<int> returnedGrades;
+    std::vector<std::string> diagnostics;
+    std::uint64_t attempts = 0;
+    bool usedStreaming = false;
+    bool usedFuzzyFlag = false;
+    bool usedLiteralFlag = false;
+    bool usedFuzzyRetry = false;
+    bool usedLiteralTextRetry = false;
+};
+
+static std::ostream* g_debugOut = nullptr;
+static std::unique_ptr<std::ofstream> g_debugFile;
+static std::mutex g_debugMutex;
+
+static void debugLogWriteJsonLine(const DebugLogEntry& e) {
+    if (!g_debugOut)
+        return;
+
+    json j;
+    j["query"] = e.query;
+    j["relevant_doc_ids"] = e.relevantDocIds;
+    j["relevant_files"] = e.relevantFiles;
+    j["returned_paths"] = e.returnedPaths;
+    j["returned_doc_ids"] = e.returnedDocIds;
+    j["returned_scores"] = e.returnedScores;
+    j["returned_grades"] = e.returnedGrades;
+    j["attempts"] = e.attempts;
+    j["used_streaming"] = e.usedStreaming;
+    j["used_fuzzy_flag"] = e.usedFuzzyFlag;
+    j["used_literal_flag"] = e.usedLiteralFlag;
+    j["used_fuzzy_retry"] = e.usedFuzzyRetry;
+    j["used_literal_retry"] = e.usedLiteralTextRetry;
+    j["diag"] = e.diagnostics;
+
+    std::lock_guard<std::mutex> lock(g_debugMutex);
+    (*g_debugOut) << j.dump() << "\n";
+    g_debugOut->flush();
+}
+
 // Store final metrics globally for summary after teardown
 static RetrievalMetrics g_final_metrics;
 
@@ -296,34 +343,83 @@ double computeIDCG(std::vector<int> grades, int k) {
     return computeDCG(grades, k);
 }
 
-RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client,
+RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::path& corpusDir,
                                  const std::vector<TestQuery>& queries, int k) {
     RetrievalMetrics metrics;
     metrics.numQueries = queries.size();
     double totalMRR = 0.0, totalRecall = 0.0, totalPrecision = 0.0, totalNDCG = 0.0, totalMAP = 0.0;
 
-    for (const auto& tq : queries) {
-        yams::daemon::SearchRequest req;
-        req.query = tq.query;
-        req.searchType = "hybrid";
-        req.limit = k;
-        req.timeout = 5s;
+    std::uint64_t totalAttempts = 0;
+    std::uint64_t streamingCount = 0;
+    std::uint64_t fuzzyRetryCount = 0;
+    std::uint64_t literalRetryCount = 0;
 
-        spdlog::info("Executing search query: '{}' (relevant files: {})", tq.query,
-                     tq.relevantFiles.size());
-        auto result = yams::cli::run_sync(client.search(req), 10s);
-        if (!result) {
-            spdlog::warn("Search failed for query '{}': {}", tq.query, result.error().message);
+    for (const auto& tq : queries) {
+        yams::cli::search_runner::DaemonSearchOptions opts;
+        opts.query = tq.query;
+        opts.searchType = "hybrid";
+        opts.limit = static_cast<std::size_t>(k);
+        opts.timeout = 5s;
+        opts.symbolRank = true;
+        const bool benchDiagEnabled = []() -> bool {
+            if (const char* env = std::getenv("YAMS_BENCH_DIAG"); env && std::string(env) == "1") {
+                return true;
+            }
+            return false;
+        }();
+
+        spdlog::info("Executing search query: '{}'", tq.query);
+        auto run =
+            yams::cli::run_sync(yams::cli::search_runner::daemon_search(client, opts, true), 10s);
+        if (!run) {
+            spdlog::warn("Search failed for query '{}': {}", tq.query, run.error().message);
             continue;
         }
 
-        const auto& results = result.value().results;
-        spdlog::info("Search returned {} results for query '{}'", results.size(), tq.query);
+        totalAttempts += run.value().attempts;
+        if (run.value().usedStreaming)
+            streamingCount++;
+        if (run.value().usedFuzzyRetry)
+            fuzzyRetryCount++;
+        if (run.value().usedLiteralTextRetry)
+            literalRetryCount++;
+
+        const auto& results = run.value().response.results;
+        spdlog::info("Search returned {} results for query '{}' (attempts={}, streaming={}, "
+                     "fuzzy_retry={}, literal_retry={})",
+                     results.size(), tq.query, run.value().attempts, run.value().usedStreaming,
+                     run.value().usedFuzzyRetry, run.value().usedLiteralTextRetry);
+
+        DebugLogEntry debugEntry;
+        debugEntry.query = tq.query;
+        debugEntry.attempts = run.value().attempts;
+        debugEntry.usedStreaming = run.value().usedStreaming;
+        debugEntry.usedFuzzyFlag = false;
+        debugEntry.usedLiteralFlag = false;
+        debugEntry.usedFuzzyRetry = run.value().usedFuzzyRetry;
+        debugEntry.usedLiteralTextRetry = run.value().usedLiteralTextRetry;
+        debugEntry.relevantDocIds.assign(tq.relevantDocIds.begin(), tq.relevantDocIds.end());
+        debugEntry.relevantFiles.assign(tq.relevantFiles.begin(), tq.relevantFiles.end());
+
+        if (benchDiagEnabled) {
+            debugEntry.diagnostics.push_back("searchType=" + opts.searchType);
+            debugEntry.diagnostics.push_back(std::string("symbolRank=") +
+                                             (opts.symbolRank ? "true" : "false"));
+            debugEntry.diagnostics.push_back("limit=" + std::to_string(opts.limit));
+            debugEntry.diagnostics.push_back(
+                "timeout_ms=" +
+                std::to_string(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(opts.timeout).count()));
+        }
+
         int firstRelevantRank = -1, numRelevantInTopK = 0, numRelevantSeen = 0;
         std::vector<int> retrievedGrades;
         double avgPrecision = 0.0;
 
         for (size_t i = 0; i < std::min((size_t)k, results.size()); ++i) {
+            debugEntry.returnedPaths.push_back(results[i].path);
+            debugEntry.returnedScores.push_back(results[i].score);
+
             std::string filename = fs::path(results[i].path).filename().string();
             bool isRelevant = false;
             std::string key;
@@ -333,9 +429,11 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client,
                 if (docId.size() > 4 && docId.substr(docId.size() - 4) == ".txt") {
                     docId = docId.substr(0, docId.size() - 4);
                 }
+                debugEntry.returnedDocIds.push_back(docId);
                 key = docId;
                 isRelevant = tq.relevantDocIds.count(docId) > 0;
             } else {
+                debugEntry.returnedDocIds.push_back(filename);
                 key = filename;
                 isRelevant = tq.relevantFiles.count(filename) > 0;
             }
@@ -348,8 +446,107 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client,
                 avgPrecision += (double)numRelevantSeen / (i + 1);
             }
             auto gradeIt = tq.relevanceGrades.find(key);
-            retrievedGrades.push_back((gradeIt != tq.relevanceGrades.end()) ? gradeIt->second : 0);
+            auto grade = (gradeIt != tq.relevanceGrades.end()) ? gradeIt->second : 0;
+            retrievedGrades.push_back(grade);
+            debugEntry.returnedGrades.push_back(grade);
         }
+
+        if (benchDiagEnabled && results.empty() && tq.useDocIds && !tq.relevantDocIds.empty()) {
+            // Opt-in diagnostic: show a snippet of the relevant BEIR doc file(s).
+            std::size_t printed = 0;
+            for (const auto& docId : tq.relevantDocIds) {
+                if (printed >= 2)
+                    break;
+                const fs::path p = corpusDir / (docId + ".txt");
+                if (!fs::exists(p)) {
+                    debugEntry.diagnostics.push_back("relevant_doc_missing=" + p.string());
+                    continue;
+                }
+                std::ifstream in(p);
+
+                if (!in.is_open()) {
+                    debugEntry.diagnostics.push_back("relevant_doc_open_failed=" + p.string());
+                    continue;
+                }
+                std::string snippet;
+                snippet.resize(240);
+                in.read(snippet.data(), static_cast<std::streamsize>(snippet.size()));
+                snippet.resize(static_cast<std::size_t>(in.gcount()));
+                for (auto& c : snippet) {
+                    if (c == '\n' || c == '\r' || c == '\t')
+                        c = ' ';
+                }
+                debugEntry.diagnostics.push_back("relevant_doc_snippet[" + docId + "]=" + snippet);
+                ++printed;
+            }
+        }
+
+        // Opt-in diagnostic: run a few "shadow" queries for failing cases.
+        // This does not affect scoring; it only emits diagnostic entries.
+        if (benchDiagEnabled && results.empty()) {
+            // 1) Try a shorter query with a few salient tokens to test whether the full
+            // sentence query is failing due to strict AND semantics / tokenization.
+            std::istringstream iss(tq.query);
+            std::string token;
+            std::vector<std::string> picked;
+            picked.reserve(3);
+            while (iss >> token && picked.size() < 3) {
+                // Strip trailing punctuation for the diagnostic query.
+                while (!token.empty() && std::ispunct(static_cast<unsigned char>(token.back()))) {
+                    token.pop_back();
+                }
+                if (token.size() < 4)
+                    continue;
+                picked.push_back(token);
+            }
+
+            if (!picked.empty()) {
+                std::string diagQuery;
+                for (size_t i = 0; i < picked.size(); ++i) {
+                    if (i)
+                        diagQuery += ' ';
+                    diagQuery += picked[i];
+                }
+
+                yams::cli::search_runner::DaemonSearchOptions shadow;
+                shadow.query = diagQuery;
+                shadow.searchType = opts.searchType;
+                shadow.limit = opts.limit;
+                shadow.timeout = opts.timeout;
+                shadow.symbolRank = opts.symbolRank;
+
+                DebugLogEntry shadowEntry;
+                shadowEntry.query = "__diag_shadow_query__";
+                shadowEntry.relevantDocIds.assign(tq.relevantDocIds.begin(),
+                                                  tq.relevantDocIds.end());
+                shadowEntry.diagnostics.push_back("original_query=" + tq.query);
+                shadowEntry.diagnostics.push_back("shadow_query=" + diagQuery);
+
+                auto shadowRun = yams::cli::run_sync(
+                    yams::cli::search_runner::daemon_search(client, shadow, true), 10s);
+                if (shadowRun) {
+                    shadowEntry.attempts = shadowRun.value().attempts;
+                    shadowEntry.usedStreaming = shadowRun.value().usedStreaming;
+                    shadowEntry.usedFuzzyRetry = shadowRun.value().usedFuzzyRetry;
+                    shadowEntry.usedLiteralTextRetry = shadowRun.value().usedLiteralTextRetry;
+                    shadowEntry.returnedDocIds.push_back(
+                        "result_count=" +
+                        std::to_string(shadowRun.value().response.results.size()));
+                    for (size_t i = 0;
+                         i < std::min<size_t>(5, shadowRun.value().response.results.size()); ++i) {
+                        shadowEntry.returnedPaths.push_back(
+                            shadowRun.value().response.results[i].path);
+                    }
+                } else {
+                    shadowEntry.returnedDocIds.push_back("shadow_error=" +
+                                                         shadowRun.error().message);
+                }
+
+                debugLogWriteJsonLine(shadowEntry);
+            }
+        }
+
+        debugLogWriteJsonLine(debugEntry);
 
         if (firstRelevantRank > 0)
             totalMRR += 1.0 / firstRelevantRank;
@@ -379,6 +576,12 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client,
         metrics.precisionAtK = totalPrecision / metrics.numQueries;
         metrics.ndcgAtK = totalNDCG / metrics.numQueries;
         metrics.map = totalMAP / metrics.numQueries;
+
+        spdlog::info("Search execution stats: queries={} total_attempts={} avg_attempts={:.2f} "
+                     "streaming={} fuzzy_retries={} literal_retries={}",
+                     metrics.numQueries, totalAttempts,
+                     static_cast<double>(totalAttempts) / metrics.numQueries, streamingCount,
+                     fuzzyRetryCount, literalRetryCount);
     }
     return metrics;
 }
@@ -388,12 +591,27 @@ struct BenchFixture {
     std::unique_ptr<yams::daemon::DaemonClient> client;
     std::unique_ptr<CorpusGenerator> corpus;
     std::unique_ptr<BEIRCorpusLoader> beirCorpus;
+    fs::path benchCorpusDir;
     std::vector<TestQuery> queries;
     int corpusSize = 50, numQueries = 10, topK = 10;
     bool useBEIR = false;
 
     void setup() {
         const char* env_dataset = std::getenv("YAMS_BENCH_DATASET");
+        const char* env_debug_file = std::getenv("YAMS_BENCH_DEBUG_FILE");
+        if (env_debug_file && std::strlen(env_debug_file) > 0) {
+            g_debugFile =
+                std::make_unique<std::ofstream>(env_debug_file, std::ios::out | std::ios::app);
+            if (g_debugFile->is_open()) {
+                g_debugOut = g_debugFile.get();
+                spdlog::info("Benchmark debug logging enabled: {}", env_debug_file);
+            } else {
+                spdlog::warn("Failed to open YAMS_BENCH_DEBUG_FILE={} for writing", env_debug_file);
+                g_debugFile.reset();
+                g_debugOut = nullptr;
+            }
+        }
+
         const char* env_path = std::getenv("YAMS_BENCH_DATASET_PATH");
         const char* env_size = std::getenv("YAMS_BENCH_CORPUS_SIZE");
         const char* env_queries = std::getenv("YAMS_BENCH_NUM_QUERIES");
@@ -506,10 +724,12 @@ struct BenchFixture {
             fs::path corpusDir = harness->rootDir() / "corpus";
             beirCorpus = std::make_unique<BEIRCorpusLoader>(dataset, corpusDir);
             beirCorpus->writeDocumentsAsFiles();
+            benchCorpusDir = corpusDir;
             corpusSize = dataset.documents.size();
             numQueries = dataset.queries.size();
         } else {
-            corpus = std::make_unique<CorpusGenerator>(harness->rootDir() / "corpus");
+            benchCorpusDir = harness->rootDir() / "corpus";
+            corpus = std::make_unique<CorpusGenerator>(benchCorpusDir);
             corpus->generateDocuments(corpusSize);
         }
 
@@ -679,6 +899,141 @@ struct BenchFixture {
             throw std::runtime_error("No documents indexed - benchmark cannot proceed");
         }
 
+        // Post-ingest status/stats snapshot + sanity searches.
+        // Goal: distinguish "no docs" vs "docs but query returns empty".
+        {
+            // Log StatusResponse (it already powers our ingestion waits).
+            auto statusRes = yams::cli::run_sync(client->status(), 5s);
+            if (statusRes) {
+                const auto& st = statusRes.value();
+                uint64_t documentsTotal = 0;
+                uint64_t vectorCount = 0;
+                if (auto it = st.requestCounts.find("documents_total");
+                    it != st.requestCounts.end()) {
+                    documentsTotal = it->second;
+                }
+                if (auto it = st.requestCounts.find("vector_count"); it != st.requestCounts.end()) {
+                    vectorCount = it->second;
+                }
+
+                DebugLogEntry statusEntry;
+                statusEntry.query = "__post_ingest_status__";
+                statusEntry.returnedPaths.push_back("documents_total=" +
+                                                    std::to_string(documentsTotal));
+                statusEntry.returnedPaths.push_back("vector_count=" + std::to_string(vectorCount));
+                statusEntry.returnedPaths.push_back("post_ingest_queue_depth=" +
+                                                    std::to_string(st.postIngestQueueDepth));
+                statusEntry.returnedPaths.push_back(std::string("embedding_available=") +
+                                                    (st.embeddingAvailable ? "true" : "false"));
+                statusEntry.returnedPaths.push_back(std::string("vector_db_ready=") +
+                                                    (st.vectorDbReady ? "true" : "false"));
+                statusEntry.returnedPaths.push_back("vector_db_dim=" +
+                                                    std::to_string(st.vectorDbDim));
+                statusEntry.returnedPaths.push_back("embedding_backend=" + st.embeddingBackend);
+                statusEntry.returnedPaths.push_back("embedding_model=" + st.embeddingModel);
+                debugLogWriteJsonLine(statusEntry);
+            } else {
+                spdlog::warn("Status failed (post-ingest): {}", statusRes.error().message);
+            }
+
+            // Log GetStatsResponse (extra counters);
+            // we also emit structured JSON (additional_stats) for easier parsing.
+            yams::daemon::GetStatsRequest statsReq;
+            auto statsRes = yams::cli::run_sync(client->getStats(statsReq), 10s);
+            if (statsRes) {
+                const auto& st = statsRes.value();
+                spdlog::info("GetStats: totalDocuments={} indexedDocuments={} vectorIndexSize={} "
+                             "additionalStats.size={}",
+                             st.totalDocuments, st.indexedDocuments, st.vectorIndexSize,
+                             st.additionalStats.size());
+
+                DebugLogEntry statsEntry;
+                statsEntry.query = "__post_ingest_stats__";
+                statsEntry.returnedPaths.push_back("totalDocuments=" +
+                                                   std::to_string(st.totalDocuments));
+                statsEntry.returnedPaths.push_back("indexedDocuments=" +
+                                                   std::to_string(st.indexedDocuments));
+                statsEntry.returnedPaths.push_back("vectorIndexSize=" +
+                                                   std::to_string(st.vectorIndexSize));
+
+                std::lock_guard<std::mutex> lock(g_debugMutex);
+                if (g_debugOut) {
+                    json j;
+                    j["query"] = statsEntry.query;
+                    j["relevant_doc_ids"] = json::array();
+                    j["relevant_files"] = json::array();
+                    j["returned_paths"] = statsEntry.returnedPaths;
+                    j["returned_doc_ids"] = json::array();
+                    j["returned_scores"] = json::array();
+                    j["returned_grades"] = json::array();
+                    j["attempts"] = 0;
+                    j["used_streaming"] = false;
+                    j["used_fuzzy_retry"] = false;
+                    j["used_literal_retry"] = false;
+                    j["additional_stats"] = st.additionalStats;
+                    j["total_documents"] = st.totalDocuments;
+                    j["indexed_documents"] = st.indexedDocuments;
+                    j["vector_index_size"] = st.vectorIndexSize;
+
+                    for (const auto& [k, v] : st.additionalStats) {
+                        statsEntry.returnedPaths.push_back(k + "=" + v);
+                    }
+                    j["returned_paths"] = statsEntry.returnedPaths;
+                    (*g_debugOut) << j.dump() << "\n";
+                    g_debugOut->flush();
+                }
+            } else {
+                spdlog::warn("GetStats failed: {}", statsRes.error().message);
+            }
+
+            auto doSanitySearch = [&](std::string label, std::string query, std::string searchType,
+                                      bool symbolRank) {
+                yams::cli::search_runner::DaemonSearchOptions opts;
+                opts.query = std::move(query);
+                opts.searchType = std::move(searchType);
+                opts.limit = 25;
+                opts.timeout = 5s;
+                opts.symbolRank = symbolRank;
+
+                DebugLogEntry sanityEntry;
+                sanityEntry.query = std::move(label);
+
+                auto run = yams::cli::run_sync(
+                    yams::cli::search_runner::daemon_search(*client, opts, true), 10s);
+                if (!run) {
+                    sanityEntry.returnedPaths.push_back("error=" + run.error().message);
+                    debugLogWriteJsonLine(sanityEntry);
+                    return;
+                }
+
+                sanityEntry.attempts = run.value().attempts;
+                sanityEntry.usedStreaming = run.value().usedStreaming;
+                sanityEntry.usedFuzzyRetry = run.value().usedFuzzyRetry;
+                sanityEntry.usedLiteralTextRetry = run.value().usedLiteralTextRetry;
+
+                const auto& results = run.value().response.results;
+                for (size_t i = 0; i < std::min<size_t>(results.size(), 10); ++i) {
+                    sanityEntry.returnedPaths.push_back(results[i].path);
+                }
+
+                sanityEntry.returnedDocIds.push_back("result_count=" +
+                                                     std::to_string(results.size()));
+                debugLogWriteJsonLine(sanityEntry);
+            };
+
+            // Keyword search should return something if FTS is populated.
+            doSanitySearch("__sanity_keyword_the__", "the", "keyword", false);
+
+            // Hybrid search without symbol rank to avoid symbol-only decisions.
+            doSanitySearch("__sanity_hybrid_the__", "the", "hybrid", false);
+
+            // If BEIR corpus is used, easily-searchable token is doc id.
+            if (useBEIR && beirCorpus && !beirCorpus->dataset.documents.empty()) {
+                const auto& firstDocId = beirCorpus->dataset.documents.begin()->first;
+                doSanitySearch("__sanity_keyword_docid__", firstDocId, "keyword", false);
+            }
+        }
+
         if (useBEIR) {
             queries = beirCorpus->generateTestQueries();
         } else {
@@ -691,6 +1046,9 @@ struct BenchFixture {
         client.reset();
         harness.reset();
         corpus.reset();
+
+        g_debugOut = nullptr;
+        g_debugFile.reset();
     }
 };
 
@@ -712,10 +1070,12 @@ void BM_RetrievalQuality(benchmark::State& state) {
     SetupFixture();
     auto& fixture = *g_fixture;
     for (auto _ : state) {
-        auto metrics = evaluateQueries(*fixture.client, fixture.queries, fixture.topK);
+        auto metrics =
+            evaluateQueries(*fixture.client, fixture.benchCorpusDir, fixture.queries, fixture.topK);
         benchmark::DoNotOptimize(metrics);
     }
-    auto metrics = evaluateQueries(*fixture.client, fixture.queries, fixture.topK);
+    auto metrics =
+        evaluateQueries(*fixture.client, fixture.benchCorpusDir, fixture.queries, fixture.topK);
 
     // Store metrics globally for post-teardown summary
     g_final_metrics = metrics;

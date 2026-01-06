@@ -755,19 +755,21 @@ template <typename T>
 inline Result<T> run_result(boost::asio::awaitable<Result<T>> aw,
                             std::chrono::milliseconds timeout = std::chrono::milliseconds{0}) {
     auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
-    std::promise<Result<T>> prom;
-    auto fut = prom.get_future();
+    // Use shared_ptr to ensure the promise outlives the coroutine even if we timeout and return
+    // early. The coroutine captures a copy of the shared_ptr, preventing use-after-free.
+    auto prom = std::make_shared<std::promise<Result<T>>>();
+    auto fut = prom->get_future();
     boost::asio::co_spawn(
         io,
-        [a = std::move(aw), &prom]() mutable -> boost::asio::awaitable<void> {
+        [a = std::move(aw), prom]() mutable -> boost::asio::awaitable<void> {
             try {
                 auto r = co_await std::move(a);
-                prom.set_value(std::move(r));
+                prom->set_value(std::move(r));
             } catch (const std::exception& e) {
-                prom.set_value(
+                prom->set_value(
                     Error{ErrorCode::InternalError, std::string("Awaitable threw: ") + e.what()});
             } catch (...) {
-                prom.set_value(
+                prom->set_value(
                     Error{ErrorCode::InternalError, "Awaitable threw unknown exception"});
             }
             co_return;
