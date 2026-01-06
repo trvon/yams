@@ -12,6 +12,10 @@ else
     'symbol_search_integration_test.cpp',
   )
 
+  fsm_tuning_integration_srcs = files(
+    'fsm_tuning_benchmark_integration_test.cpp',
+  )
+
   dbg = (get_option('buildtype') == 'debug')
   if (get_option('enable-integration-tests') or dbg) and (get_option('enable-daemon-integration') or dbg)
     # Catch2 needs its main library
@@ -59,6 +63,28 @@ else
       },
       is_parallel: false,
       timeout: 120,  # 2 minutes - symbol extraction can be slow
+      # Allow exit 0 when all tests skip (Windows daemon shutdown not yet implemented)
+      args: ['--allow-running-no-tests'],
+    )
+
+    # FSM Tuning integration tests (Phase 4 of yams-7ez4)
+    fsm_tuning_integration_exe = executable('yams_fsm_tuning_integration',
+      fsm_tuning_integration_srcs,
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep, test_deps],
+      cpp_args: ['-DYAMS_TESTING=1'],
+      install: false,
+    )
+
+    test('fsm_tuning_integration',
+      fsm_tuning_integration_exe,
+      suite: ['integration', 'search', 'fsm', 'tuning', 'benchmark', 'catch2'],
+      env: {
+        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+        # Some tests need embeddings for hybrid search validation
+      },
+      is_parallel: false,
+      timeout: 180,  # 3 minutes - FSM tests run multiple search operations
       # Allow exit 0 when all tests skip (Windows daemon shutdown not yet implemented)
       args: ['--allow-running-no-tests'],
     )

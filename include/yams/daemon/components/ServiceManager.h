@@ -115,7 +115,10 @@ public:
     void startBackgroundTasks();
 
     // Service Accessors
-    std::shared_ptr<api::IContentStore> getContentStore() const { return contentStore_; }
+    // Use atomic_load for thread-safe read of shared_ptr (written by async init coroutine)
+    std::shared_ptr<api::IContentStore> getContentStore() const {
+        return std::atomic_load_explicit(&contentStore_, std::memory_order_acquire);
+    }
     std::shared_ptr<metadata::MetadataRepository> getMetadataRepo() const {
         // PBI-088: Delegate to DatabaseManager if available
         if (databaseManager_) {

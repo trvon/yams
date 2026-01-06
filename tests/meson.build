@@ -1090,6 +1090,28 @@ if catch2_dep.found()
     install: false,
   )
 
+  # SearchTuner tests (Phase 2 of Epic yams-7ez4: Adaptive Search Engine Tuning via Corpus-Aware FSM)
+  # Tests FSM state transitions, TunedParams matrix, and SearchEngineConfig generation
+  catch2_search_tuner_exe = executable('catch2_search_tuner',
+    files('unit/search/search_tuner_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # InternalBenchmark tests (Phase 3 of Epic yams-7ez4: Internal Benchmark Suite)
+  # Tests LatencyStats, BenchmarkResults, BenchmarkComparison, query generation configs
+  catch2_internal_benchmark_exe = executable('catch2_internal_benchmark',
+    files('unit/search/internal_benchmark_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # Compression submodule tests (CompressionPolicy, CompressionMonitor, Zstandard, LZMA, ErrorHandler, etc.)
   # Migrated from GTest as part of yams-3s4 / yams-pmf
   catch2_compression_submodule_exe = executable('catch2_compression_submodule',
@@ -1522,6 +1544,18 @@ if catch2_dep.found()
     install: false,
   )
 
+  # Corpus Stats Tests (Catch2) - corpus statistics for adaptive search tuning
+  # Phase 1 of Epic yams-7ez4: Adaptive Search Engine Tuning via Corpus-Aware FSM
+  # --------------------------------------------------------------------------
+  catch2_corpus_stats_exe = executable('catch2_corpus_stats',
+    files('unit/metadata/corpus_stats_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # Core tests (minimal dependencies - no daemon)
   core_test_deps = [
     dependency('spdlog'),
@@ -1776,6 +1810,21 @@ if catch2_dep.found()
     install: false,
   )
 
+  # Corpus Stats Search Integration Tests (Catch2)
+  # Phase 1 of Epic yams-7ez4: Validates corpus stats collection from real document store
+  # --------------------------------------------------------------------------
+  corpus_stats_search_integration_exe = executable('corpus_stats_search_integration',
+    files('unit/search/corpus_stats_search_integration_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + search_test_deps + [
+      dependency('yams_daemon'),
+      dependency('yams_daemon_client'),
+    ],
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # Ghidra plugin integration test (PBI-075)
   # Tests plugin spawning and JSON-RPC communication without requiring Ghidra installed
   if host_machine.system() != 'windows'
@@ -1921,6 +1970,12 @@ if catch2_dep.found()
     timeout: 180  # Includes concurrent and large content tests
   )
 
+  test('corpus_stats', catch2_corpus_stats_exe,
+    suite: ['catch2', 'unit', 'metadata', 'corpus_stats'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
   # Core tests
   test('core_cpp23_features', core_cpp23_features_exe,
     suite: ['catch2', 'unit', 'core', 'cpp23'],
@@ -2046,6 +2101,15 @@ if catch2_dep.found()
       'YAMS_DISABLE_VECTORS': '1',
     },
     timeout: 120
+  )
+
+  test('corpus_stats_search_integration', corpus_stats_search_integration_exe,
+    suite: ['catch2', 'integration', 'search', 'corpus_stats'],
+    env: {
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      'YAMS_DISABLE_VECTORS': '1',
+    },
+    timeout: 180
   )
 
   # Plugin integration tests
@@ -2283,6 +2347,20 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'search', 'yams-1yq'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 180
+  )
+
+  # SearchTuner FSM tests (Phase 2 of Epic yams-7ez4)
+  test('search_tuner', catch2_search_tuner_exe,
+    suite: ['catch2', 'unit', 'search', 'tuner', 'yams-7ez4'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  # InternalBenchmark tests (Phase 3 of Epic yams-7ez4)
+  test('internal_benchmark', catch2_internal_benchmark_exe,
+    suite: ['catch2', 'unit', 'search', 'benchmark', 'yams-7ez4'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
   )
 
   test('compression_submodule', catch2_compression_submodule_exe,

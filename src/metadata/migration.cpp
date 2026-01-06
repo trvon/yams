@@ -336,7 +336,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             removeFTS5ContentType(),
             renameDocEntitiesToKgDocEntities(),
             createSessionIndexes(),
-            createRepairTrackingSchema()};
+            createRepairTrackingSchema(),
+            createSymbolExtractionStateSchema()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -2140,6 +2141,43 @@ Migration YamsMetadataMigrations::createRepairTrackingSchema() {
 
     m.downSQL = R"(
         DROP INDEX IF EXISTS idx_documents_repair_status;
+    )";
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::createSymbolExtractionStateSchema() {
+    Migration m;
+    m.version = 22;
+    m.name = "Create symbol extraction state tracking schema";
+    m.created = std::chrono::system_clock::now();
+
+    m.upSQL = R"(
+        -- Tracks symbol extraction state per document to enable versioned dedupe.
+        -- This avoids re-extraction when:
+        --   1. Extraction already completed (even with 0 symbols)
+        --   2. Extractor version hasn't changed
+        CREATE TABLE IF NOT EXISTS document_symbol_extraction_state (
+            document_id INTEGER PRIMARY KEY,
+            extractor_id TEXT NOT NULL,           -- e.g., "symbol_extractor_treesitter:v1"
+            extractor_config_hash TEXT,           -- hash of grammar/config versions (optional)
+            extracted_at INTEGER NOT NULL,        -- unix timestamp
+            status TEXT NOT NULL DEFAULT 'complete',  -- complete|failed|pending
+            entity_count INTEGER DEFAULT 0,       -- number of symbols/entities extracted
+            error_message TEXT,
+            FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_symbol_extraction_state_extractor
+            ON document_symbol_extraction_state(extractor_id);
+        CREATE INDEX IF NOT EXISTS idx_symbol_extraction_state_status
+            ON document_symbol_extraction_state(status);
+    )";
+
+    m.downSQL = R"(
+        DROP INDEX IF EXISTS idx_symbol_extraction_state_status;
+        DROP INDEX IF EXISTS idx_symbol_extraction_state_extractor;
+        DROP TABLE IF EXISTS document_symbol_extraction_state;
     )";
 
     return m;

@@ -15,6 +15,7 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
 #include <yams/repair/embedding_repair_util.h>
+#include <yams/search/internal_benchmark.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
 
@@ -104,8 +105,8 @@ public:
         // Only run default doctor if no subcommand was invoked
         // Subcommands set their own flags and handle execution themselves
         if (!fixEmbeddings_ && !fixFts5_ && !fixGraph_ && !validateGraph_ && !fixAll_ &&
-            !fixAllTop_ && !dedupeApply_ && !pruneInvoked_ && pluginArg_.empty() &&
-            !fixConfigDims_ && !recreateVectors_) {
+            !fixAllTop_ && !dedupeApply_ && !pruneInvoked_ && !benchmarkInvoked_ &&
+            pluginArg_.empty() && !fixConfigDims_ && !recreateVectors_) {
             // No subcommand flags set, run default doctor summary
             try {
                 runAll();
@@ -2270,6 +2271,14 @@ private:
     bool pruneVerbose_{false};
     bool pruneInvoked_{false}; // Track if prune subcommand was actually invoked
     void runPrune();
+    // Benchmark state
+    bool benchmarkInvoked_{false};
+    size_t benchmarkQueries_{100};
+    bool benchmarkJson_{false};
+    bool benchmarkVerbose_{false};
+    std::string benchmarkSaveBaseline_;
+    std::string benchmarkCompareBaseline_;
+    void runBenchmark();
     // Tuning helpers
     Result<void> applyTuningBaseline(bool apply);
     std::map<std::string, std::string> parseSimpleToml(const std::filesystem::path& path) const;
@@ -2389,6 +2398,22 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
     prune->callback([this]() {
         pruneInvoked_ = true;
         runPrune();
+    });
+
+    // Search quality benchmark
+    auto* bench = doctor->add_subcommand("benchmark",
+                                         "Run internal search quality benchmark (MRR, Recall@K)");
+    bench->add_option("-q,--queries", benchmarkQueries_, "Number of queries to run")
+        ->default_val(100);
+    bench->add_flag("-j,--json", benchmarkJson_, "Output results as JSON");
+    bench->add_flag("-v,--verbose", benchmarkVerbose_, "Verbose per-query output");
+    bench->add_option("--save-baseline", benchmarkSaveBaseline_,
+                      "Save results to file for future comparison");
+    bench->add_option("--compare-baseline", benchmarkCompareBaseline_,
+                      "Compare against saved baseline results");
+    bench->callback([this]() {
+        benchmarkInvoked_ = true;
+        runBenchmark();
     });
 
     // Auto-tuning baseline
@@ -3052,6 +3077,198 @@ void DoctorCommand::runPrune() {
 
     } catch (const std::exception& e) {
         std::cout << "  " << ui::status_error(std::string("Prune error: ") + e.what()) << "\n";
+    }
+}
+
+void DoctorCommand::runBenchmark() {
+    try {
+        using namespace yams::cli::ui;
+        using namespace yams::search;
+
+        std::cout << "\n" << section_header("Search Quality Benchmark") << "\n\n";
+
+        if (!cli_) {
+            std::cout << "  " << status_error("CLI context unavailable") << "\n";
+            return;
+        }
+
+        // Ensure storage initialized
+        auto ensured = cli_->ensureStorageInitialized();
+        if (!ensured) {
+            std::cout << "  " << status_error("Storage init failed: " + ensured.error().message)
+                      << "\n";
+            return;
+        }
+
+        auto appCtx = cli_->getAppContext();
+        if (!appCtx) {
+            std::cout << "  " << status_error("AppContext unavailable") << "\n";
+            return;
+        }
+
+        if (!appCtx->searchEngine) {
+            std::cout << "  " << status_error("Search engine unavailable") << "\n";
+            return;
+        }
+
+        if (!appCtx->metadataRepo) {
+            std::cout << "  " << status_error("Metadata repository unavailable") << "\n";
+            return;
+        }
+
+        // Create benchmark runner
+        InternalBenchmark benchmark(appCtx->searchEngine, appCtx->metadataRepo);
+
+        // Configure benchmark
+        BenchmarkConfig config;
+        config.queryCount = benchmarkQueries_;
+        config.k = 10;
+        config.includeExecutions = benchmarkVerbose_;
+        config.verbose = benchmarkVerbose_;
+        config.warmupQueries = std::min(size_t(5), benchmarkQueries_ / 10);
+
+        // Check corpus size
+        SyntheticQueryGenerator gen(appCtx->metadataRepo);
+        auto docCount = gen.getAvailableDocumentCount();
+        if (!docCount) {
+            std::cout << "  " << status_error("Failed to query corpus: " + docCount.error().message)
+                      << "\n";
+            return;
+        }
+
+        if (docCount.value() == 0) {
+            std::cout << "  " << status_error("No documents indexed - nothing to benchmark")
+                      << "\n";
+            return;
+        }
+
+        std::cout << "  " << colorize("Corpus size:", Ansi::CYAN) << " "
+                  << format_number(docCount.value()) << " documents\n";
+        std::cout << "  " << colorize("Queries:", Ansi::CYAN) << " " << benchmarkQueries_ << "\n";
+        std::cout << "  " << colorize("K value:", Ansi::CYAN) << " " << config.k << "\n\n";
+
+        std::cout << status_pending("Generating synthetic queries") << "\n";
+        // Run benchmark
+        auto results = benchmark.run(config);
+        if (!results) {
+            std::cout << "  " << status_error("Benchmark failed: " + results.error().message)
+                      << "\n";
+            return;
+        }
+
+        const auto& benchResults = results.value();
+
+        // Output results
+        if (benchmarkJson_) {
+            std::cout << benchResults.toJson().dump(2) << "\n";
+        } else {
+            std::cout << benchResults.summary();
+        }
+
+        // Save baseline if requested
+        if (!benchmarkSaveBaseline_.empty()) {
+            try {
+                std::ofstream out(benchmarkSaveBaseline_);
+                if (!out) {
+                    std::cout << "  "
+                              << status_error("Cannot write baseline to: " + benchmarkSaveBaseline_)
+                              << "\n";
+                } else {
+                    out << benchResults.toJson().dump(2);
+                    out.close();
+                    std::cout << "\n"
+                              << status_ok("Baseline saved to: " + benchmarkSaveBaseline_) << "\n";
+                }
+            } catch (const std::exception& e) {
+                std::cout << "  "
+                          << status_error("Failed to save baseline: " + std::string(e.what()))
+                          << "\n";
+            }
+        }
+
+        // Compare with baseline if requested
+        if (!benchmarkCompareBaseline_.empty()) {
+            try {
+                std::ifstream in(benchmarkCompareBaseline_);
+                if (!in) {
+                    std::cout << "  "
+                              << status_error("Cannot read baseline from: " +
+                                              benchmarkCompareBaseline_)
+                              << "\n";
+                } else {
+                    nlohmann::json baselineJson = nlohmann::json::parse(in);
+                    in.close();
+
+                    // Parse baseline results
+                    BenchmarkResults baseline;
+                    baseline.mrr = baselineJson.value("mrr", 0.0f);
+                    baseline.recallAtK = baselineJson.value("recall_at_k", 0.0f);
+                    baseline.latency.meanMs = baselineJson.contains("latency")
+                                                  ? baselineJson["latency"].value("mean_ms", 0.0)
+                                                  : 0.0;
+
+                    // Compare
+                    auto comparison = InternalBenchmark::compare(baseline, benchResults,
+                                                                 config.regressionThreshold);
+
+                    std::cout << "\n" << subsection_header("Baseline Comparison") << "\n\n";
+                    std::cout << "  " << colorize("MRR delta:", Ansi::CYAN) << " ";
+                    if (comparison.mrrDelta > 0) {
+                        std::cout << colorize("+" + std::to_string(comparison.mrrDelta),
+                                              Ansi::GREEN);
+                    } else if (comparison.mrrDelta < 0) {
+                        std::cout << colorize(std::to_string(comparison.mrrDelta), Ansi::RED);
+                    } else {
+                        std::cout << "0.0";
+                    }
+                    std::cout << "\n";
+
+                    std::cout << "  " << colorize("Recall@K delta:", Ansi::CYAN) << " ";
+                    if (comparison.recallDelta > 0) {
+                        std::cout << colorize("+" + std::to_string(comparison.recallDelta),
+                                              Ansi::GREEN);
+                    } else if (comparison.recallDelta < 0) {
+                        std::cout << colorize(std::to_string(comparison.recallDelta), Ansi::RED);
+                    } else {
+                        std::cout << "0.0";
+                    }
+                    std::cout << "\n";
+
+                    std::cout << "  " << colorize("Latency delta:", Ansi::CYAN) << " ";
+                    if (comparison.latencyDelta < 0) {
+                        std::cout << colorize(std::to_string(comparison.latencyDelta) + " ms",
+                                              Ansi::GREEN)
+                                  << " (faster)";
+                    } else if (comparison.latencyDelta > 0) {
+                        std::cout << colorize("+" + std::to_string(comparison.latencyDelta) + " ms",
+                                              Ansi::YELLOW)
+                                  << " (slower)";
+                    } else {
+                        std::cout << "0.0 ms";
+                    }
+                    std::cout << "\n\n";
+
+                    if (comparison.isRegression) {
+                        std::cout << status_error("REGRESSION DETECTED: " + comparison.summary)
+                                  << "\n";
+                    } else if (comparison.isImprovement) {
+                        std::cout << status_ok("IMPROVEMENT: " + comparison.summary) << "\n";
+                    } else {
+                        std::cout << status_ok("No significant change") << "\n";
+                    }
+                }
+            } catch (const nlohmann::json::parse_error& e) {
+                std::cout << "  " << status_error("Invalid baseline JSON: " + std::string(e.what()))
+                          << "\n";
+            } catch (const std::exception& e) {
+                std::cout << "  "
+                          << status_error("Failed to compare baseline: " + std::string(e.what()))
+                          << "\n";
+            }
+        }
+
+    } catch (const std::exception& e) {
+        std::cout << "  " << ui::status_error(std::string("Benchmark error: ") + e.what()) << "\n";
     }
 }
 } // namespace yams::cli

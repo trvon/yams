@@ -5,7 +5,13 @@
 
 #include <chrono>
 #include <memory>
+#include <optional>
 #include <string>
+
+// Forward declarations
+namespace yams::storage {
+struct CorpusStats;
+}
 
 namespace yams {
 namespace metadata {
@@ -20,6 +26,9 @@ class EmbeddingGenerator;
 } // namespace yams
 
 namespace yams::search {
+
+// Forward declare SearchTuner
+class SearchTuner;
 
 /**
  * SearchEngineBuilder
@@ -55,6 +64,11 @@ public:
         // SearchEngine configuration with conservative defaults
         SearchEngineConfig config{};
 
+        // Auto-tune: when true, use SearchTuner to select optimal parameters
+        // based on corpus statistics. When false, use the provided config as-is.
+        // Default: true (enabled)
+        bool autoTune = true;
+
         // Convenience: default-initialize to tuned conservative config
         static BuildOptions makeDefault() {
             BuildOptions o{};
@@ -72,6 +86,14 @@ public:
             o.config.enableParallelExecution = true;
             o.config.includeDebugInfo = true;
             o.config.maxResults = 100;
+            o.autoTune = true;
+            return o;
+        }
+
+        // Create options with auto-tune disabled (use static config)
+        static BuildOptions withoutAutoTune() {
+            BuildOptions o = makeDefault();
+            o.autoTune = false;
             return o;
         }
     };

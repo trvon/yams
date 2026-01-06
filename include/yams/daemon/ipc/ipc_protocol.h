@@ -3721,6 +3721,11 @@ struct StatusResponse {
     // PBI-040, task 040-1: PostIngestQueue depth for FTS5 readiness checks
     uint32_t postIngestQueueDepth{0};
 
+    // Search tuning state (from SearchTuner FSM - epic yams-7ez4)
+    std::string searchTuningState;  // e.g., "SMALL_CODE", "SCIENTIFIC", "MIXED"
+    std::string searchTuningReason; // Human-readable explanation of state selection
+    std::map<std::string, double> searchTuningParams; // e.g., {"textWeight": 0.55, ...}
+
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
@@ -3785,6 +3790,13 @@ struct StatusResponse {
 
         // Serialize centralized tuning pool sizes
         ser << static_cast<uint32_t>(ipcPoolSize) << static_cast<uint32_t>(ioPoolSize);
+
+        // Serialize search tuning state (epic yams-7ez4)
+        ser << searchTuningState << searchTuningReason;
+        ser << static_cast<uint32_t>(searchTuningParams.size());
+        for (const auto& [key, value] : searchTuningParams) {
+            ser << key << value;
+        }
     }
 
     template <typename Deserializer>
@@ -4066,6 +4078,28 @@ struct StatusResponse {
         if (!ioSz)
             return ioSz.error();
         res.ioPoolSize = ioSz.value();
+
+        // Deserialize search tuning state (epic yams-7ez4)
+        auto tuningState = deser.readString();
+        if (!tuningState)
+            return tuningState.error();
+        res.searchTuningState = std::move(tuningState.value());
+        auto tuningReason = deser.readString();
+        if (!tuningReason)
+            return tuningReason.error();
+        res.searchTuningReason = std::move(tuningReason.value());
+        auto tuningParamsCount = deser.template read<uint32_t>();
+        if (!tuningParamsCount)
+            return tuningParamsCount.error();
+        for (uint32_t i = 0; i < tuningParamsCount.value(); ++i) {
+            auto keyRes = deser.readString();
+            if (!keyRes)
+                return keyRes.error();
+            auto valRes = deser.template read<double>();
+            if (!valRes)
+                return valRes.error();
+            res.searchTuningParams[std::move(keyRes.value())] = valRes.value();
+        }
 
         return res;
     }

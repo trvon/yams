@@ -218,7 +218,7 @@ void ServiceManager::refreshPluginStatusSnapshot() {
 
         // PBI-096: External (Python/JS) plugins
         spdlog::info("[refreshPluginStatusSnapshot] Checking external plugins, pluginManager_={}",
-                     (void*)pluginManager_.get());
+                     static_cast<void*>(pluginManager_.get()));
         if (auto* external = getExternalPluginHost()) {
             auto externalLoaded = external->listLoaded();
             spdlog::info("[refreshPluginStatusSnapshot] External host returned {} plugins",
@@ -1148,7 +1148,10 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             state_.initDurationsMs);
         if (storeRes) {
             auto& uniqueStore = const_cast<T&>(storeRes.value());
-            contentStore_ = std::shared_ptr<yams::api::IContentStore>(uniqueStore.release());
+            // Use atomic_store for thread-safe write (read by main thread via getContentStore())
+            std::atomic_store_explicit(
+                &contentStore_, std::shared_ptr<yams::api::IContentStore>(uniqueStore.release()),
+                std::memory_order_release);
             state_.readiness.contentStoreReady = true;
             writeBootstrapStatusFile(config_, state_);
         } else {
@@ -1337,11 +1340,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         try {
             auto exec = getWorkerExecutor();
             sessionWatchStopSource_ = yams::compat::stop_source{};
-            auto token = sessionWatchStopSource_.get_token();
+            auto watcherToken = sessionWatchStopSource_.get_token();
             sessionWatcherFuture_ = boost::asio::co_spawn(
                 exec,
-                [this, token]() -> boost::asio::awaitable<void> {
-                    co_await co_runSessionWatcher(token);
+                [this, watcherToken]() -> boost::asio::awaitable<void> {
+                    co_await co_runSessionWatcher(watcherToken);
                 },
                 boost::asio::use_future);
         } catch (...) {
@@ -2206,7 +2209,7 @@ std::shared_ptr<search::SearchEngine> ServiceManager::getSearchEngineSnapshot() 
 yams::app::services::AppContext ServiceManager::getAppContext() const {
     app::services::AppContext ctx;
     ctx.service_manager = const_cast<ServiceManager*>(this);
-    ctx.store = contentStore_;
+    ctx.store = getContentStore(); // Thread-safe via atomic_load
     ctx.metadataRepo = metadataRepo_;
     ctx.searchEngine = getSearchEngineSnapshot();
     ctx.vectorDatabase = getVectorDatabase();
@@ -2335,7 +2338,10 @@ ServiceManager::co_initContentStore(boost::asio::any_io_executor exec,
         }
 
         auto uniqueStore = std::move(store).value();
-        contentStore_ = std::shared_ptr<yams::api::IContentStore>(uniqueStore.release());
+        // Use atomic_store for thread-safe write (read by main thread via getContentStore())
+        std::atomic_store_explicit(&contentStore_,
+                                   std::shared_ptr<yams::api::IContentStore>(uniqueStore.release()),
+                                   std::memory_order_release);
         spdlog::info("[ServiceManager::co_initContentStore] Content store initialized");
         co_return yams::Result<void>{};
 

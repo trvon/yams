@@ -339,12 +339,8 @@ void AsioConnectionPool::shutdown_all(std::chrono::milliseconds timeout) {
 }
 
 void AsioConnectionPool::cleanup_stale_connections() {
-    connection_pool_.erase(std::ranges::remove_if(connection_pool_,
-                                                  [](const std::weak_ptr<AsioConnection>& weak) {
-                                                      return weak.expired();
-                                                  })
-                               .begin(),
-                           connection_pool_.end());
+    std::erase_if(connection_pool_,
+                  [](const std::weak_ptr<AsioConnection>& weak) { return weak.expired(); });
 }
 
 awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::acquire() {
@@ -519,8 +515,8 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                     co_return;
                 }
 
-                auto conn = weak_conn.lock();
-                if (!conn) {
+                // Re-check connection validity (may have been cancelled during co_await)
+                if (auto c = weak_conn.lock(); !c) {
                     co_return;
                 }
 
@@ -790,9 +786,8 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                 }
 
                 if (handlerPtr->streaming) {
-                    if (isHeaderOnly)
-                        conn->streaming_started.store(true, std::memory_order_relaxed);
                     if (isHeaderOnly) {
+                        conn->streaming_started.store(true, std::memory_order_relaxed);
                         handlerPtr->streaming->onHeader(r);
                     } else {
                         bool cont = handlerPtr->streaming->onChunk(r, isLast);

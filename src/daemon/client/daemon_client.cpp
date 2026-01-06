@@ -160,7 +160,7 @@ std::filesystem::path g_cachedDataDir;
 std::filesystem::path resolveDataDirCached() {
     std::call_once(g_dataDirOnce, []() {
         namespace fs = std::filesystem;
-        auto expand_tilde = [](std::string p) -> std::string {
+        auto expand_tilde = [](const std::string& p) -> std::string {
             if (!p.empty() && p.front() == '~') {
                 if (const char* home = std::getenv("HOME"))
                     return std::string(home) + p.substr(1);
@@ -1193,11 +1193,11 @@ DaemonClient::streamingAddDocument(const AddDocumentRequest& req) {
                 return;
             }
             if (auto* st = std::get_if<StatusResponse>(&headerResponse)) {
-                std::string status = st->overallStatus.empty()
-                                         ? (st->ready ? "ready" : "initializing")
-                                         : st->overallStatus;
+                std::string statusStr = st->overallStatus.empty()
+                                            ? (st->ready ? "ready" : "initializing")
+                                            : st->overallStatus;
                 error = Error{ErrorCode::InvalidState,
-                              std::string("Daemon not ready yet (status=") + status + ")"};
+                              std::string("Daemon not ready yet (status=") + statusStr + ")"};
                 return;
             }
         }
@@ -1209,11 +1209,11 @@ DaemonClient::streamingAddDocument(const AddDocumentRequest& req) {
             if (auto* st = std::get_if<StatusResponse>(&chunkResponse)) {
                 // When daemon is not ready, dispatcher returns StatusResponse instead of
                 // processing the request. Surface a friendly message and stop.
-                std::string status = st->overallStatus.empty()
-                                         ? (st->ready ? "ready" : "initializing")
-                                         : st->overallStatus;
+                std::string statusStr = st->overallStatus.empty()
+                                            ? (st->ready ? "ready" : "initializing")
+                                            : st->overallStatus;
                 error = Error{ErrorCode::InvalidState,
-                              std::string("Daemon not ready yet (status=") + status + ")"};
+                              std::string("Daemon not ready yet (status=") + statusStr + ")"};
                 return false;
             }
             if (auto* add = std::get_if<AddDocumentResponse>(&chunkResponse)) {
@@ -1904,7 +1904,6 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
         } else {
             // Try to auto-detect relative to this process path
             // On Linux, read /proc/self/exe
-            std::error_code ec;
             std::filesystem::path selfExe;
             char buf[4096];
             ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);

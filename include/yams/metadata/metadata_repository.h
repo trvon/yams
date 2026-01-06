@@ -26,6 +26,10 @@ namespace yams::daemon {
 class GraphComponent;
 }
 
+namespace yams::storage {
+struct CorpusStats;
+}
+
 namespace yams::metadata {
 
 namespace detail {
@@ -264,6 +268,9 @@ public:
     // Count documents by extraction status
     virtual Result<int64_t> getDocumentCountByExtractionStatus(ExtractionStatus status) = 0;
 
+    // Corpus statistics for adaptive search tuning (PBI: Adaptive Tuning Epic)
+    virtual Result<storage::CorpusStats> getCorpusStats() = 0;
+
     // Embedding status operations
     virtual Result<void> updateDocumentEmbeddingStatus(int64_t documentId, bool hasEmbedding,
                                                        const std::string& modelId = "") = 0;
@@ -434,6 +441,7 @@ public:
     Result<int64_t> getContentExtractedDocumentCount() override; // New
     Result<std::unordered_map<std::string, int64_t>> getDocumentCountsByExtension() override;
     Result<int64_t> getDocumentCountByExtractionStatus(ExtractionStatus status) override;
+    Result<storage::CorpusStats> getCorpusStats() override;
 
     // Component-owned metrics (lock-free, updated on insert/delete)
     uint64_t getCachedDocumentCount() const noexcept {

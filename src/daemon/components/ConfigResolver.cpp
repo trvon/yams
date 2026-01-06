@@ -83,7 +83,7 @@ ConfigResolver::parseSimpleTomlFlat(const std::filesystem::path& path) {
     while (std::getline(file, line)) {
         auto comment = line.find('#');
         if (comment != std::string::npos)
-            line = line.substr(0, comment);
+            line.resize(comment);
         line = trim(line);
         if (line.empty())
             continue;
@@ -303,25 +303,7 @@ std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,
             fs::path models = resolvedDataDir / "models";
             std::error_code ec;
             if (fs::exists(models, ec) && fs::is_directory(models, ec)) {
-                [[maybe_unused]] size_t dbDim = 0;
-                try {
-                    // Prefer sentinel dim when available
-                    if (auto s = readVectorSentinelDim(resolvedDataDir))
-                        dbDim = *s;
-                } catch (...) {
-                }
-                std::vector<std::string> preferences;
-                (void)dbDim;
-
-                for (const auto& pref : preferences) {
-                    fs::path modelPath = models / pref;
-                    if (fs::exists(modelPath / "model.onnx", ec)) {
-                        spdlog::debug("Auto-detected preferred model: {}", pref);
-                        return pref;
-                    }
-                }
-
-                // If no preferred model found, use the first available
+                // Use the first available model with model.onnx
                 for (const auto& e : fs::directory_iterator(models, ec)) {
                     if (e.is_directory() && fs::exists(e.path() / "model.onnx", ec)) {
                         preferred = e.path().filename().string();

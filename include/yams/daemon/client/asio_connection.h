@@ -62,7 +62,7 @@ struct AsioConnection {
                 boost::system::error_code ec;
                 socket->close(ec);
             }
-            socket.release();
+            socket.reset();
         }
     }
 

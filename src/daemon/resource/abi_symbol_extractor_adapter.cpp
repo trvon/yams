@@ -159,4 +159,48 @@ AbiSymbolExtractorAdapter::getSupportedExtensions() const {
     return result;
 }
 
+std::string AbiSymbolExtractorAdapter::getExtractorId() const {
+    if (!table_) {
+        return "unknown";
+    }
+
+    // Try to get name and version from capabilities JSON
+    if (table_->get_capabilities_json) {
+        char* json_str = nullptr;
+        int ret = table_->get_capabilities_json(table_->self, &json_str);
+        if (ret == 0 && json_str) {
+            try {
+                auto j = nlohmann::json::parse(json_str);
+                std::string name = "symbol_extractor";
+                std::string version;
+
+                if (j.contains("name") && j["name"].is_string()) {
+                    name = j["name"].get<std::string>();
+                }
+                if (j.contains("version") && j["version"].is_string()) {
+                    version = j["version"].get<std::string>();
+                }
+
+                if (table_->free_string) {
+                    table_->free_string(table_->self, json_str);
+                }
+
+                if (!version.empty()) {
+                    return name + ":" + version;
+                }
+                return name + ":v" + std::to_string(table_->abi_version);
+            } catch (...) {
+                // Fall through to default
+            }
+
+            if (table_->free_string) {
+                table_->free_string(table_->self, json_str);
+            }
+        }
+    }
+
+    // Fallback: use ABI version
+    return "symbol_extractor_v1:abi" + std::to_string(table_->abi_version);
+}
+
 } // namespace yams::daemon

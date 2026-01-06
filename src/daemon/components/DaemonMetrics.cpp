@@ -22,6 +22,7 @@
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
+#include <yams/search/search_tuner.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
 #include <yams/version.hpp>
@@ -1157,6 +1158,35 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         out.vectorEmbeddingsAvailable = d.embeddingsAvailable;
         out.vectorScoringEnabled = d.scoringEnabled;
         out.searchEngineBuildReason = d.buildReason;
+    } catch (...) {
+    }
+
+    // Search tuning state (from SearchTuner FSM - epic yams-7ez4)
+    try {
+        if (services_) {
+            auto metaRepo = services_->getMetadataRepo();
+            if (metaRepo) {
+                auto statsResult = metaRepo->getCorpusStats();
+                if (statsResult) {
+                    yams::search::SearchTuner tuner(statsResult.value());
+                    out.searchTuningState = yams::search::tuningStateToString(tuner.currentState());
+                    out.searchTuningReason = tuner.stateReason();
+                    // Populate params map
+                    const auto& p = tuner.getParams();
+                    out.searchTuningParams["rrfK"] = static_cast<double>(p.rrfK);
+                    out.searchTuningParams["textWeight"] = static_cast<double>(p.textWeight);
+                    out.searchTuningParams["vectorWeight"] = static_cast<double>(p.vectorWeight);
+                    out.searchTuningParams["pathTreeWeight"] =
+                        static_cast<double>(p.pathTreeWeight);
+                    out.searchTuningParams["kgWeight"] = static_cast<double>(p.kgWeight);
+                    out.searchTuningParams["tagWeight"] = static_cast<double>(p.tagWeight);
+                    out.searchTuningParams["metadataWeight"] =
+                        static_cast<double>(p.metadataWeight);
+                    out.searchTuningParams["similarityThreshold"] =
+                        static_cast<double>(p.similarityThreshold);
+                }
+            }
+        }
     } catch (...) {
     }
 

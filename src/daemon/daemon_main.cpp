@@ -857,6 +857,11 @@ int main(int argc, char* argv[]) {
         };
         daemon.setSignalCheckHook(hookLambda);
 
+        // Enable prompt SIGTERM response by binding external shutdown flag to CV predicate
+        // (yams-qe6r) This allows the daemon to wake from CV wait immediately when SIGTERM is
+        // received, rather than waiting for the full statusTickMs timeout.
+        daemon.setExternalShutdownFlag(&g_shutdown_requested);
+
         // Run the main daemon loop on this thread (handles FSM ticks, metrics refresh, etc.)
         // The loop exits when stopRequested is set (via signal handler or daemon.stop())
         spdlog::info("Calling daemon.runLoop()...");

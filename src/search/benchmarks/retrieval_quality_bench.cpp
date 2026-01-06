@@ -916,6 +916,16 @@ struct BenchFixture {
                     vectorCount = it->second;
                 }
 
+                // Log search tuning state (epic yams-7ez4)
+                if (!st.searchTuningState.empty()) {
+                    spdlog::info("Search tuning state: {} ({})", st.searchTuningState,
+                                 st.searchTuningReason);
+                    spdlog::info("Search tuning params:");
+                    for (const auto& [k, v] : st.searchTuningParams) {
+                        spdlog::info("  {}: {:.4f}", k, v);
+                    }
+                }
+
                 DebugLogEntry statusEntry;
                 statusEntry.query = "__post_ingest_status__";
                 statusEntry.returnedPaths.push_back("documents_total=" +
@@ -931,6 +941,13 @@ struct BenchFixture {
                                                     std::to_string(st.vectorDbDim));
                 statusEntry.returnedPaths.push_back("embedding_backend=" + st.embeddingBackend);
                 statusEntry.returnedPaths.push_back("embedding_model=" + st.embeddingModel);
+                // Search tuning state (epic yams-7ez4)
+                statusEntry.returnedPaths.push_back("search_tuning_state=" + st.searchTuningState);
+                statusEntry.returnedPaths.push_back("search_tuning_reason=" +
+                                                    st.searchTuningReason);
+                for (const auto& [k, v] : st.searchTuningParams) {
+                    statusEntry.returnedPaths.push_back("tuning_" + k + "=" + std::to_string(v));
+                }
                 debugLogWriteJsonLine(statusEntry);
             } else {
                 spdlog::warn("Status failed (post-ingest): {}", statusRes.error().message);

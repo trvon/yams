@@ -90,9 +90,11 @@ bool EntityGraphService::process(Job& job) {
     // Locate a symbol extractor plugin that supports the language
     const auto& extractors = services_->getSymbolExtractors();
     yams_symbol_extractor_v1* table = nullptr;
+    const AbiSymbolExtractorAdapter* extractorAdapter = nullptr;
     for (const auto& ex : extractors) {
         if (ex && ex->supportsLanguage(job.language)) {
             table = ex->table();
+            extractorAdapter = ex.get();
             break;
         }
     }
@@ -101,11 +103,30 @@ bool EntityGraphService::process(Job& job) {
         return true; // not an error: just no-op
     }
 
+    // Get extractor ID for versioned state tracking
+    std::string extractorId = extractorAdapter ? extractorAdapter->getExtractorId() : "unknown";
+
     yams_symbol_extraction_result_v1* result = nullptr;
     int rc = table->extract_symbols(table->self, job.contentUtf8.data(), job.contentUtf8.size(),
                                     job.filePath.c_str(), job.language.c_str(), &result);
     if (rc != 0 || !result) {
         spdlog::warn("EntityGraphService: extract_symbols failed rc={} for {}", rc, job.filePath);
+        // Record failed extraction state
+        if (!job.documentHash.empty()) {
+            metadata::SymbolExtractionState state;
+            state.extractorId = extractorId;
+            state.extractedAt = std::chrono::duration_cast<std::chrono::seconds>(
+                                    std::chrono::system_clock::now().time_since_epoch())
+                                    .count();
+            state.status = "failed";
+            state.entityCount = 0;
+            state.errorMessage = "extract_symbols returned rc=" + std::to_string(rc);
+            auto upsertRes = kg->upsertSymbolExtractionState(job.documentHash, state);
+            if (!upsertRes) {
+                spdlog::debug("EntityGraphService: failed to record extraction failure: {}",
+                              upsertRes.error().message);
+            }
+        }
         return false;
     }
 
@@ -114,6 +135,25 @@ bool EntityGraphService::process(Job& job) {
 
     // Populate KG with rich symbol relationships
     bool success = populateKnowledgeGraph(kg, job, result);
+
+    // Record successful extraction state (even with 0 symbols)
+    if (!job.documentHash.empty()) {
+        metadata::SymbolExtractionState state;
+        state.extractorId = extractorId;
+        state.extractedAt = std::chrono::duration_cast<std::chrono::seconds>(
+                                std::chrono::system_clock::now().time_since_epoch())
+                                .count();
+        state.status = success ? "complete" : "failed";
+        state.entityCount = static_cast<std::int64_t>(result->symbol_count);
+        if (!success) {
+            state.errorMessage = "populateKnowledgeGraph failed";
+        }
+        auto upsertRes = kg->upsertSymbolExtractionState(job.documentHash, state);
+        if (!upsertRes) {
+            spdlog::debug("EntityGraphService: failed to record extraction state: {}",
+                          upsertRes.error().message);
+        }
+    }
 
     try {
         if (table->free_result)

@@ -28,8 +28,12 @@ class ServiceManager;
 
 class GraphComponent {
 public:
+    // Check if entity extraction should be skipped for a document.
+    // If expectedExtractorId is provided, also checks that extraction was done with same version.
+    // Returns true if extraction should be skipped (already done with matching version).
     static bool shouldSkipEntityExtraction(const std::shared_ptr<metadata::KnowledgeGraphStore>& kg,
-                                           const std::string& documentHash);
+                                           const std::string& documentHash,
+                                           const std::string& expectedExtractorId = {});
     GraphComponent(std::shared_ptr<metadata::MetadataRepository> metadataRepo,
                    std::shared_ptr<metadata::KnowledgeGraphStore> kgStore,
                    ServiceManager* serviceManager = nullptr);

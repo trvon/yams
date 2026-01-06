@@ -447,10 +447,32 @@ void YamsDaemon::runLoop() {
         }
 
         uint32_t tick_ms = TuneAdvisor::statusTickMs();
-        spdlog::debug("runLoop: waiting on cv for {}ms", tick_ms);
+        // yams-qe6r fix: Use shorter poll interval when external shutdown flag is bound
+        // This ensures prompt SIGTERM response since CV only checks predicate on timeout
+        // Default statusTickMs is 250ms, but for SIGTERM we want ~50ms responsiveness
+        constexpr uint32_t kShutdownPollMs = 50;
+        auto* extFlag = externalShutdownFlag_.load(std::memory_order_acquire);
+        uint32_t effective_tick_ms = extFlag ? kShutdownPollMs : tick_ms;
+        spdlog::debug("runLoop: waiting on cv for {}ms (external_flag={})", effective_tick_ms,
+                      extFlag != nullptr);
         std::unique_lock<std::mutex> lock(stop_mutex_);
-        if (stop_cv_.wait_for(lock, std::chrono::milliseconds(tick_ms),
-                              [&] { return stopRequested_.load(); })) {
+        // CV predicate checks both internal stopRequested_ and external shutdown flag (yams-qe6r)
+        // This ensures prompt response to SIGTERM even when blocked waiting on CV
+        auto shouldStop = [&] {
+            if (stopRequested_.load(std::memory_order_acquire)) {
+                return true;
+            }
+            // Re-load external flag in case it was set between loop iterations
+            auto* ef = externalShutdownFlag_.load(std::memory_order_acquire);
+            if (ef && ef->load(std::memory_order_relaxed)) {
+                // External signal received - call requestStop() to trigger proper shutdown
+                spdlog::info("runLoop: external shutdown flag detected, calling requestStop()");
+                stopRequested_.store(true, std::memory_order_release);
+                return true;
+            }
+            return false;
+        };
+        if (stop_cv_.wait_for(lock, std::chrono::milliseconds(effective_tick_ms), shouldStop)) {
             spdlog::info(
                 "runLoop: cv woke with stop requested, dispatching ShutdownRequestedEvent");
             lifecycleFsm_.dispatch(ShutdownRequestedEvent{});

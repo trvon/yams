@@ -383,7 +383,7 @@ void PostIngestQueue::processMetadataStage(
     }
 
     try {
-        auto start = std::chrono::steady_clock::now();
+        auto startTime = std::chrono::steady_clock::now();
 
         int64_t docId = -1;
         std::string fileName;
@@ -433,7 +433,7 @@ void PostIngestQueue::processMetadataStage(
                 spdlog::warn("[PostIngestQueue] persist/index failed for {}: {}", hash,
                              pr.error().message);
             } else {
-                auto duration = std::chrono::steady_clock::now() - start;
+                auto duration = std::chrono::steady_clock::now() - startTime;
                 double ms = std::chrono::duration<double, std::milli>(duration).count();
                 spdlog::info("[PostIngestQueue] Metadata stage completed for {} in {:.2f}ms", hash,
                              ms);
@@ -482,7 +482,7 @@ void PostIngestQueue::processKnowledgeGraphStage(const std::string& hash, int64_
     spdlog::info("[PostIngestQueue] KG stage starting for {} ({})", filePath, hash.substr(0, 12));
 
     try {
-        auto start = std::chrono::steady_clock::now();
+        auto startTime = std::chrono::steady_clock::now();
 
         GraphComponent::DocumentGraphContext ctx{
             .documentHash = hash, .filePath = filePath, .tags = tags, .documentDbId = docId};
@@ -492,7 +492,7 @@ void PostIngestQueue::processKnowledgeGraphStage(const std::string& hash, int64_
             spdlog::warn("[PostIngestQueue] Graph ingestion failed for {}: {}", hash,
                          result.error().message);
         } else {
-            auto duration = std::chrono::steady_clock::now() - start;
+            auto duration = std::chrono::steady_clock::now() - startTime;
             double ms = std::chrono::duration<double, std::milli>(duration).count();
             spdlog::debug("[PostIngestQueue] KG stage completed for {} in {:.2f}ms", hash, ms);
         }
@@ -724,7 +724,7 @@ void PostIngestQueue::processSymbolExtractionStage(const std::string& hash, int6
                  hash.substr(0, 12), language);
 
     try {
-        auto start = std::chrono::steady_clock::now();
+        auto startTime = std::chrono::steady_clock::now();
 
         // Use GraphComponent to submit the extraction job
         GraphComponent::EntityExtractionJob extractJob;
@@ -754,7 +754,7 @@ void PostIngestQueue::processSymbolExtractionStage(const std::string& hash, int6
             spdlog::warn("[PostIngestQueue] Symbol extraction failed for {}: {}", hash,
                          result.error().message);
         } else {
-            auto duration = std::chrono::steady_clock::now() - start;
+            auto duration = std::chrono::steady_clock::now() - startTime;
             double ms = std::chrono::duration<double, std::milli>(duration).count();
             spdlog::debug("[PostIngestQueue] Symbol extraction submitted for {} in {:.2f}ms", hash,
                           ms);
@@ -843,7 +843,7 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                  hash.substr(0, 12), extension);
 
     try {
-        auto start = std::chrono::steady_clock::now();
+        auto startTime = std::chrono::steady_clock::now();
 
         // Find the entity provider that supports this extension
         std::shared_ptr<ExternalEntityProviderAdapter> provider;
@@ -912,8 +912,8 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                 for (const auto& node : batch.nodes) {
                     canonicalNodes.push_back(node);
 
-                    metadata::KGNode versionNode = node;
                     if (hasSnapshot) {
+                        metadata::KGNode versionNode = node;
                         std::string baseKey = node.nodeKey;
                         versionNode.nodeKey = baseKey + "@snap:" + snapshotId;
                         std::string baseType = node.type.has_value() ? node.type.value() : "entity";
@@ -932,8 +932,6 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                         props["file_path"] = filePath;
                         props["canonical_key"] = baseKey;
                         versionNode.properties = props.dump();
-                    }
-                    if (hasSnapshot) {
                         versionNodes.push_back(std::move(versionNode));
                     }
                 }
@@ -1056,7 +1054,7 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                 return true; // Continue to next batch
             });
 
-        auto duration = std::chrono::steady_clock::now() - start;
+        auto duration = std::chrono::steady_clock::now() - startTime;
         double ms = std::chrono::duration<double, std::milli>(duration).count();
 
         if (result) {

@@ -170,6 +170,12 @@ public:
     // Signal check hook for integration with main loop (avoids separate thread)
     std::function<bool()> signalCheckHook_;
 
+    // External shutdown flag reference for CV predicate wake-up (yams-qe6r fix)
+    // When set, the CV predicate in runLoop() also checks this flag, enabling
+    // prompt response to SIGTERM even when blocked waiting on the CV.
+    // Atomic pointer to avoid data race between setter and runLoop reader.
+    std::atomic<std::atomic<bool>*> externalShutdownFlag_{nullptr};
+
 public:
     // On-demand plugin autoload bridge
     Result<size_t> autoloadPluginsNow();
@@ -180,6 +186,12 @@ public:
     // Set a hook that will be called each iteration of runLoop() to check for signals
     // Returns true if shutdown was requested
     void setSignalCheckHook(std::function<bool()> hook) { signalCheckHook_ = std::move(hook); }
+
+    // Set an external shutdown flag that the CV predicate will also check (yams-qe6r)
+    // This enables the runLoop to respond promptly to SIGTERM even when blocked on CV
+    void setExternalShutdownFlag(std::atomic<bool>* flag) {
+        externalShutdownFlag_.store(flag, std::memory_order_release);
+    }
 
     void spawnShutdownThread(std::function<void()> shutdownFn);
 };

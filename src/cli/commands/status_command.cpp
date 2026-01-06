@@ -25,6 +25,7 @@
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/profiling.h>
+#include <yams/storage/corpus_stats.h>
 #include <yams/vector/embedding_service.h>
 #include <yams/vector/vector_database.h>
 
@@ -49,6 +50,9 @@ public:
         cmd->add_flag("-v,--verbose", verbose_, "Show detailed information");
         cmd->add_flag("--no-physical", noPhysical_,
                       "Skip physical size fallback scan; use daemon stats only");
+        cmd->add_flag(
+            "--corpus", corpusStats_,
+            "Show corpus statistics for search tuning (doc counts, content type ratios, coverage)");
 
         cmd->callback([this]() {
             auto result = execute();
@@ -65,6 +69,9 @@ public:
         stats->add_flag("-v,--verbose", verbose_, "Show detailed information");
         stats->add_flag("--no-physical", noPhysical_,
                         "Skip physical size fallback scan; use daemon stats only");
+        stats->add_flag(
+            "--corpus", corpusStats_,
+            "Show corpus statistics for search tuning (doc counts, content type ratios, coverage)");
         stats->callback([this]() {
             auto result = execute();
             if (!result) {
@@ -273,6 +280,22 @@ public:
                                 sr["concurrency_limit"] = s.searchMetrics.concurrencyLimit;
                                 j["search"] = std::move(sr);
                             }
+                            // Search tuning state (corpus-aware FSM)
+                            if (!s.searchTuningState.empty()) {
+                                nlohmann::json tuning = nlohmann::json::object();
+                                tuning["state"] = s.searchTuningState;
+                                if (!s.searchTuningReason.empty()) {
+                                    tuning["reason"] = s.searchTuningReason;
+                                }
+                                if (!s.searchTuningParams.empty()) {
+                                    nlohmann::json params = nlohmann::json::object();
+                                    for (const auto& [k, v] : s.searchTuningParams) {
+                                        params[k] = v;
+                                    }
+                                    tuning["params"] = std::move(params);
+                                }
+                                j["searchTuning"] = std::move(tuning);
+                            }
                             // Post-ingest gauges (from requestCounts)
                             {
                                 nlohmann::json pj;
@@ -337,6 +360,14 @@ public:
                                       << "% , lat=" << s.searchMetrics.avgLatencyUs << "us"
                                       << ", limit=" << s.searchMetrics.concurrencyLimit << "\n";
                             std::cout.unsetf(std::ios::floatfield);
+                            // Search tuning state (corpus-aware FSM)
+                            if (!s.searchTuningState.empty()) {
+                                std::cout << "TUNE : state=" << s.searchTuningState;
+                                if (!s.searchTuningReason.empty()) {
+                                    std::cout << " (" << s.searchTuningReason << ")";
+                                }
+                                std::cout << "\n";
+                            }
                             std::cout << "WORK : thr=" << getCount("worker_threads")
                                       << ", act=" << getCount("worker_active")
                                       << ", queued=" << getCount("worker_queued") << "\n";
@@ -392,8 +423,7 @@ public:
                                     int pct = 0;
                                     if (physical > 0 && logical > 0) {
                                         saved = (logical > physical) ? (logical - physical) : 0ULL;
-                                        if (logical > 0)
-                                            pct = static_cast<int>((saved * 100.0) / logical);
+                                        pct = static_cast<int>((saved * 100.0) / logical);
                                     }
                                     std::cout << "STOR : " << (storageOk ? "ok" : "unknown")
                                               << ", docs=" << docs
@@ -601,6 +631,133 @@ public:
                                 std::cout << "Error fetching verbose stats: " << e.what() << "\n";
                             }
                         }
+                        // Handle --corpus flag: fetch and display corpus statistics
+                        if (corpusStats_) {
+                            try {
+                                yams::daemon::GetStatsRequest greq;
+                                auto gres = co_await client.call(greq);
+                                if (gres) {
+                                    auto it = gres.value().additionalStats.find("corpus_stats");
+                                    if (it != gres.value().additionalStats.end()) {
+                                        if (jsonOutput_) {
+                                            // Already JSON, just output it
+                                            std::cout << it->second << std::endl;
+                                        } else {
+                                            // Parse and pretty-print
+                                            try {
+                                                auto corpusJson = nlohmann::json::parse(it->second);
+                                                std::cout << "\n== CORPUS STATISTICS ==\n";
+                                                std::cout << "Documents:        "
+                                                          << corpusJson.value("doc_count", 0)
+                                                          << "\n";
+                                                std::cout << "Total Size:       "
+                                                          << formatSize(corpusJson.value(
+                                                                 "total_size_bytes", int64_t{0}))
+                                                          << "\n";
+                                                std::cout << "Avg Doc Size:     "
+                                                          << formatSize(static_cast<uint64_t>(
+                                                                 corpusJson.value(
+                                                                     "avg_doc_length_bytes", 0.0)))
+                                                          << "\n\n";
+
+                                                std::cout << "Content Types:\n";
+                                                double codeRatio =
+                                                    corpusJson.value("code_ratio", 0.0) * 100.0;
+                                                double proseRatio =
+                                                    corpusJson.value("prose_ratio", 0.0) * 100.0;
+                                                double binaryRatio =
+                                                    corpusJson.value("binary_ratio", 0.0) * 100.0;
+                                                std::cout << "  Code:           " << std::fixed
+                                                          << std::setprecision(1) << codeRatio
+                                                          << "%\n";
+                                                std::cout << "  Prose:          " << proseRatio
+                                                          << "%\n";
+                                                std::cout << "  Binary:         " << binaryRatio
+                                                          << "%\n\n";
+
+                                                std::cout << "Feature Coverage:\n";
+                                                double embCov =
+                                                    corpusJson.value("embedding_coverage", 0.0) *
+                                                    100.0;
+                                                double tagCov =
+                                                    corpusJson.value("tag_coverage", 0.0) * 100.0;
+                                                std::cout << "  Embeddings:     " << embCov << "% ("
+                                                          << corpusJson.value("embedding_count", 0)
+                                                          << " docs)\n";
+                                                std::cout << "  Tags:           " << tagCov << "% ("
+                                                          << corpusJson.value("tag_count", 0)
+                                                          << " tags)\n";
+                                                std::cout << "  KG Symbols:     "
+                                                          << corpusJson.value("symbol_count", 0)
+                                                          << " (density="
+                                                          << corpusJson.value("symbol_density", 0.0)
+                                                          << ")\n\n";
+
+                                                std::cout << "Path Structure:\n";
+                                                std::cout << "  Avg Depth:      "
+                                                          << corpusJson.value("path_depth_avg", 0.0)
+                                                          << "\n";
+                                                std::cout << "  Max Depth:      "
+                                                          << corpusJson.value("path_depth_max", 0.0)
+                                                          << "\n\n";
+
+                                                if (corpusJson.contains("classification")) {
+                                                    auto cls = corpusJson["classification"];
+                                                    std::cout << "Classification:\n";
+                                                    if (cls.value("is_code_dominant", false))
+                                                        std::cout
+                                                            << "  Type:           Code-dominant\n";
+                                                    else if (cls.value("is_prose_dominant", false))
+                                                        std::cout
+                                                            << "  Type:           Prose-dominant\n";
+                                                    else if (cls.value("is_mixed", false))
+                                                        std::cout << "  Type:           Mixed\n";
+                                                    if (cls.value("is_scientific", false))
+                                                        std::cout << "  Scientific:     Yes\n";
+                                                    if (cls.value("is_minimal", false))
+                                                        std::cout << "  Size:           Minimal "
+                                                                     "(<100 docs)\n";
+                                                    else if (cls.value("is_small", false))
+                                                        std::cout << "  Size:           Small (<1K "
+                                                                     "docs)\n";
+                                                    else if (cls.value("is_large", false))
+                                                        std::cout << "  Size:           Large "
+                                                                     "(>=10K docs)\n";
+                                                    else
+                                                        std::cout << "  Size:           Medium\n";
+                                                }
+
+                                                if (corpusJson.contains("top_extensions")) {
+                                                    std::cout << "\nTop Extensions:\n";
+                                                    auto exts = corpusJson["top_extensions"];
+                                                    for (auto& [ext, count] : exts.items()) {
+                                                        std::cout << "  " << ext << ": " << count
+                                                                  << "\n";
+                                                    }
+                                                }
+                                                std::cout.unsetf(std::ios::floatfield);
+                                            } catch (const std::exception& e) {
+                                                std::cout
+                                                    << "Error parsing corpus stats: " << e.what()
+                                                    << "\n";
+                                            }
+                                        }
+                                    } else {
+                                        if (!jsonOutput_) {
+                                            std::cout << "\n== CORPUS STATISTICS ==\n";
+                                            std::cout
+                                                << "Corpus stats not available (daemon may be "
+                                                   "initializing)\n";
+                                        }
+                                    }
+                                }
+                            } catch (const std::exception& e) {
+                                if (!jsonOutput_) {
+                                    std::cout << "Error fetching corpus stats: " << e.what()
+                                              << "\n";
+                                }
+                            }
+                        }
                         co_return Result<void>();
                     }
                 }
@@ -628,6 +785,97 @@ public:
                 outputJson(status);
             else
                 outputText(status);
+            // Handle --corpus flag in local mode
+            if (corpusStats_ && metadataRepo) {
+                try {
+                    auto statsResult = metadataRepo->getCorpusStats();
+                    if (statsResult) {
+                        auto corpusJson = statsResult.value().toJson();
+                        if (jsonOutput_) {
+                            std::cout << corpusJson.dump(2) << std::endl;
+                        } else {
+                            std::cout << "\n== CORPUS STATISTICS ==\n";
+                            std::cout << "Documents:        " << corpusJson.value("doc_count", 0)
+                                      << "\n";
+                            std::cout
+                                << "Total Size:       "
+                                << formatSize(corpusJson.value("total_size_bytes", int64_t{0}))
+                                << "\n";
+                            std::cout << "Avg Doc Size:     "
+                                      << formatSize(static_cast<uint64_t>(
+                                             corpusJson.value("avg_doc_length_bytes", 0.0)))
+                                      << "\n\n";
+
+                            std::cout << "Content Types:\n";
+                            double codeRatio = corpusJson.value("code_ratio", 0.0) * 100.0;
+                            double proseRatio = corpusJson.value("prose_ratio", 0.0) * 100.0;
+                            double binaryRatio = corpusJson.value("binary_ratio", 0.0) * 100.0;
+                            std::cout << "  Code:           " << std::fixed << std::setprecision(1)
+                                      << codeRatio << "%\n";
+                            std::cout << "  Prose:          " << proseRatio << "%\n";
+                            std::cout << "  Binary:         " << binaryRatio << "%\n\n";
+
+                            std::cout << "Feature Coverage:\n";
+                            double embCov = corpusJson.value("embedding_coverage", 0.0) * 100.0;
+                            double tagCov = corpusJson.value("tag_coverage", 0.0) * 100.0;
+                            std::cout << "  Embeddings:     " << embCov << "% ("
+                                      << corpusJson.value("embedding_count", 0) << " docs)\n";
+                            std::cout << "  Tags:           " << tagCov << "% ("
+                                      << corpusJson.value("tag_count", 0) << " tags)\n";
+                            std::cout << "  KG Symbols:     " << corpusJson.value("symbol_count", 0)
+                                      << " (density=" << corpusJson.value("symbol_density", 0.0)
+                                      << ")\n\n";
+
+                            std::cout << "Path Structure:\n";
+                            std::cout
+                                << "  Avg Depth:      " << corpusJson.value("path_depth_avg", 0.0)
+                                << "\n";
+                            std::cout
+                                << "  Max Depth:      " << corpusJson.value("path_depth_max", 0.0)
+                                << "\n\n";
+
+                            if (corpusJson.contains("classification")) {
+                                auto cls = corpusJson["classification"];
+                                std::cout << "Classification:\n";
+                                if (cls.value("is_code_dominant", false))
+                                    std::cout << "  Type:           Code-dominant\n";
+                                else if (cls.value("is_prose_dominant", false))
+                                    std::cout << "  Type:           Prose-dominant\n";
+                                else if (cls.value("is_mixed", false))
+                                    std::cout << "  Type:           Mixed\n";
+                                if (cls.value("is_scientific", false))
+                                    std::cout << "  Scientific:     Yes\n";
+                                if (cls.value("is_minimal", false))
+                                    std::cout << "  Size:           Minimal (<100 docs)\n";
+                                else if (cls.value("is_small", false))
+                                    std::cout << "  Size:           Small (<1K docs)\n";
+                                else if (cls.value("is_large", false))
+                                    std::cout << "  Size:           Large (>=10K docs)\n";
+                                else
+                                    std::cout << "  Size:           Medium\n";
+                            }
+
+                            if (corpusJson.contains("top_extensions")) {
+                                std::cout << "\nTop Extensions:\n";
+                                auto exts = corpusJson["top_extensions"];
+                                for (auto& [ext, count] : exts.items()) {
+                                    std::cout << "  " << ext << ": " << count << "\n";
+                                }
+                            }
+                            std::cout.unsetf(std::ios::floatfield);
+                        }
+                    } else {
+                        if (!jsonOutput_) {
+                            std::cout << "\n== CORPUS STATISTICS ==\n";
+                            std::cout << "Error: " << statsResult.error().message << "\n";
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    if (!jsonOutput_) {
+                        std::cout << "Error fetching corpus stats: " << e.what() << "\n";
+                    }
+                }
+            }
             co_return Result<void>();
         } catch (const std::exception& e) {
             co_return Error{ErrorCode::Unknown, std::string(e.what())};
@@ -638,6 +886,7 @@ private:
     YamsCLI* cli_ = nullptr;
     bool jsonOutput_ = false;
     bool verbose_ = false;
+    bool corpusStats_ = false;
     // Default to using daemon-reported physical sizes only; do not local-scan unless opted in
     bool noPhysical_ = true;
 

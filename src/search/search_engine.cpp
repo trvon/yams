@@ -280,11 +280,18 @@ ResultFusion::fuseWeightedReciprocal(const std::vector<ComponentResult>& results
         result.document.filePath = components[0].filePath;
         result.score = 0.0;
 
-        // Weighted RRF: weight * (1 / (k + rank)) + weight * score
+        // Weighted RRF with score boost:
+        // - RRF provides rank-based fusion across components
+        // - Score provides a multiplicative boost to reward high-confidence matches
+        // - Formula: weight * rrfScore * (1 + score) where score is in [0,1]
+        //   This gives rank-1 with score=0.9 a 1.9x boost vs rank-1 with score=0
         for (const auto& comp : components) {
             float weight = getComponentWeight(comp.source);
             double rrfScore = 1.0 / (k + static_cast<double>(comp.rank));
-            result.score += weight * (rrfScore + comp.score) / 2.0;
+            // Score boost: multiply RRF by (1 + normalized_score)
+            // This preserves RRF ranking while rewarding high-confidence matches
+            double scoreBoost = 1.0 + std::clamp(static_cast<double>(comp.score), 0.0, 1.0);
+            result.score += weight * rrfScore * scoreBoost;
 
             if (result.snippet.empty() && comp.snippet.has_value()) {
                 result.snippet = comp.snippet.value();
@@ -870,9 +877,13 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryFullText(const std
             ComponentResult result;
             result.documentHash = searchResult.document.sha256Hash;
             result.filePath = filePath;
-            result.score = std::max(
-                0.0f, scoreMultiplier /
-                          (1.0f + static_cast<float>(std::abs(searchResult.score)) / 10.0f));
+            // FTS5 BM25 scores are negative (more negative = better match)
+            // Convert to [0, 1] range: score of -25 → 1.0, score of 0 → 0.0
+            // Using sigmoid-like transformation: 1 / (1 + exp(score/5))
+            // This preserves ranking order and normalizes to [0, 1]
+            float rawScore = static_cast<float>(searchResult.score);
+            float normalizedScore = 1.0f / (1.0f + std::exp(rawScore / 5.0f));
+            result.score = scoreMultiplier * normalizedScore;
             result.source = "text";
             result.rank = rank;
             result.snippet = searchResult.snippet.empty()

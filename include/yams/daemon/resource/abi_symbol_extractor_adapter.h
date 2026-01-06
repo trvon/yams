@@ -28,6 +28,15 @@ public:
      */
     std::unordered_map<std::string, std::string> getSupportedExtensions() const;
 
+    /**
+     * @brief Get a stable identifier for this extractor (name + version)
+     * @return String like "symbol_extractor_treesitter:v1.2.0" or fallback ID
+     *
+     * Used for versioned extraction state tracking to detect when re-extraction
+     * is needed due to extractor upgrade.
+     */
+    std::string getExtractorId() const;
+
 private:
     yams_symbol_extractor_v1* table_{};
 };

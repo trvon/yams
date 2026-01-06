@@ -153,8 +153,9 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
     // Log start
     auto tid = std::this_thread::get_id();
     spdlog::info("[VectorInit] start pid={} tid={} path={} exists={} create={} dim={}",
-                 static_cast<long long>(::getpid()), (void*)(&tid), cfg.database_path,
-                 exists ? "yes" : "no", cfg.create_if_missing ? "yes" : "no", cfg.embedding_dim);
+                 static_cast<long long>(::getpid()), static_cast<const void*>(&tid),
+                 cfg.database_path, exists ? "yes" : "no", cfg.create_if_missing ? "yes" : "no",
+                 cfg.embedding_dim);
 
     // Cross-process advisory lock
 #ifdef _WIN32

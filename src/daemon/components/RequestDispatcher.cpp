@@ -151,7 +151,7 @@ double getMemoryUsage() {
     if (status.is_open()) {
         std::string line;
         while (std::getline(status, line)) {
-            if (line.find("VmRSS:") == 0) {
+            if (line.starts_with("VmRSS:")) {
                 std::istringstream iss(line);
                 std::string label;
                 long rss_kb;

@@ -118,7 +118,8 @@ offload_to_worker(ServiceManager* sm, Fn&& fn) {
         boost::asio::use_awaitable, std::forward<Fn>(fn));
 }
 
-inline yams::Result<std::shared_ptr<IModelProvider>> check_provider_ready(ServiceManager* sm) {
+inline yams::Result<std::shared_ptr<IModelProvider>>
+check_provider_ready(const ServiceManager* sm) {
     try {
         if (!sm)
             return yams::Error{yams::ErrorCode::InvalidState, "ServiceManager unavailable"};
@@ -244,13 +245,13 @@ struct VectorDiag {
     std::string buildReason{"unknown"};
 };
 
-inline VectorDiag collect_vector_diag(ServiceManager* sm) {
+inline VectorDiag collect_vector_diag(const ServiceManager* sm) {
     VectorDiag d;
     if (!sm)
         return d;
     try {
         // Phase 2.2: Use non-blocking cached snapshot instead of getSearchEngineSnapshot()
-        auto cachedEngine = sm->getCachedSearchEngine();
+        const auto* cachedEngine = sm->getCachedSearchEngine();
         auto provider = sm->getModelProvider();
         if (provider) {
             try {
@@ -289,7 +290,7 @@ inline boost::asio::awaitable<yams::Result<T>> await_with_retry(Fn&& fn, int att
 }
 
 // Build plugins JSON snapshot and count
-inline std::pair<std::string, size_t> build_plugins_json(ServiceManager* sm) {
+inline std::pair<std::string, size_t> build_plugins_json(const ServiceManager* sm) {
     nlohmann::json arr = nlohmann::json::array();
     size_t count = 0;
     try {
@@ -333,13 +334,13 @@ inline std::pair<std::string, size_t> build_plugins_json(ServiceManager* sm) {
         };
 
         // ABI (native) plugins
-        auto* abi = sm->getAbiPluginHost();
+        const auto* abi = sm->getAbiPluginHost();
         if (abi) {
             addPlugins(abi->listLoaded(), "native");
         }
 
         // External (Python/JS) plugins
-        auto* external = sm->getExternalPluginHost();
+        const auto* external = sm->getExternalPluginHost();
         if (external) {
             addPlugins(external->listLoaded(), "external");
         }
@@ -350,7 +351,7 @@ inline std::pair<std::string, size_t> build_plugins_json(ServiceManager* sm) {
 
 // Build typed providers list for StatusResponse
 inline std::vector<yams::daemon::StatusResponse::ProviderInfo>
-build_typed_providers(ServiceManager* sm, const yams::daemon::StateComponent* state) {
+build_typed_providers(const ServiceManager* sm, const yams::daemon::StateComponent* state) {
     std::vector<yams::daemon::StatusResponse::ProviderInfo> providers;
     if (!sm) {
         spdlog::debug("[build_typed_providers] ServiceManager is null");

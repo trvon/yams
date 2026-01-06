@@ -137,6 +137,21 @@ struct AliasResolution {
 };
 
 /**
+ * Symbol extraction state for a document.
+ * Tracks whether extraction was performed and by which extractor version,
+ * enabling versioned dedupe (skip if already extracted with same version).
+ */
+struct SymbolExtractionState {
+    std::int64_t documentId = 0;
+    std::string extractorId;                        // e.g., "symbol_extractor_treesitter:v1"
+    std::optional<std::string> extractorConfigHash; // hash of grammar/config versions
+    std::int64_t extractedAt = 0;                   // Unix timestamp
+    std::string status = "complete";                // complete|failed|pending
+    std::int64_t entityCount = 0;                   // number of symbols extracted
+    std::optional<std::string> errorMessage;
+};
+
+/**
  * KnowledgeGraphStore defines the abstract API for reading/writing the local-first KG.
  * Implementations must be thread-safe for concurrent read access; writes should be serialized.
  */
@@ -267,6 +282,20 @@ public:
 
     // Remove all entities for a document
     virtual Result<void> deleteDocEntitiesForDocument(std::int64_t documentId) = 0;
+
+    // -----------------------------------------------------------------------------
+    // Symbol Extraction State (versioned dedupe)
+    // -----------------------------------------------------------------------------
+
+    // Get symbol extraction state for a document by its hash.
+    // Returns nullopt if no extraction has been recorded.
+    virtual Result<std::optional<SymbolExtractionState>>
+    getSymbolExtractionState(std::string_view documentHash) = 0;
+
+    // Upsert symbol extraction state. Uses document hash to resolve document_id internally.
+    // If extraction already recorded, updates the row; otherwise inserts.
+    virtual Result<void> upsertSymbolExtractionState(std::string_view documentHash,
+                                                     const SymbolExtractionState& state) = 0;
 
     // -----------------------------------------------------------------------------
     // Document/File Cleanup (for cascade on delete and re-indexing)

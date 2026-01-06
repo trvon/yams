@@ -209,6 +209,9 @@ private:
 
     // Version 21: Repair tracking fields to prevent duplicate work
     static Migration createRepairTrackingSchema();
+
+    // Version 22: Versioned symbol extraction state to avoid re-extraction
+    static Migration createSymbolExtractionStateSchema();
 };
 
 /**

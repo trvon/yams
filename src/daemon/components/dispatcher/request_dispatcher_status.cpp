@@ -15,6 +15,7 @@
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
 #include <yams/daemon/ipc/stream_metrics_registry.h>
+#include <yams/storage/corpus_stats.h>
 #include <yams/vector/vector_database.h>
 #include <yams/version.hpp>
 
@@ -192,6 +193,10 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             // Content store diagnostics
             res.contentStoreRoot = snap->contentStoreRoot;
             res.contentStoreError = snap->contentStoreError;
+            // Search tuning state (from SearchTuner FSM - epic yams-7ez4)
+            res.searchTuningState = snap->searchTuningState;
+            res.searchTuningReason = snap->searchTuningReason;
+            res.searchTuningParams = snap->searchTuningParams;
             // Storage size summary (exposed via requestCounts for backwards compatible clients)
             if (snap->logicalBytes > 0)
                 res.requestCounts["storage_logical_bytes"] =
@@ -332,7 +337,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 spdlog::info("[StatusRequest] Calling getSearchEngineSnapshot()");
                 auto engine = serviceManager_->getSearchEngineSnapshot();
                 spdlog::info("[StatusRequest] getSearchEngineSnapshot() returned, engine={}",
-                             (void*)engine.get());
+                             static_cast<void*>(engine.get()));
                 searchDegraded = (engine == nullptr);
             }
             res.readinessStates["search_engine_degraded"] = searchDegraded;
@@ -604,6 +609,20 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                             std::to_string(storageTotal);
                     }
                 } catch (...) {
+                }
+            }
+        } catch (...) {
+        }
+        // Collect corpus stats for search tuning (Phase 1: Adaptive Search Tuning)
+        try {
+            if (serviceManager_) {
+                auto metaRepo = serviceManager_->getMetadataRepo();
+                if (metaRepo) {
+                    auto statsResult = metaRepo->getCorpusStats();
+                    if (statsResult) {
+                        auto corpusJson = statsResult.value().toJson();
+                        response.additionalStats["corpus_stats"] = corpusJson.dump();
+                    }
                 }
             }
         } catch (...) {

@@ -125,7 +125,7 @@ private:
     void execute_on_io_context(std::function<void()> fn);
     void close_acceptor_on_executor();
     std::size_t
-    close_sockets_on_executor(std::vector<std::shared_ptr<TrackedSocket>> tracked_sockets);
+    close_sockets_on_executor(const std::vector<std::shared_ptr<TrackedSocket>>& tracked_sockets);
 };
 
 } // namespace yams::daemon

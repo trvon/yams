@@ -32,7 +32,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
     if (!req.olderThan.empty()) {
         const auto& ageStr = req.olderThan;
         try {
-            int64_t value = 0;
+            long long value = 0;
             char unit = 'd';
             if (std::sscanf(ageStr.c_str(), "%lld%c", &value, &unit) >= 1) {
                 switch (unit) {
@@ -62,7 +62,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
         if (sizeStr.empty())
             return 0;
         try {
-            int64_t value = 0;
+            long long value = 0;
             char unit[8] = {0};
             if (std::sscanf(sizeStr.c_str(), "%lld%7s", &value, unit) >= 1) {
                 std::string unitStr(unit);

@@ -19,6 +19,7 @@
 #include <yams/common/delete_resolver/resolver.hpp>
 #include <yams/common/pattern_utils.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/storage/corpus_stats.h>
 
 namespace fs = std::filesystem;
 
@@ -287,6 +288,9 @@ public:
         return Error{ErrorCode::NotImplemented, "NI"};
     }
     Result<int64_t> getDocumentCountByExtractionStatus(yams::metadata::ExtractionStatus) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+    Result<storage::CorpusStats> getCorpusStats() override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
 

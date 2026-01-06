@@ -1,6 +1,7 @@
 spdlog_dep = dependency('spdlog', required: true)
 sqlite_dep = dependency('sqlite3', required: true)
 openssl_dep = dependency('openssl', modules: ['crypto'], required: true)
+json_dep = dependency('nlohmann_json', required: true)
 yams_core = dependency('yams_core', required: false)
 yams_storage_engine_dep = dependency('yams_storage_engine', required: false)
 
@@ -17,7 +18,7 @@ yams_metadata = static_library('yams_metadata',
     'tree_differ.cpp',
   ],
   include_directories: include_directories('../../include'),
-  dependencies: [spdlog_dep, sqlite_dep, openssl_dep, yams_core, yams_storage_engine_dep],
+  dependencies: [spdlog_dep, sqlite_dep, openssl_dep, json_dep, yams_core, yams_storage_engine_dep],
   install: true,
 )
 

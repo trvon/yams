@@ -201,6 +201,168 @@ TEST_CASE("GraphComponent: Dedupe predicate detects existing doc entities",
     CHECK_FALSE(GraphComponent::shouldSkipEntityExtraction(nullptr, "hash-abc"));
 }
 
+TEST_CASE("GraphComponent: Versioned extraction state dedupe", "[daemon][graph][dedupe]") {
+    GraphComponentTestFixture fixture;
+
+    // Create a document in the database
+    DocumentInfo doc;
+    doc.fileName = "file.cpp";
+    doc.filePath = "/test/file.cpp";
+    doc.fileExtension = "cpp";
+    doc.fileSize = 100;
+    doc.sha256Hash = "hash-versioned";
+    doc.mimeType = "text/x-c++";
+    doc.setCreatedTime(1);
+    doc.setModifiedTime(1);
+    doc.setIndexedTime(1);
+    auto docIdRes = fixture.metadataRepo->insertDocument(doc);
+    REQUIRE(docIdRes.has_value());
+
+    SECTION("Skip extraction when state is 'complete' with no extractor ID specified") {
+        SymbolExtractionState state;
+        state.extractorId = "extractor_v1";
+        state.extractedAt = 1000;
+        state.status = "complete";
+        state.entityCount = 5;
+
+        auto upsertRes = fixture.kgStore->upsertSymbolExtractionState("hash-versioned", state);
+        REQUIRE(upsertRes.has_value());
+
+        // Should skip when no expected extractor specified
+        CHECK(GraphComponent::shouldSkipEntityExtraction(fixture.kgStore, "hash-versioned"));
+    }
+
+    SECTION("Skip extraction when extractor version matches") {
+        SymbolExtractionState state;
+        state.extractorId = "extractor_v2";
+        state.extractedAt = 2000;
+        state.status = "complete";
+        state.entityCount = 0; // Even with 0 symbols!
+
+        auto upsertRes = fixture.kgStore->upsertSymbolExtractionState("hash-versioned", state);
+        REQUIRE(upsertRes.has_value());
+
+        // Should skip when extractor matches
+        CHECK(GraphComponent::shouldSkipEntityExtraction(fixture.kgStore, "hash-versioned",
+                                                         "extractor_v2"));
+    }
+
+    SECTION("Re-extract when extractor version differs") {
+        SymbolExtractionState state;
+        state.extractorId = "extractor_v1";
+        state.extractedAt = 1000;
+        state.status = "complete";
+        state.entityCount = 10;
+
+        auto upsertRes = fixture.kgStore->upsertSymbolExtractionState("hash-versioned", state);
+        REQUIRE(upsertRes.has_value());
+
+        // Should NOT skip when extractor version differs
+        CHECK_FALSE(GraphComponent::shouldSkipEntityExtraction(fixture.kgStore, "hash-versioned",
+                                                               "extractor_v2"));
+    }
+
+    SECTION("Re-extract when status is 'failed'") {
+        SymbolExtractionState state;
+        state.extractorId = "extractor_v1";
+        state.extractedAt = 1000;
+        state.status = "failed";
+        state.entityCount = 0;
+        state.errorMessage = "Some error";
+
+        auto upsertRes = fixture.kgStore->upsertSymbolExtractionState("hash-versioned", state);
+        REQUIRE(upsertRes.has_value());
+
+        // Should NOT skip when status is failed
+        CHECK_FALSE(GraphComponent::shouldSkipEntityExtraction(fixture.kgStore, "hash-versioned"));
+    }
+
+    SECTION("No state recorded - should not skip") {
+        // No extraction state recorded for this document
+        CHECK_FALSE(
+            GraphComponent::shouldSkipEntityExtraction(fixture.kgStore, "hash-no-state-recorded"));
+    }
+}
+
+TEST_CASE("GraphComponent: Extraction state get/upsert roundtrip",
+          "[daemon][graph][extraction-state]") {
+    GraphComponentTestFixture fixture;
+
+    // Create a document in the database
+    DocumentInfo doc;
+    doc.fileName = "state.cpp";
+    doc.filePath = "/test/state.cpp";
+    doc.fileExtension = "cpp";
+    doc.fileSize = 100;
+    doc.sha256Hash = "hash-state";
+    doc.mimeType = "text/x-c++";
+    doc.setCreatedTime(1);
+    doc.setModifiedTime(1);
+    doc.setIndexedTime(1);
+    auto docIdRes = fixture.metadataRepo->insertDocument(doc);
+    REQUIRE(docIdRes.has_value());
+
+    SECTION("Initial state is empty") {
+        auto getRes = fixture.kgStore->getSymbolExtractionState("hash-state");
+        REQUIRE(getRes.has_value());
+        CHECK_FALSE(getRes.value().has_value()); // No state recorded
+    }
+
+    SECTION("Upsert and retrieve state") {
+        SymbolExtractionState state;
+        state.extractorId = "test_extractor:v1.2.3";
+        state.extractorConfigHash = "config-abc";
+        state.extractedAt = 1234567890;
+        state.status = "complete";
+        state.entityCount = 42;
+
+        auto upsertRes = fixture.kgStore->upsertSymbolExtractionState("hash-state", state);
+        REQUIRE(upsertRes.has_value());
+
+        auto getRes = fixture.kgStore->getSymbolExtractionState("hash-state");
+        REQUIRE(getRes.has_value());
+        REQUIRE(getRes.value().has_value());
+
+        const auto& retrieved = getRes.value().value();
+        CHECK(retrieved.extractorId == "test_extractor:v1.2.3");
+        CHECK(retrieved.extractorConfigHash.value_or("") == "config-abc");
+        CHECK(retrieved.extractedAt == 1234567890);
+        CHECK(retrieved.status == "complete");
+        CHECK(retrieved.entityCount == 42);
+    }
+
+    SECTION("Upsert updates existing state") {
+        // First upsert
+        SymbolExtractionState state1;
+        state1.extractorId = "v1";
+        state1.extractedAt = 1000;
+        state1.status = "complete";
+        state1.entityCount = 10;
+
+        auto upsertRes1 = fixture.kgStore->upsertSymbolExtractionState("hash-state", state1);
+        REQUIRE(upsertRes1.has_value());
+
+        // Second upsert should update
+        SymbolExtractionState state2;
+        state2.extractorId = "v2";
+        state2.extractedAt = 2000;
+        state2.status = "complete";
+        state2.entityCount = 20;
+
+        auto upsertRes2 = fixture.kgStore->upsertSymbolExtractionState("hash-state", state2);
+        REQUIRE(upsertRes2.has_value());
+
+        auto getRes = fixture.kgStore->getSymbolExtractionState("hash-state");
+        REQUIRE(getRes.has_value());
+        REQUIRE(getRes.value().has_value());
+
+        const auto& retrieved = getRes.value().value();
+        CHECK(retrieved.extractorId == "v2");
+        CHECK(retrieved.extractedAt == 2000);
+        CHECK(retrieved.entityCount == 20);
+    }
+}
+
 TEST_CASE("GraphComponent: Document ingestion when not initialized", "[daemon][graph][ingestion]") {
     GraphComponentTestFixture fixture;
     GraphComponent component(fixture.metadataRepo, fixture.kgStore);

@@ -47,6 +47,10 @@ else
     'ghidra_kg_entity_ingestion_test.cpp',
   )
 
+  daemon_sigterm_srcs = files(
+    'daemon_sigterm_test.cpp',
+  )
+
   dbg = (get_option('buildtype') == 'debug')
   if (get_option('enable-integration-tests') or dbg) and (get_option('enable-daemon-integration') or dbg)
     # Catch2 needs its main library
@@ -275,6 +279,33 @@ else
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
       args: ['--allow-running-no-tests'],
+    )
+
+    # SIGTERM signal handling tests (yams-qe6r)
+    daemon_sigterm_exe = executable('yams_daemon_sigterm_tests_catch2',
+      daemon_sigterm_srcs,
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep, test_deps],
+      cpp_args: ['-DYAMS_TESTING=1'],
+      install: false,
+    )
+
+    test('daemon_sigterm_external_flag',
+      daemon_sigterm_exe,
+      suite: ['integration', 'daemon', 'catch2', 'sigterm'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Daemon responds to external shutdown flag', '--allow-running-no-tests'],
+    )
+
+    test('daemon_sigterm_timing',
+      daemon_sigterm_exe,
+      suite: ['integration', 'daemon', 'catch2', 'sigterm'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Daemon shutdown timing with external flag', '--allow-running-no-tests'],
     )
 
     # Diagnostic tool (not a test, but helpful for debugging)

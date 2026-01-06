@@ -193,6 +193,11 @@ struct MetricsSnapshot {
     bool vectorEmbeddingsAvailable{false};
     bool vectorScoringEnabled{false};
     std::string searchEngineBuildReason; // "initial"|"rebuild"|"degraded"|"unknown"
+
+    // Search tuning state (from SearchTuner FSM - epic yams-7ez4)
+    std::string searchTuningState;  // e.g., "SMALL_CODE", "SCIENTIFIC", "MIXED"
+    std::string searchTuningReason; // Human-readable explanation of state selection
+    std::map<std::string, double> searchTuningParams; // e.g., {"textWeight": 0.55, ...}
 };
 
 class SocketServer; // Forward declaration

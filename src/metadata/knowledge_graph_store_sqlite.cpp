@@ -1166,6 +1166,91 @@ public:
         });
     }
 
+    // Symbol Extraction State
+    Result<std::optional<SymbolExtractionState>>
+    getSymbolExtractionState(std::string_view documentHash) override {
+        return pool_->withConnection(
+            [&](Database& db) -> Result<std::optional<SymbolExtractionState>> {
+                auto stmtR = db.prepare(R"(
+                SELECT ses.document_id, ses.extractor_id, ses.extractor_config_hash,
+                       ses.extracted_at, ses.status, ses.entity_count, ses.error_message
+                FROM document_symbol_extraction_state ses
+                JOIN documents d ON d.id = ses.document_id
+                WHERE d.sha256_hash = ?
+            )");
+                if (!stmtR)
+                    return stmtR.error();
+                auto stmt = std::move(stmtR).value();
+                auto br = stmt.bind(1, documentHash);
+                if (!br)
+                    return br.error();
+                auto stepR = stmt.step();
+                if (!stepR)
+                    return stepR.error();
+                if (!stepR.value())
+                    return std::optional<SymbolExtractionState>{};
+
+                SymbolExtractionState state;
+                state.documentId = stmt.getInt64(0);
+                state.extractorId = stmt.getString(1);
+                if (!stmt.isNull(2))
+                    state.extractorConfigHash = stmt.getString(2);
+                state.extractedAt = stmt.getInt64(3);
+                state.status = stmt.getString(4);
+                state.entityCount = stmt.getInt64(5);
+                if (!stmt.isNull(6))
+                    state.errorMessage = stmt.getString(6);
+                return std::optional<SymbolExtractionState>{std::move(state)};
+            });
+    }
+
+    Result<void> upsertSymbolExtractionState(std::string_view documentHash,
+                                             const SymbolExtractionState& state) override {
+        return pool_->withConnection([&](Database& db) -> Result<void> {
+            // Resolve document_id from hash
+            auto docIdR = db.prepare("SELECT id FROM documents WHERE sha256_hash = ?");
+            if (!docIdR)
+                return docIdR.error();
+            auto docIdStmt = std::move(docIdR).value();
+            auto br = docIdStmt.bind(1, documentHash);
+            if (!br)
+                return br.error();
+            auto stepR = docIdStmt.step();
+            if (!stepR)
+                return stepR.error();
+            if (!stepR.value()) {
+                return Error{ErrorCode::NotFound,
+                             "Document not found for hash: " + std::string(documentHash)};
+            }
+            std::int64_t documentId = docIdStmt.getInt64(0);
+
+            // Upsert the extraction state
+            auto stmtR = db.prepare(R"(
+                INSERT INTO document_symbol_extraction_state
+                    (document_id, extractor_id, extractor_config_hash, extracted_at, status, entity_count, error_message)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(document_id) DO UPDATE SET
+                    extractor_id = excluded.extractor_id,
+                    extractor_config_hash = excluded.extractor_config_hash,
+                    extracted_at = excluded.extracted_at,
+                    status = excluded.status,
+                    entity_count = excluded.entity_count,
+                    error_message = excluded.error_message
+            )");
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+            auto bindR = stmt.bindAll(
+                documentId, state.extractorId,
+                state.extractorConfigHash.value_or(std::string{}), // empty string if nullopt
+                state.extractedAt, state.status, state.entityCount,
+                state.errorMessage.value_or(std::string{}));
+            if (!bindR)
+                return bindR.error();
+            return stmt.execute();
+        });
+    }
+
     // Document/File Cleanup
     Result<std::int64_t> deleteNodesForDocumentHash(std::string_view documentHash) override {
         return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {

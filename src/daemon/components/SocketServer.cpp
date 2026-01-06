@@ -494,9 +494,6 @@ awaitable<void> SocketServer::accept_loop() {
 
             if (trace) {
                 spdlog::info("stream-trace: [conn={}] slot_acquired", conn_token);
-            }
-
-            if (trace) {
                 spdlog::info("stream-trace: [conn={}] accept completed (active={} total={})",
                              conn_token, activeConnections_.load(std::memory_order_relaxed),
                              totalConnections_.load(std::memory_order_relaxed));
@@ -888,7 +885,7 @@ void SocketServer::close_acceptor_on_executor() {
 }
 
 std::size_t SocketServer::close_sockets_on_executor(
-    std::vector<std::shared_ptr<TrackedSocket>> tracked_sockets) {
+    const std::vector<std::shared_ptr<TrackedSocket>>& tracked_sockets) {
     if (tracked_sockets.empty()) {
         return 0;
     }

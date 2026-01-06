@@ -177,11 +177,31 @@ GraphComponent::onTreeDiffApplied(int64_t diffId,
 }
 
 bool GraphComponent::shouldSkipEntityExtraction(
-    const std::shared_ptr<metadata::KnowledgeGraphStore>& kg, const std::string& documentHash) {
+    const std::shared_ptr<metadata::KnowledgeGraphStore>& kg, const std::string& documentHash,
+    const std::string& expectedExtractorId) {
     if (!kg || documentHash.empty()) {
         return false;
     }
 
+    // Check the new extraction state table first
+    auto stateRes = kg->getSymbolExtractionState(documentHash);
+    if (stateRes.has_value() && stateRes.value().has_value()) {
+        const auto& state = stateRes.value().value();
+        // Skip if extraction completed successfully
+        if (state.status == "complete") {
+            // If we have an expected extractor ID, only skip if it matches
+            if (!expectedExtractorId.empty() && state.extractorId != expectedExtractorId) {
+                spdlog::debug(
+                    "[GraphComponent] Extractor version changed: {} -> {}, will re-extract",
+                    state.extractorId, expectedExtractorId);
+                return false; // Version mismatch, need to re-extract
+            }
+            return true; // Already extracted with matching or any version
+        }
+    }
+
+    // Fallback: check kg_doc_entities for backward compatibility with existing data
+    // This handles databases that were populated before the state table existed
     auto docIdRes = kg->getDocumentIdByHash(documentHash);
     if (!docIdRes.has_value() || !docIdRes.value().has_value()) {
         return false;
