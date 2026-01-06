@@ -65,7 +65,8 @@ public:
             std::make_shared<yams::daemon::ServiceManager>(config, *state_, *lifecycleFsm_);
 
         // Use helper to ensure async initialization completes
-        bool initialized = yams::test::initializeServiceManagerFully(serviceManager_);
+        bool initialized = yams::test::initializeServiceManagerFully(
+            serviceManager_, std::chrono::seconds(30), true);
         if (!initialized) {
             throw std::runtime_error("ServiceManager initialization failed");
         }

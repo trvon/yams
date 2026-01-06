@@ -1311,6 +1311,12 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     }
     spdlog::info("[ServiceManager] Phase: DB Pool and Repo Initialized.");
 
+    // Phase: mark vectors ready (vector backend initialization is opportunistic)
+    try {
+        serviceFsm_.dispatch(VectorsInitializedEvent{});
+    } catch (...) {
+    }
+
     // Executors and sessions
     // Lightweight session directory watcher (polling), reacts to SessionService config.
     auto isTruthy = [](const char* s) {
@@ -1321,9 +1327,12 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         return v == "1" || v == "true" || v == "yes" || v == "on";
     };
-    const bool disableSessionWatcher = isTruthy(std::getenv("YAMS_DISABLE_SESSION_WATCHER"));
-    if (disableSessionWatcher) {
-        spdlog::info("[ServiceManager] Session watcher disabled via YAMS_DISABLE_SESSION_WATCHER");
+    // Session watcher is opt-in: it should not run by default in daemon mode.
+    // Enable explicitly via `YAMS_ENABLE_SESSION_WATCHER=1`.
+    const bool enableSessionWatcher = isTruthy(std::getenv("YAMS_ENABLE_SESSION_WATCHER"));
+    if (!enableSessionWatcher) {
+        spdlog::info("[ServiceManager] Session watcher disabled (default); set "
+                     "YAMS_ENABLE_SESSION_WATCHER=1 to enable");
     } else {
         try {
             auto exec = getWorkerExecutor();

@@ -108,8 +108,13 @@ private:
     boost::asio::awaitable<void> entityPoller();
     void processBatch(std::vector<InternalEventBus::PostIngestTask>&& tasks);
     void processTask(const std::string& hash, const std::string& mime);
-    void processMetadataStage(const std::string& hash, const std::string& mime,
-                              const std::optional<metadata::DocumentInfo>& info = std::nullopt);
+    void processMetadataStage(
+        const std::string& hash, const std::string& mime,
+        const std::optional<metadata::DocumentInfo>& info = std::nullopt,
+        const std::vector<std::string>* tagsOverride = nullptr,
+        const std::unordered_map<std::string, std::string>& symbolExtensionMap = {},
+        const std::vector<std::shared_ptr<ExternalEntityProviderAdapter>>& entityProviders = {});
+
     void processKnowledgeGraphStage(const std::string& hash, int64_t docId,
                                     const std::string& filePath,
                                     const std::vector<std::string>& tags);

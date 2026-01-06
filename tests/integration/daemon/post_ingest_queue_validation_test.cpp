@@ -66,6 +66,13 @@ public:
         // Set YAMS_STORAGE environment variable
         setenv("YAMS_STORAGE", testDir_.string().c_str(), 1);
 
+        // Keep all daemon/session state inside the temp test directory.
+        // This prevents any accidental scans/config reads from the repo and
+        // keeps tests hermetic.
+        setenv("XDG_DATA_HOME", testDir_.string().c_str(), 1);
+        setenv("XDG_STATE_HOME", testDir_.string().c_str(), 1);
+        setenv("HOME", testDir_.string().c_str(), 1);
+
         fixtureManager_ = std::make_shared<yams::test::FixtureManager>(testDir_);
     }
 

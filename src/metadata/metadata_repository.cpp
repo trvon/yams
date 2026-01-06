@@ -1191,21 +1191,22 @@ Result<void> MetadataRepository::deleteSavedQuery(int64_t id) {
 }
 
 // Full-text search operations
-Result<void> MetadataRepository::indexDocumentContent(int64_t documentId, const std::string& title,
-                                                      const std::string& content,
-                                                      const std::string& contentType) {
-    (void)contentType; // No longer indexed in FTS5 (v18 migration removed it)
-    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
-        // First check if FTS5 is available
-        auto fts5Result = db.hasFTS5();
-        if (!fts5Result)
-            return fts5Result.error();
+namespace {
+Result<void> indexDocumentContentImpl(Database& db, int64_t documentId, const std::string& title,
+                                      const std::string& content,
+                                      [[maybe_unused]] const std::string& contentType,
+                                      bool verifyDocumentExists) {
+    // First check if FTS5 is available
+    auto fts5Result = db.hasFTS5();
+    if (!fts5Result)
+        return fts5Result.error();
 
-        if (!fts5Result.value()) {
-            spdlog::warn("FTS5 not available, skipping content indexing");
-            return {};
-        }
+    if (!fts5Result.value()) {
+        spdlog::warn("FTS5 not available, skipping content indexing");
+        return {};
+    }
 
+    if (verifyDocumentExists) {
         // Verify document exists before indexing (FTS5 doesn't enforce foreign keys)
         auto checkStmt = db.prepare("SELECT COUNT(*) FROM documents WHERE id = ?");
         if (!checkStmt)
@@ -1222,48 +1223,72 @@ Result<void> MetadataRepository::indexDocumentContent(int64_t documentId, const 
                          "Document ID " + std::to_string(documentId) +
                              " not found - cannot index content for non-existent document"};
         }
+    }
 
-        // Delete existing entry first (FTS5 doesn't support ON CONFLICT well)
-        auto deleteResult =
-            db.execute("DELETE FROM documents_fts WHERE rowid = " + std::to_string(documentId));
-        if (!deleteResult)
-            return deleteResult.error();
+    // Delete existing entry first (FTS5 doesn't support ON CONFLICT well)
+    auto deleteStmt = db.prepare("DELETE FROM documents_fts WHERE rowid = ?");
+    if (!deleteStmt)
+        return deleteStmt.error();
 
-        const std::string sanitizedContent = common::sanitizeUtf8(content);
-        const std::string sanitizedTitle = common::sanitizeUtf8(title);
+    Statement deleteS = std::move(deleteStmt).value();
+    auto deleteBind = deleteS.bind(1, documentId);
+    if (!deleteBind)
+        return deleteBind.error();
+    auto deleteResult = deleteS.execute();
+    if (!deleteResult)
+        return deleteResult.error();
 
-        // Note: content_type removed from FTS5 in migration v18 - never used in MATCH queries
-        auto stmtResult = db.prepare(R"(
-            INSERT INTO documents_fts (rowid, content, title)
-            VALUES (?, ?, ?)
-        )");
+    const std::string sanitizedContent = common::sanitizeUtf8(content);
+    const std::string sanitizedTitle = common::sanitizeUtf8(title);
 
-        if (!stmtResult)
-            return stmtResult.error();
+    // Note: content_type removed from FTS5 in migration v18 - never used in MATCH queries
+    auto stmtResult = db.prepare(R"(
+             INSERT INTO documents_fts (rowid, content, title)
+             VALUES (?, ?, ?)
+         )");
 
-        Statement stmt = std::move(stmtResult).value();
-        auto bindResult = stmt.bindAll(documentId, sanitizedContent, sanitizedTitle);
-        if (!bindResult)
-            return bindResult.error();
+    if (!stmtResult)
+        return stmtResult.error();
 
-        auto execResult = stmt.execute();
-        if (execResult) {
-            // Verify by counting rows in FTS5 table
-            auto countStmt = db.prepare("SELECT COUNT(*) FROM documents_fts");
-            if (countStmt) {
-                auto cs = std::move(countStmt).value();
-                cs.step();
-                int64_t count = cs.getInt64(0);
-                spdlog::info("[FTS5 Index] Inserted rowid={} title='{}' contentLen={} (total FTS5 "
-                             "rows={})",
-                             documentId, sanitizedTitle.substr(0, 30), sanitizedContent.size(),
-                             count);
-            }
-        } else {
-            spdlog::warn("[FTS5 Index] Insert failed for rowid={}: {}", documentId,
-                         execResult.error().message);
+    Statement stmt = std::move(stmtResult).value();
+    auto bindResult = stmt.bindAll(documentId, sanitizedContent, sanitizedTitle);
+    if (!bindResult)
+        return bindResult.error();
+
+    auto execResult = stmt.execute();
+    if (execResult) {
+        if (spdlog::should_log(spdlog::level::debug)) {
+            spdlog::debug("[FTS5 Index] Inserted rowid={} title='{}' contentLen={}", documentId,
+                          sanitizedTitle.substr(0, 30), sanitizedContent.size());
         }
-        return execResult;
+    } else {
+        spdlog::warn("[FTS5 Index] Insert failed for rowid={}: {}", documentId,
+                     execResult.error().message);
+    }
+    return execResult;
+}
+} // namespace
+
+Result<void> MetadataRepository::indexDocumentContent(int64_t documentId, const std::string& title,
+                                                      const std::string& content,
+                                                      const std::string& contentType) {
+    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
+        return indexDocumentContentImpl(db, documentId, title, content, contentType,
+                                        /*verifyDocumentExists=*/true);
+    });
+
+    if (result)
+        invalidateQueryCache();
+    return result;
+}
+
+Result<void> MetadataRepository::indexDocumentContentTrusted(int64_t documentId,
+                                                             const std::string& title,
+                                                             const std::string& content,
+                                                             const std::string& contentType) {
+    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
+        return indexDocumentContentImpl(db, documentId, title, content, contentType,
+                                        /*verifyDocumentExists=*/false);
     });
 
     if (result)
@@ -2538,6 +2563,37 @@ Result<void> MetadataRepository::updateDocumentEmbeddingStatusByHash(const std::
 
         return Result<void>();
     });
+}
+
+Result<void> MetadataRepository::updateDocumentExtractionStatus(int64_t documentId,
+                                                                bool contentExtracted,
+                                                                ExtractionStatus status,
+                                                                const std::string& error) {
+    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
+        auto updateStmt = db.prepare(R"(
+            UPDATE documents
+            SET content_extracted = ?, extraction_status = ?, extraction_error = ?
+            WHERE id = ?
+        )");
+        if (!updateStmt)
+            return updateStmt.error();
+
+        auto& stmt = updateStmt.value();
+        if (auto r = stmt.bind(1, contentExtracted ? 1 : 0); !r)
+            return r.error();
+        if (auto r = stmt.bind(2, ExtractionStatusUtils::toString(status)); !r)
+            return r.error();
+        if (auto r = stmt.bind(3, error.empty() ? nullptr : error.c_str()); !r)
+            return r.error();
+        if (auto r = stmt.bind(4, documentId); !r)
+            return r.error();
+
+        return stmt.execute();
+    });
+
+    if (result)
+        invalidateQueryCache();
+    return result;
 }
 
 Result<void> MetadataRepository::updateDocumentRepairStatus(const std::string& hash,
@@ -4724,6 +4780,54 @@ Result<std::vector<std::string>> MetadataRepository::getDocumentTags(int64_t doc
             }
 
             return tags;
+        });
+}
+
+Result<std::unordered_map<int64_t, std::vector<std::string>>>
+MetadataRepository::batchGetDocumentTags(std::span<const int64_t> documentIds) {
+    if (documentIds.empty()) {
+        return std::unordered_map<int64_t, std::vector<std::string>>{};
+    }
+
+    return executeQuery<std::unordered_map<int64_t, std::vector<std::string>>>(
+        [&](Database& db) -> Result<std::unordered_map<int64_t, std::vector<std::string>>> {
+            std::string query =
+                "SELECT document_id, key FROM metadata WHERE key LIKE 'tag:%' AND document_id IN (";
+            for (std::size_t i = 0; i < documentIds.size(); ++i) {
+                if (i)
+                    query += ",";
+                query += "?";
+            }
+            query += ") ORDER BY document_id, key";
+
+            auto stmtResult = db.prepare(query);
+            if (!stmtResult)
+                return stmtResult.error();
+
+            Statement stmt = std::move(stmtResult).value();
+            int bindIndex = 1;
+            for (auto id : documentIds) {
+                auto b = stmt.bind(bindIndex++, id);
+                if (!b)
+                    return b.error();
+            }
+
+            std::unordered_map<int64_t, std::vector<std::string>> out;
+            while (true) {
+                auto stepResult = stmt.step();
+                if (!stepResult)
+                    return stepResult.error();
+                if (!stepResult.value())
+                    break;
+
+                int64_t docId = stmt.getInt64(0);
+                std::string fullKey = stmt.getString(1);
+                if (fullKey.starts_with("tag:")) {
+                    out[docId].push_back(fullKey.substr(4));
+                }
+            }
+
+            return out;
         });
 }
 

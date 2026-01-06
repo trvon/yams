@@ -100,6 +100,12 @@ std::filesystem::path StorageEngine::getObjectPath(std::string_view hash) const 
 }
 
 std::filesystem::path StorageEngine::getTempPath() const {
+    // Ensure temp directory exists (can be removed by external cleanup).
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(pImpl->config.basePath / "temp", ec);
+    }
+
     // Generate random temp filename
     static thread_local std::random_device rd;
     static thread_local std::mt19937 gen(rd());

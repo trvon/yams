@@ -128,6 +128,10 @@ public:
                                       const std::string&) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
+    Result<void> indexDocumentContentTrusted(int64_t, const std::string&, const std::string&,
+                                             const std::string&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
     Result<void> removeFromIndex(int64_t) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
@@ -262,6 +266,11 @@ public:
     Result<std::vector<std::string>> getDocumentTags(int64_t) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
+    Result<std::unordered_map<int64_t, std::vector<std::string>>>
+    batchGetDocumentTags(std::span<const int64_t>) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+
     Result<std::vector<std::string>> getAllTags() override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
@@ -303,6 +312,11 @@ public:
     }
     Result<void> updateDocumentEmbeddingStatusByHash(const std::string&, bool,
                                                      const std::string&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+
+    Result<void> updateDocumentExtractionStatus(int64_t, bool, yams::metadata::ExtractionStatus,
+                                                const std::string&) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
 

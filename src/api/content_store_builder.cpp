@@ -432,15 +432,13 @@ Result<std::unique_ptr<IContentStore>> ContentStoreBuilder::build() {
         return Result<std::unique_ptr<IContentStore>>(validateResult.error());
     }
 
-    // Create storage directory if it doesn't exist
-    if (!std::filesystem::exists(pImpl->config.storagePath)) {
-        try {
-            std::filesystem::create_directories(pImpl->config.storagePath);
-            std::filesystem::create_directories(pImpl->config.storagePath / "temp");
-        } catch (const std::exception& e) {
-            spdlog::error("Failed to create storage directory: {}", e.what());
-            return Result<std::unique_ptr<IContentStore>>(ErrorCode::PermissionDenied);
-        }
+    // Ensure storage directories exist (may have been created previously).
+    try {
+        std::filesystem::create_directories(pImpl->config.storagePath);
+        std::filesystem::create_directories(pImpl->config.storagePath / "temp");
+    } catch (const std::exception& e) {
+        spdlog::error("Failed to create storage directory: {}", e.what());
+        return Result<std::unique_ptr<IContentStore>>(ErrorCode::PermissionDenied);
     }
 
     // Create default components if not provided

@@ -16,7 +16,8 @@ namespace yams::test {
 
 inline bool
 initializeServiceManagerFully(std::shared_ptr<yams::daemon::ServiceManager> serviceManager,
-                              std::chrono::milliseconds timeout = std::chrono::seconds(30)) {
+                              std::chrono::milliseconds timeout = std::chrono::seconds(30),
+                              bool allowNonReadyStates = false) {
     if (!serviceManager) {
         spdlog::error("ServiceManager is null");
         return false;
@@ -39,7 +40,23 @@ initializeServiceManagerFully(std::shared_ptr<yams::daemon::ServiceManager> serv
     if (snapshot.state == yams::daemon::ServiceManagerState::Ready) {
         spdlog::info("ServiceManager fully initialized");
         return true;
-    } else if (snapshot.state == yams::daemon::ServiceManagerState::Failed) {
+    }
+
+    if (allowNonReadyStates) {
+        // Some integration tests only need the schema/vector DB to exist; they may not need the
+        // fully built search engine.
+        if (snapshot.state == yams::daemon::ServiceManagerState::SchemaReady ||
+            snapshot.state == yams::daemon::ServiceManagerState::InitializingVectors ||
+            snapshot.state == yams::daemon::ServiceManagerState::VectorsReady ||
+            snapshot.state == yams::daemon::ServiceManagerState::BuildingSearchEngine) {
+            spdlog::warn("ServiceManager not Ready within timeout (state={}); continuing "
+                         "(allowNonReadyStates)",
+                         static_cast<int>(snapshot.state));
+            return true;
+        }
+    }
+
+    if (snapshot.state == yams::daemon::ServiceManagerState::Failed) {
         spdlog::error("ServiceManager async initialization failed: {}", snapshot.lastError);
         return false;
     }

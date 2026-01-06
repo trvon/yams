@@ -191,6 +191,9 @@ public:
     virtual Result<void> indexDocumentContent(int64_t documentId, const std::string& title,
                                               const std::string& content,
                                               const std::string& contentType) = 0;
+    virtual Result<void> indexDocumentContentTrusted(int64_t documentId, const std::string& title,
+                                                     const std::string& content,
+                                                     const std::string& contentType) = 0;
     virtual Result<void> removeFromIndex(int64_t documentId) = 0;
     virtual Result<void> removeFromIndexByHash(const std::string& hash) = 0;
     virtual Result<std::vector<int64_t>> getAllFts5IndexedDocumentIds() = 0;
@@ -248,6 +251,8 @@ public:
     virtual Result<std::vector<DocumentInfo>>
     findDocumentsByTags(const std::vector<std::string>& tags, bool matchAll = false) = 0;
     virtual Result<std::vector<std::string>> getDocumentTags(int64_t documentId) = 0;
+    virtual Result<std::unordered_map<int64_t, std::vector<std::string>>>
+    batchGetDocumentTags(std::span<const int64_t> documentIds) = 0;
     virtual Result<std::vector<std::string>> getAllTags() = 0;
 
     // Statistics
@@ -264,6 +269,11 @@ public:
     virtual Result<void> updateDocumentEmbeddingStatusByHash(const std::string& hash,
                                                              bool hasEmbedding,
                                                              const std::string& modelId = "") = 0;
+
+    // Extraction status operations (avoid read-modify-write)
+    virtual Result<void> updateDocumentExtractionStatus(int64_t documentId, bool contentExtracted,
+                                                        ExtractionStatus status,
+                                                        const std::string& error = "") = 0;
 
     // Repair status operations
     virtual Result<void> updateDocumentRepairStatus(const std::string& hash,
@@ -360,6 +370,9 @@ public:
     Result<void> indexDocumentContent(int64_t documentId, const std::string& title,
                                       const std::string& content,
                                       const std::string& contentType) override;
+    Result<void> indexDocumentContentTrusted(int64_t documentId, const std::string& title,
+                                             const std::string& content,
+                                             const std::string& contentType) override;
     Result<void> removeFromIndex(int64_t documentId) override;
     Result<void> removeFromIndexByHash(const std::string& hash) override;
     Result<std::vector<int64_t>> getAllFts5IndexedDocumentIds() override;
@@ -410,6 +423,8 @@ public:
     Result<std::vector<DocumentInfo>> findDocumentsByTags(const std::vector<std::string>& tags,
                                                           bool matchAll = false) override;
     Result<std::vector<std::string>> getDocumentTags(int64_t documentId) override;
+    Result<std::unordered_map<int64_t, std::vector<std::string>>>
+    batchGetDocumentTags(std::span<const int64_t> documentIds) override;
     Result<std::vector<std::string>> getAllTags() override;
 
     // Statistics
@@ -443,6 +458,11 @@ public:
                                                const std::string& modelId = "") override;
     Result<void> updateDocumentEmbeddingStatusByHash(const std::string& hash, bool hasEmbedding,
                                                      const std::string& modelId = "") override;
+
+    // Extraction status operations (avoid read-modify-write)
+    Result<void> updateDocumentExtractionStatus(int64_t documentId, bool contentExtracted,
+                                                ExtractionStatus status,
+                                                const std::string& error = "") override;
 
     // Repair status operations
     Result<void> updateDocumentRepairStatus(const std::string& hash, RepairStatus status) override;

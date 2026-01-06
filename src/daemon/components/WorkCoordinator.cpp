@@ -37,7 +37,20 @@ WorkCoordinator::~WorkCoordinator() {
         } catch (...) {
         }
         stop();
-        join();
+
+        // Ensure all worker threads are joined before destruction.
+        // The destructor is never executed on a worker thread (the ServiceManager owns the
+        // WorkCoordinator), so a full join is safe here.
+        for (auto& worker : workers_) {
+            if (worker.joinable()) {
+                try {
+                    worker.join();
+                } catch (...) {
+                }
+            }
+        }
+        workers_.clear();
+        started_ = false;
     }
     try {
         spdlog::debug("[WorkCoordinator] Destroyed");
@@ -157,19 +170,27 @@ void WorkCoordinator::join() {
     } catch (...) {
     }
     for (auto& worker : workers_) {
-        if (worker.joinable()) {
+        if (!worker.joinable()) {
+            continue;
+        }
+
+        // If join() is called from one of the worker threads, do not attempt to
+        // self-join, and leave thread cleanup to the WorkCoordinator destructor.
+        if (worker.get_id() == std::this_thread::get_id()) {
+            continue;
+        }
+
+        try {
+            worker.join();
+        } catch (const std::exception& e) {
             try {
-                worker.join();
-            } catch (const std::exception& e) {
-                try {
-                    spdlog::warn("[WorkCoordinator] join exception: {}", e.what());
-                } catch (...) {
-                }
+                spdlog::warn("[WorkCoordinator] join exception: {}", e.what());
             } catch (...) {
-                try {
-                    spdlog::warn("[WorkCoordinator] join unknown exception");
-                } catch (...) {
-                }
+            }
+        } catch (...) {
+            try {
+                spdlog::warn("[WorkCoordinator] join unknown exception");
+            } catch (...) {
             }
         }
     }

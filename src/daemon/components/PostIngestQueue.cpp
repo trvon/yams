@@ -166,6 +166,21 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
     }
 
     std::unordered_map<std::string, metadata::DocumentInfo> infoMap;
+    std::unordered_map<int64_t, std::vector<std::string>> tagsByDocId;
+    static const std::vector<std::string> kEmptyTags;
+
+    std::unordered_map<std::string, std::string> symbolExtensionMap;
+    {
+        std::lock_guard<std::mutex> lock(extMapMutex_);
+        symbolExtensionMap = symbolExtensionMap_;
+    }
+
+    std::vector<std::shared_ptr<ExternalEntityProviderAdapter>> entityProviders;
+    {
+        std::lock_guard<std::mutex> lock(entityMutex_);
+        entityProviders = entityProviders_;
+    }
+
     if (meta_) {
         std::vector<std::string> hashes;
         hashes.reserve(tasks.size());
@@ -181,6 +196,24 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
             auto infoRes = meta_->batchGetDocumentsByHash(hashes);
             if (infoRes) {
                 infoMap = std::move(infoRes).value();
+
+                std::vector<int64_t> docIds;
+                docIds.reserve(infoMap.size());
+                for (const auto& [_, info] : infoMap) {
+                    if (info.id >= 0) {
+                        docIds.push_back(info.id);
+                    }
+                }
+
+                if (!docIds.empty()) {
+                    auto tagsRes = meta_->batchGetDocumentTags(docIds);
+                    if (tagsRes) {
+                        tagsByDocId = std::move(tagsRes).value();
+                    } else {
+                        spdlog::warn("[PostIngestQueue] batchGetDocumentTags failed: {}",
+                                     tagsRes.error().message);
+                    }
+                }
             } else {
                 spdlog::warn("[PostIngestQueue] batchGetDocumentsByHash failed: {}",
                              infoRes.error().message);
@@ -192,9 +225,17 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         try {
             auto it = infoMap.find(task.hash);
             if (it != infoMap.end()) {
-                processMetadataStage(task.hash, task.mime, it->second);
+                const auto tagsIt = tagsByDocId.find(it->second.id);
+                const std::vector<std::string>* tags =
+                    (tagsIt != tagsByDocId.end()) ? &tagsIt->second : nullptr;
+                processMetadataStage(task.hash, task.mime, it->second, tags ? tags : &kEmptyTags,
+                                     symbolExtensionMap, entityProviders);
+
             } else {
-                processMetadataStage(task.hash, task.mime, std::nullopt);
+                // Avoid extra metadata lookup for tags on the fallback path.
+                // An empty override signals "no tags" but still skips per-doc tag query.
+                processMetadataStage(task.hash, task.mime, std::nullopt, &kEmptyTags,
+                                     symbolExtensionMap, entityProviders);
             }
             // Dispatch embedding immediately after FTS5 extraction to enable parallelism
             // between FTS5 work on remaining docs and embedding generation
@@ -209,10 +250,11 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
 }
 
 void PostIngestQueue::enqueue(Task t) {
+    static constexpr const char* kChannelName = "post_ingest";
     const std::size_t channelCapacity = resolveChannelCapacity();
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
-            "post_ingest", channelCapacity);
+            kChannelName, channelCapacity);
 
     InternalEventBus::PostIngestTask task;
     task.hash = std::move(t.hash);
@@ -235,10 +277,11 @@ void PostIngestQueue::enqueue(Task t) {
 }
 
 bool PostIngestQueue::tryEnqueue(const Task& t) {
+    static constexpr const char* kChannelName = "post_ingest";
     const std::size_t channelCapacity = resolveChannelCapacity();
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
-            "post_ingest", channelCapacity);
+            kChannelName, channelCapacity);
 
     InternalEventBus::PostIngestTask task;
     task.hash = t.hash;
@@ -248,10 +291,11 @@ bool PostIngestQueue::tryEnqueue(const Task& t) {
 }
 
 bool PostIngestQueue::tryEnqueue(Task&& t) {
+    static constexpr const char* kChannelName = "post_ingest";
     const std::size_t channelCapacity = resolveChannelCapacity();
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
-            "post_ingest", channelCapacity);
+            kChannelName, channelCapacity);
 
     InternalEventBus::PostIngestTask task;
     task.hash = std::move(t.hash);
@@ -261,16 +305,48 @@ bool PostIngestQueue::tryEnqueue(Task&& t) {
 }
 
 std::size_t PostIngestQueue::size() const {
+    static constexpr const char* kChannelName = "post_ingest";
     const std::size_t channelCapacity = resolveChannelCapacity();
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
-            "post_ingest", channelCapacity);
+            kChannelName, channelCapacity);
     return channel ? channel->size_approx() : 0;
 }
 
 void PostIngestQueue::processTask(const std::string& hash, const std::string& mime) {
     try {
-        processMetadataStage(hash, mime, std::nullopt);
+        std::optional<metadata::DocumentInfo> info;
+        std::vector<std::string> tags;
+
+        if (meta_) {
+            auto infoRes = meta_->batchGetDocumentsByHash(std::vector<std::string>{hash});
+            if (infoRes) {
+                auto& infoMap = infoRes.value();
+                auto it = infoMap.find(hash);
+                if (it != infoMap.end() && it->second.id >= 0) {
+                    info = it->second;
+
+                    auto tagsRes = meta_->batchGetDocumentTags(std::vector<int64_t>{it->second.id});
+                    if (tagsRes) {
+                        auto& tagsById = tagsRes.value();
+                        auto tagsIt = tagsById.find(it->second.id);
+                        if (tagsIt != tagsById.end()) {
+                            tags = tagsIt->second;
+                        }
+                    } else {
+                        spdlog::warn("[PostIngestQueue] batchGetDocumentTags failed: {}",
+                                     tagsRes.error().message);
+                    }
+                }
+            } else {
+                spdlog::warn("[PostIngestQueue] batchGetDocumentsByHash failed: {}",
+                             infoRes.error().message);
+            }
+        }
+
+        // If metadata lookup didn't find a document, still skip per-doc tag query.
+        static const std::vector<std::string> kEmptyTags;
+        processMetadataStage(hash, mime, info, info ? &tags : &kEmptyTags, {}, {});
         processEmbeddingStage(hash, mime);
         processed_++;
         InternalEventBus::instance().incPostConsumed();
@@ -280,8 +356,27 @@ void PostIngestQueue::processTask(const std::string& hash, const std::string& mi
     }
 }
 
-void PostIngestQueue::processMetadataStage(const std::string& hash, const std::string& mime,
-                                           const std::optional<metadata::DocumentInfo>& infoOpt) {
+namespace {
+
+inline bool extensionSupportsEntityProviders(
+    const std::vector<std::shared_ptr<yams::daemon::ExternalEntityProviderAdapter>>& providers,
+    const std::string& extension) {
+    for (const auto& provider : providers) {
+        if (provider && provider->supports(extension)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+void PostIngestQueue::processMetadataStage(
+    const std::string& hash, const std::string& mime,
+    const std::optional<metadata::DocumentInfo>& infoOpt,
+    const std::vector<std::string>* tagsOverride,
+    const std::unordered_map<std::string, std::string>& symbolExtensionMap,
+    const std::vector<std::shared_ptr<ExternalEntityProviderAdapter>>& entityProviders) {
     if (!store_ || !meta_) {
         spdlog::warn("[PostIngestQueue] store or metadata unavailable; dropping task {}", hash);
         return;
@@ -322,10 +417,8 @@ void PostIngestQueue::processMetadataStage(const std::string& hash, const std::s
             spdlog::info("[PostIngestQueue] no text extracted for {} (mime={}, ext={})", hash,
                          mimeType, extension);
             if (docId >= 0) {
-                auto updated = info;
-                updated.contentExtracted = false;
-                updated.extractionStatus = metadata::ExtractionStatus::Failed;
-                auto updateRes = meta_->updateDocument(updated);
+                auto updateRes = meta_->updateDocumentExtractionStatus(
+                    docId, false, metadata::ExtractionStatus::Failed, "No text extracted");
                 if (!updateRes) {
                     spdlog::warn("[PostIngestQueue] Failed to mark extraction failed for {}: {}",
                                  hash, updateRes.error().message);
@@ -348,39 +441,29 @@ void PostIngestQueue::processMetadataStage(const std::string& hash, const std::s
         }
 
         if (docId >= 0) {
-            auto tagsRes = meta_->getDocumentTags(docId);
             std::vector<std::string> tags;
-            if (tagsRes && !tagsRes.value().empty()) {
-                tags = tagsRes.value();
+            if (tagsOverride) {
+                tags = *tagsOverride;
             }
             dispatchToKgChannel(hash, docId, fileName, std::move(tags));
 
             // Dispatch symbol extraction for code files (if plugin supports this extension)
             {
-                std::lock_guard<std::mutex> lock(extMapMutex_);
                 // Extension map keys don't have leading dots, but DB stores with dots
                 std::string extKey = extension;
                 if (!extKey.empty() && extKey[0] == '.') {
                     extKey = extKey.substr(1);
                 }
-                auto it = symbolExtensionMap_.find(extKey);
-                if (it != symbolExtensionMap_.end()) {
+                auto it = symbolExtensionMap.find(extKey);
+                if (it != symbolExtensionMap.end()) {
                     dispatchToSymbolChannel(hash, docId, fileName, it->second);
                 }
             }
 
-            // Dispatch entity extraction for binary files (if entity provider supports this
+            // Dispatch entity extraction for binary files (if any entity provider supports this
             // extension)
-            {
-                std::lock_guard<std::mutex> lock(entityMutex_);
-                spdlog::debug("[PostIngestQueue] Checking {} entity providers for ext={}",
-                              entityProviders_.size(), extension);
-                for (const auto& provider : entityProviders_) {
-                    if (provider && provider->supports(extension)) {
-                        dispatchToEntityChannel(hash, docId, fileName, extension);
-                        break; // Only dispatch to first matching provider
-                    }
-                }
+            if (extensionSupportsEntityProviders(entityProviders, extension)) {
+                dispatchToEntityChannel(hash, docId, fileName, extension);
             }
         }
     } catch (const std::exception& e) {
@@ -431,6 +514,7 @@ void PostIngestQueue::processEmbeddingStage(const std::string& hash, const std::
         }
 
         InternalEventBus::EmbedJob job;
+        job.hashes.reserve(1);
         job.hashes.push_back(hash);
         job.batchSize = 1;
         job.skipExisting = true;

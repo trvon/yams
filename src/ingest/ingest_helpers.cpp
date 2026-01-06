@@ -21,19 +21,16 @@ Result<void> persist_content_and_index(metadata::IMetadataRepository& meta, int6
         double langConfidence = 0.0;
         contentRow.language =
             yams::extraction::LanguageDetector::detectLanguage(text, &langConfidence);
+
         if (const auto up = meta.insertContent(contentRow); !up) {
             return Result<void>(Error{up.error()});
         }
-        if (auto r = meta.indexDocumentContent(docId, title, text, mime); !r) {
+        if (auto r = meta.indexDocumentContentTrusted(docId, title, text, mime); !r) {
             return Result<void>(Error{r.error()});
         }
+
         (void)meta.updateFuzzyIndex(docId);
-        if (auto d = meta.getDocument(docId); d && d.value().has_value()) {
-            auto updated = d.value().value();
-            updated.contentExtracted = true;
-            updated.extractionStatus = metadata::ExtractionStatus::Success;
-            (void)meta.updateDocument(updated);
-        }
+        (void)meta.updateDocumentExtractionStatus(docId, true, metadata::ExtractionStatus::Success);
         return Result<void>();
     } catch (const std::exception& e) {
         return Result<void>(Error{ErrorCode::InternalError, e.what()});

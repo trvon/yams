@@ -717,16 +717,11 @@ public:
             (void)co_await retryMetadataOp(
                 [&]() { return ctx_.metadataRepo->updateFuzzyIndex(info.id); });
 
-            // Mark extraction success for this light path
-            auto d =
-                co_await retryMetadataOp([&]() { return ctx_.metadataRepo->getDocument(info.id); });
-            if (d && d.value().has_value()) {
-                auto updated = *d.value();
-                updated.contentExtracted = true;
-                updated.extractionStatus = metadata::ExtractionStatus::Success;
-                (void)co_await retryMetadataOp(
-                    [&]() { return ctx_.metadataRepo->updateDocument(updated); });
-            }
+            // Mark extraction success for this light path (avoid read-modify-write)
+            (void)co_await retryMetadataOp([&]() {
+                return ctx_.metadataRepo->updateDocumentExtractionStatus(
+                    info.id, true, metadata::ExtractionStatus::Success);
+            });
 
             co_return Result<void>();
         } catch (const std::exception& e) {

@@ -67,7 +67,12 @@ public:
     Result<void> bind(int index, std::span<const std::byte> blob);
     // C++20 chrono support (seconds precision)
     Result<void> bind(int index, std::chrono::sys_seconds tp);
-    Result<void> bind(int index, const char* value) { return bind(index, std::string_view(value)); }
+    Result<void> bind(int index, const char* value) {
+        if (value == nullptr) {
+            return bind(index, std::nullptr_t{});
+        }
+        return bind(index, std::string_view{value});
+    }
 
     /**
      * @brief Bind multiple parameters using variadic templates
