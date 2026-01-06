@@ -76,10 +76,13 @@ private:
  */
 std::unordered_map<std::string, std::string> buildExtensionLanguageMap(
     const std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>>& extractors) {
+    // Defensive: tests may provide placeholder adapters.
+    // Only query extractors that have a live vtable.
+
     std::unordered_map<std::string, std::string> result;
 
     for (const auto& extractor : extractors) {
-        if (!extractor)
+        if (!extractor || !extractor->table())
             continue;
 
         auto supported = extractor->getSupportedExtensions();
@@ -184,6 +187,20 @@ RepairCoordinator::RepairCoordinator(ServiceManager* services, StateComponent* s
                                      std::function<size_t()> activeConnFn, Config cfg)
     : services_(services), state_(state), activeConnFn_(std::move(activeConnFn)),
       cfg_(std::move(cfg)), shutdownState_(std::make_shared<ShutdownState>()) {}
+
+std::shared_ptr<GraphComponent> RepairCoordinator::getGraphComponentForScheduling() const {
+    return services_ ? services_->getGraphComponent() : nullptr;
+}
+
+std::shared_ptr<metadata::KnowledgeGraphStore> RepairCoordinator::getKgStoreForScheduling() const {
+    return services_ ? services_->getKgStore() : nullptr;
+}
+
+const std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>>&
+RepairCoordinator::getSymbolExtractorsForScheduling() const {
+    static const std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> kEmpty;
+    return services_ ? services_->getSymbolExtractors() : kEmpty;
+}
 
 RepairCoordinator::~RepairCoordinator() {
     stop();
@@ -309,8 +326,8 @@ void RepairCoordinator::onDocumentAdded(const DocumentAddedEvent& event) {
     // Query plugins dynamically for supported languages - no static checks
     try {
         if (services_) {
-            auto gc = services_->getGraphComponent();
-            auto symbolExtractors = services_->getSymbolExtractors();
+            auto gc = getGraphComponentForScheduling();
+            const auto& symbolExtractors = getSymbolExtractorsForScheduling();
 
             if (gc && !symbolExtractors.empty()) {
                 static thread_local std::unordered_map<std::string, std::string> extToLang;
@@ -329,9 +346,45 @@ void RepairCoordinator::onDocumentAdded(const DocumentAddedEvent& event) {
                 if (dotPos != std::string::npos) {
                     extension = event.path.substr(dotPos + 1); // Skip the dot
                 }
+                // The plugin map stores both "cpp" and ".cpp" forms in some callers.
+                // Try the plain form first (current behavior), then the dotted form.
+                std::string dottedExtension;
+                if (!extension.empty()) {
+                    dottedExtension = "." + extension;
+                }
 
                 auto it = extToLang.find(extension);
+                if (it == extToLang.end() && !dottedExtension.empty()) {
+                    it = extToLang.find(dottedExtension);
+                }
                 if (it != extToLang.end()) {
+                    // Avoid re-queuing extraction for documents that already have KG entities.
+                    // This is important because RepairCoordinator also runs during daemon startup.
+                    auto kg = getKgStoreForScheduling();
+                    std::optional<std::int64_t> docId;
+                    if (kg) {
+                        auto idRes = kg->getDocumentIdByHash(event.hash);
+                        if (idRes.has_value()) {
+                            docId = idRes.value();
+                        }
+                    }
+
+                    bool alreadyExtracted = false;
+                    if (kg && docId.has_value()) {
+                        // Any prior doc-entity record implies extraction already happened.
+                        auto entRes = kg->getDocEntitiesForDocument(docId.value(), 1, 0);
+                        if (entRes.has_value() && !entRes.value().empty()) {
+                            alreadyExtracted = true;
+                        }
+                    }
+
+                    if (alreadyExtracted) {
+                        spdlog::debug(
+                            "RepairCoordinator: skip symbol extraction for {} (already extracted)",
+                            event.hash.substr(0, 12));
+                        return;
+                    }
+
                     GraphComponent::EntityExtractionJob j;
                     j.documentHash = event.hash;
                     j.filePath = event.path;

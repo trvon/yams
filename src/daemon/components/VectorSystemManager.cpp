@@ -7,7 +7,6 @@
 #include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/vector/vector_database.h>
-#include <yams/vector/vector_index_manager.h>
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -41,12 +40,6 @@ Result<void> VectorSystemManager::initialize() {
 }
 
 void VectorSystemManager::shutdown() {
-    // Save index if present
-    if (vectorIndexManager_) {
-        spdlog::debug("[VectorSystemManager] Shutting down vector index manager");
-        vectorIndexManager_.reset();
-    }
-
     if (vectorDatabase_) {
         spdlog::debug("[VectorSystemManager] Shutting down vector database");
         vectorDatabase_.reset();
@@ -292,103 +285,11 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
     return Result<bool>(true);
 }
 
-bool VectorSystemManager::initializeIndexManager(const std::filesystem::path& dataDir,
-                                                 size_t dimension) {
-    if (dimension == 0) {
-        // Try to get from database config
-        if (vectorDatabase_) {
-            dimension = vectorDatabase_->getConfig().embedding_dim;
-        }
-    }
-
-    if (dimension == 0) {
-        spdlog::warn("[VectorSystemManager] Cannot init index manager: dimension unknown");
-        return false;
-    }
-
-    try {
-        vector::IndexConfig indexConfig;
-        indexConfig.dimension = dimension;
-        indexConfig.max_elements = ConfigResolver::readVectorMaxElements();
-        indexConfig.hnsw_ef_construction = 200;
-        indexConfig.hnsw_m = 16;
-
-        vectorIndexManager_ = std::make_shared<vector::VectorIndexManager>(indexConfig);
-        auto initRes = vectorIndexManager_->initialize();
-
-        if (!initRes) {
-            spdlog::warn("[VectorSystemManager] Failed to initialize VectorIndexManager: {}",
-                         initRes.error().message);
-            vectorIndexManager_.reset();
-            return false;
-        }
-
-        spdlog::info(
-            "[VectorSystemManager] VectorIndexManager initialized with dim={}, max_elements={}",
-            dimension, indexConfig.max_elements);
-        return true;
-    } catch (const std::exception& e) {
-        spdlog::error("[VectorSystemManager] Exception initializing index manager: {}", e.what());
-        return false;
-    }
-}
-
-bool VectorSystemManager::loadPersistedIndex(const std::filesystem::path& indexPath) {
-    if (!vectorIndexManager_) {
-        spdlog::warn("[VectorSystemManager] Cannot load index: manager not initialized");
-        return false;
-    }
-
-    namespace fs = std::filesystem;
-    if (!fs::exists(indexPath)) {
-        spdlog::debug("[VectorSystemManager] No persisted index at {}", indexPath.string());
-        return false;
-    }
-
-    auto loadRes = vectorIndexManager_->loadIndex(indexPath.string());
-    if (!loadRes) {
-        spdlog::warn("[VectorSystemManager] Failed to load index: {}", loadRes.error().message);
-        return false;
-    }
-
-    auto stats = vectorIndexManager_->getStats();
-    spdlog::info("[VectorSystemManager] Loaded vector index with {} vectors", stats.num_vectors);
-    return stats.num_vectors > 0;
-}
-
-bool VectorSystemManager::saveIndex(const std::filesystem::path& indexPath) {
-    if (!vectorIndexManager_) {
-        return false;
-    }
-
-    auto stats = vectorIndexManager_->getStats();
-    if (stats.num_vectors == 0) {
-        spdlog::debug("[VectorSystemManager] No vectors to save");
-        return true;
-    }
-
-    auto saveRes = vectorIndexManager_->saveIndex(indexPath.string());
-    if (!saveRes) {
-        spdlog::warn("[VectorSystemManager] Failed to save index: {}", saveRes.error().message);
-        return false;
-    }
-
-    spdlog::info("[VectorSystemManager] Saved {} vectors to {}", stats.num_vectors,
-                 indexPath.string());
-    return true;
-}
-
 size_t VectorSystemManager::getEmbeddingDimension() const {
     if (vectorDatabase_) {
         return vectorDatabase_->getConfig().embedding_dim;
     }
     return 0;
-}
-
-void VectorSystemManager::alignDimensions() {
-    // Called after embedding generator is initialized
-    // Currently a no-op - dimensions are set at init time
-    spdlog::debug("[VectorSystemManager] alignDimensions called");
 }
 
 } // namespace yams::daemon

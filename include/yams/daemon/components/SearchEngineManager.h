@@ -21,7 +21,6 @@ class MetadataRepository;
 } // namespace yams::metadata
 
 namespace yams::vector {
-class VectorIndexManager;
 class VectorDatabase;
 class EmbeddingGenerator;
 } // namespace yams::vector
@@ -58,7 +57,6 @@ public:
      *
      * @param metadataRepo Metadata repository dependency
      * @param vectorDatabase Vector database (required for SearchEngine)
-     * @param vectorManager Optional vector index manager (for vector search)
      * @param embeddingGen Optional embedding generator (for vector search)
      * @param reason Human-readable reason for build (e.g., "user_initiated", "auto_repair")
      * @param timeoutMs Build timeout in milliseconds
@@ -68,7 +66,6 @@ public:
     boost::asio::awaitable<Result<std::shared_ptr<yams::search::SearchEngine>>>
     buildEngine(std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo,
                 std::shared_ptr<yams::vector::VectorDatabase> vectorDatabase,
-                std::shared_ptr<yams::vector::VectorIndexManager> vectorManager,
                 std::shared_ptr<yams::vector::EmbeddingGenerator> embeddingGen,
                 const std::string& reason, int timeoutMs,
                 boost::asio::any_io_executor workerExecutor);

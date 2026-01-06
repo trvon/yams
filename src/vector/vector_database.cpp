@@ -526,6 +526,22 @@ public:
         return result.value();
     }
 
+    std::map<std::string, VectorRecord>
+    getVectorsBatch(const std::vector<std::string>& chunk_ids) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!initialized_) {
+            return {};
+        }
+
+        auto result = backend_->getVectorsBatch(chunk_ids);
+        if (!result) {
+            return {};
+        }
+
+        return result.value();
+    }
+
     std::vector<VectorRecord> getVectorsByDocument(const std::string& document_hash) const {
         std::lock_guard<std::mutex> lock(mutex_);
 
@@ -798,6 +814,11 @@ std::vector<VectorRecord> VectorDatabase::search(const std::vector<float>& query
 
 std::optional<VectorRecord> VectorDatabase::getVector(const std::string& chunk_id) const {
     return pImpl->getVector(chunk_id);
+}
+
+std::map<std::string, VectorRecord>
+VectorDatabase::getVectorsBatch(const std::vector<std::string>& chunk_ids) const {
+    return pImpl->getVectorsBatch(chunk_ids);
 }
 
 std::vector<VectorRecord>

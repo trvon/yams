@@ -14,7 +14,6 @@ class KnowledgeGraphStore;
 } // namespace metadata
 
 namespace vector {
-class VectorIndexManager;
 class VectorDatabase;
 class EmbeddingGenerator;
 } // namespace vector
@@ -27,7 +26,7 @@ namespace yams::search {
  *
  * Central builder for composing a SearchEngine in a single place so both CLI
  * and MCP server can share composition logic. Handles:
- * - Wiring VectorIndexManager + VectorDatabase + MetadataRepository
+ * - Wiring VectorDatabase + MetadataRepository
  * - Optional KG scorer injection when a KnowledgeGraphStore is available
  * - Conservative, enabled-by-default settings
  *
@@ -80,11 +79,6 @@ public:
 public:
     SearchEngineBuilder() = default;
 
-    SearchEngineBuilder& withVectorIndex(std::shared_ptr<yams::vector::VectorIndexManager> vim) {
-        vectorIndex_ = std::move(vim);
-        return *this;
-    }
-
     SearchEngineBuilder& withVectorDatabase(std::shared_ptr<yams::vector::VectorDatabase> vdb) {
         vectorDatabase_ = std::move(vdb);
         return *this;
@@ -121,7 +115,6 @@ public:
     }
 
 private:
-    std::shared_ptr<yams::vector::VectorIndexManager> vectorIndex_;
     std::shared_ptr<yams::vector::VectorDatabase> vectorDatabase_;
     std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore_;

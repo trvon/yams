@@ -72,13 +72,21 @@ TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke insert and search basic",
 
     // Insert a simple vector
     std::vector<float> embedding = {1.0f, 0.0f, 0.0f, 0.0f};
-    REQUIRE(db.addVector("test_hash_001", embedding));
+    VectorRecord rec;
+    rec.chunk_id = "test_hash_001";
+    rec.document_hash = "test_doc_001";
+    rec.embedding = embedding;
+    rec.content = "Test content";
+    rec.start_offset = 0;
+    rec.end_offset = 12;
+    REQUIRE(db.insertVector(rec));
 
     // Search for it
-    auto results = db.search(embedding, 1);
-    REQUIRE(results.has_value());
-    REQUIRE(results->size() == 1);
-    CHECK(results->at(0).hash == "test_hash_001");
+    VectorSearchParams params;
+    params.k = 1;
+    auto results = db.search(embedding, params);
+    REQUIRE(results.size() == 1);
+    CHECK(results[0].chunk_id == "test_hash_001");
 }
 
 TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke get vector count", "[vector][smoke][catch2]") {
@@ -93,15 +101,20 @@ TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke get vector count", "[vector][s
     VectorDatabase db(config);
     REQUIRE(db.initialize());
 
-    auto count = db.getVectorCount();
-    REQUIRE(count.has_value());
-    CHECK(*count == 0);
+    size_t count = db.getVectorCount();
+    CHECK(count == 0);
 
     // Add a vector
     std::vector<float> embedding = {1.0f, 0.0f, 0.0f, 0.0f};
-    REQUIRE(db.addVector("test_hash_002", embedding));
+    VectorRecord rec;
+    rec.chunk_id = "test_hash_002";
+    rec.document_hash = "test_doc_002";
+    rec.embedding = embedding;
+    rec.content = "Test content";
+    rec.start_offset = 0;
+    rec.end_offset = 12;
+    REQUIRE(db.insertVector(rec));
 
     count = db.getVectorCount();
-    REQUIRE(count.has_value());
-    CHECK(*count == 1);
+    CHECK(count == 1);
 }

@@ -4,7 +4,6 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_engine.h>
 #include <yams/vector/vector_database.h>
-#include <yams/vector/vector_index_manager.h>
 
 #include <spdlog/spdlog.h>
 
@@ -20,10 +19,6 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
 
     // Validate required dependencies
     const bool vectorRequested = options.config.vectorWeight > 0.0f;
-    if (vectorRequested && !vectorIndex_) {
-        return Error{ErrorCode::InvalidArgument,
-                     "SearchEngineBuilder: VectorIndexManager not provided"};
-    }
     if (vectorRequested && !vectorDatabase_) {
         return Error{ErrorCode::InvalidArgument,
                      "SearchEngineBuilder: VectorDatabase not provided"};
@@ -38,8 +33,8 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
 
     // Create the SearchEngine using the factory function
     // Factory returns unique_ptr, convert to shared_ptr for builder interface
-    auto engine = createSearchEngine(metadataRepo_, vectorDatabase_, vectorIndex_,
-                                     embeddingGenerator_, kgStore_, cfg);
+    auto engine =
+        createSearchEngine(metadataRepo_, vectorDatabase_, embeddingGenerator_, kgStore_, cfg);
     if (!engine) {
         return Error{ErrorCode::InvalidState, "Failed to create SearchEngine"};
     }

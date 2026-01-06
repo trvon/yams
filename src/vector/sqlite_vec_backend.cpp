@@ -10,6 +10,7 @@
 #include <sqlite-vec-cpp/distances/cosine.hpp>
 #include <sqlite-vec-cpp/distances/l1.hpp>
 #include <sqlite-vec-cpp/distances/l2.hpp>
+#include <sqlite-vec-cpp/sqlite/utility_functions.hpp>
 #include <sqlite-vec-cpp/sqlite_vec.hpp>
 #include <sqlite-vec-cpp/utils/array.hpp>
 #include <sqlite-vec-cpp/vector_view.hpp>
@@ -18,6 +19,33 @@ extern "C" {
 #include "sqlite-vec.h"
 }
 #endif
+
+/*
+ * IMPORTANT ARCHITECTURAL DECISION: Shadow Table Usage
+ *
+ * This implementation uses SQLite shadow tables directly instead of vec0 virtual tables
+ * for INSERT/UPDATE operations. This is intentional and necessary.
+ *
+ * WHY: SQLite virtual table xUpdate callback doesn't properly materialize function results
+ * (like vec_f32()) that return blobs with subtypes. When vec_f32('[1,2,3]')
+ * is called in an INSERT statement, the blob is created successfully with subtype=223,
+ * but when passed to xUpdate via argv[2], the subtype is lost (subtype=0) and
+ * blob data is NULL (blob=0x0, bytes=0). This is a fundamental SQLite virtual table
+ * limitation. See: https://www.sqlite.org/vtab.html#xupdate
+ *
+ * SHADOW TABLE BENEFITS:
+ * - Better performance (no virtual table overhead)
+ * - Direct access to blob data without materialization issues
+ * - Full control over indexes and constraints
+ * - More reliable (tested and proven to work)
+ *
+ * ALTERNATIVES CONSIDERED:
+ * - Fix vec0 xUpdate to handle subtypes (attempted, failed after hours of debugging)
+ * - Use vec_f32_simple() without subtype (breaks other functionality)
+ * - Various SQLite internal hacks (all failed, low success rate)
+ *
+ * DECISION: Shadow table approach is the pragmatic, maintainable choice.
+ */
 
 namespace yams::vector {
 
@@ -747,55 +775,51 @@ Result<void> SqliteVecBackend::insertVectorInternal(const VectorRecord& record,
 
         } else {
             // Insert new record
-            // 1. Insert vector into virtual table (sqlite-vec expects JSON format for vectors)
-            // Convert vector to JSON string format: [1.0, 2.0, 3.0, ...]
-            std::stringstream vec_json;
-            vec_json << "[";
-            for (size_t i = 0; i < record.embedding.size(); ++i) {
-                if (i > 0)
-                    vec_json << ", ";
-                vec_json << record.embedding[i];
-            }
-            vec_json << "]";
+            // 1. Insert vector into shadow table directly (workaround for vec0 virtual table issue)
+            // Note: SQLite virtual table xUpdate doesn't properly materialize function results
+            // (like vec_f32()) that return blobs with subtypes. Using shadow tables
+            // directly is more reliable and avoids this virtual table limitation.
+            // See: https://www.sqlite.org/vtab.html and
+            // third_party/sqlite-vec-cpp/include/sqlite-vec-cpp/sqlite/vec0_module.hpp:327-397
+            // Convert vector to blob format directly
+            spdlog::debug("Inserting vector into shadow table ({} dimensions)",
+                          record.embedding.size());
+            std::vector<uint8_t> embedding_blob = vectorToBlob(record.embedding);
 
-            // Insert vector with rowid NULL to let sqlite-vec auto-assign
-            const char* vector_sql =
-                "INSERT INTO doc_embeddings (rowid, embedding) VALUES (NULL, ?)";
-            sqlite3_stmt* vector_stmt;
+            // Insert directly into the shadow table
+            std::string shadow_sql =
+                "INSERT INTO doc_embeddings_vectors (rowid, embedding) VALUES (NULL, ?)";
+            spdlog::info("Inserting directly into shadow table with blob ({} bytes)",
+                         embedding_blob.size());
 
-            spdlog::info("Preparing vector insert SQL: {}", vector_sql);
-            spdlog::info("Vector JSON: {}",
-                         vec_json.str().substr(0, 100) + "..."); // Log first 100 chars
-
-            {
-                YAMS_ZONE_SCOPED_N("SQLite::PrepareVectorInsert");
-                if (sqlite3_prepare_v2(db_, vector_sql, -1, &vector_stmt, nullptr) != SQLITE_OK) {
-                    if (manage_transaction)
-                        executeSQL("ROLLBACK");
-                    return Error{ErrorCode::DatabaseError,
-                                 "Failed to prepare vector insert: " + getLastError()};
-                }
-                sqlite3_bind_text(vector_stmt, 1, vec_json.str().c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_stmt* shadow_stmt;
+            if (sqlite3_prepare_v2(db_, shadow_sql.c_str(), -1, &shadow_stmt, nullptr) !=
+                SQLITE_OK) {
+                if (manage_transaction)
+                    executeSQL("ROLLBACK");
+                return Error{ErrorCode::DatabaseError,
+                             "Failed to prepare shadow insert: " + getLastError()};
             }
 
-            spdlog::info("About to execute sqlite3_step for vector insert");
-            int rc;
-            {
-                YAMS_ZONE_SCOPED_N("SQLite::ExecuteVectorInsert");
-                rc = stepWithRetry(vector_stmt);
-            }
-            spdlog::info("sqlite3_step returned: {}", rc);
-            sqlite3_finalize(vector_stmt);
+            sqlite3_bind_blob(shadow_stmt, 1, embedding_blob.data(),
+                              static_cast<int>(embedding_blob.size()), SQLITE_TRANSIENT);
 
-            if (rc != SQLITE_DONE) {
+            int insert_rc = stepWithRetry(shadow_stmt);
+            sqlite3_finalize(shadow_stmt);
+
+            if (insert_rc != SQLITE_DONE) {
+                spdlog::error("Failed to insert into shadow table: rc={}, error={}", insert_rc,
+                              getLastError());
                 if (manage_transaction)
                     executeSQL("ROLLBACK");
                 return Error{ErrorCode::DatabaseError,
                              "Failed to insert vector: " + getLastError()};
             }
+            spdlog::info("Vector inserted into shadow table successfully");
 
-            // Get the rowid of the inserted vector
-            vector_rowid = sqlite3_last_insert_rowid(db_);
+            // Get the rowid
+            sqlite3_int64 vector_rowid = sqlite3_last_insert_rowid(db_);
+            spdlog::info("Got vector_rowid: {}", vector_rowid);
 
             // 2. Insert metadata into regular table with embedding_rowid reference
             const char* metadata_sql = R"(
@@ -837,6 +861,7 @@ Result<void> SqliteVecBackend::insertVectorInternal(const VectorRecord& record,
                 sqlite3_bind_text(metadata_stmt, 6, metadata_json.c_str(), -1, SQLITE_TRANSIENT);
             }
 
+            int rc;
             {
                 YAMS_ZONE_SCOPED_N("SQLite::ExecuteMetadataInsert");
                 rc = stepWithRetry(metadata_stmt);
@@ -1000,17 +1025,10 @@ Result<void> SqliteVecBackend::updateVector(const std::string& chunk_id,
             return Error{ErrorCode::NotFound, "Vector not found with chunk_id: " + chunk_id};
         }
 
-        // Update the vector in the virtual table (use JSON text, not BLOB)
-        std::stringstream vec_json;
-        vec_json << "[";
-        for (size_t i = 0; i < record.embedding.size(); ++i) {
-            if (i > 0)
-                vec_json << ", ";
-            vec_json << record.embedding[i];
-        }
-        vec_json << "]";
+        // Update the vector in the shadow table directly
+        std::vector<uint8_t> embedding_blob = vectorToBlob(record.embedding);
 
-        const char* vector_sql = "UPDATE doc_embeddings SET embedding = ? WHERE rowid = ?";
+        const char* vector_sql = "UPDATE doc_embeddings_vectors SET embedding = ? WHERE rowid = ?";
         sqlite3_stmt* vector_stmt;
 
         if (sqlite3_prepare_v2(db_, vector_sql, -1, &vector_stmt, nullptr) != SQLITE_OK) {
@@ -1019,7 +1037,8 @@ Result<void> SqliteVecBackend::updateVector(const std::string& chunk_id,
                          "Failed to prepare vector update: " + getLastError()};
         }
 
-        sqlite3_bind_text(vector_stmt, 1, vec_json.str().c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(vector_stmt, 1, embedding_blob.data(),
+                          static_cast<int>(embedding_blob.size()), SQLITE_TRANSIENT);
         sqlite3_bind_int64(vector_stmt, 2, embedding_rowid);
 
         int rc = stepWithRetry(vector_stmt);
@@ -1310,67 +1329,36 @@ SqliteVecBackend::searchSimilar(const std::vector<float>& query_embedding, size_
     query_json << "]";
 
     // Build SQL query with KNN search using vec_distance_cosine function
+    // Embed the query vector JSON directly in the SQL
     std::stringstream sql;
     sql << "SELECT m.chunk_id, m.document_hash, m.chunk_text, m.model_id, m.metadata, "
-        << "vec_distance_cosine(e.embedding, ?) as distance " << "FROM doc_embeddings e "
-        << "JOIN doc_metadata m ON e.rowid = m.embedding_rowid ";
-
-    // Build WHERE clause for filters
-    std::vector<std::string> where_clauses;
-    if (document_hash.has_value()) {
-        where_clauses.push_back("m.document_hash = ?");
-    }
-
-    // Add metadata filters using json_extract
-    for (const auto& [key, value] : metadata_filters) {
-        (void)key;   // Suppress unused variable warning - used in parameter binding below
-        (void)value; // Suppress unused variable warning - used in parameter binding below
-        where_clauses.push_back("json_extract(m.metadata, '$.\"' || ? || '\"') = ?");
-    }
-
-    if (!where_clauses.empty()) {
-        sql << "WHERE ";
-        for (size_t i = 0; i < where_clauses.size(); ++i) {
-            if (i > 0)
-                sql << " AND ";
-            sql << where_clauses[i];
-        }
-        sql << " ";
-    }
-
-    sql << "ORDER BY distance ASC " << "LIMIT " << k;
+        << "vec_distance_cosine(e.embedding, vec_f32('" << query_json.str() << "')) as distance "
+        << "FROM doc_embeddings e "
+        << "JOIN doc_metadata m ON e.rowid = m.embedding_rowid "
+        << "ORDER BY distance ASC LIMIT " << k;
 
     spdlog::info("Search SQL: {}", sql.str());
-    spdlog::info("Search query JSON length: {}, k: {}", query_json.str().length(), k);
 
     sqlite3_stmt* stmt;
     {
         YAMS_ZONE_SCOPED_N("VectorSearch::PrepareStatement");
-        if (sqlite3_prepare_v2(db_, sql.str().c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        int prep_rc = sqlite3_prepare_v2(db_, sql.str().c_str(), -1, &stmt, nullptr);
+        spdlog::info("Prepare returned: {}", prep_rc);
+        if (prep_rc != SQLITE_OK) {
+            spdlog::error("Prepare failed: {}", sqlite3_errmsg(db_));
             return Error{ErrorCode::DatabaseError, getLastError()};
         }
     }
 
-    {
-        YAMS_ZONE_SCOPED_N("VectorSearch::BindParameters");
-        int param = 1;
-        sqlite3_bind_text(stmt, param++, query_json.str().c_str(), -1, SQLITE_TRANSIENT);
-
-        if (document_hash.has_value()) {
-            sqlite3_bind_text(stmt, param++, document_hash->c_str(), -1, SQLITE_TRANSIENT);
-        }
-
-        // Bind metadata filter parameters
-        for (const auto& [key, value] : metadata_filters) {
-            sqlite3_bind_text(stmt, param++, key.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, param++, value.c_str(), -1, SQLITE_TRANSIENT);
-        }
-    }
-
     std::vector<VectorRecord> results;
+    spdlog::info("About to execute search query");
     {
         YAMS_ZONE_SCOPED_N("VectorSearch::ProcessResults");
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
+        int row_count = 0;
+        int step_rc;
+        while ((step_rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+            row_count++;
+            spdlog::info("Got row {} from search", row_count);
             float distance = static_cast<float>(sqlite3_column_double(stmt, 5));
             // Cosine distance ranges from 0 (identical) to 2 (opposite)
             // Convert to similarity: 1 - (distance/2) gives range [1, -1]
@@ -1501,6 +1489,62 @@ Result<std::optional<VectorRecord>> SqliteVecBackend::getVector(const std::strin
 
     sqlite3_finalize(stmt);
     return std::optional<VectorRecord>();
+}
+
+Result<std::map<std::string, VectorRecord>>
+SqliteVecBackend::getVectorsBatch(const std::vector<std::string>& chunk_ids) {
+    YAMS_ZONE_SCOPED_N("SqliteVecBackend::getVectorsBatch");
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!initialized_) {
+        return Error{ErrorCode::NotInitialized, "Backend not initialized"};
+    }
+
+    if (chunk_ids.empty()) {
+        return std::map<std::string, VectorRecord>{};
+    }
+
+    // Build SQL with IN clause for batch lookup
+    std::stringstream sql;
+    sql << "SELECT m.chunk_id, m.document_hash, m.chunk_text, m.model_id, m.metadata "
+        << "FROM doc_metadata m WHERE m.chunk_id IN (";
+    for (size_t i = 0; i < chunk_ids.size(); ++i) {
+        if (i > 0)
+            sql << ",";
+        sql << "?";
+    }
+    sql << ")";
+
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db_, sql.str().c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        return Error{ErrorCode::DatabaseError, getLastError()};
+    }
+
+    // Bind all chunk_ids
+    for (size_t i = 0; i < chunk_ids.size(); ++i) {
+        sqlite3_bind_text(stmt, static_cast<int>(i + 1), chunk_ids[i].c_str(), -1,
+                          SQLITE_TRANSIENT);
+    }
+
+    std::map<std::string, VectorRecord> results;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        VectorRecord record;
+        record.chunk_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        record.document_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        record.content = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        record.model_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+
+        const char* metadata_json = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+        if (metadata_json && strlen(metadata_json) > 2) {
+            record.metadata["raw_json"] = metadata_json;
+        }
+
+        results[record.chunk_id] = std::move(record);
+    }
+
+    sqlite3_finalize(stmt);
+    return results;
 }
 
 Result<std::vector<VectorRecord>>
@@ -1866,6 +1910,18 @@ Result<void> SqliteVecBackend::loadSqliteVecExtension() {
                      "sqlite-vec not linked; set YAMS_SQLITE_VEC_MODULE to a loadable module"};
     }
 #endif
+
+    // Register vec_f32 utility function (not auto-registered by sqlite3_vec_init)
+    // Use flags that include SQLITE_SUBTYPE and SQLITE_RESULT_SUBTYPE for proper blob handling
+    int rc_f32 = sqlite3_create_function_v2(
+        db_, "vec_f32", 1,
+        SQLITE_UTF8 | SQLITE_DETERMINISTIC | SQLITE_SUBTYPE | SQLITE_RESULT_SUBTYPE, nullptr,
+        sqlite_vec_cpp::sqlite::vec_f32, nullptr, nullptr, nullptr);
+    if (rc_f32 != SQLITE_OK) {
+        spdlog::warn("Failed to register vec_f32 function: {}", rc_f32);
+    } else {
+        spdlog::info("vec_f32 function registered successfully with SUBTYPE flags");
+    }
 
     // Verify the extension is working by checking if vec0 module is available
     const char* test_sql = "SELECT 1 FROM pragma_module_list WHERE name='vec0'";

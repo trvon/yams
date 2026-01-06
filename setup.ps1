@@ -440,6 +440,13 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
     if ($enableZyp) { $mesonArgs += '-Dplugin-zyp=true' }
     if ($mesonToolchainArg) { $mesonArgs += $mesonToolchainArg }
     if ($mesonToolchainFile) { $mesonArgs += $mesonToolchainFile }
+    
+    # Enable vector tests for Debug/Profiling/Fuzzing builds (parity with setup.sh)
+    if ($BuildType -in @('Debug','Profiling','Fuzzing')) {
+        Write-Host "Enabling vector/embedding tests for $BuildType build"
+        $mesonArgs += '-Denable-vector-tests=true'
+    }
+    
     $mesonArgs += $extraMesonFlags
     
     Write-Host "DEBUG: Final meson command: meson $($mesonArgs -join ' ')"
@@ -451,6 +458,12 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
     $reconfigureArgs = @('setup', '--reconfigure', $buildDir, "-Dprefix=$InstallPrefix")
     if ($mesonToolchainArg) { $reconfigureArgs += $mesonToolchainArg }
     if ($mesonToolchainFile) { $reconfigureArgs += $mesonToolchainFile }
+    
+    # Ensure vector tests are enabled for Debug/Profiling/Fuzzing builds (parity with setup.sh)
+    if ($BuildType -in @('Debug','Profiling','Fuzzing')) {
+        $reconfigureArgs += '-Denable-vector-tests=true'
+    }
+    
     & meson @reconfigureArgs
 }
 

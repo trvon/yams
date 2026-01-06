@@ -160,6 +160,47 @@ TEST_CASE("GraphComponent: Document ingestion succeeds (stub)", "[daemon][graph]
     // REQUIRE(tagNodeResult.value().has_value());
 }
 
+TEST_CASE("GraphComponent: Dedupe predicate detects existing doc entities",
+          "[daemon][graph][dedupe]") {
+    GraphComponentTestFixture fixture;
+
+    // Insert a document row.
+    DocumentInfo doc;
+    doc.fileName = "example.cpp";
+    doc.filePath = "/tmp/example.cpp";
+    doc.fileExtension = "cpp";
+    doc.fileSize = 123;
+    doc.sha256Hash = "hash-abc";
+    doc.mimeType = "text/x-c++";
+    doc.setCreatedTime(1);
+    doc.setModifiedTime(1);
+    doc.setIndexedTime(1);
+    auto docIdRes = fixture.metadataRepo->insertDocument(doc);
+    REQUIRE(docIdRes.has_value());
+
+    // Seed a doc entity.
+    KGNode sym;
+    sym.nodeKey = "sym:hash-abc:F";
+    sym.label = std::string("F");
+    sym.type = std::string("symbol");
+    auto symIdRes = fixture.kgStore->upsertNode(sym);
+    REQUIRE(symIdRes.has_value());
+
+    DocEntity de;
+    de.documentId = docIdRes.value();
+    de.entityText = "F";
+    de.nodeId = symIdRes.value();
+    de.startOffset = 0;
+    de.endOffset = 1;
+    de.confidence = 1.0f;
+    de.extractor = std::string("test");
+    REQUIRE(fixture.kgStore->addDocEntities({de}).has_value());
+
+    CHECK(GraphComponent::shouldSkipEntityExtraction(fixture.kgStore, "hash-abc"));
+    CHECK_FALSE(GraphComponent::shouldSkipEntityExtraction(fixture.kgStore, "hash-missing"));
+    CHECK_FALSE(GraphComponent::shouldSkipEntityExtraction(nullptr, "hash-abc"));
+}
+
 TEST_CASE("GraphComponent: Document ingestion when not initialized", "[daemon][graph][ingestion]") {
     GraphComponentTestFixture fixture;
     GraphComponent component(fixture.metadataRepo, fixture.kgStore);

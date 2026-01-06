@@ -87,30 +87,8 @@ void CheckpointManager::launchCheckpointLoop() {
 
             while (!stopFlag->load(std::memory_order_acquire) &&
                    self->running_.load(std::memory_order_acquire)) {
-                bool needsCheckpoint = false;
-                size_t currentInserts = 0;
-
-                if (self->deps_.vectorSystemManager) {
-                    if (auto indexMgr = self->deps_.vectorSystemManager->getVectorIndexManager()) {
-                        auto stats = indexMgr->getStats();
-                        currentInserts = stats.total_inserts;
-                        size_t lastInserts =
-                            self->stats_.last_vector_insert_count.load(std::memory_order_relaxed);
-
-                        if (currentInserts > lastInserts &&
-                            (currentInserts - lastInserts) >=
-                                self->config_.vector_index_insert_threshold) {
-                            needsCheckpoint = true;
-                            spdlog::debug(
-                                "[CheckpointManager] Insert threshold reached ({} new inserts)",
-                                currentInserts - lastInserts);
-                        }
-                    }
-                }
-
-                if (needsCheckpoint) {
-                    self->checkpointNow();
-                }
+                // VectorIndexManager removed - checkpoints are no longer needed for vector index
+                // VectorDatabase uses SQLite which has its own transaction/WAL mechanism
 
                 timer.expires_after(self->config_.checkpoint_interval);
                 try {
@@ -122,9 +100,7 @@ void CheckpointManager::launchCheckpointLoop() {
                     throw;
                 }
 
-                if (!needsCheckpoint) {
-                    self->checkpointNow();
-                }
+                self->checkpointNow();
             }
 
             spdlog::debug("[CheckpointManager] Checkpoint loop stopped");
@@ -134,36 +110,10 @@ void CheckpointManager::launchCheckpointLoop() {
 }
 
 bool CheckpointManager::checkpointVectorIndex() {
-    if (!deps_.vectorSystemManager) {
-        return true;
-    }
-
-    auto indexPath = config_.data_dir / "vector_index.bin";
-
-    try {
-        if (deps_.vectorSystemManager->saveIndex(indexPath)) {
-            auto now = std::chrono::system_clock::now();
-            auto epoch =
-                std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
-            stats_.last_vector_checkpoint_epoch.store(static_cast<uint64_t>(epoch),
-                                                      std::memory_order_relaxed);
-            stats_.vector_checkpoints.fetch_add(1, std::memory_order_relaxed);
-
-            if (auto indexMgr = deps_.vectorSystemManager->getVectorIndexManager()) {
-                auto stats = indexMgr->getStats();
-                stats_.last_vector_insert_count.store(stats.total_inserts,
-                                                      std::memory_order_relaxed);
-            }
-
-            spdlog::debug("[CheckpointManager] Vector index checkpoint completed");
-            return true;
-        }
-    } catch (const std::exception& e) {
-        spdlog::warn("[CheckpointManager] Vector index checkpoint failed: {}", e.what());
-        stats_.checkpoint_errors.fetch_add(1, std::memory_order_relaxed);
-    }
-
-    return false;
+    // VectorIndexManager removed - SearchEngine uses VectorDatabase directly
+    // VectorDatabase uses SQLite which handles persistence via transactions/WAL
+    spdlog::debug("[CheckpointManager] Vector index checkpoint skipped (using VectorDatabase)");
+    return true;
 }
 
 bool CheckpointManager::checkpointHotzone() {

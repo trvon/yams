@@ -28,6 +28,8 @@ class ServiceManager;
 
 class GraphComponent {
 public:
+    static bool shouldSkipEntityExtraction(const std::shared_ptr<metadata::KnowledgeGraphStore>& kg,
+                                           const std::string& documentHash);
     GraphComponent(std::shared_ptr<metadata::MetadataRepository> metadataRepo,
                    std::shared_ptr<metadata::KnowledgeGraphStore> kgStore,
                    ServiceManager* serviceManager = nullptr);

@@ -137,6 +137,8 @@ public:
 
     // Utility operations
     std::optional<VectorRecord> getVector(const std::string& chunk_id) const;
+    std::map<std::string, VectorRecord>
+    getVectorsBatch(const std::vector<std::string>& chunk_ids) const;
     std::vector<VectorRecord> getVectorsByDocument(const std::string& document_hash) const;
     bool hasEmbedding(const std::string& document_hash) const;
 

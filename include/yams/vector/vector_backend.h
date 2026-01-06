@@ -91,6 +91,13 @@ public:
     virtual Result<std::optional<VectorRecord>> getVector(const std::string& chunk_id) = 0;
 
     /**
+     * @brief Get multiple vectors by chunk IDs (batch lookup)
+     * @return Map from chunk_id to VectorRecord for found records
+     */
+    virtual Result<std::map<std::string, VectorRecord>>
+    getVectorsBatch(const std::vector<std::string>& chunk_ids) = 0;
+
+    /**
      * @brief Get all vectors for a document
      */
     virtual Result<std::vector<VectorRecord>>

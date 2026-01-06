@@ -1080,6 +1080,7 @@ public:
     }
 
     Result<void> optimize() override {
+        std::unique_lock lock(mutex_);
         // Check if compaction is needed
         bool needs_compact = std::visit(
             [](const auto& index) {
@@ -1088,15 +1089,14 @@ public:
             hnsw_index_);
 
         if (needs_compact) {
-            std::unique_lock lock(mutex_);
             std::visit([](auto& index) { index.isolate_deleted(); }, hnsw_index_);
         }
         return Result<void>();
     }
 
     bool needsOptimization() const override {
-        return std::visit([](const auto& index) { return index.needs_compaction(0.2f); },
-                          hnsw_index_);
+        std::shared_lock lock(mutex_);
+        return needsOptimizationLocked();
     }
 
     size_t size() const override {
@@ -1113,10 +1113,17 @@ public:
         stats_.type = IndexType::HNSW;
         stats_.dimension = config_.dimension;
         stats_.metric = config_.distance_metric;
-        stats_.needs_optimization = needsOptimization();
+        stats_.needs_optimization = needsOptimizationLocked();
         return stats_;
     }
 
+private:
+    bool needsOptimizationLocked() const {
+        return std::visit([](const auto& index) { return index.needs_compaction(0.2f); },
+                          hnsw_index_);
+    }
+
+public:
     Result<void> serialize(std::ostream& out) const override {
         std::shared_lock lock(mutex_);
 

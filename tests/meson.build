@@ -33,6 +33,23 @@ if not catch2_main_dep.found()
   catch2_main_dep = catch2_dep
 endif
 
+# Get Catch2 partial dependency with includes for test builds
+catch2_compile_dep = []
+if catch2_dep.found()
+  catch2_compile_dep = [catch2_dep.partial_dependency(compile_args: true, includes: true)]
+endif
+
+# Also query pkg-config directly for robustness
+catch2_incs = []
+catch2_pkgconfig = find_program('pkg-config', required: false)
+if catch2_pkgconfig.found()
+  catch2_incdir = run_command(catch2_pkgconfig, '--variable=includedir', 'catch2',
+                              check: false).stdout().strip()
+  if catch2_incdir != '' and catch2_incdir.length() > 0
+    catch2_incs += [include_directories(catch2_incdir)]
+  endif
+endif
+
 # TSAN suppressions file for tests (if TSAN is enabled)
 # Must be defined early before subdirs are included
 _tsan_suppressions_file = meson.project_source_root() / 'tsan.suppressions'
@@ -221,7 +238,7 @@ incs = [
   include_directories('common'),         # shared helpers
   include_directories('../include'),     # headers
   include_directories('../tools/yams-tools/include'),
-]
+] + catch2_incs
 
 # Keep project strict, but don’t fail unit tests on common test-only warnings.
 # We downgrade selective warnings to non-errors for test targets only.
@@ -1160,6 +1177,7 @@ if catch2_dep.found()
       files(
         'unit/vector/document_chunker_catch2_test.cpp',
         'unit/vector/embedding_genai_selection_catch2_test.cpp',
+        'unit/vector/hnsw_index_catch2_test.cpp',
         'unit/vector/sqlite_vec_c_api_smoke_catch2_test.cpp',
         'unit/vector/vector_dimension_validation_catch2_test.cpp',
         'unit/vector/vector_smoke_catch2_test.cpp',

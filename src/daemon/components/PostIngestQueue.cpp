@@ -188,9 +188,6 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         }
     }
 
-    std::vector<std::string> embedHashes;
-    embedHashes.reserve(tasks.size());
-
     for (const auto& task : tasks) {
         try {
             auto it = infoMap.find(task.hash);
@@ -199,7 +196,9 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
             } else {
                 processMetadataStage(task.hash, task.mime, std::nullopt);
             }
-            embedHashes.push_back(task.hash);
+            // Dispatch embedding immediately after FTS5 extraction to enable parallelism
+            // between FTS5 work on remaining docs and embedding generation
+            processEmbeddingStage(task.hash, task.mime);
             processed_++;
             InternalEventBus::instance().incPostConsumed();
         } catch (const std::exception& e) {
@@ -207,8 +206,6 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
             failed_++;
         }
     }
-
-    processEmbeddingBatch(embedHashes);
 }
 
 void PostIngestQueue::enqueue(Task t) {

@@ -807,35 +807,8 @@ void ServiceManager::shutdown() {
         spdlog::info("[ServiceManager] Phase 6.3.5: No embedding service to shutdown");
     }
 
-    // Persist vector index when ready
-    spdlog::info("[ServiceManager] Phase 6.4: Saving vector index");
-    if (vectorIndexManager_ && state_.readiness.vectorIndexReady.load()) {
-        try {
-            auto indexPath = config_.dataDir / "vector_index.bin";
-
-            // Create directory if needed
-            std::error_code ec;
-            std::filesystem::create_directories(indexPath.parent_path(), ec);
-
-            spdlog::info("[ServiceManager] Phase 6.4: Saving vector index to '{}'",
-                         indexPath.string());
-            auto saveRes = vectorIndexManager_->saveIndex(indexPath.string());
-
-            if (!saveRes) {
-                spdlog::warn("[ServiceManager] Phase 6.4: Failed to save vector index: {}",
-                             saveRes.error().message);
-            } else {
-                auto stats = vectorIndexManager_->getStats();
-                spdlog::info(
-                    "[ServiceManager] Phase 6.4: Vector index saved successfully ({} vectors)",
-                    stats.num_vectors);
-            }
-        } catch (const std::exception& e) {
-            spdlog::warn("[ServiceManager] Phase 6.4: Vector index save exception: {}", e.what());
-        }
-    } else {
-        spdlog::info("[ServiceManager] Phase 6.4: No vector index to save or not ready");
-    }
+    // No vector index to save - using VectorDatabase directly
+    spdlog::info("[ServiceManager] Phase 6.4: Vector search uses VectorDatabase directly");
 
     // Model provider manages embedding lifecycle, no separate shutdown needed
     spdlog::info("[ServiceManager] Phase 6.5: Embedding lifecycle managed by model provider");
@@ -914,8 +887,7 @@ void ServiceManager::shutdown() {
     spdlog::info("[ServiceManager] Phase 8: Releasing remaining resources");
     metadataRepo_.reset();
     spdlog::info("[ServiceManager] Phase 9.2: Metadata repository reset");
-    vectorIndexManager_.reset();
-    spdlog::info("[ServiceManager] Phase 8.3: Vector index manager reset");
+    spdlog::info("[ServiceManager] Phase 8.3: Vector search uses VectorDatabase directly");
     contentStore_.reset();
     spdlog::info("[ServiceManager] Phase 8.4: Content store reset");
 
@@ -990,17 +962,8 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
     if (vectorSystemManager_) {
         auto result = vectorSystemManager_->initializeOnce(dataDir);
         if (result && result.value()) {
-            // Database initialized successfully - now init the index manager
-            size_t dim = vectorSystemManager_->getEmbeddingDimension();
-            if (dim > 0) {
-                vectorSystemManager_->initializeIndexManager(dataDir, dim);
-                // Try to load persisted index
-                auto indexPath = dataDir / "vector_index.bin";
-                vectorSystemManager_->loadPersistedIndex(indexPath);
-            }
             // Sync local members from VectorSystemManager for backward compatibility
             vectorDatabase_ = vectorSystemManager_->getVectorDatabase();
-            vectorIndexManager_ = vectorSystemManager_->getVectorIndexManager();
         }
         return result;
     }
@@ -1485,107 +1448,13 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     // Defer Vector DB initialization until after plugin adoption (provider dim)
     spdlog::info("[ServiceManager] Phase: Vector DB Init (deferred until after plugins).");
 
-    // Vector index manager (using init helpers)
-    try {
-        // Determine if vector index should be disabled (environment flags)
-        const bool disableVecIndex = []() {
-            auto is_on = [](const char* v) {
-                if (!v)
-                    return false;
-                std::string s(v);
-                std::transform(s.begin(), s.end(), s.begin(), ::tolower);
-                return s == "1" || s == "true" || s == "yes" || s == "on";
-            };
-            return is_on(std::getenv("YAMS_DISABLE_VECTORS")) ||
-                   is_on(std::getenv("YAMS_DISABLE_VECTOR_INDEX")) ||
-                   is_on(std::getenv("YAMS_DISABLE_VECTOR_DB"));
-        }();
-        vector::IndexConfig indexConfig;
-        // Derive index dimension from Vector DB config if available; else fallback to
-        // generator/heuristic
-        size_t derivedIdxDim = 0;
-        try {
-            if (vectorDatabase_)
-                derivedIdxDim = vectorDatabase_->getConfig().embedding_dim;
-        } catch (...) {
-        }
-        if (derivedIdxDim == 0) {
-            try {
-                derivedIdxDim = getEmbeddingDimension();
-            } catch (...) {
-            }
-        }
-        if (derivedIdxDim == 0)
-            derivedIdxDim = 384;
-        indexConfig.dimension = derivedIdxDim;
-        indexConfig.type = vector::IndexType::FLAT;
-        if (!disableVecIndex) {
-            vectorIndexManager_ = std::make_shared<vector::VectorIndexManager>(indexConfig);
-            auto initRes = init::record_duration(
-                "vector_index", [&]() { return vectorIndexManager_->initialize(); },
-                state_.initDurationsMs);
-            if (!initRes) {
-                spdlog::warn("Failed to initialize VectorIndexManager: {}",
-                             initRes.error().message);
-                vectorIndexManager_.reset();
-            } else {
-                state_.readiness.vectorIndexReady = true;
-                writeBootstrapStatusFile(config_, state_);
-
-                // Load persisted vector index if it exists
-                auto indexPath = config_.dataDir / "vector_index.bin";
-                bool indexLoaded = false;
-                if (std::filesystem::exists(indexPath)) {
-                    spdlog::info("[VectorInit] Loading persisted vector index from '{}'",
-                                 indexPath.string());
-                    auto loadRes = vectorIndexManager_->loadIndex(indexPath.string());
-                    if (!loadRes) {
-                        spdlog::warn("[VectorInit] Failed to load vector index: {}. Will rebuild "
-                                     "from database.",
-                                     loadRes.error().message);
-                    } else {
-                        auto stats = vectorIndexManager_->getStats();
-                        spdlog::info("[VectorInit] Loaded vector index with {} vectors",
-                                     stats.num_vectors);
-                        indexLoaded = (stats.num_vectors > 0);
-                    }
-                } else {
-                    spdlog::debug("[VectorInit] No persisted vector index found at '{}'",
-                                  indexPath.string());
-                }
-
-                // If index wasn't loaded or is empty, attempt to populate from VectorDatabase
-                if (!indexLoaded && vectorDatabase_) {
-                    spdlog::info("[VectorInit] Populating vector index from database...");
-                    try {
-                        // Use getVectorCount() which returns cached count (fast)
-                        // instead of getStats() which does expensive JOIN query
-                        auto dbVectorCount = vectorDatabase_->getVectorCount();
-                        if (dbVectorCount > 0) {
-                            spdlog::info("[VectorInit] Found {} vectors in database, loading into "
-                                         "search index",
-                                         dbVectorCount);
-
-                            spdlog::warn(
-                                "[VectorInit] Direct database->index population not yet "
-                                "implemented. "
-                                "Vectors will be available after first document is added or after "
-                                "running 'yams repair --embeddings'");
-                        } else {
-                            spdlog::debug("[VectorInit] Database is empty, no vectors to load");
-                        }
-                    } catch (const std::exception& e) {
-                        spdlog::warn("[VectorInit] Failed to populate from database: {}", e.what());
-                    }
-                }
-            }
-        } else {
-            spdlog::warn("Vector index initialization disabled by YAMS_DISABLE_VECTOR_DB");
-        }
-    } catch (const std::exception& e) {
-        spdlog::warn("Exception initializing VectorIndexManager: {}", e.what());
+    // VectorIndexManager removed - using VectorDatabase directly for vector search
+    // Mark vector index as ready since VectorDatabase handles all vector operations
+    if (vectorDatabase_) {
+        state_.readiness.vectorIndexReady = true;
+        writeBootstrapStatusFile(config_, state_);
     }
-    spdlog::info("[ServiceManager] Phase: Vector Index Manager Initialized.");
+    spdlog::info("[ServiceManager] Phase: Vector search uses VectorDatabase directly.");
 
     // Embedding generator will be initialized after plugin adoption
     spdlog::debug("Embedding generator initialization deferred to plugin adoption phase");
@@ -1680,23 +1549,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             spdlog::warn("[ServiceManager] Vector DB init failed: {}", vdbRes.error().message);
         } else if (vdbRes.value()) {
             spdlog::info("[ServiceManager] Vector DB initialized successfully");
-
-            // Now that VectorDatabase is initialized, load vectors into VectorIndexManager if
-            // needed
-            if (vectorIndexManager_ && vectorDatabase_) {
-                auto stats = vectorIndexManager_->getStats();
-                if (stats.num_vectors == 0) {
-                    // Index is empty - check if we have vectors in the database
-                    // Use getVectorCount() which returns cached count (fast)
-                    // instead of getStats() which does expensive JOIN query
-                    auto dbVectorCount = vectorDatabase_->getVectorCount();
-                    if (dbVectorCount > 0) {
-                        spdlog::info(
-                            "[VectorInit] Found {} vectors in database but search index is empty. "
-                            "Run 'yams repair --embeddings' to rebuild the search index from "
-                            "database.",
-                            dbVectorCount);
-                    }
+            // Log vector count from database
+            if (vectorDatabase_) {
+                auto dbVectorCount = vectorDatabase_->getVectorCount();
+                if (dbVectorCount > 0) {
+                    spdlog::info("[VectorInit] Found {} vectors in database", dbVectorCount);
                 }
             }
         } else {
@@ -1729,7 +1586,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             state_.readiness.searchProgress = 40;
             writeBootstrapStatusFile(config_, state_);
         }
-        if (vectorIndexManager_) {
+        if (vectorDatabase_) {
             state_.readiness.searchProgress = 70;
             writeBootstrapStatusFile(config_, state_);
         }
@@ -1743,7 +1600,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         if (vectorsDisabled) {
             spdlog::info(
                 "[SearchBuild] Vector search disabled via env flag; building text-only engine");
-        } else if (vectorDatabase_ && vectorIndexManager_) {
+        } else if (vectorDatabase_) {
             try {
                 // Use VectorDatabase directly - it knows the actual DB size
                 auto vectorCount = vectorDatabase_->getVectorCount();
@@ -1777,8 +1634,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             }
         }
         auto buildResult = co_await searchEngineManager_.buildEngine(
-            metadataRepo_, vectorDatabase_, vectorIndexManager_, embGen, "initial", build_timeout,
-            getWorkerExecutor());
+            metadataRepo_, vectorDatabase_, embGen, "initial", build_timeout, getWorkerExecutor());
 
         if (buildResult.has_value()) {
             const auto& built = buildResult.value();
@@ -1790,8 +1646,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             // Update readiness indicators after successful rebuild
             state_.readiness.searchEngineReady = true;
             state_.readiness.searchProgress = 100;
-            state_.readiness.vectorIndexReady =
-                (vectorIndexManager_ != nullptr && vectorDatabase_ != nullptr);
+            state_.readiness.vectorIndexReady = (vectorDatabase_ != nullptr);
             writeBootstrapStatusFile(config_, state_);
 
             spdlog::info("SearchEngine initialized and published to AppContext");
@@ -2224,8 +2079,8 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
 
         int build_timeout = 30000; // 30s timeout
         auto rebuildResult = co_await searchEngineManager_.buildEngine(
-            metadataRepo_, vectorDatabase_, vectorIndexManager_, embGen, "rebuild_enabled",
-            build_timeout, getWorkerExecutor());
+            metadataRepo_, vectorDatabase_, embGen, "rebuild_enabled", build_timeout,
+            getWorkerExecutor());
 
         if (rebuildResult.has_value()) {
             const auto& rebuilt = rebuildResult.value();
@@ -2236,8 +2091,7 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
 
             // Update readiness indicators
             state_.readiness.searchEngineReady = true;
-            state_.readiness.vectorIndexReady =
-                (vectorIndexManager_ != nullptr && vectorDatabase_ != nullptr);
+            state_.readiness.vectorIndexReady = (vectorDatabase_ != nullptr);
 
             spdlog::info("[ServiceManager] co_enableEmbeddingsAndRebuild: success");
         } else {
@@ -2289,8 +2143,8 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
 
             // Phase 2.4: Use SearchEngineManager instead of co_buildEngine
             auto rebuildResult = co_await searchEngineManager_.buildEngine(
-                metadataRepo_, vectorDatabase_, vectorIndexManager_, embGen, "rebuild",
-                build_timeout, getWorkerExecutor());
+                metadataRepo_, vectorDatabase_, embGen, "rebuild", build_timeout,
+                getWorkerExecutor());
 
             if (rebuildResult.has_value()) {
                 const auto& rebuilt = rebuildResult.value();
@@ -2302,8 +2156,7 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
                 // Update readiness indicators after successful rebuild
                 state_.readiness.searchEngineReady = true;
                 state_.readiness.searchProgress = 100;
-                state_.readiness.vectorIndexReady =
-                    (vectorIndexManager_ != nullptr && vectorDatabase_ != nullptr);
+                state_.readiness.vectorIndexReady = (vectorDatabase_ != nullptr);
                 writeBootstrapStatusFile(config_, state_);
 
                 spdlog::info("[Rebuild] done ok: vector scoring enabled");
@@ -2550,9 +2403,8 @@ ServiceManager::co_buildEngine(int timeout_ms, const boost::asio::cancellation_s
         } catch (...) {
         }
     }
-    auto res = co_await searchEngineManager_.buildEngine(metadataRepo_, vectorDatabase_,
-                                                         vectorIndexManager_, gen, "co_buildEngine",
-                                                         timeout_ms, exec);
+    auto res = co_await searchEngineManager_.buildEngine(metadataRepo_, vectorDatabase_, gen,
+                                                         "co_buildEngine", timeout_ms, exec);
     if (res.has_value()) {
         co_return res.value();
     }

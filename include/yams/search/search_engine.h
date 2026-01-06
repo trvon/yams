@@ -6,7 +6,6 @@
 #include <yams/search/search_results.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
-#include <yams/vector/vector_index_manager.h>
 
 #include <algorithm>
 #include <atomic>
@@ -337,7 +336,7 @@ private:
  *    - Path tree hierarchical search (path_tree_nodes)
  *    - Symbol metadata search (symbol_metadata)
  *    - Knowledge graph traversal (kg_nodes, kg_edges, kg_aliases)
- *    - Vector similarity search (VectorDatabase + VectorIndexManager)
+ *    - Vector similarity search (VectorDatabase with sqlite-vec)
  *
  * 2. Ranks and fuses results from all components using configurable strategies
  *
@@ -359,15 +358,13 @@ public:
      * @brief Construct a new SearchEngine
      *
      * @param metadataRepo Metadata repository for database access
-     * @param vectorDb Vector database for similarity search
-     * @param vectorIndex In-memory HNSW vector index
+     * @param vectorDb Vector database for similarity search (sqlite-vec)
      * @param embeddingGen Embedding generator for query vectorization
      * @param kgStore Knowledge graph store for entity/alias queries (optional)
      * @param config Search engine configuration
      */
     explicit SearchEngine(std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo,
                           std::shared_ptr<vector::VectorDatabase> vectorDb,
-                          std::shared_ptr<vector::VectorIndexManager> vectorIndex,
                           std::shared_ptr<vector::EmbeddingGenerator> embeddingGen,
                           std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore,
                           const SearchEngineConfig& config = {});
@@ -488,7 +485,6 @@ private:
 std::unique_ptr<SearchEngine>
 createSearchEngine(std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo,
                    std::shared_ptr<vector::VectorDatabase> vectorDb,
-                   std::shared_ptr<vector::VectorIndexManager> vectorIndex,
                    std::shared_ptr<vector::EmbeddingGenerator> embeddingGen,
                    std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore,
                    const SearchEngineConfig& config = {});

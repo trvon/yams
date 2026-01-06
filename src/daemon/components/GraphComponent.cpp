@@ -176,6 +176,21 @@ GraphComponent::onTreeDiffApplied(int64_t diffId,
     return Result<void>();
 }
 
+bool GraphComponent::shouldSkipEntityExtraction(
+    const std::shared_ptr<metadata::KnowledgeGraphStore>& kg, const std::string& documentHash) {
+    if (!kg || documentHash.empty()) {
+        return false;
+    }
+
+    auto docIdRes = kg->getDocumentIdByHash(documentHash);
+    if (!docIdRes.has_value() || !docIdRes.value().has_value()) {
+        return false;
+    }
+
+    auto entRes = kg->getDocEntitiesForDocument(docIdRes.value().value(), 1, 0);
+    return entRes.has_value() && !entRes.value().empty();
+}
+
 Result<void> GraphComponent::submitEntityExtraction(EntityExtractionJob job) {
     if (!initialized_) {
         return Error{ErrorCode::NotInitialized, "GraphComponent not initialized"};
@@ -183,6 +198,12 @@ Result<void> GraphComponent::submitEntityExtraction(EntityExtractionJob job) {
 
     if (!entityService_) {
         return Error{ErrorCode::NotSupported, "EntityGraphService not available"};
+    }
+
+    if (shouldSkipEntityExtraction(kgStore_, job.documentHash)) {
+        spdlog::debug("[GraphComponent] Skip entity extraction for {} (already extracted)",
+                      job.documentHash.substr(0, 12));
+        return Result<void>();
     }
 
     EntityGraphService::Job entityJob{

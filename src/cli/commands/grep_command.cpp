@@ -25,7 +25,6 @@
 #include <yams/metadata/query_helpers.h>
 #include <yams/search/search_engine.h>
 #include <yams/search/search_engine_builder.h>
-#include <yams/vector/vector_index_manager.h>
 // Daemon client API for daemon-first grep
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -1122,11 +1121,8 @@ private:
         if (!regexOnly_) {
             try {
                 // Build SearchEngine for semantic search
-                auto vecMgr = std::make_shared<yams::vector::VectorIndexManager>();
                 yams::search::SearchEngineBuilder builder;
-                builder.withVectorIndex(vecMgr)
-                    .withMetadataRepo(metadataRepo)
-                    .withKGStore(cli_->getKnowledgeGraphStore());
+                builder.withMetadataRepo(metadataRepo).withKGStore(cli_->getKnowledgeGraphStore());
 
                 // Add VectorDatabase if available
                 if (auto vecDb = cli_->getVectorDatabase()) {

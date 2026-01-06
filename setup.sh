@@ -446,7 +446,9 @@ if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true"
   MESON_OPTIONS+=(
     "-Dbuild-tests=true"
     "-Denable-bench-tests=true"
+    "-Denable-vector-tests=true"
   )
+  echo "Vector/embedding tests enabled for ${BUILD_TYPE} build"
 fi
 
 if [[ "${ENABLE_TSAN}" == "true" ]]; then

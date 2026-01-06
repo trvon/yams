@@ -1144,16 +1144,8 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             if (prov > 0)
                 out.memoryBreakdownBytes["provider_bytes"] = prov;
 
-            std::uint64_t vmem = 0;
-            try {
-                if (auto vim = services_->getVectorIndexManager()) {
-                    auto s = vim->getStats();
-                    vmem = static_cast<std::uint64_t>(s.memory_usage_bytes);
-                }
-            } catch (...) {
-            }
-            if (vmem > 0)
-                out.memoryBreakdownBytes["vector_index_bytes"] = vmem;
+            // Vector index memory stats removed - VectorIndexManager no longer used
+            // Memory is tracked by VectorDatabase (sqlite-vec) instead
         }
     } catch (...) {
     }

@@ -811,10 +811,6 @@ std::shared_ptr<yams::metadata::MetadataRepository> YamsDaemon::_test_getMetadat
     return serviceManager_ ? serviceManager_->getMetadataRepo() : nullptr;
 }
 
-std::shared_ptr<yams::vector::VectorIndexManager> YamsDaemon::_test_getVectorIndexManager() const {
-    return serviceManager_ ? serviceManager_->getVectorIndexManager() : nullptr;
-}
-
 std::shared_ptr<yams::vector::EmbeddingGenerator> YamsDaemon::_test_getEmbeddingGenerator() const {
     return serviceManager_ ? serviceManager_->getEmbeddingGenerator() : nullptr;
 }

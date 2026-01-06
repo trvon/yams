@@ -63,18 +63,16 @@ void SearchEngineManager::refreshSnapshot() {
 boost::asio::awaitable<Result<std::shared_ptr<yams::search::SearchEngine>>>
 SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo,
                                  std::shared_ptr<yams::vector::VectorDatabase> vectorDatabase,
-                                 std::shared_ptr<yams::vector::VectorIndexManager> vectorManager,
                                  std::shared_ptr<yams::vector::EmbeddingGenerator> embeddingGen,
                                  const std::string& reason, int timeoutMs,
                                  boost::asio::any_io_executor workerExecutor) {
     auto ex = co_await boost::asio::this_coro::executor;
 
-    // Enable vector search only when a manager is provided; otherwise build a text-only engine
-    // that can be upgraded later when vectors become available.
-    bool vectorEnabled = (vectorManager != nullptr && vectorDatabase != nullptr);
+    // Enable vector search only when vector database is provided
+    bool vectorEnabled = (vectorDatabase != nullptr);
 
     if (vectorEnabled) {
-        spdlog::info("[SearchEngineManager] Vector search enabled: vectorManager provided");
+        spdlog::info("[SearchEngineManager] Vector search enabled: vectorDatabase provided");
     } else {
         spdlog::info(
             "[SearchEngineManager] Vector search disabled: building text-only engine (will "
@@ -98,8 +96,6 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
     builder->withMetadataRepo(metadataRepo);
     if (vectorEnabled && vectorDatabase)
         builder->withVectorDatabase(vectorDatabase);
-    if (vectorEnabled && vectorManager)
-        builder->withVectorIndex(vectorManager);
     if (vectorEnabled && embeddingGen)
         builder->withEmbeddingGenerator(embeddingGen);
 

@@ -9,6 +9,8 @@
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 
+#include <yams/metadata/document_metadata.h>
+
 using namespace yams;
 using namespace yams::metadata;
 
@@ -107,6 +109,46 @@ TEST_CASE("KGStoreAliasAndEntities: alias exact and fuzzy resolution and removal
 TEST_CASE("KGStoreAliasAndEntities: neighbors and doc entities round trip",
           "[unit][metadata][kg]") {
     KGStoreAliasAndEntitiesFixture fix;
+
+    SECTION("Extraction dedupe predicate: doc entities presence") {
+        // Create a document row so KG can resolve hash->documentId.
+        yams::metadata::DocumentInfo doc;
+        doc.fileName = "example.cpp";
+        doc.filePath = "/tmp/example.cpp";
+        doc.fileExtension = ".cpp";
+        doc.fileSize = 123;
+        doc.sha256Hash = "hash-abc";
+        doc.mimeType = "text/x-c++";
+        doc.setCreatedTime(1);
+        doc.setModifiedTime(1);
+        doc.setIndexedTime(1);
+        auto insDoc = fix.repo_->insertDocument(doc);
+        REQUIRE(insDoc.has_value());
+        auto docId = insDoc.value();
+
+        // Seed doc entities to represent completed extraction.
+        yams::metadata::KGNode sym;
+        sym.nodeKey = "sym:hash-abc:F";
+        sym.label = std::string("F");
+        sym.type = std::string("symbol");
+        auto symIdRes = fix.store_->upsertNode(sym);
+        REQUIRE(symIdRes.has_value());
+
+        yams::metadata::DocEntity de;
+        de.documentId = docId;
+        de.entityText = "F";
+        de.nodeId = symIdRes.value();
+        de.startOffset = 0;
+        de.endOffset = 1;
+        de.confidence = 1.0f;
+        de.extractor = std::string("test");
+        auto insRes = fix.store_->addDocEntities({de});
+        REQUIRE(insRes.has_value());
+
+        auto existsRes = fix.store_->getDocEntitiesForDocument(docId, 1, 0);
+        REQUIRE(existsRes.has_value());
+        CHECK_FALSE(existsRes.value().empty());
+    }
 
     // Two nodes with an edge
     auto ids = fix.store_->upsertNodes(

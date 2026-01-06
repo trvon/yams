@@ -81,6 +81,28 @@ Result<size_t> embed_and_insert_document(yams::daemon::IModelProvider& provider,
         if (n == 0) {
             return Result<size_t>(Error{ErrorCode::InternalError, "no embeddings generated"});
         }
+
+        // Compute document-level embedding BEFORE moving chunk embeddings
+        std::vector<float> doc_embedding;
+        if (n > 0 && !embeds[0].empty()) {
+            doc_embedding.resize(embeds[0].size(), 0.0f);
+            for (size_t i = 0; i < n; ++i) {
+                for (size_t j = 0; j < embeds[i].size(); ++j) {
+                    doc_embedding[j] += embeds[i][j];
+                }
+            }
+            float norm = 0.0f;
+            for (float v : doc_embedding) {
+                norm += v * v;
+            }
+            if (norm > 0.0f) {
+                norm = std::sqrt(norm);
+                for (float& v : doc_embedding) {
+                    v /= norm;
+                }
+            }
+        }
+
         std::vector<yams::vector::VectorRecord> recs;
         recs.reserve(n);
         for (size_t i = 0; i < n; ++i) {
@@ -102,24 +124,7 @@ Result<size_t> embed_and_insert_document(yams::daemon::IModelProvider& provider,
             return Result<size_t>(Error{ErrorCode::DatabaseError, vdb.getLastError()});
         }
 
-        if (n > 0) {
-            std::vector<float> doc_embedding(embeds[0].size(), 0.0f);
-            for (size_t i = 0; i < n; ++i) {
-                for (size_t j = 0; j < embeds[i].size(); ++j) {
-                    doc_embedding[j] += embeds[i][j];
-                }
-            }
-            float norm = 0.0f;
-            for (float v : doc_embedding) {
-                norm += v * v;
-            }
-            if (norm > 0.0f) {
-                norm = std::sqrt(norm);
-                for (float& v : doc_embedding) {
-                    v /= norm;
-                }
-            }
-
+        if (!doc_embedding.empty()) {
             yams::vector::VectorRecord doc_rec;
             doc_rec.document_hash = hash;
             doc_rec.chunk_id = yams::vector::utils::generateChunkId(hash, 999999);

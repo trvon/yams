@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [v0.7.11] - Unreleased
 
+### Breaking
+- sqlite-vec-cpp submodule: HNSW API changes and third-party library removal (soft deletion, multi-threading, fp16 quantization, incremental persistence, pre-filtering).
+
 ### Added
 - MCP `graph` tool for knowledge graph queries (parity with CLI `yams graph`).
 - Graph: snapshot-scoped version nodes, `contains` edges for file→symbol, `--dead-code-report`.

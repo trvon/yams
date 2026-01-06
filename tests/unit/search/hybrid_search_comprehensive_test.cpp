@@ -43,7 +43,6 @@ TEST_CASE("HybridSearch - Windows ONNX Runtime API too old", "[hybrid][windows][
 #include <yams/search/search_engine_builder.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
-#include <yams/vector/vector_index_manager.h>
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -271,31 +270,22 @@ private:
                 yams::search::SearchEngineBuilder builder;
                 builder.withMetadataRepo(metadataRepo_);
 
-                // Create vector index manager
-                yams::vector::IndexConfig indexCfg;
-                indexCfg.dimension = 384;
-                indexCfg.index_path = (testDir_ / "vector_index.bin").string();
-                indexCfg.enable_persistence = true;
-                indexCfg.max_elements = 10000;
+                // SearchEngine now uses VectorDatabase directly (VectorIndexManager removed)
+                // Vector search configured via VectorDatabase when available
 
-                auto vectorMgr = std::make_shared<yams::vector::VectorIndexManager>(indexCfg);
-                if (vectorMgr->initialize()) {
-                    builder.withVectorIndex(vectorMgr);
+                // Try to create embedding generator (may fail if ONNX not available)
+                yams::vector::EmbeddingConfig embCfg;
+                embCfg.model_name = "all-MiniLM-L6-v2";
+                embCfg.embedding_dim = 384;
+                auto embGen = std::make_shared<yams::vector::EmbeddingGenerator>(embCfg);
+                if (embGen->initialize()) {
+                    builder.withEmbeddingGenerator(embGen);
+                }
 
-                    // Try to create embedding generator (may fail if ONNX not available)
-                    yams::vector::EmbeddingConfig embCfg;
-                    embCfg.model_name = "all-MiniLM-L6-v2";
-                    embCfg.embedding_dim = 384;
-                    auto embGen = std::make_shared<yams::vector::EmbeddingGenerator>(embCfg);
-                    if (embGen->initialize()) {
-                        builder.withEmbeddingGenerator(embGen);
-                    }
-
-                    auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
-                    auto engineResult = builder.buildEmbedded(opts);
-                    if (engineResult) {
-                        appContext_.searchEngine = engineResult.value();
-                    }
+                auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
+                auto engineResult = builder.buildEmbedded(opts);
+                if (engineResult) {
+                    appContext_.searchEngine = engineResult.value();
                 }
             } catch (...) {
                 // Search engine initialization failed - tests will expect InvalidState errors
@@ -574,78 +564,7 @@ public:
     size_t getIndexSize() const override { return 0; }
 };
 
-/**
- * @brief Mock vector index manager with controllable behavior
- */
-class ControllableVectorIndex : public VectorIndexManager {
-public:
-    // Control knobs
-    std::chrono::milliseconds search_delay{0};
-    bool should_fail{false};
-    bool init_succeeds{true};
-    std::vector<SearchResult> canned_results;
-
-    // Recorded calls
-    size_t search_call_count{0};
-    std::vector<float> last_query_vector;
-
-    Result<void> initialize() override {
-        if (init_succeeds) {
-            initialized_ = true;
-            return Result<void>();
-        }
-        return Result<void>(Error{ErrorCode::Unknown, "Mock init failure"});
-    }
-
-    Result<std::vector<SearchResult>> search(const std::vector<float>& query_vector, size_t k,
-                                             const SearchFilter& filter) override {
-        search_call_count++;
-        last_query_vector = query_vector;
-
-        if (search_delay.count() > 0) {
-            std::this_thread::sleep_for(search_delay);
-        }
-
-        if (should_fail) {
-            return Result<std::vector<SearchResult>>(Error{ErrorCode::Unknown, "Mock failure"});
-        }
-
-        std::vector<SearchResult> results;
-        for (size_t i = 0; i < std::min(k, canned_results.size()); ++i) {
-            results.push_back(canned_results[i]);
-        }
-        return Result<std::vector<SearchResult>>(results);
-    }
-
-    bool isInitialized() const override { return initialized_; }
-    void shutdown() override { initialized_ = false; }
-
-    // Unimplemented methods (not needed for tests)
-    Result<void> addDocument(const std::string&, const std::vector<float>&,
-                             const std::map<std::string, std::string>&) override {
-        return Result<void>();
-    }
-
-    Result<void> addDocuments(const std::vector<std::string>&,
-                              const std::vector<std::vector<float>>&,
-                              const std::vector<std::map<std::string, std::string>>&) override {
-        return Result<void>();
-    }
-
-    Result<void> removeDocument(const std::string&) override { return Result<void>(); }
-    Result<void> updateDocument(const std::string&, const std::vector<float>&,
-                                const std::map<std::string, std::string>&) override {
-        return Result<void>();
-    }
-    Result<void> buildIndex() override { return Result<void>(); }
-    Result<void> saveIndex(const std::string&) override { return Result<void>(); }
-    Result<void> loadIndex(const std::string&) override { return Result<void>(); }
-    size_t getDocumentCount() const override { return canned_results.size(); }
-    size_t getIndexSize() const override { return 0; }
-
-private:
-    bool initialized_{false};
-};
+// VectorIndexManager removed - SearchEngine now uses VectorDatabase directly
 
 /**
  * @brief Mock embedding generator for testing

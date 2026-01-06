@@ -1,6 +1,3 @@
-// Copyright 2025 The YAMS Authors
-// SPDX-License-Identifier: Apache-2.0
-
 #pragma once
 
 #include <yams/core/types.h>
@@ -14,7 +11,6 @@
 
 namespace yams::vector {
 class VectorDatabase;
-class VectorIndexManager;
 } // namespace yams::vector
 
 namespace yams::daemon {
@@ -24,19 +20,20 @@ class ServiceManagerFsm;
 class IModelProvider;
 
 /**
- * @brief Manages vector database and index lifecycle.
+ * @brief Manages vector database lifecycle.
  *
  * Extracted from ServiceManager (PBI-088) to centralize vector system concerns.
  *
  * ## Responsibilities
  * - Vector database initialization (with cross-process locking)
- * - Vector index manager lifecycle
  * - Embedding dimension resolution
  * - Sentinel file management
  *
  * ## Thread Safety
  * - initializeOnce() uses atomic guard for single-attempt semantics
  * - All accessors are thread-safe
+ *
+ * Note: VectorIndexManager was removed - SearchEngine uses VectorDatabase directly.
  */
 class VectorSystemManager : public IComponent {
 public:
@@ -79,39 +76,8 @@ public:
      */
     Result<bool> initializeOnce(const std::filesystem::path& dataDir);
 
-    /**
-     * @brief Initialize vector index manager.
-     *
-     * Creates and initializes the in-memory vector index.
-     * Should be called after vector database is ready.
-     *
-     * @param dataDir Data directory for index persistence
-     * @param dimension Embedding dimension
-     * @return true if initialization succeeded
-     */
-    bool initializeIndexManager(const std::filesystem::path& dataDir, size_t dimension);
-
-    /**
-     * @brief Load persisted vector index from disk.
-     *
-     * @param indexPath Path to persisted index file
-     * @return true if index was loaded successfully
-     */
-    bool loadPersistedIndex(const std::filesystem::path& indexPath);
-
-    /**
-     * @brief Save vector index to disk.
-     *
-     * @param indexPath Path to save index file
-     * @return true if save succeeded
-     */
-    bool saveIndex(const std::filesystem::path& indexPath);
-
     // Accessors
     std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const { return vectorDatabase_; }
-    std::shared_ptr<vector::VectorIndexManager> getVectorIndexManager() const {
-        return vectorIndexManager_;
-    }
 
     /**
      * @brief Get embedding dimension from database config.
@@ -129,18 +95,10 @@ public:
      */
     void resetInitAttempt() { initAttempted_.store(false, std::memory_order_release); }
 
-    /**
-     * @brief Align vector index manager dimension with database.
-     *
-     * Called after embedding generator is initialized to ensure consistency.
-     */
-    void alignDimensions();
-
 private:
     Dependencies deps_;
 
     std::shared_ptr<vector::VectorDatabase> vectorDatabase_;
-    std::shared_ptr<vector::VectorIndexManager> vectorIndexManager_;
 
     std::atomic<bool> initAttempted_{false};
 };

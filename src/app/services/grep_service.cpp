@@ -1226,9 +1226,8 @@ public:
                 std::shared_ptr<yams::search::SearchEngine> eng = ctx_.searchEngine;
                 if (!eng) {
                     auto build_start_time = std::chrono::steady_clock::now();
-                    auto vecMgr = std::make_shared<yams::vector::VectorIndexManager>();
                     yams::search::SearchEngineBuilder builder;
-                    builder.withVectorIndex(vecMgr).withMetadataRepo(ctx_.metadataRepo);
+                    builder.withMetadataRepo(ctx_.metadataRepo);
                     if (ctx_.vectorDatabase) {
                         builder.withVectorDatabase(ctx_.vectorDatabase);
                     }

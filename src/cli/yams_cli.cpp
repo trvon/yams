@@ -19,7 +19,6 @@
 #include <yams/vector/embedding_service.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
-#include <yams/vector/vector_index_manager.h>
 #include <yams/version.hpp>
 // Error hints for actionable error messages
 #include <yams/cli/error_hints.h>
@@ -574,16 +573,13 @@ std::shared_ptr<app::services::AppContext> YamsCLI::getAppContext() {
 
         // Initialize SearchEngine so SearchService can use hybrid search by default
         try {
-            auto vecMgr = getVectorIndexManager();
             auto vecDb = getVectorDatabase();
             auto repo = getMetadataRepository();
 
-            if (vecMgr && repo) {
+            if (repo) {
                 yams::search::SearchEngineBuilder builder;
-                builder.withVectorIndex(vecMgr)
-                    .withVectorDatabase(vecDb)
-                    .withMetadataRepo(repo)
-                    .withKGStore(getKnowledgeGraphStore());
+                builder.withVectorDatabase(vecDb).withMetadataRepo(repo).withKGStore(
+                    getKnowledgeGraphStore());
 
                 // Reuse a shared embedding generator if available
                 if (auto emb = getEmbeddingGenerator()) {
@@ -742,7 +738,7 @@ Result<void> YamsCLI::initializeStorage() {
             }
         }
 
-        // Initialize VectorIndexManager if vector support is available
+        // Initialize vector support (dimension detection, embedding generator, vector database)
         try {
             // Try to detect proper dimension from existing vectors or available models
             size_t vectorDimension = 384; // Safe default
@@ -803,166 +799,112 @@ Result<void> YamsCLI::initializeStorage() {
             }
 
             // Second, detect dimension from available models
-            if (const char* home = std::getenv("HOME"); home) {
-                fs::path modelsPath = dataPath_ / "models";
+            fs::path modelsPath = dataPath_ / "models";
+            if (fs::exists(modelsPath)) {
+                // Check for specific models in priority order
+                if (fs::exists(modelsPath / "all-MiniLM-L6-v2" / "model.onnx")) {
+                    vectorDimension = 384;
+                    if (verbose_) {
+                        spdlog::info("Detected all-MiniLM-L6-v2 model, using 384 dimensions");
+                    }
+                } else if (fs::exists(modelsPath / "all-mpnet-base-v2" / "model.onnx")) {
+                    vectorDimension = 768;
+                    if (verbose_) {
+                        spdlog::info("Detected all-mpnet-base-v2 model, using 768 dimensions");
+                    }
+                }
+            }
+
+            // Initialize EmbeddingGenerator if models are available
+            try {
                 if (fs::exists(modelsPath)) {
+                    // Configure embedding settings
+                    vector::EmbeddingConfig embConfig;
+
                     // Check for specific models in priority order
-                    if (fs::exists(modelsPath / "all-MiniLM-L6-v2" / "model.onnx")) {
-                        vectorDimension = 384;
-                        if (verbose_) {
-                            spdlog::info("Detected all-MiniLM-L6-v2 model, using 384 dimensions");
+                    std::string selectedModel;
+                    // 1) Preferred from config ([embeddings].preferred_model) or env
+                    try {
+                        std::string pref;
+                        auto cfgPath = getConfigPath();
+                        if (fs::exists(cfgPath)) {
+                            auto cfg = parseSimpleToml(cfgPath);
+                            auto it = cfg.find("embeddings.preferred_model");
+                            if (it != cfg.end() && !it->second.empty())
+                                pref = it->second;
                         }
-                    } else if (fs::exists(modelsPath / "all-mpnet-base-v2" / "model.onnx")) {
-                        vectorDimension = 768;
-                        if (verbose_) {
-                            spdlog::info("Detected all-mpnet-base-v2 model, using 768 dimensions");
+                        if (const char* p = std::getenv("YAMS_PREFERRED_MODEL")) {
+                            if (pref.empty())
+                                pref = p;
+                        }
+                        if (!pref.empty() && fs::exists(modelsPath / pref / "model.onnx")) {
+                            selectedModel = pref;
+                        }
+                    } catch (...) {
+                    }
+
+                    // 2) Known models (MiniLM/mpnet/nomic)
+                    if (selectedModel.empty()) {
+                        if (fs::exists(modelsPath / "nomic-embed-text-v1.5" / "model.onnx")) {
+                            selectedModel = "nomic-embed-text-v1.5";
+                        } else if (fs::exists(modelsPath / "nomic-embed-text-v1" / "model.onnx")) {
+                            selectedModel = "nomic-embed-text-v1";
+                        } else if (fs::exists(modelsPath / "all-MiniLM-L6-v2" / "model.onnx")) {
+                            selectedModel = "all-MiniLM-L6-v2";
+                        } else if (fs::exists(modelsPath / "all-mpnet-base-v2" / "model.onnx")) {
+                            selectedModel = "all-mpnet-base-v2";
                         }
                     }
-                }
-            }
 
-            // Configure the vector index with detected dimension
-            vector::IndexConfig indexConfig;
-            indexConfig.dimension = vectorDimension;
-            indexConfig.type = vector::IndexType::FLAT; // Simple flat index for reliability
-            indexConfig.distance_metric = vector::DistanceMetric::COSINE;
-            indexConfig.index_path = (dataPath_ / "vector_index.bin").string();
-            indexConfig.enable_persistence = true;
-            indexConfig.max_elements = 1000000; // 1M vectors max
-
-            vectorIndexManager_ = std::make_shared<vector::VectorIndexManager>(indexConfig);
-
-            // Initialize the index
-            auto vectorInitResult = vectorIndexManager_->initialize();
-            if (!vectorInitResult) {
-                spdlog::warn("Failed to initialize VectorIndexManager: {}",
-                             vectorInitResult.error().message);
-                vectorIndexManager_.reset(); // Clear it if initialization failed
-            } else if (verbose_) {
-                spdlog::info("VectorIndexManager initialized with {} dimension vectors",
-                             indexConfig.dimension);
-            }
-
-            // Initialize EmbeddingClient (daemon-based) if VectorIndexManager is available
-            if (vectorIndexManager_) {
-                try {
-                    // Check for available models
-                    if (const char* home = std::getenv("HOME"); home) {
-                        fs::path modelsPath = dataPath_ / "models";
-                        if (fs::exists(modelsPath)) {
-                            // Configure embedding settings
-                            vector::EmbeddingConfig embConfig;
-
-                            // Check for specific models in priority order
-                            std::string selectedModel;
-                            // 1) Preferred from config ([embeddings].preferred_model) or env
-                            try {
-                                std::string pref;
-                                // Simple TOML parse via helper
-                                auto cfgPath = getConfigPath();
-                                if (fs::exists(cfgPath)) {
-                                    auto cfg = parseSimpleToml(cfgPath);
-                                    auto it = cfg.find("embeddings.preferred_model");
-                                    if (it != cfg.end() && !it->second.empty())
-                                        pref = it->second;
-                                }
-                                if (const char* p = std::getenv("YAMS_PREFERRED_MODEL")) {
-                                    if (pref.empty())
-                                        pref = p;
-                                }
-                                if (!pref.empty() && fs::exists(modelsPath / pref / "model.onnx")) {
-                                    selectedModel = pref;
-                                }
-                            } catch (...) {
+                    // 3) Any model directory containing model.onnx
+                    if (selectedModel.empty()) {
+                        for (const auto& e : fs::directory_iterator(modelsPath)) {
+                            if (e.is_directory() && fs::exists(e.path() / "model.onnx")) {
+                                selectedModel = e.path().filename().string();
+                                break;
                             }
-
-                            // 2) Known models (MiniLM/mpnet/nomic)
-                            if (selectedModel.empty()) {
-                                if (fs::exists(modelsPath / "nomic-embed-text-v1.5" /
-                                               "model.onnx")) {
-                                    selectedModel = "nomic-embed-text-v1.5";
-                                } else if (fs::exists(modelsPath / "nomic-embed-text-v1" /
-                                                      "model.onnx")) {
-                                    selectedModel = "nomic-embed-text-v1";
-                                } else if (fs::exists(modelsPath / "all-MiniLM-L6-v2" /
-                                                      "model.onnx")) {
-                                    selectedModel = "all-MiniLM-L6-v2";
-                                } else if (fs::exists(modelsPath / "all-mpnet-base-v2" /
-                                                      "model.onnx")) {
-                                    selectedModel = "all-mpnet-base-v2";
-                                }
-                            }
-
-                            // 3) Any model directory containing model.onnx
-                            if (selectedModel.empty()) {
-                                for (const auto& e : fs::directory_iterator(modelsPath)) {
-                                    if (e.is_directory() && fs::exists(e.path() / "model.onnx")) {
-                                        selectedModel = e.path().filename().string();
-                                        break;
-                                    }
-                                }
-                            }
-
-                            if (!selectedModel.empty()) {
-                                embConfig.model_path =
-                                    (modelsPath / selectedModel / "model.onnx").string();
-                                embConfig.model_name = selectedModel;
-                                embConfig.batch_size = 32;
-                                // Provisional defaults (overridden at init by backend-reported)
-                                if (selectedModel.find("MiniLM") != std::string::npos)
-                                    embConfig.embedding_dim = 384;
-                                else if (selectedModel.find("mpnet") != std::string::npos)
-                                    embConfig.embedding_dim = 768;
-                                else if (selectedModel.find("nomic") != std::string::npos)
-                                    embConfig.embedding_dim = 768;
-                                else
-                                    embConfig.embedding_dim = 384;
-                                embConfig.max_sequence_length = 512;
-                                embConfig.normalize_embeddings = true;
-
-                                // Configure backend selection (Hybrid by default for best
-                                // performance)
-                                embConfig.backend =
-                                    vector::EmbeddingConfig::Backend::Hybrid; // Try daemon first,
-                                                                              // fallback to local
-
-                                // Additional daemon settings
-                                // daemon_socket left empty - will be auto-resolved by DaemonClient
-                                embConfig.daemon_timeout = std::chrono::milliseconds(5000);
-                                embConfig.daemon_max_retries = 3;
-                                // Do not auto-start the daemon from generic CLI init paths;
-                                // rely on explicit `yams daemon start` or on-demand components.
-                                embConfig.daemon_auto_start = false;
-
-                                spdlog::info(
-                                    "Creating EmbeddingGenerator with model: {} (hybrid backend)",
-                                    selectedModel);
-
-                                embeddingGenerator_ =
-                                    std::make_shared<vector::EmbeddingGenerator>(embConfig);
-                                // Defer initialization until actually needed to avoid daemon
-                                // connection during stats and other non-embedding commands
-                                spdlog::debug(
-                                    "Created EmbeddingGenerator (deferred init) with model: {}",
-                                    selectedModel);
-                            } else {
-                                spdlog::debug("No embedding models found in {}",
-                                              modelsPath.string());
-                            }
-                        } else {
-                            spdlog::debug("Models directory does not exist: {}",
-                                          modelsPath.string());
                         }
+                    }
+
+                    if (!selectedModel.empty()) {
+                        embConfig.model_path = (modelsPath / selectedModel / "model.onnx").string();
+                        embConfig.model_name = selectedModel;
+                        embConfig.batch_size = 32;
+                        // Provisional defaults (overridden at init by backend-reported)
+                        if (selectedModel.find("MiniLM") != std::string::npos)
+                            embConfig.embedding_dim = 384;
+                        else if (selectedModel.find("mpnet") != std::string::npos)
+                            embConfig.embedding_dim = 768;
+                        else if (selectedModel.find("nomic") != std::string::npos)
+                            embConfig.embedding_dim = 768;
+                        else
+                            embConfig.embedding_dim = 384;
+                        embConfig.max_sequence_length = 512;
+                        embConfig.normalize_embeddings = true;
+
+                        // Configure backend selection (Hybrid by default for best performance)
+                        embConfig.backend = vector::EmbeddingConfig::Backend::Hybrid;
+
+                        // Additional daemon settings
+                        embConfig.daemon_timeout = std::chrono::milliseconds(5000);
+                        embConfig.daemon_max_retries = 3;
+                        embConfig.daemon_auto_start = false;
+
+                        spdlog::info("Creating EmbeddingGenerator with model: {} (hybrid backend)",
+                                     selectedModel);
+
+                        embeddingGenerator_ =
+                            std::make_shared<vector::EmbeddingGenerator>(embConfig);
+                        spdlog::debug("Created EmbeddingGenerator (deferred init) with model: {}",
+                                      selectedModel);
                     } else {
-                        spdlog::debug("HOME environment variable not set");
+                        spdlog::debug("No embedding models found in {}", modelsPath.string());
                     }
-                } catch (const std::exception& e) {
-                    spdlog::warn("Exception while initializing EmbeddingGenerator: {}", e.what());
-                    // Continue without embedding generator
+                } else {
+                    spdlog::debug("Models directory does not exist: {}", modelsPath.string());
                 }
-            } else {
-                spdlog::debug(
-                    "VectorIndexManager not available, skipping EmbeddingGenerator initialization");
+            } catch (const std::exception& e) {
+                spdlog::warn("Exception while initializing EmbeddingGenerator: {}", e.what());
             }
 
             // Initialize vector database proactively using resolved dimension to avoid warnings

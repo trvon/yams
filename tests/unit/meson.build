@@ -143,16 +143,9 @@ unit_daemon_base = files(
 )
 
 # Daemon embedding tests - requires ONNX/model support
+# NOTE: All embedding tests migrated to Catch2 - see tests/meson.build
+# catch2_embedding_recovery_exe and catch2_abi_model_provider_dim_exe
 unit_daemon_embedding = []
-if get_option('enable-vector-tests')
-  unit_daemon_embedding += files(
-    # EmbeddingProviderFSM tests migrated to Catch2 (daemon_fsm_suite_test.cpp)
-    # Embedding status tests migrated to Catch2 (daemon_metrics_status_test.cpp)
-    # Removed: status_embedding_test.cpp
-    'daemon/embedding_provider_recovery_test.cpp',
-    'daemon/abi_model_provider_dimension_test.cpp',  # Dimension validation (27 tests total across 3 layers)
-  )
-endif
 
 unit_daemon = unit_daemon_base + unit_daemon_embedding
 
@@ -261,11 +254,12 @@ if get_option('enable-vector-tests')
 endif
 
 unit_ingest = []
-if get_option('enable-vector-tests')
-  unit_ingest += files(
-    'ingest/ingest_dimension_validation_test.cpp',  # Dimension validation - Ingest integration layer
-  )
-endif
+# Ingest tests migrated to Catch2 or empty - see tests/meson.build when ready
+# if get_option('enable-vector-tests')
+#   unit_ingest += files(
+#     'ingest/ingest_dimension_validation_catch2_test.cpp',  # TODO: Empty, pending implementation
+#   )
+# endif
 
 unit_wal = files(
   # legacy WAL tests removed

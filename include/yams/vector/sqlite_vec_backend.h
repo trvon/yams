@@ -50,6 +50,8 @@ public:
                   const std::map<std::string, std::string>& metadata_filters = {}) override;
 
     Result<std::optional<VectorRecord>> getVector(const std::string& chunk_id) override;
+    Result<std::map<std::string, VectorRecord>>
+    getVectorsBatch(const std::vector<std::string>& chunk_ids) override;
     Result<std::vector<VectorRecord>>
     getVectorsByDocument(const std::string& document_hash) override;
     Result<bool> hasEmbedding(const std::string& document_hash) override;

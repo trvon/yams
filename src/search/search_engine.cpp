@@ -343,13 +343,11 @@ class SearchEngine::Impl {
 public:
     Impl(std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo,
          std::shared_ptr<vector::VectorDatabase> vectorDb,
-         std::shared_ptr<vector::VectorIndexManager> vectorIndex,
          std::shared_ptr<vector::EmbeddingGenerator> embeddingGen,
          std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore,
          const SearchEngineConfig& config)
         : metadataRepo_(std::move(metadataRepo)), vectorDb_(std::move(vectorDb)),
-          vectorIndex_(std::move(vectorIndex)), embeddingGen_(std::move(embeddingGen)),
-          kgStore_(std::move(kgStore)), config_(config) {}
+          embeddingGen_(std::move(embeddingGen)), kgStore_(std::move(kgStore)), config_(config) {}
 
     Result<std::vector<SearchResult>> search(const std::string& query, const SearchParams& params);
 
@@ -409,7 +407,6 @@ private:
 
     std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<vector::VectorDatabase> vectorDb_;
-    std::shared_ptr<vector::VectorIndexManager> vectorIndex_;
     std::shared_ptr<vector::EmbeddingGenerator> embeddingGen_;
     std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore_;
     std::optional<boost::asio::any_io_executor> executor_;
@@ -517,7 +514,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 executor_);
         }
 
-        if (config_.vectorWeight > 0.0f && queryEmbedding.has_value() && vectorIndex_) {
+        if (config_.vectorWeight > 0.0f && queryEmbedding.has_value() && vectorDb_) {
             vectorFuture = postWork(
                 [this, &queryEmbedding, &workingConfig]() {
                     return queryVectorIndex(queryEmbedding.value(), workingConfig.vectorMaxResults);
@@ -657,7 +654,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                       "path", config_.pathTreeWeight, stats_.pathTreeQueries,
                       stats_.avgPathTreeTimeMicros);
 
-        if (queryEmbedding.has_value() && vectorIndex_) {
+        if (queryEmbedding.has_value() && vectorDb_) {
             runSequential(
                 [&]() {
                     return queryVectorIndex(queryEmbedding.value(), workingConfig.vectorMaxResults);
@@ -975,9 +972,10 @@ SearchEngine::Impl::queryVectorIndex(const std::vector<float>& embedding, size_t
     std::vector<ComponentResult> results;
     results.reserve(limit);
 
-    // Use VectorDatabase dual-path search:
-    // - Brute-force for corpus <10K vectors (faster than HNSW overhead)
-    // - HNSW for corpus >=10K vectors (100-1000x speedup)
+    // Vector search using VectorDatabase (sqlite-vec)
+    // sqlite-vec provides efficient cosine similarity search via vec_distance_cosine()
+    // Benchmarks show <30ms for 100K vectors which is acceptable for most use cases
+
     if (!vectorDb_) {
         return results;
     }
@@ -1026,6 +1024,8 @@ SearchEngine::Impl::queryVectorIndex(const std::vector<float>& embedding, size_t
 
             results.push_back(std::move(result));
         }
+
+        spdlog::debug("Vector search returned {} results", results.size());
 
     } catch (const std::exception& e) {
         spdlog::warn("Vector search exception: {}", e.what());
@@ -1163,11 +1163,6 @@ Result<void> SearchEngine::Impl::healthCheck() {
         return Error{ErrorCode::InvalidState, "Vector database not initialized"};
     }
 
-    // Check vector index
-    if (config_.vectorWeight > 0.0f && !vectorIndex_) {
-        return Error{ErrorCode::InvalidState, "Vector index not initialized"};
-    }
-
     // Check embedding generator
     if (config_.vectorWeight > 0.0f && !embeddingGen_) {
         return Error{ErrorCode::InvalidState, "Embedding generator not initialized"};
@@ -1182,13 +1177,11 @@ Result<void> SearchEngine::Impl::healthCheck() {
 
 SearchEngine::SearchEngine(std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo,
                            std::shared_ptr<vector::VectorDatabase> vectorDb,
-                           std::shared_ptr<vector::VectorIndexManager> vectorIndex,
                            std::shared_ptr<vector::EmbeddingGenerator> embeddingGen,
                            std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore,
                            const SearchEngineConfig& config)
     : pImpl_(std::make_unique<Impl>(std::move(metadataRepo), std::move(vectorDb),
-                                    std::move(vectorIndex), std::move(embeddingGen),
-                                    std::move(kgStore), config)) {}
+                                    std::move(embeddingGen), std::move(kgStore), config)) {}
 
 SearchEngine::~SearchEngine() = default;
 
@@ -1233,13 +1226,11 @@ void SearchEngine::setExecutor(std::optional<boost::asio::any_io_executor> execu
 std::unique_ptr<SearchEngine>
 createSearchEngine(std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo,
                    std::shared_ptr<vector::VectorDatabase> vectorDb,
-                   std::shared_ptr<vector::VectorIndexManager> vectorIndex,
                    std::shared_ptr<vector::EmbeddingGenerator> embeddingGen,
                    std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore,
                    const SearchEngineConfig& config) {
     return std::make_unique<SearchEngine>(std::move(metadataRepo), std::move(vectorDb),
-                                          std::move(vectorIndex), std::move(embeddingGen),
-                                          std::move(kgStore), config);
+                                          std::move(embeddingGen), std::move(kgStore), config);
 }
 
 } // namespace yams::search

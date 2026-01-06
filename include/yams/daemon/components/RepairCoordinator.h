@@ -13,6 +13,15 @@
 #include <boost/asio/thread_pool.hpp>
 #include <yams/compat/thread_stop_compat.h>
 
+namespace yams::metadata {
+class KnowledgeGraphStore;
+}
+
+namespace yams::daemon {
+class GraphComponent;
+class AbiSymbolExtractorAdapter;
+} // namespace yams::daemon
+
 namespace yams {
 namespace api {
 class IContentStore;
@@ -30,6 +39,8 @@ namespace yams::daemon {
 class ServiceManager;
 struct StateComponent;
 class YamsDaemon;
+class GraphComponent;
+class AbiSymbolExtractorAdapter;
 
 // Lightweight, feature-flagged background coordinator for repair tasks.
 // Non-invasive: derives coarse scheduling hints from server stats (idle vs active).
@@ -74,6 +85,13 @@ public:
     void setMaxBatch(std::uint32_t maxBatch) { cfg_.maxBatch = maxBatch; }
 
 private:
+    // Seams for testing.
+    // Keep these protected by default access expectations: callers should still use ServiceManager.
+    virtual std::shared_ptr<GraphComponent> getGraphComponentForScheduling() const;
+    virtual std::shared_ptr<metadata::KnowledgeGraphStore> getKgStoreForScheduling() const;
+    virtual const std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>>&
+    getSymbolExtractorsForScheduling() const;
+
     struct ShutdownState {
         std::atomic<bool> finished{false};
         std::atomic<bool> running{true};

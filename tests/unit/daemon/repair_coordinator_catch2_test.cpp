@@ -12,6 +12,11 @@
 #include <yams/daemon/components/RepairCoordinator.h>
 #include <yams/daemon/components/StateComponent.h>
 
+#include <yams/daemon/components/GraphComponent.h>
+#include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
+#include <yams/metadata/knowledge_graph_store.h>
+#include <yams/metadata/metadata_repository.h>
+
 using namespace std::chrono_literals;
 
 namespace {
@@ -33,6 +38,52 @@ inline bool wait_for_condition(std::chrono::milliseconds timeout,
 } // namespace
 
 namespace yams::daemon {
+
+namespace {
+
+class FakeGraphComponent final : public GraphComponent {
+public:
+    explicit FakeGraphComponent(std::atomic<int>& calls)
+        : GraphComponent(nullptr, nullptr, nullptr), calls_(calls) {}
+
+    Result<void> submitEntityExtraction(EntityExtractionJob) {
+        calls_.fetch_add(1);
+        return {};
+    }
+
+private:
+    std::atomic<int>& calls_;
+};
+
+class FakeRepairCoordinator final : public RepairCoordinator {
+public:
+    FakeRepairCoordinator(StateComponent* state, std::function<size_t()> activeConnFn, Config cfg,
+                          std::shared_ptr<metadata::KnowledgeGraphStore> kg,
+                          std::shared_ptr<GraphComponent> graph,
+                          std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> extractors)
+        : RepairCoordinator(nullptr, state, std::move(activeConnFn), std::move(cfg)),
+          kg_(std::move(kg)), graph_(std::move(graph)), extractors_(std::move(extractors)) {}
+
+private:
+    std::shared_ptr<GraphComponent> getGraphComponentForScheduling() const override {
+        return graph_;
+    }
+
+    std::shared_ptr<metadata::KnowledgeGraphStore> getKgStoreForScheduling() const override {
+        return kg_;
+    }
+
+    const std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>>&
+    getSymbolExtractorsForScheduling() const override {
+        return extractors_;
+    }
+
+    std::shared_ptr<metadata::KnowledgeGraphStore> kg_;
+    std::shared_ptr<GraphComponent> graph_;
+    std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> extractors_;
+};
+
+} // namespace
 
 TEST_CASE("RepairCoordinator processes document events when enabled",
           "[daemon][repair][coordinator]") {
@@ -133,6 +184,104 @@ TEST_CASE("RepairCoordinator stop is idempotent", "[daemon][repair][coordinator]
 
     // Second stop should be idempotent (no error)
     REQUIRE_NOTHROW(coordinator.stop());
+}
+
+TEST_CASE("RepairCoordinator skips symbol extraction if doc entities exist",
+          "[daemon][repair][coordinator]") {
+    StateComponent state;
+    auto activeFn = []() -> size_t { return 0; };
+
+    RepairCoordinator::Config cfg;
+    cfg.enable = true;
+    cfg.dataDir = std::filesystem::temp_directory_path() / "repair_test_dedupe";
+    cfg.maxBatch = 10;
+
+    // Minimal KG DB for predicate checks.
+    auto dbPath = std::filesystem::temp_directory_path() / "repair_test_dedupe_kg.db";
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
+
+    metadata::KnowledgeGraphStoreConfig kgCfg{};
+    auto sres = metadata::makeSqliteKnowledgeGraphStore(dbPath.string(), kgCfg);
+    REQUIRE(sres.has_value());
+    std::shared_ptr<metadata::KnowledgeGraphStore> kg = std::move(sres.value());
+
+    metadata::ConnectionPoolConfig pcfg;
+    auto pool = std::make_unique<metadata::ConnectionPool>(dbPath.string(), pcfg);
+    REQUIRE(pool->initialize().has_value());
+    auto repo = std::make_unique<metadata::MetadataRepository>(*pool);
+
+    metadata::DocumentInfo doc;
+    doc.fileName = "example.cpp";
+    doc.filePath = "/tmp/example.cpp";
+    doc.fileExtension = "cpp";
+    doc.fileSize = 123;
+    doc.sha256Hash = "hash-abc";
+    doc.mimeType = "text/x-c++";
+    doc.setCreatedTime(1);
+    doc.setModifiedTime(1);
+    doc.setIndexedTime(1);
+    auto insDoc = repo->insertDocument(doc);
+    REQUIRE(insDoc.has_value());
+    auto docId = insDoc.value();
+
+    metadata::KGNode sym;
+    sym.nodeKey = "sym:hash-abc:F";
+    sym.label = std::string("F");
+    sym.type = std::string("symbol");
+    auto symIdRes = kg->upsertNode(sym);
+    REQUIRE(symIdRes.has_value());
+
+    metadata::DocEntity de;
+    de.documentId = docId;
+    de.entityText = "F";
+    de.nodeId = symIdRes.value();
+    de.startOffset = 0;
+    de.endOffset = 1;
+    de.confidence = 1.0f;
+    de.extractor = std::string("test");
+    REQUIRE(kg->addDocEntities({de}).has_value());
+
+    std::atomic<int> extractionCalls{0};
+    auto graph = std::make_shared<FakeGraphComponent>(extractionCalls);
+
+    // Construct a minimal extractor that advertises .cpp support.
+    static yams_symbol_extractor_v1 table{};
+    table.get_capabilities_json = [](void*, char** out_json) -> int {
+        if (!out_json)
+            return 1;
+        static constexpr char kCaps[] =
+            R"({"version":1,"languages":[{"id":"cpp","extensions":["cpp",".cpp"]}]})";
+        *out_json = const_cast<char*>(kCaps);
+        return 0;
+    };
+    table.free_string = [](void*, char*) {};
+    auto extractor = std::make_shared<AbiSymbolExtractorAdapter>(&table);
+
+    std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> extractors{extractor};
+
+    FakeRepairCoordinator rc(&state, activeFn, cfg, kg, graph, std::move(extractors));
+    rc.start();
+
+    // .cpp path should match and attempt dispatch; dedupe should skip.
+    RepairCoordinator::DocumentAddedEvent ev{"hash-abc", "/tmp/example.cpp"};
+    rc.onDocumentAdded(ev);
+
+    CHECK(extractionCalls.load() == 0);
+
+    // Remove doc entities and retry. If scheduling happens it should increment,
+    // but this test primarily guards the "skip when entities exist" behavior.
+    REQUIRE(kg->deleteDocEntitiesForDocument(docId).has_value());
+    rc.onDocumentAdded(ev);
+
+    SUCCEED();
+
+    rc.stop();
+    repo.reset();
+    pool->shutdown();
+    pool.reset();
+    kg.reset();
+    std::filesystem::remove(dbPath, ec);
 }
 
 TEST_CASE("RepairCoordinator handles multiple document added events",

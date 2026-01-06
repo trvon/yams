@@ -68,7 +68,6 @@ class SearchEngine;
 class SearchEngineBuilder;
 } // namespace yams::search
 namespace yams::vector {
-class VectorIndexManager;
 class EmbeddingGenerator;
 class VectorDatabase;
 } // namespace yams::vector
@@ -127,15 +126,6 @@ public:
     }
     std::shared_ptr<IModelProvider> getModelProvider() const { return modelProvider_; }
     std::shared_ptr<yams::search::SearchEngine> getSearchEngineSnapshot() const;
-    std::shared_ptr<vector::VectorIndexManager> getVectorIndexManager() const {
-        // PBI-088: Delegate to VectorSystemManager if available
-        if (vectorSystemManager_) {
-            auto mgr = vectorSystemManager_->getVectorIndexManager();
-            if (mgr)
-                return mgr;
-        }
-        return vectorIndexManager_; // Fallback to old member
-    }
     std::string getEmbeddingModelName() const { return embeddingModelName_; }
     std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const {
         // PBI-088: Delegate to VectorSystemManager if available
@@ -490,7 +480,6 @@ private:
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_;
     std::shared_ptr<GraphComponent> graphComponent_;
-    std::shared_ptr<vector::VectorIndexManager> vectorIndexManager_;
     std::shared_ptr<vector::VectorDatabase> vectorDatabase_;
     std::shared_ptr<IModelProvider> modelProvider_;
 

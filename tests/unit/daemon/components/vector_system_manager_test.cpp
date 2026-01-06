@@ -133,34 +133,10 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager accessors befo
         CHECK(mgr.getVectorDatabase() == nullptr);
     }
 
-    SECTION("getVectorIndexManager returns nullptr before init") {
-        CHECK(mgr.getVectorIndexManager() == nullptr);
-    }
+    // VectorIndexManager removed - SearchEngine uses VectorDatabase directly
 
     SECTION("getEmbeddingDimension returns 0 before init") {
         CHECK(mgr.getEmbeddingDimension() == 0);
-    }
-}
-
-TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager index manager operations",
-                 "[daemon][components][vector][catch2]") {
-    auto deps = makeDeps();
-    VectorSystemManager mgr(deps);
-
-    SECTION("initializeIndexManager works with dimension") {
-        bool result = mgr.initializeIndexManager(tempDir, 384);
-        // May succeed or fail depending on state
-        (void)result;
-    }
-
-    SECTION("saveIndex before init returns false") {
-        bool result = mgr.saveIndex(tempDir / "index.bin");
-        CHECK_FALSE(result);
-    }
-
-    SECTION("loadPersistedIndex for non-existent file returns false") {
-        bool result = mgr.loadPersistedIndex(tempDir / "nonexistent.bin");
-        CHECK_FALSE(result);
     }
 }
 
