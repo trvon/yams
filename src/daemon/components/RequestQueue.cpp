@@ -76,12 +76,10 @@ void RequestQueue::stop() {
     auto cancel_future = cancel_done.get_future();
     boost::asio::post(executor_, [this, done = std::move(cancel_done)]() mutable {
         if (eviction_timer_) {
-            boost::system::error_code ec;
-            eviction_timer_->cancel(ec);
+            eviction_timer_->cancel();
         }
         if (aging_timer_) {
-            boost::system::error_code ec;
-            aging_timer_->cancel(ec);
+            aging_timer_->cancel();
         }
         done.set_value();
     });

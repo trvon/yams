@@ -187,7 +187,8 @@ TEST_CASE_METHOD(CommandIntegrationFixture, "get command filtering aligns with d
         auto detectResult = FileTypeDetector::instance().detectFromFile(testFile);
         if (detectResult) {
             const auto sig = detectResult.value();
-            auto isText = FileTypeDetector::instance().isTextMimeType(sig.mimeType);
+            [[maybe_unused]] auto isText =
+                FileTypeDetector::instance().isTextMimeType(sig.mimeType);
             auto isBinary = FileTypeDetector::instance().isBinaryMimeType(sig.mimeType);
             auto category = FileTypeDetector::instance().getFileTypeCategory(sig.mimeType);
 

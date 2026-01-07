@@ -357,17 +357,127 @@ public:
                                .duration = duration};
         }
 
-        // For larger data, use chunking via temporary file
-        auto tempPath = config_.storagePath / "temp" / (dataHash + "_mem");
-        std::filesystem::create_directories(tempPath.parent_path());
+        // For larger data, use in-memory chunking directly (avoid temp file I/O)
+        auto chunks = chunker_->chunkData(data);
+        spdlog::debug("Data chunked into {} chunks (in-memory)", chunks.size());
 
-        std::ofstream tempFile(tempPath, std::ios::binary);
-        tempFile.write(reinterpret_cast<const char*>(data.data()),
-                       static_cast<std::streamsize>(data.size()));
-        tempFile.close();
+        // Store chunks and track deduplication
+        uint64_t bytesStored = 0;
+        uint64_t bytesDeduped = 0;
 
-        auto result = store(tempPath, metadata, nullptr);
-        std::filesystem::remove(tempPath);
+        // Begin reference counting transaction
+        auto transaction = refCounter_->beginTransaction();
+
+        for (const auto& chunk : chunks) {
+            // Check if chunk already exists
+            auto existsResult = storage_->exists(chunk.hash);
+            if (!existsResult) {
+                transaction->rollback();
+                return Result<StoreResult>(existsResult.error());
+            }
+
+            if (existsResult.value()) {
+                // Chunk already exists, just increment reference
+                bytesDeduped += chunk.size;
+
+                // Get on-disk (compressed) size for reference counting
+                auto blockSizeResult = storage_->getBlockSize(chunk.hash);
+                size_t compressedSize =
+                    blockSizeResult ? static_cast<size_t>(blockSizeResult.value()) : chunk.size;
+
+                auto incResult = refCounter_->increment(chunk.hash, compressedSize, chunk.size);
+                if (!incResult) {
+                    transaction->rollback();
+                    return Result<StoreResult>(incResult.error());
+                }
+            } else {
+                // Store new chunk
+                auto storeResult = storage_->store(
+                    chunk.hash, std::span<const std::byte>(chunk.data.data(), chunk.data.size()));
+                if (!storeResult) {
+                    transaction->rollback();
+                    return Result<StoreResult>(storeResult.error());
+                }
+
+                bytesStored += chunk.size;
+
+                // Get on-disk (compressed) size for reference counting
+                auto blockSizeResult = storage_->getBlockSize(chunk.hash);
+                size_t compressedSize =
+                    blockSizeResult ? static_cast<size_t>(blockSizeResult.value()) : chunk.size;
+
+                // Add initial reference with both compressed and uncompressed sizes
+                auto incResult = refCounter_->increment(chunk.hash, compressedSize, chunk.size);
+                if (!incResult) {
+                    transaction->rollback();
+                    return Result<StoreResult>(incResult.error());
+                }
+            }
+        }
+
+        // Create file info for manifest
+        FileInfo fileInfo{.hash = dataHash,
+                          .size = data.size(),
+                          .mimeType = metadata.mimeType,
+                          .createdAt = metadata.createdAt,
+                          .originalName = metadata.name};
+
+        // Convert Chunk vector to ChunkRef vector
+        std::vector<manifest::ChunkRef> chunkRefs;
+        chunkRefs.reserve(chunks.size());
+        for (const auto& chunk : chunks) {
+            chunkRefs.push_back({chunk.hash, chunk.offset, static_cast<uint32_t>(chunk.size)});
+        }
+
+        // Create and store manifest
+        auto manifestResult = manifestManager_->createManifest(fileInfo, chunkRefs);
+        if (!manifestResult) {
+            transaction->rollback();
+            return Result<StoreResult>(manifestResult.error());
+        }
+
+        auto& manifest = manifestResult.value();
+
+        // Store manifest metadata
+        {
+            std::unique_lock lock(metadataMutex_);
+            metadataStore_[dataHash] = metadata;
+        }
+
+        // Serialize and store manifest
+        auto manifestData = manifestManager_->serialize(manifest);
+        if (!manifestData) {
+            transaction->rollback();
+            return Result<StoreResult>(manifestData.error());
+        }
+
+        auto manifestHash = dataHash + ".manifest";
+        auto manifestStoreResult =
+            storage_->store(manifestHash, std::span<const std::byte>(manifestData.value()));
+        if (!manifestStoreResult) {
+            transaction->rollback();
+            return Result<StoreResult>(manifestStoreResult.error());
+        }
+
+        // Commit transaction
+        auto commitResult = transaction->commit();
+        if (!commitResult) {
+            return Result<StoreResult>(commitResult.error());
+        }
+
+        // Update statistics
+        updateStats(bytesStored, bytesDeduped, 0, 1, 1, 0, 0);
+
+        auto endTime = std::chrono::steady_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+
+        StoreResult result{.contentHash = dataHash,
+                           .bytesStored = data.size(),
+                           .bytesDeduped = bytesDeduped,
+                           .duration = duration};
+
+        spdlog::debug("Stored data with hash {}, dedup ratio: {:.2f}%", dataHash,
+                      result.dedupRatio() * 100);
 
         return result;
     }

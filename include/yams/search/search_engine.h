@@ -75,12 +75,14 @@ struct SearchEngineConfig {
     } corpusProfile = CorpusProfile::MIXED;
 
     // Component weights (0.0 = disabled, 1.0 = full weight)
-    float textWeight = 0.45f;     // Full-text search weight (merged FTS5 + symbol)
+    float textWeight = 0.40f;     // Full-text search weight (merged FTS5 + symbol)
     float pathTreeWeight = 0.15f; // Path tree hierarchical weight
     float kgWeight = 0.10f;       // Knowledge graph weight
-    float vectorWeight = 0.15f;   // Vector similarity weight
-    float tagWeight = 0.10f;      // Tag-based search weight
-    float metadataWeight = 0.05f; // Metadata attribute matching weight
+    float vectorWeight = 0.20f;   // Vector similarity weight (HNSW indexed, fast)
+    float entityVectorWeight =
+        0.0f; // Entity (symbol) vector similarity weight (DISABLED: brute-force, slow)
+    float tagWeight = 0.10f;      // Tag-based search weight (modifier, not standalone)
+    float metadataWeight = 0.05f; // Metadata attribute matching weight (modifier, not standalone)
 
     // Search parameters
     size_t maxResults = 100;                     // Maximum results to return
@@ -107,12 +109,13 @@ struct SearchEngineConfig {
     } fusionStrategy = FusionStrategy::WEIGHTED_RECIPROCAL;
 
     // Component-specific settings
-    size_t textMaxResults = 200;     // Full-text search candidate limit (merged FTS5 + symbol)
-    size_t pathTreeMaxResults = 100; // Path tree candidate limit
-    size_t kgMaxResults = 50;        // KG traversal candidate limit
-    size_t vectorMaxResults = 100;   // Vector search k
-    size_t tagMaxResults = 200;      // Tag search candidate limit
-    size_t metadataMaxResults = 150; // Metadata filter candidate limit
+    size_t textMaxResults = 200;        // Full-text search candidate limit (merged FTS5 + symbol)
+    size_t pathTreeMaxResults = 100;    // Path tree candidate limit
+    size_t kgMaxResults = 50;           // KG traversal candidate limit
+    size_t vectorMaxResults = 100;      // Vector search k
+    size_t entityVectorMaxResults = 50; // Entity vector search k
+    size_t tagMaxResults = 200;         // Tag search candidate limit
+    size_t metadataMaxResults = 150;    // Metadata filter candidate limit
 
     // Performance tuning
     bool useConnectionPriority = true;   // Use High priority for search queries
@@ -121,16 +124,28 @@ struct SearchEngineConfig {
     // Symbol ranking
     bool symbolRank = true; // Enable automatic symbol ranking boost for code-like queries
 
+    // Tiered search optimization (PBI-075)
+    // When enabled, search runs in tiers with early termination:
+    // - Tier 1 (fast): FTS5 text, path tree, vector (HNSW) - all indexed
+    // - Tier 2 (medium): KG alias resolution - skipped if Tier 1 has enough results
+    // - Tier 3 (slow): Entity vectors (brute-force) - disabled by default
+    bool enableTieredSearch = true; // Enable tiered execution with early termination
+    size_t earlyTerminationMinResults =
+        0; // Min results to trigger early termination (0 = use limit)
+    float earlyTerminationQualityThreshold =
+        0.6f; // Min top score to consider results "good enough"
+
     // Debugging
-    bool includeDebugInfo = false; // Include per-component scores in results
+    bool includeDebugInfo = false;       // Include per-component scores in results
+    bool includeComponentTiming = false; // Include per-component execution time in response
 
     /**
      * @brief Get preset configuration for a corpus profile
      *
      * Returns a SearchEngineConfig with weights tuned for the given profile:
-     * - CODE: text=0.50, path=0.20, vector=0.10, kg=0.10, tag=0.05, meta=0.05
-     * - PROSE: text=0.45, path=0.10, vector=0.25, kg=0.05, tag=0.10, meta=0.05
-     * - DOCS: text=0.45, path=0.15, vector=0.20, kg=0.10, tag=0.05, meta=0.05
+     * - CODE: text=0.40, path=0.15, vector=0.10, entityVector=0.15, kg=0.10, tag=0.05, meta=0.05
+     * - PROSE: text=0.45, path=0.10, vector=0.25, entityVector=0.00, kg=0.05, tag=0.10, meta=0.05
+     * - DOCS: text=0.40, path=0.15, vector=0.20, entityVector=0.05, kg=0.10, tag=0.05, meta=0.05
      * - MIXED: Default balanced weights
      */
     static SearchEngineConfig forProfile(CorpusProfile profile) {
@@ -139,10 +154,11 @@ struct SearchEngineConfig {
 
         switch (profile) {
             case CorpusProfile::CODE:
-                config.textWeight = 0.50f;
-                config.pathTreeWeight = 0.20f;
+                config.textWeight = 0.40f;
+                config.pathTreeWeight = 0.15f;
                 config.kgWeight = 0.10f;
                 config.vectorWeight = 0.10f;
+                config.entityVectorWeight = 0.15f; // High weight for code symbol search
                 config.tagWeight = 0.05f;
                 config.metadataWeight = 0.05f;
                 break;
@@ -152,15 +168,17 @@ struct SearchEngineConfig {
                 config.pathTreeWeight = 0.10f;
                 config.kgWeight = 0.05f;
                 config.vectorWeight = 0.25f;
+                config.entityVectorWeight = 0.00f; // Disabled for prose (no symbols)
                 config.tagWeight = 0.10f;
                 config.metadataWeight = 0.05f;
                 break;
 
             case CorpusProfile::DOCS:
-                config.textWeight = 0.45f;
+                config.textWeight = 0.40f;
                 config.pathTreeWeight = 0.15f;
                 config.kgWeight = 0.10f;
                 config.vectorWeight = 0.20f;
+                config.entityVectorWeight = 0.05f; // Low weight for docs with code snippets
                 config.tagWeight = 0.05f;
                 config.metadataWeight = 0.05f;
                 break;
@@ -266,42 +284,16 @@ struct SearchResponse {
     std::vector<std::string> timedOutComponents;
     std::vector<std::string> failedComponents;
     std::vector<std::string> contributingComponents;
+    std::vector<std::string> skippedComponents; // Components skipped due to early termination
+    std::map<std::string, int64_t> componentTimingMicros; // Per-component execution time
     int64_t executionTimeMs = 0;
     bool isDegraded = false;
+    bool usedEarlyTermination = false; // True if later tiers were skipped
 
     [[nodiscard]] bool hasResults() const { return !results.empty(); }
     [[nodiscard]] bool isComplete() const {
         return timedOutComponents.empty() && failedComponents.empty();
     }
-};
-
-/**
- * @brief Parallel component query executor
- *
- * Internal class for managing parallel execution of search queries across
- * all components. Uses connection pool with High priority and deterministic
- * error handling (no hangs from timeouts).
- */
-class ComponentQueryExecutor {
-public:
-    explicit ComponentQueryExecutor(yams::metadata::ConnectionPool& pool,
-                                    const SearchEngineConfig& config);
-
-    // Execute all component queries in parallel
-    Result<std::vector<ComponentResult>>
-    executeAll(const std::string& query, const std::optional<std::vector<float>>& queryEmbedding);
-
-private:
-    // Individual component query methods (each returns Results ordered by score)
-    Result<std::vector<ComponentResult>> queryFullText(const std::string& query);
-    Result<std::vector<ComponentResult>> queryPathTree(const std::string& query);
-    Result<std::vector<ComponentResult>> queryKnowledgeGraph(const std::string& query);
-    Result<std::vector<ComponentResult>> queryVectorIndex(const std::vector<float>& embedding);
-
-    // Note: These members are retained for future use when ComponentQueryExecutor
-    // is refactored to accept MetadataRepository instead of just ConnectionPool
-    [[maybe_unused]] yams::metadata::ConnectionPool& pool_;
-    [[maybe_unused]] const SearchEngineConfig& config_;
 };
 
 /**
@@ -325,15 +317,67 @@ private:
     std::vector<SearchResult> fuseBordaCount(const std::vector<ComponentResult>& results);
     std::vector<SearchResult> fuseWeightedReciprocal(const std::vector<ComponentResult>& results);
 
-    // Helper: Group component results by document (uses unordered_map for O(1) lookup)
-    std::unordered_map<std::string, std::vector<ComponentResult>>
-    groupByDocument(const std::vector<ComponentResult>& results) const;
+    // Single-pass fusion: accumulate scores directly into result map, then sort once.
+    // Replaces the previous 3-pass pattern (groupByDocument -> iterate -> sort).
+    // ScoreFunc signature: double(const ComponentResult&)
+    template <typename ScoreFunc>
+    std::vector<SearchResult> fuseSinglePass(const std::vector<ComponentResult>& results,
+                                             ScoreFunc&& scoreFunc);
 
     // Helper: Get weight for component source
     float getComponentWeight(const std::string& source) const;
 
     const SearchEngineConfig& config_;
 };
+
+// Template implementation - must be in header
+template <typename ScoreFunc>
+std::vector<SearchResult> ResultFusion::fuseSinglePass(const std::vector<ComponentResult>& results,
+                                                       ScoreFunc&& scoreFunc) {
+    // Single map to accumulate scores directly into SearchResult objects
+    std::unordered_map<std::string, SearchResult> resultMap;
+    resultMap.reserve(results.size());
+
+    // Single pass: accumulate scores directly
+    for (const auto& comp : results) {
+        auto& r = resultMap[comp.documentHash];
+        if (r.document.sha256Hash.empty()) {
+            // First time seeing this document - initialize
+            r.document.sha256Hash = comp.documentHash;
+            r.document.filePath = comp.filePath;
+            r.score = 0.0;
+        }
+
+        // Accumulate score using the strategy-specific scoring function
+        r.score += scoreFunc(comp);
+
+        // Use first available snippet
+        if (r.snippet.empty() && comp.snippet.has_value()) {
+            r.snippet = comp.snippet.value();
+        }
+    }
+
+    // Extract results from map
+    std::vector<SearchResult> fusedResults;
+    fusedResults.reserve(resultMap.size());
+    for (auto& [_, r] : resultMap) {
+        fusedResults.emplace_back(std::move(r));
+    }
+
+    // Single sort at the end
+    if (fusedResults.size() > config_.maxResults) {
+        std::partial_sort(
+            fusedResults.begin(), fusedResults.begin() + static_cast<ptrdiff_t>(config_.maxResults),
+            fusedResults.end(),
+            [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
+        fusedResults.resize(config_.maxResults);
+    } else {
+        std::sort(fusedResults.begin(), fusedResults.end(),
+                  [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
+    }
+
+    return fusedResults;
+}
 
 /**
  * @brief Multi-component parallel search engine
@@ -441,6 +485,7 @@ public:
         std::atomic<uint64_t> pathTreeQueries{0};
         std::atomic<uint64_t> kgQueries{0};
         std::atomic<uint64_t> vectorQueries{0};
+        std::atomic<uint64_t> entityVectorQueries{0};
         std::atomic<uint64_t> tagQueries{0};
         std::atomic<uint64_t> metadataQueries{0};
 
@@ -451,6 +496,7 @@ public:
         std::atomic<uint64_t> avgPathTreeTimeMicros{0};
         std::atomic<uint64_t> avgKgTimeMicros{0};
         std::atomic<uint64_t> avgVectorTimeMicros{0};
+        std::atomic<uint64_t> avgEntityVectorTimeMicros{0};
         std::atomic<uint64_t> avgTagTimeMicros{0};
         std::atomic<uint64_t> avgMetadataTimeMicros{0};
 

@@ -29,8 +29,18 @@ if not catch2_main_dep.found()
   catch2_main_dep = dependency('Catch2WithMain', required: false, method: 'cmake')
 endif
 if not catch2_main_dep.found()
-  # Fallback: use Catch2 and assume it includes main
-  catch2_main_dep = catch2_dep
+  # Fallback: try to find libCatch2Main directly (homebrew installs separate libs)
+  cxx = meson.get_compiler('cpp')
+  catch2_main_lib = cxx.find_library('Catch2Main', required: false)
+  if catch2_main_lib.found()
+    catch2_main_dep = declare_dependency(
+      dependencies: [catch2_dep, catch2_main_lib]
+    )
+  else
+    # Last resort: use Catch2 only (tests will fail to link without main)
+    catch2_main_dep = catch2_dep
+    warning('Catch2Main library not found - tests may fail to link')
+  endif
 endif
 
 # Get Catch2 partial dependency with includes for test builds

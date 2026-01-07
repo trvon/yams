@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.7.11] - Unreleased
 
 ### Breaking
+- **Vector database migration required**: sqlite-vec-cpp HNSW rewrite invalidates existing vector indices. After upgrading, run:
+  ```bash
+  yams doctor repair --embeddings   # Regenerate all embeddings
+  yams doctor repair --graph        # Rebuild knowledge graph (optional)
+  ```
+  Without this, search will fall back to FTS5-only (no semantic search).
 - sqlite-vec-cpp submodule: HNSW API changes and third-party library removal (soft deletion, multi-threading, fp16 quantization, incremental persistence, pre-filtering).
 
 ### Added
@@ -34,7 +40,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Post-ingest throughput: dedicated worker pool, adaptive backoff, batched directory ingests.
 - Search optimizations: batch vector/KG lookups, flat_map for cache-friendly access, branch hints, memory pre-allocation.
 - Daemon startup throttling: PathTreeRepair via RepairCoordinator, Fts5Job startup delay (2s), reduced batch sizes (1000→100).
-- Benchmarks: ingestion/metadata ops improved vs prior baseline (SmallDocument ~1.1K→~2.5K docs/sec; MediumDocument ~17→~57 docs/sec; SingleUpdate ~9.1K→~14.2K ops/sec; BulkUpdate(500) ~7.4K→~11.5K ops/sec).
+- **New**: `setMetadataBatch()` API for bulk metadata updates - 4x faster than individual calls.
+- **New**: In-memory chunking for `storeBytes()` - avoids temp file I/O for large documents.
+- Benchmarks (Debug, macOS M3 Max):
+  | Benchmark | Oct 2025 | Jan 2026 | Change |
+  |-----------|----------|----------|--------|
+  | Ingestion_SmallDocument | 2,771 ops/s | 2,821 ops/s | ~same |
+  | Ingestion_MediumDocument | 56 ops/s | 57 ops/s | ~same |
+  | Metadata_SingleUpdate | 10,537 ops/s | 13,966 ops/s | **+33%** |
+  | Metadata_BulkUpdate(500) | 7,823 ops/s | 51,341 ops/s | **+6.5x** |
+  | IPC StreamingFramer_32x10 | - | 3,732 ops/s | new |
+  | IPC UnaryFramer_8KB | - | 10,088 ops/s | new |
 
 ### Fixed
 - Compression stats now persist across daemon restarts (`Storage Logical Bytes` vs

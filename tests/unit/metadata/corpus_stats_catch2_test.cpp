@@ -479,9 +479,9 @@ TEST_CASE("getCorpusStats: tag coverage", "[unit][corpus_stats][integration]") {
     // Insert documents
     auto id1 = fix.insertDocument("/a.cpp", "hash1", 100);
     auto id2 = fix.insertDocument("/b.cpp", "hash2", 100);
-    auto id3 = fix.insertDocument("/c.cpp", "hash3", 100);
-    auto id4 = fix.insertDocument("/d.cpp", "hash4", 100);
-    auto id5 = fix.insertDocument("/e.cpp", "hash5", 100);
+    [[maybe_unused]] auto id3 = fix.insertDocument("/c.cpp", "hash3", 100);
+    [[maybe_unused]] auto id4 = fix.insertDocument("/d.cpp", "hash4", 100);
+    [[maybe_unused]] auto id5 = fix.insertDocument("/e.cpp", "hash5", 100);
 
     // Add tags to some documents (2/5 = 40% coverage)
     fix.addTag(id1, "important");

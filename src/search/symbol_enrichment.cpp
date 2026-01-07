@@ -111,14 +111,18 @@ bool SymbolEnricher::enrichResult(SearchResultItem& result, const std::string& q
         }
 
         if (!hasDefinition && !matchingNodeIds.empty()) {
-            size_t checkLimit = std::min(matchingNodeIds.size(), size_t(3));
-            for (size_t i = 0; i < checkLimit; ++i) {
-                auto inEdges = kg_store_->getEdgesTo(matchingNodeIds[i], "defines", 1, 0);
-                if (inEdges.has_value() && !inEdges.value().empty()) {
-                    hasDefinition = true;
-                    bestDefinitionScore = 1.5f;
-                    ctx.matchType = "definition";
-                    break;
+            // Use batch edge fetching to check for "defines" edges on all matching nodes
+            // This eliminates N+1 queries by fetching all edges in a single query
+            auto batchEdges = kg_store_->getEdgesToBatch(matchingNodeIds, "defines", 1);
+            if (batchEdges.has_value()) {
+                for (const auto& nodeId : matchingNodeIds) {
+                    auto it = batchEdges.value().find(nodeId);
+                    if (it != batchEdges.value().end() && !it->second.empty()) {
+                        hasDefinition = true;
+                        bestDefinitionScore = 1.5f;
+                        ctx.matchType = "definition";
+                        break;
+                    }
                 }
             }
         }

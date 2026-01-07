@@ -905,20 +905,26 @@ private:
     void checkDaemon(std::optional<yams::daemon::StatusResponse>& cachedStatus) {
         using namespace yams::daemon;
         try {
-            // First, perform a lightweight check to see if the daemon is responsive.
-            // This avoids triggering auto-start logic in a diagnostic command.
             std::string effectiveSocket =
                 daemon::DaemonClient::resolveSocketPathConfigFirst().string();
-            if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
-                std::cout << "\n" << yams::cli::ui::section_header("Daemon Health") << "\n\n";
-                std::cout << yams::cli::ui::colorize("✗ UNAVAILABLE", yams::cli::ui::Ansi::RED)
-                          << " - Daemon not running on socket: " << effectiveSocket << "\n";
-                std::cout << "\n"
-                          << yams::cli::ui::colorize(
-                                 "Hint: Start the daemon with 'yams daemon start'",
-                                 yams::cli::ui::Ansi::DIM)
-                          << "\n";
-                return;
+
+            // If we already have a cached status, skip the isDaemonRunning check to avoid
+            // race conditions where the daemon might momentarily be unresponsive.
+            // The cached status was successfully retrieved, so we know the daemon was running.
+            if (!cachedStatus) {
+                // First, perform a lightweight check to see if the daemon is responsive.
+                // This avoids triggering auto-start logic in a diagnostic command.
+                if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
+                    std::cout << "\n" << yams::cli::ui::section_header("Daemon Health") << "\n\n";
+                    std::cout << yams::cli::ui::colorize("✗ UNAVAILABLE", yams::cli::ui::Ansi::RED)
+                              << " - Daemon not running on socket: " << effectiveSocket << "\n";
+                    std::cout << "\n"
+                              << yams::cli::ui::colorize(
+                                     "Hint: Start the daemon with 'yams daemon start'",
+                                     yams::cli::ui::Ansi::DIM)
+                              << "\n";
+                    return;
+                }
             }
 
             // If no cached status, fetch it now

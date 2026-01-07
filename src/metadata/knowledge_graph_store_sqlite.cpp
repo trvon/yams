@@ -9,7 +9,9 @@
 #include <chrono>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -831,6 +833,85 @@ public:
                 if (!stmt.isNull(6))
                     e.properties = stmt.getString(6);
                 out.push_back(std::move(e));
+            }
+            return out;
+        });
+    }
+
+    Result<std::unordered_map<std::int64_t, std::vector<KGEdge>>>
+    getEdgesToBatch(const std::vector<std::int64_t>& dstNodeIds,
+                    std::optional<std::string_view> relation, std::size_t limitPerNode) override {
+        using ResultMap = std::unordered_map<std::int64_t, std::vector<KGEdge>>;
+
+        if (dstNodeIds.empty()) {
+            return ResultMap{};
+        }
+
+        return pool_->withConnection([&](Database& db) -> Result<ResultMap> {
+            // Build SQL with IN clause for batch lookup
+            // Using window function to limit results per destination node
+            std::string placeholders;
+            for (size_t i = 0; i < dstNodeIds.size(); ++i) {
+                if (i > 0)
+                    placeholders += ",";
+                placeholders += "?";
+            }
+
+            std::string sql =
+                "SELECT id, src_node_id, dst_node_id, relation, weight, created_time, properties "
+                "FROM ("
+                "  SELECT *, ROW_NUMBER() OVER (PARTITION BY dst_node_id ORDER BY id) as rn "
+                "  FROM kg_edges "
+                "  WHERE dst_node_id IN (" +
+                placeholders + ")";
+            if (relation.has_value()) {
+                sql += " AND relation = ?";
+            }
+            sql += ") WHERE rn <= ?";
+
+            auto stmtR = db.prepare(sql);
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+
+            int idx = 1;
+            // Bind all destination node IDs
+            for (const auto& nodeId : dstNodeIds) {
+                auto br = stmt.bind(idx++, nodeId);
+                if (!br)
+                    return br.error();
+            }
+            // Bind relation filter if provided
+            if (relation.has_value()) {
+                auto br = stmt.bind(idx++, relation.value());
+                if (!br)
+                    return br.error();
+            }
+            // Bind limit per node
+            auto br = stmt.bind(idx++, static_cast<int64_t>(limitPerNode));
+            if (!br)
+                return br.error();
+
+            ResultMap out;
+            out.reserve(dstNodeIds.size());
+
+            while (true) {
+                auto step = stmt.step();
+                if (!step)
+                    return step.error();
+                if (!step.value())
+                    break;
+                KGEdge e;
+                e.id = stmt.getInt64(0);
+                e.srcNodeId = stmt.getInt64(1);
+                e.dstNodeId = stmt.getInt64(2);
+                e.relation = stmt.getString(3);
+                e.weight = static_cast<float>(stmt.getDouble(4));
+                if (!stmt.isNull(5))
+                    e.createdTime = stmt.getInt64(5);
+                if (!stmt.isNull(6))
+                    e.properties = stmt.getString(6);
+                out[e.dstNodeId].push_back(std::move(e));
             }
             return out;
         });
@@ -1773,6 +1854,168 @@ public:
             return res.error();
         }
         return {};
+    }
+
+    // Symbol Metadata
+    Result<void> upsertSymbolMetadata(const std::vector<SymbolMetadata>& symbols) override {
+        if (symbols.empty()) {
+            return Result<void>();
+        }
+
+        return pool_->withConnection([&](Database& db) -> Result<void> {
+            auto stmtR = db.prepare(R"(
+                INSERT INTO symbol_metadata (
+                    document_hash, file_path, symbol_name, qualified_name, kind,
+                    start_line, end_line, start_offset, end_offset,
+                    return_type, parameters, documentation
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(document_hash, qualified_name) DO UPDATE SET
+                    file_path = excluded.file_path,
+                    symbol_name = excluded.symbol_name,
+                    kind = excluded.kind,
+                    start_line = excluded.start_line,
+                    end_line = excluded.end_line,
+                    start_offset = excluded.start_offset,
+                    end_offset = excluded.end_offset,
+                    return_type = excluded.return_type,
+                    parameters = excluded.parameters,
+                    documentation = excluded.documentation
+            )");
+            if (!stmtR)
+                return stmtR.error();
+
+            auto stmt = std::move(stmtR).value();
+
+            for (const auto& sym : symbols) {
+                auto bindR = stmt.bindAll(
+                    sym.documentHash, sym.filePath, sym.symbolName, sym.qualifiedName, sym.kind,
+                    sym.startLine.value_or(0), sym.endLine.value_or(0), sym.startOffset.value_or(0),
+                    sym.endOffset.value_or(0), sym.returnType.value_or(std::string{}),
+                    sym.parameters.value_or(std::string{}),
+                    sym.documentation.value_or(std::string{}));
+                if (!bindR)
+                    return bindR.error();
+
+                auto execR = stmt.execute();
+                if (!execR)
+                    return execR.error();
+
+                stmt.reset();
+            }
+
+            spdlog::debug("upsertSymbolMetadata: inserted/updated {} symbols", symbols.size());
+            return Result<void>();
+        });
+    }
+
+    Result<std::int64_t> deleteSymbolMetadataForDocument(std::string_view documentHash) override {
+        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+            auto stmtR = db.prepare("DELETE FROM symbol_metadata WHERE document_hash = ?");
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+            auto br = stmt.bind(1, documentHash);
+            if (!br)
+                return br.error();
+            auto execR = stmt.execute();
+            if (!execR)
+                return execR.error();
+            auto deleted = db.changes();
+            spdlog::debug("deleteSymbolMetadataForDocument: deleted {} symbols for hash {}",
+                          deleted, documentHash);
+            return deleted;
+        });
+    }
+
+    Result<std::vector<SymbolMetadata>>
+    querySymbolMetadata(std::optional<std::string_view> filePath,
+                        std::optional<std::string_view> kind,
+                        std::optional<std::string_view> namePattern, std::size_t limit,
+                        std::size_t offset) override {
+        return pool_->withConnection([&](Database& db) -> Result<std::vector<SymbolMetadata>> {
+            std::ostringstream sql;
+            sql << "SELECT symbol_id, document_hash, file_path, symbol_name, qualified_name, "
+                << "kind, start_line, end_line, start_offset, end_offset, "
+                << "return_type, parameters, documentation FROM symbol_metadata WHERE 1=1";
+
+            std::vector<std::string> binds;
+            if (filePath.has_value()) {
+                sql << " AND file_path LIKE ?";
+                binds.push_back("%" + std::string(filePath.value()) + "%");
+            }
+            if (kind.has_value()) {
+                sql << " AND kind = ?";
+                binds.push_back(std::string(kind.value()));
+            }
+            if (namePattern.has_value()) {
+                sql << " AND (symbol_name LIKE ? OR qualified_name LIKE ?)";
+                std::string pattern = "%" + std::string(namePattern.value()) + "%";
+                binds.push_back(pattern);
+                binds.push_back(pattern);
+            }
+            sql << " ORDER BY qualified_name LIMIT ? OFFSET ?";
+
+            auto stmtR = db.prepare(sql.str());
+            if (!stmtR)
+                return stmtR.error();
+
+            auto stmt = std::move(stmtR).value();
+            int idx = 1;
+            for (const auto& b : binds) {
+                auto br = stmt.bind(idx++, b);
+                if (!br)
+                    return br.error();
+            }
+            auto br = stmt.bind(idx++, static_cast<std::int64_t>(limit));
+            if (!br)
+                return br.error();
+            br = stmt.bind(idx++, static_cast<std::int64_t>(offset));
+            if (!br)
+                return br.error();
+
+            std::vector<SymbolMetadata> results;
+            while (true) {
+                auto stepR = stmt.step();
+                if (!stepR)
+                    return stepR.error();
+                if (!stepR.value())
+                    break;
+
+                SymbolMetadata sym;
+                sym.symbolId = stmt.getInt64(0);
+                sym.documentHash = stmt.getString(1);
+                sym.filePath = stmt.getString(2);
+                sym.symbolName = stmt.getString(3);
+                sym.qualifiedName = stmt.getString(4);
+                sym.kind = stmt.getString(5);
+                if (!stmt.isNull(6))
+                    sym.startLine = static_cast<std::int32_t>(stmt.getInt64(6));
+                if (!stmt.isNull(7))
+                    sym.endLine = static_cast<std::int32_t>(stmt.getInt64(7));
+                if (!stmt.isNull(8))
+                    sym.startOffset = static_cast<std::int32_t>(stmt.getInt64(8));
+                if (!stmt.isNull(9))
+                    sym.endOffset = static_cast<std::int32_t>(stmt.getInt64(9));
+                if (!stmt.isNull(10)) {
+                    auto s = stmt.getString(10);
+                    if (!s.empty())
+                        sym.returnType = s;
+                }
+                if (!stmt.isNull(11)) {
+                    auto s = stmt.getString(11);
+                    if (!s.empty())
+                        sym.parameters = s;
+                }
+                if (!stmt.isNull(12)) {
+                    auto s = stmt.getString(12);
+                    if (!s.empty())
+                        sym.documentation = s;
+                }
+                results.push_back(std::move(sym));
+            }
+
+            return results;
+        });
     }
 
 private:

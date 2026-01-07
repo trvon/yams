@@ -123,7 +123,8 @@ AsioTransportAdapter::async_connect_with_timeout(const std::filesystem::path& pa
                     return;
                 if (!completed->exchange(true, std::memory_order_acq_rel)) {
                     boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
-                        std::move(h)(nullptr, RaceResult(std::in_place_index<1>, true));
+                        std::move(h)(std::exception_ptr{},
+                                     RaceResult(std::in_place_index<1>, true));
                     });
                 }
             });
@@ -133,7 +134,7 @@ AsioTransportAdapter::async_connect_with_timeout(const std::filesystem::path& pa
                 if (!completed->exchange(true, std::memory_order_acq_rel)) {
                     timer->cancel();
                     boost::asio::post(completion_exec, [h = std::move(*handlerPtr), ec]() mutable {
-                        std::move(h)(nullptr,
+                        std::move(h)(std::exception_ptr{},
                                      RaceResult(std::in_place_index<0>, ConnectResult{ec}));
                     });
                 }
@@ -196,7 +197,8 @@ AsioTransportAdapter::async_read_exact(boost::asio::local::stream_protocol::sock
                     return;
                 if (!completed->exchange(true, std::memory_order_acq_rel)) {
                     boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
-                        std::move(h)(nullptr, RaceResult(std::in_place_index<1>, true));
+                        std::move(h)(std::exception_ptr{},
+                                     RaceResult(std::in_place_index<1>, true));
                     });
                 }
             });
@@ -209,7 +211,7 @@ AsioTransportAdapter::async_read_exact(boost::asio::local::stream_protocol::sock
                         timer->cancel();
                         boost::asio::post(completion_exec, [h = std::move(*handlerPtr), ec,
                                                             bytes]() mutable {
-                            std::move(h)(nullptr,
+                            std::move(h)(std::exception_ptr{},
                                          RaceResult(std::in_place_index<0>, ReadResult{ec, bytes}));
                         });
                     }
@@ -262,7 +264,8 @@ AsioTransportAdapter::async_write_all(boost::asio::local::stream_protocol::socke
                     return;
                 if (!completed->exchange(true, std::memory_order_acq_rel)) {
                     boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
-                        std::move(h)(nullptr, RaceResult(std::in_place_index<1>, true));
+                        std::move(h)(std::exception_ptr{},
+                                     RaceResult(std::in_place_index<1>, true));
                     });
                 }
             });
@@ -273,11 +276,11 @@ AsioTransportAdapter::async_write_all(boost::asio::local::stream_protocol::socke
                                                                 std::size_t bytes) mutable {
                     if (!completed->exchange(true, std::memory_order_acq_rel)) {
                         timer->cancel();
-                        boost::asio::post(
-                            completion_exec, [h = std::move(*handlerPtr), ec, bytes]() mutable {
-                                std::move(h)(nullptr, RaceResult(std::in_place_index<0>,
-                                                                 WriteResult{ec, bytes}));
-                            });
+                        boost::asio::post(completion_exec, [h = std::move(*handlerPtr), ec,
+                                                            bytes]() mutable {
+                            std::move(h)(std::exception_ptr{}, RaceResult(std::in_place_index<0>,
+                                                                          WriteResult{ec, bytes}));
+                        });
                     }
                 });
         },
@@ -417,6 +420,8 @@ boost::asio::awaitable<Result<void>>
 AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback onHeader,
                                              ChunkCallback onChunk, ErrorCallback onError,
                                              CompleteCallback onComplete) {
+    spdlog::info("[AsioTransport] send_request_streaming entry, type={}",
+                 static_cast<int>(getMessageType(req)));
     // Check cancellation before proceeding
     auto cs = co_await this_coro::cancellation_state;
     if (cs.cancelled() != boost::asio::cancellation_type::none) {
@@ -431,7 +436,9 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
             co_return Error{ErrorCode::OperationCancelled, "Operation cancelled"};
         }
 
+        spdlog::info("[AsioTransport] get_or_create_connection attempt={}", attempt);
         auto conn = co_await get_or_create_connection(opts_);
+        spdlog::info("[AsioTransport] got connection, alive={}", conn ? conn->alive.load() : false);
         if (!conn || !conn->alive) {
             if (attempt < kMaxRetries) {
                 spdlog::debug("Failed to establish connection, retrying (attempt {}/{})",

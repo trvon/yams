@@ -1,9 +1,9 @@
 # YAMS Performance Benchmark Report
 
-**Generated**: 2026-01-05 22:29
-**YAMS Version**: 0.0.0-dev (`de213953`)
-**Test Environment**: macOS (Apple Silicon, 16 cores)
-**Build Configuration**: Debug build (TSAN disabled)
+**Generated**: 2026-01-07
+**YAMS Version**: 0.8.0-dev (`027fdc0`)
+**Test Environment**: macOS 26.2 (Apple Silicon M3 Max, 16 cores, 48GB RAM)
+**Build Configuration**: Debug build (no TSAN)
 
 > Note: This page is the canonical place for benchmark results. Keep the latest numbers inlined here (avoid relying on generated `bench_results/*` artifacts).
 
@@ -12,7 +12,7 @@
 - [Executive Summary](#executive-summary)
 - [Test Environment Specifications](#test-environment-specifications)
 - [Performance Benchmarks](#performance-benchmarks)
-  - [Latest Local Runs (2026-01-05)](#latest-local-runs-2026-01-05)
+  - [Latest Local Runs (2026-01-07)](#latest-local-runs-2026-01-07)
   - [Cryptographic Operations (SHA-256)](#1-cryptographic-operations-sha-256)
   - [Content Chunking (Rabin Fingerprinting)](#2-content-chunking-rabin-fingerprinting)
   - [Compression Performance (Zstandard)](#3-compression-performance-zstandard)
@@ -22,23 +22,32 @@
 
 This report focuses on benchmark changes that are easy to interpret and compare across runs (primarily ingestion + metadata + IPC framing). Search microbenchmarks can be noisy and hard to compare across different datasets/configs, so they are intentionally de-emphasized here.
 
-**Measured improvements (throughput)**:
+**Current Baseline (Debug, 2026-01-07)**:
 
-- `Ingestion_SmallDocument`: ~1.1K → ~2.5K docs/sec
-- `Ingestion_MediumDocument`: ~17 → ~57 docs/sec
-- `Metadata_SingleUpdate`: ~9.1K → ~14.2K ops/sec
-- `Metadata_BulkUpdate(500)`: ~7.4K → ~11.5K ops/sec
+| Benchmark | Oct 2025 | Jan 2026 | Change |
+|-----------|----------|----------|--------|
+| `Ingestion_SmallDocument` | 2,771 ops/s | 2,821 ops/s | ~same |
+| `Ingestion_MediumDocument` | 56 ops/s | 57 ops/s | ~same |
+| `Metadata_SingleUpdate` | 10,537 ops/s | 13,966 ops/s | **+33%** |
+| `Metadata_BulkUpdate(500)` | 7,823 ops/s | 51,341 ops/s | **+6.5x** |
+| `IPC StreamingFramer_32x10` | - | 3,732 ops/s | new |
+| `IPC UnaryFramer_8KB` | - | 10,088 ops/s | new |
+
+> **Note**: Debug builds with ThreadSanitizer (TSAN) add ~2-6x overhead. The numbers above are from Debug builds **without** TSAN for fair comparison with the October 2025 baseline.
 
 ## Test Environment Specifications
 
-- **Platform**: macOS 26.0.1 (Darwin 25.0.0)
-- **CPU**: Apple Silicon M3 Max, 16 cores (performance + efficiency)
-- **Memory**: System RAM with 4MB L2 cache per core
+- **Platform**: macOS 26.2 (Build 25C56)
+- **Hardware**: MacBook Pro (Mac15,9)
+- **CPU**: Apple M3 Max, 16 cores (12 performance + 4 efficiency)
+- **Memory**: 48 GB unified memory
 - **Cache Hierarchy**: L1D 64KB, L1I 128KB, L2 4MB (x16)
-- **Compiler**: AppleClang 17.0.0 with C++20 standard
-- **Build Type**: Debug (for stable benchmarks, use release build with `-O3` optimizations)
+- **Compiler**: Apple Clang 17.0.0 (clang-1700.6.3.2) with C++23 standard
+- **Build Type**: Debug (no TSAN for benchmark comparisons)
 - **Package Management**: Conan 2.0
 - **Build System**: Meson
+
+> **Note**: For fair benchmark comparisons, use Debug builds without TSAN (`./setup.sh Debug --no-tsan`). TSAN adds ~2-6x overhead.
 
 ### Available Benchmark Executables
 
@@ -95,7 +104,7 @@ Located in `builddir/tests/benchmarks/`:
 
 ## Performance Benchmarks
 
-### Latest Local Runs (2026-01-05)
+### Latest Local Runs (2026-01-07)
 
 #### Quick Links
 - [API Benchmarks](#api-benchmarks)
@@ -105,7 +114,7 @@ Located in `builddir/tests/benchmarks/`:
 #### Run Commands
 ```bash
 # API
-builddir/tests/benchmarks/yams_api_benchmarks --quiet --iterations 5
+YAMS_TEST_SAFE_SINGLE_INSTANCE=1 builddir/tests/benchmarks/yams_api_benchmarks --iterations 5
 
 # IPC streaming
 builddir/tests/benchmarks/ipc_stream_bench --benchmark_min_time=0.05
@@ -116,14 +125,14 @@ YAMS_TEST_SAFE_SINGLE_INSTANCE=1 builddir/tests/benchmarks/retrieval_quality_ben
 
 #### API Benchmarks
 
-(From `builddir/tests/benchmarks/yams_api_benchmarks`, `--iterations 5`)
+(From `builddir/tests/benchmarks/yams_api_benchmarks`, `--iterations 5`, Debug no TSAN)
 
-| Benchmark | Latest | Throughput |
-|-----------|--------|------------|
-| Ingestion_SmallDocument | 0.41 ms | 2464.27 ops/sec |
-| Ingestion_MediumDocument | 17.66 ms | 56.63 ops/sec |
-| Metadata_SingleUpdate | 0.07 ms | 14245.01 ops/sec |
-| Metadata_BulkUpdate | 43.63 ms | 11459.58 ops/sec |
+| Benchmark | Latency | Throughput | vs Oct 2025 |
+|-----------|---------|------------|-------------|
+| Ingestion_SmallDocument | 0.35 ms | 2,821 ops/sec | ~same |
+| Ingestion_MediumDocument | 17.6 ms | 57 ops/sec | ~same |
+| Metadata_SingleUpdate | 0.07 ms | 13,966 ops/sec | **+33%** |
+| Metadata_BulkUpdate | 9.7 ms | 51,341 ops/sec | **+6.5x** |
 
 #### Search Benchmarks
 
@@ -135,13 +144,13 @@ builddir/tests/benchmarks/yams_search_benchmarks --quiet --iterations 5
 
 #### IPC Streaming Benchmarks
 
-(From `builddir/tests/benchmarks/ipc_stream_bench`, `--benchmark_min_time=0.05`)
+(From `builddir/tests/benchmarks/ipc_stream_bench`, `--benchmark_min_time=0.05`, Debug no TSAN)
 
-| Benchmark | Latest | Throughput |
-|-----------|--------|------------|
-| StreamingFramer_32x10_256B | 2.58 ms | 4267.49 ops/sec |
-| StreamingFramer_64x6_512B | 4.51 ms | 1552.41 ops/sec |
-| UnaryFramer_Success_8KB | 0.10 ms | 10050.25 ops/sec |
+| Benchmark | Latency | Throughput |
+|-----------|---------|------------|
+| StreamingFramer_32x10_256B | 2.95 ms | 3,732 ops/sec |
+| StreamingFramer_64x6_512B | 4.61 ms | 1,519 ops/sec |
+| UnaryFramer_Success_8KB | 0.10 ms | 10,088 ops/sec |
 
 #### Retrieval Quality Benchmark
 

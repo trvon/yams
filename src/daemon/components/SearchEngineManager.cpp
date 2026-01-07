@@ -136,7 +136,7 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                     } catch (...) {
                     }
                     boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
-                        std::move(h)(nullptr,
+                        std::move(h)(std::exception_ptr{},
                                      RetT(Error{ErrorCode::InternalError, "build_timeout"}));
                     });
                 }
@@ -193,7 +193,7 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
 
                     boost::asio::post(completion_exec, [h = std::move(*handlerPtr),
                                                         r = std::move(result)]() mutable {
-                        std::move(h)(nullptr, std::move(r));
+                        std::move(h)(std::exception_ptr{}, std::move(r));
                     });
                 }
             });

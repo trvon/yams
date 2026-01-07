@@ -1799,7 +1799,7 @@ boost::asio::awaitable<bool> ServiceManager::co_openDatabase(const std::filesyst
                             "Database open timed out after {} ms — continuing in degraded mode",
                             timeout_ms);
                         boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
-                            std::move(h)(nullptr, false);
+                            std::move(h)(std::exception_ptr{}, false);
                         });
                     }
                 });
@@ -1890,7 +1890,7 @@ boost::asio::awaitable<bool> ServiceManager::co_migrateDatabase(int timeout_ms,
                         // Timeout won
                         spdlog::warn("Database migration timed out after {} ms", timeout_ms);
                         boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
-                            std::move(h)(nullptr, false);
+                            std::move(h)(std::exception_ptr{}, false);
                         });
                     }
                 });

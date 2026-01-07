@@ -169,20 +169,26 @@ BENCHMARK_F(MetadataBenchmark, SingleUpdate) {
 
 BENCHMARK_F(MetadataBenchmark, BulkUpdate) {
     const size_t batchSize = 100;
-    size_t successCount = 0;
     auto metadata = generator_->generateMetadata(5);
+
+    // Build batch entries
+    std::vector<std::tuple<int64_t, std::string, metadata::MetadataValue>> entries;
+    entries.reserve(batchSize * metadata.size());
     for (size_t i = 0; i < batchSize && i < documentIds_.size(); ++i) {
         for (const auto& [key, value] : metadata) {
-            auto result = metadataRepo_->setMetadata(documentIds_[i], key, value);
-            if (result) {
-                successCount++;
-            } else {
-                failedOperations_++;
-            }
+            entries.emplace_back(documentIds_[i], key, value);
         }
     }
+
+    // Execute batch update
+    auto result = metadataRepo_->setMetadataBatch(entries);
+    if (!result) {
+        failedOperations_ += entries.size();
+        return 0;
+    }
+
     avgMetadataSize_ = metadata.size();
-    return successCount;
+    return entries.size();
 }
 
 // --- Main Runner ---

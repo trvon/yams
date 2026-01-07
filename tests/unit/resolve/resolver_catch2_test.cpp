@@ -76,6 +76,11 @@ public:
                              const yams::metadata::MetadataValue&) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
+    Result<void> setMetadataBatch(
+        const std::vector<std::tuple<int64_t, std::string, yams::metadata::MetadataValue>>&)
+        override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
     Result<std::optional<yams::metadata::MetadataValue>> getMetadata(int64_t,
                                                                      const std::string&) override {
         return Error{ErrorCode::NotImplemented, "NI"};

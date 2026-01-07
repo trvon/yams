@@ -82,7 +82,7 @@ boost::asio::awaitable<bool> DatabaseManager::open(const std::filesystem::path& 
                         spdlog::warn("[DatabaseManager] open timed out after {} ms — degraded mode",
                                      timeoutMs);
                         boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
-                            std::move(h)(nullptr, false);
+                            std::move(h)(std::exception_ptr{}, false);
                         });
                     }
                 });
@@ -172,7 +172,7 @@ boost::asio::awaitable<bool> DatabaseManager::migrate(int timeoutMs,
                         spdlog::warn("[DatabaseManager] migration timed out after {} ms",
                                      timeoutMs);
                         boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
-                            std::move(h)(nullptr, false);
+                            std::move(h)(std::exception_ptr{}, false);
                         });
                     }
                 });

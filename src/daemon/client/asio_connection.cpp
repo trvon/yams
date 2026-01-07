@@ -103,7 +103,8 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
                         return;
                     if (!completed->exchange(true, std::memory_order_acq_rel)) {
                         boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
-                            std::move(h)(nullptr, RaceResult(std::in_place_index<1>, true));
+                            std::move(h)(std::exception_ptr{},
+                                         RaceResult(std::in_place_index<1>, true));
                         });
                     }
                 });
@@ -115,11 +116,12 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
                         const boost::system::error_code& ec, std::size_t bytes) mutable {
                         if (!completed->exchange(true, std::memory_order_acq_rel)) {
                             timer->cancel();
-                            boost::asio::post(
-                                completion_exec, [h = std::move(*handlerPtr), ec, bytes]() mutable {
-                                    std::move(h)(nullptr, RaceResult(std::in_place_index<0>,
-                                                                     WriteResult{ec, bytes}));
-                                });
+                            boost::asio::post(completion_exec,
+                                              [h = std::move(*handlerPtr), ec, bytes]() mutable {
+                                                  std::move(h)(std::exception_ptr{},
+                                                               RaceResult(std::in_place_index<0>,
+                                                                          WriteResult{ec, bytes}));
+                                              });
                         }
                     });
             },

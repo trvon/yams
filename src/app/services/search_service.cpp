@@ -763,7 +763,9 @@ private:
     EnhancedSearchExecutor enhanced_{};
     std::shared_ptr<yams::search::HotzoneManager> hotzones_{};
     std::shared_ptr<yams::search::SymbolEnricher> symbolEnricher_{};
-    float symbolWeight_{0.15f};
+    // PBI-074: Disabled by default due to severe performance issues (N+1 KG queries)
+    // Users can enable with --symbol-weight=0.15 if needed
+    float symbolWeight_{0.0f};
 
     std::string resolveSearchType(const SearchRequest& req, bool* forcedHybridFallback) const {
         if (forcedHybridFallback)
@@ -1296,7 +1298,10 @@ private:
 
             std::atomic<size_t> next{0};
             std::vector<std::optional<SearchItem>> slots(n);
-            const std::string& queryText = req.query;
+
+            // Store hash for post-processing symbol enrichment
+            std::vector<std::string> hashes(n);
+
             auto worker = [&, this]() {
                 YAMS_ZONE_SCOPED_N("search_service::result_shape_worker");
                 while (true) {
@@ -1312,21 +1317,8 @@ private:
                     if (!r.snippet.empty())
                         it.snippet = r.snippet;
 
-                    // PBI-074: Apply symbol ranking boost
-                    if (symbolEnricher_ && symbolWeight_ > 0.0f) {
-                        yams::search::SearchResultItem enrichItem;
-                        enrichItem.path = r.document.filePath;
-                        enrichItem.metadata["sha256_hash"] = r.document.sha256Hash;
-                        if (symbolEnricher_->enrichResult(enrichItem, queryText)) {
-                            if (enrichItem.symbolContext &&
-                                enrichItem.symbolContext->isSymbolQuery) {
-                                float boost =
-                                    1.0f + (symbolWeight_ * enrichItem.symbolContext->symbolScore);
-                                boost *= enrichItem.symbolContext->definitionScore;
-                                it.score *= boost;
-                            }
-                        }
-                    }
+                    // Store hash for symbol enrichment post-processing
+                    hashes[i] = r.document.sha256Hash;
 
                     slots[i] = std::move(it);
                 }
@@ -1339,12 +1331,44 @@ private:
             for (auto& th : ths)
                 th.join();
             resp.results.reserve(n);
-            for (size_t i = 0; i < n; ++i)
-                if (slots[i].has_value())
-                    resp.results.push_back(std::move(*slots[i]));
 
-            // PBI-074: Re-sort after symbol boost applied
-            if (symbolEnricher_ && symbolWeight_ > 0.0f) {
+            // Build result vector and track original indices for hash lookup
+            std::vector<size_t> originalIndices;
+            originalIndices.reserve(n);
+            for (size_t i = 0; i < n; ++i) {
+                if (slots[i].has_value()) {
+                    resp.results.push_back(std::move(*slots[i]));
+                    originalIndices.push_back(i);
+                }
+            }
+
+            // PBI-074: Apply symbol enrichment to TOP-K results only (post-processing)
+            // This avoids the N+1 query problem by only enriching a small subset
+            if (symbolEnricher_ && symbolWeight_ > 0.0f && !resp.results.empty()) {
+                YAMS_ZONE_SCOPED_N("search_service::symbol_enrichment_topk");
+                constexpr size_t kSymbolEnrichLimit = 100;
+                const size_t enrichCount = std::min(resp.results.size(), kSymbolEnrichLimit);
+                const std::string& queryText = req.query;
+
+                for (size_t i = 0; i < enrichCount; ++i) {
+                    auto& it = resp.results[i];
+                    const size_t origIdx = originalIndices[i];
+
+                    yams::search::SearchResultItem enrichItem;
+                    enrichItem.path = it.path;
+                    enrichItem.metadata["sha256_hash"] = hashes[origIdx];
+
+                    if (symbolEnricher_->enrichResult(enrichItem, queryText)) {
+                        if (enrichItem.symbolContext && enrichItem.symbolContext->isSymbolQuery) {
+                            float boost =
+                                1.0f + (symbolWeight_ * enrichItem.symbolContext->symbolScore);
+                            boost *= enrichItem.symbolContext->definitionScore;
+                            it.score *= boost;
+                        }
+                    }
+                }
+
+                // Re-sort after symbol boost applied
                 std::sort(
                     resp.results.begin(), resp.results.end(),
                     [](const SearchItem& a, const SearchItem& b) { return a.score > b.score; });

@@ -152,6 +152,27 @@ struct SymbolExtractionState {
 };
 
 /**
+ * Symbol metadata record for fast SQL-based filtering and lookup.
+ * Populated alongside kg_nodes and entity_vectors during symbol extraction.
+ * Provides indexed access to symbol attributes without JSON parsing.
+ */
+struct SymbolMetadata {
+    std::int64_t symbolId = 0;                // Auto-generated primary key
+    std::string documentHash;                 // Links to documents.sha256_hash
+    std::string filePath;                     // Source file path
+    std::string symbolName;                   // Simple symbol name (e.g., "processTask")
+    std::string qualifiedName;                // Fully qualified (e.g., "yams::daemon::processTask")
+    std::string kind;                         // "function", "class", "method", "variable", etc.
+    std::optional<std::int32_t> startLine;    // 1-based line number
+    std::optional<std::int32_t> endLine;      // 1-based line number
+    std::optional<std::int32_t> startOffset;  // Byte offset from file start
+    std::optional<std::int32_t> endOffset;    // Byte offset from file start
+    std::optional<std::string> returnType;    // Return type for functions/methods
+    std::optional<std::string> parameters;    // JSON array of parameter types
+    std::optional<std::string> documentation; // Extracted docstring/comment
+};
+
+/**
  * KnowledgeGraphStore defines the abstract API for reading/writing the local-first KG.
  * Implementations must be thread-safe for concurrent read access; writes should be serialized.
  */
@@ -235,6 +256,14 @@ public:
     getEdgesTo(std::int64_t dstNodeId, std::optional<std::string_view> relation = std::nullopt,
                std::size_t limit = 200, std::size_t offset = 0) = 0;
 
+    // Batch version of getEdgesTo: fetch edges for multiple destination nodes in one query
+    // Returns a map from destination node ID to its incoming edges
+    // Much more efficient than calling getEdgesTo N times (eliminates N+1 query problem)
+    virtual Result<std::unordered_map<std::int64_t, std::vector<KGEdge>>>
+    getEdgesToBatch(const std::vector<std::int64_t>& dstNodeIds,
+                    std::optional<std::string_view> relation = std::nullopt,
+                    std::size_t limitPerNode = 10) = 0;
+
     // Bidirectional edges: returns both incoming and outgoing edges in a single query
     // More efficient than calling getEdgesFrom + getEdgesTo separately for BFS traversal
     virtual Result<std::vector<KGEdge>>
@@ -296,6 +325,25 @@ public:
     // If extraction already recorded, updates the row; otherwise inserts.
     virtual Result<void> upsertSymbolExtractionState(std::string_view documentHash,
                                                      const SymbolExtractionState& state) = 0;
+
+    // -----------------------------------------------------------------------------
+    // Symbol Metadata (fast SQL-indexed symbol lookup)
+    // -----------------------------------------------------------------------------
+
+    // Upsert symbol metadata records for a document. Replaces existing records for the document.
+    // Called after symbol extraction to populate the indexed symbol_metadata table.
+    virtual Result<void> upsertSymbolMetadata(const std::vector<SymbolMetadata>& symbols) = 0;
+
+    // Delete all symbol metadata for a document hash (for re-extraction or document deletion).
+    virtual Result<std::int64_t> deleteSymbolMetadataForDocument(std::string_view documentHash) = 0;
+
+    // Query symbol metadata by various criteria. Returns matching symbols.
+    // Useful for pre-filtering before expensive vector search.
+    virtual Result<std::vector<SymbolMetadata>>
+    querySymbolMetadata(std::optional<std::string_view> filePath = std::nullopt,
+                        std::optional<std::string_view> kind = std::nullopt,
+                        std::optional<std::string_view> namePattern = std::nullopt,
+                        std::size_t limit = 100, std::size_t offset = 0) = 0;
 
     // -----------------------------------------------------------------------------
     // Document/File Cleanup (for cascade on delete and re-indexing)

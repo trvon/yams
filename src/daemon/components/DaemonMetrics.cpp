@@ -322,8 +322,7 @@ void DaemonMetrics::stopPolling() {
     // This must be done on the strand to avoid racing with async_wait
     boost::asio::post(strand_, [this]() {
         if (pollingTimer_) {
-            boost::system::error_code ec;
-            pollingTimer_->cancel(ec);
+            pollingTimer_->cancel();
         }
     });
 

@@ -92,13 +92,6 @@ public:
     void addBatch(const std::vector<std::string>& values);
 
     /**
-     * @brief Add multiple strings to the tree in parallel (for large batches)
-     * @param values Strings to add
-     * @param parallelThreshold Minimum batch size for parallel execution (default 1000)
-     */
-    void addBatchParallel(const std::vector<std::string>& values, size_t parallelThreshold = 1000);
-
-    /**
      * @brief Search for strings within a given distance
      * @param query Query string
      * @param maxDistance Maximum edit distance
@@ -106,28 +99,6 @@ public:
      */
     std::vector<std::pair<std::string, size_t>> search(const std::string& query,
                                                        size_t maxDistance) const;
-
-    /**
-     * @brief Search for strings within a given distance (parallel version)
-     * @param query Query string
-     * @param maxDistance Maximum edit distance
-     * @param parallelismThreshold Minimum branches to trigger parallel traversal
-     * @return Vector of matching strings with their distances
-     */
-    std::vector<std::pair<std::string, size_t>>
-    searchParallel(const std::string& query, size_t maxDistance,
-                   size_t parallelismThreshold = 4) const;
-
-    /**
-     * @brief Search for best N matches
-     * @param query Query string
-     * @param maxResults Maximum number of results
-     * @param maxDistance Maximum edit distance to consider
-     * @return Vector of best matching strings with distances, sorted by distance
-     */
-    std::vector<std::pair<std::string, size_t>>
-    searchBest(const std::string& query, size_t maxResults,
-               size_t maxDistance = std::numeric_limits<size_t>::max()) const;
 
     /**
      * @brief Get the number of strings in the tree
@@ -286,6 +257,8 @@ private:
     TrigramIndex keywordTrigrams_; // Trigram index for keywords
 
     std::unordered_map<std::string, std::string> idToTitle_;
+    std::unordered_map<std::string, std::vector<std::string>>
+        titleToIds_; // Reverse lookup: O(1) title->ids
     std::unordered_map<std::string, std::vector<std::string>> idToKeywords_;
 
     std::vector<SearchResult>

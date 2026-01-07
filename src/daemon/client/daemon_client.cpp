@@ -418,7 +418,8 @@ boost::asio::awaitable<Result<void>> DaemonClient::connect() {
                         if (!completed->exchange(true, std::memory_order_acq_rel)) {
                             boost::asio::post(
                                 completion_exec, [h = std::move(*handlerPtr)]() mutable {
-                                    std::move(h)(nullptr, RaceResult(std::in_place_index<1>, true));
+                                    std::move(h)(std::exception_ptr{},
+                                                 RaceResult(std::in_place_index<1>, true));
                                 });
                         }
                     });
@@ -429,7 +430,7 @@ boost::asio::awaitable<Result<void>> DaemonClient::connect() {
                             timer->cancel();
                             boost::asio::post(completion_exec, [h = std::move(*handlerPtr),
                                                                 ec]() mutable {
-                                std::move(h)(nullptr,
+                                std::move(h)(std::exception_ptr{},
                                              RaceResult(std::in_place_index<0>, ConnectResult{ec}));
                             });
                         }
@@ -550,11 +551,13 @@ boost::asio::awaitable<Result<SearchResponse>> DaemonClient::search(const Search
 
 boost::asio::awaitable<Result<SearchResponse>>
 DaemonClient::streamingSearch(const SearchRequest& req) {
-    spdlog::debug("DaemonClient::streamingSearch called");
+    spdlog::info("[DaemonClient::streamingSearch] called, query='{}'", req.query.substr(0, 50));
     auto handler = std::make_shared<StreamingSearchHandler>(req.pathsOnly, req.limit);
 
-    spdlog::debug("DaemonClient::streamingSearch calling sendRequestStreaming");
+    spdlog::info("[DaemonClient::streamingSearch] calling sendRequestStreaming");
     auto result = co_await sendRequestStreaming(req, handler);
+    spdlog::info("[DaemonClient::streamingSearch] sendRequestStreaming returned, has_value={}",
+                 result.has_value());
     if (!result) {
         co_return result.error();
     }
@@ -1121,8 +1124,8 @@ DaemonClient::sendRequestStreaming(const Request& req,
     if (!impl || impl->isShuttingDown()) {
         co_return Error{ErrorCode::InvalidState, "DaemonClient is shutting down"};
     }
-    spdlog::debug("DaemonClient::sendRequestStreaming: [{}] streaming={} sock='{}'",
-                  getRequestName(req), true, impl->config_.socketPath.string());
+    spdlog::info("[sendRequestStreaming] [{}] streaming={} sock='{}'", getRequestName(req), true,
+                 impl->config_.socketPath.string());
     // Skip the legacy connect() call when using AsioTransportAdapter
     // The adapter creates its own connection, and calling connect() here
     // causes a double connection issue where the POSIX socket immediately EOFs
@@ -1164,11 +1167,12 @@ DaemonClient::sendRequestStreaming(const Request& req,
     if (requires_single_use_connection(req)) {
         opts.poolEnabled = false;
     }
+    spdlog::info("[sendRequestStreaming] Creating AsioTransportAdapter pool={}", opts.poolEnabled);
     AsioTransportAdapter adapter(opts);
-    spdlog::debug(
-        "DaemonClient::sendRequestStreaming calling adapter.send_request_streaming pool={}",
-        opts.poolEnabled);
+    spdlog::info("[sendRequestStreaming] About to call adapter.send_request_streaming");
     auto res = co_await adapter.send_request_streaming(req, onHeader, onChunk, onError, onComplete);
+    spdlog::info("[sendRequestStreaming] adapter.send_request_streaming returned, has_value={}",
+                 res.has_value());
     // After resumption, check if client was destroyed during suspension
     if (impl->isShuttingDown()) {
         co_return Error{ErrorCode::InvalidState, "DaemonClient destroyed during request"};

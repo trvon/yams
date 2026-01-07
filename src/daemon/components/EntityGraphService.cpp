@@ -434,6 +434,53 @@ yams::Result<EntityGraphService::SymbolNodeBatch> EntityGraphService::createSymb
         batch.versionNodeIds = batch.canonicalNodeIds;
     }
 
+    // Populate symbol_metadata table for fast SQL-based filtering
+    if (hasSnapshot) {
+        std::vector<yams::metadata::SymbolMetadata> symbolMetadata;
+        symbolMetadata.reserve(result->symbol_count);
+
+        for (size_t i = 0; i < result->symbol_count; ++i) {
+            const auto& sym = result->symbols[i];
+
+            yams::metadata::SymbolMetadata meta;
+            meta.documentHash = job.documentHash;
+            meta.filePath = sym.file_path ? std::string(sym.file_path) : job.filePath;
+            meta.symbolName = sym.name ? std::string(sym.name) : "";
+            meta.qualifiedName = sym.qualified_name ? std::string(sym.qualified_name)
+                                                    : (sym.name ? std::string(sym.name) : "");
+            meta.kind = sym.kind ? std::string(sym.kind) : "symbol";
+            meta.startLine = sym.start_line;
+            meta.endLine = sym.end_line;
+            meta.startOffset = sym.start_offset;
+            meta.endOffset = sym.end_offset;
+
+            if (sym.return_type)
+                meta.returnType = std::string(sym.return_type);
+            if (sym.documentation)
+                meta.documentation = std::string(sym.documentation);
+            if (sym.parameters && sym.parameter_count > 0) {
+                std::string params;
+                for (size_t p = 0; p < sym.parameter_count; ++p) {
+                    if (sym.parameters[p]) {
+                        if (!params.empty())
+                            params += ", ";
+                        params += sym.parameters[p];
+                    }
+                }
+                meta.parameters = params;
+            }
+
+            symbolMetadata.push_back(std::move(meta));
+        }
+
+        auto metaRes = kg->upsertSymbolMetadata(symbolMetadata);
+        if (!metaRes) {
+            spdlog::warn("Failed to upsert symbol_metadata for {}: {}", job.filePath,
+                         metaRes.error().message);
+            // Non-fatal: continue even if symbol_metadata fails
+        }
+    }
+
     return batch;
 }
 

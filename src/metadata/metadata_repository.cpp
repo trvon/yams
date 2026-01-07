@@ -777,6 +777,57 @@ Result<void> MetadataRepository::setMetadata(int64_t documentId, const std::stri
     });
 }
 
+Result<void> MetadataRepository::setMetadataBatch(
+    const std::vector<std::tuple<int64_t, std::string, MetadataValue>>& entries) {
+    if (entries.empty()) {
+        return Result<void>();
+    }
+    return executeQuery<void>([&](Database& db) -> Result<void> {
+        // Begin transaction for batch operation
+        auto beginResult = db.execute("BEGIN IMMEDIATE");
+        if (!beginResult) {
+            return beginResult.error();
+        }
+
+        // Prepare statement once, reuse for all entries
+        auto stmtResult = db.prepare(R"(
+            INSERT OR REPLACE INTO metadata (document_id, key, value, value_type)
+            VALUES (?, ?, ?, ?)
+        )");
+
+        if (!stmtResult) {
+            db.execute("ROLLBACK");
+            return stmtResult.error();
+        }
+
+        Statement stmt = std::move(stmtResult).value();
+
+        for (const auto& [documentId, key, value] : entries) {
+            stmt.reset();
+            auto bindResult = stmt.bindAll(documentId, key, value.value,
+                                           MetadataValueTypeUtils::toString(value.type));
+            if (!bindResult) {
+                db.execute("ROLLBACK");
+                return bindResult.error();
+            }
+
+            auto execResult = stmt.execute();
+            if (!execResult) {
+                db.execute("ROLLBACK");
+                return execResult.error();
+            }
+        }
+
+        auto commitResult = db.execute("COMMIT");
+        if (!commitResult) {
+            db.execute("ROLLBACK");
+            return commitResult.error();
+        }
+
+        return Result<void>();
+    });
+}
+
 Result<std::optional<MetadataValue>> MetadataRepository::getMetadata(int64_t documentId,
                                                                      const std::string& key) {
     return executeQuery<std::optional<MetadataValue>>(
@@ -4323,7 +4374,16 @@ MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, i
         SearchResults results;
         results.query = query;
 
+        spdlog::info("[FUZZY_PERF] fuzzySearch starting for query='{}' limit={}", query, limit);
+        auto totalStart = std::chrono::high_resolution_clock::now();
+
+        auto ensureStart = std::chrono::high_resolution_clock::now();
         auto ensureResult = ensureFuzzyIndexInitialized();
+        auto ensureEnd = std::chrono::high_resolution_clock::now();
+        auto ensureMs =
+            std::chrono::duration_cast<std::chrono::milliseconds>(ensureEnd - ensureStart).count();
+        spdlog::info("[FUZZY_PERF] ensureFuzzyIndexInitialized took {}ms", ensureMs);
+
         if (!ensureResult) {
             results.errorMessage = "Failed to build fuzzy index: " + ensureResult.error().message;
             return results;
@@ -4344,7 +4404,14 @@ MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, i
             options.useTrigramPrefilter = true;
             options.useBKTree = true;
 
+            auto searchStart = std::chrono::high_resolution_clock::now();
             fuzzyResults = indexPtr->search(query, static_cast<size_t>(limit), options);
+            auto searchEnd = std::chrono::high_resolution_clock::now();
+            auto searchMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(searchEnd - searchStart)
+                    .count();
+            spdlog::info("[FUZZY_PERF] HybridFuzzySearch::search took {}ms, returned {} results",
+                         searchMs, fuzzyResults.size());
         }
 
         auto start = std::chrono::high_resolution_clock::now();

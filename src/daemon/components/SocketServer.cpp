@@ -773,7 +773,7 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
                                              conn_token, age_s, lifetime.count());
                                 boost::asio::post(
                                     completion_exec, [h = std::move(*handlerPtr)]() mutable {
-                                        std::move(h)(nullptr, true); // timedOut = true
+                                        std::move(h)(std::exception_ptr{}, true); // timedOut = true
                                     });
                             }
                         });
@@ -788,10 +788,11 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
                                 if (!completed->exchange(true, std::memory_order_acq_rel)) {
                                     // Handler completed first
                                     timer->cancel();
-                                    boost::asio::post(
-                                        completion_exec, [h = std::move(*handlerPtr)]() mutable {
-                                            std::move(h)(nullptr, false); // timedOut = false
-                                        });
+                                    boost::asio::post(completion_exec,
+                                                      [h = std::move(*handlerPtr)]() mutable {
+                                                          std::move(h)(std::exception_ptr{},
+                                                                       false); // timedOut = false
+                                                      });
                                 }
                             },
                             boost::asio::detached);

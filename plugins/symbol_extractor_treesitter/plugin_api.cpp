@@ -121,8 +121,8 @@ static int extract_symbols_abi(void* /*self*/, const char* content, size_t conte
     std::fprintf(stderr, "[yams] grammar loaded: handle=%p lang=%p for '%s'\n", handle,
                  (void*)tslang, language);
     // Validate language version compatibility (support versions 13-15)
-    uint32_t ver = ts_language_version(tslang);
-    std::fprintf(stderr, "[yams] ts_language_version=%u\n", ver);
+    uint32_t ver = ts_language_abi_version(tslang);
+    std::fprintf(stderr, "[yams] ts_language_abi_version=%u\n", ver);
     if (ver == 0 || ver < TREE_SITTER_MIN_COMPATIBLE_LANGUAGE_VERSION ||
         ver > TREE_SITTER_LANGUAGE_VERSION) {
         auto* r = (yams_symbol_extraction_result_v1*)std::calloc(

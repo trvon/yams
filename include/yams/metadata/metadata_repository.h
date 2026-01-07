@@ -170,6 +170,9 @@ public:
     // Metadata operations
     virtual Result<void> setMetadata(int64_t documentId, const std::string& key,
                                      const MetadataValue& value) = 0;
+    /// Batch set metadata for multiple documents in a single transaction
+    virtual Result<void> setMetadataBatch(
+        const std::vector<std::tuple<int64_t, std::string, MetadataValue>>& entries) = 0;
     virtual Result<std::optional<MetadataValue>> getMetadata(int64_t documentId,
                                                              const std::string& key) = 0;
     virtual Result<std::unordered_map<std::string, MetadataValue>>
@@ -353,6 +356,8 @@ public:
     // Metadata operations
     Result<void> setMetadata(int64_t documentId, const std::string& key,
                              const MetadataValue& value) override;
+    Result<void> setMetadataBatch(
+        const std::vector<std::tuple<int64_t, std::string, MetadataValue>>& entries) override;
     Result<std::optional<MetadataValue>> getMetadata(int64_t documentId,
                                                      const std::string& key) override;
     Result<std::unordered_map<std::string, MetadataValue>>

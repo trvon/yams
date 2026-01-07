@@ -118,7 +118,8 @@ async_connect_with_timeout(const TransportOptions& opts) {
                     return;
                 if (!completed->exchange(true, std::memory_order_acq_rel)) {
                     boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
-                        std::move(h)(nullptr, RaceResult(std::in_place_index<1>, true));
+                        std::move(h)(std::exception_ptr{},
+                                     RaceResult(std::in_place_index<1>, true));
                     });
                 }
             });
@@ -128,7 +129,7 @@ async_connect_with_timeout(const TransportOptions& opts) {
                 if (!completed->exchange(true, std::memory_order_acq_rel)) {
                     timer->cancel();
                     boost::asio::post(completion_exec, [h = std::move(*handlerPtr), ec]() mutable {
-                        std::move(h)(nullptr,
+                        std::move(h)(std::exception_ptr{},
                                      RaceResult(std::in_place_index<0>, ConnectResult{ec}));
                     });
                 }
@@ -192,7 +193,8 @@ async_read_exact(AsioConnection::socket_t& socket, size_t size, std::chrono::mil
                     return;
                 if (!completed->exchange(true, std::memory_order_acq_rel)) {
                     boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
-                        std::move(h)(nullptr, RaceResult(std::in_place_index<1>, true));
+                        std::move(h)(std::exception_ptr{},
+                                     RaceResult(std::in_place_index<1>, true));
                     });
                 }
             });
@@ -205,7 +207,7 @@ async_read_exact(AsioConnection::socket_t& socket, size_t size, std::chrono::mil
                         timer->cancel();
                         boost::asio::post(completion_exec, [h = std::move(*handlerPtr), ec,
                                                             bytes]() mutable {
-                            std::move(h)(nullptr,
+                            std::move(h)(std::exception_ptr{},
                                          RaceResult(std::in_place_index<0>, ReadResult{ec, bytes}));
                         });
                     }
@@ -563,8 +565,7 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                                 }
                                 // Cancel timer to wake up waiter
                                 if (h.unary->notify_timer) {
-                                    boost::system::error_code ec;
-                                    h.unary->notify_timer->cancel(ec);
+                                    h.unary->notify_timer->cancel();
                                 }
                             }
                             if (h.streaming) {
@@ -576,8 +577,7 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                                 }
                                 // Cancel timer to wake up waiter
                                 if (h.streaming->notify_timer) {
-                                    boost::system::error_code ec;
-                                    h.streaming->notify_timer->cancel(ec);
+                                    h.streaming->notify_timer->cancel();
                                 }
                             }
                         }
@@ -624,8 +624,7 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                                     }
                                     // Cancel timer to wake up waiter
                                     if (h.unary->notify_timer) {
-                                        boost::system::error_code ec;
-                                        h.unary->notify_timer->cancel(ec);
+                                        h.unary->notify_timer->cancel();
                                     }
                                 }
                                 if (h.streaming) {
@@ -637,8 +636,7 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                                     }
                                     // Cancel timer to wake up waiter
                                     if (h.streaming->notify_timer) {
-                                        boost::system::error_code ec;
-                                        h.streaming->notify_timer->cancel(ec);
+                                        h.streaming->notify_timer->cancel();
                                     }
                                 }
                             }
@@ -678,8 +676,7 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                                 }
                                 // Cancel timer to wake up waiter
                                 if (h.unary->notify_timer) {
-                                    boost::system::error_code ec;
-                                    h.unary->notify_timer->cancel(ec);
+                                    h.unary->notify_timer->cancel();
                                 }
                             }
                             if (h.streaming) {
@@ -691,8 +688,7 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                                 }
                                 // Cancel timer to wake up waiter
                                 if (h.streaming->notify_timer) {
-                                    boost::system::error_code ec;
-                                    h.streaming->notify_timer->cancel(ec);
+                                    h.streaming->notify_timer->cancel();
                                 }
                             }
                         }
@@ -762,8 +758,7 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                         }
                         // Cancel the notify timer to wake up the waiter immediately
                         if (handlerPtr->unary->notify_timer) {
-                            boost::system::error_code ec;
-                            handlerPtr->unary->notify_timer->cancel(ec);
+                            handlerPtr->unary->notify_timer->cancel();
                         }
                         conn->handlers.erase(reqId);
                     } else if (handlerPtr->streaming) {
@@ -776,8 +771,7 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                         }
                         // Cancel timer to wake up waiter
                         if (handlerPtr->streaming->notify_timer) {
-                            boost::system::error_code ec;
-                            handlerPtr->streaming->notify_timer->cancel(ec);
+                            handlerPtr->streaming->notify_timer->cancel();
                         }
                         conn->handlers.erase(reqId);
                         conn->streaming_started.store(false, std::memory_order_relaxed);
@@ -800,8 +794,7 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                             }
                             // Cancel timer to wake up waiter
                             if (handlerPtr->streaming->notify_timer) {
-                                boost::system::error_code ec;
-                                handlerPtr->streaming->notify_timer->cancel(ec);
+                                handlerPtr->streaming->notify_timer->cancel();
                             }
                             conn->handlers.erase(reqId);
                             conn->streaming_started.store(false, std::memory_order_relaxed);

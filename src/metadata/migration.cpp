@@ -1685,7 +1685,8 @@ Migration YamsMetadataMigrations::createSymbolMetadataSchema() {
             return_type TEXT,
             parameters TEXT,
             documentation TEXT,
-            FOREIGN KEY (document_hash) REFERENCES documents(sha256_hash) ON DELETE CASCADE
+            FOREIGN KEY (document_hash) REFERENCES documents(sha256_hash) ON DELETE CASCADE,
+            UNIQUE(document_hash, qualified_name)
         );
     )");
 

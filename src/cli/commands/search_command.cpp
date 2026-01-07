@@ -1171,18 +1171,26 @@ public:
                 return renderResult;
             };
             // Fully async daemon path with a single co_spawn and promise completion
+            spdlog::info("[CLI:Search] About to create async daemon request, streaming={}",
+                         clientConfig.enableChunkedResponses);
             std::promise<Result<void>> done;
             auto fut = done.get_future();
             auto work = [&, dreq, enableStream = clientConfig.enableChunkedResponses,
                          bodyTimeoutMs = bodyTimeoutMs_, fuzzyFlag = fuzzySearch_,
                          literalFlag = literalText_]() -> boost::asio::awaitable<void> {
+                spdlog::info("[CLI:Search] Work coroutine started, enableStream={}", enableStream);
                 auto callOnce = [&](const yams::daemon::SearchRequest& rq)
                     -> boost::asio::awaitable<Result<yams::daemon::SearchResponse>> {
-                    if (enableStream)
+                    spdlog::info("[CLI:Search] callOnce invoked, enableStream={}", enableStream);
+                    if (enableStream) {
+                        spdlog::info("[CLI:Search] Calling streamingSearch");
                         co_return co_await client.streamingSearch(rq);
+                    }
+                    spdlog::info("[CLI:Search] Calling client.call (unary)");
                     co_return co_await client.call(rq);
                 };
                 const auto ipcStart = std::chrono::steady_clock::now();
+                spdlog::info("[CLI:Search] About to call callOnce");
                 auto r = co_await callOnce(dreq);
                 const auto ipcEnd = std::chrono::steady_clock::now();
                 spdlog::info(
@@ -1243,7 +1251,9 @@ public:
                 done.set_value(r.error());
                 co_return;
             };
+            spdlog::info("[CLI:Search] Spawning work coroutine on executor");
             auto coroFut = boost::asio::co_spawn(getExecutor(), work(), boost::asio::use_future);
+            spdlog::info("[CLI:Search] co_spawn returned, waiting on future...");
             if (fut.wait_for(std::chrono::seconds(30)) != std::future_status::ready) {
                 spdlog::warn("search: daemon call timed out; falling back to local execution");
                 auto fb = fallback();
@@ -1584,8 +1594,12 @@ public:
             boost::asio::co_spawn(
                 getExecutor(),
                 [&, decided, prom, leaseHandle, timer]() -> boost::asio::awaitable<void> {
+                    spdlog::info("[CLI:Search:executeAsync] streaming coroutine started");
                     auto& cliRef = **leaseHandle;
+                    spdlog::info("[CLI:Search:executeAsync] about to call streamingSearch");
                     auto sr = co_await cliRef.streamingSearch(dreq);
+                    spdlog::info("[CLI:Search:executeAsync] streamingSearch returned, has_value={}",
+                                 sr.has_value());
                     if (!decided->exchange(true)) {
                         prom->set_value(std::move(sr));
                         timer->cancel();
@@ -1597,12 +1611,18 @@ public:
             boost::asio::co_spawn(
                 getExecutor(),
                 [&, decided, prom, leaseHandle, timer]() -> boost::asio::awaitable<void> {
+                    spdlog::info("[CLI:Search:executeAsync] timer coroutine started, waiting 2s");
                     boost::system::error_code ec;
                     co_await timer->async_wait(
                         boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+                    spdlog::info("[CLI:Search:executeAsync] timer expired or cancelled, ec={}",
+                                 ec.message());
                     if (!ec && !decided->load()) {
+                        spdlog::info("[CLI:Search:executeAsync] calling unary path");
                         auto& cliRef = **leaseHandle;
                         auto ur = co_await cliRef.call(dreq);
+                        spdlog::info("[CLI:Search:executeAsync] unary returned, has_value={}",
+                                     ur.has_value());
                         if (!decided->exchange(true))
                             prom->set_value(std::move(ur));
                     }

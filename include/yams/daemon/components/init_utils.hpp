@@ -183,7 +183,8 @@ boost::asio::awaitable<yams::Result<T>> await_with_timeout(Fn&& fn, int timeout_
                 if (!completed->exchange(true, std::memory_order_acq_rel)) {
                     // Timeout won
                     boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
-                        std::move(h)(nullptr, yams::Error{yams::ErrorCode::Timeout, "timeout"});
+                        std::move(h)(std::exception_ptr{},
+                                     yams::Error{yams::ErrorCode::Timeout, "timeout"});
                     });
                 }
             });
@@ -200,7 +201,7 @@ boost::asio::awaitable<yams::Result<T>> await_with_timeout(Fn&& fn, int timeout_
                         timer->cancel();
                         boost::asio::post(completion_exec, [h = std::move(*handlerPtr),
                                                             r = std::move(result)]() mutable {
-                            std::move(h)(nullptr, std::move(r));
+                            std::move(h)(std::exception_ptr{}, std::move(r));
                         });
                     }
                 },
