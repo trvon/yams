@@ -1419,6 +1419,49 @@ public:
         postEntityConcurrentOverride_.store(std::min(v, 16u), std::memory_order_relaxed);
     }
 
+    // PBI-05b: EmbeddingService concurrency (parallel embedding workers)
+    // Embeddings are compute-heavy (ONNX inference) so we need parallelism to keep up with ingest
+    static uint32_t postEmbedConcurrent() {
+        uint32_t ov = postEmbedConcurrentOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        // Check environment
+        if (const char* val = std::getenv("YAMS_POST_EMBED_CONCURRENT")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(val));
+                if (v >= 1 && v <= 32)
+                    return v;
+            } catch (...) {
+            }
+        }
+        // Default: scale with hardware up to 8 workers
+        // Embeddings are GPU/CPU intensive, so we cap lower than other stages
+        uint32_t hw = hardwareConcurrency();
+        return std::min<uint32_t>(std::max<uint32_t>(hw / 4, 2), 8);
+    }
+    static void setPostEmbedConcurrent(uint32_t v) {
+        postEmbedConcurrentOverride_.store(std::min(v, 32u), std::memory_order_relaxed);
+    }
+
+    // Get the current embed channel capacity (for sizing the queue)
+    static uint32_t embedChannelCapacity() {
+        uint32_t ov = embedChannelCapacityOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (const char* val = std::getenv("YAMS_EMBED_CHANNEL_CAPACITY")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(val));
+                if (v >= 256 && v <= 65536)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 8192; // Increased from 2048 to handle bulk ingest
+    }
+    static void setEmbedChannelCapacity(uint32_t v) {
+        embedChannelCapacityOverride_.store(std::clamp(v, 256u, 65536u), std::memory_order_relaxed);
+    }
+
 private:
     // Runtime policy storage (single process); defaults chosen to reduce CPU when busy
     static inline std::atomic<AutoEmbedPolicy> autoEmbedPolicy_{AutoEmbedPolicy::Idle};
@@ -1487,6 +1530,10 @@ private:
     static inline std::atomic<uint32_t> postKgConcurrentOverride_{0};
     static inline std::atomic<uint32_t> postSymbolConcurrentOverride_{0};
     static inline std::atomic<uint32_t> postEntityConcurrentOverride_{0};
+
+    // PBI-05b: EmbeddingService concurrency overrides
+    static inline std::atomic<uint32_t> postEmbedConcurrentOverride_{0};
+    static inline std::atomic<uint32_t> embedChannelCapacityOverride_{0};
 };
 
 } // namespace yams::daemon

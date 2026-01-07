@@ -328,6 +328,9 @@ MetadataRepository::MetadataRepository(ConnectionPool& pool) : pool_(pool) {
                  pathFtsAvailable_);
 }
 
+// Destructor must be defined in cpp file because of forward-declared CorpusStats in unique_ptr
+MetadataRepository::~MetadataRepository() = default;
+
 // Document operations
 Result<int64_t> MetadataRepository::insertDocument(const DocumentInfo& info) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::insertDocument");
@@ -2670,12 +2673,33 @@ MetadataRepository::getDocumentCountsByExtension() {
 }
 
 Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
-    return executeQuery<storage::CorpusStats>([&](Database& db) -> Result<storage::CorpusStats> {
-        storage::CorpusStats stats;
+    // Check cache first (reader lock)
+    {
+        std::shared_lock<std::shared_mutex> readLock(corpusStatsMutex_);
+        if (cachedCorpusStats_) {
+            auto now = std::chrono::steady_clock::now();
+            auto age = std::chrono::duration_cast<std::chrono::seconds>(now - corpusStatsCachedAt_);
 
-        // 1. Basic document metrics: count, total size, avg size, path depth
-        {
-            auto stmtResult = db.prepare(R"(
+            // Check if cache is still valid:
+            // 1. Within TTL
+            // 2. Document count hasn't changed significantly
+            auto currentDocCount = cachedDocumentCount_.load(std::memory_order_relaxed);
+            bool docCountUnchanged = (currentDocCount == corpusStatsDocCount_);
+
+            if (age < kCorpusStatsTtl && docCountUnchanged) {
+                return *cachedCorpusStats_;
+            }
+        }
+    }
+
+    // Cache miss or stale - compute fresh stats
+    auto result =
+        executeQuery<storage::CorpusStats>([&](Database& db) -> Result<storage::CorpusStats> {
+            storage::CorpusStats stats;
+
+            // 1. Basic document metrics: count, total size, avg size, path depth
+            {
+                auto stmtResult = db.prepare(R"(
                     SELECT 
                         COUNT(*) as doc_count,
                         COALESCE(SUM(file_size), 0) as total_size,
@@ -2684,156 +2708,166 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
                         COALESCE(MAX(path_depth), 0) as max_depth
                     FROM documents
                 )");
-            if (!stmtResult)
-                return stmtResult.error();
+                if (!stmtResult)
+                    return stmtResult.error();
 
-            auto& stmt = stmtResult.value();
-            auto stepResult = stmt.step();
-            if (!stepResult)
-                return stepResult.error();
-            if (stepResult.value()) {
-                stats.docCount = stmt.getInt64(0);
-                stats.totalSizeBytes = stmt.getInt64(1);
-                stats.avgDocLengthBytes = stmt.getDouble(2);
-                stats.pathDepthAvg = stmt.getDouble(3);
-                stats.pathDepthMax = stmt.getDouble(4);
+                auto& stmt = stmtResult.value();
+                auto stepResult = stmt.step();
+                if (!stepResult)
+                    return stepResult.error();
+                if (stepResult.value()) {
+                    stats.docCount = stmt.getInt64(0);
+                    stats.totalSizeBytes = stmt.getInt64(1);
+                    stats.avgDocLengthBytes = stmt.getDouble(2);
+                    stats.pathDepthAvg = stmt.getDouble(3);
+                    stats.pathDepthMax = stmt.getDouble(4);
+                }
             }
-        }
 
-        // Early return if no documents
-        if (stats.docCount == 0) {
-            stats.computedAtMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                     std::chrono::system_clock::now().time_since_epoch())
-                                     .count();
-            return stats;
-        }
+            // Early return if no documents
+            if (stats.docCount == 0) {
+                stats.computedAtMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::system_clock::now().time_since_epoch())
+                                         .count();
+                return stats;
+            }
 
-        // 2. Extension counts and content type classification
-        {
-            auto stmtResult = db.prepare(R"(
+            // 2. Extension counts and content type classification
+            {
+                auto stmtResult = db.prepare(R"(
                     SELECT file_extension, COUNT(*) as count
                     FROM documents
                     GROUP BY file_extension
                     ORDER BY count DESC
                 )");
-            if (!stmtResult)
-                return stmtResult.error();
+                if (!stmtResult)
+                    return stmtResult.error();
 
-            auto& stmt = stmtResult.value();
-            int64_t codeCount = 0;
-            int64_t proseCount = 0;
-            int64_t binaryCount = 0;
+                auto& stmt = stmtResult.value();
+                int64_t codeCount = 0;
+                int64_t proseCount = 0;
+                int64_t binaryCount = 0;
 
-            while (true) {
-                auto stepResult = stmt.step();
-                if (!stepResult)
-                    return stepResult.error();
-                if (!stepResult.value())
-                    break;
+                while (true) {
+                    auto stepResult = stmt.step();
+                    if (!stepResult)
+                        return stepResult.error();
+                    if (!stepResult.value())
+                        break;
 
-                std::string ext = stmt.getString(0);
-                int64_t count = stmt.getInt64(1);
-                stats.extensionCounts[ext] = count;
+                    std::string ext = stmt.getString(0);
+                    int64_t count = stmt.getInt64(1);
+                    stats.extensionCounts[ext] = count;
 
-                // Normalize extension to lowercase with leading dot
-                std::string extLower = ext;
-                std::transform(extLower.begin(), extLower.end(), extLower.begin(),
-                               [](unsigned char c) { return std::tolower(c); });
-                if (!extLower.empty() && extLower[0] != '.') {
-                    extLower = "." + extLower;
+                    // Normalize extension to lowercase with leading dot
+                    std::string extLower = ext;
+                    std::transform(extLower.begin(), extLower.end(), extLower.begin(),
+                                   [](unsigned char c) { return std::tolower(c); });
+                    if (!extLower.empty() && extLower[0] != '.') {
+                        extLower = "." + extLower;
+                    }
+
+                    // Classify by extension
+                    if (storage::detail::kCodeExtensions.contains(extLower)) {
+                        codeCount += count;
+                    } else if (storage::detail::kProseExtensions.contains(extLower)) {
+                        proseCount += count;
+                    } else if (storage::detail::kBinaryExtensions.contains(extLower)) {
+                        binaryCount += count;
+                    }
+                    // Unknown extensions are not counted (could be either)
                 }
 
-                // Classify by extension
-                if (storage::detail::kCodeExtensions.contains(extLower)) {
-                    codeCount += count;
-                } else if (storage::detail::kProseExtensions.contains(extLower)) {
-                    proseCount += count;
-                } else if (storage::detail::kBinaryExtensions.contains(extLower)) {
-                    binaryCount += count;
-                }
-                // Unknown extensions are not counted (could be either)
+                // Calculate ratios
+                double total = static_cast<double>(stats.docCount);
+                stats.codeRatio = static_cast<double>(codeCount) / total;
+                stats.proseRatio = static_cast<double>(proseCount) / total;
+                stats.binaryRatio = static_cast<double>(binaryCount) / total;
             }
 
-            // Calculate ratios
-            double total = static_cast<double>(stats.docCount);
-            stats.codeRatio = static_cast<double>(codeCount) / total;
-            stats.proseRatio = static_cast<double>(proseCount) / total;
-            stats.binaryRatio = static_cast<double>(binaryCount) / total;
-        }
-
-        // 3. Embedding coverage
-        {
-            auto stmtResult = db.prepare(R"(
+            // 3. Embedding coverage
+            {
+                auto stmtResult = db.prepare(R"(
                     SELECT COUNT(*) FROM document_embeddings_status WHERE has_embedding = 1
                 )");
-            if (stmtResult) {
-                auto& stmt = stmtResult.value();
-                auto stepResult = stmt.step();
-                if (stepResult && stepResult.value()) {
-                    stats.embeddingCount = stmt.getInt64(0);
-                    stats.embeddingCoverage = static_cast<double>(stats.embeddingCount) /
-                                              static_cast<double>(stats.docCount);
-                }
-            }
-            // If table doesn't exist or query fails, counts stay at 0
-        }
-
-        // 4. Tag coverage (metadata keys starting with 'tag')
-        {
-            auto stmtResult = db.prepare(R"(
-                    SELECT COUNT(DISTINCT document_id), COUNT(*)
-                    FROM metadata
-                    WHERE key = 'tag' OR key LIKE 'tag:%'
-                )");
-            if (stmtResult) {
-                auto& stmt = stmtResult.value();
-                auto stepResult = stmt.step();
-                if (stepResult && stepResult.value()) {
-                    stats.docsWithTags = stmt.getInt64(0);
-                    stats.tagCount = stmt.getInt64(1);
-                    stats.tagCoverage = static_cast<double>(stats.docsWithTags) /
-                                        static_cast<double>(stats.docCount);
-                }
-            }
-        }
-
-        // 5. KG symbol count (check if kg_doc_entities table exists first)
-        {
-            // Check if table exists
-            auto checkResult = db.prepare(R"(
-                    SELECT COUNT(*) FROM sqlite_master 
-                    WHERE type='table' AND name='kg_doc_entities'
-                )");
-            bool tableExists = false;
-            if (checkResult) {
-                auto& stmt = checkResult.value();
-                auto stepResult = stmt.step();
-                if (stepResult && stepResult.value()) {
-                    tableExists = stmt.getInt64(0) > 0;
-                }
-            }
-
-            if (tableExists) {
-                auto stmtResult = db.prepare("SELECT COUNT(*) FROM kg_doc_entities");
                 if (stmtResult) {
                     auto& stmt = stmtResult.value();
                     auto stepResult = stmt.step();
                     if (stepResult && stepResult.value()) {
-                        stats.symbolCount = stmt.getInt64(0);
-                        stats.symbolDensity = static_cast<double>(stats.symbolCount) /
-                                              static_cast<double>(stats.docCount);
+                        stats.embeddingCount = stmt.getInt64(0);
+                        stats.embeddingCoverage = static_cast<double>(stats.embeddingCount) /
+                                                  static_cast<double>(stats.docCount);
+                    }
+                }
+                // If table doesn't exist or query fails, counts stay at 0
+            }
+
+            // 4. Tag coverage (metadata keys starting with 'tag')
+            {
+                auto stmtResult = db.prepare(R"(
+                    SELECT COUNT(DISTINCT document_id), COUNT(*)
+                    FROM metadata
+                    WHERE key = 'tag' OR key LIKE 'tag:%'
+                )");
+                if (stmtResult) {
+                    auto& stmt = stmtResult.value();
+                    auto stepResult = stmt.step();
+                    if (stepResult && stepResult.value()) {
+                        stats.docsWithTags = stmt.getInt64(0);
+                        stats.tagCount = stmt.getInt64(1);
+                        stats.tagCoverage = static_cast<double>(stats.docsWithTags) /
+                                            static_cast<double>(stats.docCount);
                     }
                 }
             }
-        }
 
-        // 6. Set timestamp
-        stats.computedAtMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                 std::chrono::system_clock::now().time_since_epoch())
-                                 .count();
+            // 5. KG symbol count (check if kg_doc_entities table exists first)
+            {
+                // Check if table exists
+                auto checkResult = db.prepare(R"(
+                    SELECT COUNT(*) FROM sqlite_master 
+                    WHERE type='table' AND name='kg_doc_entities'
+                )");
+                bool tableExists = false;
+                if (checkResult) {
+                    auto& stmt = checkResult.value();
+                    auto stepResult = stmt.step();
+                    if (stepResult && stepResult.value()) {
+                        tableExists = stmt.getInt64(0) > 0;
+                    }
+                }
 
-        return stats;
-    });
+                if (tableExists) {
+                    auto stmtResult = db.prepare("SELECT COUNT(*) FROM kg_doc_entities");
+                    if (stmtResult) {
+                        auto& stmt = stmtResult.value();
+                        auto stepResult = stmt.step();
+                        if (stepResult && stepResult.value()) {
+                            stats.symbolCount = stmt.getInt64(0);
+                            stats.symbolDensity = static_cast<double>(stats.symbolCount) /
+                                                  static_cast<double>(stats.docCount);
+                        }
+                    }
+                }
+            }
+
+            // 6. Set timestamp
+            stats.computedAtMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::system_clock::now().time_since_epoch())
+                                     .count();
+
+            return stats;
+        });
+
+    // Cache the result if successful
+    if (result.has_value()) {
+        std::unique_lock<std::shared_mutex> writeLock(corpusStatsMutex_);
+        cachedCorpusStats_ = std::make_unique<storage::CorpusStats>(result.value());
+        corpusStatsCachedAt_ = std::chrono::steady_clock::now();
+        corpusStatsDocCount_ = cachedDocumentCount_.load(std::memory_order_relaxed);
+    }
+
+    return result;
 }
 
 Result<void> MetadataRepository::ensureFuzzyIndexInitialized() {

@@ -187,7 +187,7 @@ void ServiceManager::refreshPluginStatusSnapshot() {
         const auto modelsLoaded = cachedModelProviderModelCount_.load(std::memory_order_relaxed);
         // Helper lambda to add plugin records
         auto addPluginRecords = [&](const std::vector<PluginDescriptor>& loaded,
-                                    const std::string& pluginType) {
+                                    [[maybe_unused]] const std::string& pluginType) {
             for (const auto& d : loaded) {
                 PluginStatusRecord rec;
                 rec.name = d.name;
@@ -1362,8 +1362,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             taThreads = TA::postIngestThreads();
         } catch (...) {
         }
-        std::size_t threads = taThreads ? static_cast<std::size_t>(taThreads)
-                                        : static_cast<std::size_t>(TA::postIngestThreads());
+        (void)taThreads; // Retrieved for future use in post-ingest configuration
         // Initialize KG store on daemon side using connection pool if available
         try {
             if (connectionPool_) {
@@ -1431,9 +1430,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             taThreads = TA::postIngestThreads();
         } catch (...) {
         }
-        std::size_t postIngestThreads = taThreads
-                                            ? static_cast<std::size_t>(taThreads)
-                                            : static_cast<std::size_t>(TA::postIngestThreads());
+        (void)taThreads; // Retrieved for future use in embedding service configuration
         embeddingService_ = std::make_unique<EmbeddingService>(contentStore_, metadataRepo_,
                                                                workCoordinator_.get());
 
@@ -2061,6 +2058,13 @@ boost::asio::awaitable<Result<size_t>> ServiceManager::autoloadPluginsNow() {
 
 boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
     spdlog::info("[ServiceManager] co_enableEmbeddingsAndRebuild: starting");
+
+    // Skip if search engine is already ready - avoid unnecessary rebuilds
+    if (state_.readiness.searchEngineReady.load() && searchEngine_) {
+        spdlog::info("[ServiceManager] co_enableEmbeddingsAndRebuild: search engine already ready, "
+                     "skipping rebuild");
+        co_return;
+    }
 
     // Protect against concurrent rebuilds
     bool buildingAlready = false;

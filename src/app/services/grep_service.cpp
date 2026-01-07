@@ -117,7 +117,7 @@ static std::map<std::string, std::string> parseConfigForKeys(const std::filesyst
     while (std::getline(file, line)) {
         auto comment = line.find('#');
         if (comment != std::string::npos)
-            line = line.substr(0, comment);
+            line.resize(comment);
         line = trim(line);
         if (line.empty())
             continue;
@@ -185,7 +185,6 @@ static std::string normalizePathForCompare(const std::string& path) {
     if (path.empty())
         return {};
     std::filesystem::path fs(path);
-    std::error_code ec;
     auto normalized = fs.lexically_normal();
     std::string out = normalized.generic_string();
     if (out.empty()) {

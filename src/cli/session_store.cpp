@@ -1,6 +1,7 @@
 #include <yams/cli/session_store.h>
 
 #include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
 #include <cstdlib>
 #include <fstream>
 
@@ -49,7 +50,8 @@ std::optional<std::string> current_session() {
             if (!s.empty())
                 return s;
         }
-    } catch (...) {
+    } catch (const std::exception& e) {
+        spdlog::debug("Failed to read current session from index: {}", e.what());
     }
     return std::nullopt;
 }
@@ -73,7 +75,8 @@ static std::vector<std::string> load_pinned_legacy() {
                 }
             }
         }
-    } catch (...) {
+    } catch (const std::exception& e) {
+        spdlog::debug("Failed to load legacy pinned.json: {}", e.what());
     }
     return out;
 }
@@ -98,7 +101,8 @@ static std::string normalize_selector_path(const std::string& value) {
     if (!has_wildcards(normalized)) {
         std::error_code ec;
         std::filesystem::path candidate(value);
-        if (std::filesystem::exists(candidate, ec) && std::filesystem::is_directory(candidate, ec)) {
+        if (std::filesystem::exists(candidate, ec) &&
+            std::filesystem::is_directory(candidate, ec)) {
             if (!normalized.empty() && normalized.back() != '/')
                 normalized += '/';
             normalized += "**/*";
@@ -137,7 +141,8 @@ std::vector<std::string> active_include_patterns(const std::optional<std::string
                         }
                     }
                 }
-            } catch (...) {
+            } catch (const std::exception& e) {
+                spdlog::debug("Failed to read session index: {}", e.what());
             }
         }
     }

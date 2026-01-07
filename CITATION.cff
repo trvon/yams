@@ -1,0 +1,57 @@
+# This CITATION.cff file was generated to help users cite YAMS in academic work.
+# See https://citation-file-format.github.io/ for format specification.
+
+cff-version: 1.2.0
+title: "YAMS: Yet Another Memory System"
+message: "If you use YAMS in your research, please cite it using the metadata from this file."
+type: software
+authors:
+  - family-names: Williams
+    given-names: Trevon
+    email: git@trevon.dev
+    orcid: ""  # Add ORCID if available
+repository-code: "https://github.com/trvon/yams"
+url: "https://yamsmemory.ai"
+repository-artifact: "https://sr.ht/~trvon/yams/"
+abstract: >-
+  YAMS (Yet Another Memory System) is an open-source hybrid retrieval system
+  combining SQLite FTS5 full-text search with dense vector embeddings for
+  semantic similarity. Designed as persistent memory for LLM applications,
+  YAMS features content-addressed storage with SHA-256 hashing, block-level
+  deduplication via Rabin chunking, real-time incremental indexing, and
+  ONNX-accelerated embeddings. The hybrid search mechanism achieves
+  state-of-the-art retrieval quality on standard benchmarks while maintaining
+  low latency for interactive use cases.
+keywords:
+  - information-retrieval
+  - hybrid-search
+  - vector-search
+  - full-text-search
+  - semantic-search
+  - embeddings
+  - llm-memory
+  - rag
+  - retrieval-augmented-generation
+  - sqlite
+  - fts5
+  - content-addressed-storage
+  - deduplication
+license: GPL-3.0-or-later
+version: "0.1.0"
+date-released: "2025-08-10"
+identifiers:
+  - type: url
+    value: "https://github.com/trvon/yams"
+    description: "GitHub repository"
+  - type: url
+    value: "https://sr.ht/~trvon/yams/"
+    description: "SourceHut repository"
+preferred-citation:
+  type: software
+  title: "YAMS: Yet Another Memory System - Hybrid Retrieval for LLM Applications"
+  authors:
+    - family-names: Williams
+      given-names: Trevon
+  year: 2025
+  url: "https://github.com/trvon/yams"
+  license: GPL-3.0-or-later

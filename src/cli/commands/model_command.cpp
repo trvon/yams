@@ -774,7 +774,8 @@ private:
         return Result<void>{};
     }
 
-    Result<void> downloadModel(const std::string& model_name, const std::string& output_dir,
+    Result<void> downloadModel(const std::string& model_name,
+                               [[maybe_unused]] const std::string& output_dir,
                                const std::string& override_url) {
         YAMS_ZONE_SCOPED_N("ModelCommand::downloadModel");
 

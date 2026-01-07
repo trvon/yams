@@ -2,6 +2,7 @@
 #include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/spdlog.h>
 
+#include <cstdio>
 #include <fstream>
 #include <future>
 #include <mutex>
@@ -130,11 +131,16 @@ YamsDaemon::~YamsDaemon() {
                 try {
                     spdlog::warn("[YamsDaemon] shutdown thread join exception: {}", e.what());
                 } catch (...) {
+                    std::fprintf(stderr,
+                                 "[YamsDaemon] shutdown thread join exception (logging failed)\n");
                 }
             } catch (...) {
                 try {
                     spdlog::warn("[YamsDaemon] shutdown thread join unknown exception");
                 } catch (...) {
+                    std::fprintf(
+                        stderr,
+                        "[YamsDaemon] shutdown thread join unknown exception (logging failed)\n");
                 }
             }
         }
@@ -270,11 +276,14 @@ Result<void> YamsDaemon::start() {
             uint32_t per = 8;
             try {
                 rec = TuneAdvisor::recommendedThreads();
-            } catch (...) {
+            } catch (const std::exception& e) {
+                spdlog::debug("TuneAdvisor::recommendedThreads() failed, using default: {}",
+                              e.what());
             }
             try {
                 per = TuneAdvisor::ioConnPerThread();
-            } catch (...) {
+            } catch (const std::exception& e) {
+                spdlog::debug("TuneAdvisor::ioConnPerThread() failed, using default: {}", e.what());
             }
             uint64_t computed = static_cast<uint64_t>(rec) * static_cast<uint64_t>(per) * 4ull;
             if (computed < 256ull)
@@ -442,7 +451,10 @@ void YamsDaemon::runLoop() {
 #endif
                     break;
                 }
+            } catch (const std::exception& e) {
+                spdlog::warn("Signal check hook threw exception: {}", e.what());
             } catch (...) {
+                spdlog::warn("Signal check hook threw unknown exception");
             }
         }
 
@@ -486,13 +498,15 @@ void YamsDaemon::runLoop() {
             if (metrics_) {
                 metrics_->refresh();
             }
-        } catch (...) {
+        } catch (const std::exception& e) {
+            spdlog::debug("Metrics refresh failed: {}", e.what());
         }
         // Apply pending reload requests (e.g., SIGHUP) for tuning-only adjustments
         if (reloadRequested_.load(std::memory_order_relaxed)) {
             try {
                 reloadTuningConfig();
-            } catch (...) {
+            } catch (const std::exception& e) {
+                spdlog::warn("Config reload failed: {}", e.what());
             }
             reloadRequested_.store(false, std::memory_order_relaxed);
         }
@@ -593,8 +607,9 @@ void YamsDaemon::runLoop() {
                                   state_.readiness.searchProgress.load());
                 }
             }
-        } catch (...) {
-            // best-effort ticker; ignore errors
+        } catch (const std::exception& e) {
+            // best-effort ticker; log but don't crash
+            spdlog::debug("Readiness ticker error: {}", e.what());
         }
 
 #if defined(TRACY_ENABLE)
@@ -635,6 +650,7 @@ Result<void> YamsDaemon::stop() {
         } catch (const std::exception& e) {
             spdlog::warn("TuningManager stop exception: {}", e.what());
         } catch (...) {
+            spdlog::warn("TuningManager stop: unknown exception");
         }
         tuningManager_.reset();
     }
@@ -853,7 +869,9 @@ void YamsDaemon::reloadTuningConfig() {
             spdlog::warn("[Reload] Config file missing: {}", config_.configFilePath.string());
             return;
         }
-    } catch (...) {
+    } catch (const std::exception& e) {
+        spdlog::warn("[Reload] Error checking config file: {}", e.what());
+        return;
     }
     try {
         yams::config::ConfigMigrator migrator;
@@ -874,7 +892,8 @@ void YamsDaemon::reloadTuningConfig() {
                 return std::nullopt;
             try {
                 return std::stoi(it->second);
-            } catch (...) {
+            } catch (const std::exception& e) {
+                spdlog::debug("[Reload] Failed to parse tuning key '{}': {}", k, e.what());
                 return std::nullopt;
             }
         };

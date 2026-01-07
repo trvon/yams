@@ -584,6 +584,135 @@ public:
         return stats;
     }
 
+    // =========================================================================
+    // Entity Vector Operations
+    // =========================================================================
+
+    Result<void> insertEntityVector(const EntityVectorRecord& record) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!initialized_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        return backend_->insertEntityVector(record);
+    }
+
+    Result<void> insertEntityVectorsBatch(const std::vector<EntityVectorRecord>& records) {
+        if (records.empty()) {
+            return Result<void>{};
+        }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!initialized_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        return backend_->insertEntityVectorsBatch(records);
+    }
+
+    Result<void> updateEntityVector(const std::string& node_key, EntityEmbeddingType type,
+                                    const EntityVectorRecord& record) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!initialized_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        // Delete existing and insert new (simple upsert)
+        // First try to delete any existing record with this node_key + type
+        // Then insert the new record
+        auto deleteRes = backend_->deleteEntityVectorsByNode(node_key);
+        if (!deleteRes) {
+            return deleteRes;
+        }
+
+        return backend_->insertEntityVector(record);
+    }
+
+    Result<void> deleteEntityVectorsByNode(const std::string& node_key) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!initialized_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        return backend_->deleteEntityVectorsByNode(node_key);
+    }
+
+    Result<void> deleteEntityVectorsByDocument(const std::string& document_hash) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!initialized_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        return backend_->deleteEntityVectorsByDocument(document_hash);
+    }
+
+    std::vector<EntityVectorRecord> searchEntities(const std::vector<float>& query_embedding,
+                                                   const EntitySearchParams& params) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!initialized_) {
+            return {};
+        }
+
+        return backend_->searchEntities(query_embedding, params);
+    }
+
+    std::vector<EntityVectorRecord> getEntityVectorsByNode(const std::string& node_key) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!initialized_) {
+            return {};
+        }
+
+        return backend_->getEntityVectorsByNode(node_key);
+    }
+
+    std::vector<EntityVectorRecord>
+    getEntityVectorsByDocument(const std::string& document_hash) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!initialized_) {
+            return {};
+        }
+
+        return backend_->getEntityVectorsByDocument(document_hash);
+    }
+
+    bool hasEntityEmbedding(const std::string& node_key) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!initialized_) {
+            return false;
+        }
+
+        return backend_->hasEntityEmbedding(node_key);
+    }
+
+    size_t getEntityVectorCount() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!initialized_) {
+            return 0;
+        }
+
+        return backend_->getEntityVectorCount();
+    }
+
+    Result<void> markEntityAsStale(const std::string& node_key) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!initialized_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        return backend_->markEntityAsStale(node_key);
+    }
+
     bool buildIndex() {
         std::lock_guard<std::mutex> lock(mutex_);
 
@@ -795,20 +924,8 @@ std::vector<VectorRecord> VectorDatabase::search(const std::vector<float>& query
                                                  const VectorSearchParams& params) const {
     YAMS_ZONE_SCOPED_N("VectorDB::search");
 
-    constexpr size_t BRUTE_FORCE_THRESHOLD = 10000;
-
-    size_t vector_count = getVectorCount();
-
-    spdlog::debug("VectorDatabase::search: corpus_size={}, k={}, threshold={}", vector_count,
-                  params.k, BRUTE_FORCE_THRESHOLD);
-
-    if (vector_count < BRUTE_FORCE_THRESHOLD) {
-        spdlog::debug("Using brute-force search for small corpus ({})", vector_count);
-        return searchSimilar(query_embedding, params);
-    }
-
-    spdlog::debug("Using HNSW search for large corpus ({})", vector_count);
-
+    // All search uses HNSW - O(log n) approximate nearest neighbor
+    // HNSW achieves 100% recall vs brute-force in benchmarks (see bench_results/hnsw_*.json)
     return searchSimilar(query_embedding, params);
 }
 
@@ -904,6 +1021,61 @@ Result<void> VectorDatabase::markAsDeleted(const std::string& /*chunk_id*/) {
 Result<size_t> VectorDatabase::purgeDeleted(std::chrono::hours /*age_threshold*/) {
     // TODO: Implement purge of soft-deleted records
     return size_t{0};
+}
+
+// =========================================================================
+// Entity Vector Operations (Public API)
+// =========================================================================
+
+Result<void> VectorDatabase::insertEntityVector(const EntityVectorRecord& record) {
+    return pImpl->insertEntityVector(record);
+}
+
+Result<void>
+VectorDatabase::insertEntityVectorsBatch(const std::vector<EntityVectorRecord>& records) {
+    return pImpl->insertEntityVectorsBatch(records);
+}
+
+Result<void> VectorDatabase::updateEntityVector(const std::string& node_key,
+                                                EntityEmbeddingType type,
+                                                const EntityVectorRecord& record) {
+    return pImpl->updateEntityVector(node_key, type, record);
+}
+
+Result<void> VectorDatabase::deleteEntityVectorsByNode(const std::string& node_key) {
+    return pImpl->deleteEntityVectorsByNode(node_key);
+}
+
+Result<void> VectorDatabase::deleteEntityVectorsByDocument(const std::string& document_hash) {
+    return pImpl->deleteEntityVectorsByDocument(document_hash);
+}
+
+std::vector<EntityVectorRecord>
+VectorDatabase::searchEntities(const std::vector<float>& query_embedding,
+                               const EntitySearchParams& params) const {
+    return pImpl->searchEntities(query_embedding, params);
+}
+
+std::vector<EntityVectorRecord>
+VectorDatabase::getEntityVectorsByNode(const std::string& node_key) const {
+    return pImpl->getEntityVectorsByNode(node_key);
+}
+
+std::vector<EntityVectorRecord>
+VectorDatabase::getEntityVectorsByDocument(const std::string& document_hash) const {
+    return pImpl->getEntityVectorsByDocument(document_hash);
+}
+
+bool VectorDatabase::hasEntityEmbedding(const std::string& node_key) const {
+    return pImpl->hasEntityEmbedding(node_key);
+}
+
+size_t VectorDatabase::getEntityVectorCount() const {
+    return pImpl->getEntityVectorCount();
+}
+
+Result<void> VectorDatabase::markEntityAsStale(const std::string& node_key) {
+    return pImpl->markEntityAsStale(node_key);
 }
 
 bool VectorDatabase::isValidEmbedding(const std::vector<float>& embedding, size_t expected_dim) {

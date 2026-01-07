@@ -214,3 +214,33 @@ test('symbol_extraction_bench', symbol_extraction_bench,
 
 alias_target('bench_symbol_extraction', symbol_extraction_bench)
 
+# HNSW Entity Search benchmark (Catch2-based)
+# Benchmarks HNSW search performance with various corpus sizes, dimensions, and k values
+# Also tests symbol extractor integration for entity vector search
+hnsw_entity_search_bench = executable('hnsw_entity_search_bench',
+  files('hnsw_entity_search_bench.cpp'),
+  include_directories: incs,
+  dependencies: [
+    dependency('catch2-with-main'),
+    dependency('nlohmann_json'),
+    dependency('yams_vector'),
+    dependency('spdlog'),
+  ] + tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  install: false,
+)
+
+# Register as Catch2 test (not a standard test, only run manually or in nightly CI)
+# Tests are tagged [!benchmark] so won't run by default
+test('hnsw_entity_search_bench', hnsw_entity_search_bench,
+     args: ['--allow-running-no-tests'],
+     suite: ['bench', 'hnsw'],
+     is_parallel: false,
+     timeout: 300,
+     env: {
+       'YAMS_SKIP_MODEL_LOADING': '1',
+       'LD_LIBRARY_PATH': _test_env_ld_library_path,
+     })
+
+alias_target('bench_hnsw', hnsw_entity_search_bench)
+

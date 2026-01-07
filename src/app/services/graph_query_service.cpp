@@ -122,7 +122,8 @@ public:
         return response;
     }
 
-    Result<ListSnapshotsResponse> listSnapshots(const ListSnapshotsRequest& req) override {
+    Result<ListSnapshotsResponse>
+    listSnapshots([[maybe_unused]] const ListSnapshotsRequest& req) override {
         ListSnapshotsResponse response;
 
         if (!metadataRepo_) {
@@ -374,18 +375,6 @@ private:
                 visited.insert(neighborId);
             }
         }
-    }
-
-    // Legacy collectNeighbors for backward compatibility (without cache)
-    void collectNeighbors(std::int64_t nodeId, int distance, int maxDepth,
-                          const std::vector<GraphRelationType>& relationFilters,
-                          const std::vector<std::string>& relationNames,
-                          std::unordered_set<std::int64_t>& visited,
-                          std::queue<std::pair<std::int64_t, int>>& queue,
-                          bool reverseTraversal = false) {
-        EdgeCache dummyCache;
-        collectNeighborsWithCache(nodeId, distance, maxDepth, relationFilters, relationNames,
-                                  visited, queue, dummyCache, reverseTraversal);
     }
 
     Result<void> performBFSTraversal(std::int64_t originNodeId, const GraphQueryRequest& req,

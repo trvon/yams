@@ -133,6 +133,22 @@ private:
                       const yams_symbol_extraction_result_v1* result,
                       const std::vector<std::int64_t>& symbolNodeIds);
 
+    /**
+     * Generate and store entity embeddings for extracted symbols.
+     * Creates EntityVectorRecords with SIGNATURE embedding type for semantic search.
+     * Non-blocking: skips gracefully if model provider or vector DB is not available.
+     */
+    yams::Result<void> generateEntityEmbeddings(const Job& job,
+                                                const yams_symbol_extraction_result_v1* result,
+                                                const SymbolNodeBatch& symbolNodes);
+
+    /**
+     * Build text representation for a symbol (for embedding generation).
+     * Combines kind, qualified name, parameters, return type, and documentation.
+     */
+    static std::string buildSymbolText(const yams_symbol_extraction_result_v1* result,
+                                       size_t index);
+
     ServiceManager* services_{};
     std::atomic<bool> stop_{false};
     std::atomic<std::uint64_t> accepted_{0}, processed_{0}, failed_{0};

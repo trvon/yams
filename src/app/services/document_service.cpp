@@ -127,10 +127,10 @@ inline std::string generateSnippet(const std::string& contentText, int snippetLe
     }
     std::string snippet = contentText;
     if (snippet.length() > static_cast<size_t>(snippetLength)) {
-        snippet = snippet.substr(0, static_cast<size_t>(snippetLength - 3));
+        snippet.resize(static_cast<size_t>(snippetLength - 3));
         size_t lastSpace = snippet.find_last_of(' ');
         if (lastSpace != std::string::npos && lastSpace > static_cast<size_t>(snippetLength / 2)) {
-            snippet = snippet.substr(0, lastSpace);
+            snippet.resize(lastSpace);
         }
         snippet += "...";
     }
@@ -1348,9 +1348,7 @@ public:
                                           }),
                            docs.end());
             }
-        }
 
-        if (!usedQuery) {
             // Filter by type (text/binary) or explicit flags
             if (req.text || req.type == "text") {
                 docs.erase(std::remove_if(docs.begin(), docs.end(),

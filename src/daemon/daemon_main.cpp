@@ -171,7 +171,9 @@ int main(int argc, char* argv[]) {
             if (next_str(v)) {
                 try {
                     config.maxMemoryGb = static_cast<size_t>(std::stoul(v));
-                } catch (...) {
+                } catch (const std::exception& e) {
+                    std::cerr << "Warning: invalid --max-memory value '" << v << "': " << e.what()
+                              << "\n";
                 }
             }
         } else if (arg == "--log-level") {
@@ -247,7 +249,8 @@ int main(int argc, char* argv[]) {
                 if (daemonSection.find("max_memory_gb") != daemonSection.end()) {
                     try {
                         config.maxMemoryGb = std::stoi(daemonSection.at("max_memory_gb"));
-                    } catch (...) {
+                    } catch (const std::exception& e) {
+                        spdlog::warn("Config: failed to parse daemon.max_memory_gb: {}", e.what());
                     }
                 }
 
@@ -285,7 +288,9 @@ int main(int argc, char* argv[]) {
                     try {
                         config.autoRepairBatchSize = static_cast<size_t>(
                             std::stoul(daemonSection.at("auto_repair_batch_size")));
-                    } catch (...) {
+                    } catch (const std::exception& e) {
+                        spdlog::warn("Config: failed to parse daemon.auto_repair_batch_size: {}",
+                                     e.what());
                     }
                 }
             } else {
@@ -306,13 +311,18 @@ int main(int argc, char* argv[]) {
                     try {
                         config.graphPrune.keepLatestPerCanonical =
                             static_cast<size_t>(std::stoul(it->second));
-                    } catch (...) {
+                    } catch (const std::exception& e) {
+                        spdlog::warn("Config: failed to parse daemon.graph_prune.keep_latest: {}",
+                                     e.what());
                     }
                 }
                 if (auto it = pruneSection.find("interval_minutes"); it != pruneSection.end()) {
                     try {
                         config.graphPrune.interval = std::chrono::minutes{std::stol(it->second)};
-                    } catch (...) {
+                    } catch (const std::exception& e) {
+                        spdlog::warn(
+                            "Config: failed to parse daemon.graph_prune.interval_minutes: {}",
+                            e.what());
                     }
                 }
                 if (auto it = pruneSection.find("initial_delay_minutes");
@@ -320,7 +330,10 @@ int main(int argc, char* argv[]) {
                     try {
                         config.graphPrune.initialDelay =
                             std::chrono::minutes{std::stol(it->second)};
-                    } catch (...) {
+                    } catch (const std::exception& e) {
+                        spdlog::warn(
+                            "Config: failed to parse daemon.graph_prune.initial_delay_minutes: {}",
+                            e.what());
                     }
                 }
             }
@@ -346,7 +359,8 @@ int main(int argc, char* argv[]) {
                         return std::nullopt;
                     try {
                         return std::stoi(it->second);
-                    } catch (...) {
+                    } catch (const std::exception& e) {
+                        spdlog::warn("Config: failed to parse tuning.{} as int: {}", k, e.what());
                         return std::nullopt;
                     }
                 };
@@ -356,7 +370,9 @@ int main(int argc, char* argv[]) {
                         return std::nullopt;
                     try {
                         return static_cast<std::uint64_t>(std::stoull(it->second));
-                    } catch (...) {
+                    } catch (const std::exception& e) {
+                        spdlog::warn("Config: failed to parse tuning.{} as uint64: {}", k,
+                                     e.what());
                         return std::nullopt;
                     }
                 };
@@ -366,7 +382,9 @@ int main(int argc, char* argv[]) {
                         return std::nullopt;
                     try {
                         return std::stod(it->second);
-                    } catch (...) {
+                    } catch (const std::exception& e) {
+                        spdlog::warn("Config: failed to parse tuning.{} as double: {}", k,
+                                     e.what());
                         return std::nullopt;
                     }
                 };
@@ -459,7 +477,8 @@ int main(int argc, char* argv[]) {
                         tc.controlIntervalMs = static_cast<uint32_t>(*v);
                     if (auto v = as_int("hold_ms"))
                         tc.holdMs = static_cast<uint32_t>(*v);
-                } catch (...) {
+                } catch (const std::exception& e) {
+                    spdlog::warn("Config: error applying tuning config: {}", e.what());
                 }
             }
 
@@ -499,7 +518,9 @@ int main(int argc, char* argv[]) {
                     try {
                         config.modelPoolConfig.maxLoadedModels =
                             std::stoul(modelsSection.at("max_loaded_models"));
-                    } catch (...) {
+                    } catch (const std::exception& e) {
+                        spdlog::warn("Config: failed to parse daemon.models.max_loaded_models: {}",
+                                     e.what());
                     }
                 }
 
@@ -507,7 +528,9 @@ int main(int argc, char* argv[]) {
                     try {
                         config.modelPoolConfig.hotPoolSize =
                             std::stoul(modelsSection.at("hot_pool_size"));
-                    } catch (...) {
+                    } catch (const std::exception& e) {
+                        spdlog::warn("Config: failed to parse daemon.models.hot_pool_size: {}",
+                                     e.what());
                     }
                 }
 
@@ -573,7 +596,9 @@ int main(int argc, char* argv[]) {
                     try {
                         config.downloadPolicy.timeout =
                             std::chrono::milliseconds(std::stoll(dlSection.at("timeout_ms")));
-                    } catch (...) {
+                    } catch (const std::exception& e) {
+                        spdlog::warn("Config: failed to parse daemon.download.timeout_ms: {}",
+                                     e.what());
                     }
                 }
 
@@ -582,7 +607,9 @@ int main(int argc, char* argv[]) {
                     try {
                         config.downloadPolicy.maxFileBytes =
                             static_cast<std::uint64_t>(std::stoull(dlSection.at("max_file_bytes")));
-                    } catch (...) {
+                    } catch (const std::exception& e) {
+                        spdlog::warn("Config: failed to parse daemon.download.max_file_bytes: {}",
+                                     e.what());
                     }
                 }
 
@@ -591,7 +618,9 @@ int main(int argc, char* argv[]) {
                     try {
                         config.downloadPolicy.rateLimitRps =
                             static_cast<size_t>(std::stoul(dlSection.at("rate_limit_rps")));
-                    } catch (...) {
+                    } catch (const std::exception& e) {
+                        spdlog::warn("Config: failed to parse daemon.download.rate_limit_rps: {}",
+                                     e.what());
                     }
                 }
 
@@ -614,7 +643,9 @@ int main(int argc, char* argv[]) {
                     try {
                         config.modelPoolConfig.numThreads =
                             std::stoi(modelsSection.at("num_threads"));
-                    } catch (...) {
+                    } catch (const std::exception& e) {
+                        spdlog::warn("Config: failed to parse daemon.models.num_threads: {}",
+                                     e.what());
                     }
                 }
 
@@ -688,8 +719,8 @@ int main(int argc, char* argv[]) {
         config.logFile = expand_tilde(config.logFile);
         // dataDir may be normalized earlier; expand '~' here as a last pass.
         config.dataDir = expand_tilde(config.dataDir);
-    } catch (...) {
-        // best effort
+    } catch (const std::exception& e) {
+        spdlog::debug("Path normalization error (best-effort): {}", e.what());
     }
 
     // If dataDir not specified, allow environment to define it (YAMS_STORAGE or YAMS_DATA_DIR)
@@ -715,8 +746,9 @@ int main(int argc, char* argv[]) {
     // Create log directory if needed
     try {
         std::filesystem::create_directories(config.logFile.parent_path());
-    } catch (...) {
-        // Best effort
+    } catch (const std::exception& e) {
+        // Best effort - log may go to fallback location
+        std::cerr << "Warning: could not create log directory: " << e.what() << "\n";
     }
 
     // Configure logging (default to file to preserve logs after daemonizing)
@@ -733,8 +765,9 @@ int main(int argc, char* argv[]) {
         // Log rotation info
         spdlog::info("Log rotation enabled: {} (max {}MB x {} files)", config.logFile.string(),
                      max_size / (1024 * 1024), max_files);
-    } catch (...) {
-        // Fallback silently to default logger
+    } catch (const std::exception& e) {
+        // Fallback silently to default logger - can't log the error yet
+        std::cerr << "Warning: log file setup failed, using default logger: " << e.what() << "\n";
     }
 
     if (config.logLevel == "trace") {
@@ -770,8 +803,9 @@ int main(int argc, char* argv[]) {
                 spdlog::warn("Configuration migration to v2 is required. Run: yams config migrate");
             }
         }
-    } catch (...) {
+    } catch (const std::exception& e) {
         // Non-fatal: ignore config check errors in daemon startup
+        spdlog::debug("Config migration check failed (non-fatal): {}", e.what());
     }
 
     // Daemonize if not running in foreground

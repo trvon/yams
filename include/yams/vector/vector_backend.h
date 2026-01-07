@@ -128,6 +128,64 @@ public:
      */
     virtual Result<void> optimize() = 0;
 
+    // =========================================================================
+    // Entity Vector Operations (for symbols, functions, classes, etc.)
+    // =========================================================================
+
+    /**
+     * @brief Insert a single entity vector record
+     */
+    virtual Result<void> insertEntityVector(const EntityVectorRecord& record) = 0;
+
+    /**
+     * @brief Insert multiple entity vectors in a batch
+     */
+    virtual Result<void>
+    insertEntityVectorsBatch(const std::vector<EntityVectorRecord>& records) = 0;
+
+    /**
+     * @brief Delete entity vectors by node_key
+     */
+    virtual Result<void> deleteEntityVectorsByNode(const std::string& node_key) = 0;
+
+    /**
+     * @brief Delete all entity vectors for a document
+     */
+    virtual Result<void> deleteEntityVectorsByDocument(const std::string& document_hash) = 0;
+
+    /**
+     * @brief Search for similar entity vectors
+     */
+    virtual std::vector<EntityVectorRecord>
+    searchEntities(const std::vector<float>& query_embedding,
+                   const EntitySearchParams& params = {}) = 0;
+
+    /**
+     * @brief Get entity vectors by node_key
+     */
+    virtual std::vector<EntityVectorRecord> getEntityVectorsByNode(const std::string& node_key) = 0;
+
+    /**
+     * @brief Get entity vectors by document
+     */
+    virtual std::vector<EntityVectorRecord>
+    getEntityVectorsByDocument(const std::string& document_hash) = 0;
+
+    /**
+     * @brief Check if an entity has embeddings
+     */
+    virtual bool hasEntityEmbedding(const std::string& node_key) = 0;
+
+    /**
+     * @brief Get count of entity vectors
+     */
+    virtual size_t getEntityVectorCount() = 0;
+
+    /**
+     * @brief Mark entity embeddings as stale
+     */
+    virtual Result<void> markEntityAsStale(const std::string& node_key) = 0;
+
     /**
      * @brief Begin a transaction
      */

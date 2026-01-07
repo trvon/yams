@@ -4,11 +4,13 @@
 #include <algorithm>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/api/content_store.h>
 #include <yams/core/types.h>
 #include <yams/daemon/components/InternalEventBus.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/ingest/ingest_helpers.h>
@@ -30,30 +32,32 @@ EmbeddingService::~EmbeddingService() {
 }
 
 Result<void> EmbeddingService::initialize() {
+    // Use configurable channel capacity from TuneAdvisor
+    const std::size_t capacity = TuneAdvisor::embedChannelCapacity();
     embedChannel_ = InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
-        "embed_jobs", 2048);
+        "embed_jobs", capacity);
 
     if (!embedChannel_) {
         return Error{ErrorCode::InvalidOperation,
                      "Failed to create embedding channel on InternalBus"};
     }
 
-    spdlog::info("EmbeddingService: initialized");
+    spdlog::info("EmbeddingService: initialized with channel capacity {}", capacity);
     return Result<void>();
 }
 
 void EmbeddingService::start() {
     stop_.store(false);
     boost::asio::co_spawn(strand_, channelPoller(), boost::asio::detached);
-    spdlog::info("EmbeddingService: started channel poller");
+    spdlog::info("EmbeddingService: started parallel channel poller");
 }
 
 void EmbeddingService::shutdown() {
     if (stop_.exchange(true)) {
         return;
     }
-    spdlog::info("EmbeddingService: shutting down (processed={}, failed={})", processed_.load(),
-                 failed_.load());
+    spdlog::info("EmbeddingService: shutting down (processed={}, failed={}, inFlight={})",
+                 processed_.load(), failed_.load(), inFlight_.load());
 }
 
 void EmbeddingService::setProviders(
@@ -66,52 +70,58 @@ void EmbeddingService::setProviders(
 }
 
 std::size_t EmbeddingService::queuedJobs() const {
-    return 0;
+    return embedChannel_ ? embedChannel_->size_approx() : 0;
+}
+
+std::size_t EmbeddingService::inFlightJobs() const {
+    return inFlight_.load();
 }
 
 boost::asio::awaitable<void> EmbeddingService::channelPoller() {
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
-    // Track consecutive failures to implement backoff when deadlocked
-    std::size_t consecutiveDeadlocks = 0;
-    std::chrono::milliseconds cooldown(0);
+    auto idleDelay = std::chrono::milliseconds(1);
+    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(50);
+
+    spdlog::info("[EmbeddingService] Parallel poller started");
 
     while (!stop_.load()) {
-        // Apply cooldown if we've hit repeated deadlocks
-        if (cooldown.count() > 0) {
-            spdlog::debug("EmbeddingService: cooling down for {} ms after {} consecutive deadlocks",
-                          cooldown.count(), consecutiveDeadlocks);
-            timer.expires_after(cooldown);
-            co_await timer.async_wait(boost::asio::use_awaitable);
-            cooldown = std::chrono::milliseconds(0);
+        bool didWork = false;
+        InternalEventBus::EmbedJob job;
+
+        // Dynamic concurrency limit from TuneAdvisor (scaled by TuningManager)
+        const std::size_t maxConcurrent = TuneAdvisor::postEmbedConcurrent();
+
+        // Dispatch jobs up to concurrency limit
+        while (inFlight_.load() < maxConcurrent && embedChannel_ && embedChannel_->try_pop(job)) {
+            didWork = true;
+            inFlight_.fetch_add(1);
+            InternalEventBus::instance().incEmbedConsumed();
+
+            // Dispatch to work executor for parallel processing
+            boost::asio::post(coordinator_->getExecutor(), [this, job = std::move(job)]() mutable {
+                processEmbedJob(std::move(job));
+                inFlight_.fetch_sub(1);
+            });
         }
 
-        InternalEventBus::EmbedJob job;
-        if (embedChannel_ && embedChannel_->try_pop(job)) {
-            // Process job inline (not co_spawn) to ensure true serialization.
-            // This avoids executor thread pool concurrency issues.
-            auto result = co_await processEmbedJobWithStatus(job);
+        if (didWork) {
+            idleDelay = std::chrono::milliseconds(1);
+            continue; // Check for more work immediately
+        }
 
-            if (result.deadlockDetected) {
-                consecutiveDeadlocks++;
-                // Exponential backoff: 500ms, 1s, 2s, 4s, max 10s
-                cooldown = std::chrono::milliseconds(std::min<int64_t>(
-                    500 * (1 << std::min<std::size_t>(consecutiveDeadlocks, 4)), 10000));
-                spdlog::warn("EmbeddingService: deadlock detected, will cooldown for {} ms",
-                             cooldown.count());
-            } else {
-                consecutiveDeadlocks = 0;
-            }
-        } else {
-            timer.expires_after(std::chrono::milliseconds(100));
-            co_await timer.async_wait(boost::asio::use_awaitable);
+        // Idle - wait before polling again
+        timer.expires_after(idleDelay);
+        co_await timer.async_wait(boost::asio::use_awaitable);
+        if (idleDelay < kMaxIdleDelay) {
+            idleDelay *= 2;
         }
     }
+
+    spdlog::info("[EmbeddingService] Parallel poller exited");
 }
 
-boost::asio::awaitable<EmbeddingService::EmbedJobResult>
-EmbeddingService::processEmbedJobWithStatus(const InternalEventBus::EmbedJob& job) {
-    EmbedJobResult result;
+void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     std::shared_ptr<IModelProvider> provider;
     std::string modelName;
     std::shared_ptr<yams::vector::VectorDatabase> vdb;
@@ -133,7 +143,7 @@ EmbeddingService::processEmbedJobWithStatus(const InternalEventBus::EmbedJob& jo
                      job.hashes.size(), provider ? "available" : "null", modelName,
                      vdb ? "available" : "null");
         failed_.fetch_add(job.hashes.size());
-        co_return result;
+        return;
     }
 
     spdlog::debug("EmbeddingService: processing batch of {} documents with model '{}'",
@@ -204,14 +214,7 @@ EmbeddingService::processEmbedJobWithStatus(const InternalEventBus::EmbedJob& jo
                 const bool isBusy = msg.find("busy") != std::string::npos ||
                                     msg.find("locked") != std::string::npos;
 
-                // On Windows, MSVC can surface EDEADLK as "resource deadlock would occur".
-                // That may be wrapped as InternalError by higher layers (e.g., provider failures),
-                // so don't gate retries purely on ErrorCode::DatabaseError.
                 const bool retryable = (isDeadlock || isBusy);
-
-                if (isDeadlock) {
-                    result.deadlockDetected = true;
-                }
 
                 if (!retryable || attempt == maxAttempts) {
                     spdlog::warn("EmbeddingService: embed/insert failed for {} (attempt {}/{}): {}",
@@ -225,21 +228,11 @@ EmbeddingService::processEmbedJobWithStatus(const InternalEventBus::EmbedJob& jo
 
                 spdlog::warn("EmbeddingService: retrying {} after {} ms (attempt {}/{}): {}", hash,
                              backoff.count(), attempt, maxAttempts, msg);
-                boost::asio::steady_timer backoffTimer(co_await boost::asio::this_coro::executor);
-                backoffTimer.expires_after(backoff);
-                co_await backoffTimer.async_wait(boost::asio::use_awaitable);
+                std::this_thread::sleep_for(backoff);
                 backoff = std::min<std::chrono::milliseconds>(backoff * 2, std::chrono::seconds(2));
             }
         } catch (const std::exception& e) {
-            // std::async failures in model loading show as "resource deadlock would occur"
-            if (std::string(e.what()).find("deadlock") != std::string::npos ||
-                std::string(e.what()).find("resource deadlock") != std::string::npos) {
-                result.deadlockDetected = true;
-                spdlog::warn("EmbeddingService: deadlock exception processing {}: {}", hash,
-                             e.what());
-            } else {
-                spdlog::error("EmbeddingService: exception processing {}: {}", hash, e.what());
-            }
+            spdlog::error("EmbeddingService: exception processing {}: {}", hash, e.what());
             failed_.fetch_add(1);
             // Mark repair as failed on exception
             (void)meta_->updateDocumentRepairStatus(hash, metadata::RepairStatus::Failed);
@@ -250,7 +243,6 @@ EmbeddingService::processEmbedJobWithStatus(const InternalEventBus::EmbedJob& jo
 
     spdlog::debug("EmbeddingService: batch complete (succeeded={}, skipped={}, failed={})",
                   succeeded, skipped, job.hashes.size() - succeeded - skipped);
-    co_return result;
 }
 
 } // namespace daemon

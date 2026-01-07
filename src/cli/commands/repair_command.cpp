@@ -32,6 +32,7 @@
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
 #include <yams/vector/vector_index_manager.h>
+#include <yams/vector/vector_schema_migration.h>
 
 namespace yams::cli {
 

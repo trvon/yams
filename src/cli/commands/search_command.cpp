@@ -375,7 +375,6 @@ private:
                             return a.title < b.title;
                         return a.score > b.score;
                     });
-                    const auto& best = vec.front();
 
                     // File path in magenta
                     std::cout << ui::colorize(path, ui::Ansi::MAGENTA);

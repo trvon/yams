@@ -81,7 +81,7 @@ struct TunedParams {
         config.tagWeight = tagWeight;
         config.metadataWeight = metadataWeight;
         config.similarityThreshold = similarityThreshold;
-        // Note: RRF k is not in SearchEngineConfig - it's used in fusion
+        config.rrfK = static_cast<float>(rrfK);
     }
 
     /**

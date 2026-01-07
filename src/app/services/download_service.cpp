@@ -118,7 +118,7 @@ public:
                             }
                             auto questionMark = filename.find('?');
                             if (questionMark != std::string::npos) {
-                                filename = filename.substr(0, questionMark);
+                                filename.resize(questionMark);
                             }
                             if (filename.empty()) {
                                 filename = "downloaded_file";
@@ -282,7 +282,7 @@ public:
                     fname = fname.substr(lastSlash + 1);
                 auto q = fname.find('?');
                 if (q != std::string::npos)
-                    fname = fname.substr(0, q);
+                    fname.resize(q);
                 if (fname.empty())
                     fname = "downloaded_file";
                 response.indexName = std::move(fname);

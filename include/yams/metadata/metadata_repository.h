@@ -334,7 +334,8 @@ public:
 class MetadataRepository : public IMetadataRepository {
 public:
     explicit MetadataRepository(ConnectionPool& pool);
-    ~MetadataRepository() override = default;
+    ~MetadataRepository()
+        override; // Defined in cpp to allow unique_ptr<CorpusStats> with forward decl
 
     // Document operations
     Result<int64_t> insertDocument(const DocumentInfo& info) override;
@@ -589,6 +590,13 @@ private:
     static constexpr std::size_t kQueryCacheCapacity = 512;
     mutable std::shared_ptr<QueryCacheMap> queryCacheSnapshot_{std::make_shared<QueryCacheMap>()};
     mutable std::mutex queryCacheMutex_;
+
+    // CorpusStats cache (invalidated on document changes, TTL 30s base)
+    mutable std::unique_ptr<storage::CorpusStats> cachedCorpusStats_;
+    mutable std::chrono::steady_clock::time_point corpusStatsCachedAt_{};
+    mutable uint64_t corpusStatsDocCount_{0}; // docCount at cache time for change detection
+    mutable std::shared_mutex corpusStatsMutex_;
+    static constexpr std::chrono::seconds kCorpusStatsTtl{30}; // Base TTL
 
     // Approximate LRU hit recording (lock-free ring of path hashes)
     mutable std::unique_ptr<std::atomic<uint64_t>[]> hitRing_;

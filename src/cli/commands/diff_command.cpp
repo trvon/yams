@@ -205,7 +205,7 @@ private:
     };
 
     std::optional<SnapshotMetadata>
-    getSnapshotMetadata(std::shared_ptr<metadata::MetadataRepository> repo,
+    getSnapshotMetadata([[maybe_unused]] std::shared_ptr<metadata::MetadataRepository> repo,
                         const std::string& snapshotId) {
         // Query metadata repository for snapshot by opening the database directly
         try {

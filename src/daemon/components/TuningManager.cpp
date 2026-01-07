@@ -8,6 +8,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/use_future.hpp>
+#include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PoolManager.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
@@ -94,7 +95,6 @@ void TuningManager::tick_once() {
     // Idle shrink and pressure grow (centralized mirror of ResourceTuner, using TuneAdvisor)
     auto& pm = PoolManager::instance();
 
-    const std::uint64_t maxMux = TuneAdvisor::maxMuxBytes();
     if (sm_) {
         auto ingestMetrics = sm_->getIngestMetricsSnapshot();
         if (TuneAdvisor::enableParallelIngest()) {
@@ -198,11 +198,38 @@ void TuningManager::tick_once() {
             uint32_t entityTarget = queuedItems > 50 ? 4 : 2;
             TuneAdvisor::setPostEntityConcurrent(entityTarget);
 
+            // PBI-05b: Embedding concurrency scaling
+            // Embeddings are compute-heavy (ONNX model inference) and often bottleneck bulk ingest.
+            // Scale aggressively when there's backlog to prevent queue overflow and job dropping.
+            // Check embed queue depth from InternalEventBus
+            auto& bus = InternalEventBus::instance();
+            const std::size_t embedQueued = bus.embedQueued();
+            const std::size_t embedDropped = bus.embedDropped();
+
+            uint32_t embedTarget = 2; // minimum baseline
+            if (embedQueued > 1000 || embedDropped > 100) {
+                // Heavy backlog or significant drops - scale to max
+                embedTarget = std::min<uint32_t>(hwThreads / 2, 16);
+            } else if (embedQueued > 500 || embedDropped > 10) {
+                embedTarget = std::min<uint32_t>(hwThreads / 3, 12);
+            } else if (embedQueued > 100) {
+                embedTarget = std::min<uint32_t>(hwThreads / 4, 8);
+            } else if (embedQueued > 10) {
+                embedTarget = 4;
+            } else if (embedQueued == 0 && queuedItems == 0) {
+                embedTarget = 2; // idle - minimum
+            }
+            embedTarget = std::max<uint32_t>(2, embedTarget); // floor
+            TuneAdvisor::setPostEmbedConcurrent(embedTarget);
+
 #if defined(TRACY_ENABLE)
             TracyPlot("post.queued", static_cast<double>(queuedItems));
             TracyPlot("post.inflight", static_cast<double>(currentInFlight));
             TracyPlot("post.extraction.limit", static_cast<double>(extractionTarget));
             TracyPlot("post.kg.limit", static_cast<double>(kgTarget));
+            TracyPlot("post.embed.limit", static_cast<double>(embedTarget));
+            TracyPlot("post.embed.queued", static_cast<double>(embedQueued));
+            TracyPlot("post.embed.dropped", static_cast<double>(embedDropped));
 #endif
         }
     } catch (...) {

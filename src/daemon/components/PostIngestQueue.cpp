@@ -504,9 +504,11 @@ void PostIngestQueue::processKnowledgeGraphStage(const std::string& hash, int64_
 
 void PostIngestQueue::processEmbeddingStage(const std::string& hash, const std::string& /*mime*/) {
     try {
+        // PBI-05b: Use TuneAdvisor for channel capacity
+        const std::size_t capacity = TuneAdvisor::embedChannelCapacity();
         auto embedChannel =
             InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
-                "embed_jobs", 2048);
+                "embed_jobs", capacity);
 
         if (!embedChannel) {
             spdlog::warn("[PostIngestQueue] Embed channel unavailable for {}", hash);
@@ -520,8 +522,14 @@ void PostIngestQueue::processEmbeddingStage(const std::string& hash, const std::
         job.skipExisting = true;
         job.modelName = "";
 
-        if (!embedChannel->try_push(std::move(job))) {
-            spdlog::warn("[PostIngestQueue] Embed channel full, dropping job for {}", hash);
+        // PBI-05b: Use blocking push with backpressure to prevent embed job drops.
+        // Wait up to 5 seconds for space - this creates backpressure on ingest when
+        // embedding can't keep up, which is better than silently dropping jobs.
+        constexpr auto kEmbedPushTimeout = std::chrono::seconds(5);
+        if (!embedChannel->push_wait(std::move(job), kEmbedPushTimeout)) {
+            spdlog::warn(
+                "[PostIngestQueue] Embed channel full after {}s backpressure, dropping job for {}",
+                kEmbedPushTimeout.count(), hash);
             InternalEventBus::instance().incEmbedDropped();
         } else {
             InternalEventBus::instance().incEmbedQueued();
@@ -538,9 +546,11 @@ void PostIngestQueue::processEmbeddingBatch(const std::vector<std::string>& hash
     }
 
     try {
+        // PBI-05b: Use TuneAdvisor for channel capacity
+        const std::size_t capacity = TuneAdvisor::embedChannelCapacity();
         auto embedChannel =
             InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
-                "embed_jobs", 2048);
+                "embed_jobs", capacity);
 
         if (!embedChannel) {
             for (std::size_t i = 0; i < hashes.size(); ++i) {
@@ -557,12 +567,17 @@ void PostIngestQueue::processEmbeddingBatch(const std::vector<std::string>& hash
         job.skipExisting = true;
         job.modelName = "";
 
-        if (!embedChannel->try_push(std::move(job))) {
+        // PBI-05b: Use blocking push with backpressure to prevent embed job drops.
+        // Wait up to 5 seconds for space - this creates backpressure on ingest when
+        // embedding can't keep up, which is better than silently dropping jobs.
+        constexpr auto kEmbedPushTimeout = std::chrono::seconds(5);
+        if (!embedChannel->push_wait(std::move(job), kEmbedPushTimeout)) {
             for (std::size_t i = 0; i < hashes.size(); ++i) {
                 InternalEventBus::instance().incEmbedDropped();
             }
-            spdlog::warn("[PostIngestQueue] Embed channel full, dropping job for {} hashes",
-                         hashes.size());
+            spdlog::warn("[PostIngestQueue] Embed channel full after {}s backpressure, dropping "
+                         "batch of {} hashes",
+                         kEmbedPushTimeout.count(), hashes.size());
         } else {
             for (std::size_t i = 0; i < hashes.size(); ++i) {
                 InternalEventBus::instance().incEmbedQueued();
@@ -711,7 +726,8 @@ void PostIngestQueue::dispatchToSymbolChannel(const std::string& hash, int64_t d
     }
 }
 
-void PostIngestQueue::processSymbolExtractionStage(const std::string& hash, int64_t docId,
+void PostIngestQueue::processSymbolExtractionStage(const std::string& hash,
+                                                   [[maybe_unused]] int64_t docId,
                                                    const std::string& filePath,
                                                    const std::string& language) {
     if (!graphComponent_) {
@@ -891,6 +907,12 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
         size_t totalEdgesInserted = 0;
         size_t totalAliasesInserted = 0;
         const std::string snapshotId = hash;
+
+        // NOTE: Entity embeddings (entity_vectors table) are intentionally NOT generated here.
+        // The KG nodes/edges/aliases provide precise structural navigation (call graphs,
+        // inheritance, containment). Embeddings would add noise for code navigation where
+        // exact matches and graph traversal are preferred. The entity_vectors schema exists
+        // for future semantic search use cases (e.g., "find similar functions").
 
         // Use streaming extraction with per-batch KG insertion
         auto result = provider->extractEntitiesStreaming(

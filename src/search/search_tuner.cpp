@@ -10,8 +10,8 @@ SearchTuner::SearchTuner(const storage::CorpusStats& stats) : stats_(stats) {
     state_ = computeState(stats, stateReason_);
     params_ = getTunedParams(state_);
 
-    spdlog::info("SearchTuner initialized: state={}, reason='{}'", tuningStateToString(state_),
-                 stateReason_);
+    spdlog::debug("SearchTuner initialized: state={}, reason='{}'", tuningStateToString(state_),
+                  stateReason_);
 }
 
 SearchEngineConfig SearchTuner::getConfig() const {

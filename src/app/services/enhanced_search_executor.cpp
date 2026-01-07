@@ -9,7 +9,7 @@ namespace yams::app::services {
 
 namespace fs = std::filesystem;
 
-static std::string trim(std::string s) {
+static std::string trim(const std::string& s) {
     auto l = s.find_first_not_of(" \t");
     if (l == std::string::npos)
         return "";

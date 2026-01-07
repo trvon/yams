@@ -133,8 +133,8 @@ public:
                 }
             }
             // tail (last line without trailing newline)
-            if (start <= content.size()) {
-                allLines.emplace_back(&content[start], content.size() - start);
+            if (start < content.size()) {
+                allLines.emplace_back(content.data() + start, content.size() - start);
                 allLineStartOffsets.push_back(start);
             }
         }

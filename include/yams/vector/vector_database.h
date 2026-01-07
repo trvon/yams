@@ -15,6 +15,16 @@ namespace yams::vector {
 enum class EmbeddingLevel { CHUNK, DOCUMENT };
 
 /**
+ * Type of entity embedding content
+ */
+enum class EntityEmbeddingType {
+    SIGNATURE,     // Function/method signature: qualified_name + params + return_type
+    DOCUMENTATION, // Docstrings, comments
+    ALIAS,         // Entity aliases for linking
+    CONTEXT        // Surrounding code context
+};
+
+/**
  * Configuration for the vector database
  */
 struct VectorDatabaseConfig {
@@ -78,6 +88,55 @@ struct VectorRecord {
     VectorRecord(VectorRecord&&) = default;
     VectorRecord& operator=(const VectorRecord&) = default;
     VectorRecord& operator=(VectorRecord&&) = default;
+};
+
+/**
+ * Represents an entity/symbol vector record in the database
+ * Used for semantic search over code symbols, functions, classes, etc.
+ */
+struct EntityVectorRecord {
+    int64_t rowid = 0;                  // Database row ID (0 = new record)
+    std::string node_key;               // KG node key (e.g., "function:foo@src/bar.cpp")
+    EntityEmbeddingType embedding_type; // What was embedded (signature, docs, etc.)
+    std::vector<float> embedding;       // Embedding vector
+    std::string content;                // Text that was embedded
+    std::string model_id;               // Model identifier
+    std::string model_version;          // Model version
+    std::chrono::system_clock::time_point embedded_at;
+    bool is_stale = false;        // Mark for re-embedding
+    float relevance_score = 0.0f; // For search results
+
+    // Optional metadata from the KG node
+    std::string node_type;      // "function", "class", "method", etc.
+    std::string qualified_name; // Fully qualified symbol name
+    std::string file_path;      // Source file path
+    std::string document_hash;  // Source document hash (for joining)
+
+    EntityVectorRecord() = default;
+
+    EntityVectorRecord(std::string node_key_param, EntityEmbeddingType type,
+                       std::vector<float> embedding_param, std::string content_param)
+        : node_key(std::move(node_key_param)), embedding_type(type),
+          embedding(std::move(embedding_param)), content(std::move(content_param)),
+          embedded_at(std::chrono::system_clock::now()) {}
+
+    // Copy and move
+    EntityVectorRecord(const EntityVectorRecord&) = default;
+    EntityVectorRecord(EntityVectorRecord&&) = default;
+    EntityVectorRecord& operator=(const EntityVectorRecord&) = default;
+    EntityVectorRecord& operator=(EntityVectorRecord&&) = default;
+};
+
+/**
+ * Search parameters for entity vector similarity queries
+ */
+struct EntitySearchParams {
+    size_t k = 10;
+    float similarity_threshold = 0.5f;
+    std::optional<EntityEmbeddingType> embedding_type; // Filter by type
+    std::optional<std::string> node_type;              // Filter by KG node type
+    std::optional<std::string> document_hash;          // Filter by source document
+    bool include_embeddings = false;
 };
 
 /**
@@ -177,6 +236,68 @@ public:
     Result<void> markAsDeleted(const std::string& chunk_id);
     Result<size_t> purgeDeleted(std::chrono::hours age_threshold);
 
+    // =========================================================================
+    // Entity Vector Operations (for symbols, functions, classes, etc.)
+    // =========================================================================
+
+    /**
+     * @brief Insert a single entity vector record
+     */
+    Result<void> insertEntityVector(const EntityVectorRecord& record);
+
+    /**
+     * @brief Insert multiple entity vectors in a batch
+     */
+    Result<void> insertEntityVectorsBatch(const std::vector<EntityVectorRecord>& records);
+
+    /**
+     * @brief Update an entity vector by node_key + embedding_type
+     */
+    Result<void> updateEntityVector(const std::string& node_key, EntityEmbeddingType type,
+                                    const EntityVectorRecord& record);
+
+    /**
+     * @brief Delete entity vectors by node_key
+     */
+    Result<void> deleteEntityVectorsByNode(const std::string& node_key);
+
+    /**
+     * @brief Delete all entity vectors for a document
+     */
+    Result<void> deleteEntityVectorsByDocument(const std::string& document_hash);
+
+    /**
+     * @brief Search for similar entity vectors
+     */
+    std::vector<EntityVectorRecord> searchEntities(const std::vector<float>& query_embedding,
+                                                   const EntitySearchParams& params = {}) const;
+
+    /**
+     * @brief Get entity vectors by node_key
+     */
+    std::vector<EntityVectorRecord> getEntityVectorsByNode(const std::string& node_key) const;
+
+    /**
+     * @brief Get entity vectors by document
+     */
+    std::vector<EntityVectorRecord>
+    getEntityVectorsByDocument(const std::string& document_hash) const;
+
+    /**
+     * @brief Check if an entity has embeddings
+     */
+    bool hasEntityEmbedding(const std::string& node_key) const;
+
+    /**
+     * @brief Get count of entity vectors
+     */
+    size_t getEntityVectorCount() const;
+
+    /**
+     * @brief Mark entity embeddings as stale (e.g., when source code changes)
+     */
+    Result<void> markEntityAsStale(const std::string& node_key);
+
     // Configuration and error handling
     const VectorDatabaseConfig& getConfig() const;
     std::string getLastError() const;
@@ -224,6 +345,40 @@ double similarityToDistance(double similarity);
  * Convert distance metric to similarity score
  */
 double distanceToSimilarity(double distance);
+
+/**
+ * Convert EntityEmbeddingType to string
+ */
+inline std::string entityEmbeddingTypeToString(EntityEmbeddingType type) {
+    switch (type) {
+        case EntityEmbeddingType::SIGNATURE:
+            return "signature";
+        case EntityEmbeddingType::DOCUMENTATION:
+            return "documentation";
+        case EntityEmbeddingType::ALIAS:
+            return "alias";
+        case EntityEmbeddingType::CONTEXT:
+            return "context";
+        default:
+            return "unknown";
+    }
+}
+
+/**
+ * Convert string to EntityEmbeddingType
+ */
+inline EntityEmbeddingType stringToEntityEmbeddingType(const std::string& str) {
+    if (str == "signature")
+        return EntityEmbeddingType::SIGNATURE;
+    if (str == "documentation")
+        return EntityEmbeddingType::DOCUMENTATION;
+    if (str == "alias")
+        return EntityEmbeddingType::ALIAS;
+    if (str == "context")
+        return EntityEmbeddingType::CONTEXT;
+    return EntityEmbeddingType::SIGNATURE; // default
+}
+
 } // namespace utils
 
 } // namespace yams::vector

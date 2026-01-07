@@ -141,7 +141,11 @@ TimeParser::parseUnixTimestamp(const std::string& timestampStr) {
             // Likely seconds
             return std::chrono::system_clock::from_time_t(timestamp);
         }
+    } catch (const std::exception& e) {
+        spdlog::debug("Failed to parse Unix timestamp '{}': {}", timestampStr, e.what());
+        return std::nullopt;
     } catch (...) {
+        spdlog::debug("Failed to parse Unix timestamp '{}': unknown error", timestampStr);
         return std::nullopt;
     }
 }

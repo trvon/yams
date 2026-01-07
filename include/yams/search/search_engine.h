@@ -89,6 +89,12 @@ struct SearchEngineConfig {
     std::chrono::milliseconds componentTimeout = // Timeout per component (0 = no timeout)
         std::chrono::milliseconds(0);
 
+    // RRF (Reciprocal Rank Fusion) parameter
+    // Lower k = more weight on top-ranked items
+    // Higher k = smoother ranking across positions
+    // Optimal values: 15-30 for small corpora, 45-60 for large corpora
+    float rrfK = 60.0f;
+
     // Benchmarking support
     bool enableProfiling = false; // Enable detailed profiling output
 
@@ -292,8 +298,10 @@ private:
     Result<std::vector<ComponentResult>> queryKnowledgeGraph(const std::string& query);
     Result<std::vector<ComponentResult>> queryVectorIndex(const std::vector<float>& embedding);
 
-    yams::metadata::ConnectionPool& pool_;
-    const SearchEngineConfig& config_;
+    // Note: These members are retained for future use when ComponentQueryExecutor
+    // is refactored to accept MetadataRepository instead of just ConnectionPool
+    [[maybe_unused]] yams::metadata::ConnectionPool& pool_;
+    [[maybe_unused]] const SearchEngineConfig& config_;
 };
 
 /**

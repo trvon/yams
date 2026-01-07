@@ -188,8 +188,6 @@ boost::asio::awaitable<decltype(std::declval<Fn>()())>
 retryMetadataOp(Fn&& fn, std::size_t maxAttempts = 4,
                 std::chrono::milliseconds initialDelay = std::chrono::milliseconds(25),
                 MetadataTelemetry* telemetry = nullptr) {
-    using ResultT = decltype(std::declval<Fn>()());
-
     if (telemetry) {
         telemetry->operations.fetch_add(1, std::memory_order_relaxed);
     }
@@ -1187,7 +1185,7 @@ private:
     Result<SearchResponse> hybridSearch(const SearchRequest& req,
                                         const yams::search::ExtractScope& scope,
                                         MetadataTelemetry* telemetry,
-                                        const std::string& pathPattern) {
+                                        [[maybe_unused]] const std::string& pathPattern) {
         // Build SearchParams for the new SearchEngine API
         yams::search::SearchParams params;
         params.limit = req.limit;
@@ -1358,7 +1356,7 @@ private:
     }
 
     Result<SearchResponse> metadataSearch(const SearchRequest& req,
-                                          MetadataTelemetry* telemetry = nullptr) {
+                                          [[maybe_unused]] MetadataTelemetry* telemetry = nullptr) {
         YAMS_ZONE_SCOPED_N("search_service::keyword_pipeline");
         // Prepare query - escape regex if literalText is requested
         std::string processedQuery = req.query;

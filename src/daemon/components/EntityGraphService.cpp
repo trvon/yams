@@ -4,14 +4,17 @@
 #include <spdlog/spdlog.h>
 #include <chrono>
 #include <filesystem>
+#include <sstream>
 #include <unordered_map>
 #include <boost/asio.hpp>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
+#include <yams/daemon/resource/model_provider.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/plugins/symbol_extractor_v1.h>
+#include <yams/vector/vector_database.h>
 
 namespace yams::daemon {
 
@@ -215,6 +218,14 @@ bool EntityGraphService::populateKnowledgeGraph(
             spdlog::warn("EntityGraphService: failed to create doc entities: {}",
                          docEntitiesRes.error().message);
             // Non-fatal
+        }
+
+        // Generate entity embeddings for semantic symbol search (non-blocking)
+        auto embeddingsRes = generateEntityEmbeddings(job, result, symbolNodes);
+        if (!embeddingsRes) {
+            spdlog::debug("EntityGraphService: entity embeddings skipped or failed: {}",
+                          embeddingsRes.error().message);
+            // Non-fatal - KG is still populated
         }
 
         spdlog::info("EntityGraphService: populated KG with {} symbols from {}",
@@ -714,6 +725,182 @@ yams::Result<void> EntityGraphService::createDocEntities(
         }
     }
     return yams::Result<void>();
+}
+
+std::string EntityGraphService::buildSymbolText(const yams_symbol_extraction_result_v1* result,
+                                                size_t index) {
+    if (!result || index >= result->symbol_count) {
+        return "";
+    }
+
+    const auto& sym = result->symbols[index];
+    std::ostringstream oss;
+
+    // Kind (function, class, method, etc.)
+    if (sym.kind) {
+        oss << sym.kind << " ";
+    }
+
+    // Qualified name or simple name
+    if (sym.qualified_name) {
+        oss << sym.qualified_name;
+    } else if (sym.name) {
+        oss << sym.name;
+    }
+
+    // Parameters (for functions/methods)
+    if (sym.parameters && sym.parameter_count > 0) {
+        oss << "(";
+        for (size_t p = 0; p < sym.parameter_count; ++p) {
+            if (p > 0)
+                oss << ", ";
+            if (sym.parameters[p])
+                oss << sym.parameters[p];
+        }
+        oss << ")";
+    }
+
+    // Return type
+    if (sym.return_type) {
+        oss << " -> " << sym.return_type;
+    }
+
+    // Documentation (truncated to avoid excessive embedding text)
+    if (sym.documentation) {
+        std::string doc(sym.documentation);
+        constexpr size_t kMaxDocLength = 500;
+        if (doc.size() > kMaxDocLength) {
+            doc = doc.substr(0, kMaxDocLength) + "...";
+        }
+        oss << " // " << doc;
+    }
+
+    return oss.str();
+}
+
+yams::Result<void>
+EntityGraphService::generateEntityEmbeddings(const Job& job,
+                                             const yams_symbol_extraction_result_v1* result,
+                                             const SymbolNodeBatch& symbolNodes) {
+    if (!services_) {
+        return Result<void>(); // No services, skip silently
+    }
+
+    auto vdb = services_->getVectorDatabase();
+    auto provider = services_->getModelProvider();
+
+    if (!vdb) {
+        spdlog::debug("EntityGraphService: no vector database, skipping entity embeddings");
+        return Result<void>();
+    }
+
+    if (!provider || !provider->isAvailable()) {
+        spdlog::debug(
+            "EntityGraphService: no model provider available, skipping entity embeddings");
+        return Result<void>();
+    }
+
+    if (!result || result->symbol_count == 0) {
+        return Result<void>();
+    }
+
+    // Get the embedding model name
+    std::string modelName = services_->getEmbeddingModelName();
+    if (modelName.empty()) {
+        auto loadedModels = provider->getLoadedModels();
+        if (loadedModels.empty()) {
+            spdlog::debug(
+                "EntityGraphService: no embedding model loaded, skipping entity embeddings");
+            return Result<void>();
+        }
+        modelName = loadedModels[0];
+    }
+
+    // Build text representations for each symbol
+    std::vector<std::string> texts;
+    texts.reserve(result->symbol_count);
+    for (size_t i = 0; i < result->symbol_count; ++i) {
+        texts.push_back(buildSymbolText(result, i));
+    }
+
+    // Filter out empty texts and track indices
+    std::vector<std::string> nonEmptyTexts;
+    std::vector<size_t> originalIndices;
+    nonEmptyTexts.reserve(texts.size());
+    originalIndices.reserve(texts.size());
+    for (size_t i = 0; i < texts.size(); ++i) {
+        if (!texts[i].empty()) {
+            nonEmptyTexts.push_back(texts[i]);
+            originalIndices.push_back(i);
+        }
+    }
+
+    if (nonEmptyTexts.empty()) {
+        return Result<void>();
+    }
+
+    // Generate embeddings in batch
+    auto embedResult = provider->generateBatchEmbeddingsFor(modelName, nonEmptyTexts);
+    if (!embedResult) {
+        spdlog::warn("EntityGraphService: failed to generate entity embeddings: {}",
+                     embedResult.error().message);
+        return embedResult.error();
+    }
+
+    const auto& embeddings = embedResult.value();
+    if (embeddings.size() != nonEmptyTexts.size()) {
+        spdlog::warn("EntityGraphService: embedding count mismatch ({} vs {})", embeddings.size(),
+                     nonEmptyTexts.size());
+        return Error{ErrorCode::InternalError, "embedding count mismatch"};
+    }
+
+    // Get model info for versioning
+    std::string modelVersion;
+    auto modelInfo = provider->getModelInfo(modelName);
+    if (modelInfo) {
+        modelVersion = std::to_string(modelInfo.value().embeddingDim); // Use dim as pseudo-version
+    }
+
+    // Create EntityVectorRecords
+    std::vector<vector::EntityVectorRecord> records;
+    records.reserve(embeddings.size());
+
+    for (size_t i = 0; i < embeddings.size(); ++i) {
+        size_t origIdx = originalIndices[i];
+        const auto& sym = result->symbols[origIdx];
+
+        vector::EntityVectorRecord rec;
+        // Use the symbol key from SymbolNodeBatch (qualified name)
+        rec.node_key = symbolNodes.symbolKeys[origIdx];
+        rec.embedding_type = vector::EntityEmbeddingType::SIGNATURE;
+        rec.embedding = embeddings[i];
+        rec.content = nonEmptyTexts[i];
+        rec.model_id = modelName;
+        rec.model_version = modelVersion;
+        rec.embedded_at = std::chrono::system_clock::now();
+        rec.is_stale = false;
+
+        // Metadata from symbol
+        rec.node_type = sym.kind ? std::string(sym.kind) : "symbol";
+        rec.qualified_name = sym.qualified_name ? std::string(sym.qualified_name)
+                                                : (sym.name ? std::string(sym.name) : "");
+        rec.file_path = job.filePath;
+        rec.document_hash = job.documentHash;
+
+        records.push_back(std::move(rec));
+    }
+
+    // Insert into vector database
+    auto insertResult = vdb->insertEntityVectorsBatch(records);
+    if (!insertResult) {
+        spdlog::warn("EntityGraphService: failed to insert entity vectors: {}",
+                     insertResult.error().message);
+        return insertResult.error();
+    }
+
+    spdlog::info("EntityGraphService: generated {} entity embeddings for {}", records.size(),
+                 job.filePath);
+    return Result<void>();
 }
 
 } // namespace yams::daemon

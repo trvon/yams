@@ -426,7 +426,8 @@ public:
                     sanitizeStringList(includePatterns_, "Include pattern", kMaxPatternLength);
                 if (!sanitizedIncludeRes)
                     return sanitizedIncludeRes.error();
-                const auto& sanitizedInclude = sanitizedIncludeRes.value();
+                // Include patterns validated but not directly used here; daemon applies them
+                (void)sanitizedIncludeRes.value();
 
                 auto sanitizedExcludeRes =
                     sanitizeStringList(excludePatterns_, "Exclude pattern", kMaxPatternLength);

@@ -1,5 +1,6 @@
 #include <yams/cli/graph_helpers.h>
 
+#include <spdlog/spdlog.h>
 #include <filesystem>
 #include <unordered_set>
 
@@ -23,8 +24,9 @@ std::vector<std::string> build_graph_file_node_candidates(const std::string& nam
             auto absolute = std::filesystem::absolute(input).lexically_normal();
             push_unique(absolute.string());
         }
-    } catch (...) {
-        // Best-effort normalization only.
+    } catch (const std::exception& e) {
+        // Best-effort normalization only - path operations can fail on invalid inputs
+        spdlog::trace("Path normalization failed for '{}': {}", name, e.what());
     }
 
     return candidates;

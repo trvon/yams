@@ -291,22 +291,22 @@ struct CorpusGenerator {
 // ============================================================================
 
 struct QueueSnapshot {
-    int64_t timestamp_ms;
+    int64_t timestamp_ms = 0;
     // Queue depths (actual items in queues)
-    uint64_t store_document_tasks;
-    uint64_t embed_jobs;
-    uint64_t fts5_jobs;
-    uint64_t post_ingest;
+    uint64_t store_document_tasks = 0;
+    uint64_t embed_jobs = 0;
+    uint64_t fts5_jobs = 0;
+    uint64_t post_ingest = 0;
     // Cumulative counters (for stage completion detection)
-    uint64_t embed_queued;
-    uint64_t embed_consumed;
-    uint64_t embed_dropped;
-    uint64_t fts5_queued;
-    uint64_t fts5_consumed;
-    uint64_t fts5_dropped;
-    uint64_t post_queued;
-    uint64_t post_consumed;
-    uint64_t post_dropped;
+    uint64_t embed_queued = 0;
+    uint64_t embed_consumed = 0;
+    uint64_t embed_dropped = 0;
+    uint64_t fts5_queued = 0;
+    uint64_t fts5_consumed = 0;
+    uint64_t fts5_dropped = 0;
+    uint64_t post_queued = 0;
+    uint64_t post_consumed = 0;
+    uint64_t post_dropped = 0;
 
     json toJson() const {
         return json{

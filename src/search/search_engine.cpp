@@ -59,7 +59,8 @@ auto postWork(Work work, const std::optional<boost::asio::any_io_executor>& exec
     if (executor) {
         boost::asio::post(*executor, [task = std::move(task)]() mutable { task(); });
     } else {
-        std::async(std::launch::async, [task = std::move(task)]() mutable { task(); });
+        // Fire-and-forget async task - intentionally discard the future
+        (void)std::async(std::launch::async, [task = std::move(task)]() mutable { task(); });
     }
     return future;
 }
@@ -86,9 +87,9 @@ ComponentQueryExecutor::ComponentQueryExecutor(yams::metadata::ConnectionPool& p
                                                const SearchEngineConfig& config)
     : pool_(pool), config_(config) {}
 
-Result<std::vector<ComponentResult>>
-ComponentQueryExecutor::executeAll(const std::string& query,
-                                   const std::optional<std::vector<float>>& queryEmbedding) {
+Result<std::vector<ComponentResult>> ComponentQueryExecutor::executeAll(
+    [[maybe_unused]] const std::string& query,
+    [[maybe_unused]] const std::optional<std::vector<float>>& queryEmbedding) {
     // Note: This class needs access to MetadataRepository, not just ConnectionPool
     // This will be passed from SearchEngine::Impl which has the repo reference
     return Error{ErrorCode::NotImplemented,
@@ -96,22 +97,22 @@ ComponentQueryExecutor::executeAll(const std::string& query,
 }
 
 Result<std::vector<ComponentResult>>
-ComponentQueryExecutor::queryFullText(const std::string& query) {
+ComponentQueryExecutor::queryFullText([[maybe_unused]] const std::string& query) {
     return Error{ErrorCode::NotImplemented, "Query methods moved to SearchEngine::Impl"};
 }
 
 Result<std::vector<ComponentResult>>
-ComponentQueryExecutor::queryPathTree(const std::string& query) {
+ComponentQueryExecutor::queryPathTree([[maybe_unused]] const std::string& query) {
     return Error{ErrorCode::NotImplemented, "Query methods moved to SearchEngine::Impl"};
 }
 
 Result<std::vector<ComponentResult>>
-ComponentQueryExecutor::queryKnowledgeGraph(const std::string& query) {
+ComponentQueryExecutor::queryKnowledgeGraph([[maybe_unused]] const std::string& query) {
     return Error{ErrorCode::NotImplemented, "Query methods moved to SearchEngine::Impl"};
 }
 
 Result<std::vector<ComponentResult>>
-ComponentQueryExecutor::queryVectorIndex(const std::vector<float>& embedding) {
+ComponentQueryExecutor::queryVectorIndex([[maybe_unused]] const std::vector<float>& embedding) {
     return Error{ErrorCode::NotImplemented, "Query methods moved to SearchEngine::Impl"};
 }
 
@@ -191,7 +192,7 @@ ResultFusion::fuseReciprocalRank(const std::vector<ComponentResult>& results) {
     std::vector<SearchResult> fusedResults;
     fusedResults.reserve(std::min(grouped.size(), config_.maxResults));
 
-    const float k = 60.0f; // RRF constant
+    const float k = config_.rrfK; // Use tuned RRF k value
 
     for (const auto& [docHash, components] : grouped) {
         SearchResult result;
@@ -272,7 +273,7 @@ ResultFusion::fuseWeightedReciprocal(const std::vector<ComponentResult>& results
     std::vector<SearchResult> fusedResults;
     fusedResults.reserve(std::min(grouped.size(), config_.maxResults));
 
-    const float k = 60.0f;
+    const float k = config_.rrfK; // Use tuned RRF k value
 
     for (const auto& [docHash, components] : grouped) {
         SearchResult result;

@@ -194,7 +194,9 @@ StreamingRequestProcessor::process_streaming_impl(Request request) {
         }
 
         // Not a streaming-recognized request: delegate immediately.
-        co_return co_await delegate_->process(req_copy);
+        // Note: request is still valid here because all branches that move it
+        // also co_return immediately, so we only reach here if it wasn't moved.
+        co_return co_await delegate_->process(request);
     } catch (...) {
         // On unexpected failure; choose streaming path so caller can still progress.
         if (!pending_request_.has_value()) {

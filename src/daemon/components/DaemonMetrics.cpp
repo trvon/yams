@@ -1162,28 +1162,61 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
     }
 
     // Search tuning state (from SearchTuner FSM - epic yams-7ez4)
+    // Cached with TTL and docCount change detection to avoid re-instantiation (yams-fbtq)
     try {
         if (services_) {
             auto metaRepo = services_->getMetadataRepo();
             if (metaRepo) {
                 auto statsResult = metaRepo->getCorpusStats();
                 if (statsResult) {
-                    yams::search::SearchTuner tuner(statsResult.value());
-                    out.searchTuningState = yams::search::tuningStateToString(tuner.currentState());
-                    out.searchTuningReason = tuner.stateReason();
-                    // Populate params map
-                    const auto& p = tuner.getParams();
-                    out.searchTuningParams["rrfK"] = static_cast<double>(p.rrfK);
-                    out.searchTuningParams["textWeight"] = static_cast<double>(p.textWeight);
-                    out.searchTuningParams["vectorWeight"] = static_cast<double>(p.vectorWeight);
-                    out.searchTuningParams["pathTreeWeight"] =
-                        static_cast<double>(p.pathTreeWeight);
-                    out.searchTuningParams["kgWeight"] = static_cast<double>(p.kgWeight);
-                    out.searchTuningParams["tagWeight"] = static_cast<double>(p.tagWeight);
-                    out.searchTuningParams["metadataWeight"] =
-                        static_cast<double>(p.metadataWeight);
-                    out.searchTuningParams["similarityThreshold"] =
-                        static_cast<double>(p.similarityThreshold);
+                    const auto& stats = statsResult.value();
+                    auto now = std::chrono::steady_clock::now();
+
+                    // Check if refresh needed under shared lock
+                    bool needsRefresh = false;
+                    {
+                        std::shared_lock tunerLock(tunerCacheMutex_);
+                        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           now - lastTunerStateAt_)
+                                           .count();
+                        // Recompute if: TTL expired OR corpus docCount changed
+                        needsRefresh = (elapsed > tunerStateTtlMs_) ||
+                                       (stats.docCount != cachedTunerDocCount_);
+                    }
+
+                    if (needsRefresh) {
+                        // Compute new tuner state outside lock
+                        yams::search::SearchTuner tuner(stats);
+                        auto newState = yams::search::tuningStateToString(tuner.currentState());
+                        auto newReason = tuner.stateReason();
+                        const auto& p = tuner.getParams();
+                        std::map<std::string, double> newParams;
+                        newParams["rrfK"] = static_cast<double>(p.rrfK);
+                        newParams["textWeight"] = static_cast<double>(p.textWeight);
+                        newParams["vectorWeight"] = static_cast<double>(p.vectorWeight);
+                        newParams["pathTreeWeight"] = static_cast<double>(p.pathTreeWeight);
+                        newParams["kgWeight"] = static_cast<double>(p.kgWeight);
+                        newParams["tagWeight"] = static_cast<double>(p.tagWeight);
+                        newParams["metadataWeight"] = static_cast<double>(p.metadataWeight);
+                        newParams["similarityThreshold"] =
+                            static_cast<double>(p.similarityThreshold);
+
+                        // Update cache under exclusive lock
+                        std::unique_lock tunerLock(tunerCacheMutex_);
+                        cachedTuningState_ = std::move(newState);
+                        cachedTuningReason_ = std::move(newReason);
+                        cachedTuningParams_ = std::move(newParams);
+                        cachedTunerDocCount_ = stats.docCount;
+                        lastTunerStateAt_ = now;
+                    }
+
+                    // Use cached values under shared lock
+                    {
+                        std::shared_lock tunerLock(tunerCacheMutex_);
+                        out.searchTuningState = cachedTuningState_;
+                        out.searchTuningReason = cachedTuningReason_;
+                        out.searchTuningParams = cachedTuningParams_;
+                    }
                 }
             }
         }

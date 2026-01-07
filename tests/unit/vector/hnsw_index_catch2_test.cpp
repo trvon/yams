@@ -317,7 +317,7 @@ TEST_CASE_METHOD(HNSWIndexFixture, "HNSWIndex fp16 accuracy preserved",
     // Query with vec1 - vec2 should be in top results
     VectorSearchParams params;
     params.k = 3;
-    params.similarity_threshold = 0.0f; // Include all results regardless of similarity
+    params.similarity_threshold = -2.0f; // Include all results including negative similarities
     auto results = db.search(vec1, params);
     REQUIRE(results.size() == 3);
 
@@ -397,7 +397,7 @@ TEST_CASE_METHOD(HNSWIndexFixture, "HNSWIndex search with different params",
     // Search with k=3
     VectorSearchParams params;
     params.k = 3;
-    params.similarity_threshold = 0.0f; // Include all results regardless of similarity
+    params.similarity_threshold = -2.0f; // Include all results including negative similarities
     auto results = db.search(vec1, params);
     REQUIRE(results.size() == 3);
 

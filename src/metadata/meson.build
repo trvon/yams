@@ -32,6 +32,6 @@ pkg.generate(yams_metadata,
 yams_metadata_dep = declare_dependency(
   link_with: yams_metadata,
   include_directories: include_directories('../../include'),
-  dependencies: [sqlite_dep],
+  dependencies: [sqlite_dep, json_dep],
 )
 meson.override_dependency('yams_metadata', yams_metadata_dep)

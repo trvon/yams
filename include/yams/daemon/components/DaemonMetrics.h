@@ -235,7 +235,7 @@ private:
     const DaemonLifecycleFsm* lifecycle_;
     const StateComponent* state_;
     const ServiceManager* services_;
-    WorkCoordinator* coordinator_;
+    [[maybe_unused]] WorkCoordinator* coordinator_; // Retained for future metrics expansion
     const SocketServer* socketServer_;
     boost::asio::strand<boost::asio::io_context::executor_type> strand_;
 
@@ -273,6 +273,15 @@ private:
     mutable std::uint64_t cachedDocumentsExtracted_{0};
     mutable std::uint64_t cachedVectorRows_{0};
     uint32_t docCountsTtlMs_{5000}; // 5s TTL for document counts
+
+    // TTL cache for SearchTuner state (avoid re-instantiation on every poll - yams-fbtq)
+    mutable std::shared_mutex tunerCacheMutex_; // protects tuner cache state
+    mutable std::chrono::steady_clock::time_point lastTunerStateAt_{};
+    mutable std::string cachedTuningState_;
+    mutable std::string cachedTuningReason_;
+    mutable std::map<std::string, double> cachedTuningParams_;
+    mutable std::uint64_t cachedTunerDocCount_{0}; // docCount when tuner was cached
+    uint32_t tunerStateTtlMs_{30000}; // 30s TTL for tuner state (matches CorpusStats cache)
 };
 
 } // namespace yams::daemon

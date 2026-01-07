@@ -1,12 +1,14 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
@@ -73,6 +75,43 @@ public:
         auto h = head_.load(std::memory_order_acquire);
         auto t = tail_.load(std::memory_order_acquire);
         return (h >= t) ? (h - t) : (cap_ - t + h);
+    }
+
+    // Blocking push with exponential backoff. Returns true if pushed, false if timeout.
+    // This provides backpressure for slow consumers (e.g., embedding service).
+    // PBI-05b: Used by PostIngestQueue to prevent embed job drops during bulk ingest.
+    template <typename Rep, typename Period>
+    bool push_wait(T&& v, std::chrono::duration<Rep, Period> timeout) noexcept {
+        auto deadline = std::chrono::steady_clock::now() + timeout;
+        auto delay = std::chrono::microseconds(100); // Start with 100us
+        constexpr auto maxDelay = std::chrono::milliseconds(10);
+
+        while (!try_push(std::move(v))) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return false; // Timeout
+            }
+            std::this_thread::sleep_for(delay);
+            delay = std::min(delay * 2,
+                             std::chrono::duration_cast<std::chrono::microseconds>(maxDelay));
+        }
+        return true;
+    }
+
+    template <typename Rep, typename Period>
+    bool push_wait(const T& v, std::chrono::duration<Rep, Period> timeout) noexcept {
+        auto deadline = std::chrono::steady_clock::now() + timeout;
+        auto delay = std::chrono::microseconds(100);
+        constexpr auto maxDelay = std::chrono::milliseconds(10);
+
+        while (!try_push(v)) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return false;
+            }
+            std::this_thread::sleep_for(delay);
+            delay = std::min(delay * 2,
+                             std::chrono::duration_cast<std::chrono::microseconds>(maxDelay));
+        }
+        return true;
     }
 #else
     // Original lock-free SPSC variant (unsafe for multiple producers/consumers).

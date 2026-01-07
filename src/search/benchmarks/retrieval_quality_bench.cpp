@@ -171,7 +171,7 @@ struct TestQuery {
     std::set<std::string> relevantFiles;
     std::set<std::string> relevantDocIds;
     std::map<std::string, int> relevanceGrades;
-    bool useDocIds;
+    bool useDocIds = false;
 };
 
 struct CorpusGenerator {
@@ -634,6 +634,23 @@ struct BenchFixture {
         spdlog::info("Setting up RAG benchmark: {} dataset, {} docs, {} queries, k={}",
                      useBEIR ? "SciFact BEIR" : "synthetic", corpusSize, numQueries, topK);
 
+        // PBI-05b: Create summary log file for important embedding metrics
+        fs::path summaryLogPath = fs::temp_directory_path() / "yams_bench_summary.log";
+        std::ofstream summaryLog(summaryLogPath, std::ios::trunc);
+        if (summaryLog) {
+            auto now = std::chrono::system_clock::now();
+            auto time_t_now = std::chrono::system_clock::to_time_t(now);
+            summaryLog << "=== YAMS Retrieval Quality Benchmark ===" << std::endl;
+            summaryLog << "Started: " << std::ctime(&time_t_now);
+            summaryLog << "Dataset: " << (useBEIR ? "SciFact BEIR" : "synthetic") << std::endl;
+            summaryLog << "Corpus size: " << corpusSize << std::endl;
+            summaryLog << "Num queries: " << numQueries << std::endl;
+            summaryLog << "Top K: " << topK << std::endl;
+            summaryLog << std::endl;
+            summaryLog.flush();
+        }
+        spdlog::info("Summary log: {}", summaryLogPath.string());
+
         const char* disableVectors = std::getenv("YAMS_DISABLE_VECTORS");
         bool vectorsDisabled = disableVectors && std::string(disableVectors) == "1";
 
@@ -826,11 +843,23 @@ struct BenchFixture {
         bool vectorsEnabled = !vectorsDisabled;
 
         if (vectorsEnabled) {
-            spdlog::info("Waiting for embeddings to be generated...");
+            spdlog::info("Waiting for embeddings to be generated (target: {} docs)...", corpusSize);
+
+            // Log to summary file
+            if (summaryLog) {
+                summaryLog << "=== Embedding Generation ===" << std::endl;
+                summaryLog << "Target: " << corpusSize << " documents" << std::endl;
+            }
+
             deadline =
-                std::chrono::steady_clock::now() + 900s; // 15 minute timeout for large corpus
+                std::chrono::steady_clock::now() + 1800s; // 30 minute timeout for large corpus
             uint64_t lastVectorCount = 0;
             int stableCount = 0;
+            uint64_t embedDropped = 0;
+            auto embedStartTime = std::chrono::steady_clock::now();
+
+            // Phase 1: Wait for embedding queue to drain and vectors to reach target
+            // We need vectors >= corpusSize for complete coverage
             while (std::chrono::steady_clock::now() < deadline) {
                 auto statusResult = yams::cli::run_sync(client->status(), 5s);
                 if (statusResult) {
@@ -840,15 +869,92 @@ struct BenchFixture {
                     if (it != statusResult.value().requestCounts.end()) {
                         vectorCount = it->second;
                     }
+
+                    // Check embed queue status
+                    uint64_t embedQueued = 0;
+                    uint64_t embedInFlight = 0;
+                    auto itQ = statusResult.value().requestCounts.find("bus_embed_queued");
+                    if (itQ != statusResult.value().requestCounts.end()) {
+                        embedQueued = itQ->second;
+                    }
+                    auto itD = statusResult.value().requestCounts.find("bus_embed_dropped");
+                    if (itD != statusResult.value().requestCounts.end()) {
+                        embedDropped = itD->second;
+                    }
+
                     if (vectorCount != lastVectorCount) {
-                        spdlog::info("Vector count: {} / {} docs", vectorCount, corpusSize);
+                        double coverage = corpusSize > 0 ? (vectorCount * 100.0 / corpusSize) : 0;
+                        spdlog::info("Vectors: {} / {} ({:.1f}%) | queue={} dropped={}",
+                                     vectorCount, corpusSize, coverage, embedQueued, embedDropped);
+
+                        // Log progress to summary file
+                        if (summaryLog) {
+                            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                               std::chrono::steady_clock::now() - embedStartTime)
+                                               .count();
+                            summaryLog << "[" << elapsed << "ms] Vectors: " << vectorCount << " / "
+                                       << corpusSize << " (" << std::fixed << std::setprecision(1)
+                                       << coverage << "%) | queue=" << embedQueued
+                                       << " dropped=" << embedDropped << std::endl;
+                            summaryLog.flush();
+                        }
+
                         lastVectorCount = vectorCount;
                         stableCount = 0;
                     } else {
                         stableCount++;
-                        // If vector count hasn't changed for 10 checks (5s), assume done
-                        if (stableCount >= 10 && vectorCount > 0) {
-                            spdlog::info("Embedding generation complete: {} vectors", vectorCount);
+                    }
+
+                    // Success condition: vectors >= corpusSize (100% coverage)
+                    if (vectorCount >= corpusSize) {
+                        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           std::chrono::steady_clock::now() - embedStartTime)
+                                           .count();
+                        spdlog::info("Full embedding coverage achieved: {} vectors for {} docs",
+                                     vectorCount, corpusSize);
+                        if (summaryLog) {
+                            summaryLog << "\n*** SUCCESS: Full coverage in " << elapsed << "ms ***"
+                                       << std::endl;
+                            summaryLog << "Final vectors: " << vectorCount << std::endl;
+                            summaryLog << "Total dropped: " << embedDropped << std::endl;
+                            summaryLog.flush();
+                        }
+                        break;
+                    }
+
+                    // If stable and we have embeddings but not full coverage, check for dropped
+                    if (stableCount >= 20 && vectorCount > 0) { // 10s of stability
+                        double coverage = corpusSize > 0 ? (vectorCount * 100.0 / corpusSize) : 0;
+                        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           std::chrono::steady_clock::now() - embedStartTime)
+                                           .count();
+                        if (embedDropped > 0) {
+                            // PBI-05b: With parallel EmbeddingService, drops should be rare.
+                            // If they occur, log a warning and proceed (repair is background-only).
+                            spdlog::warn("Embedding generation stalled at {:.1f}% coverage. "
+                                         "{} jobs were dropped due to queue overflow. "
+                                         "Proceeding with partial coverage - consider increasing "
+                                         "embed channel capacity or reducing ingest rate.",
+                                         coverage, embedDropped);
+                            if (summaryLog) {
+                                summaryLog << "\n*** WARNING: Stalled at " << coverage << "% after "
+                                           << elapsed << "ms ***" << std::endl;
+                                summaryLog << "Jobs dropped: " << embedDropped << std::endl;
+                                summaryLog.flush();
+                            }
+                            break;
+                        } else {
+                            // No drops but still incomplete - might be legitimate (empty docs, etc)
+                            spdlog::info("Embedding generation complete (no drops): {} vectors "
+                                         "({:.1f}% coverage)",
+                                         vectorCount, coverage);
+                            if (summaryLog) {
+                                summaryLog << "\n*** Complete (no drops) in " << elapsed << "ms ***"
+                                           << std::endl;
+                                summaryLog << "Final vectors: " << vectorCount << " (" << coverage
+                                           << "%)" << std::endl;
+                                summaryLog.flush();
+                            }
                             break;
                         }
                     }
@@ -856,7 +962,7 @@ struct BenchFixture {
                 std::this_thread::sleep_for(500ms);
             }
 
-            // Check vector count to verify embeddings were created
+            // Final status check
             auto finalStatus = yams::cli::run_sync(client->status(), 5s);
             if (finalStatus && finalStatus.value().vectorDbReady) {
                 uint64_t finalVectorCount = 0;
@@ -864,8 +970,17 @@ struct BenchFixture {
                 if (it != finalStatus.value().requestCounts.end()) {
                     finalVectorCount = it->second;
                 }
-                spdlog::info("Vector DB ready: dim={}, vectors={}", finalStatus.value().vectorDbDim,
-                             finalVectorCount);
+                double finalCoverage = corpusSize > 0 ? (finalVectorCount * 100.0 / corpusSize) : 0;
+                spdlog::info("Vector DB ready: dim={}, vectors={} ({:.1f}% coverage)",
+                             finalStatus.value().vectorDbDim, finalVectorCount, finalCoverage);
+
+                if (finalCoverage < 90.0) {
+                    spdlog::error(
+                        "WARNING: Low embedding coverage ({:.1f}%) will degrade retrieval quality!",
+                        finalCoverage);
+                    spdlog::error(
+                        "Consider reducing corpus size or increasing embed channel capacity.");
+                }
             } else {
                 spdlog::warn("Vector DB may not be ready or no embeddings generated");
             }

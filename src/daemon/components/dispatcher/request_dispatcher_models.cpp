@@ -65,6 +65,7 @@ static inline ErrorResponse makeError(ErrorCode code, const std::string& msg) {
 
 boost::asio::awaitable<Response>
 RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
+    spdlog::info("[RequestDispatcher] handleLoadModelRequest: model={}", req.modelName);
     try {
         auto provRes = yams::daemon::dispatch::check_provider_ready(serviceManager_);
         if (!provRes)
