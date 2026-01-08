@@ -84,8 +84,9 @@ jobs:
         run: |
           # Force HTTPS for GitHub to handle SSH submodule URLs in CI
           git config --global url."https://github.com/".insteadOf "git@github.com:"
-          # Only init sqlite-vec-cpp which is required for the build
+          # Only init submodules required for the build
           git submodule update --init --depth 1 third_party/sqlite-vec-cpp
+          git submodule update --init --depth 1 third_party/symspell
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         shell: bash

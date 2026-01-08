@@ -169,9 +169,10 @@ jobs:
         run: |
           # Force HTTPS for GitHub to handle SSH submodule URLs in CI
           git config --global url."https://github.com/".insteadOf "git@github.com:"
-          # Only init sqlite-vec-cpp which is required for the build
+          # Init submodules required for the build
           # Skip other submodules that use SSH URLs requiring authentication
           git submodule update --init --depth 1 third_party/sqlite-vec-cpp
+          git submodule update --init --depth 1 third_party/symspell
       - name: Skip non-linux entries under act (build)
         if: github.actor == 'nektos/act' && matrix.os != 'linux-hosted'
         shell: bash

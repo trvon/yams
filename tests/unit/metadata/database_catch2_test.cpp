@@ -307,7 +307,7 @@ TEST_CASE("Database: Migrations", "[unit][metadata][database]") {
         auto currentVersion = mm.getCurrentVersion();
         REQUIRE(currentVersion.has_value());
         CHECK(currentVersion.value() ==
-              22); // Latest schema version (keep in sync with migration.cpp)
+              23); // Latest schema version (keep in sync with migration.cpp)
 
         // Verify tables exist
         auto docExists = db.tableExists("documents");

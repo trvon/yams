@@ -92,6 +92,7 @@ jobs:
           # Only init sqlite-vec-cpp which is required for the build
           # Skip other submodules that use SSH URLs requiring authentication
           git submodule update --init --depth 1 third_party/sqlite-vec-cpp
+          git submodule update --init --depth 1 third_party/symspell
 
       - name: Cache Conan packages (warm)
         if: github.actor != 'nektos/act'
