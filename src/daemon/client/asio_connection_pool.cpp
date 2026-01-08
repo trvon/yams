@@ -448,6 +448,8 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
     }
 
     if (!socket_res) {
+        spdlog::warn("[ConnectionPool::create_connection] socket_res is error: {}",
+                     socket_res.error().message);
         co_return nullptr;
     }
     conn->socket = std::move(socket_res.value());
@@ -467,6 +469,11 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
         std::lock_guard<std::mutex> lk(mutex_);
         cleanup_stale_connections();
         connection_pool_.push_back(conn);
+    }
+
+    // For non-shared pools, keep the pool alive as long as the connection is in use
+    if (!shared_) {
+        conn->pool_keepalive = shared_from_this();
     }
 
     ConnectionRegistry::instance().add(conn);

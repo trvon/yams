@@ -20,7 +20,6 @@
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_concepts.h>
 #include <yams/profiling.h>
-#include <yams/search/bk_tree.h>
 
 namespace yams::search {
 class SymSpellSearch; // Forward declaration for SQLite-backed fuzzy search
@@ -217,8 +216,7 @@ public:
     virtual Result<SearchResults>
     fuzzySearch(const std::string& query, float minSimilarity = 0.7f, int limit = 50,
                 const std::optional<std::vector<int64_t>>& docIds = std::nullopt) = 0;
-    virtual Result<void> buildFuzzyIndex() = 0;
-    virtual Result<void> updateFuzzyIndex(int64_t documentId) = 0;
+    virtual void addSymSpellTerm(std::string_view term, int64_t frequency = 1) = 0;
 
     // Bulk operations
     virtual Result<std::optional<DocumentInfo>>
@@ -402,8 +400,6 @@ public:
     Result<SearchResults>
     fuzzySearch(const std::string& query, float minSimilarity = 0.7f, int limit = 50,
                 const std::optional<std::vector<int64_t>>& docIds = std::nullopt) override;
-    Result<void> buildFuzzyIndex() override;
-    Result<void> updateFuzzyIndex(int64_t documentId) override;
 
     /**
      * @brief Add a term to the SymSpell fuzzy search index
@@ -411,7 +407,7 @@ public:
      * @param term The term to add (filename, path component, keyword, etc.)
      * @param frequency How many times this term appears (default 1)
      */
-    void addSymSpellTerm(std::string_view term, int64_t frequency = 1);
+    void addSymSpellTerm(std::string_view term, int64_t frequency = 1) override;
 
     /**
      * @brief Initialize SymSpell index (creates schema if needed)
@@ -571,11 +567,7 @@ private:
 
     // Legacy makeSelect removed; callers now use sql::QuerySpec to build SELECTs
 
-    // Fuzzy search indices
-    mutable std::unique_ptr<search::HybridFuzzySearch> fuzzySearchIndex_;
-    mutable YAMS_SHARED_LOCKABLE(std::shared_mutex, fuzzyIndexMutex_);
-
-    // SymSpell fuzzy search (SQLite-backed, replaces HybridFuzzySearch for edit-distance)
+    // SymSpell fuzzy search (SQLite-backed)
     mutable std::unique_ptr<search::SymSpellSearch> symspellIndex_;
     mutable bool symspellInitialized_{false};
 

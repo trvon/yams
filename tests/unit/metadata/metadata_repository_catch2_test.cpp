@@ -18,7 +18,6 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 #include <yams/metadata/path_utils.h>
-#include <yams/search/bk_tree.h>
 
 using namespace yams;
 using namespace yams::metadata;
@@ -422,8 +421,6 @@ TEST_CASE("MetadataRepository: fuzzy search returns content matches",
     auto indexResult =
         fix.repository_->indexDocumentContent(docId, doc.fileName, contentText, "text/plain");
     REQUIRE(indexResult.has_value());
-
-    REQUIRE(fix.repository_->buildFuzzyIndex().has_value());
 
     auto fuzzyResult = fix.repository_->fuzzySearch(kRareTerm, 0.6f, 10);
     REQUIRE(fuzzyResult.has_value());

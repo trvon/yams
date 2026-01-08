@@ -1594,12 +1594,8 @@ public:
             boost::asio::co_spawn(
                 getExecutor(),
                 [&, decided, prom, leaseHandle, timer]() -> boost::asio::awaitable<void> {
-                    spdlog::info("[CLI:Search:executeAsync] streaming coroutine started");
                     auto& cliRef = **leaseHandle;
-                    spdlog::info("[CLI:Search:executeAsync] about to call streamingSearch");
                     auto sr = co_await cliRef.streamingSearch(dreq);
-                    spdlog::info("[CLI:Search:executeAsync] streamingSearch returned, has_value={}",
-                                 sr.has_value());
                     if (!decided->exchange(true)) {
                         prom->set_value(std::move(sr));
                         timer->cancel();
@@ -1611,18 +1607,12 @@ public:
             boost::asio::co_spawn(
                 getExecutor(),
                 [&, decided, prom, leaseHandle, timer]() -> boost::asio::awaitable<void> {
-                    spdlog::info("[CLI:Search:executeAsync] timer coroutine started, waiting 2s");
                     boost::system::error_code ec;
                     co_await timer->async_wait(
                         boost::asio::redirect_error(boost::asio::use_awaitable, ec));
-                    spdlog::info("[CLI:Search:executeAsync] timer expired or cancelled, ec={}",
-                                 ec.message());
                     if (!ec && !decided->load()) {
-                        spdlog::info("[CLI:Search:executeAsync] calling unary path");
                         auto& cliRef = **leaseHandle;
                         auto ur = co_await cliRef.call(dreq);
-                        spdlog::info("[CLI:Search:executeAsync] unary returned, has_value={}",
-                                     ur.has_value());
                         if (!decided->exchange(true))
                             prom->set_value(std::move(ur));
                     }
@@ -1636,7 +1626,13 @@ public:
             } else {
                 result_stream_or_unary = Error{ErrorCode::Timeout, "Search timed out"};
             }
-            timer->cancel();
+            // Cancel timer if we timed out and streaming didn't already cancel it
+            // Use post() to serialize with timer operations on the executor
+            boost::asio::post(getExecutor(), [timer, decided]() {
+                if (!decided->load(std::memory_order_acquire)) {
+                    timer->cancel();
+                }
+            });
         } else {
             // Non-streaming path (cold): unary only
             result_stream_or_unary = co_await client.call(dreq);

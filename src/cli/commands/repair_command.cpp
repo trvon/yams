@@ -1434,7 +1434,6 @@ Result<void> RepairCommand::rebuildFts5Index(const app::services::AppContext& ct
                 auto ir = ctx.metadataRepo->indexDocumentContent(d.id, d.fileName, *extractedOpt,
                                                                  d.mimeType);
                 if (ir && contentResult) {
-                    (void)ctx.metadataRepo->updateFuzzyIndex(d.id);
                     ++stats.succeeded;
                 } else {
                     // Check if this was a transient error (database locked)

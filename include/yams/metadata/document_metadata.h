@@ -356,6 +356,14 @@ struct SearchResult {
     double score = 0.0;                    ///< Search relevance score
     std::vector<std::string> matchedTerms; ///< Terms that matched
     std::string snippet;                   ///< Content snippet with highlights
+
+    // Score breakdown by component (populated during fusion)
+    std::optional<double> vectorScore;  ///< Contribution from vector/semantic search
+    std::optional<double> keywordScore; ///< Contribution from FTS5/keyword search
+    std::optional<double> kgScore;      ///< Contribution from knowledge graph
+    std::optional<double> pathScore;    ///< Contribution from path matching
+    std::optional<double> tagScore;     ///< Contribution from tag matching
+    std::optional<double> symbolScore;  ///< Contribution from symbol search
 };
 
 /**

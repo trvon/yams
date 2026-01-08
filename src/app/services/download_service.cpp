@@ -242,7 +242,6 @@ public:
                                     contentBytes.value().size());
                                 (void)ctx_.metadataRepo->indexDocumentContent(
                                     docId, filename, fileContent, docInfo.mimeType);
-                                ctx_.metadataRepo->updateFuzzyIndex(docId);
                             }
                         } else {
                             spdlog::warn("DownloadService: Failed to insert document metadata: {}",

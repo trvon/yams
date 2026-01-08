@@ -874,7 +874,6 @@ private:
                             auto ir = appCtx->metadataRepo->indexDocumentContent(
                                 d.id, d.fileName, *extracted, d.mimeType);
                             if (ir) {
-                                (void)appCtx->metadataRepo->updateFuzzyIndex(d.id);
                                 ++ok;
                             } else {
                                 ++fail;

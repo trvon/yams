@@ -420,8 +420,6 @@ boost::asio::awaitable<Result<void>>
 AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback onHeader,
                                              ChunkCallback onChunk, ErrorCallback onError,
                                              CompleteCallback onComplete) {
-    spdlog::info("[AsioTransport] send_request_streaming entry, type={}",
-                 static_cast<int>(getMessageType(req)));
     // Check cancellation before proceeding
     auto cs = co_await this_coro::cancellation_state;
     if (cs.cancelled() != boost::asio::cancellation_type::none) {
@@ -436,9 +434,7 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
             co_return Error{ErrorCode::OperationCancelled, "Operation cancelled"};
         }
 
-        spdlog::info("[AsioTransport] get_or_create_connection attempt={}", attempt);
         auto conn = co_await get_or_create_connection(opts_);
-        spdlog::info("[AsioTransport] got connection, alive={}", conn ? conn->alive.load() : false);
         if (!conn || !conn->alive) {
             if (attempt < kMaxRetries) {
                 spdlog::debug("Failed to establish connection, retrying (attempt {}/{})",

@@ -223,10 +223,10 @@ static void BM_RetrievalService_CatByName(benchmark::State& state) {
     }
 }
 
-// Benchmark: Search service query performance
-static void BM_RetrievalService_Search(benchmark::State& state) {
+// Benchmark: Search service query performance (keyword only)
+static void BM_RetrievalService_Search_Keyword(benchmark::State& state) {
 #ifdef TRACY_ENABLE
-    ZoneScopedN("BM_Search");
+    ZoneScopedN("BM_Search_Keyword");
 #endif
 
     std::vector<int64_t> latencies_us;
@@ -243,6 +243,8 @@ static void BM_RetrievalService_Search(benchmark::State& state) {
             req.query = "document";
             req.limit = 20;
             req.pathsOnly = false;
+            req.searchType = "keyword";
+            req.fuzzy = false;
 
             auto result = cli::run_sync(g_client->search(req), std::chrono::milliseconds(2000));
 
@@ -275,6 +277,110 @@ static void BM_RetrievalService_Search(benchmark::State& state) {
     if (p95 > 500000) {
         std::cerr << "⚠️  WARNING: Search P95 latency " << (p95 / 1000.0)
                   << "ms exceeds 500ms target\n";
+    }
+}
+
+// Benchmark: Search with fuzzy enabled (tests SymSpell expansion + FTS5)
+static void BM_RetrievalService_Search_Fuzzy(benchmark::State& state) {
+#ifdef TRACY_ENABLE
+    ZoneScopedN("BM_Search_Fuzzy");
+#endif
+
+    std::vector<int64_t> latencies_us;
+    size_t total_results = 0;
+
+    for (auto _ : state) {
+        auto start = std::chrono::high_resolution_clock::now();
+
+        daemon::SearchRequest req;
+        req.query = "documnt"; // Intentional typo to test fuzzy
+        req.limit = 20;
+        req.pathsOnly = false;
+        req.fuzzy = true;
+        req.similarity = 0.6;
+
+        auto result = cli::run_sync(g_client->search(req), std::chrono::milliseconds(2000));
+
+        if (result) {
+            total_results += result.value().results.size();
+        }
+
+        auto end = std::chrono::high_resolution_clock::now();
+        auto latency_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+        latencies_us.push_back(latency_us);
+    }
+
+    if (latencies_us.empty()) {
+        state.SkipWithError("No samples collected for fuzzy search benchmark");
+        return;
+    }
+
+    std::sort(latencies_us.begin(), latencies_us.end());
+    auto p50 = latencies_us[latencies_us.size() / 2];
+    auto p95 = latencies_us[static_cast<size_t>(latencies_us.size() * 0.95)];
+    auto max_us = latencies_us.back();
+
+    state.counters["total_results"] = static_cast<double>(total_results);
+    state.counters["p50_us"] = static_cast<double>(p50);
+    state.counters["p95_us"] = static_cast<double>(p95);
+    state.counters["max_us"] = static_cast<double>(max_us);
+
+    if (p95 > 500000) {
+        std::cerr << "⚠️  WARNING: Fuzzy Search P95 latency " << (p95 / 1000.0)
+                  << "ms exceeds 500ms target\n";
+    }
+}
+
+// Benchmark: Hybrid search (keyword + semantic + vector)
+static void BM_RetrievalService_Search_Hybrid(benchmark::State& state) {
+#ifdef TRACY_ENABLE
+    ZoneScopedN("BM_Search_Hybrid");
+#endif
+
+    std::vector<int64_t> latencies_us;
+    size_t total_results = 0;
+
+    for (auto _ : state) {
+        auto start = std::chrono::high_resolution_clock::now();
+
+        daemon::SearchRequest req;
+        req.query = "test document performance";
+        req.limit = 20;
+        req.pathsOnly = false;
+        req.searchType = "hybrid";
+        req.fuzzy = false;
+
+        auto result = cli::run_sync(g_client->search(req), std::chrono::milliseconds(3000));
+
+        if (result) {
+            total_results += result.value().results.size();
+        }
+
+        auto end = std::chrono::high_resolution_clock::now();
+        auto latency_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+        latencies_us.push_back(latency_us);
+    }
+
+    if (latencies_us.empty()) {
+        state.SkipWithError("No samples collected for hybrid search benchmark");
+        return;
+    }
+
+    std::sort(latencies_us.begin(), latencies_us.end());
+    auto p50 = latencies_us[latencies_us.size() / 2];
+    auto p95 = latencies_us[static_cast<size_t>(latencies_us.size() * 0.95)];
+    auto max_us = latencies_us.back();
+
+    state.counters["total_results"] = static_cast<double>(total_results);
+    state.counters["p50_us"] = static_cast<double>(p50);
+    state.counters["p95_us"] = static_cast<double>(p95);
+    state.counters["max_us"] = static_cast<double>(max_us);
+
+    if (p95 > 1000000) {
+        std::cerr << "⚠️  WARNING: Hybrid Search P95 latency " << (p95 / 1000.0)
+                  << "ms exceeds 1000ms target\n";
     }
 }
 
@@ -474,7 +580,11 @@ BENCHMARK(BM_RetrievalService_List)->Unit(benchmark::kMicrosecond)->Iterations(5
 
 BENCHMARK(BM_GrepService_Search)->Unit(benchmark::kMicrosecond)->Iterations(30);
 
-BENCHMARK(BM_RetrievalService_Search)->Unit(benchmark::kMicrosecond)->Iterations(40);
+BENCHMARK(BM_RetrievalService_Search_Keyword)->Unit(benchmark::kMicrosecond)->Iterations(40);
+
+BENCHMARK(BM_RetrievalService_Search_Fuzzy)->Unit(benchmark::kMicrosecond)->Iterations(40);
+
+BENCHMARK(BM_RetrievalService_Search_Hybrid)->Unit(benchmark::kMicrosecond)->Iterations(20);
 
 // Custom main to setup/teardown daemon
 int main(int argc, char** argv) {
@@ -486,7 +596,9 @@ int main(int argc, char** argv) {
     std::cout << "  • GetByName (FTS5 ready):     P95 < 500ms\n";
     std::cout << "  • Cat (by name):              P95 < 500ms\n";
     std::cout << "  • GetByName (not found):      P95 < 1000ms (fast error)\n";
-    std::cout << "  • Search query:               P95 < 500ms\n";
+    std::cout << "  • Search (keyword):           P95 < 500ms\n";
+    std::cout << "  • Search (fuzzy/SymSpell):    P95 < 500ms\n";
+    std::cout << "  • Search (hybrid):            P95 < 1000ms\n";
     std::cout << "  • List documents:             Responsive metadata queries\n";
     std::cout << "  • Grep search:                P95 < 500ms (with sync indexing)\n";
     std::cout << "\n";

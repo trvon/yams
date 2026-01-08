@@ -235,7 +235,7 @@ public:
         return Result<void>();
     }
 
-    Result<void> updateFuzzyIndex(int64_t) override { return Result<void>(); }
+    void addSymSpellTerm(std::string_view, int64_t) override { /* no-op for mock */ }
 
     Result<std::vector<std::string>> getDocumentTags(int64_t) override {
         return std::vector<std::string>{};

@@ -2924,16 +2924,6 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
     return result;
 }
 
-Result<void> MetadataRepository::ensureFuzzyIndexInitialized() {
-    {
-        std::shared_lock<std::shared_mutex> readLock(fuzzyIndexMutex_);
-        if (fuzzySearchIndex_) {
-            return Result<void>();
-        }
-    }
-    return buildFuzzyIndex();
-}
-
 // -----------------------------------------------------------------------------
 // SymSpell fuzzy search (SQLite-backed, incremental)
 // -----------------------------------------------------------------------------
@@ -4425,442 +4415,188 @@ MetadataTransaction::MetadataTransaction(MetadataRepository& repo) : repo_(repo)
 
 MetadataTransaction::~MetadataTransaction() = default;
 
-// Fuzzy search implementation
+// Fuzzy search implementation - uses SymSpell + FTS5
 Result<SearchResults>
 MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, int limit,
                                 const std::optional<std::vector<int64_t>>& docIds) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::fuzzySearch");
-    return executeQuery<SearchResults>([&]([[maybe_unused]] Database& db) -> Result<SearchResults> {
+    (void)minSimilarity; // SymSpell uses edit distance, not similarity threshold
+
+    return executeQuery<SearchResults>([&](Database& db) -> Result<SearchResults> {
         SearchResults results;
         results.query = query;
 
-        spdlog::info("[FUZZY_PERF] fuzzySearch starting for query='{}' limit={}", query, limit);
+        spdlog::debug("[FUZZY] fuzzySearch starting for query='{}' limit={}", query, limit);
         auto totalStart = std::chrono::high_resolution_clock::now();
 
-        auto ensureStart = std::chrono::high_resolution_clock::now();
-        auto ensureResult = ensureFuzzyIndexInitialized();
-        auto ensureEnd = std::chrono::high_resolution_clock::now();
-        auto ensureMs =
-            std::chrono::duration_cast<std::chrono::milliseconds>(ensureEnd - ensureStart).count();
-        spdlog::info("[FUZZY_PERF] ensureFuzzyIndexInitialized took {}ms", ensureMs);
-
-        if (!ensureResult) {
-            results.errorMessage = "Failed to build fuzzy index: " + ensureResult.error().message;
+        // Initialize SymSpell if needed
+        auto initResult = ensureSymSpellInitialized();
+        if (!initResult || !symspellIndex_) {
+            results.errorMessage = "SymSpell index not available";
             return results;
         }
 
-        std::vector<search::HybridFuzzySearch::SearchResult> fuzzyResults;
-        {
-            std::shared_lock<std::shared_mutex> readLock(fuzzyIndexMutex_);
-            auto* indexPtr = fuzzySearchIndex_.get();
-            if (!indexPtr) {
-                results.errorMessage = "Fuzzy index unavailable";
-                return results;
+        // Split query into terms and expand each via SymSpell
+        std::vector<std::string> expandedTerms;
+        std::istringstream iss(query);
+        std::string term;
+        while (iss >> term) {
+            // Lowercase for matching
+            std::transform(term.begin(), term.end(), term.begin(), ::tolower);
+            if (term.length() < 2)
+                continue;
+
+            search::SymSpellSearch::SearchOptions opts;
+            opts.maxEditDistance = 2;
+            opts.returnAll = true;
+            opts.maxResults = 5; // Get top 5 corrections per term
+
+            auto suggestions = symspellIndex_->search(term, opts);
+            if (!suggestions.empty()) {
+                for (const auto& s : suggestions) {
+                    expandedTerms.push_back(s.term);
+                }
+            } else {
+                // No fuzzy match found, use original term
+                expandedTerms.push_back(term);
             }
-
-            search::HybridFuzzySearch::SearchOptions options;
-            options.minSimilarity = minSimilarity;
-            options.maxEditDistance = 3;
-            options.useTrigramPrefilter = true;
-            options.useBKTree = true;
-
-            auto searchStart = std::chrono::high_resolution_clock::now();
-            fuzzyResults = indexPtr->search(query, static_cast<size_t>(limit), options);
-            auto searchEnd = std::chrono::high_resolution_clock::now();
-            auto searchMs =
-                std::chrono::duration_cast<std::chrono::milliseconds>(searchEnd - searchStart)
-                    .count();
-            spdlog::info("[FUZZY_PERF] HybridFuzzySearch::search took {}ms, returned {} results",
-                         searchMs, fuzzyResults.size());
         }
 
-        auto start = std::chrono::high_resolution_clock::now();
+        auto symspellEnd = std::chrono::high_resolution_clock::now();
+        auto symspellMs =
+            std::chrono::duration_cast<std::chrono::milliseconds>(symspellEnd - totalStart).count();
+        spdlog::debug("[FUZZY] SymSpell term expansion took {}ms, expanded to {} terms", symspellMs,
+                      expandedTerms.size());
 
-        auto parseDocId = [](const std::string& token) -> std::optional<int64_t> {
-            if (token.empty()) {
-                return std::nullopt;
-            }
-            std::size_t len = 0;
-            while (len < token.size() && std::isdigit(static_cast<unsigned char>(token[len]))) {
-                ++len;
-            }
-            if (len == 0) {
-                return std::nullopt;
-            }
-            try {
-                return std::stoll(token.substr(0, len));
-            } catch (...) {
-                return std::nullopt;
-            }
-        };
+        if (expandedTerms.empty()) {
+            results.totalCount = 0;
+            results.executionTimeMs = symspellMs;
+            return results;
+        }
 
-        std::unordered_set<int64_t> seenDocIds;
-        const size_t effectiveLimit = limit > 0 ? static_cast<size_t>(limit) : SIZE_MAX;
+        // Build FTS5 query with OR'd expanded terms
+        std::string ftsQuery;
+        for (size_t i = 0; i < expandedTerms.size(); ++i) {
+            if (i > 0)
+                ftsQuery += " OR ";
+            // Escape special FTS5 characters
+            std::string escaped = expandedTerms[i];
+            for (auto& c : escaped) {
+                if (c == '"' || c == '*' || c == '-')
+                    c = ' ';
+            }
+            ftsQuery += "\"" + escaped + "\"";
+        }
 
-        for (const auto& fuzzyResult : fuzzyResults) {
-            // Early termination once we have enough results
-            if (results.results.size() >= effectiveLimit) {
+        spdlog::debug("[FUZZY] FTS5 query: {}", ftsQuery);
+
+        // Execute FTS5 query DIRECTLY - do NOT call search() which has fuzzy fallback
+        // that would cause infinite recursion (fuzzySearch -> search -> fuzzySearch -> ...)
+        constexpr int kMaxSearchLimit = 10000;
+        const int effectiveLimit = std::min(limit > 0 ? limit : 100, kMaxSearchLimit);
+
+        std::string sql = R"(
+            SELECT fts.rowid, fts.title,
+                   snippet(documents_fts, 0, '<b>', '</b>', '...', 16) as snippet,
+                   bm25(documents_fts) as score,
+                   d.file_path, d.file_name, d.file_extension, d.file_size,
+                   d.sha256_hash, d.mime_type, d.created_time, d.modified_time,
+                   d.indexed_time, d.content_extracted, d.extraction_status, d.extraction_error
+            FROM documents_fts fts
+            JOIN documents d ON d.id = fts.rowid
+            WHERE documents_fts MATCH ?
+        )";
+
+        // Add doc ID filter if provided
+        if (docIds && !docIds->empty()) {
+            sql += " AND d.id IN (";
+            for (size_t i = 0; i < docIds->size(); ++i) {
+                if (i > 0)
+                    sql += ',';
+                sql += '?';
+            }
+            sql += ')';
+        }
+        sql += " ORDER BY score LIMIT ?";
+
+        auto stmtResult = db.prepare(sql);
+        if (!stmtResult) {
+            spdlog::warn("[FUZZY] FTS5 prepare failed: {}", stmtResult.error().message);
+            results.errorMessage = "FTS5 query failed: " + stmtResult.error().message;
+            auto end = std::chrono::high_resolution_clock::now();
+            results.executionTimeMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(end - totalStart).count();
+            return results;
+        }
+
+        Statement stmt = std::move(stmtResult).value();
+        int bindIndex = 1;
+
+        // Bind the FTS5 query
+        auto b1 = stmt.bind(bindIndex++, ftsQuery);
+        if (!b1) {
+            results.errorMessage = "Bind failed: " + b1.error().message;
+            return results;
+        }
+
+        // Bind doc IDs if provided
+        if (docIds && !docIds->empty()) {
+            for (auto id : *docIds) {
+                auto b = stmt.bind(bindIndex++, static_cast<int64_t>(id));
+                if (!b) {
+                    results.errorMessage = "Bind doc ID failed: " + b.error().message;
+                    return results;
+                }
+            }
+        }
+
+        // Bind limit
+        auto bLimit = stmt.bind(bindIndex++, effectiveLimit);
+        if (!bLimit) {
+            results.errorMessage = "Bind limit failed: " + bLimit.error().message;
+            return results;
+        }
+
+        // Execute and collect results
+        while (true) {
+            auto stepResult = stmt.step();
+            if (!stepResult) {
+                spdlog::warn("[FUZZY] FTS5 step failed: {}", stepResult.error().message);
                 break;
             }
-
-            auto docIdOpt = parseDocId(fuzzyResult.id);
-            if (!docIdOpt.has_value()) {
-                continue;
-            }
-            int64_t docId = *docIdOpt;
-
-            if (!seenDocIds.insert(docId).second) {
-                continue;
-            }
-
-            if (docIds && std::find(docIds->begin(), docIds->end(), docId) == docIds->end()) {
-                continue;
-            }
-
-            auto docResult = getDocument(docId);
-            if (!docResult || !docResult.value().has_value()) {
-                continue;
-            }
+            if (!stepResult.value())
+                break;
 
             SearchResult result;
-            result.document = docResult.value().value();
-            // Snippet will be populated by the service layer if needed
-            // Store match metadata in matchedTerms for debugging if needed
-            result.matchedTerms.push_back(fuzzyResult.matchType);
-            result.score = static_cast<double>(fuzzyResult.score);
+            result.document.id = stmt.getInt64(0);
+            result.document.filePath = stmt.getString(4);
+            result.document.fileName = stmt.getString(5);
+            result.document.fileExtension = stmt.getString(6);
+            result.document.fileSize = stmt.getInt64(7);
+            result.document.sha256Hash = stmt.getString(8);
+            result.document.mimeType = stmt.getString(9);
+            result.document.createdTime = stmt.getTime(10);
+            result.document.modifiedTime = stmt.getTime(11);
+            result.document.indexedTime = stmt.getTime(12);
+            result.document.contentExtracted = stmt.getInt(13) != 0;
+            result.document.extractionStatus =
+                ExtractionStatusUtils::fromString(stmt.getString(14));
+            result.document.extractionError = stmt.getString(15);
+            result.snippet = common::sanitizeUtf8(stmt.getString(2));
+            result.score = stmt.getDouble(3);
 
             results.results.push_back(result);
         }
 
-        results.totalCount = static_cast<int64_t>(results.results.size());
+        results.totalCount = results.results.size();
 
         auto end = std::chrono::high_resolution_clock::now();
         results.executionTimeMs =
-            std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+            std::chrono::duration_cast<std::chrono::milliseconds>(end - totalStart).count();
+        spdlog::debug("[FUZZY] SymSpell+FTS5 returned {} results in {}ms", results.results.size(),
+                      results.executionTimeMs);
 
         return results;
-    });
-}
-
-Result<void> MetadataRepository::buildFuzzyIndex() {
-    YAMS_ZONE_SCOPED_N("MetadataRepo::buildFuzzyIndex");
-    return executeQuery<void>([&](Database& db) -> Result<void> {
-        std::unique_lock<std::shared_mutex> lock(fuzzyIndexMutex_);
-
-        // Create new fuzzy search index
-        fuzzySearchIndex_ = std::make_unique<search::HybridFuzzySearch>();
-
-        // Smart filtering: use metadata and KG to prioritize relevant documents
-        // This keeps memory bounded while indexing the most important documents
-        auto stmtResult = db.prepare(R"(
-            WITH ranked_docs AS (
-                SELECT 
-                    d.id,
-                    d.file_name,
-                    d.file_path,
-                    d.indexed_time,
-                    -- Prioritize documents with rich metadata
-                    COALESCE((SELECT COUNT(*) FROM metadata m WHERE m.document_id = d.id AND m.key = 'tag'), 0) as tag_count,
-                    -- Prioritize documents in knowledge graph (have symbols/entities)
-                    COALESCE((SELECT COUNT(DISTINCT kde.id) 
-                              FROM kg_doc_entities kde 
-                              WHERE kde.document_id = d.id), 0) as entity_count,
-                    -- Recency score
-                    CASE 
-                        WHEN d.indexed_time > datetime('now', '-7 days') THEN 4
-                        WHEN d.indexed_time > datetime('now', '-30 days') THEN 3
-                        WHEN d.indexed_time > datetime('now', '-90 days') THEN 2
-                        WHEN d.indexed_time > datetime('now', '-180 days') THEN 1
-                        ELSE 0
-                    END as recency_score,
-                    -- Boost code files (likely to have symbols)
-                    CASE 
-                        WHEN d.mime_type LIKE 'text/x-%' OR 
-                             d.mime_type IN ('application/javascript', 'application/typescript') OR
-                             d.file_name LIKE '%.py' OR d.file_name LIKE '%.cpp' OR 
-                             d.file_name LIKE '%.h' OR d.file_name LIKE '%.hpp' OR
-                             d.file_name LIKE '%.rs' OR d.file_name LIKE '%.go' THEN 2
-                        ELSE 0
-                    END as code_boost
-                FROM documents d
-                WHERE d.indexed_time IS NOT NULL
-            )
-            SELECT id, file_name, file_path
-            FROM ranked_docs
-            -- Prioritize: tagged > KG-connected > recent > code files > rest
-            ORDER BY (tag_count * 3 + entity_count * 2 + recency_score + code_boost) DESC, 
-                     indexed_time DESC
-        )");
-
-        if (!stmtResult)
-            return stmtResult.error();
-
-        Statement stmt = std::move(stmtResult).value();
-
-        constexpr size_t kSafetyBufferEntries = 2048;
-        size_t docsAdded = 0;
-        size_t guardLimit = std::numeric_limits<size_t>::max();
-        std::optional<size_t> configuredLimit;
-
-        if (const char* envLimit = std::getenv("YAMS_FUZZY_INDEX_LIMIT"); envLimit && *envLimit) {
-            try {
-                auto parsed = static_cast<size_t>(std::stoull(envLimit));
-                if (parsed > 0) {
-                    configuredLimit = parsed;
-                    if (parsed > std::numeric_limits<size_t>::max() - kSafetyBufferEntries) {
-                        guardLimit = std::numeric_limits<size_t>::max();
-                    } else {
-                        guardLimit = parsed + kSafetyBufferEntries;
-                    }
-                }
-            } catch (...) {
-                spdlog::warn("Invalid YAMS_FUZZY_INDEX_LIMIT '{}', ignoring", envLimit);
-            }
-        }
-
-        auto guardTriggered = [&](size_t count) {
-            return guardLimit != std::numeric_limits<size_t>::max() && count >= guardLimit;
-        };
-
-        bool guardHit = false;
-        auto stopIfGuarded = [&](const char* phase) {
-            if (guardHit || !guardTriggered(docsAdded)) {
-                return guardHit;
-            }
-            guardHit = true;
-            if (configuredLimit) {
-                spdlog::warn("Fuzzy index stopped after {} entries while {} (configured limit {} + "
-                             "{} entry safety buffer)",
-                             docsAdded, phase, configuredLimit.value(), kSafetyBufferEntries);
-            } else {
-                spdlog::warn("Fuzzy index stopped after {} entries while {} to protect memory",
-                             docsAdded, phase);
-            }
-            return true;
-        };
-
-        while (true) {
-            auto stepResult = stmt.step();
-            if (!stepResult)
-                return stepResult.error();
-            if (!stepResult.value())
-                break;
-
-            if (stopIfGuarded("scanning ranked documents")) {
-                break;
-            }
-
-            int64_t id = stmt.getInt64(0);
-            std::string fileName = stmt.getString(1);
-            std::string filePath = stmt.getString(2);
-
-            // Extract keywords from file path
-            std::vector<std::string> keywords;
-
-            // Split path into components as keywords
-            size_t pos = 0;
-            std::string path = filePath;
-            while ((pos = path.find('/')) != std::string::npos) {
-                std::string component = path.substr(0, pos);
-                if (!component.empty() && component != "." && component != "..") {
-                    keywords.push_back(component);
-                }
-                path.erase(0, pos + 1);
-            }
-            if (!path.empty()) {
-                keywords.push_back(path);
-            }
-
-            // Add document to fuzzy index with both filename and content
-            // First add with filename as title
-            try {
-                fuzzySearchIndex_->addDocument(std::to_string(id), fileName, keywords);
-                docsAdded++;
-                if (stopIfGuarded("indexing document metadata")) {
-                    break;
-                }
-            } catch (const std::bad_alloc& e) {
-                spdlog::error("Memory exhausted building fuzzy index at {} documents, stopping",
-                              docsAdded);
-                guardHit = true;
-                break;
-            }
-            // std::cerr << "[DEBUG] Added doc " << id << " with title '" << fileName << "' and " <<
-            // keywords.size() << " keywords" << std::endl;
-
-            // Also get and index document content for fuzzy search
-            auto contentResult = getContent(id);
-            if (contentResult && contentResult.value().has_value()) {
-                auto content = contentResult.value().value();
-
-                // Extract more comprehensive keywords from content
-                std::vector<std::string> contentKeywords;
-
-                // Process larger portion of content (up to 5000 chars instead of 500)
-                size_t maxContentLength = std::min(size_t(5000), content.contentText.length());
-                std::string contentToIndex = content.contentText.substr(0, maxContentLength);
-
-                // Convert to lowercase for better matching
-                std::transform(contentToIndex.begin(), contentToIndex.end(), contentToIndex.begin(),
-                               ::tolower);
-
-                // Extract words and multi-word phrases
-                std::istringstream iss(contentToIndex);
-                std::string word;
-                std::string previousWord;
-
-                while (iss >> word) {
-                    // Clean up word - remove common punctuation
-                    word.erase(std::remove_if(
-                                   word.begin(), word.end(),
-                                   [](char c) { return !std::isalnum(c) && c != '-' && c != '_'; }),
-                               word.end());
-
-                    if (!word.empty() && word.length() > 2) { // Skip very short words
-                        contentKeywords.push_back(word);
-
-                        // Also add two-word phrases for better phrase matching
-                        if (!previousWord.empty()) {
-                            std::string phrase = previousWord + " " + word;
-                            contentKeywords.push_back(phrase);
-                        }
-
-                        previousWord = word;
-                    }
-
-                    // Limit total keywords to prevent memory issues
-                    if (contentKeywords.size() >= 100) {
-                        break;
-                    }
-                }
-
-                // Add content-based entry with more content preview
-                std::string contentPreview = content.contentText.substr(
-                    0, std::min(size_t(200), content.contentText.length()));
-                try {
-                    fuzzySearchIndex_->addDocument(std::to_string(id) + "_content", contentPreview,
-                                                   contentKeywords);
-                    docsAdded++;
-                    if (stopIfGuarded("indexing document content")) {
-                        break;
-                    }
-                } catch (const std::bad_alloc& e) {
-                    spdlog::warn("Memory limit reached adding content entries, skipping remaining");
-                    guardHit = true;
-                    break;
-                }
-            }
-
-            // Check if we've hit the limit
-            if (stopIfGuarded("indexing ranked documents")) {
-                break;
-            }
-        }
-
-        if (!guardHit) {
-            // Also query metadata tags
-            auto tagStmtResult = db.prepare(R"(
-                SELECT document_id, value
-                FROM metadata
-                WHERE key = 'tag'
-            )");
-
-            if (tagStmtResult) {
-                Statement tagStmt = std::move(tagStmtResult).value();
-
-                std::unordered_map<int64_t, std::vector<std::string>> docTags;
-
-                while (true) {
-                    auto stepResult = tagStmt.step();
-                    if (!stepResult || !stepResult.value())
-                        break;
-
-                    int64_t docId = tagStmt.getInt64(0);
-                    std::string tag = tagStmt.getString(1);
-                    docTags[docId].push_back(tag);
-                }
-
-                // Update documents with tags (respecting limit)
-                for (const auto& [docId, tags] : docTags) {
-                    if (stopIfGuarded("enriching metadata tags")) {
-                        break;
-                    }
-
-                    auto docResult = getDocument(docId);
-                    if (docResult && docResult.value().has_value()) {
-                        auto doc = docResult.value().value();
-                        try {
-                            fuzzySearchIndex_->addDocument(std::to_string(docId), doc.fileName,
-                                                           tags);
-                            docsAdded++;
-                            if (stopIfGuarded("enriching metadata tags")) {
-                                break;
-                            }
-                        } catch (const std::bad_alloc& e) {
-                            spdlog::error("Memory exhausted adding tagged documents at {} docs",
-                                          docsAdded);
-                            guardHit = true;
-                            break;
-                        }
-                    }
-                }
-            }
-        } else {
-            spdlog::debug("Skipping tag enrichment after fuzzy index guard triggered");
-        }
-
-        const size_t totalDocs = fuzzySearchIndex_->getStats().documentCount;
-        if (configuredLimit) {
-            if (guardTriggered(totalDocs)) {
-                spdlog::info("Built fuzzy index with {} entries (reached configured limit {} plus "
-                             "{} entry safety buffer)",
-                             totalDocs, configuredLimit.value(), kSafetyBufferEntries);
-            } else {
-                spdlog::info("Built fuzzy index with {} entries (configured limit {})", totalDocs,
-                             configuredLimit.value());
-            }
-        } else {
-            spdlog::info("Built fuzzy index with {} entries", totalDocs);
-        }
-
-        return Result<void>();
-    });
-}
-
-Result<void> MetadataRepository::updateFuzzyIndex(int64_t documentId) {
-    return executeQuery<void>([&](Database& db) -> Result<void> {
-        std::unique_lock<std::shared_mutex> lock(fuzzyIndexMutex_);
-
-        if (!fuzzySearchIndex_) {
-            // Index not built yet, will be built on first search
-            return Result<void>();
-        }
-
-        // Get document info using internal helper to avoid nested connection acquisition deadlock
-        // Previously this called getDocument() which would try to acquire another connection
-        // from the pool while we already hold one, causing "resource deadlock would occur"
-        auto docResult = getDocumentInternal(db, documentId);
-        if (!docResult || !docResult.value().has_value()) {
-            return Error{ErrorCode::NotFound, "Document not found"};
-        }
-
-        auto doc = docResult.value().value();
-
-        // Get document tags using internal helper to avoid nested connection acquisition
-        std::vector<std::string> keywords;
-        auto metadataResult = getAllMetadataInternal(db, documentId);
-        if (metadataResult) {
-            for (const auto& [key, value] : metadataResult.value()) {
-                if (key == "tag" && value.type == MetadataValueType::String) {
-                    keywords.push_back(value.value);
-                }
-            }
-        }
-
-        // Update fuzzy index
-        fuzzySearchIndex_->addDocument(std::to_string(documentId), doc.fileName, keywords);
-
-        return Result<void>();
     });
 }
 

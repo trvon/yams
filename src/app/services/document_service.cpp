@@ -60,7 +60,7 @@ inline bool isTextMime(const std::string& mime) {
 }
 
 // Extract searchable terms from a document for fuzzy search indexing.
-// Extracts: filename (without extension), extension, and path components.
+// Extracts: filename stem (without extension) and file extension.
 // Terms shorter than 2 characters are skipped to reduce noise.
 inline void
 indexDocumentTermsForFuzzySearch(const std::shared_ptr<metadata::MetadataRepository>& repo,
@@ -87,19 +87,6 @@ indexDocumentTermsForFuzzySearch(const std::shared_ptr<metadata::MetadataReposit
         auto ext = fp.extension().string();
         if (ext.length() > 1) {     // Has extension beyond just "."
             addTerm(ext.substr(1)); // Skip the leading dot
-        }
-    }
-
-    // Add path components (directory names)
-    if (!info.filePath.empty()) {
-        std::filesystem::path p(info.filePath);
-        for (const auto& part : p) {
-            auto partStr = part.string();
-            // Skip root, current dir, parent dir, and the filename itself
-            if (partStr == "/" || partStr == "." || partStr == ".." || partStr == info.fileName) {
-                continue;
-            }
-            addTerm(partStr);
         }
     }
 }
@@ -1807,9 +1794,6 @@ public:
                 }
             }
         }
-
-        // Update fuzzy index
-        ctx_.metadataRepo->updateFuzzyIndex(target.id);
 
         resp.success = (errors.empty() || !req.atomic);
         resp.updatesApplied = count;

@@ -124,17 +124,6 @@ struct SearchEngineConfig {
     // Symbol ranking
     bool symbolRank = true; // Enable automatic symbol ranking boost for code-like queries
 
-    // Tiered search optimization (PBI-075)
-    // When enabled, search runs in tiers with early termination:
-    // - Tier 1 (fast): FTS5 text, path tree, vector (HNSW) - all indexed
-    // - Tier 2 (medium): KG alias resolution - skipped if Tier 1 has enough results
-    // - Tier 3 (slow): Entity vectors (brute-force) - disabled by default
-    bool enableTieredSearch = true; // Enable tiered execution with early termination
-    size_t earlyTerminationMinResults =
-        0; // Min results to trigger early termination (0 = use limit)
-    float earlyTerminationQualityThreshold =
-        0.6f; // Min top score to consider results "good enough"
-
     // Debugging
     bool includeDebugInfo = false;       // Include per-component scores in results
     bool includeComponentTiming = false; // Include per-component execution time in response
@@ -330,6 +319,26 @@ private:
     const SearchEngineConfig& config_;
 };
 
+// Helper to accumulate a component score into the appropriate breakdown field
+inline void accumulateComponentScore(SearchResult& r, const std::string& source,
+                                     double contribution) {
+    // Map source names to breakdown fields
+    if (source == "vector" || source == "entity_vector") {
+        r.vectorScore = r.vectorScore.value_or(0.0) + contribution;
+    } else if (source == "text" || source == "fts5") {
+        r.keywordScore = r.keywordScore.value_or(0.0) + contribution;
+    } else if (source == "kg") {
+        r.kgScore = r.kgScore.value_or(0.0) + contribution;
+    } else if (source == "path_tree") {
+        r.pathScore = r.pathScore.value_or(0.0) + contribution;
+    } else if (source == "tag" || source == "metadata") {
+        r.tagScore = r.tagScore.value_or(0.0) + contribution;
+    } else if (source == "symbol") {
+        r.symbolScore = r.symbolScore.value_or(0.0) + contribution;
+    }
+    // Unknown sources still contribute to total score but don't get a breakdown field
+}
+
 // Template implementation - must be in header
 template <typename ScoreFunc>
 std::vector<SearchResult> ResultFusion::fuseSinglePass(const std::vector<ComponentResult>& results,
@@ -348,8 +357,14 @@ std::vector<SearchResult> ResultFusion::fuseSinglePass(const std::vector<Compone
             r.score = 0.0;
         }
 
-        // Accumulate score using the strategy-specific scoring function
-        r.score += scoreFunc(comp);
+        // Calculate this component's contribution
+        const double contribution = scoreFunc(comp);
+
+        // Accumulate total score
+        r.score += contribution;
+
+        // Track per-component breakdown
+        accumulateComponentScore(r, comp.source, contribution);
 
         // Use first available snippet
         if (r.snippet.empty() && comp.snippet.has_value()) {

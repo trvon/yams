@@ -283,3 +283,138 @@ TEST_CASE("AsioConnectionPool handles EOF during read", "[daemon][connection-poo
     fs::remove(socketPath, ec);
     AsioConnectionPool::shutdown_all(100ms);
 }
+
+TEST_CASE("Non-shared pool connection stays alive via pool_keepalive",
+          "[daemon][connection-pool][unit]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    // This test verifies that when poolEnabled=false (non-shared pool),
+    // the pool_keepalive reference in the connection prevents the pool
+    // from being destroyed prematurely.
+
+    auto runtimeDir = makeTempRuntimeDir("non-shared-pool-" + randomSuffix());
+    auto socketPath = runtimeDir / "ipc.sock";
+    std::error_code ec;
+    fs::remove(socketPath, ec);
+
+    boost::asio::io_context server_io;
+    boost::asio::local::stream_protocol::acceptor acceptor(
+        server_io, boost::asio::local::stream_protocol::endpoint(socketPath.string()));
+
+    std::atomic<bool> stop{false};
+    std::promise<void> connected;
+
+    std::thread server_thread([&] {
+        boost::system::error_code bec;
+        boost::asio::local::stream_protocol::socket sock(server_io);
+        acceptor.accept(sock);
+        connected.set_value();
+
+        // Keep connection open until test completes
+        while (!stop.load()) {
+            std::this_thread::sleep_for(10ms);
+        }
+        sock.close(bec);
+    });
+
+    TransportOptions opts;
+    opts.socketPath = socketPath;
+    opts.requestTimeout = 500ms;
+    opts.poolEnabled = false; // Non-shared pool - this is the key setting
+
+    // Create pool and acquire connection in a scope that lets pool go out of scope
+    std::shared_ptr<AsioConnection> conn;
+    {
+        auto pool = AsioConnectionPool::get_or_create(opts);
+        REQUIRE_FALSE(pool->is_shared()); // Verify it's a non-shared pool
+
+        auto fut = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),
+                                         boost::asio::use_future);
+        REQUIRE(fut.wait_for(2s) == std::future_status::ready);
+        conn = fut.get();
+        REQUIRE(conn);
+        REQUIRE(connected.get_future().wait_for(1s) == std::future_status::ready);
+
+        // Verify pool_keepalive is set for non-shared pools
+        REQUIRE(conn->pool_keepalive != nullptr);
+
+        // Pool goes out of scope here, but connection should still be alive
+        // because pool_keepalive holds a reference
+    }
+
+    // Connection should still be alive after pool variable went out of scope
+    REQUIRE(conn->alive.load());
+    REQUIRE(conn->socket);
+    REQUIRE(conn->socket->is_open());
+
+    // Clean up
+    conn->pool_keepalive.reset(); // Release the keepalive reference
+    conn.reset();
+
+    stop.store(true);
+    boost::system::error_code bec;
+    acceptor.close(bec);
+    server_thread.join();
+    fs::remove(socketPath, ec);
+}
+
+TEST_CASE("Shared pool does not set pool_keepalive", "[daemon][connection-pool][unit]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    // Shared pools are stored in the global registry, so they don't need
+    // the keepalive mechanism. Verify pool_keepalive is not set.
+
+    auto runtimeDir = makeTempRuntimeDir("shared-pool-" + randomSuffix());
+    auto socketPath = runtimeDir / "ipc.sock";
+    std::error_code ec;
+    fs::remove(socketPath, ec);
+
+    boost::asio::io_context server_io;
+    boost::asio::local::stream_protocol::acceptor acceptor(
+        server_io, boost::asio::local::stream_protocol::endpoint(socketPath.string()));
+
+    std::atomic<bool> stop{false};
+    std::promise<void> connected;
+
+    std::thread server_thread([&] {
+        boost::system::error_code bec;
+        boost::asio::local::stream_protocol::socket sock(server_io);
+        acceptor.accept(sock);
+        connected.set_value();
+
+        while (!stop.load()) {
+            std::this_thread::sleep_for(10ms);
+        }
+        sock.close(bec);
+    });
+
+    TransportOptions opts;
+    opts.socketPath = socketPath;
+    opts.requestTimeout = 500ms;
+    opts.poolEnabled = true; // Shared pool
+
+    auto pool = AsioConnectionPool::get_or_create(opts);
+    REQUIRE(pool->is_shared()); // Verify it's a shared pool
+
+    auto fut = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),
+                                     boost::asio::use_future);
+    REQUIRE(fut.wait_for(2s) == std::future_status::ready);
+    auto conn = fut.get();
+    REQUIRE(conn);
+    REQUIRE(connected.get_future().wait_for(1s) == std::future_status::ready);
+
+    // Shared pools should NOT set pool_keepalive (they're in the registry)
+    REQUIRE(conn->pool_keepalive == nullptr);
+
+    pool->release(conn);
+    stop.store(true);
+    boost::system::error_code bec;
+    acceptor.close(bec);
+    server_thread.join();
+    fs::remove(socketPath, ec);
+    AsioConnectionPool::shutdown_all(100ms);
+}

@@ -307,8 +307,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     workingConfig.metadataMaxResults = std::min(config_.metadataMaxResults, componentCap);
     workingConfig.maxResults = userLimit;
 
-    spdlog::debug("Search limit optimization: userLimit={}, componentCap={}, tiered={}", userLimit,
-                  componentCap, config_.enableTieredSearch);
+    spdlog::debug("Search limit optimization: userLimit={}, componentCap={}", userLimit,
+                  componentCap);
 
     std::vector<ComponentResult> allComponentResults;
     size_t estimatedResults = 0;
@@ -327,24 +327,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     if (workingConfig.metadataWeight > 0.0f)
         estimatedResults += workingConfig.metadataMaxResults;
     allComponentResults.reserve(estimatedResults);
-
-    // Early termination helper: check if we have enough quality results
-    const size_t earlyTerminationMinResults =
-        config_.earlyTerminationMinResults > 0 ? config_.earlyTerminationMinResults : userLimit;
-
-    auto shouldTerminateEarly = [&]() -> bool {
-        if (!config_.enableTieredSearch)
-            return false;
-        if (allComponentResults.size() < earlyTerminationMinResults)
-            return false;
-
-        // Check if we have high-quality results (top score above threshold)
-        float maxScore = 0.0f;
-        for (const auto& r : allComponentResults) {
-            maxScore = std::max(maxScore, r.score);
-        }
-        return maxScore >= config_.earlyTerminationQualityThreshold;
-    };
 
     // Component result collection helper with timing
     enum class ComponentStatus { Success, Failed, TimedOut };
@@ -409,257 +391,100 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
     };
 
-    bool usedEarlyTermination = false;
-
     if (config_.enableParallelExecution) [[likely]] {
-        if (config_.enableTieredSearch) {
-            // =====================================================================
-            // TIERED SEARCH (PBI-075): Run components in tiers with early termination
-            // Tier 1 (fast, indexed): text, path, vector (HNSW)
-            // Tier 2 (medium): KG alias resolution
-            // Tier 3 (slow, disabled by default): entity vectors (brute-force)
-            // =====================================================================
-            YAMS_ZONE_SCOPED_N("search_engine::tiered_parallel");
+        // All components run in parallel for best results
+        YAMS_ZONE_SCOPED_N("search_engine::fanout_parallel");
+        std::future<Result<std::vector<ComponentResult>>> textFuture;
+        std::future<Result<std::vector<ComponentResult>>> kgFuture;
+        std::future<Result<std::vector<ComponentResult>>> pathFuture;
+        std::future<Result<std::vector<ComponentResult>>> vectorFuture;
+        std::future<Result<std::vector<ComponentResult>>> entityVectorFuture;
+        std::future<Result<std::vector<ComponentResult>>> tagFuture;
+        std::future<Result<std::vector<ComponentResult>>> metaFuture;
 
-            // --- TIER 1: Fast indexed searches (run in parallel) ---
-            {
-                YAMS_ZONE_SCOPED_N("search_engine::tier1_fast");
-                std::future<Result<std::vector<ComponentResult>>> textFuture;
-                std::future<Result<std::vector<ComponentResult>>> pathFuture;
-                std::future<Result<std::vector<ComponentResult>>> vectorFuture;
-                std::future<Result<std::vector<ComponentResult>>> tagFuture;
-                std::future<Result<std::vector<ComponentResult>>> metaFuture;
-
-                if (config_.textWeight > 0.0f) {
-                    textFuture = postWork(
-                        [this, &query, &workingConfig]() {
-                            YAMS_ZONE_SCOPED_N("component::text");
-                            return queryFullText(query, workingConfig.textMaxResults);
-                        },
-                        executor_);
-                }
-
-                if (config_.pathTreeWeight > 0.0f) {
-                    pathFuture = postWork(
-                        [this, &query, &workingConfig]() {
-                            YAMS_ZONE_SCOPED_N("component::path");
-                            return queryPathTree(query, workingConfig.pathTreeMaxResults);
-                        },
-                        executor_);
-                }
-
-                if (config_.vectorWeight > 0.0f && queryEmbedding.has_value() && vectorDb_) {
-                    vectorFuture = postWork(
-                        [this, &queryEmbedding, &workingConfig]() {
-                            YAMS_ZONE_SCOPED_N("component::vector");
-                            return queryVectorIndex(queryEmbedding.value(),
-                                                    workingConfig.vectorMaxResults);
-                        },
-                        executor_);
-                }
-
-                // Tags and metadata are modifiers - run them in Tier 1 as well
-                if (config_.tagWeight > 0.0f && !params.tags.empty()) {
-                    tagFuture = postWork(
-                        [this, &params, &workingConfig]() {
-                            YAMS_ZONE_SCOPED_N("component::tag");
-                            return queryTags(params.tags, params.matchAllTags,
-                                             workingConfig.tagMaxResults);
-                        },
-                        executor_);
-                }
-
-                if (config_.metadataWeight > 0.0f) {
-                    metaFuture = postWork(
-                        [this, &params, &workingConfig]() {
-                            YAMS_ZONE_SCOPED_N("component::metadata");
-                            return queryMetadata(params, workingConfig.metadataMaxResults);
-                        },
-                        executor_);
-                }
-
-                // Collect Tier 1 results
-                handleStatus(collectResults(textFuture, "text", stats_.textQueries,
-                                            stats_.avgTextTimeMicros),
-                             "text");
-                handleStatus(collectResults(pathFuture, "path", stats_.pathTreeQueries,
-                                            stats_.avgPathTreeTimeMicros),
-                             "path");
-                handleStatus(collectResults(vectorFuture, "vector", stats_.vectorQueries,
-                                            stats_.avgVectorTimeMicros),
-                             "vector");
-                handleStatus(
-                    collectResults(tagFuture, "tag", stats_.tagQueries, stats_.avgTagTimeMicros),
-                    "tag");
-                handleStatus(collectResults(metaFuture, "metadata", stats_.metadataQueries,
-                                            stats_.avgMetadataTimeMicros),
-                             "metadata");
-            }
-
-            // Check for early termination after Tier 1
-            if (shouldTerminateEarly()) {
-                spdlog::debug(
-                    "Early termination after Tier 1: {} results, skipping KG and entity_vector",
-                    allComponentResults.size());
-                usedEarlyTermination = true;
-                if (config_.kgWeight > 0.0f && kgStore_) {
-                    skipped.push_back("kg");
-                }
-                if (config_.entityVectorWeight > 0.0f && vectorDb_) {
-                    skipped.push_back("entity_vector");
-                }
-            } else {
-                // --- TIER 2: Knowledge Graph search (medium cost) ---
-                if (config_.kgWeight > 0.0f && kgStore_) {
-                    YAMS_ZONE_SCOPED_N("search_engine::tier2_kg");
-                    std::future<Result<std::vector<ComponentResult>>> kgFuture;
-
-                    kgFuture = postWork(
-                        [this, &query, &workingConfig]() {
-                            YAMS_ZONE_SCOPED_N("component::kg");
-                            return queryKnowledgeGraph(query, workingConfig.kgMaxResults);
-                        },
-                        executor_);
-
-                    handleStatus(
-                        collectResults(kgFuture, "kg", stats_.kgQueries, stats_.avgKgTimeMicros),
-                        "kg");
-                }
-
-                // Check for early termination after Tier 2
-                if (shouldTerminateEarly()) {
-                    spdlog::debug(
-                        "Early termination after Tier 2: {} results, skipping entity_vector",
-                        allComponentResults.size());
-                    usedEarlyTermination = true;
-                    if (config_.entityVectorWeight > 0.0f && vectorDb_) {
-                        skipped.push_back("entity_vector");
-                    }
-                } else {
-                    // --- TIER 3: Entity vectors (slow, brute-force) ---
-                    // Only run if explicitly enabled (weight > 0)
-                    if (config_.entityVectorWeight > 0.0f && queryEmbedding.has_value() &&
-                        vectorDb_) {
-                        YAMS_ZONE_SCOPED_N("search_engine::tier3_entity_vector");
-                        std::future<Result<std::vector<ComponentResult>>> entityVectorFuture;
-
-                        entityVectorFuture = postWork(
-                            [this, &queryEmbedding, &workingConfig]() {
-                                YAMS_ZONE_SCOPED_N("component::entity_vector");
-                                return queryEntityVectors(queryEmbedding.value(),
-                                                          workingConfig.entityVectorMaxResults);
-                            },
-                            executor_);
-
-                        handleStatus(collectResults(entityVectorFuture, "entity_vector",
-                                                    stats_.entityVectorQueries,
-                                                    stats_.avgEntityVectorTimeMicros),
-                                     "entity_vector");
-                    }
-                }
-            }
-        } else {
-            // =====================================================================
-            // LEGACY: All components in parallel (no tiering)
-            // =====================================================================
-            YAMS_ZONE_SCOPED_N("search_engine::fanout_parallel");
-            std::future<Result<std::vector<ComponentResult>>> textFuture;
-            std::future<Result<std::vector<ComponentResult>>> kgFuture;
-            std::future<Result<std::vector<ComponentResult>>> pathFuture;
-            std::future<Result<std::vector<ComponentResult>>> vectorFuture;
-            std::future<Result<std::vector<ComponentResult>>> entityVectorFuture;
-            std::future<Result<std::vector<ComponentResult>>> tagFuture;
-            std::future<Result<std::vector<ComponentResult>>> metaFuture;
-
-            if (config_.textWeight > 0.0f) {
-                textFuture = postWork(
-                    [this, &query, &workingConfig]() {
-                        YAMS_ZONE_SCOPED_N("component::text");
-                        return queryFullText(query, workingConfig.textMaxResults);
-                    },
-                    executor_);
-            }
-
-            if (config_.kgWeight > 0.0f && kgStore_) {
-                kgFuture = postWork(
-                    [this, &query, &workingConfig]() {
-                        YAMS_ZONE_SCOPED_N("component::kg");
-                        return queryKnowledgeGraph(query, workingConfig.kgMaxResults);
-                    },
-                    executor_);
-            }
-
-            if (config_.pathTreeWeight > 0.0f) {
-                pathFuture = postWork(
-                    [this, &query, &workingConfig]() {
-                        YAMS_ZONE_SCOPED_N("component::path");
-                        return queryPathTree(query, workingConfig.pathTreeMaxResults);
-                    },
-                    executor_);
-            }
-
-            if (config_.vectorWeight > 0.0f && queryEmbedding.has_value() && vectorDb_) {
-                vectorFuture = postWork(
-                    [this, &queryEmbedding, &workingConfig]() {
-                        YAMS_ZONE_SCOPED_N("component::vector");
-                        return queryVectorIndex(queryEmbedding.value(),
-                                                workingConfig.vectorMaxResults);
-                    },
-                    executor_);
-            }
-
-            if (config_.entityVectorWeight > 0.0f && queryEmbedding.has_value() && vectorDb_) {
-                entityVectorFuture = postWork(
-                    [this, &queryEmbedding, &workingConfig]() {
-                        YAMS_ZONE_SCOPED_N("component::entity_vector");
-                        return queryEntityVectors(queryEmbedding.value(),
-                                                  workingConfig.entityVectorMaxResults);
-                    },
-                    executor_);
-            }
-
-            if (config_.tagWeight > 0.0f && !params.tags.empty()) {
-                tagFuture = postWork(
-                    [this, &params, &workingConfig]() {
-                        YAMS_ZONE_SCOPED_N("component::tag");
-                        return queryTags(params.tags, params.matchAllTags,
-                                         workingConfig.tagMaxResults);
-                    },
-                    executor_);
-            }
-
-            if (config_.metadataWeight > 0.0f) {
-                metaFuture = postWork(
-                    [this, &params, &workingConfig]() {
-                        YAMS_ZONE_SCOPED_N("component::metadata");
-                        return queryMetadata(params, workingConfig.metadataMaxResults);
-                    },
-                    executor_);
-            }
-
-            handleStatus(
-                collectResults(textFuture, "text", stats_.textQueries, stats_.avgTextTimeMicros),
-                "text");
-            handleStatus(collectResults(kgFuture, "kg", stats_.kgQueries, stats_.avgKgTimeMicros),
-                         "kg");
-            handleStatus(collectResults(pathFuture, "path", stats_.pathTreeQueries,
-                                        stats_.avgPathTreeTimeMicros),
-                         "path");
-            handleStatus(collectResults(vectorFuture, "vector", stats_.vectorQueries,
-                                        stats_.avgVectorTimeMicros),
-                         "vector");
-            handleStatus(collectResults(entityVectorFuture, "entity_vector",
-                                        stats_.entityVectorQueries,
-                                        stats_.avgEntityVectorTimeMicros),
-                         "entity_vector");
-            handleStatus(
-                collectResults(tagFuture, "tag", stats_.tagQueries, stats_.avgTagTimeMicros),
-                "tag");
-            handleStatus(collectResults(metaFuture, "metadata", stats_.metadataQueries,
-                                        stats_.avgMetadataTimeMicros),
-                         "metadata");
+        if (config_.textWeight > 0.0f) {
+            textFuture = postWork(
+                [this, &query, &workingConfig]() {
+                    YAMS_ZONE_SCOPED_N("component::text");
+                    return queryFullText(query, workingConfig.textMaxResults);
+                },
+                executor_);
         }
 
+        if (config_.kgWeight > 0.0f && kgStore_) {
+            kgFuture = postWork(
+                [this, &query, &workingConfig]() {
+                    YAMS_ZONE_SCOPED_N("component::kg");
+                    return queryKnowledgeGraph(query, workingConfig.kgMaxResults);
+                },
+                executor_);
+        }
+
+        if (config_.pathTreeWeight > 0.0f) {
+            pathFuture = postWork(
+                [this, &query, &workingConfig]() {
+                    YAMS_ZONE_SCOPED_N("component::path");
+                    return queryPathTree(query, workingConfig.pathTreeMaxResults);
+                },
+                executor_);
+        }
+
+        if (config_.vectorWeight > 0.0f && queryEmbedding.has_value() && vectorDb_) {
+            vectorFuture = postWork(
+                [this, &queryEmbedding, &workingConfig]() {
+                    YAMS_ZONE_SCOPED_N("component::vector");
+                    return queryVectorIndex(queryEmbedding.value(), workingConfig.vectorMaxResults);
+                },
+                executor_);
+        }
+
+        if (config_.entityVectorWeight > 0.0f && queryEmbedding.has_value() && vectorDb_) {
+            entityVectorFuture = postWork(
+                [this, &queryEmbedding, &workingConfig]() {
+                    YAMS_ZONE_SCOPED_N("component::entity_vector");
+                    return queryEntityVectors(queryEmbedding.value(),
+                                              workingConfig.entityVectorMaxResults);
+                },
+                executor_);
+        }
+
+        if (config_.tagWeight > 0.0f && !params.tags.empty()) {
+            tagFuture = postWork(
+                [this, &params, &workingConfig]() {
+                    YAMS_ZONE_SCOPED_N("component::tag");
+                    return queryTags(params.tags, params.matchAllTags, workingConfig.tagMaxResults);
+                },
+                executor_);
+        }
+
+        if (config_.metadataWeight > 0.0f) {
+            metaFuture = postWork(
+                [this, &params, &workingConfig]() {
+                    YAMS_ZONE_SCOPED_N("component::metadata");
+                    return queryMetadata(params, workingConfig.metadataMaxResults);
+                },
+                executor_);
+        }
+
+        handleStatus(
+            collectResults(textFuture, "text", stats_.textQueries, stats_.avgTextTimeMicros),
+            "text");
+        handleStatus(collectResults(kgFuture, "kg", stats_.kgQueries, stats_.avgKgTimeMicros),
+                     "kg");
+        handleStatus(collectResults(pathFuture, "path", stats_.pathTreeQueries,
+                                    stats_.avgPathTreeTimeMicros),
+                     "path");
+        handleStatus(collectResults(vectorFuture, "vector", stats_.vectorQueries,
+                                    stats_.avgVectorTimeMicros),
+                     "vector");
+        handleStatus(collectResults(entityVectorFuture, "entity_vector", stats_.entityVectorQueries,
+                                    stats_.avgEntityVectorTimeMicros),
+                     "entity_vector");
+        handleStatus(collectResults(tagFuture, "tag", stats_.tagQueries, stats_.avgTagTimeMicros),
+                     "tag");
+        handleStatus(collectResults(metaFuture, "metadata", stats_.metadataQueries,
+                                    stats_.avgMetadataTimeMicros),
+                     "metadata");
     } else {
         auto runSequential = [&](auto queryFn, const char* name, float weight,
                                  std::atomic<uint64_t>& queryCount,
@@ -737,13 +562,13 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     if (const char* env = std::getenv("YAMS_SEARCH_DIAG"); env && std::string(env) == "1") {
         const bool embeddingsAvailable = queryEmbedding.has_value();
         spdlog::warn("[search_diag] query='{}' components: contributing={} failed={} timed_out={} "
-                     "skipped={} early_termination={} embedding={} pre_fusion_total={} "
+                     "skipped={} embedding={} pre_fusion_total={} "
                      "weights(text={},vector={},entity_vector={},kg={},path={},tag={},meta={})",
                      query, contributing.size(), failed.size(), timedOut.size(), skipped.size(),
-                     usedEarlyTermination ? "yes" : "no", embeddingsAvailable ? "yes" : "no",
-                     allComponentResults.size(), workingConfig.textWeight,
-                     workingConfig.vectorWeight, workingConfig.entityVectorWeight,
-                     workingConfig.kgWeight, workingConfig.pathTreeWeight, workingConfig.tagWeight,
+                     embeddingsAvailable ? "yes" : "no", allComponentResults.size(),
+                     workingConfig.textWeight, workingConfig.vectorWeight,
+                     workingConfig.entityVectorWeight, workingConfig.kgWeight,
+                     workingConfig.pathTreeWeight, workingConfig.tagWeight,
                      workingConfig.metadataWeight);
         // Log per-component timing if available
         if (!componentTiming.empty()) {
@@ -795,7 +620,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     response.failedComponents = std::move(failed);
     response.contributingComponents = std::move(contributing);
     response.skippedComponents = std::move(skipped);
-    response.usedEarlyTermination = usedEarlyTermination;
+    response.usedEarlyTermination = false;
     if (config_.includeComponentTiming) {
         response.componentTimingMicros = std::move(componentTiming);
     }

@@ -1082,12 +1082,10 @@ if catch2_dep.found()
     install: false,
   )
 
-  # Search submodule tests (BKTree, TrigramIndex, HybridFuzzySearch, QueryParser, SearchExecutor, etc.)
+  # Search submodule tests (QueryParser, SearchExecutor, etc.)
   # Migrated from GTest as part of yams-3s4 / yams-1yq
   catch2_search_submodule_exe = executable('catch2_search_submodule',
     files(
-      'unit/search/bk_tree_smoke_catch2_test.cpp',
-      'unit/search/bk_tree_catch2_test.cpp',
       'unit/search/chunk_coverage_catch2_test.cpp',
       'unit/search/entity_linker_catch2_test.cpp',
       'unit/search/kg_scorer_simple_catch2_test.cpp',

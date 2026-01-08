@@ -388,9 +388,6 @@ Result<void> UpdateCommand::executeLocal() {
         }
     }
 
-    // Update fuzzy index if needed
-    metadataRepo->updateFuzzyIndex(docId);
-
     // Output results
     if (cli_ && (cli_->getJsonOutput() || cli_->getVerbose())) {
         json output;

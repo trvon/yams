@@ -316,8 +316,6 @@ private:
             spdlog::warn("Failed to index document content for FTS5: {}",
                          indexResult.error().message);
         }
-        // Also update fuzzy index
-        (void)metadataRepo_->updateFuzzyIndex(docInfo.id);
     }
 
     void cleanupServices() {

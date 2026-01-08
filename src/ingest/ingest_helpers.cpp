@@ -31,7 +31,6 @@ Result<void> persist_content_and_index(metadata::IMetadataRepository& meta, int6
             return Result<void>(Error{r.error()});
         }
 
-        (void)meta.updateFuzzyIndex(docId);
         (void)meta.updateDocumentExtractionStatus(docId, true, metadata::ExtractionStatus::Success);
         return Result<void>();
     } catch (const std::exception& e) {

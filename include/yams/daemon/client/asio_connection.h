@@ -25,6 +25,9 @@
 
 namespace yams::daemon {
 
+// Forward declaration for pool keepalive
+class AsioConnectionPool;
+
 class ConnectionRegistry {
 public:
     static ConnectionRegistry& instance();
@@ -127,6 +130,10 @@ struct AsioConnection {
     std::chrono::steady_clock::time_point last_adjust{std::chrono::steady_clock::now()};
 
     boost::asio::awaitable<Result<void>> async_write_frame(std::vector<uint8_t> frame);
+
+    // Keep-alive reference to the owning pool (for non-shared pools).
+    // This prevents the pool from being destroyed while connections are still in use.
+    std::shared_ptr<AsioConnectionPool> pool_keepalive;
 };
 
 } // namespace yams::daemon

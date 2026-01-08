@@ -159,10 +159,7 @@ public:
                 const std::optional<std::vector<int64_t>>& = std::nullopt) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
-    Result<void> buildFuzzyIndex() override { return Error{ErrorCode::NotImplemented, "NI"}; }
-    Result<void> updateFuzzyIndex(int64_t) override {
-        return Error{ErrorCode::NotImplemented, "NI"};
-    }
+    void addSymSpellTerm(std::string_view, int64_t) override { /* no-op for mock */ }
 
     // Query documents - THE MAIN METHOD USED IN TESTS
     Result<std::vector<DocumentInfo>>

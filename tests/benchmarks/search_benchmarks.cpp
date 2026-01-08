@@ -13,7 +13,6 @@
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/metadata_repository.h>
-#include <yams/search/bk_tree.h>
 #include <yams/search/parallel_post_processor.hpp>
 #include <yams/search/query_parser.h>
 #include <yams/search/query_tokenizer.h>
@@ -60,25 +59,6 @@ protected:
     std::unique_ptr<api::IContentStore> contentStore_;
     size_t corpusSize_;
     std::vector<std::string> queries_;
-};
-
-// --- BKTree Benchmarks from bk_tree_bench.cpp ---
-
-class BKTreeConstructionBenchmark : public BenchmarkBase {
-public:
-    BKTreeConstructionBenchmark(const std::string& name, int vocabSize,
-                                const Config& config = Config())
-        : BenchmarkBase(name, config), vocabSize_(vocabSize) {}
-
-protected:
-    size_t runIteration() override {
-        search::BKTree tree;
-        for (int i = 0; i < vocabSize_; ++i) {
-            tree.add("w" + std::to_string(i));
-        }
-        return vocabSize_;
-    }
-    int vocabSize_;
 };
 
 // --- QueryParser Benchmarks from query_parser_bench.cpp ---
@@ -148,7 +128,6 @@ protected:
 // --- Main Runner ---
 
 using yams::benchmark::BenchmarkBase;
-using yams::benchmark::BKTreeConstructionBenchmark;
 using yams::benchmark::QueryParserBenchmark;
 using yams::benchmark::SearchBenchmark;
 using yams::test::BenchmarkTracker;
@@ -188,12 +167,6 @@ int main(int argc, char** argv) {
 
     // Search benchmarks
     benchmarks.push_back(std::make_unique<SearchBenchmark>("ExactMatch_1K", 1000, config));
-
-    // BK-Tree benchmarks
-    benchmarks.push_back(
-        std::make_unique<BKTreeConstructionBenchmark>("BKTree_Construction_256", 256, config));
-    benchmarks.push_back(
-        std::make_unique<BKTreeConstructionBenchmark>("BKTree_Construction_4096", 4096, config));
 
     // QueryParser benchmarks
     benchmarks.push_back(

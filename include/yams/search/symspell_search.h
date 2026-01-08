@@ -22,14 +22,12 @@ namespace yams::search {
  * @brief SymSpell-based fuzzy search for YAMS
  *
  * Provides fast edit-distance fuzzy search using the SymSpell algorithm
- * with SQLite persistence. This replaces the slower BK-tree based
- * HybridFuzzySearch for the edit-distance component.
+ * with SQLite persistence.
  *
  * Key features:
  * - O(1) lookup via precomputed delete variants
  * - SQLite-backed persistence (survives daemon restart)
  * - Incremental updates during document ingest
- * - 1000x faster than BK-tree for typical queries
  */
 class SymSpellSearch {
 public:

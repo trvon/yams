@@ -689,8 +689,6 @@ public:
                 return ctx_.metadataRepo->indexDocumentContent(info.id, info.fileName, text,
                                                                mime.empty() ? "text/plain" : mime);
             });
-            (void)co_await retryMetadataOp(
-                [&]() { return ctx_.metadataRepo->updateFuzzyIndex(info.id); });
 
             // Mark extraction success for this light path (avoid read-modify-write)
             (void)co_await retryMetadataOp([&]() {
@@ -968,7 +966,7 @@ private:
             } else {
                 SearchItem it;
                 it.id = d.id;
-                it.hash = req.showHash ? d.sha256Hash : "";
+                it.hash = d.sha256Hash;
                 it.title = d.fileName;
                 it.path = d.filePath;
                 it.score = 1.0; // neutral score for path matches
@@ -1075,7 +1073,7 @@ private:
             } else {
                 SearchItem it;
                 it.id = doc.id;
-                it.hash = req.showHash ? doc.sha256Hash : "";
+                it.hash = doc.sha256Hash;
                 it.title = doc.fileName;
                 it.path = doc.filePath;
                 it.score = 1.0;
@@ -1086,9 +1084,7 @@ private:
                 it.created = doc.createdTime.time_since_epoch().count();
                 it.modified = doc.modifiedTime.time_since_epoch().count();
                 it.indexed = doc.indexedTime.time_since_epoch().count();
-                if (req.showHash) {
-                    it.metadata["hash"] = doc.sha256Hash;
-                }
+                it.metadata["hash"] = doc.sha256Hash;
                 it.metadata["indexed"] = std::to_string(doc.indexedTime.time_since_epoch().count());
                 it.metadata["path"] = doc.filePath;
                 resp.results.push_back(std::move(it));
@@ -1234,11 +1230,19 @@ private:
                     const auto& r = *candidates[i];
                     SearchItem it;
                     it.id = static_cast<int64_t>(i + 1);
+                    it.hash = r.document.sha256Hash;
                     it.title = r.document.fileName;
                     it.path = r.document.filePath;
                     it.score = r.score;
                     if (!r.snippet.empty())
                         it.snippet = r.snippet;
+
+                    // Copy score breakdown if available
+                    it.vectorScore = r.vectorScore;
+                    it.keywordScore = r.keywordScore;
+                    it.kgEntityScore = r.kgScore;
+                    it.structuralScore = r.pathScore;
+                    // tagScore and symbolScore mapped to SearchItem if needed
 
                     // Store hash for symbol enrichment post-processing
                     hashes[i] = r.document.sha256Hash;
@@ -1413,11 +1417,18 @@ private:
             for (const auto& item : metaResults.results) {
                 SearchItem it;
                 it.id = item.document.id;
-                it.hash = req.showHash ? item.document.sha256Hash : "";
+                it.hash = item.document.sha256Hash;
                 it.title = item.document.fileName;
                 it.path = item.document.filePath;
                 it.score = item.score;
                 it.snippet = item.snippet;
+
+                // Copy score breakdown if available
+                it.vectorScore = item.vectorScore;
+                it.keywordScore = item.keywordScore;
+                it.kgEntityScore = item.kgScore;
+                it.structuralScore = item.pathScore;
+
                 serviceResults.push_back(std::move(it));
             }
             return serviceResults;

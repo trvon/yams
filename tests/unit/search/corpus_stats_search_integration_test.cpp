@@ -416,7 +416,6 @@ private:
         if (!indexResult) {
             spdlog::warn("Failed to index document content: {}", indexResult.error().message);
         }
-        (void)metadataRepo_->updateFuzzyIndex(docInfo.id);
     }
 
     void cleanupServices() { docService_.reset(); }
