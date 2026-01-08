@@ -80,42 +80,42 @@ struct SearchEngineConfig {
     float kgWeight = 0.10f;       // Knowledge graph weight
     float vectorWeight = 0.20f;   // Vector similarity weight (HNSW indexed, fast)
     float entityVectorWeight =
-        0.0f; // Entity (symbol) vector similarity weight (DISABLED: brute-force, slow)
-    float tagWeight = 0.10f;      // Tag-based search weight (modifier, not standalone)
+        0.10f;               // Entity (symbol) vector similarity weight (enabled for better recall)
+    float tagWeight = 0.10f; // Tag-based search weight (modifier, not standalone)
     float metadataWeight = 0.05f; // Metadata attribute matching weight (modifier, not standalone)
 
     // Search parameters
-    size_t maxResults = 100;                     // Maximum results to return
-    float similarityThreshold = 0.65f;           // Minimum similarity threshold
-    bool enableParallelExecution = true;         // Parallel component queries
+    size_t maxResults = 100;             // Maximum results to return
+    float similarityThreshold = 0.50f;   // Minimum similarity threshold (lowered for better recall)
+    bool enableParallelExecution = true; // Parallel component queries
     std::chrono::milliseconds componentTimeout = // Timeout per component (0 = no timeout)
         std::chrono::milliseconds(0);
 
     // RRF (Reciprocal Rank Fusion) parameter
     // Lower k = more weight on top-ranked items
     // Higher k = smoother ranking across positions
-    // Optimal values: 15-30 for small corpora, 45-60 for large corpora
-    float rrfK = 60.0f;
+    float rrfK = 30.0f;
 
     // Benchmarking support
-    bool enableProfiling = false; // Enable detailed profiling output
+    bool enableProfiling = false;
 
     // Result fusion strategy
     enum class FusionStrategy {
-        WEIGHTED_SUM,       // Sum of weighted scores
-        RECIPROCAL_RANK,    // Reciprocal Rank Fusion
-        BORDA_COUNT,        // Borda count voting
-        WEIGHTED_RECIPROCAL // Weighted RRF (custom)
-    } fusionStrategy = FusionStrategy::WEIGHTED_RECIPROCAL;
+        WEIGHTED_SUM,        // Sum of weighted scores
+        RECIPROCAL_RANK,     // Reciprocal Rank Fusion
+        BORDA_COUNT,         // Borda count voting
+        WEIGHTED_RECIPROCAL, // Weighted RRF (custom)
+        COMB_MNZ             // CombMNZ: score * num_components (recall-focused)
+    } fusionStrategy = FusionStrategy::COMB_MNZ;
 
-    // Component-specific settings
-    size_t textMaxResults = 200;        // Full-text search candidate limit (merged FTS5 + symbol)
-    size_t pathTreeMaxResults = 100;    // Path tree candidate limit
-    size_t kgMaxResults = 50;           // KG traversal candidate limit
-    size_t vectorMaxResults = 100;      // Vector search k
-    size_t entityVectorMaxResults = 50; // Entity vector search k
-    size_t tagMaxResults = 200;         // Tag search candidate limit
-    size_t metadataMaxResults = 150;    // Metadata filter candidate limit
+    // Component-specific settings (increased for better recall)
+    size_t textMaxResults = 300;
+    size_t pathTreeMaxResults = 150;
+    size_t kgMaxResults = 100;
+    size_t vectorMaxResults = 150;
+    size_t entityVectorMaxResults = 100;
+    size_t tagMaxResults = 250;
+    size_t metadataMaxResults = 200;
 
     // Performance tuning
     bool useConnectionPriority = true;   // Use High priority for search queries
@@ -300,20 +300,16 @@ public:
     std::vector<SearchResult> fuse(const std::vector<ComponentResult>& componentResults);
 
 private:
-    // Fusion strategy implementations
     std::vector<SearchResult> fuseWeightedSum(const std::vector<ComponentResult>& results);
     std::vector<SearchResult> fuseReciprocalRank(const std::vector<ComponentResult>& results);
     std::vector<SearchResult> fuseBordaCount(const std::vector<ComponentResult>& results);
     std::vector<SearchResult> fuseWeightedReciprocal(const std::vector<ComponentResult>& results);
+    std::vector<SearchResult> fuseCombMNZ(const std::vector<ComponentResult>& results);
 
-    // Single-pass fusion: accumulate scores directly into result map, then sort once.
-    // Replaces the previous 3-pass pattern (groupByDocument -> iterate -> sort).
-    // ScoreFunc signature: double(const ComponentResult&)
     template <typename ScoreFunc>
     std::vector<SearchResult> fuseSinglePass(const std::vector<ComponentResult>& results,
                                              ScoreFunc&& scoreFunc);
 
-    // Helper: Get weight for component source
     float getComponentWeight(const std::string& source) const;
 
     const SearchEngineConfig& config_;

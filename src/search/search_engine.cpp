@@ -88,7 +88,6 @@ std::vector<SearchResult> ResultFusion::fuse(const std::vector<ComponentResult>&
         return {};
     }
 
-    // Dispatch to fusion strategy
     switch (config_.fusionStrategy) {
         case SearchEngineConfig::FusionStrategy::WEIGHTED_SUM:
             return fuseWeightedSum(componentResults);
@@ -98,8 +97,10 @@ std::vector<SearchResult> ResultFusion::fuse(const std::vector<ComponentResult>&
             return fuseBordaCount(componentResults);
         case SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL:
             return fuseWeightedReciprocal(componentResults);
+        case SearchEngineConfig::FusionStrategy::COMB_MNZ:
+            return fuseCombMNZ(componentResults);
         default:
-            return fuseWeightedReciprocal(componentResults);
+            return fuseCombMNZ(componentResults);
     }
 }
 
@@ -142,6 +143,23 @@ ResultFusion::fuseWeightedReciprocal(const std::vector<ComponentResult>& results
         double rrfScore = 1.0 / (k + static_cast<double>(comp.rank));
         double scoreBoost = 1.0 + std::clamp(static_cast<double>(comp.score), 0.0, 1.0);
         return weight * rrfScore * scoreBoost;
+    });
+}
+
+std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentResult>& results) {
+    // CombMNZ: documents found by multiple components get boosted
+    // First pass: count how many components found each document
+    std::unordered_map<std::string, size_t> componentCounts;
+    for (const auto& comp : results) {
+        componentCounts[comp.documentHash]++;
+    }
+
+    const float k = config_.rrfK;
+    return fuseSinglePass(results, [this, k, &componentCounts](const ComponentResult& comp) {
+        float weight = getComponentWeight(comp.source);
+        double rrfScore = 1.0 / (k + static_cast<double>(comp.rank));
+        double mnzBoost = static_cast<double>(componentCounts[comp.documentHash]);
+        return weight * rrfScore * mnzBoost;
     });
 }
 
