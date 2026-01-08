@@ -60,6 +60,29 @@ static const std::vector<EmbeddingModel> EMBEDDING_MODELS = {
      "model.onnx",
      "Optimized for semantic search on QA pairs (215M training samples)", 90, 384}};
 
+// Available GLiNER models for named entity recognition (NER)
+struct GlinerModel {
+    std::string name;
+    std::string repo;       // HuggingFace repo (e.g., "onnx-community/gliner_small-v2.1")
+    std::string model_file; // Model filename (e.g., "model_quantized.onnx" or "model.onnx")
+    std::string description;
+    size_t size_mb; // Approximate total size (model + tokenizer)
+};
+
+static const std::vector<GlinerModel> GLINER_MODELS = {
+    {"gliner_small-v2.1-quantized", "onnx-community/gliner_small-v2.1", "model_quantized.onnx",
+     "Small GLiNER quantized (fast, recommended)", 175},
+    {"gliner_small-v2.1", "onnx-community/gliner_small-v2.1", "model.onnx",
+     "Small GLiNER full precision (~580MB)", 580},
+    {"gliner_medium-v2.1-quantized", "onnx-community/gliner_medium-v2.1", "model_quantized.onnx",
+     "Medium GLiNER quantized (balanced)", 220},
+    {"gliner_medium-v2.1", "onnx-community/gliner_medium-v2.1", "model.onnx",
+     "Medium GLiNER full precision (~745MB)", 745}};
+
+// Files required for GLiNER model (tokenizer files at repo root)
+static const std::vector<std::string> GLINER_TOKENIZER_FILES = {"tokenizer.json", "config.json",
+                                                                "gliner_config.json"};
+
 // Available tree-sitter grammars for symbol extraction
 struct GrammarInfo {
     std::string_view language;
@@ -67,6 +90,185 @@ struct GrammarInfo {
     std::string_view description;
     bool recommended; // Show in default selection
 };
+
+// Embedded YAMS skill file for AI agents (Claude Code, OpenCode)
+static constexpr std::string_view YAMS_SKILL_CONTENT = R"skill(---
+name: yams
+description: Code indexing, semantic search, and knowledge graph for project memory
+license: GPL-3.0
+compatibility: claude-code, opencode
+metadata:
+  tools: cli, mcp
+  categories: search, indexing, memory, knowledge-graph
+---
+
+# YAMS Skill
+
+## Quick Reference
+
+```bash
+# Status & Health
+yams status                    # Check daemon and index status
+yams daemon start              # Start background daemon
+yams doctor                    # Diagnose issues
+
+# Indexing
+yams add <file>                # Index single file
+yams add . -r --include "*.py" # Index directory recursively
+yams watch                     # Auto-index on file changes
+
+# Search (use grep first, search for semantic)
+yams grep "pattern"            # Code pattern search (fast, exact)
+yams search "query"            # Semantic/hybrid search
+
+# Graph
+yams graph --name <file>       # Show file relationships
+yams graph --list-type symbol  # List symbols
+```
+
+## Code Indexing
+
+### Index Project Files
+
+```bash
+# Index specific file types
+yams add . -r --include "*.ts,*.tsx,*.js"
+
+# Index with exclusions
+yams add . -r --include "*.py" --exclude "venv/**,__pycache__/**"
+
+# Index with metadata for tracking
+yams add src/ -r --metadata "task=feature-auth"
+```
+
+### Auto-Index with Watch
+
+```bash
+yams watch                     # Start watching current directory
+yams watch --interval 2000     # Custom interval (ms)
+yams watch --stop              # Stop watching
+```
+
+## Search Patterns
+
+### Decision Tree
+
+1. **Code patterns** -> `yams grep` (fast, regex)
+2. **Semantic/concept** -> `yams search` (embeddings)
+3. **No results from grep** -> Try `yams search`
+
+### grep (Code Search)
+
+```bash
+# Exact pattern
+yams grep "function authenticate"
+
+# Regex pattern
+yams grep "async.*await.*fetch"
+
+# Fuzzy matching
+yams grep "authentcation" --fuzzy
+
+# With context lines
+yams grep "TODO" -A 2 -B 2
+
+# Filter by extension
+yams grep "import" --ext py
+```
+
+### search (Semantic Search)
+
+```bash
+# Concept search
+yams search "error handling patterns"
+
+# Hybrid search (default)
+yams search "authentication flow" --type hybrid
+
+# Limit results
+yams search "database connection" --limit 5
+```
+
+## Knowledge Management
+
+### Store Research
+
+```bash
+# Index documentation
+curl -s "https://docs.example.com/api" | yams add - --name "api-docs.md"
+
+# Store with metadata
+yams add notes.md --metadata "source=research,topic=auth"
+```
+
+## Session Management
+
+```bash
+# Start named session
+yams session start --name "feature-auth"
+
+# List sessions
+yams session ls
+
+# Switch session
+yams session use "feature-auth"
+
+# Warm session cache (faster searches)
+yams session warm --limit 100
+```
+
+## Graph Queries
+
+```bash
+# Show file dependencies
+yams graph --name src/auth/login.ts --depth 2
+
+# List all symbols of type
+yams graph --list-type function --limit 50
+
+# Find isolated nodes (potential dead code)
+yams graph --list-type symbol --isolated
+```
+
+## MCP Integration
+
+YAMS exposes tools via Model Context Protocol for programmatic access.
+
+```bash
+yams serve                     # Start MCP server (quiet mode)
+```
+
+### MCP Configuration
+
+```json
+{
+  "mcpServers": {
+    "yams": {
+      "command": "yams",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+## Troubleshooting
+
+```bash
+yams daemon status -d          # Check daemon status
+yams daemon log -n 50          # View daemon logs
+yams doctor                    # Full diagnostic
+yams doctor repair --all       # Repair index
+```
+
+## Environment Variables
+
+| Variable | Purpose |
+|----------|---------|
+| `YAMS_DATA_DIR` | Storage directory |
+| `YAMS_SOCKET` | Daemon socket path |
+| `YAMS_LOG_LEVEL` | Logging verbosity |
+| `YAMS_SESSION_CURRENT` | Default session |
+)skill";
 
 // Must match grammar_loader.h kGrammarRepos
 static constexpr GrammarInfo SUPPORTED_GRAMMARS[] = {
@@ -172,8 +374,11 @@ public:
                 spdlog::info("YAMS is already initialized at {} (use --force to overwrite).",
                              dataPath.string());
 
-                // Still offer grammar download even if already initialized
+                // Still offer GLiNER model, grammar download, and skill install even if already
+                // initialized
+                maybeSetupGlinerModel(dataPath, configPath);
                 maybeSetupGrammars(dataPath);
+                maybeSetupAgentSkill();
                 maybeBootstrapProjectSession();
                 return Result<void>();
             }
@@ -361,10 +566,16 @@ public:
                 } catch (const std::exception& e) {
                     spdlog::debug("Skipping plugin_name_policy write: {}", e.what());
                 }
+
+                // 7a) GLiNER Model Setup (for NER in Glint plugin)
+                maybeSetupGlinerModel(dataPath, configPath);
             }
 
             // 7) Tree-sitter Grammar Setup (for symbol extraction)
             maybeSetupGrammars(dataPath);
+
+            // 8) AI Agent Skill Installation (Claude Code, OpenCode)
+            maybeSetupAgentSkill();
 
             maybeBootstrapProjectSession();
             spdlog::info("YAMS initialization complete.");
@@ -1179,6 +1390,294 @@ private:
         return false;
     }
 
+    // Download GLiNER model files using the unified downloader
+    Result<void> downloadGlinerModelFiles(const GlinerModel& model, const fs::path& outputDir) {
+        fs::create_directories(outputDir);
+        fs::path modelFile = outputDir / "model.onnx";
+
+        // Check if already downloaded
+        if (fs::exists(modelFile) && fs::exists(outputDir / "tokenizer.json")) {
+            std::cout << "  GLiNER model already exists at: " << outputDir.string() << "\n";
+            return Result<void>{};
+        }
+
+        // Setup downloader
+        yams::downloader::StorageConfig storage{};
+        try {
+            fs::path dataDir = cli_ ? cli_->getDataPath() : fs::path{};
+            if (!dataDir.empty()) {
+                storage.objectsDir = dataDir / "storage" / "objects";
+                storage.stagingDir = dataDir / "staging" / "downloader";
+            } else {
+                auto tmp = fs::temp_directory_path();
+                storage.objectsDir = tmp / "yams" / "objects";
+                storage.stagingDir = tmp / "yams" / "downloader";
+            }
+        } catch (...) {
+            try {
+                auto tmp = fs::temp_directory_path();
+                storage.objectsDir = tmp / "yams" / "objects";
+                storage.stagingDir = tmp / "yams" / "downloader";
+            } catch (...) {
+            }
+        }
+
+        yams::downloader::DownloaderConfig dcfg{};
+        auto manager = yams::downloader::makeDownloadManager(storage, dcfg);
+
+        // Download helper with progress
+        auto downloadFile = [&](const std::string& url, const fs::path& outPath,
+                                const std::string& label) -> Result<void> {
+            yams::downloader::DownloadRequest req{};
+            req.url = url;
+            req.storeOnly = true;
+            req.exportPath = outPath;
+
+            size_t lastLen = 0;
+            auto onProgress = [&label, &lastLen](const yams::downloader::ProgressEvent& ev) {
+                auto stageName = [](yams::downloader::ProgressStage s) {
+                    switch (s) {
+                        case yams::downloader::ProgressStage::Resolving:
+                            return "resolving";
+                        case yams::downloader::ProgressStage::Connecting:
+                            return "connecting";
+                        case yams::downloader::ProgressStage::Downloading:
+                            return "downloading";
+                        case yams::downloader::ProgressStage::Verifying:
+                            return "verifying";
+                        case yams::downloader::ProgressStage::Finalizing:
+                            return "finalizing";
+                        default:
+                            return "";
+                    }
+                };
+                float pct = ev.percentage.value_or(0.0f);
+                double done_mb = static_cast<double>(ev.downloadedBytes) / (1024.0 * 1024.0);
+                std::string content;
+                if (ev.totalBytes) {
+                    double total_mb = static_cast<double>(*ev.totalBytes) / (1024.0 * 1024.0);
+                    content = fmt::format("  {} {:11s} {:3.0f}% [{:.1f}/{:.1f} MB]", label,
+                                          stageName(ev.stage), pct, done_mb, total_mb);
+                } else {
+                    content =
+                        fmt::format("  {} {:11s} [{:.1f} MB]", label, stageName(ev.stage), done_mb);
+                }
+                std::string out = "\r" + content;
+                if (lastLen > content.size())
+                    out += std::string(lastLen - content.size(), ' ');
+                fmt::print("{}", out);
+                std::fflush(stdout);
+                lastLen = content.size();
+                if (ev.stage == yams::downloader::ProgressStage::Finalizing) {
+                    fmt::print("\n");
+                    lastLen = 0;
+                }
+            };
+
+            auto res = manager->download(req, onProgress, [] { return false; }, {});
+            if (!res.ok() || !res.value().success) {
+                std::string msg =
+                    res.ok() ? (res.value().error ? res.value().error->message : "download failed")
+                             : res.error().message;
+                return Error{ErrorCode::InternalError, label + ": " + msg};
+            }
+            return Result<void>{};
+        };
+
+        std::cout << "\n" << cli::ui::section_header("Downloading GLiNER Model") << "\n";
+        std::cout << cli::ui::key_value("Model", model.name) << "\n";
+        std::cout << cli::ui::key_value("Size", "~" + std::to_string(model.size_mb) + " MB")
+                  << "\n\n";
+
+        // Base URL for this model's repo
+        std::string baseUrl = "https://huggingface.co/" + model.repo + "/resolve/main";
+
+        // Download the ONNX model file (from onnx/ subfolder)
+        {
+            std::string url = baseUrl + "/onnx/" + model.model_file;
+            fs::path outPath = outputDir / "model.onnx"; // Always save as model.onnx locally
+
+            auto result = downloadFile(url, outPath, model.model_file);
+            if (!result) {
+                return Error{ErrorCode::NetworkError,
+                             "Failed to download model: " + model.model_file};
+            }
+        }
+
+        // Download tokenizer files (from repo root)
+        for (const auto& filename : GLINER_TOKENIZER_FILES) {
+            std::string url = baseUrl + "/" + filename;
+            fs::path outPath = outputDir / filename;
+
+            auto result = downloadFile(url, outPath, filename);
+            if (!result) {
+                // tokenizer.json is required, others are optional
+                if (filename == "tokenizer.json") {
+                    spdlog::warn(
+                        "Required tokenizer.json not available, model may not work correctly");
+                } else {
+                    spdlog::debug("Optional file {} not available", filename);
+                }
+            }
+        }
+
+        std::cout << ui::status_ok("GLiNER model downloaded successfully") << "\n";
+        return Result<void>{};
+    }
+
+    std::string promptForGlinerModel(const fs::path& dataPath) {
+        // Build choice items
+        std::vector<ChoiceItem> items;
+        items.reserve(GLINER_MODELS.size() + 1);
+
+        // Add "skip" option first
+        ChoiceItem skipItem;
+        skipItem.value = "";
+        skipItem.label = "Skip GLiNER model download";
+        skipItem.description = "You can download a model later with: yams model download --gliner";
+        items.push_back(std::move(skipItem));
+
+        for (const auto& m : GLINER_MODELS) {
+            ChoiceItem ci;
+            ci.value = m.name;
+            ci.label = m.name + " (~" + std::to_string(m.size_mb) + " MB)";
+            ci.description = m.description;
+            items.push_back(std::move(ci));
+        }
+
+        size_t chosenIdx = prompt_choice(
+            "\nGLiNER model for named entity extraction (NER):", items,
+            ChoiceOptions{.defaultIndex = 1, .allowEmpty = true, .retryOnInvalid = true});
+
+        if (chosenIdx == 0) {
+            // Skip selected
+            std::cout << "\nSkipping GLiNER model download.\n";
+            std::cout << "You can download a model later with: yams model download --gliner\n";
+            return "";
+        }
+
+        const auto& selectedModel = GLINER_MODELS[chosenIdx - 1];
+
+        // Check if model already exists
+        fs::path modelDir = dataPath / "models" / "gliner" / selectedModel.name;
+        fs::path modelPath = modelDir / "model.onnx";
+
+        if (fs::exists(modelPath)) {
+            std::cout << "\nGLiNER model already downloaded at: " << modelDir.string() << "\n";
+        } else {
+            // Ask if user wants to download now
+            bool downloadNow = prompt_yes_no("\nDownload the GLiNER model now? [Y/n]: ",
+                                             YesNoOptions{.defaultYes = true});
+
+            if (downloadNow) {
+                auto result = downloadGlinerModelFiles(selectedModel, modelDir);
+                if (!result) {
+                    spdlog::warn("GLiNER model download failed: {}", result.error().message);
+                    std::cout << "\nYou can download the model later with:\n"
+                              << "  yams model download --gliner " << selectedModel.name << "\n";
+                }
+            } else {
+                std::cout << "\nTo download this model later:\n"
+                          << "  yams model download --gliner " << selectedModel.name << "\n";
+            }
+        }
+        return selectedModel.name;
+    }
+
+    /**
+     * @brief Unified GLiNER model setup entry point for both init and already-initialized states.
+     *
+     * Handles the prompt logic based on nonInteractive_ and autoInit_ flags:
+     * - Interactive mode: prompts user for model selection
+     * - Auto mode: downloads default model without prompting
+     * - Non-interactive (non-auto): skips GLiNER setup entirely
+     */
+    void maybeSetupGlinerModel(const fs::path& dataPath, const fs::path& configPath) {
+        std::string selectedGlinerModel;
+
+        if (autoInit_) {
+            // Auto mode: download the small model by default
+            selectedGlinerModel = GLINER_MODELS[0].name;
+            spdlog::info("Using default GLiNER model: {}", selectedGlinerModel);
+            fs::path glinerModelDir = dataPath / "models" / "gliner" / selectedGlinerModel;
+            auto result = downloadGlinerModelFiles(GLINER_MODELS[0], glinerModelDir);
+            if (!result) {
+                spdlog::warn("GLiNER model download failed: {}", result.error().message);
+                spdlog::warn("You can download the model later with: yams model download --gliner");
+            }
+        } else if (!nonInteractive_) {
+            // Interactive mode: prompt user
+            bool setupGliner =
+                prompt_yes_no("\nDownload GLiNER model for named entity extraction? [Y/n]: ",
+                              YesNoOptions{.defaultYes = true});
+            if (setupGliner) {
+                selectedGlinerModel = promptForGlinerModel(dataPath);
+            }
+        }
+        // Non-interactive non-auto: skip GLiNER setup
+
+        // Update config with GLiNER model path if selected
+        if (!selectedGlinerModel.empty()) {
+            updateGlinerConfig(configPath, dataPath, selectedGlinerModel);
+        }
+    }
+
+    /**
+     * @brief Updates config.toml with GLiNER model path.
+     */
+    void updateGlinerConfig(const fs::path& configPath, const fs::path& dataPath,
+                            const std::string& selectedGlinerModel) {
+        try {
+            std::ifstream in(configPath);
+            std::stringstream buf;
+            buf << in.rdbuf();
+            in.close();
+            std::string content = buf.str();
+
+            // Ensure [plugins] section exists
+            if (content.find("[plugins]") == std::string::npos) {
+                content.append("\n[plugins]\n");
+            }
+
+            // Ensure [plugins.glint] section exists
+            if (content.find("[plugins.glint]") == std::string::npos) {
+                auto pluginsPos = content.find("[plugins]");
+                if (pluginsPos != std::string::npos) {
+                    auto nextSec = content.find("\n[", pluginsPos + 1);
+                    auto insertPos = (nextSec == std::string::npos) ? content.size() : nextSec;
+                    content.insert(insertPos, "\n[plugins.glint]\nenabled = true\n");
+                }
+            }
+
+            // Set model_path in [plugins.glint]
+            fs::path glinerModelPath =
+                dataPath / "models" / "gliner" / selectedGlinerModel / "model.onnx";
+            auto secPos = content.find("[plugins.glint]");
+            if (secPos != std::string::npos) {
+                auto nextSec = content.find("\n[", secPos + 1);
+                auto rangeEnd = (nextSec == std::string::npos) ? content.size() : nextSec;
+                auto keyPos = content.find("model_path", secPos);
+                std::string modelPathLine =
+                    "model_path = \"" + escapeTomlString(glinerModelPath.string()) + "\"";
+                if (keyPos == std::string::npos || keyPos > rangeEnd) {
+                    content.insert(rangeEnd, modelPathLine + "\n");
+                } else {
+                    auto lineEnd = content.find("\n", keyPos);
+                    if (lineEnd == std::string::npos)
+                        lineEnd = content.size();
+                    content.replace(keyPos, lineEnd - keyPos, modelPathLine);
+                }
+            }
+
+            std::ofstream outCfg(configPath, std::ios::trunc);
+            outCfg << content;
+            outCfg.close();
+            spdlog::info("Configured [plugins.glint].model_path");
+        } catch (const std::exception& e) {
+            spdlog::debug("Skipping GLiNER config write: {}", e.what());
+        }
+    }
+
     /**
      * @brief Unified grammar setup entry point for both init and already-initialized states.
      *
@@ -1713,6 +2212,98 @@ private:
         } catch (const std::exception& e) {
             cleanup();
             return Error{ErrorCode::InternalError, e.what()};
+        }
+    }
+
+    /**
+     * @brief Installs YAMS skill file for AI agents (Claude Code, OpenCode).
+     *
+     * Handles the prompt logic based on nonInteractive_ and autoInit_ flags:
+     * - Interactive mode: prompts user for installation
+     * - Auto mode: installs skill automatically
+     * - Non-interactive (non-auto): skips skill installation
+     */
+    void maybeSetupAgentSkill() {
+        if (autoInit_) {
+            // Auto mode: install skill without prompting
+            installAgentSkill(true, true);
+        } else if (!nonInteractive_) {
+            // Interactive mode: prompt user
+            bool installSkill =
+                prompt_yes_no("\nInstall YAMS skill for AI agents (Claude Code, OpenCode)? [Y/n]: ",
+                              YesNoOptions{.defaultYes = true});
+            if (installSkill) {
+                // Ask which agents to install for
+                std::cout << "\n" << cli::ui::section_header("AI Agent Skill Installation") << "\n";
+                std::cout << cli::ui::numbered_item("Claude Code only", 1, 2) << "\n";
+                std::cout << cli::ui::numbered_item("OpenCode only", 2, 2) << "\n";
+                std::cout << cli::ui::numbered_item("Both (recommended)", 3, 2) << "\n";
+                std::cout << "  Choice [3]: ";
+
+                std::string choice;
+                std::getline(std::cin, choice);
+                if (choice.empty())
+                    choice = "3";
+
+                bool installClaude = (choice == "1" || choice == "3");
+                bool installOpenCode = (choice == "2" || choice == "3");
+                installAgentSkill(installClaude, installOpenCode);
+            }
+        }
+        // Non-interactive non-auto: skip skill installation
+    }
+
+    /**
+     * @brief Writes the YAMS skill file to the specified agent skill directories.
+     */
+    void installAgentSkill(bool installClaude, bool installOpenCode) {
+        const char* home = std::getenv("HOME");
+        if (!home) {
+#ifdef _WIN32
+            home = std::getenv("USERPROFILE");
+#endif
+            if (!home) {
+                spdlog::warn("Could not determine home directory for skill installation");
+                return;
+            }
+        }
+
+        fs::path homeDir(home);
+        std::vector<std::pair<std::string, fs::path>> targets;
+
+        if (installClaude) {
+            targets.emplace_back("Claude Code",
+                                 homeDir / ".claude" / "skills" / "yams" / "SKILL.md");
+        }
+        if (installOpenCode) {
+            targets.emplace_back("OpenCode",
+                                 homeDir / ".opencode" / "skills" / "yams" / "SKILL.md");
+        }
+
+        for (const auto& [name, skillPath] : targets) {
+            try {
+                fs::create_directories(skillPath.parent_path());
+
+                // Check if already exists
+                if (fs::exists(skillPath) && !force_) {
+                    spdlog::info("{} skill already exists at {} (use --force to overwrite)", name,
+                                 skillPath.string());
+                    continue;
+                }
+
+                // Write skill file
+                std::ofstream out(skillPath, std::ios::trunc);
+                if (!out) {
+                    spdlog::warn("Failed to write {} skill to {}", name, skillPath.string());
+                    continue;
+                }
+                out << YAMS_SKILL_CONTENT;
+                out.close();
+
+                spdlog::info("{} skill installed: {}", name, skillPath.string());
+            } catch (const std::exception& e) {
+                spdlog::warn("Failed to install {} skill: {}", name, e.what());
+            }
         }
     }
 

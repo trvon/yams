@@ -253,6 +253,15 @@ public:
 class EmbeddingGenerator {
 public:
     explicit EmbeddingGenerator(const EmbeddingConfig& config = {});
+
+    /**
+     * Constructor with custom backend injection
+     * Allows using a pre-configured IEmbeddingBackend instead of auto-selecting
+     * based on config. The backend should already be initialized.
+     */
+    explicit EmbeddingGenerator(std::unique_ptr<IEmbeddingBackend> backend,
+                                const EmbeddingConfig& config = {});
+
     ~EmbeddingGenerator();
 
     // Non-copyable but movable

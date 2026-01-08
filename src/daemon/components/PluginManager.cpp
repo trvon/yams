@@ -8,6 +8,7 @@
 #include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/daemon.h>
+#include <yams/daemon/resource/abi_entity_extractor_adapter.h>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
@@ -17,6 +18,7 @@
 #include <yams/daemon/resource/plugin_content_extractor_adapter.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/plugins/content_extractor_v1.h>
+#include <yams/plugins/entity_extractor_v2.h>
 #include <yams/plugins/model_provider_v1.h>
 #include <yams/plugins/symbol_extractor_v1.h>
 
@@ -324,10 +326,42 @@ PluginManager::autoloadPlugins(boost::asio::any_io_executor executor) {
                     continue;
                 }
                 auto path = desc.path;
+                auto pluginName = desc.name;
+
+                // Look up plugin-specific config from DaemonConfig
+                // Try multiple name variants: the config may use a short name (e.g., "glint")
+                // while the plugin descriptor uses the full name (e.g., "yams_glint")
+                std::string configJson;
+                if (deps_.config) {
+                    // Build list of name variants to try
+                    std::vector<std::string> nameVariants = {pluginName};
+
+                    // If name starts with "yams_", also try without the prefix
+                    if (pluginName.rfind("yams_", 0) == 0 && pluginName.size() > 5) {
+                        nameVariants.push_back(pluginName.substr(5));
+                    }
+                    // If name starts with "libyams_", try without the "lib" and "libyams_" prefixes
+                    if (pluginName.rfind("libyams_", 0) == 0 && pluginName.size() > 8) {
+                        nameVariants.push_back(pluginName.substr(8)); // without "libyams_"
+                        nameVariants.push_back(pluginName.substr(3)); // without "lib" (yams_*)
+                    }
+
+                    for (const auto& variant : nameVariants) {
+                        auto it = deps_.config->pluginConfigs.find(variant);
+                        if (it != deps_.config->pluginConfigs.end()) {
+                            configJson = it->second;
+                            spdlog::info(
+                                "[PluginManager] passing config to plugin '{}' (key '{}'): {}",
+                                pluginName, variant, configJson);
+                            break;
+                        }
+                    }
+                }
+
                 loadTasks.push_back(boost::asio::co_spawn(
                     executor,
-                    [host, path]() -> boost::asio::awaitable<Result<PluginDescriptor>> {
-                        co_return host->load(path, "");
+                    [host, path, configJson]() -> boost::asio::awaitable<Result<PluginDescriptor>> {
+                        co_return host->load(path, configJson);
                     },
                     boost::asio::use_awaitable));
             }
@@ -391,7 +425,33 @@ PluginManager::autoloadPlugins(boost::asio::any_io_executor executor) {
                         for (const auto& desc : scanResult.value()) {
                             spdlog::info("[PluginManager] loading external plugin '{}' from {}",
                                          desc.name, desc.path.string());
-                            auto loadResult = externalHost_->load(desc.path, "");
+
+                            // Look up plugin-specific config from DaemonConfig
+                            // Try multiple name variants (same logic as ABI plugins)
+                            std::string configJson;
+                            if (deps_.config) {
+                                std::vector<std::string> nameVariants = {desc.name};
+                                if (desc.name.rfind("yams_", 0) == 0 && desc.name.size() > 5) {
+                                    nameVariants.push_back(desc.name.substr(5));
+                                }
+                                if (desc.name.rfind("libyams_", 0) == 0 && desc.name.size() > 8) {
+                                    nameVariants.push_back(desc.name.substr(8));
+                                    nameVariants.push_back(desc.name.substr(3));
+                                }
+
+                                for (const auto& variant : nameVariants) {
+                                    auto it = deps_.config->pluginConfigs.find(variant);
+                                    if (it != deps_.config->pluginConfigs.end()) {
+                                        configJson = it->second;
+                                        spdlog::info("[PluginManager] passing config to external "
+                                                     "plugin '{}' (key '{}'): {}",
+                                                     desc.name, variant, configJson);
+                                        break;
+                                    }
+                                }
+                            }
+
+                            auto loadResult = externalHost_->load(desc.path, configJson);
                             if (loadResult) {
                                 ++loadedCount;
                                 spdlog::info("[PluginManager] loaded external: '{}' (ifaces=[{}])",
@@ -431,6 +491,7 @@ PluginManager::autoloadPlugins(boost::asio::any_io_executor executor) {
 
         adoptContentExtractors();
         adoptSymbolExtractors();
+        adoptEntityExtractors();
         adoptEntityProviders();
 
         refreshStatusSnapshot();
@@ -656,6 +717,35 @@ Result<size_t> PluginManager::adoptSymbolExtractors() {
                 symbolExtractors_, [](const yams_symbol_extractor_v1* table) {
                     return table->abi_version == YAMS_IFACE_SYMBOL_EXTRACTOR_V1_VERSION;
                 });
+        return Result<size_t>(adopted);
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::Unknown, e.what()};
+    }
+}
+
+Result<size_t> PluginManager::adoptEntityExtractors() {
+    try {
+        // Clear existing extractors to avoid duplicates on re-adoption
+        entityExtractors_.clear();
+
+        // Use getActivePluginHost() to get the correct host (shared or owned)
+        auto* host = getActivePluginHost();
+        if (!host) {
+            spdlog::info("[PluginManager] No active plugin host for entity extractor adoption");
+            return Result<size_t>(0);
+        }
+
+        size_t adopted =
+            adoptPluginInterfaceImpl<yams_entity_extractor_v2, AbiEntityExtractorAdapter,
+                                     AbiEntityExtractorAdapter>(
+                host, YAMS_IFACE_ENTITY_EXTRACTOR_V2, YAMS_IFACE_ENTITY_EXTRACTOR_V2_VERSION,
+                entityExtractors_, [](const yams_entity_extractor_v2* table) {
+                    return table->abi_version == YAMS_IFACE_ENTITY_EXTRACTOR_V2_VERSION;
+                });
+
+        if (adopted > 0) {
+            spdlog::info("[PluginManager] Adopted {} entity extractor(s) (e.g., Glint)", adopted);
+        }
         return Result<size_t>(adopted);
     } catch (const std::exception& e) {
         return Error{ErrorCode::Unknown, e.what()};

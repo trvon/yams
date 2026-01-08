@@ -1,6 +1,7 @@
 #include <yams/daemon/daemon.h>
 #include <yams/platform/windows_init.h>
 
+#include <nlohmann/json.hpp>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/spdlog.h>
@@ -347,6 +348,42 @@ int main(int argc, char* argv[]) {
                         if (!p.empty())
                             config.trustedPluginPaths.push_back(std::move(p));
                     }
+                }
+            }
+
+            // [plugins.<name>] sections: per-plugin configuration as JSON
+            // Example: [plugins.glint] with model_path, threshold, etc.
+            for (const auto& [sectionName, sectionData] : tomlConfig) {
+                if (sectionName.rfind("plugins.", 0) == 0 && sectionName.size() > 8) {
+                    // Extract plugin name: "plugins.glint" -> "glint"
+                    std::string pluginName = sectionName.substr(8);
+
+                    // Convert section to JSON object
+                    nlohmann::json pluginCfg;
+                    for (const auto& [key, value] : sectionData) {
+                        // Try to parse as bool, number, or leave as string
+                        if (value == "true") {
+                            pluginCfg[key] = true;
+                        } else if (value == "false") {
+                            pluginCfg[key] = false;
+                        } else {
+                            // Try as number first
+                            try {
+                                if (value.find('.') != std::string::npos) {
+                                    pluginCfg[key] = std::stod(value);
+                                } else {
+                                    pluginCfg[key] = std::stoll(value);
+                                }
+                            } catch (...) {
+                                // Keep as string
+                                pluginCfg[key] = value;
+                            }
+                        }
+                    }
+
+                    config.pluginConfigs[pluginName] = pluginCfg.dump();
+                    spdlog::info("Parsed plugin config for '{}': {}", pluginName,
+                                 config.pluginConfigs[pluginName]);
                 }
             }
 

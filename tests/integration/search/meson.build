@@ -27,7 +27,7 @@ else
     hybrid_search_integration_exe = executable('yams_hybrid_search_integration',
       hybrid_search_integration_srcs,
       include_directories: incs,
-      dependencies: [catch2_dep, catch2_main_dep, test_deps],
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
       cpp_args: ['-DYAMS_TESTING=1'],
       install: false,
     )
@@ -49,7 +49,7 @@ else
     symbol_search_integration_exe = executable('yams_symbol_search_integration',
       symbol_search_integration_srcs,
       include_directories: incs,
-      dependencies: [catch2_dep, catch2_main_dep, test_deps],
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
       cpp_args: ['-DYAMS_TESTING=1'],
       install: false,
     )
@@ -71,7 +71,7 @@ else
     fsm_tuning_integration_exe = executable('yams_fsm_tuning_integration',
       fsm_tuning_integration_srcs,
       include_directories: incs,
-      dependencies: [catch2_dep, catch2_main_dep, test_deps],
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
       cpp_args: ['-DYAMS_TESTING=1'],
       install: false,
     )

@@ -46,6 +46,7 @@
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/retrieval_session.h>
+#include <yams/daemon/resource/abi_entity_extractor_adapter.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/daemon/resource/plugin_host.h>
@@ -240,6 +241,15 @@ public:
             return pluginManager_->getSymbolExtractors();
         }
         return symbolExtractors_; // Empty fallback
+    }
+
+    // NL Entity extractors (ABI adapters, e.g., Glint) - delegate to PluginManager
+    const std::vector<std::shared_ptr<AbiEntityExtractorAdapter>>& getEntityExtractors() const {
+        if (pluginManager_) {
+            return pluginManager_->getEntityExtractors();
+        }
+        static const std::vector<std::shared_ptr<AbiEntityExtractorAdapter>> kEmpty;
+        return kEmpty;
     }
 
     // Knowledge Graph Store (PBI-059)

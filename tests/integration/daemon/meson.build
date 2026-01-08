@@ -66,7 +66,7 @@ else
     daemon_catch2_exe = executable('yams_daemon_socket_tests_catch2',
       daemon_catch2_srcs,
       include_directories: incs,
-      dependencies: [catch2_dep, catch2_main_dep, test_deps],
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
       cpp_args: ['-DYAMS_TESTING=1'],
       install: false,
     )
@@ -140,7 +140,7 @@ else
     daemon_shutdown_exe = executable('yams_daemon_shutdown_tests_catch2',
       daemon_shutdown_srcs,
       include_directories: incs,
-      dependencies: [catch2_dep, catch2_main_dep, test_deps],
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
       cpp_args: ['-DYAMS_TESTING=1'],
       install: false,
     )
@@ -170,7 +170,7 @@ else
     post_ingest_queue_validation_exe = executable('yams_post_ingest_queue_validation',
       post_ingest_queue_validation_srcs,
       include_directories: incs,
-      dependencies: [catch2_dep, catch2_main_dep, test_deps],
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
       cpp_args: ['-DYAMS_TESTING=1'],
       install: false,
     )
@@ -187,7 +187,7 @@ else
     client_timeout_recovery_exe = executable('yams_client_timeout_recovery_tests_catch2',
       client_timeout_recovery_srcs,
       include_directories: incs,
-      dependencies: [catch2_dep, catch2_main_dep, test_deps],
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
       cpp_args: ['-DYAMS_TESTING=1'],
       install: false,
     )
@@ -206,7 +206,7 @@ else
     socket_memory_pressure_exe = executable('yams_socket_memory_pressure_tests_catch2',
       socket_memory_pressure_srcs,
       include_directories: incs,
-      dependencies: [catch2_dep, catch2_main_dep, test_deps],
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
       cpp_args: ['-DYAMS_TESTING=1'],
       install: false,
     )
@@ -223,7 +223,7 @@ else
     stats_command_crash_exe = executable('yams_stats_command_crash_tests_catch2',
       stats_command_crash_srcs,
       include_directories: incs,
-      dependencies: [catch2_dep, catch2_main_dep, test_deps],
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
       cpp_args: ['-DYAMS_TESTING=1'],
       install: false,
     )
@@ -239,7 +239,7 @@ else
     entity_graph_integration_exe = executable('yams_entity_graph_integration_tests_catch2',
       entity_graph_integration_srcs,
       include_directories: incs,
-      dependencies: [catch2_dep, catch2_main_dep, test_deps],
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
       cpp_args: ['-DYAMS_TESTING=1'],
       install: false,
     )
@@ -263,7 +263,7 @@ else
     ghidra_kg_entity_ingestion_exe = executable('yams_ghidra_kg_entity_ingestion_tests_catch2',
       ghidra_kg_entity_ingestion_srcs,
       include_directories: incs,
-      dependencies: [catch2_dep, catch2_main_dep, test_deps],
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
       cpp_args: ['-DYAMS_TESTING=1'],
       install: false,
     )
@@ -281,7 +281,7 @@ else
     daemon_sigterm_exe = executable('yams_daemon_sigterm_tests_catch2',
       daemon_sigterm_srcs,
       include_directories: incs,
-      dependencies: [catch2_dep, catch2_main_dep, test_deps],
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
       cpp_args: ['-DYAMS_TESTING=1'],
       install: false,
     )

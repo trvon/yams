@@ -435,9 +435,18 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
         }
     }
 
+    # Auto-enable Glint NL entity extractor plugin (GLiNER-based)
+    # Requires ONNX Runtime which is already a dependency
+    $enableGlint = $false
+    if ($env:YAMS_DISABLE_ONNX -ne 'true') {
+        Write-Host "Enabling Glint NL entity extractor plugin"
+        $enableGlint = $true
+    }
+
     # Build meson command arguments as a proper array
     $mesonArgs = @('setup', $buildDir, "--buildtype=$buildTypeLower", "--prefix=$InstallPrefix", "-Denable-modules=$enableModulesFlag")
     if ($enableZyp) { $mesonArgs += '-Dplugin-zyp=true' }
+    if ($enableGlint) { $mesonArgs += '-Dplugin-glint=true' }
     if ($mesonToolchainArg) { $mesonArgs += $mesonToolchainArg }
     if ($mesonToolchainFile) { $mesonArgs += $mesonToolchainFile }
     

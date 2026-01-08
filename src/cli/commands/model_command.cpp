@@ -134,8 +134,11 @@ private:
         auto cfg = load_json_file(model_dir / "config.json");
         auto sbert = load_json_file(model_dir / "sentence_bert_config.json");
         try {
+            // Standard models use hidden_size, Nomic models use n_embd
             if (cfg.contains("hidden_size"))
                 out.dim = static_cast<size_t>(cfg["hidden_size"].get<int>());
+            else if (cfg.contains("n_embd"))
+                out.dim = static_cast<size_t>(cfg["n_embd"].get<int>());
             if (cfg.contains("max_position_embeddings"))
                 out.max_seq = static_cast<size_t>(cfg["max_position_embeddings"].get<int>());
         } catch (...) {
@@ -726,6 +729,8 @@ private:
                                 else if (j.contains("hidden_size") &&
                                          j["hidden_size"].is_number_integer())
                                     dim = j["hidden_size"].get<int>();
+                                else if (j.contains("n_embd") && j["n_embd"].is_number_integer())
+                                    dim = j["n_embd"].get<int>();
                             }
                             if (!seq) {
                                 if (j.contains("max_seq_length") &&

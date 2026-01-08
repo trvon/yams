@@ -16,6 +16,7 @@ option('build-tests', type: 'boolean', value: false, description: 'Build unit/in
 option('build-fuzzers', type: 'boolean', value: false, description: 'Build fuzzing harnesses under tools/fuzzing/')
 option('plugin-symbols', type: 'boolean', value: true, description: 'Build Tree-sitter symbol extractor plugin')
 option('plugin-zyp', type: 'boolean', value: false, description: 'Build zyp PDF extractor plugin (requires Zig 0.15.2+)')
+option('plugin-glint', type: 'boolean', value: false, description: 'Build Glint NL entity extractor plugin (GLiNER-based)')
 option('yams-version', type: 'string', value: '', description: 'Override runtime/display version (falls back to project version when empty). A generated header will expose this.')
 option('unit-timeout', type: 'integer', value: 1200, description: 'Total time budget (seconds) for unit tests; per-shard timeout is derived automatically when sharding is enabled')
 option('unit-shards', type: 'integer', value: 6, description: 'Number of shards to split the unit test binary into via GTest sharding (set to 1 to disable)')

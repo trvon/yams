@@ -48,6 +48,82 @@ using namespace std::chrono_literals;
 using namespace yams;
 using json = nlohmann::json;
 
+// Helper to discover GLiNER model path for entity extraction
+// Searches standard locations where yams init downloads models
+static std::string discoverGlinerModelPath() {
+    // Preferred model names in order
+    const std::vector<std::string> model_names = {
+        "gliner_small-v2.1-quantized",
+        "gliner_small-v2.1",
+        "gliner_medium-v2.1-quantized",
+        "gliner_medium-v2.1",
+    };
+
+    // Build list of base directories to search
+    std::vector<fs::path> search_dirs;
+
+    // YAMS_GLINT_MODEL_PATH - explicit override
+    if (const char* env_path = std::getenv("YAMS_GLINT_MODEL_PATH")) {
+        if (fs::exists(env_path)) {
+            spdlog::info("[Bench] Using GLiNER model from YAMS_GLINT_MODEL_PATH: {}", env_path);
+            return env_path;
+        }
+    }
+
+    // YAMS_DATA_DIR
+    if (const char* data_dir = std::getenv("YAMS_DATA_DIR")) {
+        search_dirs.emplace_back(fs::path(data_dir) / "models" / "gliner");
+    }
+
+    // YAMS_STORAGE
+    if (const char* storage = std::getenv("YAMS_STORAGE")) {
+        search_dirs.emplace_back(fs::path(storage) / "models" / "gliner");
+    }
+
+    // ~/.local/share/yams (XDG default)
+    if (const char* home = std::getenv("HOME")) {
+        search_dirs.emplace_back(fs::path(home) / ".local" / "share" / "yams" / "models" /
+                                 "gliner");
+    }
+
+    // Development path
+    search_dirs.emplace_back("/Volumes/picaso/yams/models/gliner");
+
+    // Homebrew path
+    search_dirs.emplace_back("/opt/homebrew/share/yams/models/gliner");
+
+    // Search for models
+    for (const auto& base_dir : search_dirs) {
+        if (!fs::exists(base_dir)) {
+            continue;
+        }
+
+        // Try preferred model names first
+        for (const auto& model_name : model_names) {
+            fs::path model_path = base_dir / model_name / "model.onnx";
+            if (fs::exists(model_path)) {
+                spdlog::info("[Bench] Found GLiNER model at: {}", model_path.string());
+                return model_path.string();
+            }
+        }
+
+        // Fall back to scanning directory for any model
+        std::error_code ec;
+        for (const auto& entry : fs::directory_iterator(base_dir, ec)) {
+            if (!entry.is_directory())
+                continue;
+            fs::path model_path = entry.path() / "model.onnx";
+            if (fs::exists(model_path)) {
+                spdlog::info("[Bench] Found GLiNER model at: {}", model_path.string());
+                return model_path.string();
+            }
+        }
+    }
+
+    spdlog::warn("[Bench] No GLiNER model found - entity extraction will use mock mode");
+    return "";
+}
+
 struct BEIRDocument {
     std::string id;
     std::string title;
@@ -669,6 +745,16 @@ struct BenchFixture {
                 harnessOptions.pluginDir = fs::current_path() / "builddir" / "plugins";
             }
             harnessOptions.preloadModels = {"all-MiniLM-L6-v2"};
+
+            // Configure Glint plugin with GLiNER model path for NL entity extraction
+            std::string glinerModelPath = discoverGlinerModelPath();
+            if (!glinerModelPath.empty()) {
+                json glintConfig;
+                glintConfig["model_path"] = glinerModelPath;
+                glintConfig["threshold"] = 0.5; // Default confidence threshold
+                harnessOptions.pluginConfigs["glint"] = glintConfig.dump();
+                spdlog::info("Configured Glint plugin with model: {}", glinerModelPath);
+            }
         } else {
             spdlog::info("Using mock model provider (YAMS_DISABLE_VECTORS=1)");
         }

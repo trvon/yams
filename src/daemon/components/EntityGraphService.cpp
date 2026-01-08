@@ -9,10 +9,12 @@
 #include <boost/asio.hpp>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/WorkCoordinator.h>
+#include <yams/daemon/resource/abi_entity_extractor_adapter.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/plugins/entity_extractor_v2.h>
 #include <yams/plugins/symbol_extractor_v1.h>
 #include <yams/vector/vector_database.h>
 
@@ -90,7 +92,12 @@ bool EntityGraphService::process(Job& job) {
         return true; // not an error if KG is not configured
     }
 
-    // Locate a symbol extractor plugin that supports the language
+    // Route to NL extraction for natural language content
+    if (isNaturalLanguageContent(job)) {
+        return processNaturalLanguage(job);
+    }
+
+    // Code path: Locate a symbol extractor plugin that supports the language
     const auto& extractors = services_->getSymbolExtractors();
     yams_symbol_extractor_v1* table = nullptr;
     const AbiSymbolExtractorAdapter* extractorAdapter = nullptr;
@@ -102,6 +109,14 @@ bool EntityGraphService::process(Job& job) {
         }
     }
     if (!table || !table->extract_symbols) {
+        // No code extractor - try NL extraction as fallback for unknown content
+        const auto& nlExtractors = services_->getEntityExtractors();
+        if (!nlExtractors.empty()) {
+            spdlog::debug(
+                "EntityGraphService: no code extractor for lang='{}', trying NL extraction",
+                job.language);
+            return processNaturalLanguage(job);
+        }
         spdlog::debug("EntityGraphService: no extractor for lang='{}' (skip)", job.language);
         return true; // not an error: just no-op
     }
@@ -946,6 +961,443 @@ EntityGraphService::generateEntityEmbeddings(const Job& job,
     }
 
     spdlog::info("EntityGraphService: generated {} entity embeddings for {}", records.size(),
+                 job.filePath);
+    return Result<void>();
+}
+
+// ============================================================================
+// Natural Language Entity Extraction (Glint/GLiNER integration)
+// ============================================================================
+
+bool EntityGraphService::isNaturalLanguageContent(const Job& job) {
+    // Check MIME type first
+    if (!job.mimeType.empty()) {
+        if (job.mimeType == "text/plain" || job.mimeType == "text/markdown" ||
+            job.mimeType == "application/json") {
+            return true;
+        }
+    }
+
+    // Check file extension
+    if (!job.filePath.empty()) {
+        std::filesystem::path p(job.filePath);
+        std::string ext = p.extension().string();
+        if (ext == ".txt" || ext == ".md" || ext == ".markdown" || ext == ".json" ||
+            ext == ".jsonl" || ext == ".csv" || ext == ".tsv") {
+            return true;
+        }
+    }
+
+    // Check if language is empty or unknown (likely NL content)
+    if (job.language.empty() || job.language == "unknown" || job.language == "text") {
+        return true;
+    }
+
+    return false;
+}
+
+bool EntityGraphService::processNaturalLanguage(Job& job) {
+    if (!services_)
+        return false;
+
+    auto kg = services_->getKgStore();
+    if (!kg) {
+        spdlog::debug("EntityGraphService: no KG store for NL extraction");
+        return true;
+    }
+
+    // Find an entity extractor that supports the content type
+    const auto& extractors = services_->getEntityExtractors();
+    const AbiEntityExtractorAdapter* adapter = nullptr;
+
+    // Determine content type to check
+    std::string contentType = job.mimeType;
+    if (contentType.empty()) {
+        // Infer from extension
+        std::filesystem::path p(job.filePath);
+        std::string ext = p.extension().string();
+        if (ext == ".md" || ext == ".markdown") {
+            contentType = "text/markdown";
+        } else if (ext == ".json" || ext == ".jsonl") {
+            contentType = "application/json";
+        } else {
+            contentType = "text/plain";
+        }
+    }
+
+    for (const auto& ex : extractors) {
+        if (ex && ex->supportsContentType(contentType)) {
+            adapter = ex.get();
+            break;
+        }
+    }
+
+    if (!adapter) {
+        spdlog::debug("EntityGraphService: no NL extractor for content_type='{}' (skip)",
+                      contentType);
+        return true; // not an error
+    }
+
+    // Extract entities
+    auto* result =
+        adapter->extract(job.contentUtf8, nullptr, 0, job.language.c_str(), job.filePath.c_str());
+    if (!result) {
+        spdlog::warn("EntityGraphService: NL extraction failed for {}", job.filePath);
+        // Record failed state
+        if (!job.documentHash.empty()) {
+            metadata::SymbolExtractionState state;
+            state.extractorId = adapter->getExtractorId();
+            state.extractedAt = std::chrono::duration_cast<std::chrono::seconds>(
+                                    std::chrono::system_clock::now().time_since_epoch())
+                                    .count();
+            state.status = "failed";
+            state.entityCount = 0;
+            state.errorMessage = "NL extraction returned null";
+            kg->upsertSymbolExtractionState(job.documentHash, state);
+        }
+        return false;
+    }
+
+    // Check for extraction error
+    if (result->error) {
+        spdlog::warn("EntityGraphService: NL extraction error for {}: {}", job.filePath,
+                     result->error);
+        adapter->freeResult(result);
+        return false;
+    }
+
+    spdlog::info("EntityGraphService: extracted {} NL entities from {} (type={})",
+                 result->entity_count, job.filePath, contentType);
+
+    // Populate KG with NL entities
+    bool success = populateKnowledgeGraphNL(kg, job, result, adapter);
+
+    // Record extraction state
+    if (!job.documentHash.empty()) {
+        metadata::SymbolExtractionState state;
+        state.extractorId = adapter->getExtractorId();
+        state.extractedAt = std::chrono::duration_cast<std::chrono::seconds>(
+                                std::chrono::system_clock::now().time_since_epoch())
+                                .count();
+        state.status = success ? "complete" : "failed";
+        state.entityCount = static_cast<std::int64_t>(result->entity_count);
+        kg->upsertSymbolExtractionState(job.documentHash, state);
+    }
+
+    adapter->freeResult(result);
+    return success;
+}
+
+bool EntityGraphService::populateKnowledgeGraphNL(
+    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg, const Job& job,
+    const yams_entity_extraction_result_v2* result, const AbiEntityExtractorAdapter* adapter) {
+    if (!result || result->entity_count == 0) {
+        return true; // No entities to process
+    }
+
+    spdlog::info("EntityGraphService: populating KG with {} NL entities from {}",
+                 result->entity_count, job.filePath);
+
+    try {
+        // Resolve context nodes (document, file, directory)
+        std::optional<std::int64_t> documentDbId;
+        auto contextNodesRes = resolveContextNodes(kg, job, documentDbId);
+        if (!contextNodesRes) {
+            spdlog::warn("EntityGraphService: failed to resolve context nodes for NL: {}",
+                         contextNodesRes.error().message);
+            return false;
+        }
+        auto& contextNodes = contextNodesRes.value();
+
+        // Create entity nodes
+        auto entityNodesRes = createEntityNodes(kg, job, result);
+        if (!entityNodesRes) {
+            spdlog::warn("EntityGraphService: failed to create entity nodes: {}",
+                         entityNodesRes.error().message);
+            return false;
+        }
+        auto& entityNodes = entityNodesRes.value();
+
+        // Link entities to document context
+        if (contextNodes.documentNodeId.has_value() || contextNodes.fileNodeId.has_value()) {
+            std::vector<yams::metadata::KGEdge> contextEdges;
+            contextEdges.reserve(entityNodes.nodeIds.size());
+
+            for (size_t i = 0; i < entityNodes.nodeIds.size(); ++i) {
+                const auto& ent = result->entities[i];
+
+                // Link to document
+                if (contextNodes.documentNodeId.has_value()) {
+                    nlohmann::json edgeProps;
+                    edgeProps["start_offset"] = ent.start_offset;
+                    edgeProps["end_offset"] = ent.end_offset;
+                    edgeProps["confidence"] = ent.confidence;
+                    if (!job.documentHash.empty())
+                        edgeProps["snapshot_id"] = job.documentHash;
+
+                    yams::metadata::KGEdge edge;
+                    edge.srcNodeId = entityNodes.nodeIds[i];
+                    edge.dstNodeId = contextNodes.documentNodeId.value();
+                    edge.relation = "mentioned_in";
+                    edge.weight = ent.confidence;
+                    edge.properties = edgeProps.dump();
+                    contextEdges.push_back(edge);
+                }
+
+                // Link to file if no document
+                if (!contextNodes.documentNodeId.has_value() &&
+                    contextNodes.fileNodeId.has_value()) {
+                    yams::metadata::KGEdge edge;
+                    edge.srcNodeId = entityNodes.nodeIds[i];
+                    edge.dstNodeId = contextNodes.fileNodeId.value();
+                    edge.relation = "mentioned_in";
+                    edge.weight = ent.confidence;
+                    contextEdges.push_back(edge);
+                }
+            }
+
+            if (!contextEdges.empty()) {
+                kg->addEdgesUnique(contextEdges);
+            }
+        }
+
+        // Create DocEntity records for entity spans
+        if (documentDbId.has_value()) {
+            std::vector<yams::metadata::DocEntity> docEntities;
+            docEntities.reserve(result->entity_count);
+
+            for (size_t i = 0; i < result->entity_count; ++i) {
+                const auto& ent = result->entities[i];
+
+                yams::metadata::DocEntity docEnt;
+                docEnt.documentId = documentDbId.value();
+                docEnt.entityText = ent.text ? std::string(ent.text) : "";
+                docEnt.nodeId = entityNodes.nodeIds[i];
+                docEnt.startOffset = ent.start_offset;
+                docEnt.endOffset = ent.end_offset;
+                docEnt.confidence = ent.confidence;
+                docEnt.extractor = adapter->getExtractorId();
+                docEntities.push_back(docEnt);
+            }
+
+            if (!docEntities.empty()) {
+                kg->deleteDocEntitiesForDocument(documentDbId.value());
+                kg->addDocEntities(docEntities);
+            }
+        }
+
+        // Generate embeddings for NL entities
+        auto embeddingsRes = generateNLEntityEmbeddings(job, result, entityNodes);
+        if (!embeddingsRes) {
+            spdlog::debug("EntityGraphService: NL entity embeddings skipped: {}",
+                          embeddingsRes.error().message);
+            // Non-fatal
+        }
+
+        spdlog::info("EntityGraphService: populated KG with {} NL entities from {}",
+                     result->entity_count, job.filePath);
+        return true;
+
+    } catch (const std::exception& e) {
+        spdlog::warn("EntityGraphService: exception populating NL KG: {}", e.what());
+        return false;
+    }
+}
+
+yams::Result<EntityGraphService::EntityNodeBatch> EntityGraphService::createEntityNodes(
+    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg, const Job& job,
+    const yams_entity_extraction_result_v2* result) {
+    EntityNodeBatch batch;
+    if (!result || result->entity_count == 0) {
+        return batch;
+    }
+
+    std::vector<yams::metadata::KGNode> nodes;
+    nodes.reserve(result->entity_count);
+    batch.entityKeys.reserve(result->entity_count);
+
+    auto now = std::chrono::system_clock::now().time_since_epoch().count();
+
+    for (size_t i = 0; i < result->entity_count; ++i) {
+        const auto& ent = result->entities[i];
+
+        std::string text = ent.text ? std::string(ent.text) : "";
+        std::string type = ent.type ? std::string(ent.type) : "entity";
+
+        // Create canonical node key: type:normalized_text
+        // Normalize text for canonical matching (lowercase, trim)
+        std::string normalizedText = text;
+        std::transform(normalizedText.begin(), normalizedText.end(), normalizedText.begin(),
+                       ::tolower);
+
+        std::string nodeKey = "nl_entity:" + type + ":" + normalizedText;
+
+        yams::metadata::KGNode node;
+        node.nodeKey = nodeKey;
+        node.label = text;
+        node.type = type;
+
+        nlohmann::json props;
+        props["entity_text"] = text;
+        props["entity_type"] = type;
+        props["confidence"] = ent.confidence;
+        props["first_seen_file"] = job.filePath;
+        props["last_seen"] = now;
+        if (!job.documentHash.empty()) {
+            props["first_seen_hash"] = job.documentHash;
+        }
+        if (ent.properties_json) {
+            try {
+                auto extraProps = nlohmann::json::parse(ent.properties_json);
+                for (auto& [key, val] : extraProps.items()) {
+                    props[key] = val;
+                }
+            } catch (...) {
+            }
+        }
+        node.properties = props.dump();
+
+        nodes.push_back(std::move(node));
+        batch.entityKeys.push_back(nodeKey);
+    }
+
+    auto nodeIdsRes = kg->upsertNodes(nodes);
+    if (!nodeIdsRes) {
+        return nodeIdsRes.error();
+    }
+
+    batch.nodeIds = nodeIdsRes.value();
+
+    // Add aliases for entity text (for search)
+    std::vector<yams::metadata::KGAlias> aliases;
+    for (size_t i = 0; i < result->entity_count; ++i) {
+        const auto& ent = result->entities[i];
+        if (!ent.text)
+            continue;
+
+        yams::metadata::KGAlias alias;
+        alias.nodeId = batch.nodeIds[i];
+        alias.alias = std::string(ent.text);
+        alias.source = "nl_entity_text";
+        alias.confidence = ent.confidence;
+        aliases.push_back(alias);
+    }
+
+    if (!aliases.empty()) {
+        kg->addAliases(aliases);
+    }
+
+    return batch;
+}
+
+yams::Result<void>
+EntityGraphService::generateNLEntityEmbeddings(const Job& job,
+                                               const yams_entity_extraction_result_v2* result,
+                                               const EntityNodeBatch& entityNodes) {
+    if (!services_) {
+        return Result<void>();
+    }
+
+    auto vdb = services_->getVectorDatabase();
+    auto provider = services_->getModelProvider();
+
+    if (!vdb) {
+        return Error{ErrorCode::NotFound, "no vector database"};
+    }
+
+    if (!provider || !provider->isAvailable()) {
+        return Error{ErrorCode::NotFound, "no model provider"};
+    }
+
+    if (!result || result->entity_count == 0) {
+        return Result<void>();
+    }
+
+    std::string modelName = services_->getEmbeddingModelName();
+    if (modelName.empty()) {
+        auto loadedModels = provider->getLoadedModels();
+        if (loadedModels.empty()) {
+            return Error{ErrorCode::NotFound, "no embedding model"};
+        }
+        modelName = loadedModels[0];
+    }
+
+    // Build text representations for entities
+    std::vector<std::string> texts;
+    std::vector<size_t> originalIndices;
+    texts.reserve(result->entity_count);
+    originalIndices.reserve(result->entity_count);
+
+    for (size_t i = 0; i < result->entity_count; ++i) {
+        const auto& ent = result->entities[i];
+        if (!ent.text)
+            continue;
+
+        // Format: "TYPE: text"
+        std::string text;
+        if (ent.type) {
+            text = std::string(ent.type) + ": " + std::string(ent.text);
+        } else {
+            text = std::string(ent.text);
+        }
+
+        texts.push_back(text);
+        originalIndices.push_back(i);
+    }
+
+    if (texts.empty()) {
+        return Result<void>();
+    }
+
+    // Generate embeddings
+    auto embedResult = provider->generateBatchEmbeddingsFor(modelName, texts);
+    if (!embedResult) {
+        return embedResult.error();
+    }
+
+    const auto& embeddings = embedResult.value();
+    if (embeddings.size() != texts.size()) {
+        return Error{ErrorCode::InternalError, "embedding count mismatch"};
+    }
+
+    // Create EntityVectorRecords
+    std::vector<vector::EntityVectorRecord> records;
+    records.reserve(embeddings.size());
+
+    std::string modelVersion;
+    auto modelInfo = provider->getModelInfo(modelName);
+    if (modelInfo) {
+        modelVersion = std::to_string(modelInfo.value().embeddingDim);
+    }
+
+    for (size_t i = 0; i < embeddings.size(); ++i) {
+        size_t origIdx = originalIndices[i];
+        const auto& ent = result->entities[origIdx];
+
+        vector::EntityVectorRecord rec;
+        rec.node_key = entityNodes.entityKeys[origIdx];
+        rec.embedding_type = vector::EntityEmbeddingType::SIGNATURE;
+        rec.embedding = embeddings[i];
+        rec.content = texts[i];
+        rec.model_id = modelName;
+        rec.model_version = modelVersion;
+        rec.embedded_at = std::chrono::system_clock::now();
+        rec.is_stale = false;
+
+        rec.node_type = ent.type ? std::string(ent.type) : "entity";
+        rec.qualified_name = ent.text ? std::string(ent.text) : "";
+        rec.file_path = job.filePath;
+        rec.document_hash = job.documentHash;
+
+        records.push_back(std::move(rec));
+    }
+
+    auto insertResult = vdb->insertEntityVectorsBatch(records);
+    if (!insertResult) {
+        return insertResult.error();
+    }
+
+    spdlog::info("EntityGraphService: generated {} NL entity embeddings for {}", records.size(),
                  job.filePath);
     return Result<void>();
 }

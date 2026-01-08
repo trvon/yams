@@ -1636,10 +1636,16 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         // Phase 2.4: Use SearchEngineManager instead of co_buildEngine
         // Get embedding generator from model provider if available
         std::shared_ptr<vector::EmbeddingGenerator> embGen;
+        spdlog::info("[SearchBuild] Checking embedding generator: modelProvider_={} isAvailable={} "
+                     "modelName='{}'",
+                     modelProvider_ != nullptr,
+                     modelProvider_ ? modelProvider_->isAvailable() : false, embeddingModelName_);
         if (modelProvider_ && modelProvider_->isAvailable() && !embeddingModelName_.empty()) {
             try {
                 embGen = modelProvider_->getEmbeddingGenerator(embeddingModelName_);
-            } catch (...) {
+                spdlog::info("[SearchBuild] Got embedding generator: {}", embGen != nullptr);
+            } catch (const std::exception& e) {
+                spdlog::warn("[SearchBuild] Failed to get embedding generator: {}", e.what());
             }
         }
         auto buildResult = co_await searchEngineManager_.buildEngine(
@@ -1656,9 +1662,19 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             state_.readiness.searchEngineReady = true;
             state_.readiness.searchProgress = 100;
             state_.readiness.vectorIndexReady = (vectorDatabase_ != nullptr);
+
+            // Track doc count at build time for re-tuning decisions
+            if (metadataRepo_) {
+                auto countRes = metadataRepo_->getDocumentCount();
+                if (countRes) {
+                    state_.readiness.searchEngineDocCount.store(countRes.value());
+                }
+            }
+
             writeBootstrapStatusFile(config_, state_);
 
-            spdlog::info("SearchEngine initialized and published to AppContext");
+            spdlog::info("SearchEngine initialized and published to AppContext (docs={})",
+                         state_.readiness.searchEngineDocCount.load());
             try {
                 serviceFsm_.dispatch(SearchEngineBuiltEvent{});
             } catch (...) {
@@ -1944,7 +1960,10 @@ Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& pref
         if (result && result.value()) {
             // Sync local members from PluginManager for backward compatibility
             modelProvider_ = pluginManager_->getModelProvider();
+            embeddingModelName_ = pluginManager_->getEmbeddingModelName();
             state_.readiness.modelProviderReady = (modelProvider_ != nullptr);
+            spdlog::info("[ServiceManager] Synced model provider: model='{}', provider={}",
+                         embeddingModelName_, modelProvider_ ? "valid" : "null");
         }
         return result;
     }
@@ -2059,10 +2078,42 @@ boost::asio::awaitable<Result<size_t>> ServiceManager::autoloadPluginsNow() {
 boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
     spdlog::info("[ServiceManager] co_enableEmbeddingsAndRebuild: starting");
 
-    // Skip if search engine is already ready - avoid unnecessary rebuilds
-    if (state_.readiness.searchEngineReady.load() && searchEngine_) {
+    // Check if rebuild is needed based on corpus growth
+    // The search engine may have been built with minimal docs and needs re-tuning
+    bool needsRebuild = false;
+    uint64_t currentDocCount = 0;
+    uint64_t lastBuildDocCount = 0;
+
+    try {
+        if (metadataRepo_) {
+            auto countRes = metadataRepo_->getDocumentCount();
+            if (countRes) {
+                currentDocCount = countRes.value();
+            }
+        }
+        lastBuildDocCount = state_.readiness.searchEngineDocCount.load();
+
+        // Rebuild if corpus has grown significantly (10x or +1000 docs minimum)
+        if (currentDocCount > 0 && lastBuildDocCount < currentDocCount) {
+            bool significantGrowth = (currentDocCount >= lastBuildDocCount * 10) ||
+                                     (currentDocCount >= lastBuildDocCount + 1000);
+            if (significantGrowth) {
+                needsRebuild = true;
+                spdlog::info("[ServiceManager] co_enableEmbeddingsAndRebuild: corpus grew from {} "
+                             "to {} docs, "
+                             "triggering rebuild for re-tuning",
+                             lastBuildDocCount, currentDocCount);
+            }
+        }
+    } catch (...) {
+        // If we can't determine doc count, don't block rebuild
+    }
+
+    // Skip if search engine is already ready AND corpus hasn't grown significantly
+    if (state_.readiness.searchEngineReady.load() && searchEngine_ && !needsRebuild) {
         spdlog::info("[ServiceManager] co_enableEmbeddingsAndRebuild: search engine already ready, "
-                     "skipping rebuild");
+                     "skipping rebuild (docs: {} -> {})",
+                     lastBuildDocCount, currentDocCount);
         co_return;
     }
 
@@ -2109,7 +2160,16 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
             state_.readiness.searchEngineReady = true;
             state_.readiness.vectorIndexReady = (vectorDatabase_ != nullptr);
 
-            spdlog::info("[ServiceManager] co_enableEmbeddingsAndRebuild: success");
+            // Track doc count at build time for re-tuning decisions
+            if (metadataRepo_) {
+                auto countRes = metadataRepo_->getDocumentCount();
+                if (countRes) {
+                    state_.readiness.searchEngineDocCount.store(countRes.value());
+                }
+            }
+
+            spdlog::info("[ServiceManager] co_enableEmbeddingsAndRebuild: success (docs={})",
+                         state_.readiness.searchEngineDocCount.load());
         } else {
             spdlog::warn("[ServiceManager] co_enableEmbeddingsAndRebuild: failed");
         }
@@ -2173,9 +2233,19 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
                 state_.readiness.searchEngineReady = true;
                 state_.readiness.searchProgress = 100;
                 state_.readiness.vectorIndexReady = (vectorDatabase_ != nullptr);
+
+                // Track doc count at build time for re-tuning decisions
+                if (metadataRepo_) {
+                    auto countRes = metadataRepo_->getDocumentCount();
+                    if (countRes) {
+                        state_.readiness.searchEngineDocCount.store(countRes.value());
+                    }
+                }
+
                 writeBootstrapStatusFile(config_, state_);
 
-                spdlog::info("[Rebuild] done ok: vector scoring enabled");
+                spdlog::info("[Rebuild] done ok: vector scoring enabled (docs={})",
+                             state_.readiness.searchEngineDocCount.load());
             } else {
                 spdlog::warn("[Rebuild] failed: engine rebuild unsuccessful");
             }

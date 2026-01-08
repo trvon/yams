@@ -45,3 +45,21 @@ if get_option('plugin-zyp')
     timeout: 60,
   )
 endif
+
+# Glint (GLiNER NL entity extractor) plugin tests
+if get_option('plugin-glint')
+  glint_plugin_path = join_paths(plugin_build_dir, 'plugins/glint/yams_glint' + plugin_ext)
+
+  glint_test_exe = executable('yams_glint_tests',
+    files('glint/glint_plugin_test.cpp', '../test_main.cpp'),
+    include_directories: incs,
+    dependencies: [gtest_dep, nlohmann_json_dep] + test_deps,
+    cpp_args: ['-DGLINT_PLUGIN_PATH="' + glint_plugin_path + '"'],
+    install: false,
+  )
+
+  test('glint_plugin', glint_test_exe,
+    env: {'YAMS_SKIP_MODEL_LOADING': '1'},
+    timeout: 60,
+  )
+endif

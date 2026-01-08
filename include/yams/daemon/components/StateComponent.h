@@ -30,6 +30,9 @@ struct DaemonReadiness {
     std::atomic<int> vectorIndexProgress{0};
     std::atomic<int> modelLoadProgress{0};
 
+    // Track doc count at last search engine build for re-tuning decisions
+    std::atomic<uint64_t> searchEngineDocCount{0};
+
     // DEPRECATED: not an authoritative lifecycle signal. Use DaemonLifecycleFsm state instead.
     bool fullyReady() const {
         return ipcServerReady && contentStoreReady && databaseReady && metadataRepoReady &&

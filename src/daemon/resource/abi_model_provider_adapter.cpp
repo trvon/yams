@@ -3,9 +3,72 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <span>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
+#include <yams/vector/embedding_generator.h>
 
 namespace yams::daemon {
+
+/**
+ * ModelProviderBackend - Custom IEmbeddingBackend that wraps IModelProvider
+ *
+ * This backend directly uses the IModelProvider interface for embedding generation,
+ * avoiding the need to go through the daemon IPC or mock providers.
+ */
+class ModelProviderBackend : public vector::IEmbeddingBackend {
+public:
+    ModelProviderBackend(IModelProvider* provider, std::string modelName, size_t dim)
+        : provider_(provider), modelName_(std::move(modelName)), dim_(dim), initialized_(false) {}
+
+    bool initialize() override {
+        if (!provider_) {
+            spdlog::warn("[ModelProviderBackend] No provider");
+            return false;
+        }
+        initialized_ = true;
+        spdlog::info("[ModelProviderBackend] Initialized with model '{}' dim={}", modelName_, dim_);
+        return true;
+    }
+
+    void shutdown() override { initialized_ = false; }
+
+    bool isInitialized() const override { return initialized_; }
+
+    Result<std::vector<float>> generateEmbedding(const std::string& text) override {
+        if (!provider_) {
+            return Error{ErrorCode::NotInitialized, "Provider not available"};
+        }
+        return provider_->generateEmbeddingFor(modelName_, text);
+    }
+
+    Result<std::vector<std::vector<float>>>
+    generateEmbeddings(std::span<const std::string> texts) override {
+        if (!provider_) {
+            return Error{ErrorCode::NotInitialized, "Provider not available"};
+        }
+        std::vector<std::string> textVec(texts.begin(), texts.end());
+        return provider_->generateBatchEmbeddingsFor(modelName_, textVec);
+    }
+
+    size_t getEmbeddingDimension() const override { return dim_; }
+
+    size_t getMaxSequenceLength() const override { return 512; }
+
+    std::string getBackendName() const override { return "ModelProviderBackend"; }
+
+    bool isAvailable() const override { return provider_ != nullptr && initialized_; }
+
+    vector::GenerationStats getStats() const override { return stats_; }
+
+    void resetStats() override { stats_ = vector::GenerationStats{}; }
+
+private:
+    IModelProvider* provider_;
+    std::string modelName_;
+    size_t dim_;
+    bool initialized_;
+    vector::GenerationStats stats_;
+};
 
 AbiModelProviderAdapter::AbiModelProviderAdapter(yams_model_provider_v1* table) : table_(table) {}
 
@@ -250,9 +313,46 @@ size_t AbiModelProviderAdapter::getEmbeddingDim(const std::string& modelName) co
 
 std::shared_ptr<vector::EmbeddingGenerator>
 AbiModelProviderAdapter::getEmbeddingGenerator(const std::string& modelName) {
-    // For now, return nullptr - plugins provide embeddings via generateEmbedding()
-    // ServiceManager should use modelProvider directly, not create separate EmbeddingGenerator
-    (void)modelName;
+    // Use our custom ModelProviderBackend that wraps IModelProvider directly.
+    // This bypasses the broken ml::createEmbeddingProvider() factory that returns MockProvider.
+
+    std::string model = modelName.empty() ? "all-MiniLM-L6-v2" : modelName;
+
+    // Get dimension from our provider
+    size_t dim = 384; // Default for MiniLM
+    if (table_ && table_->get_embedding_dim) {
+        size_t pluginDim = 0;
+        if (table_->get_embedding_dim(table_->self, model.c_str(), &pluginDim) == YAMS_OK &&
+            pluginDim > 0) {
+            dim = pluginDim;
+        }
+    }
+
+    // Create our custom backend that wraps this IModelProvider
+    auto backend = std::make_unique<ModelProviderBackend>(this, model, dim);
+    if (!backend->initialize()) {
+        spdlog::warn("[AbiModelProviderAdapter] Failed to initialize ModelProviderBackend for '{}'",
+                     model);
+        return nullptr;
+    }
+
+    // Build config for the EmbeddingGenerator
+    vector::EmbeddingConfig config;
+    config.model_name = model;
+    config.embedding_dim = dim;
+
+    // Create EmbeddingGenerator with our custom backend
+    auto gen = std::make_shared<vector::EmbeddingGenerator>(std::move(backend), config);
+    if (gen->initialize()) {
+        spdlog::info(
+            "[AbiModelProviderAdapter] Created EmbeddingGenerator with ModelProviderBackend "
+            "for model '{}' dim={}",
+            model, dim);
+        return gen;
+    }
+
+    spdlog::warn("[AbiModelProviderAdapter] Failed to initialize EmbeddingGenerator for model '{}'",
+                 model);
     return nullptr;
 }
 

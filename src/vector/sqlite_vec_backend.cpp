@@ -429,6 +429,7 @@ public:
         // Insert into HNSW
         ensureHnswLoadedUnlocked();
         if (hnsw_) {
+            size_t before_size = hnsw_->size();
             for (size_t i = 0; i < records.size(); ++i) {
                 std::span<const float> embedding_span(records[i].embedding.data(),
                                                       records[i].embedding.size());
@@ -437,9 +438,22 @@ public:
             hnsw_dirty_ = true;
             pending_inserts_ += records.size();
 
+            // Diagnostic: log HNSW size change every 100 batches or when significant
+            static std::atomic<uint64_t> batch_counter{0};
+            uint64_t bc = batch_counter.fetch_add(1);
+            if (bc % 100 == 0 || records.size() >= 10) {
+                spdlog::debug(
+                    "[HNSW] insertVectorsBatch: added {} records, hnsw_size: {} -> {} (batch #{})",
+                    records.size(), before_size, hnsw_->size(), bc);
+            }
+
             if (pending_inserts_ >= config_.checkpoint_threshold) {
                 saveHnswCheckpointUnlocked();
             }
+        } else {
+            spdlog::warn("[HNSW] insertVectorsBatch: hnsw_ is null after "
+                         "ensureHnswLoadedUnlocked(), {} records NOT indexed in HNSW",
+                         records.size());
         }
 
         return Result<void>{};
@@ -607,7 +621,17 @@ public:
         }
 
         if (!hnsw_ || hnsw_->empty()) {
+            spdlog::warn("[HNSW] searchSimilar: hnsw_ is {}, returning empty results",
+                         hnsw_ ? "empty" : "null");
             return std::vector<VectorRecord>{};
+        }
+
+        // Diagnostic: log HNSW size at search time (first 10 searches, then every 100)
+        static std::atomic<uint64_t> search_counter{0};
+        uint64_t sc = search_counter.fetch_add(1);
+        if (sc < 10 || sc % 100 == 0) {
+            spdlog::info("[HNSW] searchSimilar: hnsw_size={}, k={}, search #{}", hnsw_->size(), k,
+                         sc);
         }
 
         // Build filter function for document_hash and metadata
@@ -1550,8 +1574,20 @@ private:
 
     // Ensure HNSW is loaded (lazy loading)
     void ensureHnswLoadedUnlocked() {
-        if (hnsw_loaded_)
+        if (hnsw_loaded_) {
+            // Already loaded - log occasionally for diagnostics
+            static std::atomic<uint64_t> skip_counter{0};
+            uint64_t skc = skip_counter.fetch_add(1);
+            if (skc < 5 || skc % 1000 == 0) {
+                spdlog::debug("[HNSW] ensureHnswLoadedUnlocked: already loaded, hnsw_size={}, "
+                              "backend={:p} (skip #{})",
+                              hnsw_ ? hnsw_->size() : 0, static_cast<void*>(this), skc);
+            }
             return;
+        }
+
+        spdlog::info("[HNSW] ensureHnswLoadedUnlocked: first load, backend={:p}",
+                     static_cast<void*>(this));
 
         // Check if HNSW tables exist and have data
         sqlite3_stmt* stmt = nullptr;

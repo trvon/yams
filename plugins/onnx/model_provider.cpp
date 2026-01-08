@@ -847,8 +847,11 @@ struct ProviderSingleton {
                             return j.value("embedding_dimension", 0u);
                         if (j.contains("embedding_dim"))
                             return j.value("embedding_dim", 0u);
+                        // Standard models use hidden_size, Nomic models use n_embd
                         if (j.contains("hidden_size"))
                             return j.value("hidden_size", 0u);
+                        if (j.contains("n_embd"))
+                            return j.value("n_embd", 0u);
                     } catch (...) {
                     }
                     return 0u;

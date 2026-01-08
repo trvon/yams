@@ -51,6 +51,13 @@ if catch2_dep.found()
   catch2_compile_dep = [catch2_dep.partial_dependency(compile_args: true, includes: true)]
 endif
 
+# Trailing link deps for Catch2 tests - ensure spdlog/fmt symbols are available
+# after Catch2 libs (static link order matters: users before providers)
+catch2_trailing_link_deps = [
+  dependency('spdlog'),
+  dependency('fmt', required: false),
+]
+
 # Also query pkg-config directly for robustness
 catch2_incs = []
 catch2_pkgconfig = find_program('pkg-config', required: false)

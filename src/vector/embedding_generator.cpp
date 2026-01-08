@@ -1855,6 +1855,13 @@ public:
         }
     }
 
+    /**
+     * Constructor with pre-configured backend injection
+     * Allows using a custom IEmbeddingBackend instead of auto-selecting based on config.
+     */
+    Impl(std::unique_ptr<IEmbeddingBackend> backend, const EmbeddingConfig& config)
+        : config_(config), backend_(std::move(backend)) {}
+
     bool initialize() {
         YAMS_ZONE_SCOPED_N("EmbeddingGenerator::initialize");
 
@@ -2095,6 +2102,10 @@ int EmbeddingGenerator::Impl::ConcurrencyGuard::g_active_{0};
 
 EmbeddingGenerator::EmbeddingGenerator(const EmbeddingConfig& config)
     : pImpl(std::make_unique<Impl>(config)) {}
+
+EmbeddingGenerator::EmbeddingGenerator(std::unique_ptr<IEmbeddingBackend> backend,
+                                       const EmbeddingConfig& config)
+    : pImpl(std::make_unique<Impl>(std::move(backend), config)) {}
 
 EmbeddingGenerator::~EmbeddingGenerator() = default;
 EmbeddingGenerator::EmbeddingGenerator(EmbeddingGenerator&&) noexcept = default;

@@ -32,6 +32,7 @@ namespace yams::daemon {
 
 class AbiPluginLoader;
 class AbiPluginHost;
+class AbiEntityExtractorAdapter;
 class AbiSymbolExtractorAdapter;
 class DaemonLifecycleFsm;
 class ExternalPluginHost;
@@ -200,6 +201,16 @@ public:
      */
     Result<size_t> adoptEntityProviders();
 
+    /**
+     * @brief Adopt NL entity extractors from loaded plugins (e.g., Glint).
+     *
+     * Entity extractors implement entity_extractor_v2 for extracting named entities
+     * (person, organization, location, etc.) from natural language text.
+     *
+     * @return Number of extractors adopted
+     */
+    Result<size_t> adoptEntityExtractors();
+
     // --- Adopted Interface Accessors ---
 
     std::shared_ptr<IModelProvider> getModelProvider() const { return modelProvider_; }
@@ -216,6 +227,10 @@ public:
 
     const std::vector<std::shared_ptr<ExternalEntityProviderAdapter>>& getEntityProviders() const {
         return entityProviders_;
+    }
+
+    const std::vector<std::shared_ptr<AbiEntityExtractorAdapter>>& getEntityExtractors() const {
+        return entityExtractors_;
     }
 
     // --- Model Provider State ---
@@ -334,6 +349,7 @@ private:
     std::string embeddingModelName_;
     std::vector<std::shared_ptr<extraction::IContentExtractor>> contentExtractors_;
     std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> symbolExtractors_;
+    std::vector<std::shared_ptr<AbiEntityExtractorAdapter>> entityExtractors_;
     std::vector<std::shared_ptr<ExternalEntityProviderAdapter>> entityProviders_;
     PostIngestQueue* postIngestQueue_{nullptr};
 

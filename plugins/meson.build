@@ -16,3 +16,7 @@ if get_option('plugin-zyp')
   subdir('zyp')
 endif
 
+if get_option('plugin-glint')
+  subdir('glint')
+endif
+

@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <set>
 #include <sstream>
 #include <yams/cli/command.h>
 #include <yams/cli/ui_helpers.hpp>
@@ -869,28 +870,50 @@ private:
     // Check if embedding models are available
     std::vector<std::string> getAvailableModels() {
         std::vector<std::string> models;
+        std::set<std::string> seen; // Track unique model names
 
-        fs::path modelsPath;
-        const char* xdgDataHome = std::getenv("XDG_DATA_HOME");
-        if (xdgDataHome && *xdgDataHome) {
-            modelsPath = fs::path(xdgDataHome) / "yams" / "models";
-        } else {
-            const char* home = std::getenv("HOME");
-            if (!home)
-                return models;
-            modelsPath = fs::path(home) / ".local" / "share" / "yams" / "models";
+        // Collect model directories from multiple potential paths
+        std::vector<fs::path> searchPaths;
+
+        // Priority 1: YAMS_STORAGE environment variable
+        if (const char* storage = std::getenv("YAMS_STORAGE")) {
+            searchPaths.emplace_back(fs::path(storage) / "models");
         }
 
-        if (fs::exists(modelsPath)) {
+        // Priority 2: XDG_DATA_HOME or ~/.local/share/yams
+        const char* xdgDataHome = std::getenv("XDG_DATA_HOME");
+        if (xdgDataHome && *xdgDataHome) {
+            searchPaths.emplace_back(fs::path(xdgDataHome) / "yams" / "models");
+        } else {
+            const char* home = std::getenv("HOME");
+            if (home) {
+                searchPaths.emplace_back(fs::path(home) / ".local" / "share" / "yams" / "models");
+            }
+        }
+
+        // Priority 3: ~/.yams/models (legacy path)
+        if (const char* home = std::getenv("HOME")) {
+            searchPaths.emplace_back(fs::path(home) / ".yams" / "models");
+        }
+
+        // Scan all paths for models
+        for (const auto& modelsPath : searchPaths) {
+            if (!fs::exists(modelsPath))
+                continue;
+
             for (const auto& entry : fs::directory_iterator(modelsPath)) {
                 if (entry.is_directory()) {
                     fs::path modelFile = entry.path() / "model.onnx";
                     if (fs::exists(modelFile)) {
-                        models.push_back(entry.path().filename().string());
+                        std::string name = entry.path().filename().string();
+                        if (seen.insert(name).second) {
+                            models.push_back(name);
+                        }
                     }
                 }
             }
         }
+
         return models;
     }
 

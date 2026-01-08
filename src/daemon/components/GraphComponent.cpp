@@ -122,11 +122,38 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
         }
     }
 
-    // Skip if no language detected (not a supported source file)
-    if (language.empty()) {
-        // Only log at debug for non-code files, but trace why for debugging
+    // Check if NL entity extractors support this file type (for non-code files)
+    bool hasNlExtractor = false;
+    std::string contentType;
+    if (language.empty() && !ctx.filePath.empty()) {
+        std::filesystem::path path(ctx.filePath);
+        std::string ext = path.extension().string();
+
+        // Map extension to content type for NL extractors
+        if (ext == ".md" || ext == ".markdown") {
+            contentType = "text/markdown";
+        } else if (ext == ".json" || ext == ".jsonl") {
+            contentType = "application/json";
+        } else if (ext == ".txt" || ext.empty()) {
+            contentType = "text/plain";
+        }
+
+        // Check if any NL entity extractor supports this content type
+        if (!contentType.empty()) {
+            const auto& nlExtractors = serviceManager_->getEntityExtractors();
+            for (const auto& ex : nlExtractors) {
+                if (ex && ex->supportsContentType(contentType)) {
+                    hasNlExtractor = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Skip if no language detected AND no NL extractor supports the content type
+    if (language.empty() && !hasNlExtractor) {
         spdlog::debug(
-            "[GraphComponent] No language detected for {} (ext='{}'), skipping extraction",
+            "[GraphComponent] No language/extractor for {} (ext='{}'), skipping extraction",
             ctx.filePath,
             ctx.filePath.empty() ? "" : std::filesystem::path(ctx.filePath).extension().string());
         return Result<void>();
@@ -156,8 +183,9 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
         spdlog::warn("[GraphComponent] Failed to submit extraction for {}: {}",
                      ctx.documentHash.substr(0, 12), submitResult.error().message);
     } else {
-        spdlog::info("[GraphComponent] Queued symbol extraction for {} ({}) lang={}", ctx.filePath,
-                     ctx.documentHash.substr(0, 12), language);
+        spdlog::info("[GraphComponent] Queued entity extraction for {} ({}) lang={} nl={}",
+                     ctx.filePath, ctx.documentHash.substr(0, 12),
+                     language.empty() ? "(none)" : language, hasNlExtractor ? "yes" : "no");
     }
 
     return Result<void>();

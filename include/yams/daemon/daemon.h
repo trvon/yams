@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <functional>
 #include <future>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -55,6 +56,10 @@ struct DaemonConfig {
     bool useMockModelProvider = false;
     size_t autoRepairBatchSize = 32;
     size_t maxPendingRepairs = 1000;
+
+    // Per-plugin configuration: plugin name -> JSON config string
+    // Parsed from [plugins.<name>] sections in config.toml
+    std::map<std::string, std::string> pluginConfigs;
 
     // Streaming keepalive configuration
     std::chrono::milliseconds heartbeatInterval{500}; // default 500ms

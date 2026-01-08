@@ -4,8 +4,10 @@
 #include <spdlog/spdlog.h>
 #include <cstdlib>
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <random>
+#include <string>
 #include <thread>
 #include <vector>
 #include "test_async_helpers.h"
@@ -42,6 +44,8 @@ struct DaemonHarnessOptions {
     bool modelPoolLazyLoading = true;
     std::vector<std::string> preloadModels;
     std::optional<std::filesystem::path> pluginDir;
+    // Per-plugin configuration: plugin name -> JSON config string
+    std::map<std::string, std::string> pluginConfigs;
 };
 
 class DaemonHarness {
@@ -109,6 +113,8 @@ public:
             cfg.modelPoolConfig.lazyLoading = options_.modelPoolLazyLoading;
             cfg.modelPoolConfig.preloadModels = options_.preloadModels;
         }
+        // Pass plugin-specific configurations
+        cfg.pluginConfigs = options_.pluginConfigs;
         daemon_ = std::make_unique<yams::daemon::YamsDaemon>(cfg);
         spdlog::info("[DaemonHarness] Daemon instance created");
 

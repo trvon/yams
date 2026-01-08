@@ -989,9 +989,12 @@ private:
                     j["embedding_dimension"].is_number_integer()) {
                     embeddingDim_ = static_cast<size_t>(j["embedding_dimension"].get<int>());
                 }
-                // Hidden size often present in HF config
+                // Hidden size often present in HF config (standard models use hidden_size,
+                // Nomic models use n_embd)
                 if (j.contains("hidden_size") && j["hidden_size"].is_number_integer()) {
                     embeddingDim_ = static_cast<size_t>(j["hidden_size"].get<int>());
+                } else if (j.contains("n_embd") && j["n_embd"].is_number_integer()) {
+                    embeddingDim_ = static_cast<size_t>(j["n_embd"].get<int>());
                 }
                 // Nomic-specific hints via architectures
                 try {

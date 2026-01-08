@@ -546,6 +546,13 @@ if command -v zig >/dev/null 2>&1; then
   fi
 fi
 
+# Auto-enable Glint NL entity extractor plugin (GLiNER-based)
+# Requires ONNX Runtime which is already a dependency
+if [[ "${YAMS_DISABLE_ONNX:-}" != "true" ]]; then
+  echo "Enabling Glint NL entity extractor plugin"
+  MESON_OPTIONS+=("-Dplugin-glint=true")
+fi
+
 echo "--- Running meson setup... ---"
 if [[ -n "${PREV_CPPSTD}" ]]; then
   if [[ "${PREV_CPPSTD}" != "${MESON_CPPSTD}" ]]; then

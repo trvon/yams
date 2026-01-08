@@ -21,6 +21,7 @@
 
 // Forward declarations for C ABI types
 struct yams_symbol_extraction_result_v1;
+struct yams_entity_extraction_result_v2;
 
 namespace yams {
 namespace metadata {
@@ -30,6 +31,7 @@ class MetadataRepository;
 namespace daemon {
 class ServiceManager;
 class AbiSymbolExtractorAdapter;
+class AbiEntityExtractorAdapter;
 
 /**
  * EntityGraphService facade.
@@ -44,6 +46,7 @@ public:
         std::string filePath;     ///< Absolute or repo-relative path
         std::string contentUtf8;  ///< UTF-8 document content
         std::string language;     ///< Language hint (e.g., "cpp", "python")
+        std::string mimeType;     ///< MIME type for content routing (e.g., "text/plain")
     };
 
     /**
@@ -148,6 +151,44 @@ private:
      */
     static std::string buildSymbolText(const yams_symbol_extraction_result_v1* result,
                                        size_t index);
+
+    /**
+     * Check if content type should use NL entity extraction instead of code symbol extraction.
+     * Returns true for text/plain, text/markdown, application/json, and similar NL content.
+     */
+    static bool isNaturalLanguageContent(const Job& job);
+
+    /**
+     * Process NL content using entity extractor plugins (e.g., Glint for GLiNER).
+     * Extracts named entities (person, organization, location, etc.) from text.
+     */
+    bool processNaturalLanguage(Job& job);
+
+    /**
+     * Populate KG with NL entities (person, organization, location, etc.)
+     */
+    bool populateKnowledgeGraphNL(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
+                                  const Job& job, const yams_entity_extraction_result_v2* result,
+                                  const AbiEntityExtractorAdapter* adapter);
+
+    /**
+     * Create KG nodes for NL entities.
+     */
+    struct EntityNodeBatch {
+        std::vector<std::int64_t> nodeIds;
+        std::vector<std::string> entityKeys;
+    };
+
+    yams::Result<EntityNodeBatch>
+    createEntityNodes(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
+                      const Job& job, const yams_entity_extraction_result_v2* result);
+
+    /**
+     * Generate embeddings for NL entities.
+     */
+    yams::Result<void> generateNLEntityEmbeddings(const Job& job,
+                                                  const yams_entity_extraction_result_v2* result,
+                                                  const EntityNodeBatch& entityNodes);
 
     ServiceManager* services_{};
     std::atomic<bool> stop_{false};
