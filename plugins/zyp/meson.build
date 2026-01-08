@@ -22,7 +22,14 @@ elif host_machine.system() == 'windows'
   zpdf_lib_name = 'zpdf.dll'
   zpdf_import_lib_name = 'zpdf.lib'
   zyp_install_rpath = ''  # Windows doesn't use rpath
-  zyp_link_args = ['/NODEFAULTLIB:libcmt']  # Avoid linker conflicts
+  # Link against dynamic CRT libraries; avoid static CRT conflict
+  zyp_link_args = [
+    '/NODEFAULTLIB:libcmt',
+    '/NODEFAULTLIB:libcmtd',
+    'msvcrt.lib',
+    'vcruntime.lib',
+    'ucrt.lib',
+  ]
 else
   zpdf_lib_name = 'libzpdf.so'
   # $ORIGIN refers to directory containing the loading module
@@ -31,13 +38,16 @@ else
 endif
 
 # Build zpdf shared library via Zig and copy to build directory
-# Zig outputs to zpdf/zig-out/lib/, we copy it to make it accessible for linking
+# Zig outputs DLLs to zpdf/zig-out/bin/ on Windows, shared libs to zig-out/lib/ on Unix
 zpdf_src_dir = meson.current_source_dir() / 'zpdf'
-zpdf_lib_src = zpdf_src_dir / 'zig-out' / 'lib' / zpdf_lib_name
-zpdf_build_dir = meson.current_build_dir()
 if host_machine.system() == 'windows'
+  # Windows: DLL goes to bin/, import lib goes to lib/
+  zpdf_lib_src = zpdf_src_dir / 'zig-out' / 'bin' / zpdf_lib_name
   zpdf_import_lib_src = zpdf_src_dir / 'zig-out' / 'lib' / zpdf_import_lib_name
+else
+  zpdf_lib_src = zpdf_src_dir / 'zig-out' / 'lib' / zpdf_lib_name
 endif
+zpdf_build_dir = meson.current_build_dir()
 fs = import('fs')
 if not fs.exists(zpdf_src_dir / 'build.zig')
   warning('zpdf source not found (missing build.zig), skipping zyp plugin build.')
@@ -47,6 +57,7 @@ endif
 # Platform-specific build command
 if host_machine.system() == 'windows'
   # Windows: Use PowerShell for build
+  # Build zpdf and copy both DLL and import lib to build directory
   zpdf_lib = custom_target('zpdf_shared',
     command: [
       'powershell', '-NoProfile', '-Command',
@@ -64,6 +75,8 @@ if host_machine.system() == 'windows'
     build_by_default: true,
     console: true,
   )
+  # Extract just the import library for linking
+  zpdf_import_lib = zpdf_lib[1]
 else
   # Unix (Linux/macOS): Use shell
   zpdf_lib = custom_target('zpdf_shared',
@@ -85,10 +98,19 @@ endif
 
 # Create a dependency object that includes the zpdf library
 # Use build_rpath for build-time, install_rpath handles installed location
-zpdf_dep = declare_dependency(
-  link_args: ['-L' + zpdf_build_dir, '-lzpdf'],
-  sources: [zpdf_lib],  # This creates the build dependency
-)
+if host_machine.system() == 'windows'
+  # On Windows, link against the import library only (not the DLL)
+  # Use sources to establish build dependency, but link via explicit path
+  zpdf_dep = declare_dependency(
+    link_args: [zpdf_build_dir / zpdf_import_lib_name],
+    sources: [zpdf_import_lib],  # Build dependency on just the import lib
+  )
+else
+  zpdf_dep = declare_dependency(
+    link_args: ['-L' + zpdf_build_dir, '-lzpdf'],
+    sources: [zpdf_lib],  # This creates the build dependency
+  )
+endif
 
 # Compiler-specific flags for this plugin.
 zyp_cpp_args = []
@@ -127,7 +149,7 @@ zyp_plugin = shared_module('yams_zyp',
 # Use platform-specific install script
 if host_machine.system() == 'windows'
   meson.add_install_script('powershell', '-NoProfile', '-Command',
-    'Copy-Item -Path "@0@" -Destination "$env:DESTDIR@1@"'.format(
+    '$dest = if ($env:DESTDIR) { Join-Path $env:DESTDIR "@1@" } else { "@1@" }; New-Item -ItemType Directory -Force -Path $dest | Out-Null; Copy-Item -Path "@0@" -Destination $dest'.format(
       zpdf_build_dir / zpdf_lib_name,
       get_option('prefix') / plugins_dir
     )

@@ -15,4 +15,4 @@
  	url = https://git.sr.ht/~trvon/yams-sdk
 [submodule "plugins/zyp/zpdf"]
 	path = plugins/zyp/zpdf
-	url = https://github.com/Lulzx/zpdf.git
+	url = https://github.com/trvon/zpdf
