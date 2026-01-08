@@ -36,21 +36,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Zig language support: functions, structs, enums, unions, fields, imports, calls.
 
 ### Performance
+
+#### IPC & Daemon
 - IPC latency reduced from ~8-28ms to ~2-5ms (connection pooling, async timers, cached config).
-- Post-ingest throughput: dedicated worker pool, adaptive backoff, batched directory ingests.
-- Search optimizations: batch vector/KG lookups, flat_map for cache-friendly access, branch hints, memory pre-allocation.
 - Daemon startup throttling: PathTreeRepair via RepairCoordinator, Fts5Job startup delay (2s), reduced batch sizes (1000→100).
-- **New**: `setMetadataBatch()` API for bulk metadata updates - 4x faster than individual calls.
-- **New**: In-memory chunking for `storeBytes()` - avoids temp file I/O for large documents.
-- Benchmarks (Debug, macOS M3 Max):
-  | Benchmark | Oct 2025 | Jan 2026 | Change |
-  |-----------|----------|----------|--------|
-  | Ingestion_SmallDocument | 2,771 ops/s | 2,821 ops/s | ~same |
-  | Ingestion_MediumDocument | 56 ops/s | 57 ops/s | ~same |
-  | Metadata_SingleUpdate | 10,537 ops/s | 13,966 ops/s | **+33%** |
-  | Metadata_BulkUpdate(500) | 7,823 ops/s | 51,341 ops/s | **+6.5x** |
-  | IPC StreamingFramer_32x10 | - | 3,732 ops/s | new |
-  | IPC UnaryFramer_8KB | - | 10,088 ops/s | new |
+
+#### Ingestion & Storage
+- Post-ingest throughput: dedicated worker pool, adaptive backoff, batched directory ingests.
+- In-memory chunking for `storeBytes()` - avoids temp file I/O for large documents.
+
+#### Database & Metadata
+- Prepared statement caching for SQLite queries - reduces SQL compilation overhead on repeated operations. Cached methods: `setMetadata`, `setMetadataBatch`, `getMetadata`, `getAllMetadata`, `getContent`, `getDocument`, `getDocumentByHash`, `updateDocument`, `deleteDocument`, `insertContent`.
+- `setMetadataBatch()` API for bulk metadata updates - 4x faster than individual calls.
+
+#### Search & Retrieval
+- Batch vector/KG lookups, flat_map for cache-friendly access, branch hints, memory pre-allocation.
+
+#### Throughput Benchmarks (Debug, macOS M3 Max)
+
+| Benchmark | Oct 2025 | Jan 2026 | Change |
+|-----------|----------|----------|--------|
+| Ingestion_SmallDocument | 2,771 ops/s | 2,821 ops/s | ~same |
+| Ingestion_MediumDocument | 56 ops/s | 57 ops/s | ~same |
+| Metadata_SingleUpdate | 10,537 ops/s | 17,794 ops/s | **+69%** |
+| Metadata_BulkUpdate(500) | 7,823 ops/s | 50,473 ops/s | **+6.5x** |
+| IPC_StreamingFramer | - | 3,732 ops/s | new |
+| IPC_UnaryFramer | - | 10,088 ops/s | new |
+
+#### Retrieval Quality Benchmarks (SciFact: 5,183 docs, 300 queries)
+
+| Metric | Score | Description |
+|--------|-------|-------------|
+| MRR | 0.630 | Mean Reciprocal Rank |
+| Recall@10 | 0.799 | Recall at K=10 |
+| MAP | 0.628 | Mean Average Precision |
+| nDCG@10 | 0.669 | Normalized Discounted Cumulative Gain |
 
 ### Fixed
 - Compression stats now persist across daemon restarts (`Storage Logical Bytes` vs

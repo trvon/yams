@@ -31,7 +31,9 @@ endif
 if not catch2_main_dep.found()
   # Fallback: try to find libCatch2Main directly (homebrew installs separate libs)
   cxx = meson.get_compiler('cpp')
-  catch2_main_lib = cxx.find_library('Catch2Main', required: false)
+  # Try with dirs hint for homebrew
+  catch2_main_lib = cxx.find_library('Catch2Main', required: false,
+                                      dirs: ['/opt/homebrew/lib', '/usr/local/lib'])
   if catch2_main_lib.found()
     catch2_main_dep = declare_dependency(
       dependencies: [catch2_dep, catch2_main_lib]

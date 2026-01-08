@@ -307,7 +307,7 @@ TEST_CASE("Database: Migrations", "[unit][metadata][database]") {
         auto currentVersion = mm.getCurrentVersion();
         REQUIRE(currentVersion.has_value());
         CHECK(currentVersion.value() ==
-              21); // Latest schema version (keep in sync with migration.cpp)
+              22); // Latest schema version (keep in sync with migration.cpp)
 
         // Verify tables exist
         auto docExists = db.tableExists("documents");
@@ -384,4 +384,93 @@ TEST_CASE("Database: Concurrent access", "[unit][metadata][database][.slow]") {
 
     REQUIRE(result.has_value());
     CHECK(result.value() == numThreads * incrementsPerThread);
+}
+
+TEST_CASE("Database: Statement cache", "[unit][metadata][database]") {
+    DatabaseFixture fix;
+    Database db;
+
+    auto openResult = db.open(fix.dbPath_.string(), ConnectionMode::Create);
+    REQUIRE(openResult.has_value());
+
+    // Create a test table
+    auto createResult = db.execute("CREATE TABLE test_cache (id INTEGER PRIMARY KEY, value TEXT)");
+    REQUIRE(createResult.has_value());
+
+    SECTION("prepareCached returns working statement") {
+        auto stmtResult = db.prepareCached("INSERT INTO test_cache (id, value) VALUES (?, ?)");
+        REQUIRE(stmtResult.has_value());
+
+        auto& stmt = *stmtResult.value();
+        auto bindResult = stmt.bindAll(1, "hello");
+        REQUIRE(bindResult.has_value());
+
+        auto execResult = stmt.execute();
+        REQUIRE(execResult.has_value());
+    }
+
+    SECTION("prepareCached reuses statements") {
+        const std::string sql = "SELECT id, value FROM test_cache WHERE id = ?";
+
+        // First call - cache miss
+        {
+            auto stmtResult = db.prepareCached(sql);
+            REQUIRE(stmtResult.has_value());
+        } // Statement returned to cache
+
+        auto stats1 = db.getStatementCacheStats();
+        CHECK(stats1.misses == 1);
+        CHECK(stats1.hits == 0);
+        CHECK(stats1.currentSize == 1);
+
+        // Second call - cache hit
+        {
+            auto stmtResult = db.prepareCached(sql);
+            REQUIRE(stmtResult.has_value());
+        }
+
+        auto stats2 = db.getStatementCacheStats();
+        CHECK(stats2.misses == 1);
+        CHECK(stats2.hits == 1);
+        CHECK(stats2.currentSize == 1);
+
+        // Third call - another cache hit
+        {
+            auto stmtResult = db.prepareCached(sql);
+            REQUIRE(stmtResult.has_value());
+        }
+
+        auto stats3 = db.getStatementCacheStats();
+        CHECK(stats3.hits == 2);
+    }
+
+    SECTION("clearStatementCache clears cache and stats") {
+        auto stmtResult = db.prepareCached("SELECT 1");
+        REQUIRE(stmtResult.has_value());
+        stmtResult.value().release(); // Don't return to cache
+
+        // Use it again to populate cache
+        stmtResult = db.prepareCached("SELECT 1");
+        REQUIRE(stmtResult.has_value());
+
+        db.clearStatementCache();
+
+        auto stats = db.getStatementCacheStats();
+        CHECK(stats.hits == 0);
+        CHECK(stats.misses == 0);
+        CHECK(stats.currentSize == 0);
+    }
+
+    SECTION("CachedStatement can be released") {
+        auto stmtResult = db.prepareCached("SELECT 1");
+        REQUIRE(stmtResult.has_value());
+
+        Statement stmt = stmtResult.value().release();
+        auto stepResult = stmt.step();
+        REQUIRE(stepResult.has_value());
+        CHECK(stepResult.value() == true);
+        CHECK(stmt.getInt(0) == 1);
+
+        // Statement won't be returned to cache since it was released
+    }
 }

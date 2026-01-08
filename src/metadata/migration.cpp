@@ -337,7 +337,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             renameDocEntitiesToKgDocEntities(),
             createSessionIndexes(),
             createRepairTrackingSchema(),
-            createSymbolExtractionStateSchema()};
+            createSymbolExtractionStateSchema(),
+            createSymSpellSchema()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -2179,6 +2180,51 @@ Migration YamsMetadataMigrations::createSymbolExtractionStateSchema() {
         DROP INDEX IF EXISTS idx_symbol_extraction_state_status;
         DROP INDEX IF EXISTS idx_symbol_extraction_state_extractor;
         DROP TABLE IF EXISTS document_symbol_extraction_state;
+    )";
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::createSymSpellSchema() {
+    Migration m;
+    m.version = 23;
+    m.name = "Create SymSpell fuzzy search tables";
+    m.created = std::chrono::system_clock::now();
+
+    m.upSQL = R"(
+        -- SymSpell dictionary terms table
+        -- Stores original terms with their frequencies for fuzzy matching
+        CREATE TABLE IF NOT EXISTS symspell_terms (
+            id INTEGER PRIMARY KEY,
+            term TEXT UNIQUE NOT NULL,
+            frequency INTEGER DEFAULT 1,
+            created_at INTEGER DEFAULT (unixepoch())
+        );
+
+        -- SymSpell delete variants table
+        -- Maps delete hashes to term IDs for O(1) lookup during fuzzy search
+        -- WITHOUT ROWID saves ~30% storage for this lookup-only table
+        CREATE TABLE IF NOT EXISTS symspell_deletes (
+            delete_hash INTEGER NOT NULL,
+            term_id INTEGER NOT NULL,
+            FOREIGN KEY (term_id) REFERENCES symspell_terms(id) ON DELETE CASCADE,
+            PRIMARY KEY (delete_hash, term_id)
+        ) WITHOUT ROWID;
+
+        -- Index for fast hash lookups (the core SymSpell query pattern)
+        CREATE INDEX IF NOT EXISTS idx_symspell_deletes_hash 
+            ON symspell_deletes(delete_hash);
+        
+        -- Index for term lookups by text (for frequency updates and exact matches)
+        CREATE INDEX IF NOT EXISTS idx_symspell_terms_term 
+            ON symspell_terms(term);
+    )";
+
+    m.downSQL = R"(
+        DROP INDEX IF EXISTS idx_symspell_terms_term;
+        DROP INDEX IF EXISTS idx_symspell_deletes_hash;
+        DROP TABLE IF EXISTS symspell_deletes;
+        DROP TABLE IF EXISTS symspell_terms;
     )";
 
     return m;

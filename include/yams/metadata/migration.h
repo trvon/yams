@@ -212,6 +212,9 @@ private:
 
     // Version 22: Versioned symbol extraction state to avoid re-extraction
     static Migration createSymbolExtractionStateSchema();
+
+    // Version 23: SymSpell fuzzy search tables for fast edit-distance queries
+    static Migration createSymSpellSchema();
 };
 
 /**

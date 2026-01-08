@@ -24,6 +24,7 @@
 #include <yams/metadata/path_utils.h>
 #include <yams/metadata/query_helpers.h>
 #include <yams/profiling.h>
+#include <yams/search/symspell_search.h>
 #include <yams/storage/corpus_stats.h>
 
 namespace yams::metadata {
@@ -439,12 +440,13 @@ Result<std::optional<DocumentInfo>> MetadataRepository::getDocument(int64_t id) 
             spec.table = "documents";
             spec.columns = {cols};
             spec.conditions = {"id = ?"};
-            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
+            // Use prepareCached for better performance on repeated lookups
+            auto stmtResult = db.prepareCached(yams::metadata::sql::buildSelect(spec));
 
             if (!stmtResult)
                 return stmtResult.error();
 
-            Statement stmt = std::move(stmtResult).value();
+            auto& stmt = *stmtResult.value();
             auto bindResult = stmt.bind(1, id);
             if (!bindResult)
                 return bindResult.error();
@@ -470,12 +472,13 @@ Result<std::optional<DocumentInfo>> MetadataRepository::getDocumentInternal(Data
     spec.table = "documents";
     spec.columns = {cols};
     spec.conditions = {"id = ?"};
-    auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
+    // Use prepareCached for better performance on repeated lookups
+    auto stmtResult = db.prepareCached(yams::metadata::sql::buildSelect(spec));
 
     if (!stmtResult)
         return stmtResult.error();
 
-    Statement stmt = std::move(stmtResult).value();
+    auto& stmt = *stmtResult.value();
     auto bindResult = stmt.bind(1, id);
     if (!bindResult)
         return bindResult.error();
@@ -540,13 +543,14 @@ Result<std::optional<DocumentInfo>> MetadataRepository::getDocumentByHash(const 
             spec.columns = {cols};
             spec.conditions = {"sha256_hash = ?"};
             auto sql = yams::metadata::sql::buildSelect(spec);
-            auto stmtResult = db.prepare(sql);
+            // Use prepareCached for better performance on repeated lookups
+            auto stmtResult = db.prepareCached(sql);
 
             if (!stmtResult) {
                 return stmtResult.error();
             }
 
-            Statement stmt = std::move(stmtResult).value();
+            auto& stmt = *stmtResult.value();
             auto bindResult = stmt.bind(1, hash);
             if (!bindResult) {
                 return bindResult.error();
@@ -567,7 +571,8 @@ Result<std::optional<DocumentInfo>> MetadataRepository::getDocumentByHash(const 
 
 Result<void> MetadataRepository::updateDocument(const DocumentInfo& info) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
-        auto stmtResult = db.prepare(R"(
+        // Use prepareCached for better performance on repeated updates
+        auto stmtResult = db.prepareCached(R"(
             UPDATE documents SET
                 file_path = ?, file_name = ?, file_extension = ?,
                 file_size = ?, sha256_hash = ?, mime_type = ?,
@@ -581,7 +586,7 @@ Result<void> MetadataRepository::updateDocument(const DocumentInfo& info) {
         if (!stmtResult)
             return stmtResult.error();
 
-        Statement stmt = std::move(stmtResult).value();
+        auto& stmt = *stmtResult.value();
         auto bindResult = stmt.bindAll(
             info.filePath, info.fileName, info.fileExtension, info.fileSize, info.sha256Hash,
             info.mimeType, info.createdTime, info.modifiedTime, info.indexedTime,
@@ -602,14 +607,15 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
         bool wasExtracted = false;
         bool wasIndexed = false;
         {
-            auto checkStmt = db.prepare(R"(
+            // Use prepareCached for better performance on repeated deletes
+            auto checkStmt = db.prepareCached(R"(
                 SELECT d.content_extracted, COALESCE(des.has_embedding, 0)
                 FROM documents d
                 LEFT JOIN document_embeddings_status des ON d.id = des.document_id
                 WHERE d.id = ?
             )");
             if (checkStmt) {
-                auto& stmt = checkStmt.value();
+                auto& stmt = *checkStmt.value();
                 stmt.bind(1, id);
                 if (auto stepRes = stmt.step(); stepRes && stepRes.value()) {
                     wasExtracted = stmt.getInt(0) != 0;
@@ -619,11 +625,12 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
         }
 
         // Foreign key constraints will handle cascading deletes
-        auto stmtResult = db.prepare("DELETE FROM documents WHERE id = ?");
+        // Use prepareCached for better performance
+        auto stmtResult = db.prepareCached("DELETE FROM documents WHERE id = ?");
         if (!stmtResult)
             return stmtResult.error();
 
-        Statement stmt = std::move(stmtResult).value();
+        auto& stmt = *stmtResult.value();
         auto bindResult = stmt.bind(1, id);
         if (!bindResult)
             return bindResult.error();
@@ -650,7 +657,8 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
 // Content operations
 Result<void> MetadataRepository::insertContent(const DocumentContent& content) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
-        auto stmtResult = db.prepare(R"(
+        // Use prepareCached for better performance on repeated content insertions
+        auto stmtResult = db.prepareCached(R"(
             INSERT INTO document_content (
                 document_id, content_text, content_length,
                 extraction_method, language
@@ -665,7 +673,7 @@ Result<void> MetadataRepository::insertContent(const DocumentContent& content) {
         if (!stmtResult)
             return stmtResult.error();
 
-        Statement stmt = std::move(stmtResult).value();
+        auto& stmt = *stmtResult.value();
         const std::string sanitizedContent = common::sanitizeUtf8(content.contentText);
         auto bindResult = stmt.bindAll(content.documentId, sanitizedContent,
                                        static_cast<int64_t>(sanitizedContent.length()),
@@ -681,19 +689,18 @@ Result<void> MetadataRepository::insertContent(const DocumentContent& content) {
 Result<std::optional<DocumentContent>> MetadataRepository::getContent(int64_t documentId) {
     return executeQuery<std::optional<DocumentContent>>(
         [&](Database& db) -> Result<std::optional<DocumentContent>> {
-            std::string sql = R"(
+            // Use prepareCached for hot-path queries
+            auto stmtResult = db.prepareCached(R"(
             SELECT document_id, content_text, content_length,
                    extraction_method, language
             FROM document_content WHERE document_id = ?
-        )";
-
-            auto stmtResult = db.prepare(sql);
+        )");
 
             if (!stmtResult) {
                 return stmtResult.error();
             }
 
-            Statement stmt = std::move(stmtResult).value();
+            auto& stmt = *stmtResult.value();
             auto bindResult = stmt.bind(1, documentId);
             if (!bindResult) {
                 return bindResult.error();
@@ -758,7 +765,8 @@ Result<void> MetadataRepository::setMetadata(int64_t documentId, const std::stri
                                              const MetadataValue& value) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
         // Use INSERT OR REPLACE to handle both insert and update
-        auto stmtResult = db.prepare(R"(
+        // Use prepareCached for better performance on repeated calls
+        auto stmtResult = db.prepareCached(R"(
             INSERT OR REPLACE INTO metadata (document_id, key, value, value_type)
             VALUES (?, ?, ?, ?)
         )");
@@ -766,7 +774,7 @@ Result<void> MetadataRepository::setMetadata(int64_t documentId, const std::stri
         if (!stmtResult)
             return stmtResult.error();
 
-        Statement stmt = std::move(stmtResult).value();
+        auto& stmt = *stmtResult.value();
         auto bindResult = stmt.bindAll(documentId, key, value.value,
                                        MetadataValueTypeUtils::toString(value.type));
 
@@ -789,8 +797,8 @@ Result<void> MetadataRepository::setMetadataBatch(
             return beginResult.error();
         }
 
-        // Prepare statement once, reuse for all entries
-        auto stmtResult = db.prepare(R"(
+        // Use prepareCached for better performance - statement is reused across calls
+        auto stmtResult = db.prepareCached(R"(
             INSERT OR REPLACE INTO metadata (document_id, key, value, value_type)
             VALUES (?, ?, ?, ?)
         )");
@@ -800,10 +808,11 @@ Result<void> MetadataRepository::setMetadataBatch(
             return stmtResult.error();
         }
 
-        Statement stmt = std::move(stmtResult).value();
+        auto& stmt = *stmtResult.value();
 
         for (const auto& [documentId, key, value] : entries) {
             stmt.reset();
+            stmt.clearBindings();
             auto bindResult = stmt.bindAll(documentId, key, value.value,
                                            MetadataValueTypeUtils::toString(value.type));
             if (!bindResult) {
@@ -832,17 +841,14 @@ Result<std::optional<MetadataValue>> MetadataRepository::getMetadata(int64_t doc
                                                                      const std::string& key) {
     return executeQuery<std::optional<MetadataValue>>(
         [&](Database& db) -> Result<std::optional<MetadataValue>> {
-            using yams::metadata::sql::QuerySpec;
-            QuerySpec spec{};
-            spec.table = "metadata";
-            spec.columns = {"value", "value_type"};
-            spec.conditions = {"document_id = ?", "key = ?"};
-            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
+            // Use prepareCached for hot-path queries
+            auto stmtResult = db.prepareCached(
+                "SELECT value, value_type FROM metadata WHERE document_id = ? AND key = ?");
 
             if (!stmtResult)
                 return stmtResult.error();
 
-            Statement stmt = std::move(stmtResult).value();
+            auto& stmt = *stmtResult.value();
             auto bindResult = stmt.bindAll(documentId, key);
             if (!bindResult)
                 return bindResult.error();
@@ -867,17 +873,14 @@ Result<std::unordered_map<std::string, MetadataValue>>
 MetadataRepository::getAllMetadata(int64_t documentId) {
     return executeQuery<std::unordered_map<std::string, MetadataValue>>(
         [&](Database& db) -> Result<std::unordered_map<std::string, MetadataValue>> {
-            using yams::metadata::sql::QuerySpec;
-            QuerySpec spec{};
-            spec.table = "metadata";
-            spec.columns = {"key", "value", "value_type"};
-            spec.conditions = {"document_id = ?"};
-            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
+            // Use prepareCached for hot-path queries
+            auto stmtResult = db.prepareCached(
+                "SELECT key, value, value_type FROM metadata WHERE document_id = ?");
 
             if (!stmtResult)
                 return stmtResult.error();
 
-            Statement stmt = std::move(stmtResult).value();
+            auto& stmt = *stmtResult.value();
             auto bindResult = stmt.bind(1, documentId);
             if (!bindResult)
                 return bindResult.error();
@@ -2929,6 +2932,63 @@ Result<void> MetadataRepository::ensureFuzzyIndexInitialized() {
         }
     }
     return buildFuzzyIndex();
+}
+
+// -----------------------------------------------------------------------------
+// SymSpell fuzzy search (SQLite-backed, incremental)
+// -----------------------------------------------------------------------------
+
+Result<void> MetadataRepository::ensureSymSpellInitialized() {
+    if (symspellInitialized_) {
+        return Result<void>();
+    }
+
+    // Get a connection and initialize the schema + index
+    return executeQuery<void>([this](Database& db) -> Result<void> {
+        // Double-check after acquiring connection
+        if (symspellInitialized_) {
+            return Result<void>();
+        }
+
+        sqlite3* rawDb = db.rawHandle();
+        if (!rawDb) {
+            return Error{ErrorCode::DatabaseError, "Failed to get raw SQLite handle"};
+        }
+
+        // Initialize schema (idempotent - creates tables if not exist)
+        auto schemaResult = search::SymSpellSearch::initializeSchema(rawDb);
+        if (!schemaResult) {
+            spdlog::error("SymSpell schema initialization failed: {}",
+                          schemaResult.error().message);
+            return schemaResult;
+        }
+
+        // Create the search index instance
+        symspellIndex_ = std::make_unique<search::SymSpellSearch>(rawDb);
+        symspellInitialized_ = true;
+
+        spdlog::info("SymSpell fuzzy search index initialized");
+        return Result<void>();
+    });
+}
+
+void MetadataRepository::addSymSpellTerm(std::string_view term, int64_t frequency) {
+    if (term.empty()) {
+        return;
+    }
+
+    // Ensure initialized (lazy init on first term add)
+    auto initResult = ensureSymSpellInitialized();
+    if (!initResult) {
+        spdlog::warn("SymSpell not initialized, skipping term '{}': {}", term,
+                     initResult.error().message);
+        return;
+    }
+
+    // Add term to the index
+    if (symspellIndex_) {
+        symspellIndex_->addTerm(term, frequency);
+    }
 }
 
 Result<void> MetadataRepository::updateDocumentEmbeddingStatus(int64_t documentId,

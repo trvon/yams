@@ -22,6 +22,10 @@
 #include <yams/profiling.h>
 #include <yams/search/bk_tree.h>
 
+namespace yams::search {
+class SymSpellSearch; // Forward declaration for SQLite-backed fuzzy search
+}
+
 namespace yams::daemon {
 class GraphComponent;
 }
@@ -401,6 +405,20 @@ public:
     Result<void> buildFuzzyIndex() override;
     Result<void> updateFuzzyIndex(int64_t documentId) override;
 
+    /**
+     * @brief Add a term to the SymSpell fuzzy search index
+     * Call during document ingest to populate the index incrementally.
+     * @param term The term to add (filename, path component, keyword, etc.)
+     * @param frequency How many times this term appears (default 1)
+     */
+    void addSymSpellTerm(std::string_view term, int64_t frequency = 1);
+
+    /**
+     * @brief Initialize SymSpell index (creates schema if needed)
+     * Called automatically on first use.
+     */
+    Result<void> ensureSymSpellInitialized();
+
     // Bulk operations
     Result<std::vector<DocumentInfo>> findDocumentsByHashPrefix(const std::string& hashPrefix,
                                                                 std::size_t limit = 100) override;
@@ -556,6 +574,10 @@ private:
     // Fuzzy search indices
     mutable std::unique_ptr<search::HybridFuzzySearch> fuzzySearchIndex_;
     mutable YAMS_SHARED_LOCKABLE(std::shared_mutex, fuzzyIndexMutex_);
+
+    // SymSpell fuzzy search (SQLite-backed, replaces HybridFuzzySearch for edit-distance)
+    mutable std::unique_ptr<search::SymSpellSearch> symspellIndex_;
+    mutable bool symspellInitialized_{false};
 
     struct PathCacheEntry {
         std::string path;

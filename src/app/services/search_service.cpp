@@ -558,7 +558,6 @@ public:
 
         if (result && !normalizedReq.pathsOnly) {
             auto resp = std::move(result).value();
-            // Apply optional enhanced pipeline (Phase A: hotzones only) before snippets.
             if (enhancedCfg_.enable) {
                 enhanced_.apply(ctx_, enhancedCfg_, normalizedReq.query, resp.results);
             }
@@ -566,39 +565,12 @@ public:
             result = Result<SearchResponse>(std::move(resp));
         }
 
-        // --- Plugin Search ---
-#ifdef YAMS_ENABLE_DAEMON_FEATURES
-        if (ctx_.service_manager) {
-            auto abi_host = ctx_.service_manager->getAbiPluginHost();
-            if (abi_host) {
-                auto loaded_plugins = abi_host->listLoaded();
-                for (const auto& plugin_desc : loaded_plugins) {
-                    auto iface =
-                        abi_host->getInterface(plugin_desc.name, YAMS_IFACE_SEARCH_PROVIDER_V1_ID,
-                                               YAMS_IFACE_SEARCH_PROVIDER_V1_VERSION);
-                    if (iface) {
-                        auto* search_provider =
-                            static_cast<yams_search_provider_v1*>(iface.value());
-                        if (search_provider && search_provider->search) {
-                            // For now, we don't have a good way to do this asynchronously from the
-                            // plugin. We will call it synchronously and merge the results.
-                        }
-                    }
-                }
-            }
-        }
-#endif
-
         if (result) {
             auto resp = std::move(result).value();
             if (forcedHybridFallback) {
                 resp.searchStats["hybrid_fallback"] =
                     repairDetails_.empty() ? "hybrid_disabled" : repairDetails_;
                 resp.searchStats["effective_type"] = type;
-            }
-            if (req.pathsOnly && resp.paths.empty()) {
-                spdlog::info("[SearchService] invoking paths fallback for empty pathsOnly result");
-                co_await ensurePathsFallbackAsync(normalizedReq, resp, &metadataTelemetry);
             }
             auto totalElapsed = duration_cast<milliseconds>(steady_clock::now() - t0).count();
             resp.executionTimeMs = static_cast<int64_t>(totalElapsed);
@@ -763,9 +735,7 @@ private:
     EnhancedSearchExecutor enhanced_{};
     std::shared_ptr<yams::search::HotzoneManager> hotzones_{};
     std::shared_ptr<yams::search::SymbolEnricher> symbolEnricher_{};
-    // PBI-074: Disabled by default due to severe performance issues (N+1 KG queries)
-    // Users can enable with --symbol-weight=0.15 if needed
-    float symbolWeight_{0.0f};
+    float symbolWeight_{0.15f};
 
     std::string resolveSearchType(const SearchRequest& req, bool* forcedHybridFallback) const {
         if (forcedHybridFallback)
@@ -936,56 +906,6 @@ private:
                                 MetadataTelemetry* telemetry = nullptr) {
         // Use batch-optimized version instead
         co_return co_await hydrateSnippetsAsync(req, resp, telemetry);
-    }
-
-    boost::asio::awaitable<void> ensurePathsFallbackAsync(const SearchRequest& req,
-                                                          SearchResponse& resp,
-                                                          MetadataTelemetry* telemetry = nullptr) {
-        if (!ctx_.metadataRepo)
-            co_return;
-        auto allDocsResult = co_await retryMetadataOp(
-            [&]() { return metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%"); }, 4,
-            std::chrono::milliseconds(25), telemetry);
-        if (!allDocsResult) {
-            spdlog::warn(
-                "[SearchService] ensurePathsFallback failed to enumerate paths: code={} message={}",
-                static_cast<int>(allDocsResult.error().code), allDocsResult.error().message);
-            co_return;
-        }
-        const auto& docs = allDocsResult.value();
-        spdlog::info("[SearchService] ensurePathsFallback scanning {} docs for query '{}'",
-                     docs.size(), req.query);
-
-        std::vector<std::string> foundPaths;
-        std::vector<std::string> fallbackPaths;
-        const std::size_t limit = req.limit == 0 ? std::numeric_limits<std::size_t>::max()
-                                                 : static_cast<std::size_t>(req.limit);
-        fallbackPaths.reserve(std::min<std::size_t>(docs.size(), limit));
-
-        for (const auto& doc : docs) {
-            const bool matches = req.query.empty() ||
-                                 doc.filePath.find(req.query) != std::string::npos ||
-                                 doc.fileName.find(req.query) != std::string::npos;
-            std::string path = !doc.filePath.empty() ? doc.filePath : doc.fileName;
-            if (fallbackPaths.size() < limit) {
-                fallbackPaths.push_back(path);
-            }
-            if (matches && foundPaths.size() < limit) {
-                foundPaths.push_back(std::move(path));
-            }
-            if (foundPaths.size() >= limit)
-                break;
-        }
-
-        if (!foundPaths.empty()) {
-            spdlog::info("[SearchService] ensurePathsFallback matched {} paths", foundPaths.size());
-            resp.paths = std::move(foundPaths);
-        } else {
-            spdlog::info(
-                "[SearchService] ensurePathsFallback using fallback paths count={} limit={}",
-                fallbackPaths.size(), req.limit);
-            resp.paths = std::move(fallbackPaths);
-        }
     }
 
     boost::asio::awaitable<Result<SearchResponse>>
@@ -1262,6 +1182,9 @@ private:
         resp.timedOutComponents = engineResponse.timedOutComponents;
         resp.failedComponents = engineResponse.failedComponents;
         resp.contributingComponents = engineResponse.contributingComponents;
+        resp.skippedComponents = engineResponse.skippedComponents;
+        resp.componentTimingMicros = engineResponse.componentTimingMicros;
+        resp.usedEarlyTermination = engineResponse.usedEarlyTermination;
         resp.facets = engineResponse.facets;
 
         if (resp.isDegraded) {

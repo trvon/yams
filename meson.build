@@ -360,6 +360,10 @@ subdir('src/plugins')
 subdir('src/indexing')
 subdir('src/genai')
 subdir('src/vector')
+
+# Third-party libraries (must come before src/search which depends on symspell)
+subdir('third_party/symspell')
+
 subdir('src/search')
 subdir('src/api')
 subdir('src/ingest')

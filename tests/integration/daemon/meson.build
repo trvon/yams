@@ -53,11 +53,7 @@ else
 
   dbg = (get_option('buildtype') == 'debug')
   if (get_option('enable-integration-tests') or dbg) and (get_option('enable-daemon-integration') or dbg)
-    # Catch2 needs its main library
-    catch2_main_dep = dependency('catch2-with-main', required: false)
-    if not catch2_main_dep.found()
-      catch2_main_dep = dependency('Catch2WithMain', required: false, method: 'cmake')
-    endif
+    # catch2_main_dep is inherited from parent tests/meson.build - no need to redeclare
 
     # Common environment for daemon tests
     _daemon_test_env = {

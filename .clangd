@@ -77,6 +77,16 @@ Diagnostics:
   UnusedIncludes: None
 
 ---
+# BUT enable symspell (our own code in third_party)
+If:
+  PathMatch: third_party/symspell/.*
+Index:
+  Background: Build
+Diagnostics:
+  Suppress: []
+  UnusedIncludes: Strict
+
+---
 # Skip background indexing for external submodules
 If:
   PathMatch: external/.*

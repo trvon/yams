@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <optional>
 #include <regex>
 #include <string>
@@ -281,6 +282,12 @@ struct SearchResponse {
     std::vector<std::string> timedOutComponents;
     std::vector<std::string> failedComponents;
     std::vector<std::string> contributingComponents;
+
+    // Tiered search (PBI-075)
+    std::vector<std::string> skippedComponents; // Components skipped due to early termination
+    std::map<std::string, int64_t>
+        componentTimingMicros;        // Per-component execution time (microseconds)
+    bool usedEarlyTermination{false}; // True if later tiers were skipped
 };
 
 class ISearchService {

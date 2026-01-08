@@ -59,6 +59,51 @@ inline bool isTextMime(const std::string& mime) {
     return !mime.empty() && string_starts_with(mime, "text/");
 }
 
+// Extract searchable terms from a document for fuzzy search indexing.
+// Extracts: filename (without extension), extension, and path components.
+// Terms shorter than 2 characters are skipped to reduce noise.
+inline void
+indexDocumentTermsForFuzzySearch(const std::shared_ptr<metadata::MetadataRepository>& repo,
+                                 const metadata::DocumentInfo& info) {
+    if (!repo)
+        return;
+
+    constexpr size_t kMinTermLength = 2;
+
+    // Helper to add term if long enough
+    auto addTerm = [&](std::string_view term) {
+        if (term.length() >= kMinTermLength) {
+            repo->addSymSpellTerm(term);
+        }
+    };
+
+    // Add filename without extension
+    if (!info.fileName.empty()) {
+        std::filesystem::path fp(info.fileName);
+        auto stem = fp.stem().string();
+        addTerm(stem);
+
+        // Also add extension without the dot (e.g., "cpp", "py")
+        auto ext = fp.extension().string();
+        if (ext.length() > 1) {     // Has extension beyond just "."
+            addTerm(ext.substr(1)); // Skip the leading dot
+        }
+    }
+
+    // Add path components (directory names)
+    if (!info.filePath.empty()) {
+        std::filesystem::path p(info.filePath);
+        for (const auto& part : p) {
+            auto partStr = part.string();
+            // Skip root, current dir, parent dir, and the filename itself
+            if (partStr == "/" || partStr == "." || partStr == ".." || partStr == info.fileName) {
+                continue;
+            }
+            addTerm(partStr);
+        }
+    }
+}
+
 inline const char* toFileType(const std::string& mime) {
     return isTextMime(mime) ? "text" : "binary";
 }
@@ -703,6 +748,13 @@ public:
                     }
                 } catch (...) {
                     // Non-fatal: path tree update is opportunistic
+                }
+
+                // Index document terms for fuzzy search (best-effort)
+                try {
+                    indexDocumentTermsForFuzzySearch(ctx_.metadataRepo, info);
+                } catch (...) {
+                    // Non-fatal: fuzzy search indexing is opportunistic
                 }
             }
         }

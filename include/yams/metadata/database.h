@@ -7,6 +7,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <yams/core/types.h>
 
@@ -142,6 +143,60 @@ private:
 };
 
 /**
+ * @brief RAII wrapper for cached statement access
+ *
+ * Returns the statement to the cache on destruction (reset + clear bindings).
+ * If the statement was invalidated or an error occurred, it won't be returned.
+ */
+class CachedStatement {
+public:
+    CachedStatement() = default;
+    CachedStatement(Statement&& stmt, std::function<void(Statement&&)> returnFunc)
+        : stmt_(std::move(stmt)), returnFunc_(std::move(returnFunc)) {}
+    ~CachedStatement() {
+        if (returnFunc_ && stmt_.columnCount() >= 0) { // Check if stmt is valid
+            returnFunc_(std::move(stmt_));
+        }
+    }
+
+    // Move-only
+    CachedStatement(CachedStatement&& other) noexcept
+        : stmt_(std::move(other.stmt_)), returnFunc_(std::move(other.returnFunc_)) {
+        other.returnFunc_ = nullptr;
+    }
+    CachedStatement& operator=(CachedStatement&& other) noexcept {
+        if (this != &other) {
+            if (returnFunc_ && stmt_.columnCount() >= 0) {
+                returnFunc_(std::move(stmt_));
+            }
+            stmt_ = std::move(other.stmt_);
+            returnFunc_ = std::move(other.returnFunc_);
+            other.returnFunc_ = nullptr;
+        }
+        return *this;
+    }
+    CachedStatement(const CachedStatement&) = delete;
+    CachedStatement& operator=(const CachedStatement&) = delete;
+
+    Statement* operator->() { return &stmt_; }
+    const Statement* operator->() const { return &stmt_; }
+    Statement& operator*() { return stmt_; }
+    const Statement& operator*() const { return stmt_; }
+
+    /**
+     * @brief Release ownership - statement won't be returned to cache
+     */
+    Statement release() {
+        returnFunc_ = nullptr;
+        return std::move(stmt_);
+    }
+
+private:
+    Statement stmt_;
+    std::function<void(Statement&&)> returnFunc_;
+};
+
+/**
  * @brief Database connection wrapper
  */
 class Database {
@@ -171,9 +226,39 @@ public:
     [[nodiscard]] bool isOpen() const { return db_ != nullptr; }
 
     /**
-     * @brief Prepare SQL statement
+     * @brief Prepare SQL statement (creates new statement each time)
      */
     Result<Statement> prepare(const std::string& sql);
+
+    /**
+     * @brief Get or create a cached prepared statement
+     *
+     * This is the preferred method for hot paths. The returned CachedStatement
+     * automatically returns the statement to the cache when destroyed.
+     * Use reset() and clearBindings() are called automatically on return.
+     *
+     * @param sql The SQL query string (used as cache key)
+     * @return CachedStatement wrapper that returns to cache on destruction
+     */
+    Result<CachedStatement> prepareCached(const std::string& sql);
+
+    /**
+     * @brief Clear the statement cache
+     *
+     * Call this after schema changes or when cache should be invalidated.
+     */
+    void clearStatementCache();
+
+    /**
+     * @brief Get statement cache statistics
+     */
+    struct CacheStats {
+        size_t hits{0};
+        size_t misses{0};
+        size_t currentSize{0};
+        size_t maxSize{0};
+    };
+    [[nodiscard]] CacheStats getStatementCacheStats() const;
 
     /**
      * @brief Execute SQL directly (for non-SELECT queries)
@@ -263,10 +348,28 @@ public:
      */
     [[nodiscard]] const std::string& path() const { return path_; }
 
+    /**
+     * @brief Get raw SQLite handle for low-level operations
+     * @warning Use with care - caller must ensure handle remains valid
+     */
+    [[nodiscard]] sqlite3* rawHandle() const { return db_; }
+
 private:
     sqlite3* db_ = nullptr;
     std::string path_;
     bool inTransaction_ = false;
+
+    // Statement cache for prepared statement reuse
+    // Key: SQL string, Value: prepared Statement ready for reuse
+    std::unordered_map<std::string, Statement> statementCache_;
+    mutable size_t cacheHits_{0};
+    mutable size_t cacheMisses_{0};
+    static constexpr size_t kMaxCacheSize = 64; // Limit cache size
+
+    /**
+     * @brief Return a statement to the cache after use
+     */
+    void returnToCache(const std::string& sql, Statement&& stmt);
 
     /**
      * @brief Convert SQLite error code to our error type

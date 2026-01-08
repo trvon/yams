@@ -202,9 +202,13 @@ Database::~Database() {
 }
 
 Database::Database(Database&& other) noexcept
-    : db_(other.db_), path_(std::move(other.path_)), inTransaction_(other.inTransaction_) {
+    : db_(other.db_), path_(std::move(other.path_)), inTransaction_(other.inTransaction_),
+      statementCache_(std::move(other.statementCache_)), cacheHits_(other.cacheHits_),
+      cacheMisses_(other.cacheMisses_) {
     other.db_ = nullptr;
     other.inTransaction_ = false;
+    other.cacheHits_ = 0;
+    other.cacheMisses_ = 0;
 }
 
 Database& Database::operator=(Database&& other) noexcept {
@@ -213,8 +217,13 @@ Database& Database::operator=(Database&& other) noexcept {
         db_ = other.db_;
         path_ = std::move(other.path_);
         inTransaction_ = other.inTransaction_;
+        statementCache_ = std::move(other.statementCache_);
+        cacheHits_ = other.cacheHits_;
+        cacheMisses_ = other.cacheMisses_;
         other.db_ = nullptr;
         other.inTransaction_ = false;
+        other.cacheHits_ = 0;
+        other.cacheMisses_ = 0;
     }
     return *this;
 }
@@ -254,6 +263,8 @@ Result<void> Database::open(const std::string& path, ConnectionMode mode) {
 }
 
 void Database::close() {
+    // Clear statement cache before closing (statements must be finalized before db close)
+    statementCache_.clear();
     if (db_) {
         sqlite3_close(db_);
         db_ = nullptr;
@@ -272,6 +283,96 @@ Result<Statement> Database::prepare(const std::string& sql) {
     } catch (const std::exception& e) {
         return Error{ErrorCode::DatabaseError, e.what()};
     }
+}
+
+Result<CachedStatement> Database::prepareCached(const std::string& sql) {
+    if (!db_) {
+        return Error{ErrorCode::InvalidState, "Database not open"};
+    }
+
+    // Check if statement is in cache
+    auto it = statementCache_.find(sql);
+    if (it != statementCache_.end()) {
+        // Cache hit - extract statement and return wrapped
+        cacheHits_++;
+        Statement stmt = std::move(it->second);
+        statementCache_.erase(it);
+
+        // Reset the statement for reuse
+        auto resetResult = stmt.reset();
+        if (!resetResult) {
+            // Statement is invalid, create a new one
+            try {
+                return CachedStatement(Statement(db_, sql), [this, sql](Statement&& s) {
+                    returnToCache(sql, std::move(s));
+                });
+            } catch (const std::exception& e) {
+                return Error{ErrorCode::DatabaseError, e.what()};
+            }
+        }
+
+        auto clearResult = stmt.clearBindings();
+        if (!clearResult) {
+            // Statement is invalid, create a new one
+            try {
+                return CachedStatement(Statement(db_, sql), [this, sql](Statement&& s) {
+                    returnToCache(sql, std::move(s));
+                });
+            } catch (const std::exception& e) {
+                return Error{ErrorCode::DatabaseError, e.what()};
+            }
+        }
+
+        return CachedStatement(std::move(stmt),
+                               [this, sql](Statement&& s) { returnToCache(sql, std::move(s)); });
+    }
+
+    // Cache miss - create new statement
+    cacheMisses_++;
+    try {
+        return CachedStatement(Statement(db_, sql),
+                               [this, sql](Statement&& s) { returnToCache(sql, std::move(s)); });
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::DatabaseError, e.what()};
+    }
+}
+
+void Database::returnToCache(const std::string& sql, Statement&& stmt) {
+    // Don't cache if DB is closed or cache is full
+    if (!db_) {
+        return;
+    }
+
+    // Reset statement before caching
+    auto resetResult = stmt.reset();
+    if (!resetResult) {
+        return; // Statement is invalid, don't cache
+    }
+
+    auto clearResult = stmt.clearBindings();
+    if (!clearResult) {
+        return; // Statement is invalid, don't cache
+    }
+
+    // Evict oldest entry if cache is full (simple LRU approximation: just clear if full)
+    if (statementCache_.size() >= kMaxCacheSize) {
+        // Remove one entry (first one found - could be improved with proper LRU)
+        if (!statementCache_.empty()) {
+            statementCache_.erase(statementCache_.begin());
+        }
+    }
+
+    statementCache_[sql] = std::move(stmt);
+}
+
+void Database::clearStatementCache() {
+    statementCache_.clear();
+    cacheHits_ = 0;
+    cacheMisses_ = 0;
+}
+
+Database::CacheStats Database::getStatementCacheStats() const {
+    return CacheStats{cacheHits_, cacheMisses_, statementCache_.size(), kMaxCacheSize};
 }
 
 Result<void> Database::execute(const std::string& sql) {

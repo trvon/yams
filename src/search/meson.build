@@ -5,6 +5,9 @@ yams_core = dependency('yams_core', required: false)
 yams_metadata = dependency('yams_metadata', required: false)
 yams_vector = dependency('yams_vector', required: false)
 
+# SymSpell dependency (defined in third_party/symspell/meson.build)
+# Note: symspell_dep must be declared before this file is processed
+
 yams_search = static_library('yams_search',
   [
     'query_tokenizer.cpp',
@@ -24,9 +27,13 @@ yams_search = static_library('yams_search',
     'hotzone_manager.cpp',
     'symbol_enrichment.cpp',
     'internal_benchmark.cpp',
+    'symspell_search.cpp',
   ],
-  include_directories: include_directories('../../include'),
-  dependencies: [spdlog_dep, nlohmann_json_dep, boost_dep, yams_core, yams_metadata, yams_vector],
+  include_directories: [
+    include_directories('../../include'),
+    include_directories('../../third_party/symspell/include'),
+  ],
+  dependencies: [spdlog_dep, nlohmann_json_dep, boost_dep, yams_core, yams_metadata, yams_vector, symspell_dep],
   install: true,
 )
 
@@ -39,7 +46,10 @@ pkg.generate(yams_search,
 
 yams_search_dep = declare_dependency(
   link_with: yams_search,
-  include_directories: include_directories('../../include'),
-  dependencies: [yams_core, yams_metadata, yams_vector, nlohmann_json_dep, spdlog_dep, boost_dep],
+  include_directories: [
+    include_directories('../../include'),
+    include_directories('../../third_party/symspell/include'),
+  ],
+  dependencies: [yams_core, yams_metadata, yams_vector, nlohmann_json_dep, spdlog_dep, boost_dep, symspell_dep],
 )
 meson.override_dependency('yams_search', yams_search_dep)
