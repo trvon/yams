@@ -729,6 +729,17 @@ public:
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
+        // Lazily prepare statements if not yet done (e.g., when opening existing DB)
+        if (!stmt_has_embedding_) {
+            lock.unlock();
+            std::unique_lock write_lock(mutex_);
+            if (!stmt_has_embedding_) {
+                prepareStatements();
+            }
+            write_lock.unlock();
+            lock.lock();
+        }
+
         if (stmt_has_embedding_) {
             sqlite3_reset(stmt_has_embedding_);
             sqlite3_bind_text(stmt_has_embedding_, 1, document_hash.c_str(), -1, SQLITE_TRANSIENT);

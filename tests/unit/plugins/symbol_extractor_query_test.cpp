@@ -68,9 +68,9 @@ const char* get_plugin_path() {
 #if defined(_WIN32)
     return "builddir/plugins/symbol_extractor_treesitter/yams_symbol_extractor.dll";
 #elif defined(__APPLE__)
-    return "/usr/local/lib/yams/plugins/yams_symbol_extractor.dylib";
+    return "builddir/plugins/symbol_extractor_treesitter/yams_symbol_extractor.dylib";
 #else
-    return "/usr/local/lib/yams/plugins/yams_symbol_extractor.so";
+    return "builddir/plugins/symbol_extractor_treesitter/yams_symbol_extractor.so";
 #endif
 }
 
