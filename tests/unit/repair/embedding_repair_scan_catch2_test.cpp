@@ -67,6 +67,9 @@ TEST_CASE("RepairUtilScan missing embeddings list identifies missing documents",
     // Prepare temp dir for vector DB
     auto tmp = std::filesystem::temp_directory_path() /
                ("yams_repair_catch2_" + std::to_string(std::rand()));
+    // Clean up any existing directory from previous runs
+    std::error_code ec;
+    std::filesystem::remove_all(tmp, ec);
     std::filesystem::create_directories(tmp);
 
     // Seed metadata with two docs; pre-insert one embedding
@@ -98,6 +101,9 @@ TEST_CASE("RepairUtilScan missing embeddings list identifies missing documents",
     rec.content = "hello";
     REQUIRE(vdb->insertVector(rec));
 
+    // Close the vector database to ensure all data is committed before scanning
+    vdb.reset();
+
     // Call repair scan
     auto missing = getDocumentsMissingEmbeddings(repo, tmp);
     REQUIRE(missing);
@@ -107,7 +113,6 @@ TEST_CASE("RepairUtilScan missing embeddings list identifies missing documents",
     CHECK(list[0] == std::string("h2"));
 
     // Cleanup
-    std::error_code ec;
     std::filesystem::remove_all(tmp, ec);
 }
 

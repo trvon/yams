@@ -88,6 +88,11 @@ public:
             }
         }
     }
+    void detach() {
+        if (t_.joinable()) {
+            t_.detach();
+        }
+    }
     void request_stop() noexcept { /* no-op */ }
 
 private:

@@ -235,6 +235,28 @@ public:
         return Result<void>();
     }
 
+    Result<void> indexDocumentContentTrusted(int64_t, const std::string&,
+                                             const std::string& content,
+                                             const std::string&) override {
+        std::lock_guard<std::mutex> lk(mu_);
+        indexedContent_ = content;
+        return Result<void>();
+    }
+
+    Result<void> updateDocumentExtractionStatus(int64_t docId, bool contentExtracted,
+                                                metadata::ExtractionStatus status,
+                                                const std::string& = "") override {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = docsById_.find(docId);
+        if (it != docsById_.end()) {
+            it->second.contentExtracted = contentExtracted;
+            it->second.extractionStatus = status;
+            lastUpdated_ = it->second;
+            docsByHash_[it->second.sha256Hash] = it->second;
+        }
+        return Result<void>();
+    }
+
     void addSymSpellTerm(std::string_view, int64_t) override { /* no-op for mock */ }
 
     Result<std::vector<std::string>> getDocumentTags(int64_t) override {

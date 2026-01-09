@@ -16,7 +16,11 @@ SymSpellSearch::SymSpellSearch(sqlite3* db, int maxEditDistance, int prefixLengt
 SymSpellSearch::~SymSpellSearch() = default;
 
 Result<void> SymSpellSearch::initializeSchema(sqlite3* db) {
-    return symspell::SQLiteStore::initializeDatabase(db);
+    auto result = symspell::SQLiteStore::initializeDatabase(db);
+    if (!result) {
+        return Result<void>(Error(ErrorCode::DatabaseError, result.error().message));
+    }
+    return Result<void>();
 }
 
 bool SymSpellSearch::addTerm(std::string_view term, int64_t frequency) {

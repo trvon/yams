@@ -24,6 +24,12 @@ using HNSWIndex = sqlite_vec_cpp::index::HNSWIndex<float, CosineMetric>;
 
 namespace {
 
+// Helper to safely get string from sqlite column (avoids GNU ?: extension)
+inline std::string safeColumnText(sqlite3_stmt* stmt, int col) {
+    const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, col));
+    return text ? text : "";
+}
+
 // SQL statements
 constexpr const char* kCreateVectorsTable = R"sql(
 CREATE TABLE IF NOT EXISTS vectors (
@@ -834,6 +840,17 @@ public:
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
+        // Lazily prepare statements if not yet done (e.g., when opening existing DB)
+        if (!stmt_has_embedding_) {
+            lock.unlock();
+            std::unique_lock write_lock(mutex_);
+            if (!stmt_has_embedding_) {
+                prepareStatements();
+            }
+            write_lock.unlock();
+            lock.lock();
+        }
+
         if (stmt_has_embedding_) {
             sqlite3_reset(stmt_has_embedding_);
             sqlite3_bind_text(stmt_has_embedding_, 1, document_hash.c_str(), -1, SQLITE_TRANSIENT);
@@ -1459,9 +1476,8 @@ private:
         EntityVectorRecord record;
 
         record.rowid = sqlite3_column_int64(stmt, 0);
-        record.node_key = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)) ?: "";
-        record.embedding_type = utils::stringToEntityEmbeddingType(
-            reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2)) ?: "");
+        record.node_key = safeColumnText(stmt, 1);
+        record.embedding_type = utils::stringToEntityEmbeddingType(safeColumnText(stmt, 2));
 
         // Parse embedding blob
         const void* blob = sqlite3_column_blob(stmt, 3);
@@ -1472,15 +1488,15 @@ private:
             std::memcpy(record.embedding.data(), blob, blob_size);
         }
 
-        record.content = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4)) ?: "";
-        record.model_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5)) ?: "";
-        record.model_version = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6)) ?: "";
+        record.content = safeColumnText(stmt, 4);
+        record.model_id = safeColumnText(stmt, 5);
+        record.model_version = safeColumnText(stmt, 6);
         record.embedded_at = fromUnixTimestamp(sqlite3_column_int64(stmt, 7));
         record.is_stale = sqlite3_column_int(stmt, 8) != 0;
-        record.node_type = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 9)) ?: "";
-        record.qualified_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 10)) ?: "";
-        record.file_path = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 11)) ?: "";
-        record.document_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 12)) ?: "";
+        record.node_type = safeColumnText(stmt, 9);
+        record.qualified_name = safeColumnText(stmt, 10);
+        record.file_path = safeColumnText(stmt, 11);
+        record.document_hash = safeColumnText(stmt, 12);
 
         return record;
     }
