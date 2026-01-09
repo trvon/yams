@@ -455,57 +455,7 @@ private:
 
     // Parse all config values into a map (section.key format)
     std::map<std::string, std::string> parseSimpleToml(const fs::path& path) const {
-        std::map<std::string, std::string> config;
-        std::ifstream file(path);
-        if (!file) {
-            return config;
-        }
-
-        std::string line;
-        std::string currentSection;
-
-        while (std::getline(file, line)) {
-            yams::config::trim(line);
-
-            // Skip comments and empty lines
-            if (line.empty() || line[0] == '#')
-                continue;
-
-            // Check for section headers
-            if (line[0] == '[') {
-                size_t end = line.find(']');
-                if (end != std::string::npos) {
-                    currentSection = line.substr(1, end - 1);
-                    yams::config::trim(currentSection);
-                    if (!currentSection.empty()) {
-                        currentSection += ".";
-                    }
-                }
-                continue;
-            }
-
-            // Parse key-value pairs
-            size_t eq = line.find('=');
-            if (eq != std::string::npos) {
-                std::string key = line.substr(0, eq);
-                std::string value = line.substr(eq + 1);
-
-                yams::config::trim(key);
-                yams::config::trim(value);
-
-                // Remove inline comments
-                size_t comment = value.find('#');
-                if (comment != std::string::npos) {
-                    value = value.substr(0, comment);
-                    yams::config::trim(value);
-                }
-
-                value = yams::config::unquote(value);
-                config[currentSection + key] = value;
-            }
-        }
-
-        return config;
+        return yams::config::parse_simple_toml(path);
     }
 
     Result<void> executeGet() {
@@ -763,52 +713,11 @@ private:
 
     // Helper method to write config values
     Result<void> writeConfigValue(const std::string& key, const std::string& value) {
-        try {
-            auto configPath = getConfigPath();
-
-            // Ensure config directory exists
-            fs::create_directories(configPath.parent_path());
-
-            // Read existing config
-            auto config = parseSimpleToml(configPath);
-            config[key] = value;
-
-            // Write back to file
-            std::ofstream file(configPath);
-            if (!file) {
-                return Error{ErrorCode::WriteError,
-                             "Cannot write to config file: " + configPath.string()};
-            }
-
-            // Simple TOML writing (organized by sections)
-            std::map<std::string, std::map<std::string, std::string>> sections;
-
-            for (const auto& [fullKey, val] : config) {
-                size_t dot = fullKey.find('.');
-                if (dot != std::string::npos) {
-                    std::string section = fullKey.substr(0, dot);
-                    std::string subkey = fullKey.substr(dot + 1);
-                    sections[section][subkey] = val;
-                } else {
-                    sections[""][fullKey] = val;
-                }
-            }
-
-            // Write sections
-            for (const auto& [section, values] : sections) {
-                if (!section.empty()) {
-                    file << "\n[" << section << "]\n";
-                }
-                for (const auto& [k, v] : values) {
-                    file << k << " = \"" << v << "\"\n";
-                }
-            }
-
+        auto configPath = getConfigPath();
+        if (yams::config::write_config_value(configPath, key, value)) {
             return Result<void>();
-
-        } catch (const std::exception& e) {
-            return Error{ErrorCode::Unknown, std::string(e.what())};
         }
+        return Error{ErrorCode::WriteError, "Failed to write config key: " + key};
     }
 
     Result<void> executeTuningProfile() {
@@ -881,15 +790,7 @@ private:
         }
 
         // Priority 2: XDG_DATA_HOME or ~/.local/share/yams
-        const char* xdgDataHome = std::getenv("XDG_DATA_HOME");
-        if (xdgDataHome && *xdgDataHome) {
-            searchPaths.emplace_back(fs::path(xdgDataHome) / "yams" / "models");
-        } else {
-            const char* home = std::getenv("HOME");
-            if (home) {
-                searchPaths.emplace_back(fs::path(home) / ".local" / "share" / "yams" / "models");
-            }
-        }
+        searchPaths.emplace_back(yams::config::get_data_dir() / "models");
 
         // Priority 3: ~/.yams/models (legacy path)
         if (const char* home = std::getenv("HOME")) {
@@ -1483,21 +1384,7 @@ private:
         }
     }
 
-    fs::path getGrammarPath() const {
-        const char* xdgDataHome = std::getenv("XDG_DATA_HOME");
-        const char* homeEnv = std::getenv("HOME");
-
-        fs::path dataHome;
-        if (xdgDataHome) {
-            dataHome = fs::path(xdgDataHome);
-        } else if (homeEnv) {
-            dataHome = fs::path(homeEnv) / ".local" / "share";
-        } else {
-            return fs::path("~/.local/share") / "yams" / "grammars";
-        }
-
-        return dataHome / "yams" / "grammars";
-    }
+    fs::path getGrammarPath() const { return yams::config::get_data_dir() / "grammars"; }
 
     Result<void> executeGrammarList() {
         try {

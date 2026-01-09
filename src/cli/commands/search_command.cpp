@@ -19,6 +19,7 @@
 #include <yams/cli/session_store.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_helpers.h>
 #include <yams/common/utf8_utils.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/profiling.h>
@@ -501,11 +502,9 @@ private:
     }
 
     static std::string trim(const std::string& s) {
-        auto start = s.find_first_not_of(" \t\n\r");
-        if (start == std::string::npos)
-            return std::string();
-        auto end = s.find_last_not_of(" \t\n\r");
-        return s.substr(start, end - start + 1);
+        std::string copy = s;
+        yams::config::trim(copy);
+        return copy;
     }
 
     static std::vector<std::string> splitCommaPatterns(const std::vector<std::string>& inputs) {
@@ -1093,9 +1092,7 @@ public:
                     std::stringstream ss(filterTags_);
                     std::string tag;
                     while (std::getline(ss, tag, ',')) {
-                        // Trim whitespace
-                        tag.erase(0, tag.find_first_not_of(" \t"));
-                        tag.erase(tag.find_last_not_of(" \t") + 1);
+                        yams::config::trim(tag);
                         if (!tag.empty()) {
                             sreq.tags.push_back(tag);
                         }
@@ -1409,8 +1406,7 @@ public:
                         std::stringstream ss(filterTags_);
                         std::string tag;
                         while (std::getline(ss, tag, ',')) {
-                            tag.erase(0, tag.find_first_not_of(" \t"));
-                            tag.erase(tag.find_last_not_of(" \t") + 1);
+                            yams::config::trim(tag);
                             if (!tag.empty())
                                 sreq.tags.push_back(tag);
                         }

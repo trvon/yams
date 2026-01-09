@@ -24,7 +24,9 @@
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
+#include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/downloader/downloader.hpp>
@@ -154,32 +156,18 @@ private:
                 out.pooling = out.pooling.empty() ? "cls" : (out.pooling + "+cls");
         } catch (...) {
         }
-        // Heuristics by well-known model names
+        // Heuristics by well-known model names (using extracted utility)
         if (out.dim == 0) {
-            if (model_name.find("MiniLM-L6") != std::string::npos)
-                out.dim = 384;
-            else if (model_name.find("mpnet") != std::string::npos)
-                out.dim = 768;
-            else if (model_name.find("nomic") != std::string::npos)
-                out.dim = 768;
+            if (auto heuristic = vecutil::getModelDimensionHeuristic(model_name)) {
+                out.dim = *heuristic;
+            }
         }
         if (out.max_seq == 0)
             out.max_seq = 512; // safe default
         return out;
     }
 
-    static fs::path resolveConfigPath() {
-        const char* xdg = std::getenv("XDG_CONFIG_HOME");
-        const char* home = std::getenv("HOME");
-        fs::path base;
-        if (xdg && *xdg)
-            base = fs::path(xdg);
-        else if (home && *home)
-            base = fs::path(home) / ".config";
-        else
-            base = fs::path("~/.config");
-        return base / "yams" / "config.toml";
-    }
+    static fs::path resolveConfigPath() { return yams::config::get_config_path(); }
 
     static void
     toml_write(std::ostream& file,
@@ -478,48 +466,10 @@ public:
                 // Read preferred model from config
                 std::string preferred;
                 {
-                    namespace fs = std::filesystem;
-                    fs::path cfgp;
-                    if (const char* xdg = std::getenv("XDG_CONFIG_HOME"))
-                        cfgp = fs::path(xdg) / "yams" / "config.toml";
-                    else if (const char* home = std::getenv("HOME"))
-                        cfgp = fs::path(home) / ".config" / "yams" / "config.toml";
-                    std::ifstream in(cfgp);
-                    if (in) {
-                        std::string line, section;
-                        auto trim = [](std::string& str) {
-                            if (str.empty())
-                                return;
-                            str.erase(0, str.find_first_not_of(" \t"));
-                            auto p = str.find_last_not_of(" \t");
-                            if (p != std::string::npos)
-                                str.erase(p + 1);
-                        };
-                        while (std::getline(in, line)) {
-                            std::string l = line;
-                            trim(l);
-                            if (l.empty() || l[0] == '#')
-                                continue;
-                            if (l.front() == '[') {
-                                auto e = l.find(']');
-                                section =
-                                    e != std::string::npos ? l.substr(1, e - 1) : std::string();
-                                continue;
-                            }
-                            auto eq = l.find('=');
-                            if (eq == std::string::npos)
-                                continue;
-                            std::string key = l.substr(0, eq);
-                            std::string val = l.substr(eq + 1);
-                            trim(key);
-                            trim(val);
-                            if (!val.empty() && val.front() == '"' && val.back() == '"')
-                                val = val.substr(1, val.size() - 2);
-                            if (section == "embeddings" && key == "preferred_model") {
-                                preferred = val;
-                                break;
-                            }
-                        }
+                    auto cfgp = yams::config::get_config_path();
+                    auto config = yams::config::parse_simple_toml(cfgp);
+                    if (auto it = config.find("embeddings.preferred_model"); it != config.end()) {
+                        preferred = it->second;
                     }
                 }
                 if (!preferred.empty())
@@ -597,47 +547,10 @@ private:
         // Preferred model from config/env
         std::string preferred;
         try {
-            namespace fs = std::filesystem;
-            fs::path cfgp;
-            if (const char* xdg = std::getenv("XDG_CONFIG_HOME"))
-                cfgp = fs::path(xdg) / "yams" / "config.toml";
-            else if (const char* home = std::getenv("HOME"))
-                cfgp = fs::path(home) / ".config" / "yams" / "config.toml";
-            std::ifstream in(cfgp);
-            if (in) {
-                std::string line, section;
-                auto trim = [](std::string& str) {
-                    if (str.empty())
-                        return;
-                    str.erase(0, str.find_first_not_of(" \t"));
-                    auto p = str.find_last_not_of(" \t");
-                    if (p != std::string::npos)
-                        str.erase(p + 1);
-                };
-                while (std::getline(in, line)) {
-                    std::string l = line;
-                    trim(l);
-                    if (l.empty() || l[0] == '#')
-                        continue;
-                    if (l.front() == '[') {
-                        auto e = l.find(']');
-                        section = e != std::string::npos ? l.substr(1, e - 1) : std::string();
-                        continue;
-                    }
-                    auto eq = l.find('=');
-                    if (eq == std::string::npos)
-                        continue;
-                    std::string key = l.substr(0, eq);
-                    std::string val = l.substr(eq + 1);
-                    trim(key);
-                    trim(val);
-                    if (!val.empty() && val.front() == '"' && val.back() == '"')
-                        val = val.substr(1, val.size() - 2);
-                    if (section == "embeddings" && key == "preferred_model") {
-                        preferred = val;
-                        break;
-                    }
-                }
+            auto cfgp = yams::config::get_config_path();
+            auto config = yams::config::parse_simple_toml(cfgp);
+            if (auto it = config.find("embeddings.preferred_model"); it != config.end()) {
+                preferred = it->second;
             }
             if (preferred.empty()) {
                 if (const char* p = std::getenv("YAMS_PREFERRED_MODEL"))

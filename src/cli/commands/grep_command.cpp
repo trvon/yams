@@ -20,6 +20,7 @@
 #include <yams/cli/session_store.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_helpers.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
@@ -117,76 +118,12 @@ private:
         return !jsonMode && !pathsOnly_ && !filesOnly_ && !countOnly_;
     }
 
-    // Helpers for configuration discovery
+    // Helpers for configuration discovery (delegating to shared utilities)
     std::map<std::string, std::string> parseSimpleToml(const std::filesystem::path& path) const {
-        std::map<std::string, std::string> config;
-        std::ifstream file(path);
-        if (!file)
-            return config;
-
-        std::string line;
-        std::string currentSection;
-
-        auto trim = [](std::string s) {
-            auto issp = [](unsigned char c) { return std::isspace(c) != 0; };
-            while (!s.empty() && issp(static_cast<unsigned char>(s.front())))
-                s.erase(s.begin());
-            while (!s.empty() && issp(static_cast<unsigned char>(s.back())))
-                s.pop_back();
-            return s;
-        };
-
-        while (std::getline(file, line)) {
-            auto hashPos = line.find('#');
-            if (hashPos != std::string::npos)
-                line = line.substr(0, hashPos);
-            line = trim(line);
-            if (line.empty())
-                continue;
-
-            if (line.front() == '[' && line.back() == ']') {
-                currentSection = line.substr(1, line.size() - 2);
-                continue;
-            }
-
-            auto eq = line.find('=');
-            if (eq == std::string::npos)
-                continue;
-            std::string key = trim(line.substr(0, eq));
-            std::string value = trim(line.substr(eq + 1));
-            if (!value.empty() && value.front() == '"' && value.back() == '"') {
-                value = value.substr(1, value.size() - 2);
-            }
-            if (!currentSection.empty()) {
-                config[currentSection + "." + key] = value;
-            } else {
-                config[key] = value;
-            }
-        }
-        return config;
+        return yams::config::parse_simple_toml(path);
     }
 
-    std::filesystem::path resolveConfigPath() const {
-        if (const char* explicitPath = std::getenv("YAMS_CONFIG_PATH")) {
-            std::filesystem::path p{explicitPath};
-            if (std::filesystem::exists(p))
-                return p;
-        }
-        const char* xdgConfig = std::getenv("XDG_CONFIG_HOME");
-        const char* homeEnv = std::getenv("HOME");
-        if (xdgConfig) {
-            std::filesystem::path p = std::filesystem::path(xdgConfig) / "yams" / "config.toml";
-            if (std::filesystem::exists(p))
-                return p;
-        }
-        if (homeEnv) {
-            std::filesystem::path p =
-                std::filesystem::path(homeEnv) / ".config" / "yams" / "config.toml";
-            if (std::filesystem::exists(p))
-                return p;
-        }
-        return {};
-    }
+    std::filesystem::path resolveConfigPath() const { return yams::config::get_config_path(); }
 
 public:
     std::string getName() const override { return "grep"; }
@@ -848,9 +785,7 @@ private:
         std::stringstream ss(input);
         std::string item;
         while (std::getline(ss, item, ',')) {
-            // Trim whitespace
-            item.erase(0, item.find_first_not_of(" \t"));
-            item.erase(item.find_last_not_of(" \t") + 1);
+            yams::config::trim(item);
             if (!item.empty()) {
                 result.push_back(item);
             }
@@ -982,12 +917,8 @@ private:
             //   - "*.ext"             -> extension filter only
             // Patterns that do not match these forms fall back to LIKE.
 
-            auto trim = [](std::string s) {
-                auto issp = [](unsigned char c) { return std::isspace(c) != 0; };
-                while (!s.empty() && issp(static_cast<unsigned char>(s.front())))
-                    s.erase(s.begin());
-                while (!s.empty() && issp(static_cast<unsigned char>(s.back())))
-                    s.pop_back();
+            auto trimCopy = [](std::string s) {
+                yams::config::trim(s);
                 return s;
             };
             auto strip_leading_slash = [](std::string s) {
@@ -1019,7 +950,7 @@ private:
             };
 
             for (const auto& raw : queryPatterns) {
-                std::string p = trim(raw);
+                std::string p = trimCopy(raw);
                 if (p.empty())
                     continue;
 
@@ -1565,9 +1496,7 @@ private:
             std::stringstream ss(pattern);
             std::string item;
             while (std::getline(ss, item, ',')) {
-                // Trim whitespace
-                item.erase(0, item.find_first_not_of(" \t"));
-                item.erase(item.find_last_not_of(" \t") + 1);
+                yams::config::trim(item);
                 if (!item.empty()) {
                     result.push_back(item);
                 }

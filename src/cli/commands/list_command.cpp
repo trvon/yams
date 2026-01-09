@@ -8,6 +8,7 @@
 #include <yams/cli/time_parser.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/metadata/document_metadata.h>
@@ -1529,9 +1530,7 @@ private:
             std::string token;
             bool found = false;
             while (std::getline(ss, token, ',')) {
-                // Trim whitespace
-                token.erase(0, token.find_first_not_of(" \t"));
-                token.erase(token.find_last_not_of(" \t") + 1);
+                yams::config::trim(token);
 
                 // Add dot if not present
                 if (!token.empty() && token[0] != '.') {

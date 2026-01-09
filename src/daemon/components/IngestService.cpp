@@ -61,7 +61,7 @@ static void processTask(ServiceManager* sm, const InternalEventBus::StoreDocumen
                      req.path, req.name, req.recursive ? 1 : 0, req.content.empty() ? 0 : 1,
                      req.noEmbeddings ? 1 : 0, req.includePatterns.size(),
                      req.excludePatterns.size(), req.tags.size(), req.metadata.size());
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch): logging failures must not interrupt ingest
     }
 
     bool isDir = (!req.path.empty() && std::filesystem::is_directory(req.path));

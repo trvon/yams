@@ -23,8 +23,9 @@ public:
     /// Schema version enum
     enum class SchemaVersion {
         Unknown = 0,
-        V1 = 1, ///< Old schema: doc_embeddings (vec0) + doc_metadata
-        V2 = 2  ///< New schema: vectors + vectors_hnsw_meta + vectors_hnsw_nodes
+        V1 = 1,  ///< Old schema: doc_embeddings (vec0) + doc_metadata
+        V2 = 2,  ///< New schema: vectors + vectors_hnsw_meta + vectors_hnsw_nodes
+        V2_1 = 3 ///< V2 with embedding_dim column
     };
 
     /**
@@ -48,6 +49,26 @@ public:
      * @return Success or error
      */
     static Result<void> migrateV1ToV2(sqlite3* db, size_t embedding_dim);
+
+    /**
+     * @brief Migrate V2 schema to V2.1 (add embedding_dim column)
+     *
+     * Steps:
+     * 1. Add embedding_dim column to vectors table
+     * 2. Backfill dimension from BLOB size: LENGTH(embedding) / 4
+     * 3. Create index on embedding_dim for efficient queries
+     *
+     * @param db SQLite database handle
+     * @return Success or error
+     */
+    static Result<void> migrateV2ToV2_1(sqlite3* db);
+
+    /**
+     * @brief Check if vectors table has embedding_dim column
+     * @param db SQLite database handle
+     * @return true if embedding_dim column exists
+     */
+    static bool hasEmbeddingDimColumn(sqlite3* db);
 
     /**
      * @brief Rollback V2 migration (restore V1 schema)

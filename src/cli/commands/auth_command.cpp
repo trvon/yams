@@ -3,6 +3,7 @@
 #include <yams/cli/command.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_helpers.h>
 
 namespace yams::cli {
 
@@ -24,7 +25,7 @@ public:
             ->default_val("ed25519")
             ->check(CLI::IsMember({"ed25519", "rsa"}));
         keygenCmd->add_option("--output", outputPath_, "Output directory for keys")
-            ->default_val("~/.yams/keys/");
+            ->default_val((yams::config::get_config_dir() / "keys").string());
         keygenCmd->add_flag("--force", force_, "Overwrite existing keys");
         keygenCmd->callback([this]() {
             spdlog::info("Auth keygen command - Coming in Phase 2");
@@ -73,7 +74,7 @@ public:
         // Token subcommand (JWT generation)
         auto* tokenCmd = cmd->add_subcommand("token", "Generate JWT token");
         tokenCmd->add_option("--key", keyPath_, "Private key path for signing")
-            ->default_val("~/.yams/keys/ed25519.pem");
+            ->default_val((yams::config::get_config_dir() / "keys" / "ed25519.pem").string());
         tokenCmd->add_option("--validity", validity_, "Token validity duration (e.g., '24h', '7d')")
             ->default_val("24h");
         tokenCmd->add_option("--claims", claims_, "Additional JWT claims (JSON)")

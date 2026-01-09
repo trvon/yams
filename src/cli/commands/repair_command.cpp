@@ -18,7 +18,9 @@
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/progress_indicator.h>
 #include <yams/cli/ui_helpers.hpp>
+#include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_helpers.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
@@ -984,73 +986,9 @@ private:
         std::cout << ui::section_header("Generating Missing Embeddings") << "\n";
 
         // Ensure vector DB schema dimension matches target before generating
-        // Determine target dimension: config > env > generator > heuristic
-        size_t targetDim = 0;
-        // Config (best-effort parse of ~/.config/yams/config.toml or XDG)
-        try {
-            namespace fs = std::filesystem;
-            fs::path cfgHome;
-            if (const char* xdg = std::getenv("XDG_CONFIG_HOME"))
-                cfgHome = fs::path(xdg);
-            else if (const char* h = std::getenv("HOME"))
-                cfgHome = fs::path(h) / ".config";
-            fs::path cfgPath = cfgHome / "yams" / "config.toml";
-            if (!cfgPath.empty() && fs::exists(cfgPath)) {
-                std::ifstream in(cfgPath);
-                std::string line;
-                auto trim = [&](std::string& t) {
-                    if (t.empty())
-                        return;
-                    t.erase(0, t.find_first_not_of(" \t"));
-                    auto p = t.find_last_not_of(" \t");
-                    if (p != std::string::npos)
-                        t.erase(p + 1);
-                };
-                while (std::getline(in, line)) {
-                    std::string l = line;
-                    trim(l);
-                    if (l.empty() || l[0] == '#')
-                        continue;
-                    if (l.find("embeddings.embedding_dim") != std::string::npos) {
-                        auto eq = l.find('=');
-                        if (eq != std::string::npos) {
-                            std::string v = l.substr(eq + 1);
-                            trim(v);
-                            if (!v.empty() && v.front() == '"' && v.back() == '"')
-                                v = v.substr(1, v.size() - 2);
-                            try {
-                                targetDim = static_cast<size_t>(std::stoul(v));
-                            } catch (...) {
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-        } catch (...) {
-        }
-        // Env
-        if (targetDim == 0) {
-            if (const char* envd = std::getenv("YAMS_EMBED_DIM")) {
-                try {
-                    targetDim = static_cast<size_t>(std::stoul(envd));
-                } catch (...) {
-                }
-            }
-        }
-        // Generator
-        if (targetDim == 0) {
-            try {
-                if (auto emb = cli_->getEmbeddingGenerator()) {
-                    auto d = emb->getEmbeddingDimension();
-                    if (d > 0)
-                        targetDim = d;
-                }
-            } catch (...) {
-            }
-        }
-        if (targetDim == 0)
-            targetDim = 384; // final fallback
+        // Use extracted utility for dimension resolution (config > env > generator > heuristic)
+        auto resolved = vecutil::resolveEmbeddingDimension(cli_, cli_->getDataPath());
+        size_t targetDim = resolved.dimension;
 
         // Align vectors.db schema dimension if needed (no daemon required)
         try {
@@ -1186,46 +1124,11 @@ private:
                 }
                 // 2) Read from config/env
                 try {
-                    namespace fs = std::filesystem;
-                    fs::path cfgp;
-                    if (const char* xdg = std::getenv("XDG_CONFIG_HOME"))
-                        cfgp = fs::path(xdg) / "yams" / "config.toml";
-                    else if (const char* home = std::getenv("HOME"))
-                        cfgp = fs::path(home) / ".config" / "yams" / "config.toml";
-                    std::ifstream in(cfgp);
-                    if (in) {
-                        std::string line, section;
-                        auto trim = [](std::string& str) {
-                            if (str.empty())
-                                return;
-                            str.erase(0, str.find_first_not_of(" \t"));
-                            auto p = str.find_last_not_of(" \t");
-                            if (p != std::string::npos)
-                                str.erase(p + 1);
-                        };
-                        while (std::getline(in, line)) {
-                            std::string l = line;
-                            trim(l);
-                            if (l.empty() || l[0] == '#')
-                                continue;
-                            if (l.front() == '[') {
-                                auto e = l.find(']');
-                                section =
-                                    e != std::string::npos ? l.substr(1, e - 1) : std::string();
-                                continue;
-                            }
-                            auto eq = l.find('=');
-                            if (eq == std::string::npos)
-                                continue;
-                            std::string key = l.substr(0, eq);
-                            std::string val = l.substr(eq + 1);
-                            trim(key);
-                            trim(val);
-                            if (!val.empty() && val.front() == '"' && val.back() == '"')
-                                val = val.substr(1, val.size() - 2);
-                            if (section == "embeddings" && key == "preferred_model" && !val.empty())
-                                return val;
-                        }
+                    auto cfgp = yams::config::get_config_path();
+                    auto config = yams::config::parse_simple_toml(cfgp);
+                    if (auto it = config.find("embeddings.preferred_model"); it != config.end()) {
+                        if (!it->second.empty())
+                            return it->second;
                     }
                 } catch (...) {
                 }

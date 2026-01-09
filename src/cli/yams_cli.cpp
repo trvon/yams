@@ -1026,11 +1026,8 @@ std::filesystem::path YamsCLI::findMagicNumbersFile() {
     searchPaths.push_back("/usr/share/yams/data/magic_numbers.json");
     searchPaths.push_back("/opt/yams/share/data/magic_numbers.json");
 
-    // 5. Check in home directory
-    if (const char* home = std::getenv("HOME")) {
-        searchPaths.push_back(fs::path(home) / ".local" / "share" / "yams" / "data" /
-                              "magic_numbers.json");
-    }
+    // 5. Check in user data directory
+    searchPaths.push_back(yams::config::get_data_dir() / "data" / "magic_numbers.json");
 
     // Find the first existing file
     for (const auto& path : searchPaths) {
@@ -1098,62 +1095,7 @@ fs::path YamsCLI::getConfigPath() const {
 }
 
 std::map<std::string, std::string> YamsCLI::parseSimpleToml(const fs::path& path) const {
-    std::map<std::string, std::string> config;
-    std::ifstream file(path);
-    if (!file) {
-        return config;
-    }
-
-    std::string line;
-    std::string currentSection;
-
-    while (std::getline(file, line)) {
-        // Skip comments and empty lines
-        if (line.empty() || line[0] == '#')
-            continue;
-
-        // Check for section headers
-        if (line[0] == '[') {
-            size_t end = line.find(']');
-            if (end != std::string::npos) {
-                currentSection = line.substr(1, end - 1);
-                if (!currentSection.empty()) {
-                    currentSection += ".";
-                }
-            }
-            continue;
-        }
-
-        // Parse key-value pairs
-        size_t eq = line.find('=');
-        if (eq != std::string::npos) {
-            std::string key = line.substr(0, eq);
-            std::string value = line.substr(eq + 1);
-
-            // Trim whitespace
-            key.erase(0, key.find_first_not_of(" \t"));
-            key.erase(key.find_last_not_of(" \t") + 1);
-            value.erase(0, value.find_first_not_of(" \t"));
-            value.erase(value.find_last_not_of(" \t") + 1);
-
-            // Remove quotes if present
-            if (value.size() >= 2 && value[0] == '"' && value.back() == '"') {
-                value = value.substr(1, value.size() - 2);
-            }
-
-            // Remove comments from value
-            size_t comment = value.find('#');
-            if (comment != std::string::npos) {
-                value = value.substr(0, comment);
-                // Trim again after removing comment
-                value.erase(value.find_last_not_of(" \t") + 1);
-            }
-
-            config[currentSection + key] = value;
-        }
-    }
-
-    return config;
+    return yams::config::parse_simple_toml(path);
 }
 
 void YamsCLI::checkConfigMigration() {

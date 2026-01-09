@@ -306,4 +306,179 @@ std::vector<std::filesystem::path> parse_path_list(const std::string& raw) {
     return out;
 }
 
+// ============================================================================
+// Full TOML config parsing and writing utilities
+// ============================================================================
+
+std::map<std::string, std::string> parse_simple_toml(const std::filesystem::path& path) {
+    std::map<std::string, std::string> config;
+    std::ifstream file(path);
+    if (!file) {
+        return config;
+    }
+
+    std::string line;
+    std::string currentSection;
+
+    while (std::getline(file, line)) {
+        trim(line);
+
+        // Skip comments and empty lines
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+
+        // Check for section headers [section]
+        if (line[0] == '[') {
+            size_t end = line.find(']');
+            if (end != std::string::npos) {
+                currentSection = line.substr(1, end - 1);
+                trim(currentSection);
+                if (!currentSection.empty()) {
+                    currentSection += ".";
+                }
+            }
+            continue;
+        }
+
+        // Parse key-value pairs
+        size_t eq = line.find('=');
+        if (eq != std::string::npos) {
+            std::string key = line.substr(0, eq);
+            std::string value = line.substr(eq + 1);
+
+            trim(key);
+            trim(value);
+
+            // Remove inline comments (but be careful with quoted strings)
+            bool inQuote = false;
+            for (size_t i = 0; i < value.size(); ++i) {
+                if (value[i] == '"' || value[i] == '\'') {
+                    inQuote = !inQuote;
+                } else if (value[i] == '#' && !inQuote) {
+                    value = value.substr(0, i);
+                    trim(value);
+                    break;
+                }
+            }
+
+            value = unquote(value);
+            config[currentSection + key] = value;
+        }
+    }
+
+    return config;
+}
+
+DimensionConfig read_dimension_config(const std::filesystem::path& config_path) {
+    DimensionConfig result{};
+
+    if (!std::filesystem::exists(config_path)) {
+        return result;
+    }
+
+    auto config = parse_simple_toml(config_path);
+
+    auto parseSize = [](const std::string& str) -> std::optional<size_t> {
+        if (str.empty()) {
+            return std::nullopt;
+        }
+        try {
+            return static_cast<size_t>(std::stoul(str));
+        } catch (...) {
+            return std::nullopt;
+        }
+    };
+
+    // Check various keys for embedding dimension
+    if (auto it = config.find("embeddings.embedding_dim"); it != config.end()) {
+        result.embeddings = parseSize(it->second);
+    }
+    if (auto it = config.find("vector_database.embedding_dim"); it != config.end()) {
+        result.vectorDb = parseSize(it->second);
+    }
+    if (auto it = config.find("vector_index.dimension"); it != config.end()) {
+        result.index = parseSize(it->second);
+    }
+    // Also check for typo variant
+    if (!result.index) {
+        if (auto it = config.find("vector_index.dimenions"); it != config.end()) {
+            result.index = parseSize(it->second);
+        }
+    }
+
+    return result;
+}
+
+bool write_dimension_config(const std::filesystem::path& config_path, size_t dim) {
+    std::map<std::string, std::string> values;
+    values["embeddings.embedding_dim"] = std::to_string(dim);
+    values["vector_database.embedding_dim"] = std::to_string(dim);
+    values["vector_index.dimension"] = std::to_string(dim);
+    return write_config_values(config_path, values);
+}
+
+bool write_config_value(const std::filesystem::path& config_path, const std::string& key,
+                        const std::string& value) {
+    std::map<std::string, std::string> values;
+    values[key] = value;
+    return write_config_values(config_path, values);
+}
+
+bool write_config_values(const std::filesystem::path& config_path,
+                         const std::map<std::string, std::string>& values) {
+    try {
+        // Ensure parent directories exist
+        std::filesystem::create_directories(config_path.parent_path());
+
+        // Read existing config
+        auto config = parse_simple_toml(config_path);
+
+        // Merge new values
+        for (const auto& [key, value] : values) {
+            config[key] = value;
+        }
+
+        // Group by section for writing
+        std::map<std::string, std::map<std::string, std::string>> sections;
+        for (const auto& [fullKey, val] : config) {
+            size_t dot = fullKey.find('.');
+            if (dot != std::string::npos) {
+                std::string section = fullKey.substr(0, dot);
+                std::string subkey = fullKey.substr(dot + 1);
+                sections[section][subkey] = val;
+            } else {
+                // Top-level key (no section)
+                sections[""][fullKey] = val;
+            }
+        }
+
+        // Write back to file
+        std::ofstream file(config_path, std::ios::trunc);
+        if (!file) {
+            return false;
+        }
+
+        // Write top-level keys first (if any)
+        if (auto it = sections.find(""); it != sections.end()) {
+            for (const auto& [key, val] : it->second) {
+                file << key << " = \"" << val << "\"\n";
+            }
+            sections.erase(it);
+        }
+
+        // Write each section
+        for (const auto& [section, kvs] : sections) {
+            file << "\n[" << section << "]\n";
+            for (const auto& [key, val] : kvs) {
+                file << key << " = \"" << val << "\"\n";
+            }
+        }
+
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 } // namespace yams::config

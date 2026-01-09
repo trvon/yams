@@ -5,6 +5,7 @@
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_helpers.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/tree_differ.h>
 
@@ -304,9 +305,7 @@ private:
         std::string pattern;
 
         while (std::getline(ss, pattern, ',')) {
-            // Trim whitespace
-            pattern.erase(0, pattern.find_first_not_of(" \t"));
-            pattern.erase(pattern.find_last_not_of(" \t") + 1);
+            yams::config::trim(pattern);
             if (!pattern.empty()) {
                 result.push_back(pattern);
             }

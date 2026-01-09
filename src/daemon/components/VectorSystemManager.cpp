@@ -70,7 +70,11 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
     bool exists = fs::exists(cfg.database_path);
     cfg.create_if_missing = true;
 
-    // Resolve embedding dimension with precedence
+    // Resolve embedding dimension with precedence:
+    // 1. Existing DB DDL (existing data takes precedence)
+    // 2. getEmbeddingDimension callback (actual model dimension via ServiceManager)
+    // 3. Provider directly (if weak_ptr is set)
+    // 4. Config file / env (fallback only)
     std::optional<size_t> dim;
 
     // 1. Existing DB DDL
@@ -85,9 +89,37 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
         }
     }
 
-    // 2. Config file / env (only if no provider available)
+    // 2. Embedding generator callback (ServiceManager::getEmbeddingDimension)
+    // This is preferred over config because it returns the actual model dimension
+    if (!dim && deps_.getEmbeddingDimension) {
+        try {
+            size_t g = deps_.getEmbeddingDimension();
+            if (g > 0) {
+                dim = g;
+                spdlog::info("[VectorInit] probe: generator dim={}", g);
+            }
+        } catch (...) {
+        }
+    }
+
+    // 3. Ask provider directly (if weak_ptr is set)
     auto modelProvider = deps_.modelProvider.lock();
-    if (!dim && (!modelProvider || !modelProvider->isAvailable())) {
+    if (!dim && deps_.resolvePreferredModel) {
+        try {
+            std::string preferred = deps_.resolvePreferredModel();
+            if (!preferred.empty() && modelProvider && modelProvider->isAvailable()) {
+                size_t prov = modelProvider->getEmbeddingDim(preferred);
+                if (prov > 0) {
+                    dim = prov;
+                    spdlog::info("[VectorInit] using provider dim={} from '{}'", *dim, preferred);
+                }
+            }
+        } catch (...) {
+        }
+    }
+
+    // 4. Config file / env (fallback only when model dimension unknown)
+    if (!dim) {
         auto cfgPath = ConfigResolver::resolveDefaultConfigPath();
         if (!cfgPath.empty()) {
             try {
@@ -108,31 +140,6 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                 } catch (...) {
                 }
             }
-        }
-    }
-
-    // 3. Ask provider
-    if (!dim && deps_.resolvePreferredModel) {
-        try {
-            std::string preferred = deps_.resolvePreferredModel();
-            if (!preferred.empty() && modelProvider && modelProvider->isAvailable()) {
-                size_t prov = modelProvider->getEmbeddingDim(preferred);
-                if (prov > 0) {
-                    dim = prov;
-                    spdlog::info("[VectorInit] using provider dim={} from '{}'", *dim, preferred);
-                }
-            }
-        } catch (...) {
-        }
-    }
-
-    // 4. Embedding generator
-    if (!dim && (!modelProvider || !modelProvider->isAvailable()) && deps_.getEmbeddingDimension) {
-        try {
-            size_t g = deps_.getEmbeddingDimension();
-            if (g > 0)
-                dim = g;
-        } catch (...) {
         }
     }
 

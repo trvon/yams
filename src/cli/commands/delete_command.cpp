@@ -15,6 +15,7 @@
 #include <yams/cli/progress_indicator.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_helpers.h>
 
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/metadata/query_helpers.h>
@@ -558,9 +559,7 @@ private:
         std::stringstream ss(namesList);
         std::string name;
         while (std::getline(ss, name, ',')) {
-            // Trim whitespace
-            name.erase(0, name.find_first_not_of(" \t"));
-            name.erase(name.find_last_not_of(" \t") + 1);
+            yams::config::trim(name);
             if (!name.empty()) {
                 names.push_back(name);
             }

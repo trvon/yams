@@ -31,9 +31,9 @@ namespace yams::daemon {
 struct OnnxModelInfo {
     std::string name;
     std::string path;
-    size_t embeddingDim;
-    size_t maxSequenceLength;
-    size_t memoryUsageBytes;
+    size_t embeddingDim{0};
+    size_t maxSequenceLength{0};
+    size_t memoryUsageBytes{0};
     std::chrono::system_clock::time_point loadTime;
     // Whether this model is part of the hot pool (kept in memory eagerly)
     bool isHot = false;

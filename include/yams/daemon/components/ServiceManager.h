@@ -35,6 +35,7 @@
 #include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/PoolManager.h>
 #include <yams/daemon/components/PostIngestQueue.h>
+#include <yams/daemon/components/SearchComponent.h>
 #include <yams/daemon/components/SearchEngineFsm.h>
 #include <yams/daemon/components/SearchEngineManager.h>
 #include <yams/daemon/components/ServiceManagerFsm.h>
@@ -310,6 +311,7 @@ public:
     PluginManager* getPluginManager() const { return pluginManager_.get(); }
     VectorSystemManager* getVectorSystemManager() const { return vectorSystemManager_.get(); }
     DatabaseManager* getDatabaseManager() const { return databaseManager_.get(); }
+    SearchComponent* getSearchComponent() const { return searchComponent_.get(); }
 
     // Worker pool metrics accessors
     std::size_t getWorkerActive() const { return poolActive_.load(std::memory_order_relaxed); }
@@ -408,6 +410,11 @@ public:
     // prevent duplicate execution and ensures proper lifetime management.
     // Should be called via co_spawn with shared_from_this() for safety.
     boost::asio::awaitable<void> co_enableEmbeddingsAndRebuild();
+
+    // Check if search engine needs rebuild due to corpus growth and trigger if needed.
+    // Safe to call frequently (e.g., from status handler) - uses atomic guards.
+    // Returns true if a rebuild was triggered (async, not awaited).
+    bool triggerSearchEngineRebuildIfNeeded();
 
     // Ensure embedding generator is initialized for a specific model name (already loaded in
     // provider). Returns success if generator is ready or initialized; schedules no rebuild by
@@ -602,6 +609,7 @@ private:
 
     // Phase 2.4: Extracted managers (consolidate lifecycle management)
     SearchEngineManager searchEngineManager_;
+    std::unique_ptr<SearchComponent> searchComponent_;
 
     std::unique_ptr<PluginManager> pluginManager_;
     std::unique_ptr<VectorSystemManager> vectorSystemManager_;

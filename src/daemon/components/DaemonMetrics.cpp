@@ -405,6 +405,17 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
                 } catch (...) {
                     spdlog::debug("DaemonMetrics: failed to update document counts (unknown)");
                 }
+
+                // Check if search engine needs re-tuning based on corpus growth
+                // Delegate to SearchComponent which handles rate limiting and atomic guards
+                try {
+                    if (services_) {
+                        if (auto* searchComp = services_->getSearchComponent()) {
+                            searchComp->checkAndTriggerRebuildIfNeeded();
+                        }
+                    }
+                } catch (...) {
+                }
             }
 
             // Update physical filesystem stats in background (TTL-based)

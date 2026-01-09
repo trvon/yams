@@ -6,6 +6,7 @@
 #include <cstring>
 #include <shared_mutex>
 #include <span>
+#include <unordered_set>
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -30,6 +31,7 @@ CREATE TABLE IF NOT EXISTS vectors (
     chunk_id TEXT UNIQUE NOT NULL,
     document_hash TEXT NOT NULL,
     embedding BLOB NOT NULL,
+    embedding_dim INTEGER,
     content TEXT,
     start_offset INTEGER DEFAULT 0,
     end_offset INTEGER DEFAULT 0,
@@ -49,20 +51,21 @@ CREATE TABLE IF NOT EXISTS vectors (
 CREATE INDEX IF NOT EXISTS idx_vectors_chunk_id ON vectors(chunk_id);
 CREATE INDEX IF NOT EXISTS idx_vectors_document_hash ON vectors(document_hash);
 CREATE INDEX IF NOT EXISTS idx_vectors_model ON vectors(model_id, model_version);
+CREATE INDEX IF NOT EXISTS idx_vectors_embedding_dim ON vectors(embedding_dim);
 )sql";
 
 constexpr const char* kInsertVector = R"sql(
 INSERT INTO vectors (
-    chunk_id, document_hash, embedding, content,
+    chunk_id, document_hash, embedding, embedding_dim, content,
     start_offset, end_offset, metadata,
     model_id, model_version, embedding_version, content_hash,
     created_at, embedded_at, is_stale, level,
     source_chunk_ids, parent_document_hash, child_document_hashes
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 )sql";
 
 constexpr const char* kSelectByChunkId = R"sql(
-SELECT rowid, chunk_id, document_hash, embedding, content,
+SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
        start_offset, end_offset, metadata,
        model_id, model_version, embedding_version, content_hash,
        created_at, embedded_at, is_stale, level,
@@ -71,7 +74,7 @@ FROM vectors WHERE chunk_id = ?
 )sql";
 
 constexpr const char* kSelectByRowid = R"sql(
-SELECT rowid, chunk_id, document_hash, embedding, content,
+SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
        start_offset, end_offset, metadata,
        model_id, model_version, embedding_version, content_hash,
        created_at, embedded_at, is_stale, level,
@@ -80,7 +83,7 @@ FROM vectors WHERE rowid = ?
 )sql";
 
 constexpr const char* kSelectByDocumentHash = R"sql(
-SELECT rowid, chunk_id, document_hash, embedding, content,
+SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
        start_offset, end_offset, metadata,
        model_id, model_version, embedding_version, content_hash,
        created_at, embedded_at, is_stale, level,
@@ -258,7 +261,7 @@ public:
         // Check for V1 schema and migrate if needed
         auto schema_version = VectorSchemaMigration::detectVersion(db_);
         if (schema_version == VectorSchemaMigration::SchemaVersion::V1) {
-            spdlog::info("Detected V1 vector schema, migrating to V2...");
+            spdlog::info("Detected V1 vector schema, migrating to V2.1...");
             auto migrate_result = VectorSchemaMigration::migrateV1ToV2(db_, config_.embedding_dim);
             if (!migrate_result) {
                 spdlog::error("V1 to V2 migration failed: {}", migrate_result.error().message);
@@ -267,11 +270,38 @@ public:
                 return Error{ErrorCode::DatabaseError,
                              "Schema migration failed: " + migrate_result.error().message};
             }
-            spdlog::info("V1 to V2 migration completed successfully");
+            spdlog::info("V1 to V2.1 migration completed successfully");
+        } else if (schema_version == VectorSchemaMigration::SchemaVersion::V2) {
+            // Upgrade V2 to V2.1 (add embedding_dim column)
+            spdlog::info("Detected V2 vector schema, upgrading to V2.1...");
+            auto migrate_result = VectorSchemaMigration::migrateV2ToV2_1(db_);
+            if (!migrate_result) {
+                spdlog::error("V2 to V2.1 migration failed: {}", migrate_result.error().message);
+                sqlite3_close(db_);
+                db_ = nullptr;
+                return Error{ErrorCode::DatabaseError,
+                             "Schema migration failed: " + migrate_result.error().message};
+            }
+            spdlog::info("V2 to V2.1 migration completed successfully");
         }
 
         db_path_ = db_path;
         initialized_ = true;
+
+        // If tables already exist, prepare statements for immediate use
+        // (inline check to avoid lock contention - we already hold the lock)
+        {
+            sqlite3_stmt* check_stmt = nullptr;
+            int rc = sqlite3_prepare_v2(db_, kTableExists, -1, &check_stmt, nullptr);
+            if (rc == SQLITE_OK) {
+                rc = sqlite3_step(check_stmt);
+                bool exists = (rc == SQLITE_ROW);
+                sqlite3_finalize(check_stmt);
+                if (exists) {
+                    prepareStatements();
+                }
+            }
+        }
 
         return Result<void>{};
     }
@@ -279,9 +309,9 @@ public:
     void close() {
         std::unique_lock lock(mutex_);
 
-        // Save HNSW if dirty
-        if (hnsw_dirty_ && hnsw_ && db_) {
-            saveHnswUnlocked();
+        // Save all dirty HNSW indices
+        if (db_) {
+            saveAllHnswUnlocked();
         }
 
         // Finalize prepared statements
@@ -292,10 +322,10 @@ public:
             db_ = nullptr;
         }
 
-        hnsw_.reset();
+        hnsw_indices_.clear();
+        hnsw_dirty_.clear();
         initialized_ = false;
         hnsw_loaded_ = false;
-        hnsw_dirty_ = false;
     }
 
     bool isInitialized() const {
@@ -375,12 +405,13 @@ public:
 
         int64_t rowid = rowid_result.value();
 
-        // Insert into HNSW
+        // Insert into HNSW (dimension-specific index)
         ensureHnswLoadedUnlocked();
-        if (hnsw_) {
+        size_t dim = record.embedding.size();
+        if (auto* hnsw = getOrCreateHnswForDim(dim)) {
             std::span<const float> embedding_span(record.embedding.data(), record.embedding.size());
-            hnsw_->insert(static_cast<size_t>(rowid), embedding_span);
-            hnsw_dirty_ = true;
+            hnsw->insert(static_cast<size_t>(rowid), embedding_span);
+            hnsw_dirty_[dim] = true;
             pending_inserts_++;
 
             if (pending_inserts_ >= config_.checkpoint_threshold) {
@@ -426,34 +457,41 @@ public:
             return Error{ErrorCode::DatabaseError, "Failed to commit transaction"};
         }
 
-        // Insert into HNSW
+        // Insert into HNSW (dimension-specific indices)
         ensureHnswLoadedUnlocked();
-        if (hnsw_) {
-            size_t before_size = hnsw_->size();
-            for (size_t i = 0; i < records.size(); ++i) {
-                std::span<const float> embedding_span(records[i].embedding.data(),
-                                                      records[i].embedding.size());
-                hnsw_->insert(static_cast<size_t>(rowids[i]), embedding_span);
-            }
-            hnsw_dirty_ = true;
-            pending_inserts_ += records.size();
 
-            // Diagnostic: log HNSW size change every 100 batches or when significant
-            static std::atomic<uint64_t> batch_counter{0};
-            uint64_t bc = batch_counter.fetch_add(1);
-            if (bc % 100 == 0 || records.size() >= 10) {
-                spdlog::debug(
-                    "[HNSW] insertVectorsBatch: added {} records, hnsw_size: {} -> {} (batch #{})",
-                    records.size(), before_size, hnsw_->size(), bc);
-            }
+        // Group records by dimension for batch insertion into appropriate indices
+        std::unordered_map<size_t, std::vector<std::pair<size_t, size_t>>>
+            dim_records; // dim -> [(idx, rowid)]
+        for (size_t i = 0; i < records.size(); ++i) {
+            size_t dim = records[i].embedding.size();
+            dim_records[dim].emplace_back(i, rowids[i]);
+        }
 
-            if (pending_inserts_ >= config_.checkpoint_threshold) {
-                saveHnswCheckpointUnlocked();
+        static std::atomic<uint64_t> batch_counter{0};
+        uint64_t bc = batch_counter.fetch_add(1);
+
+        for (auto& [dim, indices] : dim_records) {
+            if (auto* hnsw = getOrCreateHnswForDim(dim)) {
+                size_t before_size = hnsw->size();
+                for (const auto& [idx, rowid] : indices) {
+                    std::span<const float> embedding_span(records[idx].embedding.data(),
+                                                          records[idx].embedding.size());
+                    hnsw->insert(static_cast<size_t>(rowid), embedding_span);
+                }
+                hnsw_dirty_[dim] = true;
+
+                if (bc % 100 == 0 || indices.size() >= 10) {
+                    spdlog::debug("[HNSW] insertVectorsBatch: dim={}, added {} records, hnsw_size: "
+                                  "{} -> {} (batch #{})",
+                                  dim, indices.size(), before_size, hnsw->size(), bc);
+                }
             }
-        } else {
-            spdlog::warn("[HNSW] insertVectorsBatch: hnsw_ is null after "
-                         "ensureHnswLoadedUnlocked(), {} records NOT indexed in HNSW",
-                         records.size());
+        }
+
+        pending_inserts_ += records.size();
+        if (pending_inserts_ >= config_.checkpoint_threshold) {
+            saveHnswCheckpointUnlocked();
         }
 
         return Result<void>{};
@@ -474,6 +512,13 @@ public:
 
         int64_t old_rowid = *rowid_opt;
 
+        // Get old dimension before deleting (need to know which HNSW index to remove from)
+        std::optional<size_t> old_dim;
+        auto old_record = getVectorByChunkIdUnlocked(chunk_id);
+        if (old_record) {
+            old_dim = old_record->embedding.size();
+        }
+
         // Delete old record
         if (stmt_delete_by_chunk_id_) {
             sqlite3_reset(stmt_delete_by_chunk_id_);
@@ -481,10 +526,12 @@ public:
             sqlite3_step(stmt_delete_by_chunk_id_);
         }
 
-        // Remove from HNSW (soft delete)
+        // Remove from HNSW (soft delete from old dimension's index)
         ensureHnswLoadedUnlocked();
-        if (hnsw_) {
-            hnsw_->remove(static_cast<size_t>(old_rowid));
+        if (old_dim) {
+            if (auto* old_hnsw = getHnswForDim(*old_dim)) {
+                old_hnsw->remove(static_cast<size_t>(old_rowid));
+            }
         }
 
         // Insert new record
@@ -494,28 +541,27 @@ public:
         }
 
         int64_t new_rowid = rowid_result.value();
+        size_t new_dim = record.embedding.size();
 
-        // Insert into HNSW
-        if (hnsw_) {
+        // Insert into HNSW (new dimension's index)
+        if (auto* hnsw = getOrCreateHnswForDim(new_dim)) {
             std::span<const float> embedding_span(record.embedding.data(), record.embedding.size());
 
-            // Handle SQLite rowid reuse: if new_rowid == old_rowid, the node still exists
-            // in HNSW (just soft-deleted). We need to restore it and the vector data
-            // is already correct since HNSW stores the actual vector.
-            if (new_rowid == old_rowid) {
-                // Restore the soft-deleted node - the vector data in HNSW is stale,
-                // but since HNSW doesn't support in-place update, we need to remove
-                // completely and re-insert. Use a workaround: compact to remove,
-                // then insert fresh.
-                *hnsw_ = hnsw_->compact(); // Remove the deleted node entirely
-                hnsw_->insert(static_cast<size_t>(new_rowid), embedding_span);
+            // Handle SQLite rowid reuse: if new_rowid == old_rowid AND same dimension,
+            // the node still exists in HNSW (just soft-deleted).
+            bool same_dim = old_dim && *old_dim == new_dim;
+            if (new_rowid == old_rowid && same_dim) {
+                // Compact to fully remove the deleted node, then insert fresh
+                *hnsw = hnsw->compact();
+                hnsw->insert(static_cast<size_t>(new_rowid), embedding_span);
             } else {
-                hnsw_->insert(static_cast<size_t>(new_rowid), embedding_span);
+                hnsw->insert(static_cast<size_t>(new_rowid), embedding_span);
             }
-            hnsw_dirty_ = true;
+            hnsw_dirty_[new_dim] = true;
 
             // Check if compaction needed (skip if we just compacted)
-            if (new_rowid != old_rowid && hnsw_->needs_compaction(config_.compaction_threshold)) {
+            if (!(new_rowid == old_rowid && same_dim) &&
+                hnsw->needs_compaction(config_.compaction_threshold)) {
                 compactHnswUnlocked();
             }
         }
@@ -530,13 +576,20 @@ public:
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
-        // Get rowid first
+        // Get rowid and dimension first
         auto rowid_opt = getRowidByChunkIdUnlocked(chunk_id);
         if (!rowid_opt) {
             return Result<void>{}; // Not found is OK for delete
         }
 
         int64_t rowid = *rowid_opt;
+
+        // Get dimension before deleting
+        std::optional<size_t> dim;
+        auto record = getVectorByChunkIdUnlocked(chunk_id);
+        if (record) {
+            dim = record->embedding.size();
+        }
 
         // Delete from SQLite
         if (stmt_delete_by_chunk_id_) {
@@ -545,14 +598,16 @@ public:
             sqlite3_step(stmt_delete_by_chunk_id_);
         }
 
-        // Soft delete from HNSW
+        // Soft delete from HNSW (dimension-specific index)
         ensureHnswLoadedUnlocked();
-        if (hnsw_) {
-            hnsw_->remove(static_cast<size_t>(rowid));
-            hnsw_dirty_ = true;
+        if (dim) {
+            if (auto* hnsw = getHnswForDim(*dim)) {
+                hnsw->remove(static_cast<size_t>(rowid));
+                hnsw_dirty_[*dim] = true;
 
-            if (hnsw_->needs_compaction(config_.compaction_threshold)) {
-                compactHnswUnlocked();
+                if (hnsw->needs_compaction(config_.compaction_threshold)) {
+                    compactHnswUnlocked();
+                }
             }
         }
 
@@ -566,16 +621,21 @@ public:
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
-        // Get all rowids for this document
-        std::vector<int64_t> rowids;
-        if (stmt_get_rowids_by_doc_) {
-            sqlite3_reset(stmt_get_rowids_by_doc_);
-            sqlite3_bind_text(stmt_get_rowids_by_doc_, 1, document_hash.c_str(), -1,
-                              SQLITE_TRANSIENT);
-
-            while (sqlite3_step(stmt_get_rowids_by_doc_) == SQLITE_ROW) {
-                rowids.push_back(sqlite3_column_int64(stmt_get_rowids_by_doc_, 0));
+        // Get all rowids and their dimensions for this document
+        // We need to query rowid and embedding_dim together
+        std::vector<std::pair<int64_t, size_t>> rowid_dims; // (rowid, dimension)
+        const char* query_sql = "SELECT rowid, embedding_dim FROM vectors WHERE document_hash = ?";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, query_sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, document_hash.c_str(), -1, SQLITE_TRANSIENT);
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                int64_t rowid = sqlite3_column_int64(stmt, 0);
+                int64_t dim = sqlite3_column_int64(stmt, 1);
+                if (dim > 0) {
+                    rowid_dims.emplace_back(rowid, static_cast<size_t>(dim));
+                }
             }
+            sqlite3_finalize(stmt);
         }
 
         // Delete from SQLite
@@ -585,16 +645,26 @@ public:
             sqlite3_step(stmt_delete_by_doc_);
         }
 
-        // Soft delete from HNSW
+        // Soft delete from HNSW (dimension-specific indices)
         ensureHnswLoadedUnlocked();
-        if (hnsw_ && !rowids.empty()) {
-            for (int64_t rowid : rowids) {
-                hnsw_->remove(static_cast<size_t>(rowid));
+        if (!rowid_dims.empty()) {
+            std::unordered_set<size_t> affected_dims;
+            for (const auto& [rowid, dim] : rowid_dims) {
+                if (auto* hnsw = getHnswForDim(dim)) {
+                    hnsw->remove(static_cast<size_t>(rowid));
+                    hnsw_dirty_[dim] = true;
+                    affected_dims.insert(dim);
+                }
             }
-            hnsw_dirty_ = true;
 
-            if (hnsw_->needs_compaction(config_.compaction_threshold)) {
-                compactHnswUnlocked();
+            // Check compaction for affected indices
+            for (size_t dim : affected_dims) {
+                if (auto* hnsw = getHnswForDim(dim)) {
+                    if (hnsw->needs_compaction(config_.compaction_threshold)) {
+                        compactHnswUnlocked();
+                        break; // compactHnswUnlocked handles all indices
+                    }
+                }
             }
         }
 
@@ -620,9 +690,20 @@ public:
             lock.lock();
         }
 
-        if (!hnsw_ || hnsw_->empty()) {
-            spdlog::warn("[HNSW] searchSimilar: hnsw_ is {}, returning empty results",
-                         hnsw_ ? "empty" : "null");
+        // Route to the correct HNSW index based on query embedding dimension
+        size_t query_dim = query_embedding.size();
+        HNSWIndex* hnsw = nullptr;
+
+        // Find index for this dimension (const access, no creation)
+        auto it = hnsw_indices_.find(query_dim);
+        if (it != hnsw_indices_.end()) {
+            hnsw = it->second.get();
+        }
+
+        if (!hnsw || hnsw->empty()) {
+            spdlog::warn(
+                "[HNSW] searchSimilar: no index for dim={} (hnsw={}), returning empty results",
+                query_dim, hnsw ? "empty" : "null");
             return std::vector<VectorRecord>{};
         }
 
@@ -630,8 +711,8 @@ public:
         static std::atomic<uint64_t> search_counter{0};
         uint64_t sc = search_counter.fetch_add(1);
         if (sc < 10 || sc % 100 == 0) {
-            spdlog::info("[HNSW] searchSimilar: hnsw_size={}, k={}, search #{}", hnsw_->size(), k,
-                         sc);
+            spdlog::info("[HNSW] searchSimilar: dim={}, hnsw_size={}, k={}, search #{}", query_dim,
+                         hnsw->size(), k, sc);
         }
 
         // Build filter function for document_hash and metadata
@@ -669,7 +750,7 @@ public:
         // Over-fetch if filtering to ensure enough results
         size_t fetch_k = (filter != nullptr) ? k * 5 : k;
 
-        auto results = hnsw_->search_with_filter(query_span, fetch_k, ef_search, filter);
+        auto results = hnsw->search_with_filter(query_span, fetch_k, ef_search, filter);
 
         // Convert to VectorRecords
         std::vector<VectorRecord> records;
@@ -830,10 +911,19 @@ public:
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
-        // Compact HNSW if needed
-        if (hnsw_ && hnsw_->needs_compaction(0.1f)) { // Lower threshold for explicit optimize
-            compactHnswUnlocked();
+        // Compact all HNSW indices if needed (lower threshold for explicit optimize)
+        for (auto& [dim, hnsw] : hnsw_indices_) {
+            if (hnsw && hnsw->needs_compaction(0.1f)) {
+                spdlog::info("Compacting HNSW index for dim={} (deleted ratio: {:.2f})", dim,
+                             static_cast<float>(hnsw->deleted_count()) /
+                                 static_cast<float>(hnsw->size()));
+                *hnsw = hnsw->compact();
+                hnsw_dirty_[dim] = true;
+            }
         }
+
+        // Save any dirty indices
+        saveAllHnswUnlocked();
 
         // Vacuum SQLite
         sqlite3_exec(db_, "VACUUM", nullptr, nullptr, nullptr);
@@ -929,7 +1019,22 @@ public:
             return std::nullopt;
         }
 
-        // Get dimension from first vector
+        // Try to get dimension from the embedding_dim column first (V2.1+ schema)
+        const char* probe_dim_col =
+            "SELECT embedding_dim FROM vectors WHERE embedding_dim IS NOT NULL LIMIT 1";
+        if (sqlite3_prepare_v2(db_, probe_dim_col, -1, &stmt, nullptr) == SQLITE_OK) {
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                int64_t dim = sqlite3_column_int64(stmt, 0);
+                sqlite3_finalize(stmt);
+                if (dim > 0) {
+                    return static_cast<size_t>(dim);
+                }
+            } else {
+                sqlite3_finalize(stmt);
+            }
+        }
+
+        // Fallback: infer dimension from BLOB size (V2.0 schema without embedding_dim column)
         const char* probe_sql = "SELECT LENGTH(embedding) / 4 FROM vectors LIMIT 1";
         if (sqlite3_prepare_v2(db_, probe_sql, -1, &stmt, nullptr) != SQLITE_OK) {
             return std::nullopt;
@@ -955,24 +1060,40 @@ public:
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
-        // Save and clear HNSW first
-        if (hnsw_) {
-            hnsw_.reset();
-            hnsw_loaded_ = false;
-            hnsw_dirty_ = false;
-        }
+        // Clear all HNSW indices
+        hnsw_indices_.clear();
+        hnsw_dirty_.clear();
+        hnsw_loaded_ = false;
 
         // Finalize all prepared statements
         finalizeStatements();
 
-        // Drop tables in order (HNSW shadow tables first, then main table)
-        const char* drop_statements[] = {"DROP TABLE IF EXISTS vectors_hnsw_meta",
-                                         "DROP TABLE IF EXISTS vectors_hnsw_nodes",
-                                         "DROP TABLE IF EXISTS vectors"};
+        // Find and drop all dimension-specific HNSW tables
+        // Pattern: vectors_{dim}_hnsw_meta, vectors_{dim}_hnsw_nodes
+        std::vector<std::string> tables_to_drop;
+        const char* find_tables =
+            "SELECT name FROM sqlite_master WHERE type='table' AND "
+            "(name LIKE 'vectors_%_hnsw_meta' OR name LIKE 'vectors_%_hnsw_nodes' OR "
+            " name = 'vectors_hnsw_meta' OR name = 'vectors_hnsw_nodes')";
 
-        for (const char* sql : drop_statements) {
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, find_tables, -1, &stmt, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char* table_name =
+                    reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+                if (table_name) {
+                    tables_to_drop.push_back(std::string("DROP TABLE IF EXISTS ") + table_name);
+                }
+            }
+            sqlite3_finalize(stmt);
+        }
+
+        // Drop main vectors table
+        tables_to_drop.push_back("DROP TABLE IF EXISTS vectors");
+
+        for (const auto& sql : tables_to_drop) {
             char* err_msg = nullptr;
-            int rc = sqlite3_exec(db_, sql, nullptr, nullptr, &err_msg);
+            int rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &err_msg);
             if (rc != SQLITE_OK) {
                 std::string err = err_msg ? err_msg : "Unknown error";
                 sqlite3_free(err_msg);
@@ -980,7 +1101,7 @@ public:
             }
         }
 
-        spdlog::info("Dropped vector tables");
+        spdlog::info("Dropped vector tables (including {} HNSW tables)", tables_to_drop.size() - 1);
         return Result<void>{};
     }
 
@@ -1385,32 +1506,35 @@ private:
         sqlite3_bind_blob(stmt_insert_, 3, record.embedding.data(),
                           record.embedding.size() * sizeof(float), SQLITE_TRANSIENT);
 
-        sqlite3_bind_text(stmt_insert_, 4, record.content.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int64(stmt_insert_, 5, static_cast<int64_t>(record.start_offset));
-        sqlite3_bind_int64(stmt_insert_, 6, static_cast<int64_t>(record.end_offset));
+        // Embedding dimension
+        sqlite3_bind_int64(stmt_insert_, 4, static_cast<int64_t>(record.embedding.size()));
+
+        sqlite3_bind_text(stmt_insert_, 5, record.content.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt_insert_, 6, static_cast<int64_t>(record.start_offset));
+        sqlite3_bind_int64(stmt_insert_, 7, static_cast<int64_t>(record.end_offset));
 
         // Metadata as JSON
         std::string metadata_json = serializeMetadata(record.metadata);
-        sqlite3_bind_text(stmt_insert_, 7, metadata_json.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt_insert_, 8, metadata_json.c_str(), -1, SQLITE_TRANSIENT);
 
-        sqlite3_bind_text(stmt_insert_, 8, record.model_id.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt_insert_, 9, record.model_version.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int(stmt_insert_, 10, static_cast<int>(record.embedding_version));
-        sqlite3_bind_text(stmt_insert_, 11, record.content_hash_at_embedding.c_str(), -1,
+        sqlite3_bind_text(stmt_insert_, 9, record.model_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt_insert_, 10, record.model_version.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt_insert_, 11, static_cast<int>(record.embedding_version));
+        sqlite3_bind_text(stmt_insert_, 12, record.content_hash_at_embedding.c_str(), -1,
                           SQLITE_TRANSIENT);
 
-        sqlite3_bind_int64(stmt_insert_, 12, toUnixTimestamp(record.created_at));
-        sqlite3_bind_int64(stmt_insert_, 13, toUnixTimestamp(record.embedded_at));
-        sqlite3_bind_int(stmt_insert_, 14, record.is_stale ? 1 : 0);
-        sqlite3_bind_int(stmt_insert_, 15, static_cast<int>(record.level));
+        sqlite3_bind_int64(stmt_insert_, 13, toUnixTimestamp(record.created_at));
+        sqlite3_bind_int64(stmt_insert_, 14, toUnixTimestamp(record.embedded_at));
+        sqlite3_bind_int(stmt_insert_, 15, record.is_stale ? 1 : 0);
+        sqlite3_bind_int(stmt_insert_, 16, static_cast<int>(record.level));
 
         // JSON arrays
         std::string source_chunks_json = serializeStringVector(record.source_chunk_ids);
-        sqlite3_bind_text(stmt_insert_, 16, source_chunks_json.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt_insert_, 17, record.parent_document_hash.c_str(), -1,
+        sqlite3_bind_text(stmt_insert_, 17, source_chunks_json.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt_insert_, 18, record.parent_document_hash.c_str(), -1,
                           SQLITE_TRANSIENT);
         std::string child_hashes_json = serializeStringVector(record.child_document_hashes);
-        sqlite3_bind_text(stmt_insert_, 18, child_hashes_json.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt_insert_, 19, child_hashes_json.c_str(), -1, SQLITE_TRANSIENT);
 
         int rc = sqlite3_step(stmt_insert_);
         if (rc != SQLITE_DONE) {
@@ -1474,7 +1598,7 @@ private:
         VectorRecord record;
 
         // Column indices match SELECT statement
-        // 0: rowid, 1: chunk_id, 2: document_hash, 3: embedding, ...
+        // 0: rowid, 1: chunk_id, 2: document_hash, 3: embedding, 4: embedding_dim, 5: content, ...
 
         record.chunk_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
         record.document_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
@@ -1486,38 +1610,41 @@ private:
         record.embedding.resize(num_floats);
         std::memcpy(record.embedding.data(), blob, blob_size);
 
-        const char* content = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+        // Column 4 is embedding_dim - we skip it since embedding.size() provides this
+        // (useful for queries but not needed when loading record)
+
+        const char* content = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
         record.content = content ? content : "";
 
-        record.start_offset = static_cast<size_t>(sqlite3_column_int64(stmt, 5));
-        record.end_offset = static_cast<size_t>(sqlite3_column_int64(stmt, 6));
+        record.start_offset = static_cast<size_t>(sqlite3_column_int64(stmt, 6));
+        record.end_offset = static_cast<size_t>(sqlite3_column_int64(stmt, 7));
 
-        const char* metadata_json = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 7));
+        const char* metadata_json = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 8));
         record.metadata = deserializeMetadata(metadata_json ? metadata_json : "");
 
-        const char* model_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 8));
+        const char* model_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 9));
         record.model_id = model_id ? model_id : "";
 
-        const char* model_version = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 9));
+        const char* model_version = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 10));
         record.model_version = model_version ? model_version : "";
 
-        record.embedding_version = static_cast<uint32_t>(sqlite3_column_int(stmt, 10));
+        record.embedding_version = static_cast<uint32_t>(sqlite3_column_int(stmt, 11));
 
-        const char* content_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 11));
+        const char* content_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 12));
         record.content_hash_at_embedding = content_hash ? content_hash : "";
 
-        record.created_at = fromUnixTimestamp(sqlite3_column_int64(stmt, 12));
-        record.embedded_at = fromUnixTimestamp(sqlite3_column_int64(stmt, 13));
-        record.is_stale = sqlite3_column_int(stmt, 14) != 0;
-        record.level = static_cast<EmbeddingLevel>(sqlite3_column_int(stmt, 15));
+        record.created_at = fromUnixTimestamp(sqlite3_column_int64(stmt, 13));
+        record.embedded_at = fromUnixTimestamp(sqlite3_column_int64(stmt, 14));
+        record.is_stale = sqlite3_column_int(stmt, 15) != 0;
+        record.level = static_cast<EmbeddingLevel>(sqlite3_column_int(stmt, 16));
 
-        const char* source_chunks = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 16));
+        const char* source_chunks = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 17));
         record.source_chunk_ids = deserializeStringVector(source_chunks ? source_chunks : "");
 
-        const char* parent_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 17));
+        const char* parent_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 18));
         record.parent_document_hash = parent_hash ? parent_hash : "";
 
-        const char* child_hashes = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 18));
+        const char* child_hashes = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 19));
         record.child_document_hashes = deserializeStringVector(child_hashes ? child_hashes : "");
 
         return record;
@@ -1572,16 +1699,22 @@ private:
         stmt_has_embedding_ = nullptr;
     }
 
-    // Ensure HNSW is loaded (lazy loading)
+    // Ensure HNSW indices are loaded (lazy loading)
+    // Discovers existing dimension-specific tables and loads each index
     void ensureHnswLoadedUnlocked() {
         if (hnsw_loaded_) {
             // Already loaded - log occasionally for diagnostics
             static std::atomic<uint64_t> skip_counter{0};
             uint64_t skc = skip_counter.fetch_add(1);
             if (skc < 5 || skc % 1000 == 0) {
-                spdlog::debug("[HNSW] ensureHnswLoadedUnlocked: already loaded, hnsw_size={}, "
-                              "backend={:p} (skip #{})",
-                              hnsw_ ? hnsw_->size() : 0, static_cast<void*>(this), skc);
+                size_t total_size = 0;
+                for (const auto& [dim, idx] : hnsw_indices_) {
+                    if (idx)
+                        total_size += idx->size();
+                }
+                spdlog::debug("[HNSW] ensureHnswLoadedUnlocked: already loaded, total_size={}, "
+                              "num_indices={}, backend={:p} (skip #{})",
+                              total_size, hnsw_indices_.size(), static_cast<void*>(this), skc);
             }
             return;
         }
@@ -1589,127 +1722,192 @@ private:
         spdlog::info("[HNSW] ensureHnswLoadedUnlocked: first load, backend={:p}",
                      static_cast<void*>(this));
 
-        // Check if HNSW tables exist and have data
-        sqlite3_stmt* stmt = nullptr;
-        const char* check_sql =
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='vectors_hnsw_meta'";
-        if (sqlite3_prepare_v2(db_, check_sql, -1, &stmt, nullptr) == SQLITE_OK) {
-            if (sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int64(stmt, 0) > 0) {
-                sqlite3_finalize(stmt);
+        // Discover existing dimension-specific HNSW tables
+        // Pattern: vectors_{dim}_hnsw_meta (e.g., vectors_384_hnsw_meta, vectors_768_hnsw_meta)
+        std::vector<size_t> existing_dims;
 
-                // Try to load existing HNSW
-                try {
-                    char* err = nullptr;
-                    hnsw_ = std::make_unique<HNSWIndex>(
-                        sqlite_vec_cpp::index::load_hnsw_index<float, CosineMetric>(
-                            db_, "main", "vectors", &err));
-                    if (err) {
-                        sqlite3_free(err);
-                        hnsw_.reset();
-                    } else {
-                        spdlog::info("Loaded HNSW index with {} vectors", hnsw_->size());
-                        hnsw_loaded_ = true;
-                        return;
+        // First check for legacy single-dimension tables (vectors_hnsw_meta)
+        sqlite3_stmt* stmt = nullptr;
+        const char* check_legacy =
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='vectors_hnsw_meta'";
+        if (sqlite3_prepare_v2(db_, check_legacy, -1, &stmt, nullptr) == SQLITE_OK) {
+            if (sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int64(stmt, 0) > 0) {
+                // Legacy table exists - need to migrate or load with detected dimension
+                spdlog::info(
+                    "[HNSW] Found legacy vectors_hnsw_meta table, will probe for dimension");
+                // The dimension will be determined when we load from vectors table
+            }
+            sqlite3_finalize(stmt);
+        }
+
+        // Find all dimension-specific tables
+        const char* find_dims =
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'vectors_%_hnsw_meta'";
+        if (sqlite3_prepare_v2(db_, find_dims, -1, &stmt, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char* table_name =
+                    reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+                if (table_name) {
+                    // Parse dimension from table name: vectors_384_hnsw_meta -> 384
+                    std::string name(table_name);
+                    auto start = name.find('_') + 1;
+                    auto end = name.find('_', start);
+                    if (start != std::string::npos && end != std::string::npos) {
+                        try {
+                            size_t dim = std::stoull(name.substr(start, end - start));
+                            if (dim > 0) {
+                                existing_dims.push_back(dim);
+                                spdlog::debug("[HNSW] Found existing HNSW table for dim={}", dim);
+                            }
+                        } catch (...) {
+                            // Ignore malformed table names
+                        }
                     }
-                } catch (const std::exception& e) {
-                    spdlog::warn("Failed to load HNSW index: {}. Will rebuild.", e.what());
                 }
-            } else {
-                sqlite3_finalize(stmt);
+            }
+            sqlite3_finalize(stmt);
+        }
+
+        // Load existing indices
+        for (size_t dim : existing_dims) {
+            try {
+                std::string table_prefix = hnswTablePrefix(dim);
+                char* err = nullptr;
+                auto loaded_hnsw = sqlite_vec_cpp::index::load_hnsw_index<float, CosineMetric>(
+                    db_, "main", table_prefix.c_str(), &err);
+                if (err) {
+                    spdlog::warn("[HNSW] Failed to load index for dim={}: {}", dim, err);
+                    sqlite3_free(err);
+                } else {
+                    hnsw_indices_[dim] = std::make_unique<HNSWIndex>(std::move(loaded_hnsw));
+                    hnsw_dirty_[dim] = false;
+                    spdlog::info("[HNSW] Loaded index for dim={} with {} vectors", dim,
+                                 hnsw_indices_[dim]->size());
+                }
+            } catch (const std::exception& e) {
+                spdlog::warn("[HNSW] Exception loading index for dim={}: {}", dim, e.what());
             }
         }
 
-        // No existing HNSW or load failed - create new
-        HNSWIndex::Config config;
-        config.M = config_.hnsw_m;
-        config.M_max = config_.hnsw_m * 2;
-        config.M_max_0 = config_.hnsw_m * 2;
-        config.ef_construction = config_.hnsw_ef_construction;
+        // If no existing indices found, build from database grouped by dimension
+        if (hnsw_indices_.empty()) {
+            spdlog::info("[HNSW] No existing indices found, building from vectors table");
 
-        hnsw_ = std::make_unique<HNSWIndex>(config);
+            // Query vectors grouped by dimension
+            const char* select_by_dim =
+                "SELECT rowid, embedding, embedding_dim FROM vectors ORDER BY embedding_dim";
+            if (sqlite3_prepare_v2(db_, select_by_dim, -1, &stmt, nullptr) == SQLITE_OK) {
+                while (sqlite3_step(stmt) == SQLITE_ROW) {
+                    int64_t rowid = sqlite3_column_int64(stmt, 0);
+                    const void* blob = sqlite3_column_blob(stmt, 1);
+                    int blob_size = sqlite3_column_bytes(stmt, 1);
+                    size_t num_floats = blob_size / sizeof(float);
 
-        // Populate from database
-        const char* select_all = "SELECT rowid, embedding FROM vectors";
-        if (sqlite3_prepare_v2(db_, select_all, -1, &stmt, nullptr) == SQLITE_OK) {
-            while (sqlite3_step(stmt) == SQLITE_ROW) {
-                int64_t rowid = sqlite3_column_int64(stmt, 0);
-                const void* blob = sqlite3_column_blob(stmt, 1);
-                int blob_size = sqlite3_column_bytes(stmt, 1);
-                size_t num_floats = blob_size / sizeof(float);
+                    // Get dimension from column or infer from blob
+                    size_t dim = sqlite3_column_int64(stmt, 2);
+                    if (dim == 0) {
+                        dim = num_floats; // Fallback to blob size
+                    }
 
-                std::vector<float> embedding(num_floats);
-                std::memcpy(embedding.data(), blob, blob_size);
+                    if (dim == 0 || num_floats == 0)
+                        continue;
 
-                std::span<const float> embedding_span(embedding.data(), embedding.size());
-                hnsw_->insert(static_cast<size_t>(rowid), embedding_span);
+                    std::vector<float> embedding(num_floats);
+                    std::memcpy(embedding.data(), blob, blob_size);
+
+                    std::span<const float> embedding_span(embedding.data(), embedding.size());
+
+                    // Get or create index for this dimension
+                    auto* hnsw = getOrCreateHnswForDim(dim);
+                    if (hnsw) {
+                        hnsw->insert(static_cast<size_t>(rowid), embedding_span);
+                    }
+                }
+                sqlite3_finalize(stmt);
+
+                // Log what we built
+                for (const auto& [dim, idx] : hnsw_indices_) {
+                    spdlog::info("[HNSW] Built index for dim={} with {} vectors", dim, idx->size());
+                    hnsw_dirty_[dim] = true; // Needs to be saved
+                }
             }
-            sqlite3_finalize(stmt);
-
-            spdlog::info("Built HNSW index with {} vectors", hnsw_->size());
         }
 
         hnsw_loaded_ = true;
-        hnsw_dirty_ = true; // Needs to be saved
     }
 
-    // Save HNSW to disk
-    void saveHnswUnlocked() {
-        if (!hnsw_ || !db_)
+    // Save all HNSW indices to disk
+    void saveAllHnswUnlocked() {
+        if (!db_)
             return;
 
-        char* err = nullptr;
-        int rc = sqlite_vec_cpp::index::save_hnsw_index<float, CosineMetric>(db_, "main", "vectors",
-                                                                             *hnsw_, &err);
-        if (rc != SQLITE_OK) {
-            if (err) {
-                spdlog::error("Failed to save HNSW index: {}", err);
+        for (auto& [dim, hnsw] : hnsw_indices_) {
+            if (!hnsw || !hnsw_dirty_[dim])
+                continue;
+
+            std::string table_prefix = hnswTablePrefix(dim);
+            char* err = nullptr;
+            int rc = sqlite_vec_cpp::index::save_hnsw_index<float, CosineMetric>(
+                db_, "main", table_prefix.c_str(), *hnsw, &err);
+            if (rc != SQLITE_OK) {
+                if (err) {
+                    spdlog::error("[HNSW] Failed to save index for dim={}: {}", dim, err);
+                    sqlite3_free(err);
+                }
+            } else {
+                hnsw_dirty_[dim] = false;
+                spdlog::debug("[HNSW] Saved index for dim={} with {} vectors", dim, hnsw->size());
+            }
+        }
+        pending_inserts_ = 0;
+    }
+
+    // Save HNSW checkpoint (metadata + recent nodes) for all indices
+    void saveHnswCheckpointUnlocked() {
+        if (!db_)
+            return;
+
+        for (auto& [dim, hnsw] : hnsw_indices_) {
+            if (!hnsw || !hnsw_dirty_[dim])
+                continue;
+
+            std::string table_prefix = hnswTablePrefix(dim);
+            char* err = nullptr;
+            int rc = sqlite_vec_cpp::index::save_hnsw_checkpoint<float, CosineMetric>(
+                db_, "main", table_prefix.c_str(), *hnsw, &err);
+            if (rc != SQLITE_OK && err) {
+                spdlog::warn("[HNSW] Failed to save checkpoint for dim={}: {}", dim, err);
                 sqlite3_free(err);
             }
-        } else {
-            hnsw_dirty_ = false;
-            pending_inserts_ = 0;
         }
+        pending_inserts_ = 0;
     }
 
-    // Save HNSW checkpoint (metadata + recent nodes)
-    void saveHnswCheckpointUnlocked() {
-        if (!hnsw_ || !db_)
-            return;
-
-        char* err = nullptr;
-        int rc = sqlite_vec_cpp::index::save_hnsw_checkpoint<float, CosineMetric>(
-            db_, "main", "vectors", *hnsw_, &err);
-        if (rc != SQLITE_OK && err) {
-            spdlog::warn("Failed to save HNSW checkpoint: {}", err);
-            sqlite3_free(err);
-        } else {
-            pending_inserts_ = 0;
-        }
-    }
-
-    // Rebuild HNSW from scratch
+    // Rebuild all HNSW indices from scratch
     void rebuildHnswUnlocked() {
-        hnsw_.reset();
+        hnsw_indices_.clear();
+        hnsw_dirty_.clear();
         hnsw_loaded_ = false;
-        hnsw_dirty_ = false;
 
         ensureHnswLoadedUnlocked();
-        saveHnswUnlocked();
+        saveAllHnswUnlocked();
     }
 
-    // Compact HNSW (remove soft-deleted nodes)
+    // Compact all HNSW indices (remove soft-deleted nodes)
     void compactHnswUnlocked() {
-        if (!hnsw_)
-            return;
+        for (auto& [dim, hnsw] : hnsw_indices_) {
+            if (!hnsw || !hnsw->needs_compaction(config_.compaction_threshold))
+                continue;
 
-        spdlog::info("Compacting HNSW index (deleted ratio: {:.2f})",
-                     static_cast<float>(hnsw_->deleted_count()) /
-                         static_cast<float>(hnsw_->size()));
+            spdlog::info("[HNSW] Compacting index for dim={} (deleted ratio: {:.2f})", dim,
+                         static_cast<float>(hnsw->deleted_count()) /
+                             static_cast<float>(hnsw->size()));
 
-        *hnsw_ = hnsw_->compact();
-        hnsw_dirty_ = true;
+            *hnsw = hnsw->compact();
+            hnsw_dirty_[dim] = true;
+        }
 
-        saveHnswUnlocked();
+        saveAllHnswUnlocked();
     }
 
     Config config_;
@@ -1718,11 +1916,66 @@ private:
     bool initialized_ = false;
     bool in_transaction_ = false;
 
-    // HNSW index
-    std::unique_ptr<HNSWIndex> hnsw_;
+    // HNSW indices - one per embedding dimension for multi-model support
+    // Key: embedding dimension (e.g., 384, 768)
+    // Value: HNSW index for vectors of that dimension
+    std::unordered_map<size_t, std::unique_ptr<HNSWIndex>> hnsw_indices_;
+    std::unordered_map<size_t, bool> hnsw_dirty_; // Track dirty state per dimension
     bool hnsw_loaded_ = false;
-    bool hnsw_dirty_ = false;
     size_t pending_inserts_ = 0;
+
+    // Helper to get table prefix for dimension-specific HNSW tables
+    std::string hnswTablePrefix(size_t dim) const { return "vectors_" + std::to_string(dim); }
+
+    // Get or create HNSW index for a specific dimension
+    HNSWIndex* getOrCreateHnswForDim(size_t dim) {
+        auto it = hnsw_indices_.find(dim);
+        if (it != hnsw_indices_.end()) {
+            return it->second.get();
+        }
+
+        // Create new HNSW index for this dimension
+        HNSWIndex::Config config;
+        config.M = config_.hnsw_m;
+        config.M_max = config_.hnsw_m * 2;
+        config.M_max_0 = config_.hnsw_m * 2;
+        config.ef_construction = config_.hnsw_ef_construction;
+
+        auto idx = std::make_unique<HNSWIndex>(config);
+        auto* ptr = idx.get();
+        hnsw_indices_[dim] = std::move(idx);
+        hnsw_dirty_[dim] = true;
+
+        // Create dimension-specific shadow tables
+        std::string table_prefix = hnswTablePrefix(dim);
+        char* err_msg = nullptr;
+        int rc = sqlite_vec_cpp::index::create_hnsw_shadow_tables(db_, "main", table_prefix.c_str(),
+                                                                  &err_msg);
+        if (rc != SQLITE_OK) {
+            spdlog::warn("[HNSW] Failed to create shadow tables for dim {}: {}", dim,
+                         err_msg ? err_msg : "unknown");
+            sqlite3_free(err_msg);
+        } else {
+            spdlog::info("[HNSW] Created shadow tables for dim {} ({})", dim, table_prefix);
+        }
+
+        return ptr;
+    }
+
+    // Get existing HNSW index for a dimension (nullptr if not exists)
+    HNSWIndex* getHnswForDim(size_t dim) {
+        auto it = hnsw_indices_.find(dim);
+        return it != hnsw_indices_.end() ? it->second.get() : nullptr;
+    }
+
+    // Check if any HNSW index has data
+    bool anyHnswHasData() const {
+        for (const auto& [dim, idx] : hnsw_indices_) {
+            if (idx && !idx->empty())
+                return true;
+        }
+        return false;
+    }
 
     // Prepared statements
     sqlite3_stmt* stmt_insert_ = nullptr;

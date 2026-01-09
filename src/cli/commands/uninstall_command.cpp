@@ -4,6 +4,7 @@
 #include <yams/cli/command.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_helpers.h>
 
 namespace yams::cli {
 
@@ -53,11 +54,9 @@ public:
             // Show what would be removed (dry run)
             std::cout << "Directories that would be removed:\n";
 
-            fs::path homeDir =
-                std::getenv("HOME") ? fs::path(std::getenv("HOME")) : fs::current_path();
-            fs::path configDir = homeDir / ".config" / "yams";
-            fs::path dataDir = homeDir / ".local" / "share" / "yams";
-            fs::path cacheDir = homeDir / ".cache" / "yams";
+            fs::path configDir = yams::config::get_config_dir();
+            fs::path dataDir = yams::config::get_data_dir();
+            fs::path cacheDir = yams::config::get_cache_dir();
 
             if (fs::exists(configDir) && !keepConfig_) {
                 std::cout << "  ✓ " << configDir << " (config & keys)\n";

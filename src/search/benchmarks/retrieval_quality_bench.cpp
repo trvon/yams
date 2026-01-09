@@ -744,7 +744,7 @@ struct BenchFixture {
             } else {
                 harnessOptions.pluginDir = fs::current_path() / "builddir" / "plugins";
             }
-            harnessOptions.preloadModels = {"all-MiniLM-L6-v2"};
+            harnessOptions.preloadModels = {"nomic-embed-text-v1.5"};
 
             // Configure Glint plugin with GLiNER model path for NL entity extraction
             std::string glinerModelPath = discoverGlinerModelPath();

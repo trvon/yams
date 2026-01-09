@@ -4,9 +4,13 @@
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/doctor_checks.h>
+#include <yams/cli/plugin_util.h>
 #include <yams/cli/recommendation_util.h>
 #include <yams/cli/ui_helpers.hpp>
+#include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_helpers.h>
 #include <yams/core/magic_numbers.hpp>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
@@ -92,6 +96,9 @@ static int unsetenv(const char* name) {
 
 namespace yams::cli {
 
+// Note: vecutil (yams::cli::vecutil) and plugin (yams::cli::plugin) namespaces
+// are available from vector_db_util.h and plugin_util.h respectively
+
 class DoctorCommand : public ICommand {
 public:
     std::string getName() const override { return "doctor"; }
@@ -102,6 +109,16 @@ public:
 
     Result<void> execute() override { return Result<void>(); }
     boost::asio::awaitable<Result<void>> executeAsync() override {
+        // Handle --vectors flag first (detect and fix dimension mismatch)
+        if (vectorsFix_) {
+            try {
+                runVectorsFix();
+            } catch (const std::exception& e) {
+                std::cout << "Doctor --vectors error: " << e.what() << "\n";
+                co_return Error{ErrorCode::Unknown, e.what()};
+            }
+            co_return Result<void>();
+        }
         // Only run default doctor if no subcommand was invoked
         // Subcommands set their own flags and handle execution themselves
         if (!fixEmbeddings_ && !fixFts5_ && !fixGraph_ && !validateGraph_ && !fixAll_ &&
@@ -118,159 +135,11 @@ public:
         co_return Result<void>();
     }
 
-    // Resolve embedding dimension for DB creation (config > env > generator > model > heuristic)
+    // Resolve embedding dimension for DB creation (delegating to extracted utility)
     std::pair<size_t, std::string> resolveEmbeddingDim() {
-        namespace fs = std::filesystem;
-        size_t dim = 0;
-        std::string src;
-        // Prefer existing DB schema when present
-        try {
-            if (cli_) {
-                fs::path dbPath = cli_->getDataPath() / "vectors.db";
-                if (fs::exists(dbPath)) {
-                    sqlite3* db = nullptr;
-                    if (sqlite3_open(dbPath.string().c_str(), &db) == SQLITE_OK && db) {
-                        const char* sql =
-                            "SELECT sql FROM sqlite_master WHERE name='doc_embeddings' LIMIT 1";
-                        sqlite3_stmt* stmt = nullptr;
-                        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-                            if (sqlite3_step(stmt) == SQLITE_ROW) {
-                                const unsigned char* txt = sqlite3_column_text(stmt, 0);
-                                if (txt) {
-                                    std::string ddl(reinterpret_cast<const char*>(txt));
-                                    auto pos = ddl.find("float[");
-                                    if (pos != std::string::npos) {
-                                        auto end = ddl.find(']', pos);
-                                        if (end != std::string::npos && end > pos + 6) {
-                                            std::string num = ddl.substr(pos + 6, end - (pos + 6));
-                                            try {
-                                                dim = static_cast<size_t>(std::stoul(num));
-                                                src = "db";
-                                            } catch (...) {
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            sqlite3_finalize(stmt);
-                        }
-                        sqlite3_close(db);
-                    }
-                }
-            }
-        } catch (...) {
-        }
-        if (dim > 0)
-            return {dim, src};
-        // Config
-        try {
-            fs::path cfgHome;
-            if (const char* xdg = std::getenv("XDG_CONFIG_HOME"))
-                cfgHome = fs::path(xdg);
-            else if (const char* home = std::getenv("HOME"))
-                cfgHome = fs::path(home) / ".config";
-            else
-                cfgHome = fs::path("~/.config");
-            fs::path cfgPath = cfgHome / "yams" / "config.toml";
-            if (fs::exists(cfgPath)) {
-                std::ifstream in(cfgPath);
-                std::string line;
-                auto trim = [&](std::string& t) {
-                    if (t.empty())
-                        return;
-                    t.erase(0, t.find_first_not_of(" 	"));
-                    auto p = t.find_last_not_of(" 	");
-                    if (p != std::string::npos)
-                        t.erase(p + 1);
-                };
-                while (std::getline(in, line)) {
-                    std::string l = line;
-                    trim(l);
-                    if (l.empty() || l[0] == '#')
-                        continue;
-                    if (l.rfind("embeddings.embedding_dim", 0) == 0 ||
-                        l.find("embeddings.embedding_dim") != std::string::npos ||
-                        l.find("vector_database.embedding_dim") != std::string::npos) {
-                        auto eq = l.find('=');
-                        if (eq != std::string::npos) {
-                            std::string v = l.substr(eq + 1);
-                            trim(v);
-                            if (!v.empty() && v.front() == '"' && v.back() == '"')
-                                v = v.substr(1, v.size() - 2);
-                            try {
-                                dim = static_cast<size_t>(std::stoul(v));
-                                src = "config";
-                            } catch (...) {
-                            }
-                        }
-                        if (dim > 0)
-                            break;
-                    }
-                }
-            }
-        } catch (...) {
-        }
-        if (dim > 0)
-            return {dim, src};
-        // Env
-        try {
-            if (const char* envd = std::getenv("YAMS_EMBED_DIM")) {
-                dim = static_cast<size_t>(std::stoul(envd));
-                src = "env";
-            }
-        } catch (...) {
-        }
-        if (dim > 0)
-            return {dim, src};
-        // Generator (next best)
-        try {
-            auto emb = cli_ ? cli_->getEmbeddingGenerator() : nullptr;
-            if (emb) {
-                dim = emb->getEmbeddingDimension();
-                if (dim > 0)
-                    src = "generator";
-            }
-        } catch (...) {
-        }
-        if (dim > 0)
-            return {dim, src};
-        // Model heuristic
-        try {
-            std::string pick;
-            if (const char* pref = std::getenv("YAMS_PREFERRED_MODEL"))
-                pick = std::string(pref);
-            if (pick.empty()) {
-                if (cli_) {
-                    fs::path models = cli_->getDataPath() / "models";
-                    std::error_code ec;
-                    if (fs::exists(models, ec) && fs::is_directory(models, ec)) {
-                        for (const auto& e : fs::directory_iterator(models, ec)) {
-                            if (!e.is_directory())
-                                continue;
-                            if (fs::exists(e.path() / "model.onnx", ec)) {
-                                pick = e.path().filename().string();
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            if (!pick.empty()) {
-                if (pick.find("MiniLM") != std::string::npos) {
-                    dim = 384;
-                } else {
-                    dim = 768;
-                }
-                src = "model";
-            }
-        } catch (...) {
-        }
-        if (dim > 0)
-            return {dim, src};
-        // Heuristic fallback
-        dim = 384;
-        src = "heuristic";
-        return {dim, src};
+        std::filesystem::path dataPath = cli_ ? cli_->getDataPath() : yams::config::get_data_dir();
+        auto resolved = vecutil::resolveEmbeddingDimension(cli_, dataPath);
+        return {resolved.dimension, resolved.source};
     }
 
     // (Removed clearEmbeddingDegraded helper; subcommand placeholder was eliminated. If
@@ -428,22 +297,9 @@ private:
             std::cout << "\n";
         }
     }
-    // Step helpers to make doctor logic composable
+    // Step helpers to make doctor logic composable (delegating to extracted utilities)
     Result<void> touchDbFile(const std::filesystem::path& dbPath) {
-        try {
-            namespace fs = std::filesystem;
-            if (!fs::exists(dbPath)) {
-                std::ofstream f(dbPath);
-                f.flush();
-                f.close();
-            }
-            if (!fs::exists(dbPath)) {
-                return Error{ErrorCode::IOError, "failed to create vectors.db"};
-            }
-            return Result<void>();
-        } catch (const std::exception& e) {
-            return Error{ErrorCode::IOError, e.what()};
-        }
+        return vecutil::ensureDbFile(dbPath);
     }
 
     // Legacy lock helpers kept for reference; no-ops now
@@ -506,104 +362,20 @@ private:
     }
 
     static void writeVectorSentinel(const std::filesystem::path& dataDir, size_t dim) {
-        try {
-            namespace fs = std::filesystem;
-            nlohmann::json j;
-            j["embedding_dim"] = dim;
-            j["schema"] = "vec0";
-            j["schema_version"] = 1;
-            j["updated"] = static_cast<std::int64_t>(std::time(nullptr));
-            fs::path p = dataDir / "vectors_sentinel.json";
-            std::ofstream out(p);
-            out << j.dump(2);
-        } catch (...) {
-        }
+        vecutil::writeVectorSentinel(dataDir, dim);
     }
-    // ============ Config Helpers (TOML — best-effort line edits) ============
-    static std::filesystem::path resolveConfigPath() {
-        namespace fs = std::filesystem;
-        fs::path cfgHome;
-        if (const char* xdg = std::getenv("XDG_CONFIG_HOME"))
-            cfgHome = fs::path(xdg);
-        else if (const char* home = std::getenv("HOME"))
-            cfgHome = fs::path(home) / ".config";
-        else
-            cfgHome = fs::path("~/.config");
-        return cfgHome / "yams" / "config.toml";
-    }
+    // ============ Config Helpers (delegating to extracted utilities) ============
+    static std::filesystem::path resolveConfigPath() { return yams::config::get_config_path(); }
 
-    struct ConfigDims {
-        std::optional<size_t> embeddings;
-        std::optional<size_t> vector_db;
-        std::optional<size_t> index;
-    };
+    // ConfigDims is now yams::config::DimensionConfig
+    using ConfigDims = yams::config::DimensionConfig;
 
     static ConfigDims readConfigDims(const std::filesystem::path& cfg) {
-        ConfigDims out{};
-        try {
-            std::ifstream in(cfg);
-            if (!in)
-                return out;
-            std::string line;
-            std::regex kvRe(R"(^\s*([A-Za-z0-9_\.]+)\s*=\s*([0-9]+))");
-            while (std::getline(in, line)) {
-                std::smatch m;
-                if (!std::regex_search(line, m, kvRe))
-                    continue;
-                std::string key = m[1];
-                size_t val = 0;
-                try {
-                    val = static_cast<size_t>(std::stoul(m[2]));
-                } catch (...) {
-                    continue;
-                }
-                if (key == "embeddings.embedding_dim")
-                    out.embeddings = val;
-                else if (key == "vector_database.embedding_dim")
-                    out.vector_db = val;
-                else if (key == "vector_index.dimension" || key == "vector_index.dimenions")
-                    out.index = val;
-            }
-        } catch (...) {
-        }
-        return out;
+        return yams::config::read_dimension_config(cfg);
     }
 
     static bool writeOrReplaceConfigDims(const std::filesystem::path& cfg, size_t dim) {
-        try {
-            std::vector<std::string> lines;
-            lines.reserve(256);
-            {
-                std::ifstream in(cfg);
-                if (in) {
-                    std::string L;
-                    while (std::getline(in, L))
-                        lines.push_back(L);
-                }
-            }
-            auto replace_or_append = [&](const std::string& key) {
-                bool replaced = false;
-                std::regex re(std::string("^\\s*") + key + R"(\s*=\s*[0-9]+)");
-                for (auto& L : lines) {
-                    if (std::regex_search(L, re)) {
-                        L = key + " = " + std::to_string(dim);
-                        replaced = true;
-                        break;
-                    }
-                }
-                if (!replaced)
-                    lines.push_back(key + " = " + std::to_string(dim));
-            };
-            replace_or_append("embeddings.embedding_dim");
-            replace_or_append("vector_database.embedding_dim");
-            replace_or_append("vector_index.dimension");
-            std::ofstream out(cfg, std::ios::trunc);
-            for (auto& L : lines)
-                out << L << "\n";
-            return true;
-        } catch (...) {
-            return false;
-        }
+        return yams::config::write_dimension_config(cfg, dim);
     }
     // Run a blocking function with a console spinner and timeout.
     // Returns optional result; nullopt indicates timeout.
@@ -1129,142 +901,16 @@ private:
         }
     }
 
-    // Read trust file and collect trusted roots
-    static std::set<std::filesystem::path> readTrusted() {
-        namespace fs = std::filesystem;
-        fs::path cfgHome;
-        if (const char* xdg = std::getenv("XDG_CONFIG_HOME"))
-            cfgHome = fs::path(xdg);
-        else if (const char* home = std::getenv("HOME"))
-            cfgHome = fs::path(home) / ".config";
-        else
-            cfgHome = fs::path("~/.config");
-        fs::path trustFile = cfgHome / "yams" / "plugins_trust.txt";
-        std::set<fs::path> roots;
-        std::ifstream in(trustFile);
-        if (!in)
-            return roots;
-        std::string line;
-        while (std::getline(in, line)) {
-            if (line.empty())
-                continue;
-            roots.insert(fs::path(line));
-        }
-        return roots;
-    }
+    // Plugin utilities (delegating to extracted plugin_util)
+    static std::set<std::filesystem::path> readTrusted() { return plugin::readTrustedRoots(); }
 
     static bool isTrustedPath(const std::filesystem::path& p,
                               const std::set<std::filesystem::path>& roots) {
-        namespace fs = std::filesystem;
-        std::error_code ec;
-        auto canon = fs::weakly_canonical(p, ec);
-        for (const auto& r : roots) {
-            auto rc = fs::weakly_canonical(r, ec);
-            auto cs = canon.string();
-            auto rs = rc.string();
-            if (!rs.empty() && cs.rfind(rs, 0) == 0)
-                return true;
-        }
-        return false;
+        return plugin::isPathTrusted(p, roots);
     }
 
-    // Resolve name to path by scanning default plugin dirs for a matching descriptor name
     static std::optional<std::filesystem::path> resolveByName(const std::string& name) {
-        namespace fs = std::filesystem;
-        // 1) Try exact filename/stem match first (ABI default dirs)
-        for (const auto& dir : std::vector<std::filesystem::path>{
-                 (std::getenv("HOME") ? std::filesystem::path(std::getenv("HOME")) / ".local" /
-                                            "lib" / "yams" / "plugins"
-                                      : std::filesystem::path()),
-#ifdef __APPLE__
-                 std::filesystem::path("/opt/homebrew/lib/yams/plugins"),
-#endif
-                 std::filesystem::path("/usr/local/lib/yams/plugins"),
-                 std::filesystem::path("/usr/lib/yams/plugins")
-#ifdef YAMS_INSTALL_PREFIX
-                     ,
-                 std::filesystem::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins"
-#endif
-             }) {
-            std::error_code ec;
-            if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec))
-                continue;
-            for (const auto& e : fs::directory_iterator(dir, ec)) {
-                if (!e.is_regular_file(ec))
-                    continue;
-                auto p = e.path();
-                auto ext = p.extension().string();
-                if (ext != ".so" && ext != ".dylib" && ext != ".dll" && ext != ".wasm")
-                    continue;
-                if (p.stem().string() == name || p.filename().string() == name)
-                    return p;
-            }
-        }
-        // 2) Try ABI descriptor name via dlopen + yams_plugin_get_name() in default dirs
-        for (const auto& dir : std::vector<std::filesystem::path>{
-                 (std::getenv("HOME") ? std::filesystem::path(std::getenv("HOME")) / ".local" /
-                                            "lib" / "yams" / "plugins"
-                                      : std::filesystem::path()),
-#ifdef __APPLE__
-                 std::filesystem::path("/opt/homebrew/lib/yams/plugins"),
-#endif
-                 std::filesystem::path("/usr/local/lib/yams/plugins"),
-                 std::filesystem::path("/usr/lib/yams/plugins")
-#ifdef YAMS_INSTALL_PREFIX
-                     ,
-                 std::filesystem::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins"
-#endif
-             }) {
-            std::error_code ec;
-            if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec))
-                continue;
-            for (const auto& e : fs::directory_iterator(dir, ec)) {
-                if (!e.is_regular_file(ec))
-                    continue;
-                auto p = e.path();
-                auto ext = p.extension().string();
-                if (ext != ".so" && ext != ".dylib" && ext != ".dll")
-                    continue; // ABI path for C++ plugins; WASM handled by manifest separately
-                void* h = dlopen(p.c_str(), RTLD_LAZY | RTLD_LOCAL);
-                if (!h)
-                    continue;
-                auto close = [&]() { dlclose(h); };
-                auto get_name =
-                    reinterpret_cast<const char* (*)()>(dlsym(h, "yams_plugin_get_name"));
-                const char* nm = get_name ? get_name() : nullptr;
-                bool match = (nm && std::string(nm) == name);
-                close();
-                if (match)
-                    return p;
-            }
-        }
-        // 3) Heuristic: filename contains the token (e.g., libyams_onnx_plugin.so for "onnx")
-        for (const auto& dir : std::vector<std::filesystem::path>{
-                 (std::getenv("HOME") ? std::filesystem::path(std::getenv("HOME")) / ".local" /
-                                            "lib" / "yams" / "plugins"
-                                      : std::filesystem::path()),
-#ifdef __APPLE__
-                 std::filesystem::path("/opt/homebrew/lib/yams/plugins"),
-#endif
-                 std::filesystem::path("/usr/local/lib/yams/plugins"),
-                 std::filesystem::path("/usr/lib/yams/plugins")
-#ifdef YAMS_INSTALL_PREFIX
-                     ,
-                 std::filesystem::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins"
-#endif
-             }) {
-            std::error_code ec;
-            if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec))
-                continue;
-            for (const auto& e : fs::directory_iterator(dir, ec)) {
-                if (!e.is_regular_file(ec))
-                    continue;
-                auto p = e.path().filename().string();
-                if (p.find(name) != std::string::npos)
-                    return e.path();
-            }
-        }
-        return std::nullopt;
+        return plugin::resolvePlugin(name);
     }
 
     // Perform local dlopen + symbol/iface probes
@@ -1905,12 +1551,8 @@ private:
         fs::path old_base = fs::path(home) / ".yams" / "models";
 
         // Check for models in NEW unified location
-        fs::path new_base = cli ? cli->getDataPath() / "models" : "";
-        if (new_base.empty()) {
-            const char* xdg_data = std::getenv("XDG_DATA_HOME");
-            new_base = xdg_data ? fs::path(xdg_data) / "yams" / "models"
-                                : fs::path(home) / ".local" / "share" / "yams" / "models";
-        }
+        fs::path new_base =
+            cli ? cli->getDataPath() / "models" : yams::config::get_data_dir() / "models";
 
         std::error_code ec;
 
@@ -2033,9 +1675,8 @@ private:
         namespace fs = std::filesystem;
         printHeader("Vector DB Schema (vec0 module)");
 
-        fs::path dbPath = cli_ ? cli_->getDataPath() / "vectors.db"
-                               : fs::path(std::getenv("HOME") ? std::getenv("HOME") : "/tmp") /
-                                     ".local/share/yams/vectors.db";
+        fs::path dbPath =
+            cli_ ? cli_->getDataPath() / "vectors.db" : yams::config::get_data_dir() / "vectors.db";
 
         if (!fs::exists(dbPath)) {
             std::cout << "  "
@@ -2257,6 +1898,7 @@ private:
     bool recreateVectors_{false};
     std::optional<size_t> recreateDim_;
     bool stopDaemon_{false};
+    bool vectorsFix_{false}; // --vectors flag: detect and fix dimension mismatch
     // Dedupe state
     bool dedupeApply_{false};
     std::string dedupeMode_{"path"};
@@ -2266,6 +1908,7 @@ private:
     Result<void> repairGraph();
     Result<void> validateGraph();
     void runDedupe();
+    void runVectorsFix(); // Implementation of yams doctor --vectors
     // Prune state
     bool pruneApply_{false};
     std::vector<std::string> pruneCategories_;
@@ -2310,6 +1953,8 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
         "--dim", recreateDim_,
         "Target dimension to use with --recreate-vectors (defaults to resolved target)");
     doctor->add_flag("--stop-daemon", stopDaemon_, "Attempt to stop daemon before DB operations");
+    doctor->add_flag("--vectors", vectorsFix_,
+                     "Detect and fix embedding dimension mismatch (updates config to match DB)");
 
     doctor->callback([this]() { cli_->setPendingCommand(this); });
 
@@ -2435,90 +2080,22 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
     });
 }
 
-// --- Minimal TOML helpers (duplicated from config_command for simplicity) ---
+// --- TOML helpers (delegating to shared utilities) ---
 std::map<std::string, std::string>
 DoctorCommand::parseSimpleToml(const std::filesystem::path& path) const {
-    std::map<std::string, std::string> config;
-    std::ifstream file(path);
-    if (!file)
-        return config;
-    std::string line;
-    std::string currentSection;
-    while (std::getline(file, line)) {
-        if (line.empty() || line[0] == '#')
-            continue;
-        if (line[0] == '[') {
-            size_t end = line.find(']');
-            if (end != std::string::npos) {
-                currentSection = line.substr(1, end - 1);
-                if (!currentSection.empty())
-                    currentSection += ".";
-            }
-            continue;
-        }
-        size_t eq = line.find('=');
-        if (eq != std::string::npos) {
-            std::string key = line.substr(0, eq);
-            std::string value = line.substr(eq + 1);
-            key.erase(0, key.find_first_not_of(" \t"));
-            key.erase(key.find_last_not_of(" \t") + 1);
-            value.erase(0, value.find_first_not_of(" \t"));
-            value.erase(value.find_last_not_of(" \t") + 1);
-            if (value.size() >= 2 && value[0] == '"' && value.back() == '"') {
-                value = value.substr(1, value.size() - 2);
-            }
-            size_t comment = value.find('#');
-            if (comment != std::string::npos) {
-                value = value.substr(0, comment);
-                value.erase(value.find_last_not_of(" \t") + 1);
-            }
-            config[currentSection + key] = value;
-        }
-    }
-    return config;
+    return yams::config::parse_simple_toml(path);
 }
 
 std::filesystem::path DoctorCommand::getConfigPath() const {
-    const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME");
-    const char* homeEnv = std::getenv("HOME");
-    std::filesystem::path configHome = xdgConfigHome
-                                           ? std::filesystem::path(xdgConfigHome)
-                                           : (homeEnv ? std::filesystem::path(homeEnv) / ".config"
-                                                      : std::filesystem::path("~/.config"));
-    return configHome / "yams" / "config.toml";
+    return yams::config::get_config_path();
 }
 
 Result<void> DoctorCommand::writeConfigValue(const std::string& key, const std::string& value) {
-    try {
-        auto configPath = getConfigPath();
-        std::filesystem::create_directories(configPath.parent_path());
-        auto config = parseSimpleToml(configPath);
-        config[key] = value;
-        std::ofstream file(configPath);
-        if (!file)
-            return Error{ErrorCode::WriteError, "Cannot write config: " + configPath.string()};
-        std::map<std::string, std::map<std::string, std::string>> sections;
-        for (const auto& [fullKey, val] : config) {
-            size_t dot = fullKey.find('.');
-            if (dot != std::string::npos) {
-                std::string section = fullKey.substr(0, dot);
-                std::string subkey = fullKey.substr(dot + 1);
-                sections[section][subkey] = val;
-            } else {
-                sections[""][fullKey] = val;
-            }
-        }
-        for (const auto& [section, values] : sections) {
-            if (!section.empty())
-                file << "\n[" << section << "]\n";
-            for (const auto& [k, v] : values) {
-                file << k << " = \"" << v << "\"\n";
-            }
-        }
+    auto configPath = getConfigPath();
+    if (yams::config::write_config_value(configPath, key, value)) {
         return Result<void>();
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::Unknown, e.what()};
     }
+    return Error{ErrorCode::WriteError, "Failed to write config key: " + key};
 }
 
 Result<void> DoctorCommand::applyTuningBaseline(bool apply) {
@@ -3274,6 +2851,305 @@ void DoctorCommand::runBenchmark() {
 
     } catch (const std::exception& e) {
         std::cout << "  " << ui::status_error(std::string("Benchmark error: ") + e.what()) << "\n";
+    }
+}
+
+void DoctorCommand::runVectorsFix() {
+    namespace fs = std::filesystem;
+    bool useJson = jsonOutput_ || (cli_ && cli_->getJsonOutput());
+
+    if (!useJson) {
+        printHeader("Vectors Database Check & Fix");
+    }
+
+    if (!cli_) {
+        if (useJson) {
+            std::cout << R"({"error": "CLI context unavailable"})" << "\n";
+        } else {
+            std::cout << ui::status_error("CLI context unavailable") << "\n";
+        }
+        return;
+    }
+
+    fs::path vecDbPath = cli_->getDataPath() / "vectors.db";
+    fs::path configPath = resolveConfigPath();
+
+    // Step 1: Read DB dimension
+    std::optional<size_t> dbDim;
+    if (fs::exists(vecDbPath)) {
+        sqlite3* db = nullptr;
+        if (sqlite3_open(vecDbPath.string().c_str(), &db) == SQLITE_OK && db) {
+            // Try vectors table first (new schema with embedding_dim column)
+            const char* sql1 = "SELECT DISTINCT embedding_dim FROM vectors LIMIT 1";
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(db, sql1, -1, &stmt, nullptr) == SQLITE_OK) {
+                if (sqlite3_step(stmt) == SQLITE_ROW) {
+                    dbDim = static_cast<size_t>(sqlite3_column_int(stmt, 0));
+                }
+                sqlite3_finalize(stmt);
+            }
+            // Fallback: try doc_embeddings (legacy vec0 schema)
+            if (!dbDim) {
+                const char* sql2 =
+                    "SELECT sql FROM sqlite_master WHERE name='doc_embeddings' LIMIT 1";
+                if (sqlite3_prepare_v2(db, sql2, -1, &stmt, nullptr) == SQLITE_OK) {
+                    if (sqlite3_step(stmt) == SQLITE_ROW) {
+                        const unsigned char* txt = sqlite3_column_text(stmt, 0);
+                        if (txt) {
+                            std::string ddl(reinterpret_cast<const char*>(txt));
+                            auto pos = ddl.find("float[");
+                            if (pos != std::string::npos) {
+                                auto end = ddl.find(']', pos);
+                                if (end != std::string::npos && end > pos + 6) {
+                                    std::string num = ddl.substr(pos + 6, end - (pos + 6));
+                                    try {
+                                        dbDim = static_cast<size_t>(std::stoul(num));
+                                    } catch (...) {
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    sqlite3_finalize(stmt);
+                }
+            }
+            sqlite3_close(db);
+        }
+    }
+
+    if (!dbDim) {
+        if (useJson) {
+            std::cout
+                << R"({"status": "no_vectors", "message": "No vectors.db found or no vectors stored yet"})"
+                << "\n";
+        } else {
+            std::cout << ui::status_warning("No vectors.db found or no vectors stored yet.")
+                      << "\n";
+            std::cout << "Nothing to fix. Index some documents first with 'yams add'.\n";
+        }
+        return;
+    }
+
+    if (!useJson) {
+        std::cout << "DB stored dimension: " << *dbDim << "\n";
+    }
+
+    // Step 2: Find current model dimension
+    std::optional<size_t> modelDim;
+    std::string modelName;
+    fs::path modelsPath = cli_->getDataPath() / "models";
+
+    // Check preferred model from env first
+    if (const char* pref = std::getenv("YAMS_PREFERRED_MODEL")) {
+        modelName = pref;
+    }
+
+    // Then check config file
+    if (modelName.empty()) {
+        if (!configPath.empty()) {
+            auto config = parseSimpleToml(configPath);
+            auto it = config.find("embeddings.preferred_model");
+            if (it != config.end() && !it->second.empty()) {
+                modelName = it->second;
+            }
+        }
+    }
+
+    // If still no preference, find first installed model
+    if (modelName.empty()) {
+        std::error_code ec;
+        if (fs::exists(modelsPath, ec) && fs::is_directory(modelsPath, ec)) {
+            for (const auto& entry : fs::directory_iterator(modelsPath, ec)) {
+                if (!entry.is_directory())
+                    continue;
+                if (fs::exists(entry.path() / "model.onnx", ec)) {
+                    modelName = entry.path().filename().string();
+                    break;
+                }
+            }
+        }
+    }
+
+    // Determine model dimension from name heuristics
+    auto getModelDim = [](const std::string& name) -> std::optional<size_t> {
+        if (name.find("MiniLM") != std::string::npos || name.find("minilm") != std::string::npos) {
+            return 384;
+        } else if (name.find("nomic") != std::string::npos ||
+                   name.find("mpnet") != std::string::npos ||
+                   name.find("bge") != std::string::npos) {
+            return 768;
+        } else if (name.find("e5-large") != std::string::npos) {
+            return 1024;
+        }
+        return std::nullopt;
+    };
+
+    if (!modelName.empty()) {
+        modelDim = getModelDim(modelName);
+        if (!useJson) {
+            std::cout << "Current model: " << modelName;
+            if (modelDim) {
+                std::cout << " (" << *modelDim << "-dim)";
+            }
+            std::cout << "\n";
+        }
+    }
+
+    // Step 3: Check for mismatch
+    if (modelDim && *modelDim == *dbDim) {
+        if (useJson) {
+            std::cout << "{\"status\": \"ok\", \"db_dim\": " << *dbDim << ", \"model\": \""
+                      << modelName << "\", \"model_dim\": " << *modelDim
+                      << ", \"mismatch\": false}\n";
+        } else {
+            std::cout << "\n"
+                      << ui::status_ok("No dimension mismatch. DB and model are aligned.") << "\n";
+        }
+        return;
+    }
+
+    if (!useJson) {
+        if (modelDim) {
+            std::cout << "\n" << ui::status_warning("Dimension mismatch detected:") << "\n";
+            std::cout << "  DB has: " << *dbDim << "-dim vectors\n";
+            std::cout << "  Model:  " << *modelDim << "-dim (" << modelName << ")\n\n";
+        } else {
+            std::cout << "\n"
+                      << ui::status_warning(
+                             "Could not determine model dimension. Checking installed models...")
+                      << "\n\n";
+        }
+    }
+
+    // Step 4: Find a model that matches DB dimension
+    std::string matchingModel;
+    std::error_code ec;
+    if (fs::exists(modelsPath, ec) && fs::is_directory(modelsPath, ec)) {
+        for (const auto& entry : fs::directory_iterator(modelsPath, ec)) {
+            if (!entry.is_directory())
+                continue;
+            if (!fs::exists(entry.path() / "model.onnx", ec))
+                continue;
+            std::string name = entry.path().filename().string();
+            auto dim = getModelDim(name);
+            if (dim && *dim == *dbDim) {
+                matchingModel = name;
+                break;
+            }
+        }
+    }
+
+    if (matchingModel.empty()) {
+        if (useJson) {
+            std::cout << "{\"status\": \"error\", \"db_dim\": " << *dbDim << ", \"model\": \""
+                      << modelName << "\"";
+            if (modelDim) {
+                std::cout << ", \"model_dim\": " << *modelDim;
+            }
+            std::cout << ", \"mismatch\": true, \"fixed\": false, \"error\": \"No installed model "
+                         "matches "
+                      << *dbDim << "-dim\"}\n";
+        } else {
+            std::cout << ui::status_error("No installed model matches " + std::to_string(*dbDim) +
+                                          "-dim")
+                      << "\n\n";
+            std::cout << "Options:\n";
+            if (*dbDim == 384) {
+                std::cout
+                    << "  1. Download matching model: yams model --download all-MiniLM-L6-v2\n";
+            } else if (*dbDim == 768) {
+                std::cout << "  1. Download matching model: yams model --download "
+                             "nomic-embed-text-v1.5\n";
+            } else {
+                std::cout << "  1. Download a model that produces " << *dbDim
+                          << "-dim embeddings\n";
+            }
+            std::cout << "  2. Recreate vectors with current model: yams doctor --recreate-vectors";
+            if (modelDim) {
+                std::cout << " --dim " << *modelDim;
+            }
+            std::cout << "\n";
+        }
+        return;
+    }
+
+    // Step 5: Fix config to use matching model
+    if (!useJson) {
+        std::cout << ui::status_ok("Found matching model: " + matchingModel) << "\n\n";
+        std::cout << "Updating config to use " << matchingModel << "...\n";
+    }
+
+    // Update config file
+    bool configUpdated = false;
+    try {
+        std::vector<std::string> lines;
+        bool foundModelLine = false;
+        bool foundDimLine = false;
+
+        if (fs::exists(configPath)) {
+            std::ifstream in(configPath);
+            std::string line;
+            while (std::getline(in, line)) {
+                // Replace preferred_model line
+                if (line.find("preferred_model") != std::string::npos ||
+                    line.find("model_name") != std::string::npos) {
+                    lines.push_back("preferred_model = \"" + matchingModel + "\"");
+                    foundModelLine = true;
+                }
+                // Replace embedding_dim lines
+                else if (line.find("embedding_dim") != std::string::npos) {
+                    lines.push_back("embeddings.embedding_dim = " + std::to_string(*dbDim));
+                    foundDimLine = true;
+                } else {
+                    lines.push_back(line);
+                }
+            }
+        }
+
+        // Add missing entries
+        if (!foundModelLine) {
+            lines.push_back("");
+            lines.push_back("# Model preference (set by yams doctor --vectors)");
+            lines.push_back("preferred_model = \"" + matchingModel + "\"");
+        }
+        if (!foundDimLine) {
+            lines.push_back("embeddings.embedding_dim = " + std::to_string(*dbDim));
+        }
+
+        // Write config
+        fs::create_directories(configPath.parent_path());
+        std::ofstream out(configPath, std::ios::trunc);
+        for (const auto& l : lines) {
+            out << l << "\n";
+        }
+        configUpdated = true;
+    } catch (const std::exception& e) {
+        if (useJson) {
+            std::cout << "{\"status\": \"error\", \"error\": \"Failed to update config: "
+                      << e.what() << "\"}\n";
+        } else {
+            std::cout << ui::status_error("Failed to update config: " + std::string(e.what()))
+                      << "\n";
+        }
+        return;
+    }
+
+    if (configUpdated) {
+        if (useJson) {
+            std::cout << "{\"status\": \"fixed\", \"db_dim\": " << *dbDim
+                      << ", \"previous_model\": \"" << modelName << "\"";
+            if (modelDim) {
+                std::cout << ", \"previous_model_dim\": " << *modelDim;
+            }
+            std::cout << ", \"new_model\": \"" << matchingModel
+                      << "\", \"new_model_dim\": " << *dbDim << ", \"config_path\": \""
+                      << configPath.string() << "\"}\n";
+        } else {
+            std::cout << "\n" << ui::status_ok("Config updated: " + configPath.string()) << "\n";
+            std::cout << "  preferred_model = \"" << matchingModel << "\"\n";
+            std::cout << "  embeddings.embedding_dim = " << *dbDim << "\n\n";
+            std::cout << "Restart daemon to apply: yams daemon restart\n";
+        }
     }
 }
 } // namespace yams::cli

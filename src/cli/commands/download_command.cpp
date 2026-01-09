@@ -15,6 +15,7 @@
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/downloader/downloader.hpp>
 
@@ -257,16 +258,8 @@ public:
             std::string key = kv.substr(0, pos);
             std::string value = kv.substr(pos + 1);
             // Trim spaces around key/value
-            auto trim = [](std::string& s) {
-                if (s.empty())
-                    return;
-                s.erase(0, s.find_first_not_of(" \t"));
-                auto p = s.find_last_not_of(" \t");
-                if (p != std::string::npos)
-                    s.erase(p + 1);
-            };
-            trim(key);
-            trim(value);
+            yams::config::trim(key);
+            yams::config::trim(value);
             if (key.empty()) {
                 spdlog::warn("Ignoring --meta with empty key: {}", kv);
                 continue;
@@ -482,16 +475,8 @@ private:
             }
             std::string key = kv.substr(0, pos);
             std::string value = kv.substr(pos + 1);
-            auto trim = [](std::string& s) {
-                if (s.empty())
-                    return;
-                s.erase(0, s.find_first_not_of(" \t"));
-                auto p = s.find_last_not_of(" \t");
-                if (p != std::string::npos)
-                    s.erase(p + 1);
-            };
-            trim(key);
-            trim(value);
+            yams::config::trim(key);
+            yams::config::trim(value);
             if (!key.empty()) {
                 metadata.emplace(std::move(key), std::move(value));
             }

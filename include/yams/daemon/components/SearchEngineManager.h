@@ -68,7 +68,7 @@ public:
                 std::shared_ptr<yams::vector::VectorDatabase> vectorDatabase,
                 std::shared_ptr<yams::vector::EmbeddingGenerator> embeddingGen,
                 const std::string& reason, int timeoutMs,
-                boost::asio::any_io_executor workerExecutor);
+                const boost::asio::any_io_executor& workerExecutor);
 
     /**
      * Get cached engine pointer for non-blocking reads.

@@ -86,6 +86,26 @@ bool isVec0Available(sqlite3* db) {
     return has_data;
 }
 
+// Check if a column exists in a table
+bool columnExists(sqlite3* db, const char* table_name, const char* column_name) {
+    // Use PRAGMA table_info to check for column
+    std::string sql = "SELECT COUNT(*) FROM pragma_table_info('" + std::string(table_name) +
+                      "') WHERE name = '" + std::string(column_name) + "'";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        return false;
+    }
+
+    bool exists = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        exists = (sqlite3_column_int(stmt, 0) > 0);
+    }
+    sqlite3_finalize(stmt);
+
+    return exists;
+}
+
 } // namespace
 
 VectorSchemaMigration::SchemaVersion VectorSchemaMigration::detectVersion(sqlite3* db) {
@@ -95,6 +115,10 @@ VectorSchemaMigration::SchemaVersion VectorSchemaMigration::detectVersion(sqlite
 
     // Check for V2 schema (unified vectors table)
     if (tableExists(db, "vectors") && tableExists(db, "vectors_hnsw_meta")) {
+        // Check for V2.1 (has embedding_dim column)
+        if (columnExists(db, "vectors", "embedding_dim")) {
+            return SchemaVersion::V2_1;
+        }
         return SchemaVersion::V2;
     }
 
@@ -104,6 +128,88 @@ VectorSchemaMigration::SchemaVersion VectorSchemaMigration::detectVersion(sqlite
     }
 
     return SchemaVersion::Unknown;
+}
+
+bool VectorSchemaMigration::hasEmbeddingDimColumn(sqlite3* db) {
+    if (!db) {
+        return false;
+    }
+    return columnExists(db, "vectors", "embedding_dim");
+}
+
+Result<void> VectorSchemaMigration::migrateV2ToV2_1(sqlite3* db) {
+    if (!db) {
+        return Error{ErrorCode::InvalidArgument, "Database handle is null"};
+    }
+
+    // Check if already migrated
+    if (hasEmbeddingDimColumn(db)) {
+        spdlog::debug("Database already has embedding_dim column, skipping migration");
+        return Result<void>{};
+    }
+
+    // Check that we have a V2 schema
+    auto version = detectVersion(db);
+    if (version != SchemaVersion::V2) {
+        return Error{ErrorCode::InvalidState,
+                     "Cannot migrate to V2.1: database is not at V2 schema"};
+    }
+
+    spdlog::info("Starting V2 to V2.1 schema migration (adding embedding_dim column)...");
+
+    // Begin transaction
+    auto result = executeSQL(db, "BEGIN TRANSACTION");
+    if (!result) {
+        return result;
+    }
+
+    // 1. Add embedding_dim column
+    result = executeSQL(db, "ALTER TABLE vectors ADD COLUMN embedding_dim INTEGER");
+    if (!result) {
+        executeSQL(db, "ROLLBACK");
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to add embedding_dim column: " + result.error().message};
+    }
+
+    // 2. Backfill dimension from BLOB size
+    result = executeSQL(db, "UPDATE vectors SET embedding_dim = LENGTH(embedding) / 4");
+    if (!result) {
+        executeSQL(db, "ROLLBACK");
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to backfill embedding_dim: " + result.error().message};
+    }
+
+    // 3. Create index for efficient dimension queries
+    result = executeSQL(
+        db, "CREATE INDEX IF NOT EXISTS idx_vectors_embedding_dim ON vectors(embedding_dim)");
+    if (!result) {
+        executeSQL(db, "ROLLBACK");
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to create embedding_dim index: " + result.error().message};
+    }
+
+    // Get count of migrated records
+    sqlite3_stmt* count_stmt = nullptr;
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*), COUNT(DISTINCT embedding_dim) FROM vectors", -1,
+                           &count_stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(count_stmt) == SQLITE_ROW) {
+            int64_t count = sqlite3_column_int64(count_stmt, 0);
+            int64_t distinct_dims = sqlite3_column_int64(count_stmt, 1);
+            spdlog::info("Backfilled embedding_dim for {} vectors ({} distinct dimensions)", count,
+                         distinct_dims);
+        }
+        sqlite3_finalize(count_stmt);
+    }
+
+    // Commit transaction
+    result = executeSQL(db, "COMMIT");
+    if (!result) {
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to commit migration: " + result.error().message};
+    }
+
+    spdlog::info("V2 to V2.1 migration completed successfully");
+    return Result<void>{};
 }
 
 Result<void> VectorSchemaMigration::migrateV1ToV2(sqlite3* db, size_t embedding_dim) {
@@ -116,7 +222,12 @@ Result<void> VectorSchemaMigration::migrateV1ToV2(sqlite3* db, size_t embedding_
     // Check current version
     auto version = detectVersion(db);
     if (version == SchemaVersion::V2) {
-        spdlog::info("Database already at V2 schema, skipping migration");
+        spdlog::info("Database already at V2 schema, upgrading to V2.1...");
+        return migrateV2ToV2_1(db);
+    }
+
+    if (version == SchemaVersion::V2_1) {
+        spdlog::info("Database already at V2.1 schema, skipping migration");
         return Result<void>{};
     }
 
@@ -139,6 +250,7 @@ Result<void> VectorSchemaMigration::migrateV1ToV2(sqlite3* db, size_t embedding_
             chunk_id TEXT UNIQUE NOT NULL,
             document_hash TEXT NOT NULL,
             embedding BLOB NOT NULL,
+            embedding_dim INTEGER,
             content TEXT,
             start_offset INTEGER DEFAULT 0,
             end_offset INTEGER DEFAULT 0,
@@ -172,6 +284,13 @@ Result<void> VectorSchemaMigration::migrateV1ToV2(sqlite3* db, size_t embedding_
 
     result = executeSQL(
         db, "CREATE INDEX IF NOT EXISTS idx_vectors_document_hash ON vectors(document_hash)");
+    if (!result) {
+        executeSQL(db, "ROLLBACK");
+        return result;
+    }
+
+    result = executeSQL(
+        db, "CREATE INDEX IF NOT EXISTS idx_vectors_embedding_dim ON vectors(embedding_dim)");
     if (!result) {
         executeSQL(db, "ROLLBACK");
         return result;
@@ -260,13 +379,14 @@ Result<void> VectorSchemaMigration::migrateV1ToV2(sqlite3* db, size_t embedding_
 
     const char* copy_sql = R"sql(
         INSERT INTO vectors (
-            chunk_id, document_hash, embedding, content, metadata,
+            chunk_id, document_hash, embedding, embedding_dim, content, metadata,
             model_id, created_at, embedding_version
         )
         SELECT
             m.chunk_id,
             m.document_hash,
             e.embedding,
+            LENGTH(e.embedding) / 4,
             m.chunk_text,
             m.metadata,
             m.model_id,
@@ -285,13 +405,14 @@ Result<void> VectorSchemaMigration::migrateV1ToV2(sqlite3* db, size_t embedding_
         // The embedding column in vec0 is accessed via the virtual table
         const char* copy_sql_alt = R"sql(
             INSERT INTO vectors (
-                chunk_id, document_hash, embedding, content, metadata,
+                chunk_id, document_hash, embedding, embedding_dim, content, metadata,
                 model_id, created_at, embedding_version
             )
             SELECT
                 m.chunk_id,
                 m.document_hash,
                 (SELECT embedding FROM doc_embeddings WHERE rowid = m.embedding_rowid),
+                (SELECT LENGTH(embedding) / 4 FROM doc_embeddings WHERE rowid = m.embedding_rowid),
                 m.chunk_text,
                 m.metadata,
                 m.model_id,

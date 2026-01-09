@@ -341,6 +341,20 @@ yams_build_mcp = get_option('build-mcp-server')
 # the top-level 'include' directory (was producing prefix/include/include/...).
 install_subdir('include', install_dir: get_option('includedir'), strip_directory: true)
 
+# --- tl-expected global resolution ---
+# tl-expected is a header-only library. Homebrew installs it without pkgconfig.
+# Resolve it once here and override for all subdirs.
+_tl_expected_dep = dependency('tl-expected', method: 'cmake', required: false)
+if not _tl_expected_dep.found()
+  _tl_expected_dep = dependency('tl-expected', method: 'pkg-config', required: false)
+endif
+if not _tl_expected_dep.found()
+  # Manual fallback for homebrew installation
+  _tl_expected_inc = include_directories('/opt/homebrew/include', is_system: true)
+  _tl_expected_dep = declare_dependency(include_directories: _tl_expected_inc)
+endif
+meson.override_dependency('tl-expected', _tl_expected_dep)
+
 # Core libraries (ordered by dependency)
 subdir('src/core')
 subdir('src/crypto')

@@ -801,7 +801,7 @@ int main(int argc, char* argv[]) {
 
         // Log rotation info
         spdlog::info("Log rotation enabled: {} (max {}MB x {} files)", config.logFile.string(),
-                     max_size / (1024 * 1024), max_files);
+                     max_size / (1024ULL * 1024), max_files);
     } catch (const std::exception& e) {
         // Fallback silently to default logger - can't log the error yet
         std::cerr << "Warning: log file setup failed, using default logger: " << e.what() << "\n";

@@ -1044,6 +1044,12 @@ OnnxModelSession::OnnxModelSession(const std::string& modelPath, const std::stri
     if (auto res = pImpl->loadModel(); !res) {
         spdlog::error("[ONNX] Eager load failed for '{}': {}", modelName, res.error().message);
         // We can't return an error from constructor, but pImpl state remains unloaded/invalid
+    } else {
+        // Copy dimension info from impl to info_ struct
+        info_.embeddingDim = pImpl->getEmbeddingDim();
+        info_.maxSequenceLength = pImpl->getMaxSequenceLength();
+        spdlog::debug("[ONNX] Session for '{}' initialized: dim={}, max_seq_len={}", modelName,
+                      info_.embeddingDim, info_.maxSequenceLength);
     }
 }
 

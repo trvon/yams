@@ -42,11 +42,22 @@ Diagnostics:
       - modernize-*
       - performance-*
       - readability-identifier-naming
+      # Refactoring assistance: identify complex/duplicate code
+      - readability-function-size
+      - readability-function-cognitive-complexity
+      - readability-redundant-*
+      - misc-redundant-expression
     # Remove slow or noisy checks
     Remove:
       - bugprone-easily-swappable-parameters
       - modernize-use-trailing-return-type
       - modernize-avoid-c-arrays
+    CheckOptions:
+      # Flag functions over 100 lines or 20 statements
+      readability-function-size.LineThreshold: 100
+      readability-function-size.StatementThreshold: 100
+      # Flag cognitive complexity over 25
+      readability-function-cognitive-complexity.Threshold: 25
 
 Completion:
   AllScopes: Yes

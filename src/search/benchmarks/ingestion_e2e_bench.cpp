@@ -24,6 +24,7 @@
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <fmt/ranges.h>
 
 #include "tests/integration/daemon/test_async_helpers.h"
 #include <boost/asio/awaitable.hpp>

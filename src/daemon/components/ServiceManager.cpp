@@ -439,6 +439,10 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             checkpointManager_ = std::make_unique<CheckpointManager>(std::move(checkpointConfig),
                                                                      std::move(checkpointDeps));
             spdlog::debug("[ServiceManager] CheckpointManager created");
+
+            // Create SearchComponent for corpus monitoring and auto-rebuild
+            searchComponent_ = std::make_unique<SearchComponent>(*this, state_);
+            spdlog::debug("[ServiceManager] SearchComponent created");
         } catch (const std::exception& e) {
             spdlog::warn("[ServiceManager] Failed to create extracted managers: {}", e.what());
         }
@@ -1667,7 +1671,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             if (metadataRepo_) {
                 auto countRes = metadataRepo_->getDocumentCount();
                 if (countRes) {
-                    state_.readiness.searchEngineDocCount.store(countRes.value());
+                    if (searchComponent_) {
+                        searchComponent_->recordSuccessfulBuild(countRes.value());
+                    } else {
+                        state_.readiness.searchEngineDocCount.store(countRes.value());
+                    }
                 }
             }
 
@@ -2078,45 +2086,6 @@ boost::asio::awaitable<Result<size_t>> ServiceManager::autoloadPluginsNow() {
 boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
     spdlog::info("[ServiceManager] co_enableEmbeddingsAndRebuild: starting");
 
-    // Check if rebuild is needed based on corpus growth
-    // The search engine may have been built with minimal docs and needs re-tuning
-    bool needsRebuild = false;
-    uint64_t currentDocCount = 0;
-    uint64_t lastBuildDocCount = 0;
-
-    try {
-        if (metadataRepo_) {
-            auto countRes = metadataRepo_->getDocumentCount();
-            if (countRes) {
-                currentDocCount = countRes.value();
-            }
-        }
-        lastBuildDocCount = state_.readiness.searchEngineDocCount.load();
-
-        // Rebuild if corpus has grown significantly (10x or +1000 docs minimum)
-        if (currentDocCount > 0 && lastBuildDocCount < currentDocCount) {
-            bool significantGrowth = (currentDocCount >= lastBuildDocCount * 10) ||
-                                     (currentDocCount >= lastBuildDocCount + 1000);
-            if (significantGrowth) {
-                needsRebuild = true;
-                spdlog::info("[ServiceManager] co_enableEmbeddingsAndRebuild: corpus grew from {} "
-                             "to {} docs, "
-                             "triggering rebuild for re-tuning",
-                             lastBuildDocCount, currentDocCount);
-            }
-        }
-    } catch (...) {
-        // If we can't determine doc count, don't block rebuild
-    }
-
-    // Skip if search engine is already ready AND corpus hasn't grown significantly
-    if (state_.readiness.searchEngineReady.load() && searchEngine_ && !needsRebuild) {
-        spdlog::info("[ServiceManager] co_enableEmbeddingsAndRebuild: search engine already ready, "
-                     "skipping rebuild (docs: {} -> {})",
-                     lastBuildDocCount, currentDocCount);
-        co_return;
-    }
-
     // Protect against concurrent rebuilds
     bool buildingAlready = false;
     try {
@@ -2164,7 +2133,11 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
             if (metadataRepo_) {
                 auto countRes = metadataRepo_->getDocumentCount();
                 if (countRes) {
-                    state_.readiness.searchEngineDocCount.store(countRes.value());
+                    if (searchComponent_) {
+                        searchComponent_->recordSuccessfulBuild(countRes.value());
+                    } else {
+                        state_.readiness.searchEngineDocCount.store(countRes.value());
+                    }
                 }
             }
 
@@ -2176,6 +2149,14 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
     } catch (const std::exception& e) {
         spdlog::error("[ServiceManager] co_enableEmbeddingsAndRebuild: exception: {}", e.what());
     }
+}
+
+bool ServiceManager::triggerSearchEngineRebuildIfNeeded() {
+    // Delegate to SearchComponent for corpus monitoring and rebuild triggering
+    if (searchComponent_) {
+        return searchComponent_->checkAndTriggerRebuildIfNeeded();
+    }
+    return false;
 }
 
 boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured() {
@@ -2238,7 +2219,11 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
                 if (metadataRepo_) {
                     auto countRes = metadataRepo_->getDocumentCount();
                     if (countRes) {
-                        state_.readiness.searchEngineDocCount.store(countRes.value());
+                        if (searchComponent_) {
+                            searchComponent_->recordSuccessfulBuild(countRes.value());
+                        } else {
+                            state_.readiness.searchEngineDocCount.store(countRes.value());
+                        }
                     }
                 }
 

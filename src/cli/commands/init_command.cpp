@@ -1091,14 +1091,8 @@ private:
             // Write trust file entry so daemon will load from here by default
             // Trust file aligns with ServiceManager: XDG_CONFIG_HOME or
             // ~/.config/yams/plugins_trust.txt
-            fs::path cfgHome;
-            if (const char* xdg = std::getenv("XDG_CONFIG_HOME"))
-                cfgHome = fs::path(xdg);
-            else if (const char* home = std::getenv("HOME"))
-                cfgHome = fs::path(home) / ".config";
-            else
-                cfgHome = fs::path(".config");
-            fs::path trustFile = cfgHome / "yams" / "plugins_trust.txt";
+            fs::path yamsConfigDir = yams::config::get_config_dir();
+            fs::path trustFile = yamsConfigDir / "plugins_trust.txt";
             fs::create_directories(trustFile.parent_path());
             // Append only if not already present
             std::vector<std::string> lines;
@@ -1128,7 +1122,7 @@ private:
 
             // Also set [daemon].plugin_dir in config.toml to this path (best-effort)
             try {
-                fs::path configPath = cfgHome / "yams" / "config.toml";
+                fs::path configPath = yamsConfigDir / "config.toml";
                 if (fs::exists(configPath)) {
                     std::ifstream in(configPath);
                     std::stringstream buf;
@@ -1708,26 +1702,9 @@ private:
      * @param dataPath Base data directory for fallback grammar path
      * @param useDefaults If true, downloads recommended grammars without menu
      */
-    void downloadGrammars(const fs::path& dataPath, bool useDefaults) {
-        // Determine grammar output directory
-        fs::path grammarDir;
-#ifdef _WIN32
-        // On Windows, use %LOCALAPPDATA%\yams\grammars or dataPath\grammars
-        if (const char* localAppData = std::getenv("LOCALAPPDATA")) {
-            grammarDir = fs::path(localAppData) / "yams" / "grammars";
-        } else {
-            grammarDir = dataPath / "grammars";
-        }
-#else
-        // On Unix, use XDG_DATA_HOME or ~/.local/share/yams/grammars
-        if (const char* xdgData = std::getenv("XDG_DATA_HOME")) {
-            grammarDir = fs::path(xdgData) / "yams" / "grammars";
-        } else if (const char* home = std::getenv("HOME")) {
-            grammarDir = fs::path(home) / ".local" / "share" / "yams" / "grammars";
-        } else {
-            grammarDir = dataPath / "grammars";
-        }
-#endif
+    void downloadGrammars([[maybe_unused]] const fs::path& dataPath, bool useDefaults) {
+        // Determine grammar output directory (platform-aware via config helper)
+        fs::path grammarDir = yams::config::get_data_dir() / "grammars";
         fs::create_directories(grammarDir);
 
         std::vector<std::string> selectedLanguages;
@@ -1788,9 +1765,7 @@ private:
                 std::istringstream iss(langs);
                 std::string lang;
                 while (std::getline(iss, lang, ',')) {
-                    // Trim whitespace
-                    lang.erase(0, lang.find_first_not_of(" \t"));
-                    lang.erase(lang.find_last_not_of(" \t") + 1);
+                    yams::config::trim(lang);
                     if (!lang.empty()) {
                         selectedLanguages.push_back(lang);
                     }

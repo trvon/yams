@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -110,5 +112,35 @@ std::filesystem::path get_runtime_dir();
 // Daemon-specific config resolution (env → config → defaults)
 std::filesystem::path resolve_socket_path_from_config();
 std::filesystem::path resolve_data_dir_from_config();
+
+// ============================================================================
+// Full TOML config parsing and writing utilities
+// ============================================================================
+
+/// Parse entire config file into a map with section.key format
+/// e.g., [embeddings] dim = 384 becomes "embeddings.dim" -> "384"
+std::map<std::string, std::string> parse_simple_toml(const std::filesystem::path& path);
+
+/// Dimension configuration from config file
+struct DimensionConfig {
+    std::optional<size_t> embeddings; // embeddings.embedding_dim
+    std::optional<size_t> vectorDb;   // vector_database.embedding_dim
+    std::optional<size_t> index;      // vector_index.dimension
+};
+
+/// Read dimension-related config values
+DimensionConfig read_dimension_config(const std::filesystem::path& config_path);
+
+/// Write dimension config values (updates all dimension keys)
+bool write_dimension_config(const std::filesystem::path& config_path, size_t dim);
+
+/// Write or update a single config value (section.key format)
+/// Creates the file and parent directories if they don't exist
+bool write_config_value(const std::filesystem::path& config_path, const std::string& key,
+                        const std::string& value);
+
+/// Write multiple config values atomically
+bool write_config_values(const std::filesystem::path& config_path,
+                         const std::map<std::string, std::string>& values);
 
 } // namespace yams::config

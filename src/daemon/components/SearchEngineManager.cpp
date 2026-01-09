@@ -65,7 +65,7 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                                  std::shared_ptr<yams::vector::VectorDatabase> vectorDatabase,
                                  std::shared_ptr<yams::vector::EmbeddingGenerator> embeddingGen,
                                  const std::string& reason, int timeoutMs,
-                                 boost::asio::any_io_executor workerExecutor) {
+                                 const boost::asio::any_io_executor& workerExecutor) {
     auto ex = co_await boost::asio::this_coro::executor;
 
     // Enable vector search only when vector database is provided
@@ -85,7 +85,7 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         ev.reason = reason;
         ev.includeVectorSearch = vectorEnabled;
         fsm_.dispatch(ev);
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch): FSM failures must not interrupt build
     }
 
     spdlog::info("[SearchEngineManager] Build started: reason={} vector={} timeout={}ms", reason,

@@ -350,7 +350,7 @@ boost::asio::awaitable<Response> RequestDispatcher::dispatch(const Request& req)
         if (state_) {
             state_->stats.requestsProcessed.fetch_add(1, std::memory_order_relaxed);
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch): stats failures must not interrupt response
     }
 
     co_return out;
@@ -361,7 +361,7 @@ boost::asio::any_io_executor RequestDispatcher::getWorkerExecutor() const {
         if (serviceManager_) {
             return serviceManager_->getWorkerExecutor();
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch): fall through to throw
     }
     throw std::runtime_error("RequestDispatcher: ServiceManager not available");
 }
@@ -369,7 +369,7 @@ std::function<void(bool)> RequestDispatcher::getWorkerJobSignal() const {
     try {
         if (serviceManager_)
             return serviceManager_->getWorkerJobSignal();
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch): fall through to return empty
     }
     return {};
 }
@@ -386,6 +386,7 @@ RequestDispatcher::handleShutdownRequest(const ShutdownRequest& req) {
             try {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
+                // NOLINTBEGIN(bugprone-empty-catch): logger may be unavailable during shutdown
                 try {
                     spdlog::info("Initiating daemon shutdown sequence...");
                 } catch (...) {
@@ -424,6 +425,7 @@ RequestDispatcher::handleShutdownRequest(const ShutdownRequest& req) {
                 } catch (...) {
                 }
             }
+            // NOLINTEND(bugprone-empty-catch)
 
             (void)graceful;
         });
