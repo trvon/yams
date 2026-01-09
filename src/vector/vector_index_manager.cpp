@@ -14,6 +14,18 @@
 #include <thread>
 #include <type_traits>
 
+// Include jthread compatibility shim for platforms lacking C++20 jthread support
+// Must be included before sqlite-vec-cpp headers that use std::jthread
+#include <yams/compat/thread_stop_compat.h>
+
+// Provide std::jthread alias if not available natively
+#if !defined(__cpp_lib_jthread) || (__cpp_lib_jthread < 201911L)
+namespace std {
+using jthread = yams::compat::jthread;
+using stop_token = yams::compat::stop_token;
+}
+#endif
+
 // Include sqlite-vec-cpp HNSW before namespace to avoid namespace conflicts
 #include <sqlite-vec-cpp/distances/cosine.hpp>
 #include <sqlite-vec-cpp/distances/inner_product.hpp>
