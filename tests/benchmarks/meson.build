@@ -105,6 +105,17 @@ if benchmark_dep.found()
 
   alias_target('bench_retrieval_quality', retrieval_quality_bench)
 
+  # Fusion strategy experiment - compares different fusion approaches
+  fusion_experiment = executable('fusion_strategy_experiment',
+    files('../../src/search/benchmarks/fusion_strategy_experiment.cpp'),
+    include_directories: incs,
+    dependencies: retrieval_quality_bench_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    install: false,
+  )
+
+  alias_target('bench_fusion_experiment', fusion_experiment)
+
   # PBI-004: End-to-end ingestion pipeline benchmark
   ingestion_e2e_bench_deps = search_bench_deps + [test_deps]
 

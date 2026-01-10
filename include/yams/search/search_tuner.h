@@ -71,6 +71,10 @@ struct TunedParams {
     // Similarity threshold for vector search
     float similarityThreshold = 0.65f;
 
+    // Fusion strategy (default: COMB_MNZ, but TEXT_ANCHOR for scientific corpora)
+    SearchEngineConfig::FusionStrategy fusionStrategy =
+        SearchEngineConfig::FusionStrategy::COMB_MNZ;
+
     /**
      * @brief Apply tuned parameters to a SearchEngineConfig.
      */
@@ -84,6 +88,7 @@ struct TunedParams {
         config.metadataWeight = metadataWeight;
         config.similarityThreshold = similarityThreshold;
         config.rrfK = static_cast<float>(rrfK);
+        config.fusionStrategy = fusionStrategy;
     }
 
     /**
@@ -160,6 +165,7 @@ struct TunedParams {
             params.kgWeight = 0.00f;
             params.tagWeight = 0.00f;
             params.metadataWeight = 0.05f;
+            params.fusionStrategy = SearchEngineConfig::FusionStrategy::TEXT_ANCHOR;
             break;
 
         case TuningState::MIXED:

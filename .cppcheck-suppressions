@@ -31,6 +31,37 @@
 # ONNX Runtime headers
 *:*/onnxruntime/*
 
+# Example plugins with special characters
+*:*/examples/plugins/*
+
+# =============================================================================
+# C++20/23 feature false positives
+# =============================================================================
+# cppcheck doesn't fully support C++20/23 features like coroutines, concepts,
+# ranges, etc. These produce syntaxError and other false positives.
+
+# Coroutine-related false positives (co_await, co_return, co_yield)
+syntaxError:*daemon_client.h
+syntaxError:*request_handler.h
+syntaxError:*request_handler.cpp
+syntaxError:*streaming_processor.cpp
+syntaxError:*InternalEventBus.h
+syntaxError:*plugin_host_services.cpp
+
+# C++20 concepts (requires clauses)
+syntaxError:*atomic_utils.h
+
+# C++20 ranges and other features
+syntaxError:*ui_helpers.hpp
+syntaxError:*repair_manager.h
+
+# Coroutine missingReturn false positives - awaitable<void> functions don't need
+# explicit co_return at end of function
+missingReturn:*search_service.cpp
+
+# unknownMacro false positives for standard types
+unknownMacro:*content_store_builder.h
+
 # =============================================================================
 # Specific unused function suppressions
 # =============================================================================
@@ -96,3 +127,32 @@ duplicateExpression:*query*
 constParameter:*hot_path*
 constParameter:*performance*
 constParameter:*fast_*
+
+# =============================================================================
+# Cppcheck false positives for control flow patterns
+# =============================================================================
+
+# cppcheck doesn't understand that co_return/return exits the function, so it
+# reports false nullPointerRedundantCheck after early-exit guards like:
+#   if (!ptr) { co_return Error{}; }
+#   ptr->method();  // cppcheck thinks ptr could be null here
+nullPointerRedundantCheck:*daemon_client.cpp
+nullPointerRedundantCheck:*request_dispatcher_status.cpp
+nullPointerRedundantCheck:*dispatch_utils.hpp
+nullPointerRedundantCheck:*ServiceManager.cpp
+nullPointerRedundantCheck:*SocketServer.cpp
+nullPointerRedundantCheck:*status_command.cpp
+nullPointerRedundantCheck:*request_dispatcher_documents.cpp
+nullPointerRedundantCheck:*request_dispatcher_embeddings.cpp
+nullPointerRedundantCheck:*request_dispatcher_graph.cpp
+nullPointerRedundantCheck:*request_dispatcher_plugins.cpp
+nullPointerRedundantCheck:*IngestService.cpp
+nullPointerRedundantCheck:*mcp_server.cpp
+nullPointerRedundantCheck:*session_command.cpp
+nullPointer:*dispatch_utils.hpp
+
+# Iterator validity after early-exit
+derefInvalidIteratorRedundantCheck:*request_handler.cpp
+
+# False positive: cppcheck doesn't understand try/catch control flow with coroutines
+accessMoved:*streaming_processor.cpp

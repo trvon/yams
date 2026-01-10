@@ -135,6 +135,14 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                             (es.state == EmbeddingProviderState::Degraded);
                     } catch (...) {
                     }
+                    // EmbeddingService metrics (jobs currently being processed)
+                    try {
+                        res.requestCounts["embed_in_flight"] =
+                            serviceManager_->getEmbeddingInFlightJobs();
+                        res.requestCounts["embed_svc_queued"] =
+                            serviceManager_->getEmbeddingQueuedJobs();
+                    } catch (...) {
+                    }
                     try {
                         auto ps = serviceManager_->getPluginHostFsmSnapshot();
                         res.requestCounts["plugin_host_state"] = static_cast<size_t>(ps.state);
@@ -516,6 +524,16 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
             response.additionalStats["bus_post_queued"] = std::to_string(bus.postQueued());
             response.additionalStats["bus_post_consumed"] = std::to_string(bus.postConsumed());
             response.additionalStats["bus_post_dropped"] = std::to_string(bus.postDropped());
+        } catch (...) {
+        }
+        // Embedding service metrics (in-flight jobs being processed)
+        try {
+            if (serviceManager_) {
+                response.additionalStats["embed_in_flight"] =
+                    std::to_string(serviceManager_->getEmbeddingInFlightJobs());
+                response.additionalStats["embed_svc_queued"] =
+                    std::to_string(serviceManager_->getEmbeddingQueuedJobs());
+            }
         } catch (...) {
         }
         // Minimal readiness hint (align to lifecycle readiness)

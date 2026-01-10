@@ -124,6 +124,8 @@ yams search "query"            # Semantic/hybrid search
 # Graph
 yams graph --name <file>       # Show file relationships
 yams graph --list-type symbol  # List symbols
+yams graph --relations         # List relation types with counts
+yams graph --search "pattern"  # Search nodes by label pattern
 ```
 
 ## Code Indexing
@@ -228,6 +230,11 @@ yams graph --list-type function --limit 50
 
 # Find isolated nodes (potential dead code)
 yams graph --list-type symbol --isolated
+
+# Explore graph structure
+yams graph --relations              # List all relation types with counts
+yams graph --search "Request*"      # Find nodes matching pattern (wildcards: *, ?)
+yams graph --search "*Controller"   # Find all controller nodes
 ```
 
 ## MCP Integration

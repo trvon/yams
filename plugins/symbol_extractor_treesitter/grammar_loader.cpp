@@ -10,6 +10,7 @@
 #include <string>
 
 #include <yams/compat/dlfcn.h>
+#include <yams/config/config_helpers.h>
 
 #include <chrono>
 #include <cstdlib>
@@ -59,7 +60,7 @@ std::vector<std::filesystem::path> GrammarLoader::getGrammarSearchPaths() const 
         paths.emplace_back(path);
     }
 
-    // Environment variable overrides
+    // Environment variable overrides for specific grammars
     for (const auto& spec : kSpecs) {
         if (const char* env_path = std::getenv(spec.env_var.data())) {
             if (*env_path) {
@@ -68,79 +69,13 @@ std::vector<std::filesystem::path> GrammarLoader::getGrammarSearchPaths() const 
         }
     }
 
-    // Config-specified data_dir (highest priority)
-    std::filesystem::path cfgPath;
-#ifdef _WIN32
-    // Windows: LOCALAPPDATA/yams/config.toml or APPDATA/yams/config.toml
-    if (const char* localappdata = std::getenv("LOCALAPPDATA")) {
-        cfgPath = std::filesystem::path(localappdata) / "yams" / "config.toml";
-    } else if (const char* appdata = std::getenv("APPDATA")) {
-        cfgPath = std::filesystem::path(appdata) / "yams" / "config.toml";
-    }
-#else
-    // Unix: ~/.config/yams/config.toml
-    auto cfgHome = std::getenv("XDG_CONFIG_HOME");
-    if (cfgHome && *cfgHome) {
-        cfgPath = std::filesystem::path(cfgHome) / "yams" / "config.toml";
-    } else if (const char* home = std::getenv("HOME")) {
-        cfgPath = std::filesystem::path(home) / ".config" / "yams" / "config.toml";
-    }
-#endif
-    if (!cfgPath.empty() && std::filesystem::exists(cfgPath)) {
-        // Naive parse: look for a line with 'data_dir = "..."' (TOML)
-        std::ifstream in(cfgPath);
-        std::string line;
-        while (std::getline(in, line)) {
-            auto pos = line.find("data_dir");
-            if (pos == std::string::npos)
-                continue;
-            auto q1 = line.find('"', pos);
-            if (q1 == std::string::npos)
-                continue;
-            auto q2 = line.find('"', q1 + 1);
-            if (q2 == std::string::npos || q2 <= q1 + 1)
-                continue;
-            auto val = line.substr(q1 + 1, q2 - (q1 + 1));
-            std::filesystem::path dataDir = val;
-            // Expand ~ (Unix) or %USERPROFILE% style paths
-            if (!val.empty() && val[0] == '~') {
-#ifdef _WIN32
-                if (const char* userprofile = std::getenv("USERPROFILE")) {
-                    std::string rest = val.size() > 2 ? val.substr(2) : std::string();
-                    dataDir = std::filesystem::path(userprofile) / rest;
-                }
-#else
-                if (const char* home = std::getenv("HOME")) {
-                    std::string rest = val.size() > 2 ? val.substr(2) : std::string();
-                    dataDir = std::filesystem::path(home) / rest;
-                }
-#endif
-            }
-            paths.emplace_back(dataDir / "grammars");
-            break;
-        }
-    }
+    // Use config helper for platform-aware data directory resolution
+    // This handles YAMS_DATA_DIR, YAMS_STORAGE env vars and XDG/Windows paths
+    paths.emplace_back(yams::config::get_data_dir() / "grammars");
 
+    // System-wide locations (lower priority)
 #ifdef _WIN32
-    // Windows paths: LOCALAPPDATA/yams/grammars (primary)
-    if (const char* localappdata = std::getenv("LOCALAPPDATA")) {
-        if (*localappdata) {
-            paths.emplace_back(std::filesystem::path(localappdata) / "yams" / "grammars");
-        }
-    }
-    // Fallback to APPDATA
-    if (const char* appdata = std::getenv("APPDATA")) {
-        if (*appdata) {
-            paths.emplace_back(std::filesystem::path(appdata) / "yams" / "grammars");
-        }
-    }
-    // User profile fallback
-    if (const char* userprofile = std::getenv("USERPROFILE")) {
-        if (*userprofile) {
-            paths.emplace_back(std::filesystem::path(userprofile) / ".yams" / "grammars");
-        }
-    }
-    // Program installation paths
+    // Windows: Program installation paths
     if (const char* localappdata = std::getenv("LOCALAPPDATA")) {
         if (*localappdata) {
             paths.emplace_back(std::filesystem::path(localappdata) / "Programs" / "yams" / "lib" /
@@ -148,19 +83,7 @@ std::vector<std::filesystem::path> GrammarLoader::getGrammarSearchPaths() const 
         }
     }
 #else
-    // XDG standard locations (Unix/Linux/macOS)
-    if (const char* xdg_data_home = std::getenv("XDG_DATA_HOME")) {
-        if (*xdg_data_home) {
-            paths.emplace_back(std::filesystem::path(xdg_data_home) / "yams" / "grammars");
-        }
-    }
-
-    // Default user path
-    if (const char* home = std::getenv("HOME")) {
-        paths.emplace_back(std::filesystem::path(home) / ".local" / "share" / "yams" / "grammars");
-    }
-
-    // System-wide locations
+    // Unix/Linux/macOS: System-wide locations
     paths.emplace_back("/usr/local/share/yams/grammars");
     paths.emplace_back("/usr/share/yams/grammars");
 #endif

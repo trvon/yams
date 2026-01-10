@@ -245,7 +245,7 @@ public:
                         embeddingDim_ = 384;
                     else
                         embeddingDim_ = 768; // base/default
-                } else if (has("nomic") || has("mpnet")) {
+                } else if (has("nomic") || has("mpnet") || has("jina")) {
                     embeddingDim_ = 768;
                 } else if (has("minilm")) {
                     embeddingDim_ = 384;

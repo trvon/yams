@@ -1016,12 +1016,8 @@ public:
             return std::nullopt;
         }
 
-        // If config already has a dimension set, return it
-        if (config_.embedding_dim > 0) {
-            return config_.embedding_dim;
-        }
-
-        // Otherwise, probe the database for existing vectors
+        // Probe the database for existing vectors - don't trust config value
+        // as it may differ from what's actually stored
         // First check if vectors table exists
         const char* check_table =
             "SELECT name FROM sqlite_master WHERE type='table' AND name='vectors'";

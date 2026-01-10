@@ -13,6 +13,9 @@
 
 namespace {
 
+// Global storage for plugin config JSON passed from daemon at init time
+static std::string g_plugin_config_json;
+
 // Provide a C-callable function for threading control (not supported yet)
 static yams_status_t onnx_set_threading(void* /*self*/, const char* /*model_id*/, int /*intra*/,
                                         int /*inter*/) {
@@ -87,6 +90,13 @@ struct ProviderCtx {
         cfg.lazyLoading = true;
         cfg.enableGPU = false;
         cfg.numThreads = std::max(1u, std::thread::hardware_concurrency());
+
+        // Variables for config (both file-based and JSON-based)
+        std::string dataDir;
+        bool keepModelHot = true;
+        std::string preferredModel;
+        std::vector<std::string> preloadList;
+
         // Read embeddings settings from config.toml (preferred_model, model_path, keep_model_hot)
         try {
             namespace fs = std::filesystem;
@@ -96,11 +106,6 @@ struct ProviderCtx {
             } else if (const char* home = std::getenv("HOME")) {
                 cfgPath = fs::path(home) / ".config" / "yams" / "config.toml";
             }
-            std::string modelsRoot;
-            std::string dataDir;
-            bool keepModelHot = true;
-            std::string preferredModel;
-            std::vector<std::string> preloadList;
 
             // First, check for YAMS_STORAGE environment variable
             if (const char* storage = std::getenv("YAMS_STORAGE")) {
@@ -233,6 +238,71 @@ struct ProviderCtx {
         } catch (const std::exception&) {
             // ignore config parse errors
         }
+
+        // Parse JSON config from plugin init (overrides file-based config)
+        if (!g_plugin_config_json.empty()) {
+            try {
+                auto j = nlohmann::json::parse(g_plugin_config_json, nullptr, false);
+                if (!j.is_discarded() && j.is_object()) {
+                    spdlog::info("[ONNX-Plugin] Applying JSON config: {}", g_plugin_config_json);
+                    // preferred_model
+                    if (j.contains("preferred_model") && j["preferred_model"].is_string()) {
+                        preferredModel = j["preferred_model"].get<std::string>();
+                        spdlog::info("[ONNX-Plugin] JSON config: preferred_model='{}'",
+                                     preferredModel);
+                    }
+                    // preload (CSV string or single model)
+                    if (j.contains("preload") && j["preload"].is_string()) {
+                        std::string preloadStr = j["preload"].get<std::string>();
+                        preloadList.clear();
+                        // Parse CSV: "modelA,modelB" or single "modelA"
+                        size_t start = 0;
+                        while (start < preloadStr.size()) {
+                            auto comma = preloadStr.find(',', start);
+                            std::string item = preloadStr.substr(start, comma == std::string::npos
+                                                                            ? std::string::npos
+                                                                            : (comma - start));
+                            // Trim whitespace
+                            auto trim = [](std::string& s) {
+                                if (s.empty())
+                                    return;
+                                s.erase(0, s.find_first_not_of(" \t"));
+                                auto pos = s.find_last_not_of(" \t");
+                                if (pos != std::string::npos)
+                                    s.erase(pos + 1);
+                            };
+                            trim(item);
+                            if (!item.empty())
+                                preloadList.push_back(item);
+                            if (comma == std::string::npos)
+                                break;
+                            start = comma + 1;
+                        }
+                        spdlog::info("[ONNX-Plugin] JSON config: preload list has {} models",
+                                     preloadList.size());
+                    }
+                    // keep_model_hot
+                    if (j.contains("keep_model_hot") && j["keep_model_hot"].is_boolean()) {
+                        keepModelHot = j["keep_model_hot"].get<bool>();
+                        spdlog::info("[ONNX-Plugin] JSON config: keep_model_hot={}", keepModelHot);
+                    }
+                    // models_root - override the models directory
+                    if (j.contains("models_root") && j["models_root"].is_string()) {
+                        cfg.modelsRoot = j["models_root"].get<std::string>();
+                        spdlog::info("[ONNX-Plugin] JSON config: models_root='{}'", cfg.modelsRoot);
+                    }
+                }
+            } catch (const std::exception& e) {
+                spdlog::warn("[ONNX-Plugin] Failed to parse JSON config: {}", e.what());
+            }
+            // Re-apply preload settings from JSON config
+            if (!preloadList.empty()) {
+                cfg.preloadModels = preloadList;
+            } else if (keepModelHot && !preferredModel.empty()) {
+                cfg.preloadModels = {preferredModel};
+            }
+        }
+
         spdlog::info("[ONNX-Plugin] Creating OnnxModelPool with modelsRoot={}", cfg.modelsRoot);
         pool = std::make_unique<yams::daemon::OnnxModelPool>(cfg);
         spdlog::info("[ONNX-Plugin] OnnxModelPool created, calling initialize()...");
@@ -890,7 +960,8 @@ struct ProviderSingleton {
                 ch = static_cast<char>(std::tolower(ch));
             if (lm.find("minilm") != std::string::npos)
                 dim = 384;
-            else if (lm.find("mpnet") != std::string::npos || lm.find("nomic") != std::string::npos)
+            else if (lm.find("mpnet") != std::string::npos ||
+                     lm.find("nomic") != std::string::npos || lm.find("jina") != std::string::npos)
                 dim = 768;
             else if (lm.find("bge-m3") != std::string::npos ||
                      (lm.find("bge") != std::string::npos && lm.find("large") != std::string::npos))
@@ -999,6 +1070,14 @@ static ProviderSingleton& singleton() {
 }
 
 } // namespace
+
+// Set the plugin config JSON (called from yams_plugin_init before provider is accessed)
+extern "C" void yams_onnx_set_config_json(const char* json) {
+    if (json && *json) {
+        g_plugin_config_json = json;
+        spdlog::info("[ONNX Plugin] Config JSON set: {}", g_plugin_config_json);
+    }
+}
 
 extern "C" void yams_onnx_shutdown_provider() {
     singleton().explicitShutdownCalled.store(true);

@@ -3,6 +3,8 @@
 #include <yams/core/types.h>
 #include <yams/search/search_engine.h>
 
+#include <yams/search/search_tuner.h>
+
 #include <chrono>
 #include <memory>
 #include <optional>
@@ -26,9 +28,6 @@ class EmbeddingGenerator;
 } // namespace yams
 
 namespace yams::search {
-
-// Forward declare SearchTuner
-class SearchTuner;
 
 /**
  * SearchEngineBuilder
@@ -68,6 +67,12 @@ public:
         // based on corpus statistics. When false, use the provided config as-is.
         // Default: true (enabled)
         bool autoTune = true;
+
+        // Override tuning state: when set, forces use of this tuning state instead
+        // of auto-detecting from corpus stats. Useful for benchmarks with known
+        // corpus types (e.g., SCIENTIFIC for BEIR datasets) where auto-detection
+        // may fail due to absolute path depth calculations.
+        std::optional<TuningState> tuningStateOverride = std::nullopt;
 
         // Convenience: default-initialize to tuned conservative config
         static BuildOptions makeDefault() {

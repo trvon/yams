@@ -468,9 +468,7 @@ bool hasEmbedding(const std::string& documentHash, const std::filesystem::path& 
     try {
         vector::VectorDatabaseConfig vdbConfig;
         vdbConfig.database_path = (dataPath / "vectors.db").string();
-        vdbConfig.embedding_dim = 384; // Default
-                                       // actual value does not matter for existence check
-        vdbConfig.create_if_missing = false;
+        vdbConfig.embedding_dim = 0;         // Dimension not needed for existence check
         vdbConfig.create_if_missing = false; // Never create from util
 
         auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
@@ -498,7 +496,7 @@ getDocumentsMissingEmbeddings(std::shared_ptr<metadata::IMetadataRepository> met
     // Initialize vector database for checking
     vector::VectorDatabaseConfig vdbConfig;
     vdbConfig.database_path = (dataPath / "vectors.db").string();
-    vdbConfig.embedding_dim = 384; // Default
+    vdbConfig.embedding_dim = 0; // Dimension not needed for existence check
     vdbConfig.create_if_missing = false;
 
     auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);

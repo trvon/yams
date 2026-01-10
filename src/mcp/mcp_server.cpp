@@ -897,6 +897,34 @@ void MCPServer::start() {
                     return;
                 }
 
+                // Critical handshake methods must be handled synchronously to ensure
+                // response is sent before the transport closes (fixes race condition
+                // with MCP clients like OpenCode that may close stdin quickly).
+                static const std::unordered_set<std::string> syncMethods = {
+                    "initialize",
+                    "tools/list",
+                    "resources/list",
+                    "prompts/list",
+                    "notifications/initialized",
+                    "ping"};
+
+                if (syncMethods.count(method)) {
+                    spdlog::debug("Handling '{}' synchronously on main thread", method);
+                    auto response = this->handleRequest(request);
+                    if (response) {
+                        this->sendResponse(response.value());
+                    } else {
+                        const auto& error = response.error();
+                        json errorResponse = {
+                            {"jsonrpc", protocol::JSONRPC_VERSION},
+                            {"error",
+                             {{"code", protocol::INVALID_REQUEST}, {"message", error.message}}},
+                            {"id", request.value("id", nullptr)}};
+                        this->sendResponse(errorResponse);
+                    }
+                    return;
+                }
+
                 if (method == "tools/call") {
                     const auto toolName = params.value("name", "");
                     const auto toolArgs = params.value("arguments", json::object());
@@ -950,6 +978,7 @@ void MCPServer::start() {
                     return;
                 }
 
+                // All other methods go to thread pool (non-blocking for main loop)
                 this->enqueueTask([this, req = request]() mutable {
                     auto response = this->handleRequest(req);
                     if (response) {

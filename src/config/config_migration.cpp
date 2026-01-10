@@ -335,7 +335,6 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
               {"auto_generate", "false"},
               {"auto_on_add", "false"},
               {"preferred_model", "all-MiniLM-L6-v2"},
-              {"model_path", "~/.yams/models"},
               {"tokenizer_path", "models/tokenizer.json"},
               {"max_sequence_length", "512"},
               {"embedding_dim", "384"},

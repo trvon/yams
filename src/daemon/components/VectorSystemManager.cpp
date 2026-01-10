@@ -6,6 +6,7 @@
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/resource/model_provider.h>
+#include <yams/vector/dim_resolver.h>
 #include <yams/vector/vector_database.h>
 
 #include <nlohmann/json.hpp>
@@ -140,6 +141,30 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                 } catch (...) {
                 }
             }
+        }
+    }
+
+    // 5. Fallback: try centralized model name/config lookup for preferred model
+    if (!dim && deps_.resolvePreferredModel) {
+        try {
+            std::string preferred = deps_.resolvePreferredModel();
+            if (!preferred.empty()) {
+                namespace fs = std::filesystem;
+                fs::path modelsDir =
+                    fs::path(cfg.database_path).parent_path() / "models" / preferred;
+                // Try config file first (most accurate)
+                if (auto cfgDim = vector::dimres::dim_from_model_config(modelsDir)) {
+                    dim = *cfgDim;
+                    spdlog::info("[VectorInit] probe: model config dim={} for '{}'", *dim,
+                                 preferred);
+                } else if (auto nameDim = vector::dimres::dim_from_model_name(preferred)) {
+                    // Name-based heuristic (jina, nomic, minilm, etc.)
+                    dim = *nameDim;
+                    spdlog::info("[VectorInit] probe: model name heuristic dim={} for '{}'", *dim,
+                                 preferred);
+                }
+            }
+        } catch (...) {
         }
     }
 

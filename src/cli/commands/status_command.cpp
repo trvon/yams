@@ -1064,8 +1064,9 @@ private:
             } else {
                 vector::VectorDatabaseConfig vdbConfig;
                 vdbConfig.database_path = dbPath.string();
-                // Use a conservative default; existing table schema determines dimension
-                vdbConfig.embedding_dim = 384;
+                // Status should never create tables; set to 0 and disable creation
+                vdbConfig.embedding_dim = 0;
+                vdbConfig.create_if_missing = false;
                 auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
                 if (vectorDb->initialize()) {
                     info.vectorDbHealthy = true;

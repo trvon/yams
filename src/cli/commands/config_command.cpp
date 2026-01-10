@@ -9,6 +9,7 @@
 #include <sstream>
 #include <yams/cli/command.h>
 #include <yams/cli/ui_helpers.hpp>
+#include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
@@ -784,6 +785,18 @@ private:
         // Collect model directories from multiple potential paths
         std::vector<fs::path> searchPaths;
 
+        // Priority 0: core.data_dir from config file (user's configured storage)
+        try {
+            auto configPath = getConfigPath();
+            auto config = parseSimpleToml(configPath);
+            if (config.contains("core.data_dir")) {
+                fs::path dataDir = config["core.data_dir"];
+                searchPaths.emplace_back(dataDir / "models");
+            }
+        } catch (...) {
+            // Ignore config parsing errors, fall through to other paths
+        }
+
         // Priority 1: YAMS_STORAGE environment variable
         if (const char* storage = std::getenv("YAMS_STORAGE")) {
             searchPaths.emplace_back(fs::path(storage) / "models");
@@ -828,16 +841,24 @@ private:
                 return Error{ErrorCode::NotFound, "No embedding models available"};
             }
 
+            // Preserve existing preferred_model if set and valid, otherwise use first available
+            auto config = parseSimpleToml(getConfigPath());
+            std::string preferredModel = config["embeddings.preferred_model"];
+            if (preferredModel.empty() ||
+                std::ranges::find(models, preferredModel) == models.end()) {
+                preferredModel = models[0];
+            }
+
             // Set default configurations for auto-generation
             auto result = setMultipleConfigs({{"embeddings.auto_generate", "true"},
-                                              {"embeddings.preferred_model", models[0]},
+                                              {"embeddings.preferred_model", preferredModel},
                                               {"embeddings.batch_size", "16"},
                                               {"embeddings.generation_delay_ms", "1000"}});
             if (!result)
                 return result;
 
             std::cout << ui::status_ok("Automatic embedding generation enabled") << "\n";
-            std::cout << "  Model: " << models[0] << "\n";
+            std::cout << "  Model: " << preferredModel << "\n";
             std::cout << "  Batch size: 16\n";
             std::cout << "  Processing delay: 1000ms\n\n";
             std::cout << "Documents added with 'yams add' will now automatically\n";
@@ -921,12 +942,37 @@ private:
                 return Error{ErrorCode::NotFound, "Model not available: " + embeddingModel_};
             }
 
-            auto result = writeConfigValue("embeddings.preferred_model", embeddingModel_);
+            // Build config updates: preferred_model + dimension
+            std::vector<std::pair<std::string, std::string>> configs;
+            configs.emplace_back("embeddings.preferred_model", embeddingModel_);
+
+            // Get dimension from model metadata (preferred) or fall back to heuristic
+            std::optional<size_t> dim;
+            fs::path dataDir = cli_->getDataPath();
+            dim = vecutil::getModelDimensionFromMetadata(dataDir, embeddingModel_);
+            if (!dim) {
+                dim = vecutil::getModelDimensionHeuristic(embeddingModel_);
+            }
+
+            // Update dimension configs if we found a dimension
+            if (dim) {
+                std::string dimStr = std::to_string(*dim);
+                configs.emplace_back("embeddings.embedding_dim", dimStr);
+                configs.emplace_back("vector_database.embedding_dim", dimStr);
+                configs.emplace_back("vector_index.dimension", dimStr);
+            }
+
+            auto result = setMultipleConfigs(configs);
             if (!result)
                 return result;
 
             std::cout << ui::status_ok("Preferred embedding model set to: " + embeddingModel_)
                       << "\n";
+
+            // Show dimension info
+            if (dim) {
+                std::cout << "  Embedding dimension updated to: " << *dim << "\n";
+            }
 
             return Result<void>();
 

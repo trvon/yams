@@ -2,6 +2,7 @@
 
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <thread>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/post.hpp>
@@ -58,6 +59,21 @@ void EmbeddingService::shutdown() {
     }
     spdlog::info("EmbeddingService: shutting down (processed={}, failed={}, inFlight={})",
                  processed_.load(), failed_.load(), inFlight_.load());
+
+    // Wait for in-flight jobs to complete with timeout
+    constexpr int kMaxWaitMs = 5000;
+    constexpr int kPollIntervalMs = 50;
+    int waited = 0;
+    while (inFlight_.load() > 0 && waited < kMaxWaitMs) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(kPollIntervalMs));
+        waited += kPollIntervalMs;
+    }
+    if (inFlight_.load() > 0) {
+        spdlog::warn("EmbeddingService: shutdown timeout, {} jobs still in flight",
+                     inFlight_.load());
+    } else {
+        spdlog::info("EmbeddingService: all in-flight jobs completed");
+    }
 }
 
 void EmbeddingService::setProviders(
@@ -122,6 +138,7 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
 }
 
 void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
+    spdlog::debug("[EmbeddingService] processEmbedJob called with {} hashes", job.hashes.size());
     std::shared_ptr<IModelProvider> provider;
     std::string modelName;
     std::shared_ptr<yams::vector::VectorDatabase> vdb;
@@ -132,6 +149,9 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         modelName = getPreferredModel_();
     if (getVectorDatabase_)
         vdb = getVectorDatabase_();
+
+    spdlog::debug("[EmbeddingService] Callbacks: provider={} model='{}' vdb={}",
+                  provider ? "yes" : "no", modelName, vdb ? "yes" : "no");
 
     if (!job.modelName.empty()) {
         modelName = job.modelName;

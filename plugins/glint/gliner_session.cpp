@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <yams/config/config_helpers.h>
 
 #include <algorithm>
 #include <cctype>
@@ -450,18 +451,9 @@ public:
 
         std::vector<fs::path> search_dirs;
 
-        if (const char* data_dir = std::getenv("YAMS_DATA_DIR")) {
-            search_dirs.emplace_back(fs::path(data_dir) / "models" / "gliner");
-        }
-        if (const char* storage = std::getenv("YAMS_STORAGE")) {
-            search_dirs.emplace_back(fs::path(storage) / "models" / "gliner");
-        }
-        if (const char* home = std::getenv("HOME")) {
-            search_dirs.emplace_back(fs::path(home) / ".local" / "share" / "yams" / "models" /
-                                     "gliner");
-        }
-        search_dirs.emplace_back("/Volumes/picaso/yams/models/gliner");
-        search_dirs.emplace_back("/opt/homebrew/share/yams/models/gliner");
+        // Use config helper for platform-aware data directory resolution
+        // This handles YAMS_DATA_DIR, YAMS_STORAGE env vars and XDG/Windows paths
+        search_dirs.emplace_back(yams::config::get_data_dir() / "models" / "gliner");
 
         for (const auto& base_dir : search_dirs) {
             if (!fs::exists(base_dir))

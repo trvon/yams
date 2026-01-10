@@ -2478,6 +2478,13 @@ struct GraphQueryRequest {
     // List-types mode (yams-66h): when true, return available node types with counts
     bool listTypes{false};
 
+    // List-relations mode: when true, return relation type statistics
+    bool listRelations{false};
+
+    // Search mode: search nodes by label pattern (fuzzy/prefix match)
+    bool searchMode{false};
+    std::string searchPattern; // Search pattern for node labels
+
     // Traversal options
     std::vector<std::string> relationFilters; // Empty = all relations
     int32_t maxDepth{1};                      // BFS depth limit (1-4)
@@ -2503,10 +2510,10 @@ struct GraphQueryRequest {
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
         ser << documentHash << documentName << snapshotId << nodeId << listByType << nodeType
-            << nodeKey << listTypes << relationFilters << maxDepth << maxResults
-            << maxResultsPerDepth << reverseTraversal << isolatedMode << isolatedRelation
-            << scopeToSnapshot << offset << limit << includeEdgeProperties << includeNodeProperties
-            << hydrateFully;
+            << nodeKey << listTypes << listRelations << searchMode << searchPattern
+            << relationFilters << maxDepth << maxResults << maxResultsPerDepth << reverseTraversal
+            << isolatedMode << isolatedRelation << scopeToSnapshot << offset << limit
+            << includeEdgeProperties << includeNodeProperties << hydrateFully;
     }
 
     template <typename Deserializer>
@@ -2553,6 +2560,23 @@ struct GraphQueryRequest {
         // yams-66h: listTypes mode
         if (auto r = deser.template read<bool>(); r)
             req.listTypes = r.value();
+        else
+            return r.error();
+
+        // listRelations mode
+        if (auto r = deser.template read<bool>(); r)
+            req.listRelations = r.value();
+        else
+            return r.error();
+
+        // searchMode and searchPattern
+        if (auto r = deser.template read<bool>(); r)
+            req.searchMode = r.value();
+        else
+            return r.error();
+
+        if (auto r = deser.readString(); r)
+            req.searchPattern = std::move(r.value());
         else
             return r.error();
 
@@ -5646,6 +5670,9 @@ struct GraphQueryResponse {
     // yams-66h: Node type counts for --list-types mode
     std::vector<std::pair<std::string, uint64_t>> nodeTypeCounts;
 
+    // Relation type counts for --relations mode
+    std::vector<std::pair<std::string, uint64_t>> relationTypeCounts;
+
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
@@ -5664,6 +5691,11 @@ struct GraphQueryResponse {
         ser << static_cast<uint32_t>(nodeTypeCounts.size());
         for (const auto& [type, count] : nodeTypeCounts) {
             ser << type << count;
+        }
+        // Serialize relation type counts
+        ser << static_cast<uint32_t>(relationTypeCounts.size());
+        for (const auto& [rel, count] : relationTypeCounts) {
+            ser << rel << count;
         }
     }
 
@@ -5749,6 +5781,25 @@ struct GraphQueryResponse {
                 else
                     return r.error();
                 res.nodeTypeCounts.emplace_back(std::move(type), count);
+            }
+        } else
+            return cnt.error();
+
+        // Deserialize relation type counts
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            res.relationTypeCounts.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                std::string rel;
+                uint64_t count{0};
+                if (auto r = deser.readString(); r)
+                    rel = std::move(r.value());
+                else
+                    return r.error();
+                if (auto r = deser.template read<uint64_t>(); r)
+                    count = r.value();
+                else
+                    return r.error();
+                res.relationTypeCounts.emplace_back(std::move(rel), count);
             }
         } else
             return cnt.error();

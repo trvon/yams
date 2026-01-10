@@ -282,46 +282,33 @@ void EmbeddingService::triggerRepairIfNeeded() {
         }
         vector::VectorDatabaseConfig vdbConfig;
         vdbConfig.database_path = (dataPath_ / "vectors.db").string();
-        // Choose a model-aware default for dimension to avoid creating a DB
-        // with an incorrect vec0 schema during health checks.
-        size_t modelAwareDim = 384;
+        // Choose a model-aware default for dimension using centralized lookup
         auto models = getAvailableModels();
-        if (!models.empty()) {
-            std::string pick = models[0];
-            if (const char* pref = std::getenv("YAMS_PREFERRED_MODEL")) {
-                std::string preferred(pref);
-                for (const auto& m : models) {
-                    if (m == preferred) {
-                        pick = m;
-                        break;
-                    }
-                }
-            } else {
-                for (const auto& m : models) {
-                    if (m.find("nomic") != std::string::npos) {
-                        pick = m;
-                        break;
-                    }
-                }
-                for (const auto& m : models) {
-                    if (m == "all-mpnet-base-v2") {
-                        pick = m;
-                        break;
-                    }
-                }
-                for (const auto& m : models) {
-                    if (m == "all-MiniLM-L6-v2") {
-                        pick = m;
-                        break;
-                    }
+        std::string pick = models.empty() ? std::string() : models[0];
+        if (const char* pref = std::getenv("YAMS_PREFERRED_MODEL")) {
+            std::string preferred(pref);
+            for (const auto& m : models) {
+                if (m == preferred) {
+                    pick = m;
+                    break;
                 }
             }
-            if (pick == "all-MiniLM-L6-v2")
-                modelAwareDim = 384;
-            else if (pick == "all-mpnet-base-v2")
-                modelAwareDim = 768;
-            else if (pick.find("nomic") != std::string::npos)
-                modelAwareDim = 768;
+        }
+        // Use centralized dimension lookup - sentinel -> model name -> model config
+        size_t modelAwareDim = 0;
+        if (auto sentinelDim = dimres::read_dim_from_sentinel(dataPath_)) {
+            modelAwareDim = *sentinelDim;
+        } else if (!pick.empty()) {
+            fs::path modelDir = dataPath_ / "models" / pick;
+            if (auto cfgDim = dimres::dim_from_model_config(modelDir)) {
+                modelAwareDim = *cfgDim;
+            } else if (auto nameDim = dimres::dim_from_model_name(pick)) {
+                modelAwareDim = *nameDim;
+            }
+        }
+        if (modelAwareDim == 0) {
+            spdlog::debug("triggerRepairIfNeeded: cannot determine dimension; skipping");
+            return;
         }
         vdbConfig.embedding_dim = modelAwareDim;
 
@@ -391,48 +378,29 @@ void EmbeddingService::runRepair(yams::compat::stop_token stopToken) {
         // Initialize vector DB (create on first use if missing)
         vector::VectorDatabaseConfig vdbConfig;
         vdbConfig.database_path = (dataPath_ / "vectors.db").string();
-        // Determine embedding dimension: config -> sentinel -> generator/model heuristic
-        size_t heuristicDim = 384;
-        {
-            auto models = getAvailableModels();
-            std::string pick = models.empty() ? std::string() : models[0];
-            if (const char* pref = std::getenv("YAMS_PREFERRED_MODEL")) {
-                std::string preferred(pref);
-                for (const auto& m : models) {
-                    if (m == preferred) {
-                        pick = m;
-                        break;
-                    }
-                }
-            } else {
-                for (const auto& m : models) {
-                    if (m.find("nomic") != std::string::npos) {
-                        pick = m;
-                        break;
-                    }
-                }
-                for (const auto& m : models) {
-                    if (m == "all-mpnet-base-v2") {
-                        pick = m;
-                        break;
-                    }
-                }
-                for (const auto& m : models) {
-                    if (m == "all-MiniLM-L6-v2") {
-                        pick = m;
-                        break;
-                    }
+        // Determine embedding dimension using centralized lookup
+        auto models = getAvailableModels();
+        std::string pick = models.empty() ? std::string() : models[0];
+        if (const char* pref = std::getenv("YAMS_PREFERRED_MODEL")) {
+            std::string preferred(pref);
+            for (const auto& m : models) {
+                if (m == preferred) {
+                    pick = m;
+                    break;
                 }
             }
-            if (pick == "all-MiniLM-L6-v2")
-                heuristicDim = 384;
-            else if (pick == "all-mpnet-base-v2")
-                heuristicDim = 768;
-            else if (!pick.empty() and pick.find("nomic") != std::string::npos)
-                heuristicDim = 768;
         }
-        // Prefer existing DB dimension when present to avoid mismatches during repair
-        size_t repairDim = yams::vector::dimres::resolve_dim(dataPath_, heuristicDim, 384);
+        size_t heuristicDim = 0;
+        if (!pick.empty()) {
+            fs::path modelDir = dataPath_ / "models" / pick;
+            if (auto cfgDim = dimres::dim_from_model_config(modelDir)) {
+                heuristicDim = *cfgDim;
+            } else if (auto nameDim = dimres::dim_from_model_name(pick)) {
+                heuristicDim = *nameDim;
+            }
+        }
+        // Prefer existing DB/sentinel dimension when present
+        size_t repairDim = dimres::resolve_dim(dataPath_, heuristicDim, heuristicDim);
         try {
             vector::VectorDatabaseConfig probeCfg;
             probeCfg.database_path = (dataPath_ / "vectors.db").string();
@@ -589,19 +557,33 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
 
         fs::path modelsPath = dataPath_ / "models";
 
-        // Resolve target vector DB dimension first to steer model selection if needed
+        // Get dimension from sentinel or probe existing DB
         size_t targetDbDim = 0;
-        try {
-            vector::VectorDatabaseConfig probeCfg;
-            probeCfg.database_path = (dataPath_ / "vectors.db").string();
-            probeCfg.embedding_dim = 384; // provisional
-            probeCfg.create_if_missing = false;
-            auto probeDb = std::make_unique<vector::VectorDatabase>(probeCfg);
-            if (probeDb->initialize()) {
-                targetDbDim = probeDb->getConfig().embedding_dim;
+        if (auto sentinelDim = dimres::read_dim_from_sentinel(dataPath_)) {
+            targetDbDim = *sentinelDim;
+        } else {
+            try {
+                vector::VectorDatabaseConfig probeCfg;
+                probeCfg.database_path = (dataPath_ / "vectors.db").string();
+                probeCfg.embedding_dim = 768; // provisional for probe only
+                probeCfg.create_if_missing = false;
+                auto probeDb = std::make_unique<vector::VectorDatabase>(probeCfg);
+                if (probeDb->initialize()) {
+                    targetDbDim = probeDb->getConfig().embedding_dim;
+                }
+            } catch (...) {
             }
-        } catch (...) {
         }
+
+        // Get model dimension using centralized lookup
+        auto modelDim = [&](const std::string& name) -> size_t {
+            fs::path modelDir = modelsPath / name;
+            if (auto cfgDim = dimres::dim_from_model_config(modelDir))
+                return *cfgDim;
+            if (auto nameDim = dimres::dim_from_model_name(name))
+                return *nameDim;
+            return 0; // Unknown
+        };
 
         // If DB exists (targetDbDim>0), prefer a model that matches DB dim to avoid mismatches
         if (targetDbDim > 0) {
@@ -609,28 +591,21 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                 std::error_code ec;
                 return fs::exists(modelsPath / name / "model.onnx", ec);
             };
-            auto modelDim = [&](const std::string& name) -> size_t {
-                if (name == "all-MiniLM-L6-v2" || name.find("MiniLM") != std::string::npos)
-                    return 384;
-                if (name.find("nomic") != std::string::npos || name == "all-mpnet-base-v2")
-                    return 768;
-                // default heuristic when unknown
-                return 384;
-            };
             size_t selDim = modelDim(selectedModel);
-            if (selDim != targetDbDim) {
+            if (selDim != targetDbDim && selDim > 0) {
                 // Attempt to switch to a matching model if available
-                if (targetDbDim == 384 && hasModel("all-MiniLM-L6-v2")) {
-                    spdlog::warn("EmbeddingService: switching model '{}' -> 'all-MiniLM-L6-v2' to "
-                                 "match DB dim {}",
-                                 selectedModel, targetDbDim);
-                    selectedModel = "all-MiniLM-L6-v2";
-                } else if (targetDbDim == 768 && hasModel("all-mpnet-base-v2")) {
-                    spdlog::warn("EmbeddingService: switching model '{}' -> 'all-mpnet-base-v2' to "
-                                 "match DB dim {}",
-                                 selectedModel, targetDbDim);
-                    selectedModel = "all-mpnet-base-v2";
-                } else {
+                bool switched = false;
+                for (const auto& m : availableModels) {
+                    if (modelDim(m) == targetDbDim && hasModel(m)) {
+                        spdlog::warn(
+                            "EmbeddingService: switching model '{}' -> '{}' to match DB dim {}",
+                            selectedModel, m, targetDbDim);
+                        selectedModel = m;
+                        switched = true;
+                        break;
+                    }
+                }
+                if (!switched) {
                     spdlog::warn("EmbeddingService: selected model '{}' (dim={}) does not match DB "
                                  "dim {} and no matching model found; repair may fail",
                                  selectedModel, selDim, targetDbDim);
@@ -642,15 +617,9 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
         embConfig.model_path = (modelsPath / selectedModel / "model.onnx").string();
         embConfig.model_name = selectedModel;
 
-        // Set provisional dimensions based on common defaults; will be overridden after init
-        if (selectedModel == "all-MiniLM-L6-v2")
-            embConfig.embedding_dim = 384;
-        else if (selectedModel == "all-mpnet-base-v2")
-            embConfig.embedding_dim = 768;
-        else if (selectedModel.find("nomic") != std::string::npos)
-            embConfig.embedding_dim = 768;
-        else
-            embConfig.embedding_dim = 384; // Fallback
+        // Set provisional dimensions using centralized lookup
+        size_t provDim = modelDim(selectedModel);
+        embConfig.embedding_dim = provDim > 0 ? provDim : targetDbDim;
 
         // Backend selection override via environment or special model name
         if (const char* be = std::getenv("YAMS_EMBED_BACKEND")) {

@@ -82,6 +82,13 @@ public:
         // yams-66h: List available node types with counts
         cmd->add_flag("--list-types", listTypes_, "List available node types with counts");
 
+        // yams-kt5t: List relation types with counts
+        cmd->add_flag("--relations", listRelations_, "List available relation types with counts");
+
+        // yams-kt5t: Search nodes by label pattern
+        cmd->add_option("--search", searchPattern_,
+                        "Search nodes by label pattern (supports * and ? wildcards)");
+
         cmd->callback([this]() { cli_->setPendingCommand(this); });
     }
 
@@ -94,6 +101,16 @@ public:
             // yams-66h: Handle --list-types mode (show available node types)
             if (listTypes_) {
                 co_return co_await executeListTypes();
+            }
+
+            // yams-kt5t: Handle --relations mode (show relation types with counts)
+            if (listRelations_) {
+                co_return co_await executeListRelations();
+            }
+
+            // yams-kt5t: Handle --search mode (search nodes by label pattern)
+            if (!searchPattern_.empty()) {
+                co_return co_await executeSearch();
             }
 
             if (deadCodeReport_) {
@@ -189,6 +206,186 @@ private:
                           << "\n";
                 std::cout << "\nUsage: yams graph --list-type <type> to view nodes of a type\n";
             }
+        }
+
+        co_return Result<void>();
+    }
+
+    // yams-kt5t: List relation types with counts
+    boost::asio::awaitable<Result<void>> executeListRelations() {
+        using namespace yams::daemon;
+
+        ClientConfig cfg;
+        if (cli_ && cli_->hasExplicitDataDir()) {
+            cfg.dataDir = cli_->getDataPath();
+        }
+        cfg.requestTimeout = std::chrono::milliseconds(60000);
+
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        if (!leaseRes) {
+            co_return leaseRes.error();
+        }
+        auto leaseHandle = std::move(leaseRes.value());
+        auto& client = **leaseHandle;
+
+        // Build GraphQueryRequest with listRelations mode
+        GraphQueryRequest req;
+        req.listRelations = true;
+
+        auto r = co_await client.call(req);
+        if (!r) {
+            std::cerr << "Graph query error: " << r.error().message << "\n";
+            co_return r.error();
+        }
+
+        const auto& resp = r.value();
+
+        if (!resp.kgAvailable) {
+            std::cout << yams::cli::ui::status_error("Knowledge graph not available") << "\n";
+            co_return Result<void>();
+        }
+
+        if (jsonOutput_ || outputFormat_ == "json") {
+            json out;
+            out["totalRelations"] = resp.relationTypeCounts.size();
+            json relations = json::array();
+            for (const auto& [relation, count] : resp.relationTypeCounts) {
+                relations.push_back({{"relation", relation}, {"count", count}});
+            }
+            out["relationTypes"] = relations;
+            std::cout << out.dump(2) << "\n";
+        } else {
+            std::cout << yams::cli::ui::section_header("Available Relation Types") << "\n\n";
+
+            if (resp.relationTypeCounts.empty()) {
+                std::cout << yams::cli::ui::status_info("No relations found in knowledge graph")
+                          << "\n";
+                std::cout << "\nHint: Add files with 'yams add <path>' to populate the graph.\n";
+            } else {
+                // Build table
+                yams::cli::ui::Table table;
+                table.headers = {"RELATION", "COUNT"};
+                table.has_header = true;
+
+                uint64_t totalEdges = 0;
+                for (const auto& [relation, count] : resp.relationTypeCounts) {
+                    table.add_row({relation, yams::cli::ui::format_number(count)});
+                    totalEdges += count;
+                }
+
+                yams::cli::ui::render_table(std::cout, table);
+
+                std::cout << "\n"
+                          << yams::cli::ui::status_info(
+                                 "Total: " + yams::cli::ui::format_number(totalEdges) +
+                                 " edges across " + std::to_string(resp.relationTypeCounts.size()) +
+                                 " relation types")
+                          << "\n";
+                std::cout
+                    << "\nUsage: yams graph --node-key <key> -r <relation> to filter by relation\n";
+            }
+        }
+
+        co_return Result<void>();
+    }
+
+    // yams-kt5t: Search nodes by label pattern
+    boost::asio::awaitable<Result<void>> executeSearch() {
+        using namespace yams::daemon;
+
+        ClientConfig cfg;
+        if (cli_ && cli_->hasExplicitDataDir()) {
+            cfg.dataDir = cli_->getDataPath();
+        }
+        cfg.requestTimeout = std::chrono::milliseconds(60000);
+
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        if (!leaseRes) {
+            co_return leaseRes.error();
+        }
+        auto leaseHandle = std::move(leaseRes.value());
+        auto& client = **leaseHandle;
+
+        // Build GraphQueryRequest with search mode
+        GraphQueryRequest req;
+        req.searchMode = true;
+        req.searchPattern = searchPattern_;
+        req.limit = static_cast<uint32_t>(limit_);
+        req.offset = static_cast<uint32_t>(offset_);
+        req.includeNodeProperties = verbose_;
+
+        auto r = co_await client.call(req);
+        if (!r) {
+            std::cerr << "Graph search error: " << r.error().message << "\n";
+            co_return r.error();
+        }
+
+        const auto& resp = r.value();
+
+        if (!resp.kgAvailable) {
+            std::cout << yams::cli::ui::status_error("Knowledge graph not available") << "\n";
+            co_return Result<void>();
+        }
+
+        if (jsonOutput_ || outputFormat_ == "json") {
+            json out;
+            out["pattern"] = searchPattern_;
+            out["limit"] = limit_;
+            out["offset"] = offset_;
+            out["totalNodesFound"] = resp.totalNodesFound;
+            out["truncated"] = resp.truncated;
+
+            json jsonNodes = json::array();
+            for (const auto& node : resp.connectedNodes) {
+                json n;
+                n["nodeId"] = node.nodeId;
+                n["nodeKey"] = node.nodeKey;
+                n["label"] = node.label;
+                n["type"] = node.type;
+                if (!node.documentHash.empty()) {
+                    n["documentHash"] = node.documentHash;
+                }
+                if (!node.properties.empty()) {
+                    try {
+                        n["properties"] = json::parse(node.properties);
+                    } catch (...) {
+                        n["properties"] = node.properties;
+                    }
+                }
+                jsonNodes.push_back(n);
+            }
+            out["nodes"] = jsonNodes;
+            std::cout << out.dump(2) << "\n";
+        } else {
+            std::cout << yams::cli::ui::section_header("Search: " + searchPattern_) << "\n\n";
+
+            std::string summary = "Found " + yams::cli::ui::format_number(resp.totalNodesFound) +
+                                  " matching node" + (resp.totalNodesFound != 1 ? "s" : "");
+            std::cout << yams::cli::ui::status_info(summary) << "\n";
+            std::cout << "Showing: " << resp.connectedNodes.size() << " (offset " << offset_
+                      << ", limit " << limit_ << ")\n\n";
+
+            if (!resp.connectedNodes.empty()) {
+                yams::cli::ui::Table table;
+                table.headers = {"ID", "TYPE", "LABEL", "KEY"};
+                table.has_header = true;
+
+                for (const auto& node : resp.connectedNodes) {
+                    table.add_row({std::to_string(node.nodeId), node.type.empty() ? "-" : node.type,
+                                   yams::cli::ui::truncate_to_width(node.label, 35),
+                                   yams::cli::ui::truncate_to_width(node.nodeKey, 40)});
+                }
+                yams::cli::ui::render_table(std::cout, table);
+            }
+
+            if (resp.truncated) {
+                std::cout << "\n"
+                          << yams::cli::ui::status_warning(
+                                 "Results truncated. Use --limit and --offset for pagination.")
+                          << "\n";
+            }
+
+            std::cout << "\nHint: Use wildcards in pattern: * (any chars), ? (single char)\n";
         }
 
         co_return Result<void>();
@@ -1051,6 +1248,8 @@ private:
     bool showIsolated_{false};
     bool deadCodeReport_{false};
     bool listTypes_{false};
+    bool listRelations_{false};
+    std::string searchPattern_;
     bool scopeToCwd_{false};
 };
 

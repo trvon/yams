@@ -3,6 +3,7 @@
 #include <yams/core/types.h>
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -178,11 +179,28 @@ struct SymbolMetadata {
  */
 class KnowledgeGraphStore {
 public:
+    class WriteBatch {
+    public:
+        virtual ~WriteBatch() = default;
+        virtual Result<std::int64_t> upsertNode(const KGNode& node) = 0;
+        virtual Result<std::vector<std::int64_t>> upsertNodes(const std::vector<KGNode>& nodes) = 0;
+        virtual Result<std::int64_t> addEdge(const KGEdge& edge) = 0;
+        virtual Result<void> addEdgesUnique(const std::vector<KGEdge>& edges) = 0;
+        virtual Result<void> addAliases(const std::vector<KGAlias>& aliases) = 0;
+        virtual Result<void> addDocEntities(const std::vector<DocEntity>& entities) = 0;
+        virtual Result<void> deleteDocEntitiesForDocument(std::int64_t documentId) = 0;
+        virtual Result<std::int64_t> deleteEdgesForSourceFile(std::string_view filePath) = 0;
+        virtual Result<void> upsertSymbolMetadata(const std::vector<SymbolMetadata>& symbols) = 0;
+        virtual Result<void> commit() = 0;
+    };
+
     virtual ~KnowledgeGraphStore() = default;
 
     // Configuration
     virtual void setConfig(const KnowledgeGraphStoreConfig& cfg) = 0;
     virtual const KnowledgeGraphStoreConfig& getConfig() const = 0;
+
+    virtual Result<std::unique_ptr<WriteBatch>> beginWriteBatch() = 0;
 
     // -----------------------------------------------------------------------------
     // Nodes
@@ -368,6 +386,17 @@ public:
     // Get all distinct node types with their counts, ordered by count descending.
     // Used for node type discovery in CLI (e.g., `yams graph --list-types`).
     virtual Result<std::vector<std::pair<std::string, std::size_t>>> getNodeTypeCounts() = 0;
+
+    // Get all distinct relation types with their counts, ordered by count descending.
+    // Used for relation type discovery in CLI (e.g., `yams graph --relations`).
+    virtual Result<std::vector<std::pair<std::string, std::size_t>>> getRelationTypeCounts() = 0;
+
+    // Search nodes by label using LIKE pattern matching.
+    // Pattern uses SQL LIKE wildcards: % for any sequence, _ for single char.
+    // Returns nodes with labels matching the pattern.
+    virtual Result<std::vector<KGNode>> searchNodesByLabel(std::string_view pattern,
+                                                           std::size_t limit = 100,
+                                                           std::size_t offset = 0) = 0;
 
     // -----------------------------------------------------------------------------
     // Statistics

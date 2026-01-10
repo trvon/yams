@@ -17,7 +17,7 @@ SearchTuner::SearchTuner(const storage::CorpusStats& stats) : stats_(stats) {
 SearchEngineConfig SearchTuner::getConfig() const {
     SearchEngineConfig config;
 
-    // Apply tuned weights
+    // Apply tuned weights (includes fusion strategy)
     params_.applyTo(config);
 
     // Set corpus profile to CUSTOM since we're using tuned params
@@ -26,8 +26,8 @@ SearchEngineConfig SearchTuner::getConfig() const {
     // Enable profiling for observability
     config.enableProfiling = false;
 
-    // Use weighted RRF fusion (best for multi-component search)
-    config.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL;
+    // fusionStrategy is set by params_.applyTo() based on corpus type
+    // (e.g., TEXT_ANCHOR for SCIENTIFIC corpora, COMB_MNZ for others)
 
     return config;
 }

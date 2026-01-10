@@ -41,7 +41,15 @@ DimensionResolution resolveEmbeddingDimension(YamsCLI* cli, const std::filesyste
 /// @return Dimension if found, nullopt otherwise
 std::optional<size_t> getDimensionFromDb(const std::filesystem::path& dbPath);
 
+/// Get model dimension from model metadata files (config.json, sentence_bert_config.json, etc.)
+/// @param dataDir The data directory containing models/
+/// @param modelName The model name
+/// @return Dimension if found in metadata, nullopt otherwise
+std::optional<size_t> getModelDimensionFromMetadata(const std::filesystem::path& dataDir,
+                                                    const std::string& modelName);
+
 /// Get model dimension by name heuristic (MiniLM -> 384, nomic/mpnet -> 768, etc.)
+/// Use getModelDimensionFromMetadata first when data directory is available.
 /// @param modelName The model name
 /// @return Dimension if recognized, nullopt otherwise
 std::optional<size_t> getModelDimensionHeuristic(const std::string& modelName);

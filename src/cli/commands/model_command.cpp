@@ -52,7 +52,10 @@ static const std::vector<ModelInfo> AVAILABLE_MODELS = {
      "Lightweight 384-dim embeddings for semantic search", 90, "embedding"},
     {"all-mpnet-base-v2",
      "https://huggingface.co/sentence-transformers/all-mpnet-base-v2/resolve/main/onnx/model.onnx",
-     "High-quality 768-dim embeddings", 420, "embedding"}
+     "High-quality 768-dim embeddings", 420, "embedding"},
+    {"jina-embeddings-v2-base-code",
+     "https://huggingface.co/jinaai/jina-embeddings-v2-base-code/resolve/main/onnx/model.onnx",
+     "Code-aware 768-dim embeddings for 30+ programming languages", 550, "embedding"}
     // Note: Nomic ONNX embedding model is currently not recommended due to provider limitations
     // (no batch embeddings/preload). You can still download via --hf or --url manually.
 };

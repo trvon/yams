@@ -312,6 +312,28 @@ else
       cpp_args: ['-DYAMS_TESTING=1'],
       install: false,
     )
+
+    # HNSW Retrieval Diagnostic - tests vector search quality with known corpus
+    hnsw_retrieval_diagnostic_srcs = files(
+      '../vector/hnsw_retrieval_diagnostic.cpp',
+    )
+
+    hnsw_retrieval_diagnostic_exe = executable('hnsw_retrieval_diagnostic',
+      hnsw_retrieval_diagnostic_srcs,
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
+      cpp_args: ['-DYAMS_TESTING=1'],
+      install: false,
+    )
+
+    test('hnsw_retrieval_diagnostic',
+      hnsw_retrieval_diagnostic_exe,
+      suite: ['integration', 'daemon', 'catch2', 'hnsw', 'vector', 'diagnostic'],
+      env: _kg_test_env,
+      is_parallel: false,
+      timeout: 300,  # 5 minutes for embedding generation
+      args: ['--allow-running-no-tests'],
+    )
   else
     message('daemon_socket_client test disabled (enable with -Denable-daemon-integration=true).')
   endif

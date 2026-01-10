@@ -318,14 +318,23 @@ AbiModelProviderAdapter::getEmbeddingGenerator(const std::string& modelName) {
 
     std::string model = modelName.empty() ? "all-MiniLM-L6-v2" : modelName;
 
-    // Get dimension from our provider
-    size_t dim = 384; // Default for MiniLM
+    // Get dimension from our provider - DO NOT use hardcoded fallback
+    // to avoid dimension mismatch when user switches models
+    size_t dim = 0;
     if (table_ && table_->get_embedding_dim) {
         size_t pluginDim = 0;
         if (table_->get_embedding_dim(table_->self, model.c_str(), &pluginDim) == YAMS_OK &&
             pluginDim > 0) {
             dim = pluginDim;
         }
+    }
+
+    // If we can't get the dimension, fail early rather than using wrong default
+    if (dim == 0) {
+        spdlog::warn("[AbiModelProviderAdapter] Cannot determine embedding dimension for '{}' - "
+                     "model may not be loaded yet",
+                     model);
+        return nullptr;
     }
 
     // Create our custom backend that wraps this IModelProvider

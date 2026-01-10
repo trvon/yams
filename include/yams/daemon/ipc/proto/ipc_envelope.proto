@@ -805,6 +805,9 @@ message GraphQueryRequest {
   string node_type = 6;
   string node_key = 7;
   bool list_types = 18;  // yams-66h: List available node types with counts
+  bool list_relations = 22;  // yams-kt5t: List relation types with counts
+  bool search_mode = 23;  // yams-kt5t: Search nodes by label pattern
+  string search_pattern = 24;  // yams-kt5t: Pattern for search mode
   repeated string relation_filters = 8;
   int32 max_depth = 9;
   uint32 max_results = 10;
@@ -822,6 +825,12 @@ message GraphQueryRequest {
 
 message NodeTypeCount {
   string type = 1;
+  uint64 count = 2;
+}
+
+// yams-kt5t: Relation type count for --relations flag
+message RelationTypeCount {
+  string relation = 1;
   uint64 count = 2;
 }
 
@@ -846,6 +855,7 @@ message GraphQueryResponse {
   string warning = 9;
   repeated NodeTypeCount node_type_counts = 10;  // yams-66h: Node type counts for --list-types
   repeated GraphEdge edges = 11;
+  repeated RelationTypeCount relation_type_counts = 12;  // yams-kt5t: Relation type counts
 }
 
 message GraphPathHistoryRequest {

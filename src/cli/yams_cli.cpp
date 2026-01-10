@@ -18,6 +18,7 @@
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/embedding_service.h>
 #include <yams/vector/sqlite_vec_backend.h>
+#include <yams/vector/dim_resolver.h>
 #include <yams/vector/vector_database.h>
 #include <yams/version.hpp>
 // Error hints for actionable error messages
@@ -741,7 +742,7 @@ Result<void> YamsCLI::initializeStorage() {
         // Initialize vector support (dimension detection, embedding generator, vector database)
         try {
             // Try to detect proper dimension from existing vectors or available models
-            size_t vectorDimension = 384; // Safe default
+            size_t vectorDimension = 0; // 0 means "not yet determined"
 
             // First, check if vectors.db exists and read stored dimension directly
             fs::path vectorDbPath = dataPath_ / "vectors.db";
@@ -761,8 +762,8 @@ Result<void> YamsCLI::initializeStorage() {
                 }
             }
 
-            // If no stored dim was found, prefer config > env > generator > heuristic
-            if (vectorDimension == 384) {
+            // If no stored dim was found, prefer config > env > generator > model heuristic
+            if (vectorDimension == 0) {
                 try {
                     auto cfgPath = getConfigPath();
                     if (fs::exists(cfgPath)) {
@@ -777,42 +778,91 @@ Result<void> YamsCLI::initializeStorage() {
                     }
                 } catch (...) {
                 }
-                if (vectorDimension == 384) {
-                    if (const char* envd = std::getenv("YAMS_EMBED_DIM")) {
-                        try {
-                            vectorDimension = static_cast<size_t>(std::stoul(envd));
-                        } catch (...) {
-                        }
-                    }
-                }
-                if (vectorDimension == 384) {
+            }
+            if (vectorDimension == 0) {
+                if (const char* envd = std::getenv("YAMS_EMBED_DIM")) {
                     try {
-                        if (auto emb = getEmbeddingGenerator()) {
-                            auto d = emb->getEmbeddingDimension();
-                            if (d > 0)
-                                vectorDimension = d;
-                        }
+                        vectorDimension = static_cast<size_t>(std::stoul(envd));
                     } catch (...) {
                     }
                 }
-                // Heuristic remains 384
+            }
+            if (vectorDimension == 0) {
+                try {
+                    if (auto emb = getEmbeddingGenerator()) {
+                        auto d = emb->getEmbeddingDimension();
+                        if (d > 0)
+                            vectorDimension = d;
+                    }
+                } catch (...) {
+                }
             }
 
-            // Second, detect dimension from available models
+            // If still unknown, detect from preferred model or available models
             fs::path modelsPath = dataPath_ / "models";
-            if (fs::exists(modelsPath)) {
-                // Check for specific models in priority order
-                if (fs::exists(modelsPath / "all-MiniLM-L6-v2" / "model.onnx")) {
-                    vectorDimension = 384;
-                    if (verbose_) {
-                        spdlog::info("Detected all-MiniLM-L6-v2 model, using 384 dimensions");
+            if (vectorDimension == 0 && fs::exists(modelsPath)) {
+                // Check preferred model first
+                std::string preferredModel;
+                try {
+                    auto cfgPath = getConfigPath();
+                    if (fs::exists(cfgPath)) {
+                        auto cfg = parseSimpleToml(cfgPath);
+                        auto it = cfg.find("embeddings.preferred_model");
+                        if (it != cfg.end() && !it->second.empty())
+                            preferredModel = it->second;
                     }
-                } else if (fs::exists(modelsPath / "all-mpnet-base-v2" / "model.onnx")) {
-                    vectorDimension = 768;
-                    if (verbose_) {
-                        spdlog::info("Detected all-mpnet-base-v2 model, using 768 dimensions");
+                } catch (...) {
+                }
+                if (preferredModel.empty()) {
+                    if (const char* p = std::getenv("YAMS_PREFERRED_MODEL"))
+                        preferredModel = p;
+                }
+
+                // Try preferred model dimension from config.json or name heuristic
+                if (!preferredModel.empty() && fs::exists(modelsPath / preferredModel)) {
+                    if (auto cfgDim =
+                            vector::dimres::dim_from_model_config(modelsPath / preferredModel)) {
+                        vectorDimension = *cfgDim;
+                        if (verbose_)
+                            spdlog::info("Detected {} model from config, using {} dimensions",
+                                         preferredModel, vectorDimension);
+                    } else if (auto nameDim = vector::dimres::dim_from_model_name(preferredModel)) {
+                        vectorDimension = *nameDim;
+                        if (verbose_)
+                            spdlog::info("Detected {} model from name, using {} dimensions",
+                                         preferredModel, vectorDimension);
                     }
                 }
+
+                // Fallback: scan for any model with known dimension
+                if (vectorDimension == 0) {
+                    for (const auto& e : fs::directory_iterator(modelsPath)) {
+                        if (!e.is_directory() || !fs::exists(e.path() / "model.onnx"))
+                            continue;
+                        std::string modelName = e.path().filename().string();
+                        if (auto cfgDim = vector::dimres::dim_from_model_config(e.path())) {
+                            vectorDimension = *cfgDim;
+                            if (verbose_)
+                                spdlog::info("Detected {} model from config, using {} dimensions",
+                                             modelName, vectorDimension);
+                            break;
+                        } else if (auto nameDim = vector::dimres::dim_from_model_name(modelName)) {
+                            vectorDimension = *nameDim;
+                            if (verbose_)
+                                spdlog::info("Detected {} model from name, using {} dimensions",
+                                             modelName, vectorDimension);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Track whether we're using a fallback dimension
+            bool usingFallbackDimension = false;
+            if (vectorDimension == 0) {
+                vectorDimension = 384;
+                usingFallbackDimension = true;
+                spdlog::debug("Using fallback embedding dimension: 384 (will not create DB)");
             }
 
             // Initialize EmbeddingGenerator if models are available
@@ -870,15 +920,18 @@ Result<void> YamsCLI::initializeStorage() {
                         embConfig.model_path = (modelsPath / selectedModel / "model.onnx").string();
                         embConfig.model_name = selectedModel;
                         embConfig.batch_size = 32;
-                        // Provisional defaults (overridden at init by backend-reported)
-                        if (selectedModel.find("MiniLM") != std::string::npos)
-                            embConfig.embedding_dim = 384;
-                        else if (selectedModel.find("mpnet") != std::string::npos)
-                            embConfig.embedding_dim = 768;
-                        else if (selectedModel.find("nomic") != std::string::npos)
-                            embConfig.embedding_dim = 768;
-                        else
-                            embConfig.embedding_dim = 384;
+                        // Use centralized dimension detection: config.json -> model name ->
+                        // fallback
+                        if (auto cfgDim =
+                                vector::dimres::dim_from_model_config(modelsPath / selectedModel)) {
+                            embConfig.embedding_dim = *cfgDim;
+                        } else if (auto nameDim =
+                                       vector::dimres::dim_from_model_name(selectedModel)) {
+                            embConfig.embedding_dim = *nameDim;
+                        } else {
+                            embConfig.embedding_dim =
+                                vectorDimension; // Use already-resolved dimension
+                        }
                         embConfig.max_sequence_length = 512;
                         embConfig.normalize_embeddings = true;
 
@@ -908,10 +961,13 @@ Result<void> YamsCLI::initializeStorage() {
             }
 
             // Initialize vector database proactively using resolved dimension to avoid warnings
+            // Do NOT create DB when using fallback dimension - let daemon create with correct dim
             try {
                 vector::VectorDatabaseConfig vdbConfig;
                 vdbConfig.database_path = (dataPath_ / "vectors.db").string();
                 vdbConfig.embedding_dim = vectorDimension;
+                // Only allow creation if we have a properly resolved dimension
+                vdbConfig.create_if_missing = !usingFallbackDimension;
 
                 auto vectorDb = std::make_shared<vector::VectorDatabase>(vdbConfig);
                 if (vectorDb->initialize()) {

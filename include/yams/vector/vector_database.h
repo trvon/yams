@@ -30,7 +30,7 @@ enum class EntityEmbeddingType {
 struct VectorDatabaseConfig {
     std::string database_path = "vectors.db"; // SQLite database path
     std::string table_name = "document_embeddings";
-    size_t embedding_dim = 384; // all-MiniLM-L6-v2 dimensions
+    size_t embedding_dim = 0; // Must be set explicitly - no default to prevent dimension bugs
     // Create the database file and required tables if missing.
     // Default true to satisfy unit/integration tests that expect automatic
     // creation on first use. Daemon code may override this to false when it

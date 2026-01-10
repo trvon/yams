@@ -203,8 +203,20 @@ bool EntityGraphService::populateKnowledgeGraph(
     }
 
     try {
+        // Create a write batch for reduced transaction overhead
+        auto batchRes = kg->beginWriteBatch();
+        if (!batchRes) {
+            spdlog::warn("EntityGraphService: failed to begin write batch: {}",
+                         batchRes.error().message);
+            return false;
+        }
+        auto batch = std::move(batchRes.value());
+
+        // Per-job cache to avoid redundant node key lookups
+        ExtractionCache cache;
+
         std::optional<std::int64_t> documentDbId;
-        auto contextNodesRes = resolveContextNodes(kg, job, documentDbId);
+        auto contextNodesRes = resolveContextNodes(kg, batch.get(), cache, job, documentDbId);
         if (!contextNodesRes) {
             spdlog::warn("EntityGraphService: failed to resolve context nodes: {}",
                          contextNodesRes.error().message);
@@ -212,7 +224,7 @@ bool EntityGraphService::populateKnowledgeGraph(
         }
         auto& contextNodes = contextNodesRes.value();
 
-        auto symbolNodesRes = createSymbolNodes(kg, job, result);
+        auto symbolNodesRes = createSymbolNodes(kg, batch.get(), cache, job, result);
         if (!symbolNodesRes) {
             spdlog::warn("EntityGraphService: failed to create symbol nodes: {}",
                          symbolNodesRes.error().message);
@@ -220,7 +232,8 @@ bool EntityGraphService::populateKnowledgeGraph(
         }
         auto& symbolNodes = symbolNodesRes.value();
 
-        auto edgesRes = createSymbolEdges(kg, job, result, contextNodes, symbolNodes);
+        auto edgesRes =
+            createSymbolEdges(kg, batch.get(), cache, job, result, contextNodes, symbolNodes);
         if (!edgesRes) {
             spdlog::warn("EntityGraphService: failed to create symbol edges: {}",
                          edgesRes.error().message);
@@ -228,14 +241,23 @@ bool EntityGraphService::populateKnowledgeGraph(
         }
 
         auto docEntitiesRes =
-            createDocEntities(kg, documentDbId, result, symbolNodes.versionNodeIds);
+            createDocEntities(batch.get(), documentDbId, result, symbolNodes.versionNodeIds);
         if (!docEntitiesRes) {
             spdlog::warn("EntityGraphService: failed to create doc entities: {}",
                          docEntitiesRes.error().message);
             // Non-fatal
         }
 
+        // Commit the batch
+        auto commitRes = batch->commit();
+        if (!commitRes) {
+            spdlog::warn("EntityGraphService: failed to commit write batch: {}",
+                         commitRes.error().message);
+            return false;
+        }
+
         // Generate entity embeddings for semantic symbol search (non-blocking)
+        // Note: this runs outside the batch since it may involve model inference
         auto embeddingsRes = generateEntityEmbeddings(job, result, symbolNodes);
         if (!embeddingsRes) {
             spdlog::debug("EntityGraphService: entity embeddings skipped or failed: {}",
@@ -254,8 +276,8 @@ bool EntityGraphService::populateKnowledgeGraph(
 }
 
 yams::Result<EntityGraphService::ContextNodes> EntityGraphService::resolveContextNodes(
-    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg, const Job& job,
-    std::optional<std::int64_t>& documentDbId) {
+    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg, WriteBatch* batch,
+    ExtractionCache& cache, const Job& job, std::optional<std::int64_t>& documentDbId) {
     ContextNodes contextNodes;
 
     if (!job.documentHash.empty()) {
@@ -273,9 +295,10 @@ yams::Result<EntityGraphService::ContextNodes> EntityGraphService::resolveContex
             docProps["language"] = job.language;
             docNode.properties = docProps.dump();
 
-            auto docNodeResult = kg->upsertNode(docNode);
+            auto docNodeResult = batch->upsertNode(docNode);
             if (docNodeResult.has_value()) {
                 contextNodes.documentNodeId = docNodeResult.value();
+                cache.insert(docNode.nodeKey, docNodeResult.value());
             }
         }
     }
@@ -296,9 +319,10 @@ yams::Result<EntityGraphService::ContextNodes> EntityGraphService::resolveContex
         }
         fileNode.properties = fileProps.dump();
 
-        auto fileNodeResult = kg->upsertNode(fileNode);
+        auto fileNodeResult = batch->upsertNode(fileNode);
         if (fileNodeResult.has_value()) {
             contextNodes.fileNodeId = fileNodeResult.value();
+            cache.insert(fileNode.nodeKey, fileNodeResult.value());
         }
     }
 
@@ -308,6 +332,7 @@ yams::Result<EntityGraphService::ContextNodes> EntityGraphService::resolveContex
         descriptor.path = job.filePath;
         descriptor.rootTreeHash = "";
         descriptor.isDirectory = false;
+        // Note: ensurePathNode still uses the kg interface (not batch) as it has complex logic
         auto pathNodeRes = kg->ensurePathNode(descriptor);
         if (pathNodeRes.has_value()) {
             contextNodes.pathNodeId = pathNodeRes.value();
@@ -323,7 +348,7 @@ yams::Result<EntityGraphService::ContextNodes> EntityGraphService::resolveContex
         nlohmann::json edgeProps;
         edgeProps["timestamp"] = std::chrono::system_clock::now().time_since_epoch().count();
         fileDocEdge.properties = edgeProps.dump();
-        kg->addEdge(fileDocEdge);
+        batch->addEdge(fileDocEdge);
     }
 
     if (!job.filePath.empty()) {
@@ -339,9 +364,10 @@ yams::Result<EntityGraphService::ContextNodes> EntityGraphService::resolveContex
             dirProps["path"] = dirPath;
             dirNode.properties = dirProps.dump();
 
-            auto dirNodeResult = kg->upsertNode(dirNode);
+            auto dirNodeResult = batch->upsertNode(dirNode);
             if (dirNodeResult.has_value()) {
                 contextNodes.directoryNodeId = dirNodeResult.value();
+                cache.insert(dirNode.nodeKey, dirNodeResult.value());
 
                 if (contextNodes.fileNodeId.has_value()) {
                     yams::metadata::KGEdge dirFileEdge;
@@ -349,7 +375,7 @@ yams::Result<EntityGraphService::ContextNodes> EntityGraphService::resolveContex
                     dirFileEdge.dstNodeId = contextNodes.fileNodeId.value();
                     dirFileEdge.relation = "contains";
                     dirFileEdge.weight = 1.0f;
-                    kg->addEdge(dirFileEdge);
+                    batch->addEdge(dirFileEdge);
                 }
             }
         }
@@ -359,15 +385,15 @@ yams::Result<EntityGraphService::ContextNodes> EntityGraphService::resolveContex
 }
 
 yams::Result<EntityGraphService::SymbolNodeBatch> EntityGraphService::createSymbolNodes(
-    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg, const Job& job,
-    const yams_symbol_extraction_result_v1* result) {
+    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg, WriteBatch* batch,
+    ExtractionCache& cache, const Job& job, const yams_symbol_extraction_result_v1* result) {
     std::vector<yams::metadata::KGNode> symbolNodes;
     std::vector<yams::metadata::KGNode> versionNodes;
     symbolNodes.reserve(result->symbol_count);
     versionNodes.reserve(result->symbol_count);
 
-    SymbolNodeBatch batch;
-    batch.symbolKeys.reserve(result->symbol_count);
+    SymbolNodeBatch nodeBatch;
+    nodeBatch.symbolKeys.reserve(result->symbol_count);
 
     auto now = std::chrono::system_clock::now().time_since_epoch().count();
     const bool hasSnapshot = !job.documentHash.empty();
@@ -392,7 +418,7 @@ yams::Result<EntityGraphService::SymbolNodeBatch> EntityGraphService::createSymb
         canonicalNode.properties = canonicalProps.dump();
 
         symbolNodes.push_back(std::move(canonicalNode));
-        batch.symbolKeys.push_back(qualName);
+        nodeBatch.symbolKeys.push_back(qualName);
 
         if (hasSnapshot) {
             yams::metadata::KGNode versionNode;
@@ -433,20 +459,31 @@ yams::Result<EntityGraphService::SymbolNodeBatch> EntityGraphService::createSymb
         }
     }
 
-    auto canonicalIdsRes = kg->upsertNodes(symbolNodes);
+    auto canonicalIdsRes = batch->upsertNodes(symbolNodes);
     if (!canonicalIdsRes) {
         return canonicalIdsRes.error();
     }
 
-    batch.canonicalNodeIds = canonicalIdsRes.value();
+    nodeBatch.canonicalNodeIds = canonicalIdsRes.value();
+
+    // Cache the canonical node keys
+    for (size_t i = 0; i < symbolNodes.size(); ++i) {
+        cache.insert(symbolNodes[i].nodeKey, nodeBatch.canonicalNodeIds[i]);
+    }
+
     if (hasSnapshot) {
-        auto versionIdsRes = kg->upsertNodes(versionNodes);
+        auto versionIdsRes = batch->upsertNodes(versionNodes);
         if (!versionIdsRes) {
             return versionIdsRes.error();
         }
-        batch.versionNodeIds = versionIdsRes.value();
+        nodeBatch.versionNodeIds = versionIdsRes.value();
+
+        // Cache the version node keys
+        for (size_t i = 0; i < versionNodes.size(); ++i) {
+            cache.insert(versionNodes[i].nodeKey, nodeBatch.versionNodeIds[i]);
+        }
     } else {
-        batch.versionNodeIds = batch.canonicalNodeIds;
+        nodeBatch.versionNodeIds = nodeBatch.canonicalNodeIds;
     }
 
     // Populate symbol_metadata table for fast SQL-based filtering
@@ -488,7 +525,7 @@ yams::Result<EntityGraphService::SymbolNodeBatch> EntityGraphService::createSymb
             symbolMetadata.push_back(std::move(meta));
         }
 
-        auto metaRes = kg->upsertSymbolMetadata(symbolMetadata);
+        auto metaRes = batch->upsertSymbolMetadata(symbolMetadata);
         if (!metaRes) {
             spdlog::warn("Failed to upsert symbol_metadata for {}: {}", job.filePath,
                          metaRes.error().message);
@@ -496,13 +533,13 @@ yams::Result<EntityGraphService::SymbolNodeBatch> EntityGraphService::createSymb
         }
     }
 
-    return batch;
+    return nodeBatch;
 }
 
 yams::Result<void> EntityGraphService::createSymbolEdges(
-    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg, const Job& job,
-    const yams_symbol_extraction_result_v1* result, const ContextNodes& contextNodes,
-    const SymbolNodeBatch& nodes) {
+    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg, WriteBatch* batch,
+    ExtractionCache& cache, const Job& job, const yams_symbol_extraction_result_v1* result,
+    const ContextNodes& contextNodes, const SymbolNodeBatch& nodes) {
     // Aliases
     std::vector<yams::metadata::KGAlias> aliases;
     for (size_t i = 0; i < result->symbol_count; ++i) {
@@ -543,7 +580,7 @@ yams::Result<void> EntityGraphService::createSymbolEdges(
         }
     }
     if (!aliases.empty()) {
-        kg->addAliases(aliases);
+        batch->addAliases(aliases);
     }
 
     // Context Edges
@@ -589,7 +626,7 @@ yams::Result<void> EntityGraphService::createSymbolEdges(
         }
     }
     if (!contextEdges.empty()) {
-        kg->addEdgesUnique(contextEdges);
+        batch->addEdgesUnique(contextEdges);
     }
 
     // File/Path containment edges: file/path -> symbol
@@ -618,7 +655,7 @@ yams::Result<void> EntityGraphService::createSymbolEdges(
         }
     }
     if (!containmentEdges.empty()) {
-        kg->addEdgesUnique(containmentEdges);
+        batch->addEdgesUnique(containmentEdges);
     }
 
     // Canonical -> version edges for snapshot tracking
@@ -637,7 +674,7 @@ yams::Result<void> EntityGraphService::createSymbolEdges(
             edge.properties = props.dump();
             versionEdges.push_back(edge);
         }
-        kg->addEdgesUnique(versionEdges);
+        batch->addEdgesUnique(versionEdges);
     }
 
     // Symbol-to-symbol Edges
@@ -650,14 +687,22 @@ yams::Result<void> EntityGraphService::createSymbolEdges(
         std::vector<yams::metadata::KGEdge> symbolEdges;
         auto now = std::chrono::system_clock::now().time_since_epoch().count();
 
-        // Helper to resolve symbol/alias to node ID
+        // Helper to resolve symbol/alias to node ID (uses cache first, then KG)
         auto resolveSymbolNodeId = [&](const std::string& key) -> std::optional<std::int64_t> {
+            // Check local map first
             auto it = qualNameToId.find(key);
             if (it != qualNameToId.end())
                 return it->second;
+            // Check cache
+            if (auto cached = cache.lookup(key))
+                return cached;
+            // Fall back to KG alias resolution
             auto aliasRes = kg->resolveAliasExact(key, 1);
-            if (aliasRes.has_value() && !aliasRes.value().empty())
-                return aliasRes.value()[0].nodeId;
+            if (aliasRes.has_value() && !aliasRes.value().empty()) {
+                auto nodeId = aliasRes.value()[0].nodeId;
+                cache.insert(key, nodeId);
+                return nodeId;
+            }
             return std::nullopt;
         };
 
@@ -665,6 +710,11 @@ yams::Result<void> EntityGraphService::createSymbolEdges(
             if (job.documentHash.empty()) {
                 return std::nullopt;
             }
+            // Check cache first
+            std::string cacheKey = "path:" + job.documentHash + ":" + path;
+            if (auto cached = cache.lookup(cacheKey))
+                return cached;
+            // Use KG's ensurePathNode (complex logic, not batched)
             yams::metadata::PathNodeDescriptor descriptor;
             descriptor.snapshotId = job.documentHash;
             descriptor.path = path;
@@ -672,6 +722,7 @@ yams::Result<void> EntityGraphService::createSymbolEdges(
             descriptor.isDirectory = false;
             auto nodeRes = kg->ensurePathNode(descriptor);
             if (nodeRes.has_value()) {
+                cache.insert(cacheKey, nodeRes.value());
                 return nodeRes.value();
             }
             return std::nullopt;
@@ -679,14 +730,19 @@ yams::Result<void> EntityGraphService::createSymbolEdges(
 
         // Helper to resolve/create file node for includes
         auto resolveOrCreateFileNode = [&](const std::string& path) -> std::optional<std::int64_t> {
-            // First try to find existing file node
             std::string nodeKey = "file:" + path;
+            // Check cache first
+            if (auto cached = cache.lookup(nodeKey))
+                return cached;
+            // First try to find existing file node
             auto existingRes = kg->getNodeByKey(nodeKey);
             if (existingRes.has_value() && existingRes.value().has_value()) {
-                return existingRes.value().value().id;
+                auto nodeId = existingRes.value().value().id;
+                cache.insert(nodeKey, nodeId);
+                return nodeId;
             }
 
-            // Create a placeholder file node for the included file
+            // Create a placeholder file node for the included file via batch
             yams::metadata::KGNode fileNode;
             fileNode.nodeKey = nodeKey;
             fileNode.label = path;
@@ -696,8 +752,9 @@ yams::Result<void> EntityGraphService::createSymbolEdges(
             fileProps["is_external"] = true; // Mark as external/unresolved
             fileNode.properties = fileProps.dump();
 
-            auto newNodeRes = kg->upsertNode(fileNode);
+            auto newNodeRes = batch->upsertNode(fileNode);
             if (newNodeRes.has_value()) {
+                cache.insert(nodeKey, newNodeRes.value());
                 return newNodeRes.value();
             }
             return std::nullopt;
@@ -752,17 +809,17 @@ yams::Result<void> EntityGraphService::createSymbolEdges(
         if (!symbolEdges.empty()) {
             spdlog::info("EntityGraphService: creating {} symbol/include edges",
                          symbolEdges.size());
-            kg->addEdgesUnique(symbolEdges);
+            batch->addEdgesUnique(symbolEdges);
         }
     }
 
     return yams::Result<void>();
 }
 
-yams::Result<void> EntityGraphService::createDocEntities(
-    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
-    std::optional<std::int64_t> documentDbId, const yams_symbol_extraction_result_v1* result,
-    const std::vector<std::int64_t>& symbolNodeIds) {
+yams::Result<void>
+EntityGraphService::createDocEntities(WriteBatch* batch, std::optional<std::int64_t> documentDbId,
+                                      const yams_symbol_extraction_result_v1* result,
+                                      const std::vector<std::int64_t>& symbolNodeIds) {
     if (documentDbId.has_value()) {
         std::vector<yams::metadata::DocEntity> docEntities;
         docEntities.reserve(symbolNodeIds.size());
@@ -782,8 +839,8 @@ yams::Result<void> EntityGraphService::createDocEntities(
         }
 
         if (!docEntities.empty()) {
-            kg->deleteDocEntitiesForDocument(documentDbId.value());
-            return kg->addDocEntities(docEntities);
+            batch->deleteDocEntitiesForDocument(documentDbId.value());
+            return batch->addDocEntities(docEntities);
         }
     }
     return yams::Result<void>();
@@ -1099,9 +1156,21 @@ bool EntityGraphService::populateKnowledgeGraphNL(
                  result->entity_count, job.filePath);
 
     try {
+        // Create a write batch for reduced transaction overhead
+        auto batchRes = kg->beginWriteBatch();
+        if (!batchRes) {
+            spdlog::warn("EntityGraphService: failed to begin write batch for NL: {}",
+                         batchRes.error().message);
+            return false;
+        }
+        auto batch = std::move(batchRes.value());
+
+        // Per-job cache to avoid redundant node key lookups
+        ExtractionCache cache;
+
         // Resolve context nodes (document, file, directory)
         std::optional<std::int64_t> documentDbId;
-        auto contextNodesRes = resolveContextNodes(kg, job, documentDbId);
+        auto contextNodesRes = resolveContextNodes(kg, batch.get(), cache, job, documentDbId);
         if (!contextNodesRes) {
             spdlog::warn("EntityGraphService: failed to resolve context nodes for NL: {}",
                          contextNodesRes.error().message);
@@ -1109,7 +1178,7 @@ bool EntityGraphService::populateKnowledgeGraphNL(
         }
         auto& contextNodes = contextNodesRes.value();
 
-        // Create entity nodes
+        // Create entity nodes (still uses kg directly for now, TODO: batch this too)
         auto entityNodesRes = createEntityNodes(kg, job, result);
         if (!entityNodesRes) {
             spdlog::warn("EntityGraphService: failed to create entity nodes: {}",
@@ -1157,7 +1226,7 @@ bool EntityGraphService::populateKnowledgeGraphNL(
             }
 
             if (!contextEdges.empty()) {
-                kg->addEdgesUnique(contextEdges);
+                batch->addEdgesUnique(contextEdges);
             }
         }
 
@@ -1181,12 +1250,20 @@ bool EntityGraphService::populateKnowledgeGraphNL(
             }
 
             if (!docEntities.empty()) {
-                kg->deleteDocEntitiesForDocument(documentDbId.value());
-                kg->addDocEntities(docEntities);
+                batch->deleteDocEntitiesForDocument(documentDbId.value());
+                batch->addDocEntities(docEntities);
             }
         }
 
-        // Generate embeddings for NL entities
+        // Commit the batch
+        auto commitRes = batch->commit();
+        if (!commitRes) {
+            spdlog::warn("EntityGraphService: failed to commit NL write batch: {}",
+                         commitRes.error().message);
+            return false;
+        }
+
+        // Generate embeddings for NL entities (outside batch, may involve model inference)
         auto embeddingsRes = generateNLEntityEmbeddings(job, result, entityNodes);
         if (!embeddingsRes) {
             spdlog::debug("EntityGraphService: NL entity embeddings skipped: {}",

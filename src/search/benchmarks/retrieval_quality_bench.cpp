@@ -11,8 +11,28 @@
     YAMS_BENCH_CORPUS_SIZE=N          - Number of documents to generate (default: 50)
     YAMS_BENCH_NUM_QUERIES=N          - Number of test queries (default: 10)
     YAMS_BENCH_TOPK=N                 - Retrieve top K results (default: 10)
-    YAMS_BENCH_DATASET=scifact         - Use BEIR dataset (default: synthetic)
+    YAMS_BENCH_DATASET=<name>         - Use BEIR dataset (default: synthetic)
     YAMS_BENCH_DATASET_PATH=...       - Path to dataset directory
+
+  Supported BEIR datasets (download from
+  https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/): scifact       - Scientific
+  fact verification (300 queries, 5K docs) cqadupstack   - Community Q&A including programming (13K
+  queries, 457K docs) nfcorpus      - NutritionFacts corpus (323 queries, 3.6K docs) arguana       -
+  Argument retrieval (1.4K queries, 8.7K docs) scidocs       - Scientific document similarity (1K
+  queries, 25K docs) fiqa          - Financial question answering (648 queries, 57K docs) quora -
+  Duplicate question retrieval (10K queries, 523K docs) hotpotqa      - Multi-hop question answering
+  (7.4K queries, 5.2M docs) fever         - Fact verification (6.7K queries, 5.4M docs)
+    climate-fever - Climate claim verification (1.5K queries, 5.4M docs)
+    dbpedia-entity- Entity retrieval (400 queries, 4.6M docs)
+    trec-covid    - COVID-19 retrieval (50 queries, 171K docs)
+    touche-2020   - Argument retrieval (49 queries, 382K docs)
+
+  Example (code-related benchmark):
+    mkdir -p ~/.cache/yams/benchmarks && cd ~/.cache/yams/benchmarks
+    curl -L -o cqadupstack.zip
+  https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/cqadupstack.zip unzip
+  cqadupstack.zip YAMS_TEST_SAFE_SINGLE_INSTANCE=1 YAMS_BENCH_DATASET=cqadupstack
+  ./builddir/tests/benchmarks/retrieval_quality_bench
 */
 
 #include <nlohmann/json.hpp>
@@ -240,6 +260,126 @@ static Result<BEIRDataset> loadSciFactDataset(const fs::path& cacheDir) {
     return dataset;
 }
 
+// Generic BEIR dataset loader - works with any dataset from:
+// https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/
+// Supported datasets: cqadupstack, nfcorpus, arguana, scidocs, fiqa, quora, hotpotqa,
+//                     fever, climate-fever, dbpedia-entity, trec-covid, touche-2020
+static Result<BEIRDataset> loadBEIRDataset(const std::string& datasetName,
+                                           const fs::path& cacheDir) {
+    const char* home = std::getenv("HOME");
+    if (!home) {
+        return Error{ErrorCode::InvalidArgument, "HOME environment variable not set"};
+    }
+
+    // Map dataset names to their zip file names (some differ)
+    static const std::map<std::string, std::string> DATASET_ZIP_NAMES = {
+        {"touche-2020", "webis-touche2020"},
+        {"dbpedia-entity", "dbpedia-entity"},
+    };
+
+    std::string zipName = datasetName;
+    auto zipIt = DATASET_ZIP_NAMES.find(datasetName);
+    if (zipIt != DATASET_ZIP_NAMES.end()) {
+        zipName = zipIt->second;
+    }
+
+    fs::path datasetDir = cacheDir.empty()
+                              ? fs::path(home) / ".cache" / "yams" / "benchmarks" / datasetName
+                              : cacheDir;
+
+    BEIRDataset dataset;
+    dataset.name = datasetName;
+    dataset.basePath = datasetDir;
+
+    fs::path corpusFile = datasetDir / "corpus.jsonl";
+    fs::path queriesFile = datasetDir / "queries.jsonl";
+    fs::path qrelsFile = datasetDir / "qrels" / "test.tsv";
+
+    if (!fs::exists(corpusFile) || !fs::exists(queriesFile) || !fs::exists(qrelsFile)) {
+        std::ostringstream oss;
+        oss << datasetName << " dataset not found. Please download manually:\n"
+            << "  mkdir -p ~/.cache/yams/benchmarks && cd ~/.cache/yams/benchmarks\n"
+            << "  curl -L -o " << zipName << ".zip "
+            << "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/" << zipName
+            << ".zip\n"
+            << "  unzip " << zipName << ".zip";
+        if (datasetName != zipName) {
+            oss << " && mv " << zipName << " " << datasetName;
+        }
+        return Error{ErrorCode::NotFound, oss.str()};
+    }
+
+    // Load corpus
+    std::ifstream corpusIn(corpusFile);
+    std::string line;
+    while (std::getline(corpusIn, line)) {
+        if (line.empty())
+            continue;
+        try {
+            auto j = json::parse(line);
+            BEIRDocument doc;
+            doc.id = j.value("_id", "");
+            if (doc.id.empty())
+                doc.id = j.value("id", "");
+            doc.title = j.value("title", "");
+            doc.text = j.value("text", "");
+            if (!doc.id.empty() && !doc.text.empty()) {
+                dataset.documents[doc.id] = doc;
+            }
+        } catch (const json::exception& e) {
+            spdlog::warn("Failed to parse corpus line: {}", e.what());
+        }
+    }
+    corpusIn.close();
+
+    // Load queries
+    std::ifstream queriesIn(queriesFile);
+    while (std::getline(queriesIn, line)) {
+        if (line.empty())
+            continue;
+        try {
+            auto j = json::parse(line);
+            BEIRQuery q;
+            q.id = j.value("_id", "");
+            if (q.id.empty())
+                q.id = j.value("id", "");
+            q.text = j.value("text", "");
+            if (!q.id.empty() && !q.text.empty()) {
+                dataset.queries[q.id] = q;
+            }
+        } catch (const json::exception& e) {
+            spdlog::warn("Failed to parse query line: {}", e.what());
+        }
+    }
+    queriesIn.close();
+
+    // Load qrels
+    std::ifstream qrelsIn(qrelsFile);
+    bool firstLine = true;
+    while (std::getline(qrelsIn, line)) {
+        if (line.empty() || line[0] == '#')
+            continue;
+        if (firstLine) {
+            firstLine = false;
+            if (line.find("query-id") != std::string::npos)
+                continue;
+        }
+        std::istringstream iss(line);
+        std::string queryId, docId, scoreStr;
+        if (std::getline(iss, queryId, '\t') && std::getline(iss, docId, '\t') &&
+            std::getline(iss, scoreStr, '\t')) {
+            int score = std::stoi(scoreStr);
+            dataset.qrels.emplace(queryId, std::make_pair(docId, score));
+        }
+    }
+    qrelsIn.close();
+
+    spdlog::info("Loaded BEIR {} dataset: {} documents, {} queries, {} qrels", datasetName,
+                 dataset.documents.size(), dataset.queries.size(), dataset.qrels.size());
+
+    return dataset;
+}
+
 using yams::test::DaemonHarness;
 
 struct TestQuery {
@@ -405,6 +545,7 @@ static void debugLogWriteJsonLine(const DebugLogEntry& e) {
 
 // Store final metrics globally for summary after teardown
 static RetrievalMetrics g_final_metrics;
+static RetrievalMetrics g_keyword_metrics; // FTS5-only metrics for component isolation
 
 double computeDCG(const std::vector<int>& grades, int k) {
     double dcg = 0.0;
@@ -420,7 +561,8 @@ double computeIDCG(std::vector<int> grades, int k) {
 }
 
 RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::path& corpusDir,
-                                 const std::vector<TestQuery>& queries, int k) {
+                                 const std::vector<TestQuery>& queries, int k,
+                                 const std::string& searchType = "hybrid") {
     RetrievalMetrics metrics;
     metrics.numQueries = queries.size();
     double totalMRR = 0.0, totalRecall = 0.0, totalPrecision = 0.0, totalNDCG = 0.0, totalMAP = 0.0;
@@ -433,7 +575,7 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
     for (const auto& tq : queries) {
         yams::cli::search_runner::DaemonSearchOptions opts;
         opts.query = tq.query;
-        opts.searchType = "hybrid";
+        opts.searchType = searchType;
         opts.limit = static_cast<std::size_t>(k);
         opts.timeout = 5s;
         opts.symbolRank = true;
@@ -671,6 +813,7 @@ struct BenchFixture {
     std::vector<TestQuery> queries;
     int corpusSize = 50, numQueries = 10, topK = 10;
     bool useBEIR = false;
+    std::string beirDatasetName; // Name of BEIR dataset (scifact, cqadupstack, etc.)
 
     void setup() {
         const char* env_dataset = std::getenv("YAMS_BENCH_DATASET");
@@ -695,8 +838,25 @@ struct BenchFixture {
 
         if (env_dataset) {
             std::string datasetName = env_dataset;
-            if (datasetName == "scifact") {
+            // Supported BEIR datasets from
+            // https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/
+            static const std::set<std::string> SUPPORTED_BEIR_DATASETS = {
+                "scifact",        "nfcorpus",    "arguana",    "scidocs", "fiqa",
+                "quora",          "cqadupstack", "hotpotqa",   "fever",   "climate-fever",
+                "dbpedia-entity", "trec-covid",  "touche-2020"};
+            if (SUPPORTED_BEIR_DATASETS.count(datasetName) > 0) {
                 useBEIR = true;
+                beirDatasetName = datasetName;
+                // Set SCIENTIFIC tuning override for BEIR datasets
+                // This is needed because the auto-detection uses absolute path depth
+                // which fails for temp directories (pathDepthAvg >> 1.5)
+                setenv("YAMS_TUNING_OVERRIDE", "SCIENTIFIC", 1);
+                spdlog::info("Set YAMS_TUNING_OVERRIDE=SCIENTIFIC for BEIR benchmark ({})",
+                             datasetName);
+            } else {
+                spdlog::warn("Unknown dataset '{}', using synthetic. Supported: scifact, "
+                             "cqadupstack, nfcorpus, etc.",
+                             datasetName);
             }
         }
 
@@ -708,7 +868,8 @@ struct BenchFixture {
             topK = std::stoi(env_topk);
 
         spdlog::info("Setting up RAG benchmark: {} dataset, {} docs, {} queries, k={}",
-                     useBEIR ? "SciFact BEIR" : "synthetic", corpusSize, numQueries, topK);
+                     useBEIR ? beirDatasetName + " BEIR" : "synthetic", corpusSize, numQueries,
+                     topK);
 
         // PBI-05b: Create summary log file for important embedding metrics
         fs::path summaryLogPath = fs::temp_directory_path() / "yams_bench_summary.log";
@@ -718,7 +879,8 @@ struct BenchFixture {
             auto time_t_now = std::chrono::system_clock::to_time_t(now);
             summaryLog << "=== YAMS Retrieval Quality Benchmark ===" << std::endl;
             summaryLog << "Started: " << std::ctime(&time_t_now);
-            summaryLog << "Dataset: " << (useBEIR ? "SciFact BEIR" : "synthetic") << std::endl;
+            summaryLog << "Dataset: " << (useBEIR ? beirDatasetName + " BEIR" : "synthetic")
+                       << std::endl;
             summaryLog << "Corpus size: " << corpusSize << std::endl;
             summaryLog << "Num queries: " << numQueries << std::endl;
             summaryLog << "Top K: " << topK << std::endl;
@@ -744,7 +906,21 @@ struct BenchFixture {
             } else {
                 harnessOptions.pluginDir = fs::current_path() / "builddir" / "plugins";
             }
-            harnessOptions.preloadModels = {"nomic-embed-text-v1.5"};
+            harnessOptions.preloadModels = {"all-MiniLM-L6-v2"};
+
+            // Force the benchmark to use all-MiniLM-L6-v2 regardless of user's config
+            // This env var takes precedence over config file settings
+            setenv("YAMS_PREFERRED_MODEL", "all-MiniLM-L6-v2", 1);
+            spdlog::info("Set YAMS_PREFERRED_MODEL=all-MiniLM-L6-v2 for benchmark isolation");
+
+            // Configure ONNX plugin with preferred model for embeddings
+            // Key must match plugin name variants: onnx_plugin (from libyams_onnx_plugin)
+            json onnxConfig;
+            onnxConfig["preferred_model"] = "all-MiniLM-L6-v2";
+            onnxConfig["preload"] = "all-MiniLM-L6-v2";
+            onnxConfig["keep_model_hot"] = true;
+            harnessOptions.pluginConfigs["onnx_plugin"] = onnxConfig.dump();
+            spdlog::info("Configured ONNX plugin with model: all-MiniLM-L6-v2");
 
             // Configure Glint plugin with GLiNER model path for NL entity extraction
             std::string glinerModelPath = discoverGlinerModelPath();
@@ -765,7 +941,12 @@ struct BenchFixture {
 
         if (useBEIR) {
             fs::path cachePath = env_path ? fs::path(env_path) : fs::path();
-            auto dsResult = loadSciFactDataset(cachePath);
+            Result<BEIRDataset> dsResult;
+            if (beirDatasetName == "scifact") {
+                dsResult = loadSciFactDataset(cachePath);
+            } else {
+                dsResult = loadBEIRDataset(beirDatasetName, cachePath);
+            }
             if (!dsResult) {
                 throw std::runtime_error("Failed to load BEIR dataset: " +
                                          dsResult.error().message);
@@ -945,7 +1126,8 @@ struct BenchFixture {
             auto embedStartTime = std::chrono::steady_clock::now();
 
             // Phase 1: Wait for embedding queue to drain and vectors to reach target
-            // We need vectors >= corpusSize for complete coverage
+            // We need vectors >= corpusSize AND queue/in-flight drained for complete coverage
+            // Note: Each document may produce multiple chunk vectors, so we wait for stability
             while (std::chrono::steady_clock::now() < deadline) {
                 auto statusResult = yams::cli::run_sync(client->status(), 5s);
                 if (statusResult) {
@@ -956,13 +1138,20 @@ struct BenchFixture {
                         vectorCount = it->second;
                     }
 
-                    // Check embed queue status
+                    // Check embed queue status (jobs waiting in channel)
                     uint64_t embedQueued = 0;
-                    uint64_t embedInFlight = 0;
                     auto itQ = statusResult.value().requestCounts.find("bus_embed_queued");
                     if (itQ != statusResult.value().requestCounts.end()) {
                         embedQueued = itQ->second;
                     }
+
+                    // Check embed in-flight status (jobs being processed)
+                    uint64_t embedInFlight = 0;
+                    auto itInFlight = statusResult.value().requestCounts.find("embed_in_flight");
+                    if (itInFlight != statusResult.value().requestCounts.end()) {
+                        embedInFlight = itInFlight->second;
+                    }
+
                     auto itD = statusResult.value().requestCounts.find("bus_embed_dropped");
                     if (itD != statusResult.value().requestCounts.end()) {
                         embedDropped = itD->second;
@@ -970,8 +1159,10 @@ struct BenchFixture {
 
                     if (vectorCount != lastVectorCount) {
                         double coverage = corpusSize > 0 ? (vectorCount * 100.0 / corpusSize) : 0;
-                        spdlog::info("Vectors: {} / {} ({:.1f}%) | queue={} dropped={}",
-                                     vectorCount, corpusSize, coverage, embedQueued, embedDropped);
+                        spdlog::info(
+                            "Vectors: {} / {} ({:.1f}%) | queue={} in_flight={} dropped={}",
+                            vectorCount, corpusSize, coverage, embedQueued, embedInFlight,
+                            embedDropped);
 
                         // Log progress to summary file
                         if (summaryLog) {
@@ -981,6 +1172,7 @@ struct BenchFixture {
                             summaryLog << "[" << elapsed << "ms] Vectors: " << vectorCount << " / "
                                        << corpusSize << " (" << std::fixed << std::setprecision(1)
                                        << coverage << "%) | queue=" << embedQueued
+                                       << " in_flight=" << embedInFlight
                                        << " dropped=" << embedDropped << std::endl;
                             summaryLog.flush();
                         }
@@ -991,13 +1183,16 @@ struct BenchFixture {
                         stableCount++;
                     }
 
-                    // Success condition: vectors >= corpusSize (100% coverage)
-                    if (vectorCount >= corpusSize) {
+                    // Success condition: vectors >= corpusSize AND queue drained AND no in-flight
+                    // This ensures all chunks are embedded before running queries
+                    bool queueDrained = (embedQueued == 0 && embedInFlight == 0);
+                    if (vectorCount >= corpusSize && queueDrained && stableCount >= 10) {
                         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                            std::chrono::steady_clock::now() - embedStartTime)
                                            .count();
-                        spdlog::info("Full embedding coverage achieved: {} vectors for {} docs",
-                                     vectorCount, corpusSize);
+                        spdlog::info("Full embedding coverage achieved: {} vectors for {} docs "
+                                     "(queue drained, stable for {}s)",
+                                     vectorCount, corpusSize, stableCount / 2);
                         if (summaryLog) {
                             summaryLog << "\n*** SUCCESS: Full coverage in " << elapsed << "ms ***"
                                        << std::endl;
@@ -1008,41 +1203,33 @@ struct BenchFixture {
                         break;
                     }
 
-                    // If stable and we have embeddings but not full coverage, check for dropped
-                    if (stableCount >= 20 && vectorCount > 0) { // 10s of stability
+                    // If very stable (20s) with queue drained, we're done even if < corpusSize
+                    // This handles cases where some docs have no content to embed
+                    if (stableCount >= 40 && queueDrained && vectorCount > 0) {
                         double coverage = corpusSize > 0 ? (vectorCount * 100.0 / corpusSize) : 0;
                         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                            std::chrono::steady_clock::now() - embedStartTime)
                                            .count();
-                        if (embedDropped > 0) {
-                            // PBI-05b: With parallel EmbeddingService, drops should be rare.
-                            // If they occur, log a warning and proceed (repair is background-only).
-                            spdlog::warn("Embedding generation stalled at {:.1f}% coverage. "
-                                         "{} jobs were dropped due to queue overflow. "
-                                         "Proceeding with partial coverage - consider increasing "
-                                         "embed channel capacity or reducing ingest rate.",
-                                         coverage, embedDropped);
-                            if (summaryLog) {
-                                summaryLog << "\n*** WARNING: Stalled at " << coverage << "% after "
-                                           << elapsed << "ms ***" << std::endl;
-                                summaryLog << "Jobs dropped: " << embedDropped << std::endl;
-                                summaryLog.flush();
-                            }
-                            break;
-                        } else {
-                            // No drops but still incomplete - might be legitimate (empty docs, etc)
-                            spdlog::info("Embedding generation complete (no drops): {} vectors "
-                                         "({:.1f}% coverage)",
-                                         vectorCount, coverage);
-                            if (summaryLog) {
-                                summaryLog << "\n*** Complete (no drops) in " << elapsed << "ms ***"
-                                           << std::endl;
-                                summaryLog << "Final vectors: " << vectorCount << " (" << coverage
-                                           << "%)" << std::endl;
-                                summaryLog.flush();
-                            }
-                            break;
+                        spdlog::info("Embedding generation complete (queue drained, stable): "
+                                     "{} vectors ({:.1f}% coverage)",
+                                     vectorCount, coverage);
+                        if (summaryLog) {
+                            summaryLog << "\n*** Complete (queue drained) in " << elapsed
+                                       << "ms ***" << std::endl;
+                            summaryLog << "Final vectors: " << vectorCount << " (" << coverage
+                                       << "%)" << std::endl;
+                            summaryLog.flush();
                         }
+                        break;
+                    }
+
+                    // If stable but queue NOT drained, warn about potential issues
+                    if (stableCount >= 20 && !queueDrained && vectorCount > 0) {
+                        double coverage = corpusSize > 0 ? (vectorCount * 100.0 / corpusSize) : 0;
+                        spdlog::warn("Embedding stalled at {:.1f}% but queue not drained "
+                                     "(queue={}, in_flight={}). Continuing to wait...",
+                                     coverage, embedQueued, embedInFlight);
+                        // Don't break - keep waiting for queue to drain
                     }
                 }
                 std::this_thread::sleep_for(500ms);
@@ -1292,8 +1479,10 @@ void BM_RetrievalQuality(benchmark::State& state) {
             evaluateQueries(*fixture.client, fixture.benchCorpusDir, fixture.queries, fixture.topK);
         benchmark::DoNotOptimize(metrics);
     }
-    auto metrics =
-        evaluateQueries(*fixture.client, fixture.benchCorpusDir, fixture.queries, fixture.topK);
+
+    // Evaluate hybrid search (default)
+    auto metrics = evaluateQueries(*fixture.client, fixture.benchCorpusDir, fixture.queries,
+                                   fixture.topK, "hybrid");
 
     // Store metrics globally for post-teardown summary
     g_final_metrics = metrics;
@@ -1304,6 +1493,15 @@ void BM_RetrievalQuality(benchmark::State& state) {
     state.counters["nDCG@K"] = metrics.ndcgAtK;
     state.counters["MAP"] = metrics.map;
     state.counters["num_queries"] = metrics.numQueries;
+
+    // Also evaluate keyword-only (FTS5) for component isolation
+    // This helps diagnose whether low MRR is from FTS5 or vector search
+    spdlog::info("=== Evaluating KEYWORD-ONLY (FTS5) for component isolation ===");
+    g_keyword_metrics = evaluateQueries(*fixture.client, fixture.benchCorpusDir, fixture.queries,
+                                        fixture.topK, "keyword");
+
+    state.counters["MRR_keyword"] = g_keyword_metrics.mrr;
+    state.counters["Recall_keyword"] = g_keyword_metrics.recallAtK;
 }
 BENCHMARK(BM_RetrievalQuality);
 
@@ -1321,6 +1519,9 @@ int main(int argc, char** argv) {
     std::cout << "              RETRIEVAL QUALITY BENCHMARK RESULTS\n";
     std::cout << std::string(70, '=') << "\n";
     std::cout << std::fixed << std::setprecision(4);
+
+    // Hybrid search results
+    std::cout << "\n  --- HYBRID SEARCH (text + vector) ---\n";
     std::cout << "  MRR (Mean Reciprocal Rank):     " << std::setw(10) << g_final_metrics.mrr
               << "\n";
     std::cout << "  Recall@K:                       " << std::setw(10) << g_final_metrics.recallAtK
@@ -1331,8 +1532,27 @@ int main(int argc, char** argv) {
               << "\n";
     std::cout << "  MAP (Mean Average Precision):   " << std::setw(10) << g_final_metrics.map
               << "\n";
+
+    // Keyword-only search results (FTS5 isolation)
+    std::cout << "\n  --- KEYWORD SEARCH (FTS5 only) ---\n";
+    std::cout << "  MRR (Mean Reciprocal Rank):     " << std::setw(10) << g_keyword_metrics.mrr
+              << "\n";
+    std::cout << "  Recall@K:                       " << std::setw(10)
+              << g_keyword_metrics.recallAtK << "\n";
+    std::cout << "  Precision@K:                    " << std::setw(10)
+              << g_keyword_metrics.precisionAtK << "\n";
+    std::cout << "  nDCG@K (Normalized DCG):        " << std::setw(10) << g_keyword_metrics.ndcgAtK
+              << "\n";
+    std::cout << "  MAP (Mean Average Precision):   " << std::setw(10) << g_keyword_metrics.map
+              << "\n";
+
+    // Component comparison summary
+    std::cout << "\n  --- COMPONENT COMPARISON ---\n";
     std::cout << "  Number of queries evaluated:    " << std::setw(10) << g_final_metrics.numQueries
               << "\n";
+    double mrrDelta = g_final_metrics.mrr - g_keyword_metrics.mrr;
+    std::cout << "  MRR delta (hybrid - keyword):   " << std::setw(10) << mrrDelta
+              << (mrrDelta > 0 ? " (hybrid better)" : " (keyword better)") << "\n";
     std::cout << std::string(70, '=') << "\n";
 
     return 0;

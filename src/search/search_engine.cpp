@@ -99,6 +99,8 @@ std::vector<SearchResult> ResultFusion::fuse(const std::vector<ComponentResult>&
             return fuseWeightedReciprocal(componentResults);
         case SearchEngineConfig::FusionStrategy::COMB_MNZ:
             return fuseCombMNZ(componentResults);
+        case SearchEngineConfig::FusionStrategy::TEXT_ANCHOR:
+            return fuseTextAnchor(componentResults);
         default:
             return fuseCombMNZ(componentResults);
     }
@@ -161,6 +163,129 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
         double mnzBoost = static_cast<double>(componentCounts[comp.documentHash]);
         return weight * rrfScore * mnzBoost;
     });
+}
+
+std::vector<SearchResult>
+ResultFusion::fuseTextAnchor(const std::vector<ComponentResult>& results) {
+    // TEXT_ANCHOR fusion: FTS5/text results as primary anchor, vector for re-ranking only.
+    // This strategy addresses the MRR degradation observed when vector results disagree
+    // with text ranking (e.g., 4x MRR drop on SciFact benchmark).
+    //
+    // Strategy:
+    // 1. Text-based components (text, path_tree, kg, tag, metadata) form the anchor set
+    // 2. Documents found by text get full scoring with optional vector boost
+    // 3. Vector-only documents need very high confidence (>0.85) to be included
+    // 4. This preserves text ranking while allowing semantic discovery
+
+    // Separate results by component type
+    std::unordered_map<std::string, std::vector<const ComponentResult*>> textResults;
+    std::unordered_map<std::string, std::vector<const ComponentResult*>> vectorResults;
+    std::unordered_set<std::string> textFoundDocs;
+
+    for (const auto& comp : results) {
+        if (comp.source == "vector" || comp.source == "entity_vector") {
+            vectorResults[comp.documentHash].push_back(&comp);
+        } else {
+            textResults[comp.documentHash].push_back(&comp);
+            textFoundDocs.insert(comp.documentHash);
+        }
+    }
+
+    // Accumulate scores per document
+    std::unordered_map<std::string, SearchResult> resultMap;
+    const float k = config_.rrfK;
+    constexpr float vectorOnlyThreshold = 0.85f; // High confidence for vector-only results
+    constexpr float vectorBoostFactor = 0.15f;   // Small boost from vector when text anchored
+
+    // Process text-anchored documents first (these always get included)
+    for (const auto& [docHash, compResults] : textResults) {
+        double totalScore = 0.0;
+        std::string bestPath;
+        std::optional<std::string> bestSnippet;
+        std::map<std::string, std::string> debugInfo;
+
+        for (const auto* comp : compResults) {
+            float weight = getComponentWeight(comp->source);
+            double rrfScore = 1.0 / (k + static_cast<double>(comp->rank));
+            double scoreBoost = 1.0 + std::clamp(static_cast<double>(comp->score), 0.0, 1.0);
+            double contribution = weight * rrfScore * scoreBoost;
+            totalScore += contribution;
+
+            if (bestPath.empty()) {
+                bestPath = comp->filePath;
+            }
+            if (!bestSnippet && comp->snippet) {
+                bestSnippet = comp->snippet;
+            }
+        }
+
+        // Add small vector boost if also found by vector (re-ranking)
+        if (auto it = vectorResults.find(docHash); it != vectorResults.end()) {
+            for (const auto* vcomp : it->second) {
+                // Vector contributes a small boost proportional to its score
+                double vectorBoost = vectorBoostFactor * vcomp->score;
+                totalScore += vectorBoost;
+                debugInfo["vector_boost"] = std::to_string(vectorBoost);
+            }
+        }
+
+        SearchResult sr;
+        sr.document.sha256Hash = docHash;
+        sr.document.filePath = bestPath;
+        sr.score = totalScore;
+        if (bestSnippet) {
+            sr.snippet = *bestSnippet;
+        }
+        resultMap[docHash] = std::move(sr);
+    }
+
+    // Process vector-only documents (high confidence threshold)
+    for (const auto& [docHash, compResults] : vectorResults) {
+        if (textFoundDocs.count(docHash) > 0) {
+            continue; // Already processed with text anchor
+        }
+
+        // Check if any vector result has high enough confidence
+        float maxVectorScore = 0.0f;
+        const ComponentResult* bestVectorResult = nullptr;
+        for (const auto* comp : compResults) {
+            if (comp->score > maxVectorScore) {
+                maxVectorScore = comp->score;
+                bestVectorResult = comp;
+            }
+        }
+
+        // Only include if confidence exceeds threshold (semantic discovery)
+        if (maxVectorScore >= vectorOnlyThreshold && bestVectorResult != nullptr) {
+            double score = getComponentWeight(bestVectorResult->source) *
+                           (1.0 / (k + static_cast<double>(bestVectorResult->rank))) *
+                           (1.0 + maxVectorScore);
+            // Slight penalty for being vector-only (text is more reliable)
+            score *= 0.8;
+
+            SearchResult sr;
+            sr.document.sha256Hash = docHash;
+            sr.document.filePath = bestVectorResult->filePath;
+            sr.score = score;
+            if (bestVectorResult->snippet) {
+                sr.snippet = *bestVectorResult->snippet;
+            }
+            sr.vectorScore = maxVectorScore;
+            resultMap[docHash] = std::move(sr);
+        }
+    }
+
+    // Convert to vector and sort by score
+    std::vector<SearchResult> finalResults;
+    finalResults.reserve(resultMap.size());
+    for (auto& [_, result] : resultMap) {
+        finalResults.push_back(std::move(result));
+    }
+
+    std::sort(finalResults.begin(), finalResults.end(),
+              [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
+
+    return finalResults;
 }
 
 float ResultFusion::getComponentWeight(const std::string& source) const {

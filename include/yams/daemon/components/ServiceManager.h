@@ -323,6 +323,10 @@ public:
         return workCoordinator_ ? workCoordinator_->getWorkerCount() : 0;
     }
 
+    // Embedding service metrics accessors
+    std::size_t getEmbeddingInFlightJobs() const;
+    std::size_t getEmbeddingQueuedJobs() const;
+
     RetrievalSessionManager* getRetrievalSessionManager() const { return retrievalSessions_.get(); }
 
     CheckpointManager* getCheckpointManager() const { return checkpointManager_.get(); }

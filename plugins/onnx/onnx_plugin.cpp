@@ -23,8 +23,9 @@ static const char* kManifestJson = R"JSON({
 // Lightweight runtime flags
 static bool g_plugin_disabled = false; // set by env at init
 
-// Forward-declared helper exposed by model_provider.cpp
+// Forward-declared helpers exposed by model_provider.cpp
 extern "C" const char* yams_onnx_get_health_json_cstr();
+extern "C" void yams_onnx_set_config_json(const char* json);
 
 extern "C" {
 
@@ -44,7 +45,12 @@ YAMS_PLUGIN_API const char* yams_plugin_get_manifest_json(void) {
     return kManifestJson;
 }
 
-YAMS_PLUGIN_API int yams_plugin_init(const char* /*config_json*/, const void* /*host_context*/) {
+YAMS_PLUGIN_API int yams_plugin_init(const char* config_json, const void* /*host_context*/) {
+    // Store the config JSON for later use by ProviderCtx
+    if (config_json && *config_json) {
+        yams_onnx_set_config_json(config_json);
+    }
+
     // Allow disabling the plugin without removing it from disk
     // Check multiple env vars that indicate vectors/ONNX should be disabled
     if (const char* d = std::getenv("YAMS_ONNX_PLUGIN_DISABLE"); d && *d) {

@@ -142,6 +142,14 @@ private:
     boost::asio::awaitable<Response>
     handleGraphQueryListTypes(const GraphQueryRequest& req,
                               yams::metadata::KnowledgeGraphStore* kgStore);
+    // yams-kt5t: Helper for listRelations mode (relation type statistics)
+    boost::asio::awaitable<Response>
+    handleGraphQueryListRelations(const GraphQueryRequest& req,
+                                  yams::metadata::KnowledgeGraphStore* kgStore);
+    // yams-kt5t: Helper for search mode (search nodes by label pattern)
+    boost::asio::awaitable<Response>
+    handleGraphQuerySearchMode(const GraphQueryRequest& req,
+                               yams::metadata::KnowledgeGraphStore* kgStore);
 
     // Graph maintenance handlers (PBI-009 Phase 4.3)
     boost::asio::awaitable<Response> handleGraphRepairRequest(const GraphRepairRequest& req);

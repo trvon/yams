@@ -1611,13 +1611,14 @@ private:
             if (!hasOnnx)
                 continue; // ignore non-model dirs
 
-            // Record model with a heuristic dimension for operator visibility
+            // Record model with dimension from config files or name heuristic
             int dim = -1;
-            if (name == "all-MiniLM-L6-v2" || name.find("MiniLM") != std::string::npos)
-                dim = 384;
-            else if (name == "all-mpnet-base-v2" || name.find("mpnet") != std::string::npos ||
-                     name.find("nomic") != std::string::npos)
-                dim = 768;
+            // Try config files first (most accurate)
+            if (auto cfgDim = vecutil::getModelDimensionFromMetadata(base.parent_path(), name)) {
+                dim = static_cast<int>(*cfgDim);
+            } else if (auto heurDim = vecutil::getModelDimensionHeuristic(name)) {
+                dim = static_cast<int>(*heurDim);
+            }
             models.push_back({name, dim});
 
             // General guidance: config helps provider infer dim/seq/pooling

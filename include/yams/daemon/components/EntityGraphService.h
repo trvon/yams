@@ -15,9 +15,11 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <yams/core/types.h>
+#include <yams/metadata/knowledge_graph_store.h>
 
 // Forward declarations for C ABI types
 struct yams_symbol_extraction_result_v1;
@@ -25,13 +27,25 @@ struct yams_entity_extraction_result_v2;
 
 namespace yams {
 namespace metadata {
-class KnowledgeGraphStore;
 class MetadataRepository;
 } // namespace metadata
 namespace daemon {
 class ServiceManager;
 class AbiSymbolExtractorAdapter;
 class AbiEntityExtractorAdapter;
+
+/// Per-job cache to avoid redundant KG lookups during extraction.
+/// Scoped to a single populateKnowledgeGraph() call.
+struct ExtractionCache {
+    std::unordered_map<std::string, std::int64_t> nodeKeyToId;
+
+    std::optional<std::int64_t> lookup(const std::string& key) const {
+        auto it = nodeKeyToId.find(key);
+        return it != nodeKeyToId.end() ? std::optional{it->second} : std::nullopt;
+    }
+
+    void insert(const std::string& key, std::int64_t id) { nodeKeyToId[key] = id; }
+};
 
 /**
  * EntityGraphService facade.
@@ -117,24 +131,29 @@ private:
         std::vector<std::string> symbolKeys;
     };
 
+    // WriteBatch type alias for convenience (nested in KnowledgeGraphStore)
+    using WriteBatch = yams::metadata::KnowledgeGraphStore::WriteBatch;
+
     yams::Result<ContextNodes>
     resolveContextNodes(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
-                        const Job& job, std::optional<std::int64_t>& documentDbId);
+                        WriteBatch* batch, ExtractionCache& cache, const Job& job,
+                        std::optional<std::int64_t>& documentDbId);
 
     yams::Result<SymbolNodeBatch>
     createSymbolNodes(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
-                      const Job& job, const yams_symbol_extraction_result_v1* result);
+                      WriteBatch* batch, ExtractionCache& cache, const Job& job,
+                      const yams_symbol_extraction_result_v1* result);
 
     yams::Result<void>
     createSymbolEdges(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
-                      const Job& job, const yams_symbol_extraction_result_v1* result,
+                      WriteBatch* batch, ExtractionCache& cache, const Job& job,
+                      const yams_symbol_extraction_result_v1* result,
                       const ContextNodes& contextNodes, const SymbolNodeBatch& nodes);
 
-    yams::Result<void>
-    createDocEntities(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
-                      std::optional<std::int64_t> documentDbId,
-                      const yams_symbol_extraction_result_v1* result,
-                      const std::vector<std::int64_t>& symbolNodeIds);
+    yams::Result<void> createDocEntities(WriteBatch* batch,
+                                         std::optional<std::int64_t> documentDbId,
+                                         const yams_symbol_extraction_result_v1* result,
+                                         const std::vector<std::int64_t>& symbolNodeIds);
 
     /**
      * Generate and store entity embeddings for extracted symbols.

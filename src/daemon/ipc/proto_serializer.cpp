@@ -2200,7 +2200,10 @@ template <> struct ProtoBinding<GraphQueryRequest> {
         o->set_list_by_type(r.listByType);
         o->set_node_type(r.nodeType);
         o->set_node_key(r.nodeKey);
-        o->set_list_types(r.listTypes); // yams-66h
+        o->set_list_types(r.listTypes);         // yams-66h
+        o->set_list_relations(r.listRelations); // yams-kt5t
+        o->set_search_mode(r.searchMode);       // yams-kt5t
+        o->set_search_pattern(r.searchPattern); // yams-kt5t
         set_string_list(r.relationFilters, o->mutable_relation_filters());
         o->set_max_depth(r.maxDepth);
         o->set_max_results(r.maxResults);
@@ -2225,7 +2228,10 @@ template <> struct ProtoBinding<GraphQueryRequest> {
         r.listByType = i.list_by_type();
         r.nodeType = i.node_type();
         r.nodeKey = i.node_key();
-        r.listTypes = i.list_types(); // yams-66h
+        r.listTypes = i.list_types();         // yams-66h
+        r.listRelations = i.list_relations(); // yams-kt5t
+        r.searchMode = i.search_mode();       // yams-kt5t
+        r.searchPattern = i.search_pattern(); // yams-kt5t
         r.relationFilters = get_string_list(i.relation_filters());
         r.maxDepth = i.max_depth();
         r.maxResults = i.max_results();
@@ -2293,6 +2299,12 @@ template <> struct ProtoBinding<GraphQueryResponse> {
             tc->set_type(type);
             tc->set_count(count);
         }
+        // yams-kt5t: Relation type counts
+        for (const auto& [relation, count] : r.relationTypeCounts) {
+            auto* rc = o->add_relation_type_counts();
+            rc->set_relation(relation);
+            rc->set_count(count);
+        }
     }
     static GraphQueryResponse get(const Envelope& env) {
         const auto& i = env.graph_query_response();
@@ -2345,6 +2357,11 @@ template <> struct ProtoBinding<GraphQueryResponse> {
         r.nodeTypeCounts.reserve(i.node_type_counts_size());
         for (const auto& tc : i.node_type_counts()) {
             r.nodeTypeCounts.emplace_back(tc.type(), tc.count());
+        }
+        // yams-kt5t: Relation type counts
+        r.relationTypeCounts.reserve(i.relation_type_counts_size());
+        for (const auto& rc : i.relation_type_counts()) {
+            r.relationTypeCounts.emplace_back(rc.relation(), rc.count());
         }
         return r;
     }

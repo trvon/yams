@@ -105,8 +105,29 @@ struct SearchEngineConfig {
         RECIPROCAL_RANK,     // Reciprocal Rank Fusion
         BORDA_COUNT,         // Borda count voting
         WEIGHTED_RECIPROCAL, // Weighted RRF (custom)
-        COMB_MNZ             // CombMNZ: score * num_components (recall-focused)
+        COMB_MNZ,            // CombMNZ: score * num_components (recall-focused)
+        TEXT_ANCHOR          // Text-anchored: FTS5 as primary, vector for re-ranking only
     } fusionStrategy = FusionStrategy::COMB_MNZ;
+
+    /// Convert FusionStrategy to string for logging/debugging
+    [[nodiscard]] static constexpr const char*
+    fusionStrategyToString(FusionStrategy strategy) noexcept {
+        switch (strategy) {
+            case FusionStrategy::WEIGHTED_SUM:
+                return "WEIGHTED_SUM";
+            case FusionStrategy::RECIPROCAL_RANK:
+                return "RECIPROCAL_RANK";
+            case FusionStrategy::BORDA_COUNT:
+                return "BORDA_COUNT";
+            case FusionStrategy::WEIGHTED_RECIPROCAL:
+                return "WEIGHTED_RECIPROCAL";
+            case FusionStrategy::COMB_MNZ:
+                return "COMB_MNZ";
+            case FusionStrategy::TEXT_ANCHOR:
+                return "TEXT_ANCHOR";
+        }
+        return "UNKNOWN";
+    }
 
     // Component-specific settings (increased for better recall)
     size_t textMaxResults = 300;
@@ -305,6 +326,7 @@ private:
     std::vector<SearchResult> fuseBordaCount(const std::vector<ComponentResult>& results);
     std::vector<SearchResult> fuseWeightedReciprocal(const std::vector<ComponentResult>& results);
     std::vector<SearchResult> fuseCombMNZ(const std::vector<ComponentResult>& results);
+    std::vector<SearchResult> fuseTextAnchor(const std::vector<ComponentResult>& results);
 
     template <typename ScoreFunc>
     std::vector<SearchResult> fuseSinglePass(const std::vector<ComponentResult>& results,

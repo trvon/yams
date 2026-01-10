@@ -42,6 +42,16 @@ RequestDispatcher::handleGraphQueryRequest(const GraphQueryRequest& req) {
         co_return co_await handleGraphQueryListTypes(req, kgStore.get());
     }
 
+    // Handle listRelations mode - list relation types with counts
+    if (req.listRelations) {
+        co_return co_await handleGraphQueryListRelations(req, kgStore.get());
+    }
+
+    // Handle searchMode - search nodes by label pattern
+    if (req.searchMode) {
+        co_return co_await handleGraphQuerySearchMode(req, kgStore.get());
+    }
+
     // PBI-093: Handle listByType mode - list nodes by type without traversal
     if (req.listByType) {
         co_return co_await handleGraphQueryListByType(req, kgStore.get());
@@ -286,6 +296,95 @@ RequestDispatcher::handleGraphQueryListTypes(const GraphQueryRequest& req,
     }
 
     spdlog::debug("GraphQuery listTypes: found {} distinct node types", resp.nodeTypeCounts.size());
+    co_return resp;
+}
+
+// yams-kt5t: Helper for listRelations mode - list relation types with counts
+boost::asio::awaitable<Response>
+RequestDispatcher::handleGraphQueryListRelations(const GraphQueryRequest& req,
+                                                 KnowledgeGraphStore* kgStore) {
+    spdlog::debug("GraphQuery listRelations: fetching relation type counts");
+    (void)req; // Unused for now, but may be used for future filtering
+
+    auto countsResult = kgStore->getRelationTypeCounts();
+    if (!countsResult) {
+        co_return ErrorResponse{.code = countsResult.error().code,
+                                .message = countsResult.error().message};
+    }
+
+    GraphQueryResponse resp;
+    resp.kgAvailable = true;
+    resp.totalNodesFound = 0; // Not applicable for relation listing
+    resp.truncated = false;
+    resp.maxDepthReached = 0;
+
+    // No origin node in listRelations mode
+    resp.originNode.nodeId = -1;
+    resp.originNode.nodeKey = "";
+    resp.originNode.label = "listRelations";
+    resp.originNode.type = "query";
+    resp.originNode.distance = 0;
+
+    // Populate relationTypeCounts
+    resp.relationTypeCounts.reserve(countsResult.value().size());
+    for (const auto& [relation, count] : countsResult.value()) {
+        resp.relationTypeCounts.emplace_back(relation, static_cast<uint64_t>(count));
+    }
+
+    spdlog::debug("GraphQuery listRelations: found {} distinct relation types",
+                  resp.relationTypeCounts.size());
+    co_return resp;
+}
+
+// yams-kt5t: Helper for search mode - search nodes by label pattern
+boost::asio::awaitable<Response>
+RequestDispatcher::handleGraphQuerySearchMode(const GraphQueryRequest& req,
+                                              KnowledgeGraphStore* kgStore) {
+    spdlog::debug("GraphQuery searchMode: pattern='{}', limit={}, offset={}", req.searchPattern,
+                  req.limit, req.offset);
+
+    if (req.searchPattern.empty()) {
+        co_return ErrorResponse{.code = ErrorCode::InvalidArgument,
+                                .message = "searchPattern is required for search mode"};
+    }
+
+    auto nodesResult = kgStore->searchNodesByLabel(req.searchPattern, req.limit, req.offset);
+    if (!nodesResult) {
+        co_return ErrorResponse{.code = nodesResult.error().code,
+                                .message = nodesResult.error().message};
+    }
+
+    GraphQueryResponse resp;
+    resp.kgAvailable = true;
+    resp.totalNodesFound = nodesResult.value().size();
+    resp.truncated = (nodesResult.value().size() >= req.limit);
+    resp.maxDepthReached = 0;
+
+    // No origin node in search mode
+    resp.originNode.nodeId = -1;
+    resp.originNode.nodeKey = "";
+    resp.originNode.label = "search:" + req.searchPattern;
+    resp.originNode.type = "query";
+    resp.originNode.distance = 0;
+
+    resp.connectedNodes.reserve(nodesResult.value().size());
+    for (const auto& node : nodesResult.value()) {
+        GraphNode graphNode;
+        graphNode.nodeId = node.id;
+        graphNode.nodeKey = node.nodeKey;
+        graphNode.label = node.label.value_or("");
+        graphNode.type = node.type.value_or("");
+        graphNode.distance = 0;
+
+        if (req.includeNodeProperties && node.properties) {
+            graphNode.properties = node.properties.value();
+        }
+
+        resp.connectedNodes.push_back(std::move(graphNode));
+    }
+
+    spdlog::debug("GraphQuery searchMode: found {} nodes matching pattern '{}'",
+                  resp.connectedNodes.size(), req.searchPattern);
     co_return resp;
 }
 

@@ -91,6 +91,8 @@ public:
 
     const KnowledgeGraphStoreConfig& getConfig() const override { return cfg_; }
 
+    Result<std::unique_ptr<WriteBatch>> beginWriteBatch() override;
+
     // Nodes
     Result<std::int64_t> upsertNode(const KGNode& node) override {
         // Perform an INSERT ... ON CONFLICT(node_key) DO UPDATE to ensure presence
@@ -1478,6 +1480,99 @@ public:
             });
     }
 
+    Result<std::vector<std::pair<std::string, std::size_t>>> getRelationTypeCounts() override {
+        return pool_->withConnection(
+            [&](Database& db) -> Result<std::vector<std::pair<std::string, std::size_t>>> {
+                auto stmtR = db.prepare(R"(
+                SELECT relation, COUNT(*) as cnt
+                FROM kg_edges
+                WHERE relation IS NOT NULL AND relation != ''
+                GROUP BY relation
+                ORDER BY cnt DESC
+            )");
+                if (!stmtR)
+                    return stmtR.error();
+
+                auto stmt = std::move(stmtR).value();
+                std::vector<std::pair<std::string, std::size_t>> results;
+                while (true) {
+                    auto step = stmt.step();
+                    if (!step)
+                        return step.error();
+                    if (!step.value())
+                        break;
+
+                    std::string relationName = stmt.getString(0);
+                    std::size_t count = static_cast<std::size_t>(stmt.getInt64(1));
+                    results.emplace_back(std::move(relationName), count);
+                }
+                return results;
+            });
+    }
+
+    Result<std::vector<KGNode>> searchNodesByLabel(std::string_view pattern, std::size_t limit,
+                                                   std::size_t offset) override {
+        return pool_->withConnection([&](Database& db) -> Result<std::vector<KGNode>> {
+            // Convert user pattern to SQL LIKE pattern
+            // User can use * for wildcard, we convert to %
+            std::string sqlPattern;
+            sqlPattern.reserve(pattern.size() + 2);
+            sqlPattern = "%";
+            for (char c : pattern) {
+                if (c == '*') {
+                    sqlPattern += '%';
+                } else if (c == '?') {
+                    sqlPattern += '_';
+                } else {
+                    sqlPattern += c;
+                }
+            }
+            sqlPattern += "%";
+
+            auto stmtR = db.prepare(R"(
+                SELECT id, node_key, label, type, created_time, updated_time, properties
+                FROM kg_nodes
+                WHERE label LIKE ? COLLATE NOCASE
+                ORDER BY label ASC
+                LIMIT ? OFFSET ?
+            )");
+            if (!stmtR)
+                return stmtR.error();
+
+            auto stmt = std::move(stmtR).value();
+            auto bindRes = stmt.bindAll(sqlPattern, static_cast<std::int64_t>(limit),
+                                        static_cast<std::int64_t>(offset));
+            if (!bindRes)
+                return bindRes.error();
+
+            std::vector<KGNode> results;
+            while (true) {
+                auto step = stmt.step();
+                if (!step)
+                    return step.error();
+                if (!step.value())
+                    break;
+
+                KGNode node;
+                node.id = stmt.getInt64(0);
+                node.nodeKey = stmt.getString(1);
+                if (!stmt.isNull(2))
+                    node.label = stmt.getString(2);
+                if (!stmt.isNull(3))
+                    node.type = stmt.getString(3);
+                if (!stmt.isNull(4))
+                    node.createdTime = stmt.getInt64(4);
+                if (!stmt.isNull(5))
+                    node.updatedTime = stmt.getInt64(5);
+                if (!stmt.isNull(6))
+                    node.properties = stmt.getString(6);
+
+                results.push_back(std::move(node));
+            }
+            return results;
+        });
+    }
+
     // Statistics (not needed for MVP)
     Result<std::optional<KGNodeStats>> getNodeStats(std::int64_t) override {
         return Error{ErrorCode::NotImplemented, "getNodeStats not implemented"};
@@ -2023,6 +2118,436 @@ private:
     ConnectionPool* pool_{nullptr};                       // Non-owning
     std::unique_ptr<ConnectionPool> owned_pool_{nullptr}; // Owns pool when created from path
 };
+
+// -----------------------------------------------------------------------------
+// SqliteWriteBatch implementation
+// -----------------------------------------------------------------------------
+
+class SqliteWriteBatch final : public KnowledgeGraphStore::WriteBatch {
+public:
+    SqliteWriteBatch(std::unique_ptr<PooledConnection> conn)
+        : conn_(std::move(conn)), committed_(false) {
+        // Begin transaction immediately
+        auto result = (*conn_)->beginTransaction();
+        if (!result) {
+            spdlog::error("SqliteWriteBatch: failed to begin transaction: {}",
+                          result.error().message);
+            transactionStarted_ = false;
+        } else {
+            transactionStarted_ = true;
+        }
+    }
+
+    ~SqliteWriteBatch() override {
+        if (transactionStarted_ && !committed_) {
+            // Rollback uncommitted transaction
+            auto result = (*conn_)->rollback();
+            if (!result) {
+                spdlog::warn("SqliteWriteBatch: rollback failed: {}", result.error().message);
+            }
+        }
+    }
+
+    // Non-copyable, non-movable
+    SqliteWriteBatch(const SqliteWriteBatch&) = delete;
+    SqliteWriteBatch& operator=(const SqliteWriteBatch&) = delete;
+    SqliteWriteBatch(SqliteWriteBatch&&) = delete;
+    SqliteWriteBatch& operator=(SqliteWriteBatch&&) = delete;
+
+    Result<std::int64_t> upsertNode(const KGNode& node) override {
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        Database& db = **conn_;
+
+        auto stmtR = db.prepareCached(
+            "INSERT INTO kg_nodes (node_key, label, type, created_time, updated_time, properties) "
+            "VALUES (?, ?, ?, COALESCE(?, unixepoch()), COALESCE(?, unixepoch()), ?) "
+            "ON CONFLICT(node_key) DO UPDATE SET "
+            "  label = COALESCE(excluded.label, kg_nodes.label), "
+            "  type = COALESCE(excluded.type, kg_nodes.type), "
+            "  updated_time = COALESCE(excluded.updated_time, unixepoch()), "
+            "  properties = COALESCE(excluded.properties, kg_nodes.properties)");
+        if (!stmtR)
+            return stmtR.error();
+        auto& stmt = *stmtR.value();
+
+        auto br = stmt.bind(1, node.nodeKey);
+        if (!br)
+            return br.error();
+        br = node.label.has_value() ? stmt.bind(2, node.label.value()) : stmt.bind(2, nullptr);
+        if (!br)
+            return br.error();
+        br = node.type.has_value() ? stmt.bind(3, node.type.value()) : stmt.bind(3, nullptr);
+        if (!br)
+            return br.error();
+        br = node.createdTime.has_value() ? stmt.bind(4, node.createdTime.value())
+                                          : stmt.bind(4, nullptr);
+        if (!br)
+            return br.error();
+        br = node.updatedTime.has_value() ? stmt.bind(5, node.updatedTime.value())
+                                          : stmt.bind(5, nullptr);
+        if (!br)
+            return br.error();
+        br = node.properties.has_value() ? stmt.bind(6, node.properties.value())
+                                         : stmt.bind(6, nullptr);
+        if (!br)
+            return br.error();
+
+        auto er = stmt.execute();
+        if (!er)
+            return er.error();
+
+        // Retrieve id
+        auto idStmtR = db.prepareCached("SELECT id FROM kg_nodes WHERE node_key = ? LIMIT 1");
+        if (!idStmtR)
+            return idStmtR.error();
+        auto& idStmt = *idStmtR.value();
+        br = idStmt.bind(1, node.nodeKey);
+        if (!br)
+            return br.error();
+        auto step = idStmt.step();
+        if (!step)
+            return step.error();
+        if (!step.value())
+            return Error{ErrorCode::NotFound, "node not found after upsert"};
+        return idStmt.getInt64(0);
+    }
+
+    Result<std::vector<std::int64_t>> upsertNodes(const std::vector<KGNode>& nodes) override {
+        std::vector<std::int64_t> ids;
+        ids.reserve(nodes.size());
+        for (const auto& n : nodes) {
+            auto r = upsertNode(n);
+            if (!r)
+                return r.error();
+            ids.push_back(r.value());
+        }
+        return ids;
+    }
+
+    Result<std::int64_t> addEdge(const KGEdge& edge) override {
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        Database& db = **conn_;
+
+        auto stmtR = db.prepareCached("INSERT INTO kg_edges (src_node_id, dst_node_id, relation, "
+                                      "weight, created_time, properties) "
+                                      "VALUES (?, ?, ?, ?, ?, ?)");
+        if (!stmtR)
+            return stmtR.error();
+        auto& stmt = *stmtR.value();
+
+        auto br = stmt.bind(1, edge.srcNodeId);
+        if (!br)
+            return br.error();
+        br = stmt.bind(2, edge.dstNodeId);
+        if (!br)
+            return br.error();
+        br = stmt.bind(3, edge.relation);
+        if (!br)
+            return br.error();
+        br = stmt.bind(4, static_cast<double>(edge.weight));
+        if (!br)
+            return br.error();
+        br = edge.createdTime.has_value() ? stmt.bind(5, edge.createdTime.value())
+                                          : stmt.bind(5, nullptr);
+        if (!br)
+            return br.error();
+        br = edge.properties.has_value() ? stmt.bind(6, edge.properties.value())
+                                         : stmt.bind(6, nullptr);
+        if (!br)
+            return br.error();
+
+        auto ex = stmt.execute();
+        if (!ex)
+            return ex.error();
+        return db.lastInsertRowId();
+    }
+
+    Result<void> addEdgesUnique(const std::vector<KGEdge>& edges) override {
+        if (edges.empty())
+            return Result<void>();
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        Database& db = **conn_;
+
+        auto stmtR = db.prepareCached(
+            "INSERT INTO kg_edges (src_node_id, dst_node_id, relation, weight, created_time, "
+            "properties) "
+            "SELECT ?, ?, ?, ?, ?, ? WHERE NOT EXISTS ("
+            "  SELECT 1 FROM kg_edges WHERE src_node_id = ? AND dst_node_id = ? AND relation = ?"
+            ")");
+        if (!stmtR)
+            return stmtR.error();
+        auto& stmt = *stmtR.value();
+
+        for (const auto& e : edges) {
+            auto br = stmt.clearBindings();
+            if (!br)
+                return br.error();
+            // Insert value params
+            br = stmt.bind(1, e.srcNodeId);
+            if (!br)
+                return br.error();
+            br = stmt.bind(2, e.dstNodeId);
+            if (!br)
+                return br.error();
+            br = stmt.bind(3, e.relation);
+            if (!br)
+                return br.error();
+            br = stmt.bind(4, static_cast<double>(e.weight));
+            if (!br)
+                return br.error();
+            br = e.createdTime.has_value() ? stmt.bind(5, e.createdTime.value())
+                                           : stmt.bind(5, nullptr);
+            if (!br)
+                return br.error();
+            br = e.properties.has_value() ? stmt.bind(6, e.properties.value())
+                                          : stmt.bind(6, nullptr);
+            if (!br)
+                return br.error();
+            // WHERE NOT EXISTS params
+            br = stmt.bind(7, e.srcNodeId);
+            if (!br)
+                return br.error();
+            br = stmt.bind(8, e.dstNodeId);
+            if (!br)
+                return br.error();
+            br = stmt.bind(9, e.relation);
+            if (!br)
+                return br.error();
+
+            auto ex = stmt.execute();
+            if (!ex)
+                return ex.error();
+            auto rr = stmt.reset();
+            if (!rr)
+                return rr;
+        }
+        return Result<void>();
+    }
+
+    Result<void> addAliases(const std::vector<KGAlias>& aliases) override {
+        if (aliases.empty())
+            return Result<void>();
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        Database& db = **conn_;
+
+        auto stmtR = db.prepareCached(
+            "INSERT INTO kg_aliases (node_id, alias, source, confidence) VALUES (?, ?, ?, ?)");
+        if (!stmtR)
+            return stmtR.error();
+        auto& stmt = *stmtR.value();
+
+        for (const auto& a : aliases) {
+            auto br = stmt.clearBindings();
+            if (!br)
+                return br.error();
+            br = stmt.bind(1, static_cast<int64_t>(a.nodeId));
+            if (!br)
+                return br.error();
+            br = stmt.bind(2, a.alias);
+            if (!br)
+                return br.error();
+            br = a.source.has_value() ? stmt.bind(3, a.source.value()) : stmt.bind(3, nullptr);
+            if (!br)
+                return br.error();
+            br = stmt.bind(4, static_cast<double>(a.confidence));
+            if (!br)
+                return br;
+
+            auto er = stmt.execute();
+            if (!er)
+                return er.error();
+            auto rr = stmt.reset();
+            if (!rr)
+                return rr;
+        }
+        return Result<void>();
+    }
+
+    Result<void> addDocEntities(const std::vector<DocEntity>& entities) override {
+        if (entities.empty())
+            return Result<void>();
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        Database& db = **conn_;
+
+        auto stmtR = db.prepareCached("INSERT INTO kg_doc_entities (document_id, entity_text, "
+                                      "node_id, start_offset, end_offset, confidence, extractor) "
+                                      "VALUES (?, ?, ?, ?, ?, ?, ?)");
+        if (!stmtR)
+            return stmtR.error();
+        auto& stmt = *stmtR.value();
+
+        for (const auto& de : entities) {
+            auto br = stmt.clearBindings();
+            if (!br)
+                return br;
+            br = stmt.bind(1, de.documentId);
+            if (!br)
+                return br;
+            br = stmt.bind(2, de.entityText);
+            if (!br)
+                return br;
+            br = de.nodeId.has_value() ? stmt.bind(3, de.nodeId.value()) : stmt.bind(3, nullptr);
+            if (!br)
+                return br;
+            br = de.startOffset.has_value() ? stmt.bind(4, de.startOffset.value())
+                                            : stmt.bind(4, nullptr);
+            if (!br)
+                return br;
+            br = de.endOffset.has_value() ? stmt.bind(5, de.endOffset.value())
+                                          : stmt.bind(5, nullptr);
+            if (!br)
+                return br;
+            br = de.confidence.has_value()
+                     ? stmt.bind(6, static_cast<double>(de.confidence.value()))
+                     : stmt.bind(6, nullptr);
+            if (!br)
+                return br;
+            br = de.extractor.has_value() ? stmt.bind(7, de.extractor.value())
+                                          : stmt.bind(7, nullptr);
+            if (!br)
+                return br;
+
+            auto ex = stmt.execute();
+            if (!ex)
+                return ex;
+            auto rr = stmt.reset();
+            if (!rr)
+                return rr;
+        }
+        return Result<void>();
+    }
+
+    Result<void> deleteDocEntitiesForDocument(std::int64_t documentId) override {
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        Database& db = **conn_;
+
+        auto stmtR = db.prepareCached("DELETE FROM kg_doc_entities WHERE document_id = ?");
+        if (!stmtR)
+            return stmtR.error();
+        auto& stmt = *stmtR.value();
+        auto br = stmt.bind(1, documentId);
+        if (!br)
+            return br.error();
+        return stmt.execute();
+    }
+
+    Result<std::int64_t> deleteEdgesForSourceFile(std::string_view filePath) override {
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        Database& db = **conn_;
+
+        auto stmtR = db.prepareCached(
+            "DELETE FROM kg_edges WHERE json_extract(properties, '$.source_file') = ?");
+        if (!stmtR)
+            return stmtR.error();
+        auto& stmt = *stmtR.value();
+        auto br = stmt.bind(1, filePath);
+        if (!br)
+            return br.error();
+        auto execR = stmt.execute();
+        if (!execR)
+            return execR.error();
+        auto deleted = db.changes();
+        spdlog::debug("WriteBatch::deleteEdgesForSourceFile: deleted {} edges for path {}", deleted,
+                      filePath);
+        return deleted;
+    }
+
+    Result<void> upsertSymbolMetadata(const std::vector<SymbolMetadata>& symbols) override {
+        if (symbols.empty())
+            return Result<void>();
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        Database& db = **conn_;
+
+        auto stmtR = db.prepareCached(R"(
+            INSERT INTO symbol_metadata (
+                document_hash, file_path, symbol_name, qualified_name, kind,
+                start_line, end_line, start_offset, end_offset,
+                return_type, parameters, documentation
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(document_hash, qualified_name) DO UPDATE SET
+                file_path = excluded.file_path,
+                symbol_name = excluded.symbol_name,
+                kind = excluded.kind,
+                start_line = excluded.start_line,
+                end_line = excluded.end_line,
+                start_offset = excluded.start_offset,
+                end_offset = excluded.end_offset,
+                return_type = excluded.return_type,
+                parameters = excluded.parameters,
+                documentation = excluded.documentation
+        )");
+        if (!stmtR)
+            return stmtR.error();
+        auto& stmt = *stmtR.value();
+
+        for (const auto& sym : symbols) {
+            auto bindR = stmt.bindAll(
+                sym.documentHash, sym.filePath, sym.symbolName, sym.qualifiedName, sym.kind,
+                sym.startLine.value_or(0), sym.endLine.value_or(0), sym.startOffset.value_or(0),
+                sym.endOffset.value_or(0), sym.returnType.value_or(std::string{}),
+                sym.parameters.value_or(std::string{}), sym.documentation.value_or(std::string{}));
+            if (!bindR)
+                return bindR.error();
+
+            auto execR = stmt.execute();
+            if (!execR)
+                return execR.error();
+
+            stmt.reset();
+        }
+
+        spdlog::debug("WriteBatch::upsertSymbolMetadata: inserted/updated {} symbols",
+                      symbols.size());
+        return Result<void>();
+    }
+
+    Result<void> commit() override {
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        if (committed_) {
+            return Error{ErrorCode::InvalidState, "Already committed"};
+        }
+        auto result = (*conn_)->commit();
+        if (result) {
+            committed_ = true;
+        }
+        return result;
+    }
+
+private:
+    std::unique_ptr<PooledConnection> conn_;
+    bool transactionStarted_ = false;
+    bool committed_ = false;
+};
+
+// Out-of-line implementation of beginWriteBatch (requires SqliteWriteBatch to be defined)
+Result<std::unique_ptr<KnowledgeGraphStore::WriteBatch>>
+SqliteKnowledgeGraphStore::beginWriteBatch() {
+    auto connResult = pool_->acquire(std::chrono::milliseconds(30000), ConnectionPriority::Normal);
+    if (!connResult) {
+        return Error{ErrorCode::ResourceExhausted, "Failed to acquire connection for write batch"};
+    }
+    std::unique_ptr<WriteBatch> batch =
+        std::make_unique<SqliteWriteBatch>(std::move(connResult).value());
+    return batch;
+}
 
 // Factory: SQLite store using a file path (owns its pool)
 Result<std::unique_ptr<KnowledgeGraphStore>>

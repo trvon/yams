@@ -1,7 +1,9 @@
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
+#include <yams/vector/dim_resolver.h>
 
+#include <array>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
@@ -76,26 +78,53 @@ std::optional<size_t> getDimensionFromDb(const fs::path& dbPath) {
     return result;
 }
 
-std::optional<size_t> getModelDimensionHeuristic(const std::string& modelName) {
-    // MiniLM variants are 384-dim
-    if (modelName.find("MiniLM") != std::string::npos ||
-        modelName.find("minilm") != std::string::npos) {
-        return 384;
+/// Read embedding dimension from a model config JSON file
+/// Checks: embedding_dimension, embedding_dim, hidden_size, n_embd
+static std::optional<size_t> readDimensionFromConfigFile(const fs::path& configPath) {
+    try {
+        if (!fs::exists(configPath))
+            return std::nullopt;
+        std::ifstream in(configPath);
+        if (!in)
+            return std::nullopt;
+        nlohmann::json j;
+        in >> j;
+        if (j.contains("embedding_dimension") && j["embedding_dimension"].is_number())
+            return j.value("embedding_dimension", 0u);
+        if (j.contains("embedding_dim") && j["embedding_dim"].is_number())
+            return j.value("embedding_dim", 0u);
+        // Standard transformer models use hidden_size
+        if (j.contains("hidden_size") && j["hidden_size"].is_number())
+            return j.value("hidden_size", 0u);
+        // Nomic models use n_embd
+        if (j.contains("n_embd") && j["n_embd"].is_number())
+            return j.value("n_embd", 0u);
+    } catch (...) {
     }
+    return std::nullopt;
+}
 
-    // Nomic, mpnet, bge are typically 768-dim
-    if (modelName.find("nomic") != std::string::npos ||
-        modelName.find("mpnet") != std::string::npos ||
-        modelName.find("bge") != std::string::npos) {
-        return 768;
-    }
+std::optional<size_t> getModelDimensionFromMetadata(const fs::path& dataDir,
+                                                    const std::string& modelName) {
+    // Check model directory for config files (same logic as ONNX plugin)
+    fs::path modelDir = dataDir / "models" / modelName;
 
-    // e5-large is 1024-dim
-    if (modelName.find("e5-large") != std::string::npos) {
-        return 1024;
+    // Config files to check in order of priority
+    static constexpr std::array<const char*, 5> configFiles = {
+        "sentence_bert_config.json", "config.json", "model.onnx.yams.meta.json",
+        "config.json.yams.meta.json", "sentence_bert_config.json.yams.meta.json"};
+
+    for (const auto& fn : configFiles) {
+        if (auto dim = readDimensionFromConfigFile(modelDir / fn); dim && *dim > 0)
+            return dim;
     }
 
     return std::nullopt;
+}
+
+std::optional<size_t> getModelDimensionHeuristic(const std::string& modelName) {
+    // Use centralized dim_from_model_name for consistency
+    return yams::vector::dimres::dim_from_model_name(modelName);
 }
 
 DimensionResolution resolveEmbeddingDimension(YamsCLI* cli, const fs::path& dataPath) {
@@ -177,6 +206,13 @@ DimensionResolution resolveEmbeddingDimension(YamsCLI* cli, const fs::path& data
     }
 
     if (!modelName.empty()) {
+        // Try model config files first (most accurate)
+        if (auto cfgDim = getModelDimensionFromMetadata(dataPath, modelName)) {
+            result.dimension = *cfgDim;
+            result.source = "model_config";
+            return result;
+        }
+        // Fall back to name-based heuristic
         if (auto modelDim = getModelDimensionHeuristic(modelName)) {
             result.dimension = *modelDim;
             result.source = "model";
@@ -184,9 +220,10 @@ DimensionResolution resolveEmbeddingDimension(YamsCLI* cli, const fs::path& data
         }
     }
 
-    // Priority 6: Fallback heuristic (384 is most common for MiniLM)
-    result.dimension = 384;
-    result.source = "heuristic";
+    // Priority 6: No fallback - return 0 to signal unknown dimension
+    // Caller must handle this case (e.g., query daemon or fail explicitly)
+    result.dimension = 0;
+    result.source = "unknown";
     return result;
 }
 

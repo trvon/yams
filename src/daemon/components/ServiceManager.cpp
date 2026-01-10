@@ -2369,6 +2369,20 @@ size_t ServiceManager::getEmbeddingDimension() const {
     }
 }
 
+std::size_t ServiceManager::getEmbeddingInFlightJobs() const {
+    if (embeddingService_) {
+        return embeddingService_->inFlightJobs();
+    }
+    return 0;
+}
+
+std::size_t ServiceManager::getEmbeddingQueuedJobs() const {
+    if (embeddingService_) {
+        return embeddingService_->queuedJobs();
+    }
+    return 0;
+}
+
 std::string ServiceManager::resolvePreferredModel() const {
     return ConfigResolver::resolvePreferredModel(config_, resolvedDataDir_);
 }
@@ -2538,6 +2552,21 @@ ServiceManager::co_initVectorSystem(boost::asio::any_io_executor exec,
         cfg.database_path = dbPath.string();
         cfg.create_if_missing = true;
 
+        // Get embedding dimension - use VectorSystemManager if available
+        size_t dim = 0;
+        if (vectorSystemManager_) {
+            dim = vectorSystemManager_->getEmbeddingDimension();
+        }
+        if (dim == 0) {
+            dim = getEmbeddingDimension(); // Try model provider
+        }
+        if (dim == 0) {
+            spdlog::warn(
+                "[ServiceManager::co_initVectorSystem] Cannot determine embedding dimension");
+            co_return yams::Result<void>(Error{"Cannot determine embedding dimension"});
+        }
+        cfg.embedding_dim = dim;
+
         auto vectorDb = std::make_shared<yams::vector::VectorDatabase>(cfg);
         auto initRes = vectorDb->initialize();
         if (!initRes) {
@@ -2547,7 +2576,8 @@ ServiceManager::co_initVectorSystem(boost::asio::any_io_executor exec,
         vectorDatabase_ = vectorDb;
         state_.readiness.vectorDbReady.store(true);
 
-        spdlog::info("[ServiceManager::co_initVectorSystem] Vector system initialized");
+        spdlog::info("[ServiceManager::co_initVectorSystem] Vector system initialized with dim={}",
+                     dim);
         co_return yams::Result<void>{};
 
     } catch (const std::exception& e) {
