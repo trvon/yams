@@ -120,7 +120,6 @@ private:
                                     const std::vector<std::string>& tags);
     void processSymbolExtractionStage(const std::string& hash, int64_t docId,
                                       const std::string& filePath, const std::string& language);
-    void processEmbeddingStage(const std::string& hash, const std::string& mime);
     void processEmbeddingBatch(const std::vector<std::string>& hashes);
     void dispatchToKgChannel(const std::string& hash, int64_t docId, const std::string& filePath,
                              std::vector<std::string> tags);

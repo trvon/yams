@@ -1417,11 +1417,22 @@ Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
     }
 
     // Configure pool for this model (no lock needed - local variables)
-    spdlog::info("[ONNX Plugin] Configuring resource pool");
+    // Dynamically calculate pool size based on hardware
+    const unsigned hw_threads = std::thread::hardware_concurrency();
+    // Base pool size on available CPU cores: ~25% of cores for embedding work
+    // Minimum 2, maximum 8 to avoid excessive memory usage
+    const size_t dynamic_max =
+        std::clamp(static_cast<size_t>(hw_threads / 4), size_t{2}, size_t{8});
+    const size_t dynamic_min = std::min(size_t{2}, dynamic_max);
+
+    spdlog::info("[ONNX Plugin] Configuring resource pool (hw_threads={}, pool_max={})", hw_threads,
+                 dynamic_max);
     PoolConfig<OnnxModelSession> poolConfig;
-    poolConfig.minSize = 1;
-    poolConfig.maxSize = 3; // Allow up to 3 concurrent users per model
-    poolConfig.maxIdle = 2;
+    poolConfig.minSize = dynamic_min;
+    poolConfig.maxSize = dynamic_max;
+    // Keep maxIdle = maxSize to prevent session churn. With maxIdle < maxSize,
+    // excess sessions would be destroyed on return and recreated on next acquire.
+    poolConfig.maxIdle = dynamic_max;
     poolConfig.idleTimeout = config_.modelIdleTimeout;
     // CRITICAL: Disable preCreateResources to avoid creating ONNX session during
     // ResourcePool construction. Sessions will be created lazily on first acquire().

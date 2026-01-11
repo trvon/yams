@@ -23,7 +23,7 @@
 namespace std {
 using jthread = yams::compat::jthread;
 using stop_token = yams::compat::stop_token;
-}
+} // namespace std
 #endif
 
 // Include sqlite-vec-cpp HNSW before namespace to avoid namespace conflicts
@@ -919,7 +919,13 @@ public:
         }
 
         try {
-            // Add all vectors
+            // Prepare data for parallel build
+            std::vector<size_t> labels;
+            std::vector<std::span<const float>> vector_spans;
+            labels.reserve(ids.size());
+            vector_spans.reserve(ids.size());
+
+            // Process all vectors and prepare mappings
             for (size_t i = 0; i < ids.size(); ++i) {
                 // Normalize vector if needed
                 std::vector<float> normalized_vector =
@@ -929,17 +935,22 @@ public:
                 size_t label = next_label_++;
                 id_to_label_[ids[i]] = label;
                 label_to_id_[label] = ids[i];
-                stored_vectors_[label] = normalized_vector;
+                stored_vectors_[label] = std::move(normalized_vector);
 
-                // Add to HNSW index
-                std::visit(
-                    [&](auto& index) {
-                        index.insert(label, std::span<const float>(normalized_vector));
-                    },
-                    hnsw_index_);
-
-                stats_.num_vectors++;
+                // Collect for parallel build
+                labels.push_back(label);
+                vector_spans.push_back(std::span<const float>(stored_vectors_[label]));
             }
+
+            // Use parallel build for batch insertion
+            std::visit(
+                [&](auto& index) {
+                    index.build_parallel(std::span<const size_t>(labels),
+                                         std::span<const std::span<const float>>(vector_spans));
+                },
+                hnsw_index_);
+
+            stats_.num_vectors += ids.size();
 
             updateMemoryStats();
             return Result<void>();
@@ -1053,7 +1064,13 @@ public:
             label_to_id_.clear();
             stored_vectors_.clear();
 
-            // Read each mapping and rebuild index
+            // Prepare data for parallel build
+            std::vector<size_t> labels;
+            std::vector<std::span<const float>> vector_spans;
+            labels.reserve(num_mappings);
+            vector_spans.reserve(num_mappings);
+
+            // Read each mapping into memory first
             for (size_t i = 0; i < num_mappings; ++i) {
                 size_t id_len;
                 mappings_file.read(reinterpret_cast<char*>(&id_len), sizeof(id_len));
@@ -1071,12 +1088,20 @@ public:
                 std::vector<float> vec(config_.dimension);
                 mappings_file.read(reinterpret_cast<char*>(vec.data()),
                                    config_.dimension * sizeof(float));
-                stored_vectors_[label] = vec;
+                stored_vectors_[label] = std::move(vec);
 
-                // Add to HNSW index
-                std::visit([&](auto& index) { index.insert(label, std::span<const float>(vec)); },
-                           hnsw_index_);
+                // Collect for parallel build
+                labels.push_back(label);
+                vector_spans.push_back(std::span<const float>(stored_vectors_[label]));
             }
+
+            // Use parallel build for rebuilding index
+            std::visit(
+                [&](auto& index) {
+                    index.build_parallel(std::span<const size_t>(labels),
+                                         std::span<const std::span<const float>>(vector_spans));
+                },
+                hnsw_index_);
 
             // Read next_label
             mappings_file.read(reinterpret_cast<char*>(&next_label_), sizeof(next_label_));

@@ -221,6 +221,11 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         }
     }
 
+    // Batch embedding dispatch: collect hashes and dispatch incrementally for parallelism
+    const std::size_t embedBatchThreshold = TuneAdvisor::postIngestBatchSize();
+    std::vector<std::string> embeddingHashes;
+    embeddingHashes.reserve(embedBatchThreshold);
+
     for (const auto& task : tasks) {
         try {
             auto it = infoMap.find(task.hash);
@@ -237,15 +242,23 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
                 processMetadataStage(task.hash, task.mime, std::nullopt, &kEmptyTags,
                                      symbolExtensionMap, entityProviders);
             }
-            // Dispatch embedding immediately after FTS5 extraction to enable parallelism
-            // between FTS5 work on remaining docs and embedding generation
-            processEmbeddingStage(task.hash, task.mime);
+            // Collect hash and dispatch batch when threshold reached for parallelism
+            embeddingHashes.push_back(task.hash);
+            if (embeddingHashes.size() >= embedBatchThreshold) {
+                processEmbeddingBatch(embeddingHashes);
+                embeddingHashes.clear();
+            }
             processed_++;
             InternalEventBus::instance().incPostConsumed();
         } catch (const std::exception& e) {
             spdlog::error("[PostIngestQueue] Failed to process {}: {}", task.hash, e.what());
             failed_++;
         }
+    }
+
+    // Dispatch any remaining hashes
+    if (!embeddingHashes.empty()) {
+        processEmbeddingBatch(embeddingHashes);
     }
 }
 
@@ -347,7 +360,7 @@ void PostIngestQueue::processTask(const std::string& hash, const std::string& mi
         // If metadata lookup didn't find a document, still skip per-doc tag query.
         static const std::vector<std::string> kEmptyTags;
         processMetadataStage(hash, mime, info, info ? &tags : &kEmptyTags, {}, {});
-        processEmbeddingStage(hash, mime);
+        processEmbeddingBatch(std::vector<std::string>{hash});
         processed_++;
         InternalEventBus::instance().incPostConsumed();
     } catch (const std::exception& e) {
@@ -499,44 +512,6 @@ void PostIngestQueue::processKnowledgeGraphStage(const std::string& hash, int64_
         InternalEventBus::instance().incKgConsumed();
     } catch (const std::exception& e) {
         spdlog::error("[PostIngestQueue] KG stage failed for {}: {}", hash, e.what());
-    }
-}
-
-void PostIngestQueue::processEmbeddingStage(const std::string& hash, const std::string& /*mime*/) {
-    try {
-        // PBI-05b: Use TuneAdvisor for channel capacity
-        const std::size_t capacity = TuneAdvisor::embedChannelCapacity();
-        auto embedChannel =
-            InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
-                "embed_jobs", capacity);
-
-        if (!embedChannel) {
-            spdlog::warn("[PostIngestQueue] Embed channel unavailable for {}", hash);
-            return;
-        }
-
-        InternalEventBus::EmbedJob job;
-        job.hashes.reserve(1);
-        job.hashes.push_back(hash);
-        job.batchSize = 1;
-        job.skipExisting = true;
-        job.modelName = "";
-
-        // PBI-05b: Use blocking push with backpressure to prevent embed job drops.
-        // Wait up to 5 seconds for space - this creates backpressure on ingest when
-        // embedding can't keep up, which is better than silently dropping jobs.
-        constexpr auto kEmbedPushTimeout = std::chrono::seconds(5);
-        if (!embedChannel->push_wait(std::move(job), kEmbedPushTimeout)) {
-            spdlog::warn(
-                "[PostIngestQueue] Embed channel full after {}s backpressure, dropping job for {}",
-                kEmbedPushTimeout.count(), hash);
-            InternalEventBus::instance().incEmbedDropped();
-        } else {
-            InternalEventBus::instance().incEmbedQueued();
-            spdlog::debug("[PostIngestQueue] Dispatched embedding job for {}", hash);
-        }
-    } catch (const std::exception& e) {
-        spdlog::error("[PostIngestQueue] Embedding dispatch failed for {}: {}", hash, e.what());
     }
 }
 

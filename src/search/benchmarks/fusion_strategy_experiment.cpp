@@ -742,7 +742,7 @@ int main(int argc, char** argv) {
     const size_t corpusSize = dataset.documents.size();
     std::cout << "Waiting for ingestion to complete (" << corpusSize << " docs)...\n";
     std::cout.flush();
-    auto deadline = std::chrono::steady_clock::now() + 300s;
+    auto deadline = std::chrono::steady_clock::now() + 900s; // 15 min for large corpus
     uint64_t lastDocCount = 0;
     int stableChecks = 0;
     bool ingestionComplete = false;
@@ -800,7 +800,8 @@ int main(int argc, char** argv) {
 
     // Phase 3: Wait for embeddings to be generated
     std::cout << "Waiting for embeddings to be generated (target: " << corpusSize << " docs)...\n";
-    deadline = std::chrono::steady_clock::now() + 1800s; // 30 min timeout for large corpus
+    deadline = std::chrono::steady_clock::now() +
+               7200s; // 2 hour timeout for large corpus with slow models
     uint64_t lastVectorCount = 0;
     int stableCount = 0;
     uint64_t embedDropped = 0;
@@ -814,6 +815,13 @@ int main(int argc, char** argv) {
             auto it = statusResult.value().requestCounts.find("vector_count");
             if (it != statusResult.value().requestCounts.end()) {
                 vectorCount = it->second;
+            }
+
+            // Check post-ingest queue status (documents still being processed before embedding)
+            uint64_t postIngestInFlight = 0;
+            auto itPI = statusResult.value().requestCounts.find("post_ingest_inflight");
+            if (itPI != statusResult.value().requestCounts.end()) {
+                postIngestInFlight = itPI->second;
             }
 
             // Check embed queue status (jobs waiting in channel) - use bus_embed_queued!
@@ -839,16 +847,18 @@ int main(int argc, char** argv) {
                 double coverage = corpusSize > 0 ? (vectorCount * 100.0 / corpusSize) : 0;
                 std::cout << "  Vectors: " << vectorCount << " / " << corpusSize << " ("
                           << std::fixed << std::setprecision(1) << coverage << "%)"
-                          << " | queue=" << embedQueued << " in_flight=" << embedInFlight
-                          << " dropped=" << embedDropped << "\n";
+                          << " | post_ingest=" << postIngestInFlight << " queue=" << embedQueued
+                          << " in_flight=" << embedInFlight << " dropped=" << embedDropped << "\n";
                 lastVectorCount = vectorCount;
                 stableCount = 0;
             } else {
                 stableCount++;
             }
 
-            // Success: vectors >= corpusSize AND queue drained AND no in-flight AND stable
-            bool queueDrained = (embedQueued == 0 && embedInFlight == 0);
+            // Success: vectors >= corpusSize AND all queues drained AND stable
+            // Must check post_ingest_inflight to avoid race where docs haven't reached embed
+            // channel yet
+            bool queueDrained = (postIngestInFlight == 0 && embedQueued == 0 && embedInFlight == 0);
             if (vectorCount >= corpusSize && queueDrained && stableCount >= 10) {
                 auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                                    std::chrono::steady_clock::now() - embedStartTime)
